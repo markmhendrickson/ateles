@@ -40,6 +40,8 @@ Run: pytest execution/daemons/apis/test_gate_writeback_permission.py -v
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 import skill_runner
@@ -145,14 +147,23 @@ class TestDeniedWritebackIsVisible:
     @pytest.mark.parametrize(
         "text",
         [
-            "gate writeback to the issue entity was denied this session",
-            "Neotoma correct() required approval while policy is never",
-            "GATE_WRITEBACK: denied",
-            "Could not write gate_status for this lens.",
-            "unable to correct gate_status on the parent issue",
+            # The attestation as the prompt asks for it: line-leading, reason
+            # following. This is what a genuinely silenced lens emits.
+            "GATE WRITEBACK DENIED: Neotoma correct() raised an approval "
+            "prompt this non-interactive child cannot answer",
+            "gate writeback denied: missing agent_grant for issue.correct",
+            # Models format. A leading bullet or bold still declares.
+            "- GATE WRITEBACK DENIED: permission prompt unanswerable",
+            "**GATE WRITEBACK DENIED:** tool not in allowlist",
+            # Embedded in a fuller reply, on its own line.
+            "review:ux\nFindings: none.\n"
+            "GATE WRITEBACK DENIED: correct() was refused\n**BLOCKED**",
         ],
     )
-    def test_a_reported_denial_is_detected(self, text):
+    def test_a_declared_denial_is_detected(self, text):
+        """Detection must not weaken: a missed denial reverts to the ateles#795
+        bug, where the gate sticks `pending` and is indistinguishable from a
+        review that never ran. That is the worse failure of the two."""
         assert sd.detect_gate_writeback_denial(text) is True
 
     @pytest.mark.parametrize(
@@ -168,27 +179,107 @@ class TestDeniedWritebackIsVisible:
         """A false positive here BLOCKS a good PR, so the bar is high."""
         assert sd.detect_gate_writeback_denial(text) is False
 
-    def test_prose_discussing_the_failure_mode_is_not_a_denial(self):
-        """The trap _DELIVERY_DENIAL_SIGNATURES already fell into once.
+    def test_a_review_quoting_this_modules_own_test_strings_is_not_a_denial(self):
+        """The self-referential false positive Loxia raised on PR #800.
 
-        Matching a joined blob flagged any review that merely QUOTED these
-        strings — including a review of this very change. Anchoring per line is
-        what separates "the agent said this happened" from "someone wrote it
-        down", so a panelist reviewing this PR is not reported as denied.
+        The first revision matched guessed PROSE phrasings. Per-line anchoring
+        defeated the joined-blob trap for paragraphs, but not for a reviewer
+        quoting a trigger phrase as its own STANDALONE LINE — and the review
+        most likely to do that is a review of this very change, where those
+        phrases live as single lines in this file. Every string below is one
+        this module's own first revision carried as a detection fixture; a
+        panelist reviewing PR #800 and echoing them must come back clean.
+
+        A guard that misfires on text ABOUT the thing it guards is a known
+        shape in this repo, not a hypothetical: ateles#768, where the Gmail
+        send-gate blocked a `git commit` whose message quoted a Gmail helper.
         """
         review = (
             "review:arch\n"
-            "This PR adds detection for the case where a\n"
-            "reviewer reports that its writeback was\n"
-            "refused by the local harness.\n"
+            "The detector's fixtures include these as standalone lines:\n"
+            "gate writeback to the issue entity was denied this session\n"
+            "Neotoma correct() required approval while policy is never\n"
+            "GATE_WRITEBACK: denied\n"
+            "Could not write gate_status for this lens.\n"
+            "unable to correct gate_status on the parent issue\n"
+            "Each would have tripped the previous prose signatures verbatim.\n"
             "**APPROVE**\n"
         )
         assert sd.detect_gate_writeback_denial(review) is False
 
+    def test_discussing_the_attestation_token_inline_is_not_a_denial(self):
+        """Prose ABOUT the marker mentions it mid-sentence, in backticks.
+
+        The marker survives quotation where a prose phrase could not, because
+        declaring requires the reserved token at line start — which is exactly
+        what writing about the mechanism does not do.
+        """
+        review = (
+            "review:arch\n"
+            "A refused lens now emits `GATE WRITEBACK DENIED:` and the "
+            "dispatcher escalates on that token.\n"
+            "The constant is GATE_WRITEBACK_DENIED_ATTESTATION.\n"
+            "**APPROVE**\n"
+        )
+        assert sd.detect_gate_writeback_denial(review) is False
+
+    def test_the_prompt_tells_the_lens_to_emit_the_attestation(self):
+        """A marker nobody is told to write detects nothing.
+
+        Unlike the prose signatures it replaces, this contract only holds if
+        the gate-writeback instructions name the exact token — the same
+        prompt/parser pairing MERGE_REFUSED_MARKER already uses.
+        """
+        src = inspect.getsource(sd.SwarmDispatcher._panelist_prompt)
+        assert "GATE_WRITEBACK_DENIED_ATTESTATION" in src, (
+            "the panelist prompt must instruct the lens to emit the "
+            "attestation, or a real denial is never declared"
+        )
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "I could not correct gate_status — the tool call was denied.",
+            "I was denied permission to write the gate.",
+            "My correct() call was refused by the local harness.",
+            "- I could not update gate_status on the parent issue.",
+            "We were unable to record gate_status for this lens.",
+        ],
+    )
+    def test_a_paraphrased_first_person_denial_still_detected(self, text):
+        """The marker is the contract, but a prompt is not a guarantee.
+
+        A model that paraphrases must not slip through: a MISSED denial reverts
+        to the ateles#795 bug exactly — the gate sticks `pending` and is again
+        indistinguishable from a review that never ran. A false positive only
+        costs one visible comment, so the net stays.
+        """
+        assert sd.detect_gate_writeback_denial(text) is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # Third-person description of the mechanism — what a REVIEW of this
+            # change writes, and what the first revision wrongly matched.
+            "The lens could not correct gate_status, so the gate stays pending.",
+            "Accipiter's writeback was denied this session.",
+            "A denied writeback leaves gate_status pending.",
+            "This PR detects when correct() was refused.",
+        ],
+    )
+    def test_third_person_description_is_not_a_denial(self, text):
+        """First person is what separates a claim from a description.
+
+        The fallback must not reopen the hole the marker closed: only the
+        acting agent says "I could not"; prose about the mechanism says "the
+        lens could not".
+        """
+        assert sd.detect_gate_writeback_denial(text) is False
+
     def test_detection_reads_every_supplied_stream(self):
         """A denial on stderr counts as much as one on stdout."""
         assert sd.detect_gate_writeback_denial(
-            "**SIGNED_OFF**", "gate writeback denied"
+            "**SIGNED_OFF**", "GATE WRITEBACK DENIED: correct() refused"
         ) is True
 
 

@@ -526,34 +526,77 @@ MERGE_REFUSED_MARKER = "MERGE REFUSED:"
 # read as "the gate is pending"; only one of them means the reviewer was
 # silenced.
 #
-# These signatures are matched against a panelist's own stdout, so the claim is
-# always the agent's: it says its write was denied, and the dispatcher relays
-# that rather than inferring it. Matched per line and case-insensitively,
-# following _DELIVERY_DENIAL_SIGNATURES in skill_runner — a joined-blob search
-# matched these strings wherever they appeared, including quoted inside a
-# review that was merely DISCUSSING the failure mode (this file's own diff trips
-# them), so a panelist reviewing this very change would be reported as denied.
-_GATE_WRITEBACK_DENIAL_SIGNATURES: tuple[re.Pattern[str], ...] = (
-    re.compile(r"gate[ _-]?writeback.{0,40}\bdenied\b", re.I),
-    re.compile(r"\bdenied\b.{0,40}gate[ _-]?writeback", re.I),
+# The panelist declares the denial with THIS MARKER, which the gate-writeback
+# prompt instructs it to emit at the START OF A LINE (see `gate_writeback_block`
+# in `_panelist_prompt`). Marker, not prose signatures, for the reason
+# MERGE_REFUSED_MARKER is a marker: a refusal is something the agent DECLARES,
+# and a declaration needs a token reserved for declaring it.
+#
+# The first revision guessed at phrasings instead ("gate writeback ... denied",
+# "correct() required approval", "unable to correct gate_status"). Per-line
+# anchoring defeated the joined-blob trap for prose paragraphs, but not for a
+# reviewer QUOTING a trigger phrase as its own standalone line — and the review
+# most likely to quote those phrases is a review of this very change, where they
+# appear as single lines in this module's own tests. A guard that misfires on
+# text ABOUT the thing it guards is a known shape in this repo: ateles#768, where
+# the Gmail send-gate blocked a `git commit` whose message quoted a Gmail helper.
+#
+# The marker cannot be reached by quotation the way a prose phrase can: quoting
+# it means reproducing a reserved token at line start, which prose about the
+# mechanism does not do (it writes `` `GATE WRITEBACK DENIED:` `` inline, in
+# backticks, mid-sentence).
+GATE_WRITEBACK_DENIED_ATTESTATION = "GATE WRITEBACK DENIED:"
+
+# Anchored with `re.match` per line — the same discipline as
+# `_delivery_failure_reason` in skill_runner, and for the same reason: an
+# attestation is emitted at the start of its own line, so requiring that
+# position is what separates "the agent declared this" from "someone wrote it
+# down". A leading blockquote/list marker is tolerated (models format), but an
+# inline mention mid-sentence is not an attestation.
+_GATE_WRITEBACK_DENIED_RE = re.compile(
+    r"(?:[>\-*]\s*|\*\*)?" + re.escape(GATE_WRITEBACK_DENIED_ATTESTATION),
+    re.IGNORECASE,
+)
+
+# FALLBACK — a lens that reports its denial in its own words instead of the
+# marker. The marker is the contract, but a prompt instruction is not a
+# guarantee: models paraphrase, and a MISSED denial is the worse failure of the
+# two here. It reverts to the ateles#795 bug exactly — the gate sticks `pending`
+# and is once again indistinguishable from a review that never ran, which is the
+# state that let PR #791 sit. A false positive, by contrast, posts one visible
+# comment on a PR that is otherwise fine. So the prose net stays.
+#
+# What it requires that the first revision did not: a FIRST-PERSON SUBJECT. The
+# quotation problem is that "gate writeback ... denied" describes the mechanism
+# in the abstract, which is what a review of this change writes. "I could not
+# correct gate_status" is a claim only the acting agent makes about itself. That
+# is Loxia's "first-person/agent-attributed position" suggestion, kept as the
+# net beneath the marker rather than as the primary signal.
+_GATE_WRITEBACK_FIRST_PERSON_DENIAL: tuple[re.Pattern[str], ...] = (
     re.compile(
-        r"correct\(\).{0,60}(?:required approval|requires approval|"
-        r"permission (?:prompt|denied)|was denied)",
+        r"^(?:i|my|we|our)\b.{0,80}?"
+        r"(?:could not|couldn't|cannot|can't|was|were|been)\b.{0,40}?"
+        r"(?:denied|refused|blocked|unable)",
         re.I,
     ),
     re.compile(
-        r"(?:could not|couldn't|unable to|failed to) (?:write|correct|update)"
-        r".{0,40}gate_status",
+        r"^(?:i|we)\b.{0,60}?(?:could not|couldn't|cannot|can't|unable to|"
+        r"failed to)\b.{0,40}?"
+        r"(?:correct|write|update|record|set)\b.{0,40}?gate_status",
         re.I,
     ),
 )
 
 
 def detect_gate_writeback_denial(*texts: str) -> bool:
-    """Whether a panelist reported that its own gate writeback was refused.
+    """Whether a panelist DECLARED that its own gate writeback was refused.
 
-    Read-only over the agent's own words. A lens that never owned a gate simply
-    never emits these lines, so a non-gating review is never penalised.
+    Read-only over the agent's own words. Primary signal is the reserved
+    attestation the prompt instructs a refused lens to emit; the fallback
+    catches a lens that paraphrased, but only in a first-person position, so a
+    review merely discussing or quoting the failure mode is not flagged. A lens
+    that never owned a gate emits neither, so a non-gating review is never
+    penalised.
     """
     for text in texts:
         if not text:
@@ -562,8 +605,13 @@ def detect_gate_writeback_denial(*texts: str) -> bool:
             stripped = line.strip()
             if not stripped:
                 continue
-            for pattern in _GATE_WRITEBACK_DENIAL_SIGNATURES:
-                if pattern.search(stripped):
+            if _GATE_WRITEBACK_DENIED_RE.match(stripped):
+                return True
+            # Strip list/quote/bold formatting before the first-person test:
+            # "- I could not ..." is still the agent speaking about itself.
+            unformatted = re.sub(r"^(?:[>\-*+]\s*|\*\*|\d+[.)]\s*)+", "", stripped)
+            for pattern in _GATE_WRITEBACK_FIRST_PERSON_DENIAL:
+                if pattern.match(unformatted):
                     return True
     return False
 
@@ -7086,6 +7134,16 @@ class SwarmDispatcher:
                 "reason, attempted vs read-back values, and next action (retry / "
                 f"escalate to Anthus / check agent_grant retrieve+correct on "
                 f"issue for `{lens.agent}`).\n"
+                "  4b. If the write was REFUSED OUTRIGHT — a tool-permission "
+                "prompt you cannot answer, a missing grant, any control that "
+                "stopped the `correct()` from being attempted or applied — you "
+                "MUST additionally declare it on its own line, beginning that "
+                f"line with `{GATE_WRITEBACK_DENIED_ATTESTATION}` followed by "
+                "the reason. Do not paraphrase and do not bury it in prose: the "
+                "dispatcher escalates on that exact token, and a refusal it "
+                "cannot see is indistinguishable from a review that never ran "
+                "(ateles#795). Emit it ONLY for your own refused write — never "
+                "when merely discussing, quoting, or reviewing this mechanism.\n"
                 "  5. If your verdict has any blocking finding, LEAVE the gate "
                 "`pending` (do not sign off) — the block stands until the author "
                 "resolves it and you re-review.\n"
@@ -7495,9 +7553,21 @@ class SwarmDispatcher:
         )
         try:
             async with httpx.AsyncClient(timeout=30) as client:
+                # Newest-first rather than paginating the whole thread: a marker
+                # posted by THIS mechanism is necessarily recent (it is written
+                # during the same panel round that would double-post it), so the
+                # newest page is where it can be, and the first page is then a
+                # complete answer rather than an arbitrary prefix. The default
+                # ascending order made this an OLDEST-100 read, which on the
+                # >100-comment PRs this repo actually carries (#745 alone has 66
+                # reviews) is the one window guaranteed NOT to hold it.
                 resp = await client.get(
                     url,
-                    params={"per_page": 100},
+                    params={
+                        "per_page": 100,
+                        "sort": "created",
+                        "direction": "desc",
+                    },
                     headers=self._github_headers(t.repository),
                 )
                 resp.raise_for_status()
