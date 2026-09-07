@@ -48,6 +48,7 @@ below; steps and gates are `gates_and_workflows.md`; core workflows (including i
 - [The transition vocabulary](#the-transition-vocabulary).
 - [There is no task lifecycle; there are batches](#there-is-no-task-lifecycle-there-are-batches).
 - [Intake is every task's first workflow](#intake-is-every-tasks-first-workflow).
+- [What distinguishes a task being assembled from one intake has not reached](#what-distinguishes-a-task-being-assembled-from-one-intake-has-not-reached).
 - [What a claim predicate treats as claimable](#what-a-claim-predicate-treats-as-claimable).
 - [Priority orders the claimable pool; it does not enter it](#priority-orders-the-claimable-pool-it-does-not-enter-it).
 - [A lapsed lease is not reaped; repeated lapse raises a checkpoint](#a-lapsed-lease-is-not-reaped-repeated-lapse-raises-a-checkpoint).
@@ -153,6 +154,50 @@ beyond that is hydration's, per step (`workflows.md#what-link-attaches-and-what-
 Tasks a batch creates
 (children, detached tasks, tasks extracted from a meeting) enter intake themselves; a child may take
 intake's declared fast path and never skips intake.
+
+**What a task being assembled looks like is open (decision 84, 2026-09-07, on the operator's question).**
+Registered in `conformance.md#the-register-of-open-design-decisions`, argued below.
+
+### What distinguishes a task being assembled from one intake has not reached
+
+**Open (decision 84, 2026-09-07).** Registered in
+`conformance.md#the-register-of-open-design-decisions`. The rule above makes an unrouted task a task with no
+intake batch, and that one definition covers two situations the design does not currently separate: a task
+with no intake batch **because it is still being written** — several agents each contributing part of it,
+the operator's case — and a task with no intake batch **because intake has not yet picked it up**. Both are
+unrouted. Nothing in the record says which is which, and so nothing says whether the first is finished
+enough to be claimed and executed.
+
+**The operator's proposal was a `draft` status**, and a status is disfavoured on three independent grounds,
+none of which touch the need itself:
+
+- **C1 and invariant 11.** `#there-is-no-task-lifecycle-there-are-batches` states that a task carries status
+  and edges only, and that writing a batch, lease, or sign-off fact onto the task is the defect a process
+  then has to keep true. A status meaning "still being written" is a fact about what an assembler is doing,
+  maintained on the task by whoever remembers to clear it.
+- **Invariant 12's no-overlap half.** `draft` is already a bound step name in two workflows —
+  `draft` → `draft_lint` → `consent` → `post`, and `draft` → `disclosure_lint` → `review` → `consent`
+  (`workflows.md`). A `draft` status would carry a second, unrelated sense of the same word.
+- **The status vocabulary's scope.** `#the-transition-vocabulary` and
+  `#what-a-claim-predicate-treats-as-claimable` give the vocabulary two meanings, `open` and terminal, with
+  a closing sign-off writing only a declared value and a terminal value outside the set refused at the
+  write. Statuses are how a task ends, not how it is prepared.
+
+**The dispositions, none of them taken here.**
+
+- **Nothing.** The absence of an intake batch already is the state, and being assembled is a fact about the
+  assembler rather than about the task. The cost is that the two situations stay indistinguishable to any
+  reader of the record.
+- **An edge, not a status.** A relationship marking a task as under assembly, cleared when intake starts,
+  leaving the task's own fields untouched — the shape invariant 11 prefers, and the one `held`-from-claim
+  already takes.
+- **A held intake batch.** The task enters intake immediately and intake's first step holds on the
+  condition that the task is not yet fully written, using
+  `#a-batch-may-hold-on-a-condition-discovered-mid-flight`, which exists and needs no new record.
+- **A status after all**, accepting the three costs above, and under a word other than `draft`.
+
+**What is settled, and is not part of this question:** every task enters intake, and a task with no intake
+batch is unrouted. The question is whether the design says anything further about *why* it has none.
 
 ### What a claim predicate treats as claimable
 

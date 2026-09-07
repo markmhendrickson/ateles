@@ -124,6 +124,7 @@ and 77 pass takes 73 — one number across all four documents it amends, per the
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
 | 70 | the several-instances pass of 2026-09-07 | decisions 76 and 77 registered; 77 argued here, in `#scope`'s neighbourhood — a document outside the directory that six documents in it cite and two defer live decisions to |
 | 73 | the decisions 76 and 77 pass of 2026-09-07 | decisions 76 and 77 ruled; `multi_tenant.md` recorded as in the set in `#scope`; `#a-document-the-foundation-defers-a-decision-to-and-does-not-contain` rewritten as the ruling; `multi_tenant.md` section 7's five open decisions registered as rows 79 to 83 |
+| 76 | the task-assembly pass of 2026-09-07 | decision 84 opened and registered as **open** — nothing distinguishes a task with no intake batch because it is being assembled from one intake has not reached; the number established by a sweep over every open pull-request branch, which gives 83 as the maximum assigned (PR #790) and 84 as the next free |
 
 
 ## `conformance_suite.md`
@@ -343,6 +344,7 @@ and 77 pass takes 73 — one number across all four documents it amends, per the
 | 49 | the event/signal/delivery pass of 2026-09-06 | one `calendar.md` anchor updated to its renamed section |
 | — | the rulings-61-62-64 pass of 2026-09-06 | decision 62 ruled — "must" per class as `action_policy` data, default "may", on the shape `min_tier` and `metered_resources[]` already carry |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
+| 76 | the task-assembly pass of 2026-09-07 | decision 84 argued here, beside `#intake-is-every-tasks-first-workflow` whose unrouted rule defines the gap — the operator's proposed `draft` status recorded as disfavoured on C1/invariant 11, the invariant-12 collision with `draft` as a step name, and the status vocabulary's `open`/terminal scope, with four dispositions and no ruling |
 
 
 ## `workflows.md`
