@@ -222,11 +222,102 @@ labelled chunks of a real session:
   window", which is what "someone spoke at some point in here" actually means.
 
 On that session the separation at p95 was: real speech **-24 to -38 dB** (single
-quietest real chunk -46 dB), hallucinated silence **-52 to -57 dB**. -50 dB was
-the only threshold tested that skipped zero real speech and passed zero
-hallucinations. Note this is measured on the **mic** track; a different mic,
-gain, or room may shift the range, so re-measure before assuming the default
-transfers. If real speech starts getting skipped, lower the threshold.
+quietest real chunk -46 dB), hallucinated silence **-52 to -57 dB**. -50 dB
+skipped zero real speech and passed zero hallucinations **on that recording**.
+
+**That separation does not hold on every input, and a single level threshold is
+not sufficient.** On a second session (2026-09-07, mic track, ten chunks) the
+two populations overlapped outright:
+
+| chunk | p95 RMS | reality |
+|---|---:|---|
+| ch2 | -44.7 dB | fabricated |
+| ch3 | -56.3 dB | correctly skipped as silence |
+| ch4 | **-36.4 dB** | **real speech** |
+| ch5 | **-39.0 dB** | **fabricated** |
+
+A fabrication at -39.0 dB sat **2.6 dB** from real speech at -36.4 dB, and
+another fabrication at -44.7 dB sat above the -46 dB quietest real chunk of the
+original calibration set. No threshold splits those: any value that drops ch5
+also drops ch4. Raising the gate is not the fix — it would start discarding real
+speech.
+
+The cause is ambient noise. The level gate's discriminating power depends on the
+room's noise floor sitting far below its speech floor; background noise registers
+as **energy**, so it clears a loudness threshold while carrying no speech, and
+that closes the gap the gate relies on. The original calibration held because
+that room was quiet, not because -50 dB is correct in general.
+
+So **re-measure the threshold per mic and room** — and do not treat any value as
+sufficient on its own. The level gate remains worth keeping: it is cheap, it
+runs before the API call, and on the session above it still correctly skipped
+ch3 and ch9. It is now the first of two gates, not the whole defence. See
+[the confidence gate](#3c-the-confidence-gate) below.
+
+If real speech starts getting skipped, lower the threshold.
+
+### 3c. The confidence gate
+
+The level gate answers *"was this loud"*. On a noisy microphone that is not the
+same question as *"was this speech"*, which is the question that matters. So
+after transcription the tailer asks **Whisper what it thinks**, using the
+per-segment fields the `verbose_json` response format carries.
+
+This is the model's own judgement rather than a proxy measured outside it, and
+it is **language-independent** — which output-side phrase matching can never be.
+The fabrications are open-ended across arbitrary languages: the session above
+alone produced English, Chinese, Japanese and Ukrainian, and re-transcribing one
+fabricated chunk five times produced five *different* fabrications in five
+different languages. There is no list to match against.
+
+A chunk is emitted as transcript when **at least one segment** looks like real
+speech on all three axes at once:
+
+| axis | field | default | why it alone is not enough |
+|---|---|---|---|
+| Is it speech? | `no_speech_prob` | `<= 0.40` | Real speech reached 0.370 while a fabrication sat at 0.297 — the populations overlap |
+| Was the decode coherent? | `avg_logprob` | `>= -1.0` | A fabrication decoded at -0.331, better than real speech at -1.050 |
+| How much text per second? | characters / segment seconds | `>= 3.0` | Fabricating on silence, Whisper stretches a few tokens across the whole window |
+
+The character-rate axis never inspects **what** was said, only how much text was
+claimed for how much time — it is a structural property of padding silence, not
+a phrase list. It is also the **binding** axis: across the calibration set real
+speech never fell below **3.59** chars/s, while no fabrication clearing the
+other two axes exceeded **2.87**. The default sits in that gap.
+
+Judging on **any one segment** rather than the chunk average is deliberate: a
+real sentence surrounded by stretched near-empty segments is the common shape of
+a chunk where someone spoke briefly, and averaging would suppress it.
+
+| | |
+|---|---|
+| Env / flags | `LIVE_TRANSCRIPT_MAX_NO_SPEECH_PROB`, `LIVE_TRANSCRIPT_MIN_AVG_LOGPROB`, `LIVE_TRANSCRIPT_MIN_CHAR_RATE` (or `--max-no-speech-prob`, `--min-avg-logprob`, `--min-char-rate`) |
+| On suppression | JSONL gets `{"suppressed": "low_confidence", "text": "", "suppressed_text": "…", "confidence": {…}}` |
+| On no signal | `{"confidence_unavailable": true}` — emitted, but marked, never silently suppressed |
+| Calibration mode | `--no-confidence-gate` (env `LIVE_TRANSCRIPT_CONFIDENCE_GATE=0`) judges and logs but does not suppress |
+
+**`suppressed: low_confidence` is deliberately distinct from the level gate's
+`skipped: below_threshold`**, so the two mechanisms can be measured apart. The
+fabricated text is kept under `suppressed_text` for auditing and never under
+`text` — anything reading `text` must never see a fabrication.
+
+**Whisper's decode is non-deterministic**, so a threshold fitted to a single
+transcription will overfit. Re-transcribing one fabricated chunk five times
+produced five *different* fabrications in five different languages, with
+`no_speech_prob` ranging 0.03-0.60 and `avg_logprob` -0.33 to -4.15 on the
+**same audio**. Real speech, by contrast, decoded near-identically every time —
+which is itself part of the signal. The defaults above are therefore fitted over
+**four transcriptions of each of ten chunks** (40 samples), where they keep
+24/24 real-speech transcriptions and suppress 16/16 fabricated ones.
+
+`no_speech_prob` is the most stable of the three across repeat runs;
+`avg_logprob` varies most. When calibrating on a new mic, run a session or two
+with `--no-confidence-gate`, read the `confidence` block off the JSONL, and set
+thresholds from the spread rather than from one draw.
+
+Consumers should render a `suppressed` chunk as a warning rather than as
+transcript, and a `confidence_unavailable` chunk with its uncertainty visible.
+Surfacing an unknown beats resolving it wrongly.
 
 ### Pause and resume (taking a break)
 
@@ -475,8 +566,10 @@ is the right place for those provisional rows to be confirmed or corrected.
 | `ModuleNotFoundError: config` | `execution/scripts/config.py` missing | Untracked + gitignored; copy from a worktree |
 | Garbled text on non-speech | Whisper straining on music/noise | Expected; not a defect |
 | Operator's voice absent | Only the system track is sliced | By design; see the follow-up task |
-| Subtitle boilerplate ("thank you for watching", "please subscribe") or unprompted Japanese/Korean/Ukrainian | Whisper hallucinating on silence | Should now be gated out before the API call. If it still appears, the slice measured above threshold — **raise** the threshold and re-measure |
-| Real speech missing, JSONL shows `"skipped": "below_threshold"` | Threshold too aggressive for this mic/room | **Lower** `LIVE_TRANSCRIPT_SILENCE_THRESHOLD_DB`; check the logged `rms_db` against the -50 dB default |
+| Subtitle boilerplate ("thank you for watching", "please subscribe") or unprompted Japanese/Korean/Ukrainian reaching the session as transcript | Whisper fabricating on silence, past **both** gates | Read the chunk's `confidence` block in the JSONL. Do **not** reach for the level threshold first — on a noisy mic the fabrication may sit above real speech (see [3b](#3b-the-silence-gate)). Tighten whichever confidence axis the block shows it squeaked through, usually `LIVE_TRANSCRIPT_MIN_CHAR_RATE` |
+| Real speech missing, JSONL shows `"skipped": "below_threshold"` | Level threshold too aggressive for this mic/room | **Lower** `LIVE_TRANSCRIPT_SILENCE_THRESHOLD_DB`; check the logged `rms_db` against the -50 dB default |
+| Real speech missing, JSONL shows `"suppressed": "low_confidence"` | Confidence gate too aggressive for this speaker or room | Compare the chunk's `confidence` block against the three defaults to see which axis rejected it. Brief utterances trip `min_char_rate` most often; a heavy accent or a distant mic raises `no_speech_prob`. Re-run with `--no-confidence-gate` for a session to gather the spread before changing a default |
+| Every chunk carries `"confidence_unavailable": true` | The transcription path returned no segments, so the confidence gate is inert | Check that `transcribe_slice` still passes `--segments-json` and that the Whisper path still honours `response_format="verbose_json"`. Only the level gate is protecting the feed until this is fixed |
 | Stream ends when the operator takes a break | `--follow` not passed | Relaunch with `--follow` |
 | Nothing after `paused` | Break outlasted `--follow-timeout-min`, or the resumed recording is a different track | Check `/tmp/livetail.err` for the timeout line |
 
