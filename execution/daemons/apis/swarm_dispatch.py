@@ -518,6 +518,62 @@ NOT_RECEIVED_TOKEN = "NOT RECEIVED"
 # parser so the two cannot drift.
 MERGE_REFUSED_MARKER = "MERGE REFUSED:"
 
+# ── Denied gate writeback (ateles#795) ────────────────────────────────────────
+# A gate-owning lens whose `correct()` on the parent issue entity was refused
+# leaves `gate_status.<lens>` at `pending`. From the outside that is
+# INDISTINGUISHABLE from a review that never ran — which is precisely why PR
+# #791 sat blocked with a clean panel and nobody could tell why. Both states
+# read as "the gate is pending"; only one of them means the reviewer was
+# silenced.
+#
+# These signatures are matched against a panelist's own stdout, so the claim is
+# always the agent's: it says its write was denied, and the dispatcher relays
+# that rather than inferring it. Matched per line and case-insensitively,
+# following _DELIVERY_DENIAL_SIGNATURES in skill_runner — a joined-blob search
+# matched these strings wherever they appeared, including quoted inside a
+# review that was merely DISCUSSING the failure mode (this file's own diff trips
+# them), so a panelist reviewing this very change would be reported as denied.
+_GATE_WRITEBACK_DENIAL_SIGNATURES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"gate[ _-]?writeback.{0,40}\bdenied\b", re.I),
+    re.compile(r"\bdenied\b.{0,40}gate[ _-]?writeback", re.I),
+    re.compile(
+        r"correct\(\).{0,60}(?:required approval|requires approval|"
+        r"permission (?:prompt|denied)|was denied)",
+        re.I,
+    ),
+    re.compile(
+        r"(?:could not|couldn't|unable to|failed to) (?:write|correct|update)"
+        r".{0,40}gate_status",
+        re.I,
+    ),
+)
+
+
+def detect_gate_writeback_denial(*texts: str) -> bool:
+    """Whether a panelist reported that its own gate writeback was refused.
+
+    Read-only over the agent's own words. A lens that never owned a gate simply
+    never emits these lines, so a non-gating review is never penalised.
+    """
+    for text in texts:
+        if not text:
+            continue
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            for pattern in _GATE_WRITEBACK_DENIAL_SIGNATURES:
+                if pattern.search(stripped):
+                    return True
+    return False
+
+
+# Posted to the PR when a gate-owning lens could not record its own verdict.
+# The point is that the gate's `pending` state stops being ambiguous: this
+# comment says the review RAN and was SILENCED, which is a different problem
+# from a review that is merely outstanding, and needs a different fix.
+GATE_WRITEBACK_DENIED_MARKER = "<!-- apis-gate-writeback-denied -->"
+
 # The durable outcomes of a merge attempt. `authorized_but_unable` is the state
 # ateles#565 says is missing: the autonomy flag AUTHORIZED the merge and a
 # separate control denied the mechanism. From the outside that was previously
@@ -3260,6 +3316,67 @@ class SwarmDispatcher:
                 handler=DAEMON_NAME,
             )
 
+    async def _refresh_pending_gates(
+        self, repository: str, parent: int | None, snapshot: set[str]
+    ) -> set[str]:
+        """Re-read `gate_status` from the system of record at DECISION time.
+
+        ateles#795 acceptance criterion 3, and ateles#788's failure directly.
+        `pending_gates` is parsed from Lanius's stdout BEFORE the panel runs.
+        The panel is exactly the thing that clears gates: a gate-owning lens
+        signs off and writes `gate_status.<lens>` during the panel. Handing the
+        pre-panel snapshot to the merge-authorization clause therefore asks
+        Vanellus to judge merge readiness against a view that cannot include the
+        writebacks the panel just made. On #788 every lens had signed off and
+        `arch: signed_off` was live in Neotoma, while the dispatcher withheld
+        the merge citing `arch` pending — reading its own stale snapshot.
+
+        This is the same correction ateles#460 made for the issue pipeline
+        (`_gates_green` reads the entity rather than Lanius's report of it),
+        applied to the PR-panel path where it was never carried over.
+
+        Fails SAFE by returning the snapshot unchanged: a read failure must not
+        silently CLEAR a gate. Narrowing only ever happens on a successful read
+        of the record, so the worst case here is the status quo — a stale block
+        the operator can see — never an unearned merge.
+        """
+        if not parent or not snapshot:
+            return snapshot
+        ref = f"{repository}#{parent}"
+        try:
+            store = IssueGateStore(
+                self.config.neotoma_base_url, self.config.neotoma_token
+            )
+            state = await store.load(repository, parent)
+        except Exception as exc:  # noqa: BLE001 — never crash the pipeline
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: live gate_status re-read failed "
+                f"({exc}) — keeping the pre-panel snapshot "
+                f"({', '.join(sorted(snapshot))})"
+            )
+            return snapshot
+        if not state.found:
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: no issue entity on re-read — keeping "
+                f"the pre-panel snapshot ({', '.join(sorted(snapshot))})"
+            )
+            return snapshot
+
+        still_pending = {
+            gate
+            for gate in snapshot
+            if (state.gate_status.get(gate) or "pending").strip().lower()
+            not in CLEARED_GATE_STATES
+        }
+        cleared = snapshot - still_pending
+        if cleared:
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: gate(s) {', '.join(sorted(cleared))} "
+                "cleared in the record during the panel — the pre-panel "
+                "snapshot was stale (ateles#795)"
+            )
+        return still_pending
+
     async def _gates_green(
         self, lanius: SkillResult, repository: str, issue_number: int
     ) -> bool:
@@ -3747,6 +3864,8 @@ class SwarmDispatcher:
         )
 
         reviews: list[tuple[str, str]] = []
+        # (lens, agent) for each gate owner that reported its writeback refused.
+        denied_gate_writebacks: list[tuple[str, str]] = []
         for lens in panel:
             # QE3: the qa lens (Phoenicurus) authors + runs an eval, so it needs a
             # writable PR-branch checkout as its cwd. Other lenses stay diff-only
@@ -3781,6 +3900,20 @@ class SwarmDispatcher:
                 await cleanup_pr_worktree(qa_worktree)
             if result.ok:
                 reviews.append((lens.lens, result.stdout))
+            # ateles#795: a lens that owns a gate and reports its own writeback
+            # was refused must not leave the gate merely `pending`. Recorded per
+            # lens here, surfaced on the PR below, so "silenced" is legible as
+            # something other than "not yet reviewed".
+            if lens.lens in pending_gates and detect_gate_writeback_denial(
+                result.stdout, result.stderr
+            ):
+                denied_gate_writebacks.append((lens.lens, lens.agent))
+
+        # 2a-bis. Surface any denied gate writeback as an explicit PR failure.
+        if denied_gate_writebacks:
+            await self._surface_denied_gate_writebacks(
+                trigger, parent, denied_gate_writebacks
+            )
 
         # 2b. Persist the captured reviews and backfill any review:<lens>
         #     comment the panelist could not post itself (PR-87 self-dogfood
@@ -3810,6 +3943,13 @@ class SwarmDispatcher:
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
             )
+
+        # 3b. ateles#795: re-read gate_status from the record before the merge
+        #     decision. `pending_gates` above is a PRE-panel snapshot, and the
+        #     panel is what clears gates — see _refresh_pending_gates.
+        pending_gates = await self._refresh_pending_gates(
+            trigger.repository, parent, pending_gates
+        )
 
         # 4. Vanellus aggregates panel verdicts. Merge is operator-gated
         #    unless APIS_AUTONOMY_AUTO_MERGE=1 (ateles#80 guardrail).
@@ -7285,6 +7425,94 @@ class SwarmDispatcher:
         except Exception as exc:
             log.error(
                 f"[{DAEMON_NAME}] fallback review comments failed for "
+                f"{t.repository}#{t.number}: {exc}"
+            )
+
+    async def _surface_denied_gate_writebacks(
+        self,
+        t: SwarmTrigger,
+        parent: int | None,
+        denied: list[tuple[str, str]],
+    ) -> None:
+        """Make a refused gate writeback visible on the PR and to the operator.
+
+        ateles#795 acceptance criterion 2. A denied writeback previously left
+        `gate_status.<lens>` at `pending` and said nothing — the same state a
+        review that never ran produces. The two need opposite responses (re-run
+        the lens vs. fix the grant), so collapsing them into one indistinguishable
+        `pending` is what let PR #791 sit blocked with a clean panel.
+
+        Best-effort and idempotent on the marker; never raises.
+        """
+        if not denied:
+            return
+        rows = "\n".join(
+            f"| `{lens}` | {agent} |" for lens, agent in sorted(denied)
+        )
+        lenses = ", ".join(f"`{lens}`" for lens, _ in sorted(denied))
+        log.error(
+            f"[{DAEMON_NAME}] {t.repository}#{t.number}: gate writeback DENIED "
+            f"for {lenses} — the gate stays pending because the reviewer could "
+            "not record its verdict, not because the review is outstanding"
+        )
+        try:
+            self.notifier.send(
+                f"Gate writeback denied on {t.repository}#{t.number} for "
+                f"{lenses}. The lens reviewed and could not write its own "
+                "`gate_status` result, so the gate reads `pending` and merge is "
+                "withheld on a review that actually completed. Check the "
+                "agent's tool grant for the Neotoma correct() path.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+        except Exception as exc:  # notifier must never crash the pipeline
+            log.error(f"[{DAEMON_NAME}] denied-writeback notification failed: {exc}")
+
+        repo_token = _token_for_repo(t.repository)
+        if not repo_token:
+            return
+        parent_ref = f" on parent issue #{parent}" if parent else ""
+        body = (
+            f"{GATE_WRITEBACK_DENIED_MARKER}\n"
+            "**🤖 Apis — Ateles swarm, swarm dispatcher**\n"
+            "**GATE WRITEBACK DENIED**\n\n"
+            f"The following lens(es) completed a review of this PR and were "
+            f"**refused permission to record their own gate result**"
+            f"{parent_ref}:\n\n"
+            "| gate | lens agent |\n|---|---|\n"
+            f"{rows}\n\n"
+            "The affected `gate_status` field(s) therefore still read "
+            "`pending`. That is **not** the same as an outstanding review — the "
+            "review ran; its verdict had no path into the record. Merge stays "
+            "withheld either way, so this needs the grant fixed rather than the "
+            "lens re-run.\n\n"
+            "Raised automatically so a denied writeback is never again "
+            "indistinguishable from a review that never happened (ateles#795)."
+        )
+        url = (
+            f"https://api.github.com/repos/{t.repository}/issues/"
+            f"{t.number}/comments"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    url,
+                    params={"per_page": 100},
+                    headers=self._github_headers(t.repository),
+                )
+                resp.raise_for_status()
+                if any(
+                    GATE_WRITEBACK_DENIED_MARKER in (c.get("body") or "")
+                    for c in resp.json()
+                ):
+                    return  # already surfaced for this PR
+                post = await client.post(
+                    url, json={"body": body}, headers=self._github_headers(t.repository)
+                )
+                post.raise_for_status()
+        except Exception as exc:
+            log.error(
+                f"[{DAEMON_NAME}] denied-writeback comment failed for "
                 f"{t.repository}#{t.number}: {exc}"
             )
 
