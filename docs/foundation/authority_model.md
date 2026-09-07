@@ -378,6 +378,10 @@ tool**, and therefore what the two sides of that parity test compare. The measur
 holding parity named this as its blocker rather than a finding — a copy cannot be held equal to an original
 that has no way to state what it holds.
 
+The candidate grammar for how a grant names a tool is proposed in
+[`docs/tool_grant_grammar.md`](../tool_grant_grammar.md) (decision 86, status: open — not yet
+ratified).
+
 **What is already fixed, and is not the question.** The capability op form `tool:<surface>:<operation>` with
 `param_constraints` is what the grant checker parses and what the tool proxy enforces, and the harness's own
 four recognized entry forms — a wildcard, a bare tool name, an `mcp__<server>__<tool>` reference, and a
