@@ -518,6 +518,110 @@ NOT_RECEIVED_TOKEN = "NOT RECEIVED"
 # parser so the two cannot drift.
 MERGE_REFUSED_MARKER = "MERGE REFUSED:"
 
+# ── Denied gate writeback (ateles#795) ────────────────────────────────────────
+# A gate-owning lens whose `correct()` on the parent issue entity was refused
+# leaves `gate_status.<lens>` at `pending`. From the outside that is
+# INDISTINGUISHABLE from a review that never ran — which is precisely why PR
+# #791 sat blocked with a clean panel and nobody could tell why. Both states
+# read as "the gate is pending"; only one of them means the reviewer was
+# silenced.
+#
+# The panelist declares the denial with THIS MARKER, which the gate-writeback
+# prompt instructs it to emit at the START OF A LINE (see `gate_writeback_block`
+# in `_panelist_prompt`). Marker, not prose signatures, for the reason
+# MERGE_REFUSED_MARKER is a marker: a refusal is something the agent DECLARES,
+# and a declaration needs a token reserved for declaring it.
+#
+# The first revision guessed at phrasings instead ("gate writeback ... denied",
+# "correct() required approval", "unable to correct gate_status"). Per-line
+# anchoring defeated the joined-blob trap for prose paragraphs, but not for a
+# reviewer QUOTING a trigger phrase as its own standalone line — and the review
+# most likely to quote those phrases is a review of this very change, where they
+# appear as single lines in this module's own tests. A guard that misfires on
+# text ABOUT the thing it guards is a known shape in this repo: ateles#768, where
+# the Gmail send-gate blocked a `git commit` whose message quoted a Gmail helper.
+#
+# The marker cannot be reached by quotation the way a prose phrase can: quoting
+# it means reproducing a reserved token at line start, which prose about the
+# mechanism does not do (it writes `` `GATE WRITEBACK DENIED:` `` inline, in
+# backticks, mid-sentence).
+GATE_WRITEBACK_DENIED_ATTESTATION = "GATE WRITEBACK DENIED:"
+
+# Anchored with `re.match` per line — the same discipline as
+# `_delivery_failure_reason` in skill_runner, and for the same reason: an
+# attestation is emitted at the start of its own line, so requiring that
+# position is what separates "the agent declared this" from "someone wrote it
+# down". A leading blockquote/list marker is tolerated (models format), but an
+# inline mention mid-sentence is not an attestation.
+_GATE_WRITEBACK_DENIED_RE = re.compile(
+    r"(?:[>\-*]\s*|\*\*)?" + re.escape(GATE_WRITEBACK_DENIED_ATTESTATION),
+    re.IGNORECASE,
+)
+
+# FALLBACK — a lens that reports its denial in its own words instead of the
+# marker. The marker is the contract, but a prompt instruction is not a
+# guarantee: models paraphrase, and a MISSED denial is the worse failure of the
+# two here. It reverts to the ateles#795 bug exactly — the gate sticks `pending`
+# and is once again indistinguishable from a review that never ran, which is the
+# state that let PR #791 sit. A false positive, by contrast, posts one visible
+# comment on a PR that is otherwise fine. So the prose net stays.
+#
+# What it requires that the first revision did not: a FIRST-PERSON SUBJECT. The
+# quotation problem is that "gate writeback ... denied" describes the mechanism
+# in the abstract, which is what a review of this change writes. "I could not
+# correct gate_status" is a claim only the acting agent makes about itself. That
+# is Loxia's "first-person/agent-attributed position" suggestion, kept as the
+# net beneath the marker rather than as the primary signal.
+_GATE_WRITEBACK_FIRST_PERSON_DENIAL: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"^(?:i|my|we|our)\b.{0,80}?"
+        r"(?:could not|couldn't|cannot|can't|was|were|been)\b.{0,40}?"
+        r"(?:denied|refused|blocked|unable)",
+        re.I,
+    ),
+    re.compile(
+        r"^(?:i|we)\b.{0,60}?(?:could not|couldn't|cannot|can't|unable to|"
+        r"failed to)\b.{0,40}?"
+        r"(?:correct|write|update|record|set)\b.{0,40}?gate_status",
+        re.I,
+    ),
+)
+
+
+def detect_gate_writeback_denial(*texts: str) -> bool:
+    """Whether a panelist DECLARED that its own gate writeback was refused.
+
+    Read-only over the agent's own words. Primary signal is the reserved
+    attestation the prompt instructs a refused lens to emit; the fallback
+    catches a lens that paraphrased, but only in a first-person position, so a
+    review merely discussing or quoting the failure mode is not flagged. A lens
+    that never owned a gate emits neither, so a non-gating review is never
+    penalised.
+    """
+    for text in texts:
+        if not text:
+            continue
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if _GATE_WRITEBACK_DENIED_RE.match(stripped):
+                return True
+            # Strip list/quote/bold formatting before the first-person test:
+            # "- I could not ..." is still the agent speaking about itself.
+            unformatted = re.sub(r"^(?:[>\-*+]\s*|\*\*|\d+[.)]\s*)+", "", stripped)
+            for pattern in _GATE_WRITEBACK_FIRST_PERSON_DENIAL:
+                if pattern.match(unformatted):
+                    return True
+    return False
+
+
+# Posted to the PR when a gate-owning lens could not record its own verdict.
+# The point is that the gate's `pending` state stops being ambiguous: this
+# comment says the review RAN and was SILENCED, which is a different problem
+# from a review that is merely outstanding, and needs a different fix.
+GATE_WRITEBACK_DENIED_MARKER = "<!-- apis-gate-writeback-denied -->"
+
 # The durable outcomes of a merge attempt. `authorized_but_unable` is the state
 # ateles#565 says is missing: the autonomy flag AUTHORIZED the merge and a
 # separate control denied the mechanism. From the outside that was previously
@@ -3260,6 +3364,67 @@ class SwarmDispatcher:
                 handler=DAEMON_NAME,
             )
 
+    async def _refresh_pending_gates(
+        self, repository: str, parent: int | None, snapshot: set[str]
+    ) -> set[str]:
+        """Re-read `gate_status` from the system of record at DECISION time.
+
+        ateles#795 acceptance criterion 3, and ateles#788's failure directly.
+        `pending_gates` is parsed from Lanius's stdout BEFORE the panel runs.
+        The panel is exactly the thing that clears gates: a gate-owning lens
+        signs off and writes `gate_status.<lens>` during the panel. Handing the
+        pre-panel snapshot to the merge-authorization clause therefore asks
+        Vanellus to judge merge readiness against a view that cannot include the
+        writebacks the panel just made. On #788 every lens had signed off and
+        `arch: signed_off` was live in Neotoma, while the dispatcher withheld
+        the merge citing `arch` pending — reading its own stale snapshot.
+
+        This is the same correction ateles#460 made for the issue pipeline
+        (`_gates_green` reads the entity rather than Lanius's report of it),
+        applied to the PR-panel path where it was never carried over.
+
+        Fails SAFE by returning the snapshot unchanged: a read failure must not
+        silently CLEAR a gate. Narrowing only ever happens on a successful read
+        of the record, so the worst case here is the status quo — a stale block
+        the operator can see — never an unearned merge.
+        """
+        if not parent or not snapshot:
+            return snapshot
+        ref = f"{repository}#{parent}"
+        try:
+            store = IssueGateStore(
+                self.config.neotoma_base_url, self.config.neotoma_token
+            )
+            state = await store.load(repository, parent)
+        except Exception as exc:  # noqa: BLE001 — never crash the pipeline
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: live gate_status re-read failed "
+                f"({exc}) — keeping the pre-panel snapshot "
+                f"({', '.join(sorted(snapshot))})"
+            )
+            return snapshot
+        if not state.found:
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: no issue entity on re-read — keeping "
+                f"the pre-panel snapshot ({', '.join(sorted(snapshot))})"
+            )
+            return snapshot
+
+        still_pending = {
+            gate
+            for gate in snapshot
+            if (state.gate_status.get(gate) or "pending").strip().lower()
+            not in CLEARED_GATE_STATES
+        }
+        cleared = snapshot - still_pending
+        if cleared:
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: gate(s) {', '.join(sorted(cleared))} "
+                "cleared in the record during the panel — the pre-panel "
+                "snapshot was stale (ateles#795)"
+            )
+        return still_pending
+
     async def _gates_green(
         self, lanius: SkillResult, repository: str, issue_number: int
     ) -> bool:
@@ -3747,6 +3912,8 @@ class SwarmDispatcher:
         )
 
         reviews: list[tuple[str, str]] = []
+        # (lens, agent) for each gate owner that reported its writeback refused.
+        denied_gate_writebacks: list[tuple[str, str]] = []
         for lens in panel:
             # QE3: the qa lens (Phoenicurus) authors + runs an eval, so it needs a
             # writable PR-branch checkout as its cwd. Other lenses stay diff-only
@@ -3781,6 +3948,20 @@ class SwarmDispatcher:
                 await cleanup_pr_worktree(qa_worktree)
             if result.ok:
                 reviews.append((lens.lens, result.stdout))
+            # ateles#795: a lens that owns a gate and reports its own writeback
+            # was refused must not leave the gate merely `pending`. Recorded per
+            # lens here, surfaced on the PR below, so "silenced" is legible as
+            # something other than "not yet reviewed".
+            if lens.lens in pending_gates and detect_gate_writeback_denial(
+                result.stdout, result.stderr
+            ):
+                denied_gate_writebacks.append((lens.lens, lens.agent))
+
+        # 2a-bis. Surface any denied gate writeback as an explicit PR failure.
+        if denied_gate_writebacks:
+            await self._surface_denied_gate_writebacks(
+                trigger, parent, denied_gate_writebacks
+            )
 
         # 2b. Persist the captured reviews and backfill any review:<lens>
         #     comment the panelist could not post itself (PR-87 self-dogfood
@@ -3810,6 +3991,13 @@ class SwarmDispatcher:
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
             )
+
+        # 3b. ateles#795: re-read gate_status from the record before the merge
+        #     decision. `pending_gates` above is a PRE-panel snapshot, and the
+        #     panel is what clears gates — see _refresh_pending_gates.
+        pending_gates = await self._refresh_pending_gates(
+            trigger.repository, parent, pending_gates
+        )
 
         # 4. Vanellus aggregates panel verdicts. Merge is operator-gated
         #    unless APIS_AUTONOMY_AUTO_MERGE=1 (ateles#80 guardrail).
@@ -6946,6 +7134,16 @@ class SwarmDispatcher:
                 "reason, attempted vs read-back values, and next action (retry / "
                 f"escalate to Anthus / check agent_grant retrieve+correct on "
                 f"issue for `{lens.agent}`).\n"
+                "  4b. If the write was REFUSED OUTRIGHT — a tool-permission "
+                "prompt you cannot answer, a missing grant, any control that "
+                "stopped the `correct()` from being attempted or applied — you "
+                "MUST additionally declare it on its own line, beginning that "
+                f"line with `{GATE_WRITEBACK_DENIED_ATTESTATION}` followed by "
+                "the reason. Do not paraphrase and do not bury it in prose: the "
+                "dispatcher escalates on that exact token, and a refusal it "
+                "cannot see is indistinguishable from a review that never ran "
+                "(ateles#795). Emit it ONLY for your own refused write — never "
+                "when merely discussing, quoting, or reviewing this mechanism.\n"
                 "  5. If your verdict has any blocking finding, LEAVE the gate "
                 "`pending` (do not sign off) — the block stands until the author "
                 "resolves it and you re-review.\n"
@@ -7285,6 +7483,106 @@ class SwarmDispatcher:
         except Exception as exc:
             log.error(
                 f"[{DAEMON_NAME}] fallback review comments failed for "
+                f"{t.repository}#{t.number}: {exc}"
+            )
+
+    async def _surface_denied_gate_writebacks(
+        self,
+        t: SwarmTrigger,
+        parent: int | None,
+        denied: list[tuple[str, str]],
+    ) -> None:
+        """Make a refused gate writeback visible on the PR and to the operator.
+
+        ateles#795 acceptance criterion 2. A denied writeback previously left
+        `gate_status.<lens>` at `pending` and said nothing — the same state a
+        review that never ran produces. The two need opposite responses (re-run
+        the lens vs. fix the grant), so collapsing them into one indistinguishable
+        `pending` is what let PR #791 sit blocked with a clean panel.
+
+        Best-effort and idempotent on the marker; never raises.
+        """
+        if not denied:
+            return
+        rows = "\n".join(
+            f"| `{lens}` | {agent} |" for lens, agent in sorted(denied)
+        )
+        lenses = ", ".join(f"`{lens}`" for lens, _ in sorted(denied))
+        log.error(
+            f"[{DAEMON_NAME}] {t.repository}#{t.number}: gate writeback DENIED "
+            f"for {lenses} — the gate stays pending because the reviewer could "
+            "not record its verdict, not because the review is outstanding"
+        )
+        try:
+            self.notifier.send(
+                f"Gate writeback denied on {t.repository}#{t.number} for "
+                f"{lenses}. The lens reviewed and could not write its own "
+                "`gate_status` result, so the gate reads `pending` and merge is "
+                "withheld on a review that actually completed. Check the "
+                "agent's tool grant for the Neotoma correct() path.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+        except Exception as exc:  # notifier must never crash the pipeline
+            log.error(f"[{DAEMON_NAME}] denied-writeback notification failed: {exc}")
+
+        repo_token = _token_for_repo(t.repository)
+        if not repo_token:
+            return
+        parent_ref = f" on parent issue #{parent}" if parent else ""
+        body = (
+            f"{GATE_WRITEBACK_DENIED_MARKER}\n"
+            "**🤖 Apis — Ateles swarm, swarm dispatcher**\n"
+            "**GATE WRITEBACK DENIED**\n\n"
+            f"The following lens(es) completed a review of this PR and were "
+            f"**refused permission to record their own gate result**"
+            f"{parent_ref}:\n\n"
+            "| gate | lens agent |\n|---|---|\n"
+            f"{rows}\n\n"
+            "The affected `gate_status` field(s) therefore still read "
+            "`pending`. That is **not** the same as an outstanding review — the "
+            "review ran; its verdict had no path into the record. Merge stays "
+            "withheld either way, so this needs the grant fixed rather than the "
+            "lens re-run.\n\n"
+            "Raised automatically so a denied writeback is never again "
+            "indistinguishable from a review that never happened (ateles#795)."
+        )
+        url = (
+            f"https://api.github.com/repos/{t.repository}/issues/"
+            f"{t.number}/comments"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                # Newest-first rather than paginating the whole thread: a marker
+                # posted by THIS mechanism is necessarily recent (it is written
+                # during the same panel round that would double-post it), so the
+                # newest page is where it can be, and the first page is then a
+                # complete answer rather than an arbitrary prefix. The default
+                # ascending order made this an OLDEST-100 read, which on the
+                # >100-comment PRs this repo actually carries (#745 alone has 66
+                # reviews) is the one window guaranteed NOT to hold it.
+                resp = await client.get(
+                    url,
+                    params={
+                        "per_page": 100,
+                        "sort": "created",
+                        "direction": "desc",
+                    },
+                    headers=self._github_headers(t.repository),
+                )
+                resp.raise_for_status()
+                if any(
+                    GATE_WRITEBACK_DENIED_MARKER in (c.get("body") or "")
+                    for c in resp.json()
+                ):
+                    return  # already surfaced for this PR
+                post = await client.post(
+                    url, json={"body": body}, headers=self._github_headers(t.repository)
+                )
+                post.raise_for_status()
+        except Exception as exc:
+            log.error(
+                f"[{DAEMON_NAME}] denied-writeback comment failed for "
                 f"{t.repository}#{t.number}: {exc}"
             )
 

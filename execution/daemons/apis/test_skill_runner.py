@@ -352,10 +352,19 @@ class TestRunSkill:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_wildcard_allowlist_omits_allowed_tools_flag(
+    def test_wildcard_allowlist_still_grants_the_gate_writeback(
         self, MockLoader, mock_write_harness
     ) -> None:
-        """When tool_allowlist is '*', --allowed-tools must NOT appear."""
+        """`['*']` keeps every tool AND names the gate-writeback tools.
+
+        This test previously asserted that `--allowed-tools` must NOT appear at
+        all for a wildcard agent. That was the bug (ateles#795): with no flag
+        the child stays in `default` permission mode, where every MCP write tool
+        raises an approval prompt a headless `--print` child cannot answer — so
+        the most-trusted agents were the ones whose gate writeback was surest to
+        be denied. The wildcard is preserved as the first entry, so the agent is
+        not narrowed; the three writeback tools are named so the write lands.
+        """
         wide_def = _make_def(prompt_markdown="Full-tool agent.", tool_allowlist="*")
         instance = MagicMock()
         instance.load.return_value = wide_def
@@ -389,7 +398,13 @@ class TestRunSkill:
                 )
             )
 
-        assert "--allowed-tools" not in captured_cmd
+        assert "--allowed-tools" in captured_cmd
+        allowed = captured_cmd[captured_cmd.index("--allowed-tools") + 1]
+        assert allowed.split(",")[0] == "*", (
+            "the wildcard must lead, so the agent keeps every tool it had"
+        )
+        for tool in skill_runner.GATE_WRITEBACK_TOOLS:
+            assert tool in allowed
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -1059,11 +1074,17 @@ class TestNeotomaMcpConfigInjection:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_wildcard_allowlist_not_modified(
+    def test_wildcard_allowlist_is_not_narrowed(
         self, MockLoader, mock_write_harness, monkeypatch
     ) -> None:
-        """When tool_allowlist is ['*'] (all tools), --allowed-tools must NOT
-        appear in the command (wildcard means no restriction to pass through)."""
+        """A wildcard agent keeps every tool, and still gets --mcp-config.
+
+        Was `test_wildcard_allowlist_not_modified`, asserting the flag was
+        omitted entirely. ateles#795 corrected that: omitting the flag is not
+        the permissive state it reads as. What must hold is that the agent is
+        not NARROWED — the `*` still leads the list — not that the flag is
+        absent.
+        """
         wide_def = _make_def(prompt_markdown="Full-tool agent.", tool_allowlist="*")
         instance = MagicMock()
         instance.load.return_value = wide_def
@@ -1090,10 +1111,12 @@ class TestNeotomaMcpConfigInjection:
                 )
             )
 
-        assert "--allowed-tools" not in captured_cmd, (
-            "Expected no --allowed-tools flag when tool_allowlist is ['*']"
+        assert "--allowed-tools" in captured_cmd
+        allowed = captured_cmd[captured_cmd.index("--allowed-tools") + 1]
+        assert allowed.split(",")[0] == "*", (
+            "the wildcard must lead — this fix grants, it never narrows"
         )
-        # But --mcp-config is still injected.
+        # And --mcp-config is still injected.
         assert "--mcp-config" in captured_cmd, (
             "Expected --mcp-config even when tool_allowlist is ['*']"
         )

@@ -100,6 +100,51 @@ ATELES_REPO = Path(
 # detector actually matches real CLI output, not just a single-line fixture.
 _DROPPED_ALLOWLIST_RULE_RE = re.compile(r'Ignoring\s+--allowedTools rule "([^"]*)"')
 
+# ── Gate-writeback tool grant (ateles#795) ────────────────────────────────────
+# The Neotoma tools a gate-owning review lens needs to record its OWN verdict.
+#
+# A panelist seated because it owns a pending pre-impl gate is instructed (the
+# GATE WRITEBACK block in swarm_dispatch._panelist_prompt) to `correct()`
+# `gate_status.<lens>` on the parent issue entity and then read it back. On PR
+# #791 that write was DENIED — and not by Neotoma: the `agent_grant` admitting
+# `issue` on retrieve+correct has been live and `active` since ateles#769, and
+# the instance policy is permissive. It was denied by the LOCAL harness. A
+# headless `claude --print` child runs in `default` permission mode, where an
+# MCP write tool it was not explicitly granted raises an approval prompt that a
+# non-interactive child cannot answer. The lens signed off in prose while
+# `gate_status.ux` stayed `pending`, and gate inheritance — a hard stop that
+# outranks APIS_AUTONOMY_AUTO_MERGE — withheld the merge forever.
+#
+# The remedy is to name these three tools on `--allowed-tools` so the writeback
+# is pre-approved at tool granularity. Deliberately NOT the remedy:
+# `--permission-mode bypassPermissions` or `--dangerously-skip-permissions`,
+# either of which lifts every gate on the child (shell, network, the entire MCP
+# surface) to fix one internal governance write. Least privilege is the point.
+#
+# The two retrieve tools are here because the recipe is correct-then-READ-BACK:
+# a `correct()` the lens cannot verify is exactly the silent failure ateles#762
+# cause #2 named, and a blind write would trade one invisible failure for
+# another.
+GATE_WRITEBACK_TOOLS: tuple[str, ...] = (
+    "mcp__mcpsrv_neotoma__retrieve_entity_by_identifier",
+    "mcp__mcpsrv_neotoma__retrieve_entity_snapshot",
+    "mcp__mcpsrv_neotoma__correct",
+)
+
+
+def gate_writeback_allowlist(tools: list[str]) -> list[str]:
+    """Extend *tools* with the gate-writeback tools, preserving order.
+
+    Additive by construction: the agent's own allowlist is never rebuilt or
+    reordered, only extended with entries it lacks. Rebuilding a grant list from
+    a partial view is how ateles#762 dropped grants in the first place.
+    """
+    merged = list(tools)
+    for tool in GATE_WRITEBACK_TOOLS:
+        if tool not in merged:
+            merged.append(tool)
+    return merged
+
 
 def _require_neotoma_base_url() -> str:
     """Return NEOTOMA_BASE_URL (trailing slash stripped) or raise.
@@ -1218,11 +1263,36 @@ async def _run_skill_once(
         allowed_list = list(tools)
         if "mcp__mcpsrv_neotoma__*" not in allowed_list:
             allowed_list.append("mcp__mcpsrv_neotoma__*")
+        # ateles#795: name the gate-writeback tools explicitly even though the
+        # `mcp__mcpsrv_neotoma__*` wildcard above nominally covers them. The
+        # wildcard is what a restricted agent already had on PR #791 when its
+        # `correct()` was still denied, so it is not sufficient evidence that
+        # the writeback is pre-approved. Exact tool names are.
+        allowed_list = gate_writeback_allowlist(allowed_list)
         allowed = ",".join(allowed_list)
         cmd += ["--allowed-tools", allowed]
         log.info(
             f"[apis] Spawning via {provider}: "
             f"<{_role}:agent_def+{skill}.SKILL.md> "
+            f"--allowed-tools {allowed} timeout={timeout}s"
+        )
+    elif provider == "claude":
+        # tools == ['*'] — "all tools", which previously meant NO
+        # `--allowed-tools` flag at all. That is not the permissive state it
+        # reads as: with no flag the child stays in `default` permission mode,
+        # where every MCP write tool prompts, and a headless `--print` child
+        # cannot answer a prompt. So the most-trusted agents were the ones
+        # whose gate writeback was surest to be denied (ateles#795).
+        #
+        # Granting the three gate-writeback tools by name is the smallest fix
+        # that makes the verdict recordable. It does NOT narrow the agent: the
+        # `*` wildcard is preserved as the first entry, so every other tool the
+        # agent had remains available exactly as before.
+        allowed = ",".join(gate_writeback_allowlist(["*"]))
+        cmd += ["--allowed-tools", allowed]
+        log.info(
+            f"[apis] Spawning via {provider}: "
+            f"<{_role}:{'agent_def+' if not degraded else 'degraded-'}{skill}.SKILL.md> "
             f"--allowed-tools {allowed} timeout={timeout}s"
         )
     else:
