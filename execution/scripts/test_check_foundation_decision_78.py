@@ -54,6 +54,21 @@ def test_fails_when_register_row_is_not_ruled(tmp_path: Path) -> None:
     assert "status cell must contain" in problems[0]
 
 
+def test_fails_when_register_row_is_absent(tmp_path: Path) -> None:
+    conformance_without_row = "\n".join(
+        line
+        for line in CONFORMANCE.splitlines()
+        if not line.startswith("| 78 |")
+    )
+    write_corpus(tmp_path, conformance=conformance_without_row)
+
+    problems = decision_78.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "decision-78-register" in problems[0]
+    assert 'no register row beginning "| 78 |"' in problems[0]
+
+
 def test_fails_when_adapters_section_still_opens_as_open(tmp_path: Path) -> None:
     write_corpus(tmp_path, adapters=ADAPTERS.replace("**Ruled", "**Open"))
 
@@ -62,3 +77,13 @@ def test_fails_when_adapters_section_still_opens_as_open(tmp_path: Path) -> None
     assert len(problems) == 1
     assert "decision-78-adapters" in problems[0]
     assert 'must open with "**Ruled"' in problems[0]
+
+
+def test_fails_when_adapters_section_is_absent(tmp_path: Path) -> None:
+    write_corpus(tmp_path, adapters="# Adapters\n\nUnrelated prose.\n")
+
+    problems = decision_78.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "decision-78-adapters" in problems[0]
+    assert "missing section" in problems[0]
