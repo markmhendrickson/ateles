@@ -822,7 +822,10 @@ once in the [action](#action)'s home section. The host a [daemon](#daemon) runs 
 are [artifacts](#artifact), and process control is its adapter's action classes (decision 45). A second
 instance of the record's own software, owned by another party, is **not** one: decision 55 rules it the
 same record, extended by replication, reached through the record's own peer-sync substrate rather than an
-adapter, with no [artifact](#artifact) at the seam.
+adapter, with no [artifact](#artifact) at the seam. The swarm's **own** serving instance is one only while it is
+the object of an operation upon it — decision 78 rules a restart, a redeploy, or a migration of that
+instance an action of the host's adapter, the [artifact](#artifact) being the process and its host and
+never an entity, while every read and write of the record remains inside the boundary as before.
 **See:** [`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken),
 [`adapters.md#the-two-invariants`](adapters.md#the-two-invariants),
 [`adapters.md#whether-the-host-a-daemon-runs-on-is-an-external-system`](adapters.md#whether-the-host-a-daemon-runs-on-is-an-external-system),
@@ -839,7 +842,10 @@ handle on a thing that does not. The word is also ordinary English for a thing w
 [step owner](#step-owner) writes, the record an effect leaves — and those uses stand; where the store is
 meant and the sentence could be read either way, say the record and name what is in it.
 **See:** [`data_model.md#scope`](data_model.md#scope),
-[`failure_posture.md#the-decision`](failure_posture.md#the-decision).
+[`failure_posture.md#the-decision`](failure_posture.md#the-decision),
+[`adapters.md#whether-the-instance-of-the-record-serving-a-swarm-is-an-external-system-when-the-swarm-operates-it`](adapters.md#whether-the-instance-of-the-record-serving-a-swarm-is-an-external-system-when-the-swarm-operates-it)
+(decision 78: the process serving the record is operated through the host's adapter, and the third **Not
+for** limb below is unaffected because no [adapter](#adapter) reaches the record itself).
 **Never:** —
 **Not for:** the record for an [external system](#external-system); "database" for the record in foundation
 prose; the record as something an [adapter](#adapter) reaches across a boundary.
