@@ -6,7 +6,7 @@ models. Runtime claim/lifecycle/gating paths load the kernel instead (`conforman
 **Kind:** foundation; walks the design through concrete batches so the invariants can be read in motion,
 and never states the state of a checkout. **Derived from:** `work_model.md`, `gates_and_workflows.md`,
 `failure_posture.md`, `authority_model.md`, and PR #745 operator review (2026-09-04). Structure follows
-Neotoma's `docs/subsystems/` flow documents: one paragraph, one diagram, the invariants exercised. Revised by the simplification pass of 2026-09-05 (revision 29: walkthroughs (e)–(j) merged back from `scenarios_extended.md`, whose only reason to exist — a reading-block budget — no longer applied to a document that is not on the reading list). Revised by the consistency pass of 2026-09-06 (revision 35: scenario (j)'s garbled clause, left when `lens` was retired, repaired).
+Neotoma's `docs/subsystems/` flow documents: one paragraph, one diagram, the invariants exercised. Amendment history: `revisions.md#scenariosmd`.
 
 ## Purpose
 

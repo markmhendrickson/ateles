@@ -3,8 +3,8 @@
 **Kernel document:** read on every review (`conformance.md`). **Kind:** foundation; states the design and
 never the state of a checkout. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (phase 0 of plan
 `ent_533d4ec2f7bfb60f66fb3fce`), prior art `ent_08460968e6f49dac21510f4a` (phase 3), ateles#727, the
-decision keys cited per invariant, and PR #745 operator review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Revised by the testability pass of 2026-09-06 (revision 37: invariants 3, 6, 8, and 10 given their mechanical form — the named instruments, the singletons' closure, the citation lint, and "landed" as a derived read). Revised by the Human Inversion mapping pass of 2026-09-06 (revision 44: where the human sits, operator attention as the protected constraint, and the sovereignty reason for the owned record, stated beside the invariants; the cross-disciplinary rubric named as out of scope until P4). Revised by the vocabulary-standard pass of 2026-09-06 (revision 49: invariant 12 added, stating the operator's own standard for the vocabulary's size and overlap as a design invariant, generalizing the substitution test `status.md` revision 29 already applied to the term retired for `review step` in revision 19). Which mechanisms exist on a given checkout, and where nothing fires, is
-measured in `status.md`, not here.
+decision keys cited per invariant, and PR #745 operator review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Which mechanisms exist on a given checkout, and where nothing fires, is
+measured in `status.md`, not here. Amendment history: `revisions.md#principlesmd`.
 
 ## Purpose
 

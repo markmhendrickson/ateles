@@ -11,8 +11,9 @@ life end to end, with the governance substrate (identity, capability, gating, au
 against the vision.
 
 Ateles is a design and a working example of it. The design is
-[`docs/foundation/`](docs/foundation/): twenty-one documents that state how work is created, taken,
-executed, and approved, and what the swarm does when it cannot reach its own record. The example is what
+[`docs/foundation/`](docs/foundation/): twenty-one documents — twenty stating how work is created,
+taken, executed, and approved, and what the swarm does when it cannot reach its own record, plus
+[Revisions](docs/foundation/revisions.md), which states no rule and holds their amendment history. The example is what
 runs against that design — background daemons and skills that already automate code review, releases,
 issue triage, email, calendar, recurring payments (fiat + Bitcoin), meeting capture and recap, health
 tracking, customer development, content and social, multi-jurisdiction tax prep, and CRM.

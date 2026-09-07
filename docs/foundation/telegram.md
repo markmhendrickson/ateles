@@ -10,7 +10,7 @@ to principals; approval is authorized against the required approvers), `workflow
 workflow, and the consent step of every workflow that has one), `failure_posture.md` (the halt; the
 off-record announcement path; retry classification), and Telegram's own chat-platform API documentation, read
 2026-09-05, and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decisions 25 and 26 ruled
-here). What is built is `status.md`. Revised by the testability pass of 2026-09-06 (revision 37: every uncorrelated message from a bound principal is a task; the start-time binding is a cache with a declared staleness bound). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser-resolves pointer cites decision 47 as ruled).
+here). What is built is `status.md`. Amendment history: `revisions.md#telegrammd`.
 
 ## Purpose
 
@@ -153,6 +153,13 @@ is right most of the time is worse than one that is never made, because the time
 indistinguishable from the times it is right.
 
 ## The callback payload is the swarm's own text, and free text is not
+
+**The rules in this section.**
+
+- What it does not license, which is the more important half.
+- A stale payload is a payload for a checkpoint that is no longer open.
+- The payload is small, so it carries a token and not a description.
+- Acknowledging a callback is not answering it.
 
 An inline keyboard is a set of buttons the swarm composed and attached to a message it sent. Pressing one
 delivers a callback carrying a payload **the swarm itself authored**. That is a materially different trust
@@ -379,6 +386,15 @@ than a narrowed write over a wide read.
 
 ## Delivery: webhooks, long polling, and what the dedup rule keys on
 
+**The rules in this section.**
+
+- The identifier is sequential but not permanently monotonic, and this is a design constraint rather than a
+detail.
+- Long polling and webhooks differ in what happens when the receiver is unavailable.
+- Undelivered updates are retained for a bounded period and then lost, and there is no backfill.
+- Two rules hold whichever mechanism is chosen, and both are already the design's.
+- One property of this channel makes the halt rule sharper than elsewhere.
+
 Where inbound delivery lands is ruled in `adapters.md` (decision 16,
 `adapters.md#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it`):
 the listener may be shared plumbing, and verifying a delivery and extracting its identifier are this adapter's.
@@ -591,6 +607,16 @@ action the gate held, so a resolution that reported success without landing woul
 operator believes they have decided, and the checkpoint would sit open behind an answer that was given.
 
 ## What this document refuses, and why
+
+**The rules in this section.**
+
+- It refuses to read intent from free text.
+- It refuses to treat a gesture as a decision.
+- It refuses to let the presence of a person in a chat stand in for a binding.
+- It refuses to act on a message during a halt.
+- It refuses to build chat-shaped state beside the record.
+- It refuses to send a decision-bearing message it cannot record.
+- It refuses to delete or edit away a message to make the record look clean.
 
 Each refusal is a thing the channel makes easy and the design declines. Grouped by what would break.
 

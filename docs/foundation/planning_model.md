@@ -13,24 +13,7 @@ approved instance plan `ent_d10ad28dffb8c6604a4151c2` and its decision keys `enf
 `data_model.md`, and `workflows.md`; decisions 17, 18, 30, 36, 39, 41, 43, 46, 47, 51, 52, and 56; and gaps G9, G10, and G31
 (`migration.md`), which this document closes. Written against the second rulings pass (revision 39), whose
 rulings of 36, 43, 47, 52, and 56 it carries. What is built is `status.md`; how each concept is recorded
-is `data_model.md`. Revised by the ancestry pass of 2026-09-06 (revision 45: the operator's question on
-missing ancestry — whether the swarm derives an absent parent, or finds the gap — settled against
-`#authority-per-level-an-amendment-is-an-action-and-its-class-is-the-levels` and decisions 17, 41, 51, and
-52; `judge`'s and `route`'s defect lists extended by one item each, with no new step or type; decision 61
-opened). Revised by the priority pass of 2026-09-06 (revision 47: the permissive orphan default reversed on
-the operator's argument that explicit ancestry serves both execution and prioritization — every task now
-expects an ancestor by default, satisfied at near-zero noise by a default ancestor per intake class rather
-than a finding on every orphan; the no-authoring refusal restated as the line the default and the refusal
-meet at; decision 61 reframed from a per-level expectation to a per-class default, still open and still
-blocked on decision 57). Revised by the rulings pass of 2026-09-06 (revision 48: decision 57 ruled — five
-levels, task → plan → project → strategy → mission, on the operator's word; objective settled as content
-within a strategy record and not a sixth level. Decision 61 not ruled: the priority pass (revision 47)
-reframed the question after this ruling was drafted against the pre-reversal framing, from "where a
-per-level ancestry expectation is declared" to "where an intake class's default ancestor is declared," and
-the reframed question is left as revision 47 stated it, still open and still blocked on 57, since ruling on
-the superseded framing would rule a question that no longer exists in that shape). Revised by the
-rulings-61-62-64 pass of 2026-09-06 (decision 61 ruled — the default ancestor named on the `intake_rule`,
-unblocked now that decision 57 fixes the levels).
+is `data_model.md`. Amendment history: `revisions.md#planning_modelmd`.
 
 ## Purpose
 
@@ -50,6 +33,16 @@ is `work_model.md`; steps, hydration, and the gate are `gates_and_workflows.md`;
 holds, and what it calls them, is the instance's (`#which-levels-an-instance-declares-and-what-it-calls-them`).
 
 ## The invariants
+
+**The rules in this section.**
+
+- [The hierarchy is edges, and a task has one line upward](#the-hierarchy-is-edges-and-a-task-has-one-line-upward).
+- [Upward context is a declared read, resolved along the ascent at hydration](#upward-context-is-a-declared-read-resolved-along-the-ascent-at-hydration).
+- [Downward state is derived; upward content is authored, as entities](#downward-state-is-derived-upward-content-is-authored-as-entities).
+- [Maintenance is work: the `planning` workflow](#maintenance-is-work-the-planning-workflow).
+- [Authority per level: an amendment is an action, and its class is the level's](#authority-per-level-an-amendment-is-an-action-and-its-class-is-the-levels).
+- [Binding dissolves: a task's ascent is its binding](#binding-dissolves-a-tasks-ascent-is-its-binding).
+- [The mechanism against cross-record collision is the subject](#the-mechanism-against-cross-record-collision-is-the-subject).
 
 ### The hierarchy is edges, and a task has one line upward
 
@@ -420,6 +413,14 @@ be the same argument decision 51 already settled against a second `initiative`-s
 here.
 
 ## Missing ancestry: whether the swarm derives an absent parent, or finds the gap
+
+**The rules in this section.**
+
+- [The swarm may not author a missing ancestor](#the-swarm-may-not-author-a-missing-ancestor).
+- [What happens instead: a finding, with a proposal riding beside it](#what-happens-instead-a-finding-with-a-proposal-riding-beside-it).
+- [Before or after: whether a step declared the read](#before-or-after-whether-a-step-declared-the-read).
+- [Whether an orphan is a defect at all](#whether-an-orphan-is-a-defect-at-all).
+- [Transitivity: judged edge by edge, not over the whole chain](#transitivity-judged-edge-by-edge-not-over-the-whole-chain).
 
 **The operator's question (2026-09-06):** whether the swarm should derive higher-level planning materials
 when lower-level ones lack them — a task serving no plan, a plan serving no project, a project with no
