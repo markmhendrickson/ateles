@@ -330,7 +330,7 @@ the credential form here untouched, since the several-instance case this ruling 
 
 - A degraded read never synthesizes a value more permissive than success would have returned.
 - Write admission per entity type is default-deny, and the grant is the allowlist (ruled, decision 41, 2026-09-06).
-- Whether a harness may provide a capability the grant does not name is open (decision 87).
+- A harness provides only the capabilities the principal's grant names, and a non-enforcing provider is one of them (ruled, decision 87, 2026-09-08).
 - A parameter constraint on a write capability is a field allowlist.
 - The tenant a grant is scoped to is carried on the grant, and is never derived from the credential's subject (ruled, decision 80, 2026-09-07).
 - The grant is read at every enforcement point.
@@ -387,8 +387,8 @@ would reopen it:** an instance whose grants prove to be ceremony — every role 
 day — which is the finding decision 18 names for its own default, and would argue for coarser capabilities,
 not for default-allow.
 Whether the same default-deny governs the capability surface a harness provides, rather than entity-type
-writes alone, is open decision 87
-(`#whether-a-harness-may-provide-a-capability-the-grant-does-not-name`).
+writes alone, is ruled by decision 87: it does, and the harness's configuration is closed by default
+(`#a-harness-provides-only-what-a-grant-names-and-a-provider-that-does-not-enforce-is-a-capability-the-grant-names`).
 
 **Read admission per entity type is default-deny, and the grant is the allowlist, read at the read
 (ruled, decision 94, 2026-09-08).** Registered in `conformance.md#the-register-of-open-design-decisions`.
@@ -634,12 +634,14 @@ one: reach a principal has because nothing bounded it, which no governance write
 verdict can attest. The operator's stated intent to grant any possible access is expressible in this
 grammar in full; what is not expressible is holding that access without having granted it.
 
-**What this leaves to decision 87.** This grammar makes the harness's reach nameable; it does not rule that
-the harness may not exceed what is named. Decision 87 now has something to decide over: whether a harness
-configuration is closed by default and opened only by a grant; whether a harness that cannot bound its
-non-enumerable reach may carry granted work at all, or whether its use is itself a capability a grant must
-name; and whether routing a principal to a provider that enforces nothing is a capability escalation the
-router performs, which this grammar can now describe and which no rule yet forbids. It also leaves
+**What this left to decision 87, since ruled the same day.** This grammar makes the harness's reach
+nameable; it did not rule that the harness may not exceed what is named. Decision 87 has since ruled all
+three of the questions this ruling handed it (`#a-harness-provides-only-what-a-grant-names-and-a-provider-that-does-not-enforce-is-a-capability-the-grant-names`):
+the harness configuration is closed by default and opened only by a grant; a harness that cannot bound its
+non-enumerable reach may carry granted work, with its use itself a capability the grant names through
+these reserved surfaces; and routing a principal to a provider that enforces nothing provides that
+principal a capability, which the grant must therefore name, so the router escalates nothing and an
+unnamed routing is `capability_denied`. It also leaves
 open, as decision 42 permitted and this ruling does not close, whether the harness's list is eventually
 **derived** from the grant at load — which removes the drift class — or only **held equal** by the parity
 test, which is cheaper and leaves the copy in place. And it settles nothing about *which* tools any
@@ -650,64 +652,170 @@ and the authoring pass is separate work.
 bound on one — a capability that a surface and an operation genuinely cannot name — would be evidence the
 single grammar is too narrow, and would be argued here.
 
-### Whether a harness may provide a capability the grant does not name
+### A harness provides only what a grant names, and a provider that does not enforce is a capability the grant names
 
-**Open.** Decision 41 made write admission per entity type default-deny, with the grant as the allowlist
-(`#grants`), and decision 42 made a harness's tool list a copy of the grant's tool dimension, derived from
-it or held equal to it by a parity test. Between them sits a rule neither states: whether a harness may
-put a capability in a principal's hands that no grant named. A parity test detects that a copy has
-diverged; it does not say that the divergence was forbidden, and it reaches only what the two lists
-enumerate. The operator's principle is the stronger form — no principal runs in a harness offering reach
-beyond what its grant confers — and its consequence, that a harness configuration is therefore strict by
-default and opened only by a grant.
+**Ruled (decision 87, 2026-09-08): a harness provides a principal only the capabilities its grant names.
+The configuration is closed by default and a grant is the only thing that opens anything. A reach that no
+enforcement point can bound is admitted only where a grant names it — `tool:shell:*` and its kin are held,
+never inherited — and a provider that enforces no bound is itself such a reach: routing a principal to one
+requires a capability naming it, and routing to one the grant does not name is a denial before the effect,
+not a quieter execution.** Registered in `conformance.md#the-register-of-open-design-decisions`. Decision
+86 ruled the grammar and left this rule; the three questions it named are answered in the three
+subsections below.
 
-The question is not whether the current state conforms. It does not, and the parity measurement said so:
-no agent in the roster holds parity, no grant in the instance names a tool at all, a whole MCP server's
-surface is appended to every restricted allowlist with no grant behind it, and a provider chosen by
-capacity when a runner is started gives the same grant different reach on different days. The question is
-what the design requires, so that the gap is a violation and not a vacancy.
+**The rules in this section.**
 
-**What "may not exceed" would have to mean for a surface no one can enumerate.** Default-deny over entity
-types is tractable because the types are a finite registered set, and decision 41's allowlist is a list of
-them. A harness's capability surface is not that. Its own tools are enumerable; the shell is not, and
-neither is the filesystem a process can reach because of where it runs. A rule written as "the harness's
-list is a subset of the grant's" holds only over the enumerable part, and leaves the rest — the reach a
-process has by ambient configuration rather than by a named capability — outside the rule while looking
-covered by it. That is the same shape as a wildcard grant: a statement that appears to bound and does not.
-So the rule has to say what it demands of the non-enumerable part: that it be absent by default, that its
-presence be itself a capability a grant names, or that a harness which cannot bound it is not used for
-granted work.
+- A harness provides only the capabilities the principal's grant names; the configuration is closed by default.
+- A reach whose bound no enforcement point can read is held by a grant that names it, never inherited from where a process runs.
+- Routing a principal to a provider that enforces no bound is a capability the grant names, and its absence is `capability_denied`.
 
-**Dispositions.** *Extend decision 41's default-deny to the whole capability surface*: the harness starts
-closed and the grant is the only thing that opens anything, which is the operator's own statement of it and
-the strongest form. *Make a failed or absent derivation fail closed* rather than yield a wildcard: narrower,
-changing nothing in decision 42's model, and closing only the shape `#grants` already names as fail-open —
-worth noting that this one is already forced by the rule above it, since a degraded read never synthesizes
-a value more permissive than success would have, and the loader that returns a wildcard on a failed load
-is that rule violated rather than a question. *Refuse the non-enumerable harness*: a provider whose reach
-cannot be enumerated cannot be held non-exceeding, so either it does not carry granted work or its use is
-itself a capability a grant must name — which reads the provider-dependent reach above as an authority
-question rather than a routing one. *Status quo*: parity is sufficient and the gap is an implementation
-failure, which is the reading the measurement's own framing invites and which this row exists to test.
+#### Harness configuration is closed by default, and a grant is the only thing that opens it
 
-**What decides it.** Whether the record is meant to answer "under what reach did this principal execute"
-as a bound or as a report. A bound requires the closed default and makes every ambient capability a defect;
-a report accepts that some reach is recorded and unenforced, which is what decision 42's cost clause
-already contemplated for a non-enforcing harness. The operator's stated intent — to grant any possible
-access, not only tool-mediated access — is on the record as framing for this row and is not a ruling.
+The corpus already points three ways at this and stops short of stating it. Decision 41 ruled write
+admission per entity type default-deny with the grant as the allowlist, and its argument is not about
+entity types in the part that binds here: the asymmetry it turns on is that "a denied write costs a grant"
+while an admitted wrong one costs a recovery, and "the safe direction to be unmeasured in is the closed
+one". Nothing in that sentence is a property of entity types. Principle 5 gives the direction for any field
+carrying a safety meaning, and a harness's capability surface carries the whole of it. Principle 7 makes an
+unreadable answer `Indeterminate`, which at a policy enforcement point resolves to deny. Decision 42's
+parity test is the measurement, and principle 1 is why the measurement is not the rule: a test that detects
+a copy has diverged names no thing that fails when the divergence is the harness being wider, so parity
+alone is reporting. This ruling supplies what the test was measuring against.
 
-**Sequencing: unblocked by decision 86, and still open.** This row was not implementable while the grant
-grammar could not name what the harness provides. Decision 86 has since ruled that grammar
-(`#a-capability-names-a-tool-as-toolsurfaceoperation-and-that-is-what-a-harness-allowlist-is-compared-against`):
-the shell and the harness's own tools are nameable now, as the reserved surfaces `shell` and `harness`, and
-a grant can therefore state the reach a rule here would bound. What 86 supplies is the vocabulary, not the
-rule — it makes the reach writable and leaves untouched whether a harness may hold reach no grant wrote
-down. The dispositions above are unchanged by it, with two sharpened: *extend default-deny to the whole
-capability surface* now has a surface it can be stated over, and *refuse the non-enumerable harness* now
-has the case 86 deliberately admitted — `tool:shell:*`, a surface wildcard whose membership cannot be
-enumerated and which 86 admits into the record rather than leave the reach outside it. Whether a principal
-may **hold** that capability, and whether a provider that enforces nothing may carry work granted under it,
-are this row's to answer.
+**Default-deny over a surface, not over a list.** The rule is stated over the *surface* and not over the
+enumerable part of it, because a rule scoped to what can be listed is the wildcard shape decision 41
+rejected, one level up: a statement that appears to bound and does not. What a harness starts with is
+nothing. Every capability it puts in a principal's hands — an MCP server's tools, its own `Read` and
+`Write`, a shell — is present because a capability on that principal's grant names it in decision 86's
+grammar, and absent otherwise. An unconditionally appended server surface with no grant behind it is now a
+violation of a stated rule rather than an unmeasured gap, which is the whole difference this row was opened
+to settle.
+
+**What this does not require.** It does not require that a harness be *able* to enforce every bound it
+carries. Decision 86 already ruled that a capability whose bound no enforcement point can read is recorded
+and reporting-only, and named that state rather than concealing it. The rule here is about what a
+principal *holds*, not about what mediates the holding: a grant that names `tool:shell:*` has authorized
+the shell, and the absence of a mediator makes its `param_constraints` unenforced without making the
+capability unheld. The two failures are distinct and the design keeps them distinct — unenforced is a
+recorded weakness, unwritten is an unauthorized reach.
+
+**What the operator's stated intent costs under this rule, which is nothing.** He intends to grant
+everything the tooling can do, widened to any possible access. Decision 86 kept that expressible by
+enumeration: a principal meant to hold everything holds a surface wildcard for each surface it reaches,
+`tool:shell:*` included. This ruling does not narrow that by a single capability. It removes exactly one
+thing, and it is not the wide grant: it removes the *unwritten* one. A principal that holds every surface
+wildcard under this rule holds precisely what it held before, with the difference that the holding is
+dated, attributed, readable by a reviewer, and attestable by the parity test. A rule forbidding a harness
+to exceed its grant and a grant naming everything are not in tension, because the rule constrains the
+relation between the two and never the breadth of either.
+
+**Cost accepted.** Every harness configuration in the instance becomes non-conforming on the day this
+lands, and no grant in the instance names a tool at all, so the conforming set is empty. That is the
+measurement decision 86 cites, and it is the expected consequence of ruling a vacancy into a violation
+rather than an argument against doing so: the alternative reading — that the gap is an implementation
+failure against a rule nobody wrote — is the status quo this row exists to test, and it leaves the closed
+default unstated, which means the next harness added starts open again. Migration is `migration.md`'s, and
+a stated rule with a migration behind it is the shape this corpus uses everywhere else.
+
+#### A harness whose reach cannot be bounded may carry granted work, and its use is a capability
+
+This is the harder half, and it is the case decision 86 deliberately created. 86 admitted `tool:shell:*`
+knowing its enumerability bound cannot be met, on the ground that refusing it "leaves that reach outside
+the record entirely, where no reviewer sees it and no verdict attests it — the worse of the two failures."
+The question here is whether that reasoning scales from one capability to a whole harness.
+
+**The case for refusing it.** A harness whose reach cannot be enumerated cannot be shown non-exceeding.
+Admitting it makes the rule above hold over the part that happens to be listable and lets everything else
+through, which is exactly the appearing-to-bound defect the rule was written over. Read that way, the
+non-exceedance rule is violated by construction the moment such a harness carries granted work, and the
+consistent conclusion is that it does not carry it — the reach a process has by ambient configuration is a
+reach nobody granted, and no amount of recording makes it granted.
+
+**The case for admitting it, which is what governs.** The argument above proves too much, and its
+over-reach is visible in what it would forbid. Every harness the swarm actually runs reaches a filesystem
+by where its process runs and a shell by having one; a rule refusing non-enumerable harnesses refuses all
+of them, and a design rule that no conforming implementation can satisfy is not a bound but a prohibition
+on the activity. What would follow is not stricter harnesses but the same harnesses run outside the rule's
+scope — the reach relocated rather than removed, which is precisely the failure 86 named one capability
+down. The asymmetry 86 identified holds at this scale for the same reason it held at that one: a bounded-in-name-only
+harness inside the record is reviewable, attributable, and revocable, and an unrecorded one is none of the
+three.
+
+**So the ruling takes 86's disposition and completes it, rather than choosing between the two.** A harness
+whose non-enumerable reach a grant names may carry granted work; one whose reach no grant names may not.
+The use of such a harness is **itself a capability the grant names**, in decision 86's grammar and with no
+new entry form — the reserved surfaces are what name it, and holding `tool:shell:*` *is* the statement that
+this principal may run somewhere with a shell. That collapses the two halves of the disposition list into
+one rule: refusing the non-enumerable harness and naming its use as a capability are the same act, because
+the capability is what does the refusing. A principal whose grant names no shell surface does not run in a
+harness that provides one, and the check that fails is decision 42's parity test reading the harness's
+built arguments — the same mechanism, over the same normalized set, with no second control (principle 6).
+
+**What this costs, stated.** The bound on such a capability stays unenforced until something mediates the
+shell, and this ruling does not pretend otherwise. It carries 86's standing consequence forward: the
+surface wildcard is the capability a reviewer should always find someone's argument behind. What changes is
+that the argument now has to exist, because the capability now has to be written.
+
+#### Routing to a provider that does not enforce widens reach, and the router is not where it is refused
+
+The condition is real and measured. `status.md` records that a provider chosen by capacity when a runner
+starts gives the same grant different reach on different days, and it records the enforcement points that
+map `Indeterminate` to `Permit`: `a2a_gateway.authorize_caller()` returning `(True,
+"grant_check_unavailable_advisory")` when the grant checker raises, and the tool proxy's `enforce()`
+returning permit when no identity is configured. A router that can move a principal onto such a path has
+widened that principal's effective reach with no governance write anywhere in the sequence.
+
+**It widens a principal's reach with no governance write, and naming it that is the point.** The
+alternative reading — that reach is whatever the chosen provider happens to enforce — makes a routing
+decision into an authority decision made by a
+component with no authority to make one, which is the two-homes defect invariant 9 forbids and the
+report-not-a-control defect principle 1 forbids, at once. The reach a principal has must be answerable from
+its grant; if it is answerable only from which provider had capacity, the grant is not the statement of
+what a principal may do.
+
+**But it is not a new mechanism, and the router is not where it is caught.** Three candidate treatments
+were weighed. Treating it as something the parity test already catches is false as stated and true after a
+correction: the test compares the grant's capabilities against the harness's built arguments, so a
+*non-enforcing provider* — one that receives the arguments and ignores them — passes a comparison of two
+lists that agree. What the test catches is a divergence of statements, not a failure to honour one.
+Treating it as `capability_unavailable` is the closest fit and is still wrong: decision 60 gave that class
+to a capability that exists and cannot be had right now, and asks the operator whether to wait, switch
+vendor, or accept the loss. A provider that will not enforce is not a capability temporarily missing; it is
+a bound the design requires and this path cannot supply, and asking whether to wait misdescribes it.
+
+**The ruling.** A provider's enforcement of the bounds a grant states is a property of the provider, and
+where it is absent, routing a principal there **provides that principal a capability** — the capability of
+executing unbounded — which under the rule above the grant must name. So the router widens nothing on its
+own account, because there is nothing for it to widen *to* that a grant has not already opened: a
+principal whose grant names the non-enforcing path may be routed there and the reach is on the record; one whose
+grant does not may not, and the attempted routing is a denial before the effect, `capability_denied` on the
+task, the same class `#grants` already gives a refused capability. The widening is real and the router
+is not the place it is caught, because catching it there would put the authority question in the routing
+component, which is what made the widening a governance failure in the first place.
+
+**What follows for the fail-open paths, and what does not.** The five paths `status.md` records are each a
+degraded read synthesizing a permit, and each is already forbidden by the rule three sections above this
+one — a degraded read never synthesizes a value more permissive than success would have returned — read
+together with principle 7. This ruling adds nothing to their disposition; it adds the reason a *correctly
+functioning* non-enforcing provider is also a governance question and not merely a capability gap. The two
+are distinguishable and the design distinguishes them: a checker that raises is `Indeterminate` and denies;
+a provider that enforces nothing by design is a capability, granted or not.
+
+**What this ruling does not settle.** It states what a principal may hold and what a harness may provide,
+and no mechanism (invariant 12). Whether the harness's list is **derived** from the grant at load or only
+**held equal** by the parity test is decision 42's open half and stays open — this rule binds under either,
+since it constrains what the two may contain and not how the second comes to contain it. Which tools any
+principal should actually hold is the authoring pass decision 86 named as separate work and is untouched.
+How a provider declares whether it enforces, and where that declaration sits, is a mechanism this ruling
+requires and does not choose; a `vendor_binding` capability slot on decision 42's pattern is the shape
+decision 69 used for the parallel case, and naming it here would be the mechanism this ruling is barred
+from picking. The migration from an instance where the conforming set is empty is `migration.md`'s.
+
+**What would reopen it.** A harness that can be shown to bound its reach fully — a sandbox whose filesystem
+and process reach are enumerable at check time — would remove the concession in the second subsection and
+argue for the stricter reading it declines. So would evidence in the other direction: an instance where
+every principal's grant names every surface wildcard on its first day, which would make the enumeration
+ceremony rather than authorization and argue that the rule buys nothing the parity test did not.
 
 ### Where a harness reaches the record, and what admits the request
 
