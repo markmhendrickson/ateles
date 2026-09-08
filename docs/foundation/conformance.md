@@ -619,7 +619,13 @@ lines it concerns are written; the register rows above point at them.
 foundation document. They are the gaps left by several documents opening decisions concurrently on this
 branch and renumbering around each other, and they are recorded as gaps rather than closed up: renumbering
 would break every cross-reference the documents already carry, and silence would invite the next author to
-reuse the number for something unrelated. **Do not assign 19 or 22 to a new decision.** The next free number is **79**, and it is free across every branch, not only this one. The sweep is what establishes the number; this line never does, and an author who reads it instead of repeating the sweep will collide the way its own history predicts. It has now been stale on six consecutive passes — it read 63 with 64 on the table, then 66 with 69, then 74 while this branch's own decision 74 was already written on it, then 75 while 76 and 77 were already assigned on another branch. The sweep is over the remotes, not the file: the maximum decision row on any branch's copy of this table. As of 2026-09-07 it covers every open pull-request branch and gives 69 on `feat/foundation-p1-docs` and `fix/vocabulary-undefined-terms`, 70 on the `declaration_scope` ruling, 71 on the `underdetermined_inputs` reason class, 73 on the naming-decisions pair, 75 on the identity-model branch, 77 on the multi-instance pair, and 78 here — so 79.
+reuse the number for something unrelated. **Do not assign 19 or 22 to a new decision.** The next free
+number is established by sweeping every branch's copy of this table, and never by reading a number written
+here. This line stated a stale number on
+five consecutive passes, each pass correcting it and the next finding it stale again, because a number
+written down goes out of date the moment a concurrent branch takes it: on 2026-09-08 this branch's own
+table stopped at 69 while 88 was already assigned elsewhere. The sweep is the mechanism; a number in this
+paragraph would be a second source for it (principle 9), so none is stated.
 
 **20 and 21 were assigned, then renumbered, and two pointers were left behind.** Both were opened in
 `payments.md` and renumbered to 27 and 28 before that document was committed, to avoid colliding with 23
