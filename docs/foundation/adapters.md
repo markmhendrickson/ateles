@@ -42,6 +42,14 @@ named here.
 
 ## The two invariants
 
+**The rules in this section.**
+
+- [The workflow engine never reads an external system; it reads the record](#the-workflow-engine-never-reads-an-external-system-it-reads-the-record).
+- [No external event advances a step by itself](#no-external-event-advances-a-step-by-itself).
+- [The adapter runs before and after a step, never during it](#the-adapter-runs-before-and-after-a-step-never-during-it).
+- [Where inbound delivery lands: the adapter verifies and identifies it, and the record's own subscriptions are not it](#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it).
+- [Continual inbound is the inbound side, and an intake rule evaluates downstream of it](#continual-inbound-is-the-inbound-side-and-an-intake-rule-evaluates-downstream-of-it).
+
 ### The workflow engine never reads an external system; it reads the record
 
 One engine opens steps from the entities and reads the sign-offs
@@ -461,6 +469,13 @@ indistinguishable, to every reader downstream, from an artifact for a record tha
 
 ## What the record supplies, and what an adapter therefore never builds
 
+**The rules in this section.**
+
+- An entity carries the external system and host it came from.
+- Provenance links an observation to the source it was interpreted from.
+- The source is kept, not only named, and the raw thing is what is kept.
+- Reconstruction as of a time, in two senses that must not be conflated.
+
 The rules above lean on the record having certain capabilities. They are named here abstractly — what the
 capability is and what it is for — because an adapter author's most common error is rebuilding one of them
 beside the record, and a rebuilt one is the maintained state principle 11 forbids. Which calls express them
@@ -534,7 +549,7 @@ taken (`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`). Th
 principal's hands at the boundary: on permit it performs the operation, reads the result back from the
 external system, and writes the confirmation on the action (`taken_at`, `result_ref`); the record the
 effect left is an artifact `PRODUCES` from the batch. On a checkpoint it performs nothing. The class is
-resolved under the project's `action_policy`; a class in neither set resolves to `NEVER`
+resolved under the instance's `action_policy`; a class in neither set resolves to `NEVER`
 (`gates_and_workflows.md#confidence-and-three-blast-tiers`), so a policy that wants a low-blast comment
 lists the class the comment carries. The class names in the tables below are the policy's data, not a
 closed set: `open_issue` and `notify_operator` are this document's, beside the classes the workflows
@@ -689,6 +704,18 @@ are satisfied has become a second engine (`gates_and_workflows.md#declaration-ba
 never performs an operation and reports success without reading the external system back.
 
 ## Admitting a new adapter
+
+**The rules in this section.**
+
+- [A system reached only through a rendered interface is admitted the same way, and three of its five rules were already answered by the filesystem case](#a-system-reached-only-through-a-rendered-interface-is-admitted-the-same-way-and-three-of-its-five-rules-were-already-answered-by-the-filesystem-case).
+- [The admission contract](#the-admission-contract).
+- [The obligations are the five rules, restated as failures](#the-obligations-are-the-five-rules-restated-as-failures).
+- [What an adapter's document must contain](#what-an-adapters-document-must-contain).
+- [Who may admit an adapter, and through what](#who-may-admit-an-adapter-and-through-what).
+- [Degrees of trust: the design distinguishes, and grants already express it](#degrees-of-trust-the-design-distinguishes-and-grants-already-express-it).
+- [Per-agent credentials where the system issues them, a shared credential where it does not](#per-agent-credentials-where-the-system-issues-them-a-shared-credential-where-it-does-not).
+- [When an adapter is wrong](#when-an-adapter-is-wrong).
+- [The relationship to decision 15, which rules adapter packaging](#the-relationship-to-decision-15-which-rules-adapter-packaging).
 
 Every rule above is written for an adapter that already exists. This section is the other direction: what
 a sixth adapter must satisfy before the record trusts what it writes, who admits it, and what admission
@@ -943,9 +970,9 @@ that is already answered: a write to `agent_grant` is a **governance write**, wh
 at the action gate (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`). The operator
 resolves the checkpoint the gate raises. Nothing here needs a new approver class, and adding one would be
 the second gate. That governance class is *reserved* to the operator by default (**decision 18**, ruled:
-`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`): a project with no
+`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`): an instance with no
 policy value for the class resolves it to `NEVER`, so an adapter is never granted its credential by default,
-and a project that wants the swarm to admit its second adapter under a checkpoint grants the class explicitly
+and an instance that wants the swarm to admit its second adapter under a checkpoint grants the class explicitly
 first. The first adapter's grant is the operator's own write in every case.
 
 **Its outbound classes are `action_policy` data, and that write is governance too.** An adapter that can
@@ -1215,6 +1242,12 @@ whichever listener an adapter's deliveries arrive through, because verification 
 adapter's wherever the socket is.
 
 ## The adapter and the engine are two roles
+
+**The rules in this section.**
+
+- [Whether one binding type or two names an external system's instance](#whether-one-binding-type-or-two-names-an-external-systems-instance).
+- [Whether the host a daemon runs on is an external system](#whether-the-host-a-daemon-runs-on-is-an-external-system).
+- [Whether a second instance of the record is an external system](#whether-a-second-instance-of-the-record-is-an-external-system).
 
 Whether one process hosts both is an implementation choice; the design's requirement is that they meet
 only in the record. An adapter is a daemon in the sense of `work_model.md#the-four-execution-mechanisms`:

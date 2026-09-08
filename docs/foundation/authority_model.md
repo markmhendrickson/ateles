@@ -44,7 +44,59 @@ point treats `Indeterminate` (unreachable policy source, no policy found, timed-
 for that tool; a policy check that raises is deny. `time` needs no engine: `now < granted_at + duration`
 read by the checker (OpenFGA's form).
 
+### Two examples: the same three decisions, at each of the two decision points
+
+The two decision points are asked different questions, and a reader who has only the paragraph above cannot
+tell which one answers which. The grant checker answers *may this principal do this at all* — the tuple's
+`domain` and `scope` terms, read from the `agent_grant` matched on the credential — and its enforcement
+point is the write, ahead of any effect (`#grants`). The gate answers *may this action be taken* — the
+tuple's `action` and `conditions` terms, read from the `action_policy`
+(`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`) — and its
+enforcement point is the take. A write that is also an action passes both, in that order, and the two
+examples below are one of each.
+
+**One: the grant checker, on a write to a `contact`.** An `agent` bound to an `operator` principal holds the
+`extract` step of a meeting-processing batch, and would write a `contact` the transcript named. It presents
+its AAuth `sub`; the checker matches the `agent_grant` on (`sub`, `iss`), reads `capabilities[]` and
+`param_constraints`, and reads `expires_at` against the clock. The enforcement point is the write itself,
+which is what makes the three answers different things a reader can see:
+
+| The checker returns | Because | What the enforcement point does |
+|---|---|---|
+| `Permit` | a capability names the write operation on `contact`, the fields the write carries are inside the capability's field allowlist, and `now < expires_at` | the write lands, carrying the agent that made it and the principal it acted for (`#attribution`) |
+| `Deny` | no grant matches the credential; or no capability names `contact`; or the write carries a field the allowlist does not (`#grants`) | no write is attempted — the decision precedes the effect — and the refusal names the principal, the capability, and what was refused; the agent raises one checkpoint on the task, reason `capability_denied`, and does not ask another principal to make the write for it |
+| `Indeterminate` | the record holding the grant is unreachable, or the load timed out | the enforcement point treats it as `Deny`. Nothing is written and nothing is guessed: a failed read never synthesizes a wildcard capability set, because that would grant more than success would have (`#grants`). Where the unreachable source is the record itself, this is not one denied write but the halt — no claim, no step opening, no gate decision (`failure_posture.md#the-decision`) |
+
+Two properties of this example are the ones the prose above states abstractly. The grant is read *here*, at
+this write, and not from a cache — which is why revoking the credential reaches this write and not the one
+after a restart (`#grants`). And a `Deny` here is not the end of the matter: the step stays open, and the
+checkpoint is a request the operator resolves, never a grant the agent obtained by raising it.
+
+**Two: the gate, on a `merge_pr` action from the same batch.** The `impl` step's work produced an `action`
+of class `merge_pr`, and a principal asks the gate whether it may be taken. The gate reads the class, the
+action's `confidence`, the `action_policy`, and the class's action series — no repository and no pull
+request (`gates_and_workflows.md#the-action-gate-is-pr-independent`):
+
+| The gate returns | Because | What the enforcement point does |
+|---|---|---|
+| `Permit` | the policy lists the class in `low_blast_action_types[]` and confidence is at `confidence_threshold`, or the series has cleared `recurrence_count` | the adapter takes the action, and the confirmation is the `result_ref` read back from the external system (`data_model.md#concepts`) |
+| `Deny` | the class is `operator_only`, or is listed in neither tier, or is a governance class with no policy value — each resolves to `NEVER` ahead of the confidence axis (`gates_and_workflows.md#confidence-and-three-blast-tiers`) | the action is held, not dropped: a checkpoint is written on the action, reason `gate_hold`, awaiting the principals `AWAITS` names. Resolution is not itself the permit — the gate is asked again at the take (`gates_and_workflows.md#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`) |
+| `Indeterminate` | the `action_policy` cannot be read | deny, and the unreachable source is the record, so the swarm halts rather than falling back to a policy with an empty low-blast set (`failure_posture.md#the-decision`) |
+
+The contrast the two tables are for: the checker's `Deny` and the gate's `Deny` are both refusals, and
+neither ends the work. The checker's leaves an open step and a request for a capability the principal does
+not have; the gate's leaves an action the principal *may* be permitted to take, held for a decision only a
+required approver can make. And on `Indeterminate` both collapse to the same place, because the source they
+could not read is the same record the swarm's every other decision needs.
+
 ## Principals
+
+**The rules in this section.**
+
+- The human principal is an `operator` entity (C9, settled).
+- What stays open, and it is not this document's to close.
+- [What owning confers: the required seat](#what-owning-confers-the-required-seat).
+- [Whether one operator's several instances of the record are one record or several](#whether-one-operators-several-instances-of-the-record-are-one-record-or-several) — ruled, decision 76: several records, one identity per instance, an explicit binding that fails closed when ambiguous, and a stated non-merge rule.
 
 A principal is any actor authority is attributed to: a human (an operator) or an agent. A principal is an
 entity in the record, so an ownership or delegation edge has somewhere to point (prior art: ReBAC as a data
@@ -76,14 +128,15 @@ missing while no type sat above them.
 
 **What stays open, and it is not this document's to close.** The shape of the identifier on the `operator`
 entity, and whether a tenant is derived from the `sub` or matched on the grant, are `multi_tenant.md`
-section 7's decisions 1 and 2. They are the operator's and are not settled here. Until they are, the
+section 7's decisions 1 and 2, registered as decisions 79 and 80 in `conformance.md`. They are the operator's and are not settled here. Until they are, the
 mapping above states which credential binds to which principal, and does not state the identifier's form
 or the tenant derivation. Every other statement in this document is written against "the principal entity"
 and is unchanged by this ruling.
 
 **Tenant.** The isolation boundary; `tenant_id` and `user_id` are separate fields; default-deny tenant
 scoping at the access layer; per-tenant AAuth namespacing; no cross-tenant read, write, routing, or key
-reuse (`multi_tenant.md` sections 2 and 3). Open: section 7's five decisions.
+reuse (`multi_tenant.md` sections 2 and 3). Open: section 7's five decisions, registered as decisions 79
+to 83 in `conformance.md` since that document joined the set (decision 77).
 
 **Ownership.** Named accountability for a workflow, [domain](vocabulary.md#domain), queue, or configuration
 entity, as an edge from
@@ -127,13 +180,90 @@ taking should have asked the accountable principal — which would argue for the
 
 **Matrix.** AU-16 and the approver-by-ownership rows already test the seat; no row is added.
 
+### Whether one operator's several instances of the record are one record or several
+
+**Ruled (decision 76, 2026-09-07, on the operator's answer).** **Several records, not one.** One operator
+holding several instances of the record — a personal one, and a second shared with a client engagement,
+kept apart by sensitivity rather than by tenancy — holds several records, and they must not merge. The
+ground is **accountability**: not sensitivity, which is why they are separated in practice, and not
+transport, which is what would make it an adapter question. It is the same ground decision 55 was ruled
+on, and reading the two together is what keeps them from arguing one question twice (invariant 12):
+
+- **Peering (decision 55)** — instances that share an accountable principal. Replication. One record,
+  extended. A synced entity carries no `external_id`, has no adapter, and enters through the same
+  observation machinery as a local write.
+- **Several records (this decision)** — instances whose accountable principals *differ*. Not replication.
+  They must not merge.
+
+The operator is a different principal in an instance he shares with a client engagement than in his own,
+which is what puts his case on this side of the line rather than 55's. `multi_tenant.md` does not reach
+it either: its axis is `tenant_id`, and every guarantee it states is keyed to a boundary that here has one
+value across all the stores — one tenant cannot separate stores it does not distinguish.
+
+**Why a non-goal was not available.** The row offered "an explicit non-goal for P1–P2, revisited at P3" as
+a disposition, and it was the right offer while the several-instance case was anticipated rather than
+actual. It is actual: the operator answered that he already runs two instances separated by high
+sensitivity and expects more as further engagements arrive. A non-goal would rest the design on a premise
+his own setup contradicts, and the cutover would be planned against a fiction. That the question turned
+on a fact rather than on a preference is why it was his to answer and not a reviewer's to derive.
+
+**One identity per instance.** A principal holds a distinct identity in each instance, with the reads and
+writes under each staying separate. This extends `#principals`' credential-to-principal mapping rather
+than replacing it: that mapping is many-to-one and rules that a shared instance's `user_id` collapses
+writers and resolves to no principal. A distinct identity per instance is the legitimate case the mapping
+did not state — the collapse it forbids is many *writers* behind one credential, not one writer holding
+one credential per record he is accountable in.
+
+**The binding is explicit, and an ambiguous binding fails closed.** Which instance a task's reads and
+writes belong to is carried by the task or the step, declared. Today an instance is a property of where a
+session happened to be launched, which is not a declaration and cannot be reviewed. Where the binding is
+absent or ambiguous, the resolution **fails closed** — the work is put to the operator, and never resolved
+to whichever instance is configured first. This is not a new posture: it is principle 5 (fail closed on
+the field that carries the safety meaning) at the enforcement point this document's `#scope` owns, and it
+is the posture
+`failure_posture.md#a-task-whose-inputs-cannot-be-resolved-is-put-to-the-operator-not-executed-on-a-guess`
+already takes for a read that resolves to no instance — asked here of the store the read is *of* rather
+than of the value read. What a default would cost is specific: a read bound by configuration order rather
+than by declaration crosses between the operator's personal data and a client's, which is the exact
+boundary the sensitivity separation exists to hold. ateles#624 is the same ambiguity one layer down — the
+same operation resolved differently depending on which configured server carried it, and the divergence
+taught routing around a denial rather than surfacing it.
+
+**The rule against merging is stated, not left to a component's discipline.** An orchestrator that reads
+across two of the stores to write one brief has crossed the separation, and the design refuses it here
+rather than relying on that orchestrator's care. Principle 1 is what settles the form: a mechanism that
+does not bind is not a control, and a separation guaranteed by a component's own diligence is reporting
+without binding — the defect class this corpus has repeatedly found in itself. The reads are partitioned
+the way the writes are.
+
+**What is still open.** The mechanism is not chosen here. A binding field's name and where it sits on a
+task or a step, the form of a per-instance credential, and how the read partition is enforced are each a
+mechanism, and none is named in this ruling (invariant 12). What is ruled is the shape the mechanism must
+satisfy: several records, one identity per instance, an explicit binding, a fail-closed ambiguity, and a
+stated non-merge rule. `multi_tenant.md#7-open-decisions-require-the-operator` decisions 1 and 2 —
+registered as decisions 79 and 80 — bear on the credential form and are the operator's.
+
+
 ## Grants
+
+**The rules in this section.**
+
+- A degraded read never synthesizes a value more permissive than success would have returned.
+- Write admission per entity type is default-deny, and the grant is the allowlist (ruled, decision 41, 2026-09-06).
+- Whether a harness may provide a capability the grant does not name is open (decision 87).
+- A parameter constraint on a write capability is a field allowlist.
+- The grant is read at every enforcement point.
+- The decision precedes the effect.
+- A denial raises a checkpoint, and the denied principal does not route around it.
+- Custody by revocability.
+- Rotation is staged, never a flag day.
+- Revocation's reach is every grant that matched the credential, and it is only as fast as the check that reads it.
 
 An `agent_grant` is matched on the credential (`sub`, `iss`) and lists capabilities as operation × entity
 types × repositories with parameter constraints; a human's grant is bound to a principal and a tenant, never
 a wildcard. The per-agent pattern is the template a principal dimension extends: a loader keyed on the
 agent name, a grant checker and a tool proxy keyed on the `sub`, a per-agent keypair threaded into signed
-writes, a per-agent policy override, per-agent GitHub logins, a workflow resolved per project. A failed
+writes, a per-agent policy override, per-agent GitHub logins, a workflow resolved per declaration scope. A failed
 agent load is a stub: the loader marks it, and no caller starts a runner from one (principle
 5); a stub with a wildcard tool allowlist is the fail-open shape.
 
@@ -167,9 +297,12 @@ allowlist but the default-allow this rule rejects, written as a grant; it is the
 paragraph above names, and the migration counts the instance's wildcard grants as a hazard for the same
 reason. The read side has the same shape, stated where reads are: an agent reads only the types its
 definition names, within what its grant admits (`data_model.md#what-each-actor-reads-and-writes`). **What
-would reopen it:** a project whose grants prove to be ceremony — every role granted every type on its first
+would reopen it:** an instance whose grants prove to be ceremony — every role granted every type on its first
 day — which is the finding decision 18 names for its own default, and would argue for coarser capabilities,
 not for default-allow.
+Whether the same default-deny governs the capability surface a harness provides, rather than entity-type
+writes alone, is open decision 87
+(`#whether-a-harness-may-provide-a-capability-the-grant-does-not-name`).
 
 **A parameter constraint on a write capability is a field allowlist.** The grant that admits a principal's
 writes to a type may name the fields it may write, and a write carrying a field outside them is denied at
@@ -239,6 +372,102 @@ answering confidently from stale data. Grants are read at every check, or from a
 bound is declared and whose expiry resolves to `Indeterminate` — which denies — rather than to the last
 value it held.
 
+### How a capability names a tool, and what a harness allowlist is compared against
+
+**Open.** Decision 42 made the tools a principal may invoke a dimension of its `agent_grant`, and made a
+harness's own list a copy "derived from the grant at load, or held equal to it by a parity test, and never
+a second home". Neither obtains until one question is answered: **by what grammar a capability names a
+tool**, and therefore what the two sides of that parity test compare. The measurement that found no agent
+holding parity named this as its blocker rather than a finding — a copy cannot be held equal to an original
+that has no way to state what it holds.
+
+The candidate grammar for how a grant names a tool is proposed in
+[`docs/tool_grant_grammar.md`](../tool_grant_grammar.md) (decision 86, status: open — not yet
+ratified).
+
+**What is already fixed, and is not the question.** The capability op form `tool:<surface>:<operation>` with
+`param_constraints` is what the grant checker parses and what the tool proxy enforces, and the harness's own
+four recognized entry forms — a wildcard, a bare tool name, an `mcp__<server>__<tool>` reference, and a
+scoped shell grant — are already validated in the lint that guards the allowlist. Both grammars exist. What
+does not exist is the declared mapping between them, and it is the mapping, not either grammar, that the
+parity test needs.
+
+**Four questions the mapping has to settle, each with a cost.** *The bijection*: whether the grant's
+`<surface>` half is the MCP server alone, which leaves the harness's non-MCP entries unnameable, or a
+capability surface that also admits reserved names for the harness's own tools and for the shell — the cost
+of the first is that shell and filesystem reach stays outside the record, which is the reach that most needs
+bounding; the cost of the second is two surface names whose membership the design must then say how to
+enumerate. *Wildcards*: whether a wildcard is expressible at all, and if so at which tier — a wildcard over
+every surface is the fail-open shape this section already names, and the same shape decision 41 rejects for
+entity types; a wildcard over one surface is a domain with an enumerable membership, and the harder question
+is the shell, whose reachable commands are not a list anyone can read back. *A non-enumerable harness*: a
+provider that receives no allowlist at all has a reach that is the ambient configuration, and where the
+provider is chosen at dispatch by capacity, the same grant yields different reach on different days — which
+makes the divergence a question about what a grant *means*, not only about what a test can see; principle 7
+keeps that third value distinct from a verdict and principle 5 keeps it out of the permissive branch.
+*Direction of derivation*: whether the allowlist is eventually derived from the grant at load, which removes
+the drift class, or held equal by a test, which is cheaper and leaves the copy in place — decision 42 permits
+either and the sequencing between them is unruled.
+
+**What decides it.** Whether the record is meant to answer "under what reach did this principal execute" for
+every principal and every harness, or only for the harnesses that can enforce a bound. The first requires a
+grammar that can express reach a harness cannot enforce, and accepts that some capabilities are recorded and
+reporting-only; the second lets the grammar stop where enforcement stops, and accepts that a sign-off against
+a non-enforcing harness attests a prompt and not a reach. Decision 42 leaned toward the first in its cost
+clause — naming the reporting-only case rather than hiding it — without ruling the grammar that would make it
+writable.
+
+### Whether a harness may provide a capability the grant does not name
+
+**Open.** Decision 41 made write admission per entity type default-deny, with the grant as the allowlist
+(`#grants`), and decision 42 made a harness's tool list a copy of the grant's tool dimension, derived from
+it or held equal to it by a parity test. Between them sits a rule neither states: whether a harness may
+put a capability in a principal's hands that no grant named. A parity test detects that a copy has
+diverged; it does not say that the divergence was forbidden, and it reaches only what the two lists
+enumerate. The operator's principle is the stronger form — no principal runs in a harness offering reach
+beyond what its grant confers — and its consequence, that a harness configuration is therefore strict by
+default and opened only by a grant.
+
+The question is not whether the current state conforms. It does not, and the parity measurement said so:
+no agent in the roster holds parity, no grant in the instance names a tool at all, a whole MCP server's
+surface is appended to every restricted allowlist with no grant behind it, and a provider chosen by
+capacity when a runner is started gives the same grant different reach on different days. The question is
+what the design requires, so that the gap is a violation and not a vacancy.
+
+**What "may not exceed" would have to mean for a surface no one can enumerate.** Default-deny over entity
+types is tractable because the types are a finite registered set, and decision 41's allowlist is a list of
+them. A harness's capability surface is not that. Its own tools are enumerable; the shell is not, and
+neither is the filesystem a process can reach because of where it runs. A rule written as "the harness's
+list is a subset of the grant's" holds only over the enumerable part, and leaves the rest — the reach a
+process has by ambient configuration rather than by a named capability — outside the rule while looking
+covered by it. That is the same shape as a wildcard grant: a statement that appears to bound and does not.
+So the rule has to say what it demands of the non-enumerable part: that it be absent by default, that its
+presence be itself a capability a grant names, or that a harness which cannot bound it is not used for
+granted work.
+
+**Dispositions.** *Extend decision 41's default-deny to the whole capability surface*: the harness starts
+closed and the grant is the only thing that opens anything, which is the operator's own statement of it and
+the strongest form. *Make a failed or absent derivation fail closed* rather than yield a wildcard: narrower,
+changing nothing in decision 42's model, and closing only the shape `#grants` already names as fail-open —
+worth noting that this one is already forced by the rule above it, since a degraded read never synthesizes
+a value more permissive than success would have, and the loader that returns a wildcard on a failed load
+is that rule violated rather than a question. *Refuse the non-enumerable harness*: a provider whose reach
+cannot be enumerated cannot be held non-exceeding, so either it does not carry granted work or its use is
+itself a capability a grant must name — which reads the provider-dependent reach above as an authority
+question rather than a routing one. *Status quo*: parity is sufficient and the gap is an implementation
+failure, which is the reading the measurement's own framing invites and which this row exists to test.
+
+**What decides it.** Whether the record is meant to answer "under what reach did this principal execute"
+as a bound or as a report. A bound requires the closed default and makes every ambient capability a defect;
+a report accepts that some reach is recorded and unenforced, which is what decision 42's cost clause
+already contemplated for a non-enforcing harness. The operator's stated intent — to grant any possible
+access, not only tool-mediated access — is on the record as framing for this row and is not a ruling.
+
+**Sequencing.** Not implementable before decision 86. A rule that a harness may not exceed the grant is
+unenforceable while the grant grammar cannot name what the harness provides: today it cannot express the
+shell or the harness's own tools at all, so the reach that most needs bounding is the reach the rule could
+not reach.
+
 ## Attribution
 
 Every write carries the agent that made it (a per-agent signature) and the principal it acted for; a shared
@@ -259,6 +488,12 @@ hardest-problem chain: A delegates to X, X assigns a task that Y claims, Y's act
 using C's state under D's policy, and every hop is reconstructible.
 
 ## Approval
+
+**The rules in this section.**
+
+- A required approver is a principal, a role the roster resolves, or the principal an `ownership_grant` names on an entity the subject concerns.
+- A resolution on an `operator_only` action is the operator's decision, never the confirmation that the effect happened.
+- [The raiser of a checkpoint does not resolve it, and the operator's self-resolution is marked](#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked).
 
 An approval is an explicit yes, no, or veto by a required principal on a `checkpoint`, whose subject is
 an action held at the gate or a task the swarm cannot advance (`gates_and_workflows.md#the-checkpoint`),
@@ -349,6 +584,12 @@ a field of it, the name deferred to a vocabulary pass under invariant 12
 
 ## Structural checks: quorum and separation of duties
 
+**The rules in this section.**
+
+- [The counting rule: an agent counts as its bound principal](#the-counting-rule-an-agent-counts-as-its-bound-principal).
+- [Structural checks are reads over the checkpoint's principal edges](#structural-checks-are-reads-over-the-checkpoints-principal-edges).
+- [The threshold's home is the `action_policy`, per class](#the-thresholds-home-is-the-action_policy-per-class).
+
 Rights scope what a principal may do; structural checks make an outcome depend on more than one interest,
 and both are required (README). Decided: the design is multi-principal in earnest, with real separation of
 duties, real quorum, and real attenuating delegation, and without enterprise-scale machinery (policy
@@ -432,7 +673,7 @@ the design's job is to make them expressible and enforceable, as
 classes, not to make them. So the design rules the shape and the default and no number. The default is ruled
 decision 18's `NEVER`-until-written, extended from a class's permission to a check's parameters: until a class
 carries a value it requires every awaited principal and every named pair, the strictest reading and the one an
-unmeasured project should be in; and every value is a governance write to the `action_policy` with an author
+unmeasured instance should be in; and every value is a governance write to the `action_policy` with an author
 and a date, class by class, the way every other value on that policy is set. A question whose whole residue is
 a policy value is not an open decision — the register would otherwise hold a row for every number an operator
 has yet to write, and it holds none for `confidence_threshold` or `consent_tolerance` — which is why the row
@@ -449,6 +690,13 @@ have to say why the class was the wrong grain.
 `action_policy` under test, and the fail-closed default is the row's second case (`conformance_suite.md`).
 
 ## Initiative, proposal, reprioritization
+
+**The rules in this section.**
+
+- [Initiative approval is the checkpoint](#initiative-approval-is-the-checkpoint).
+- [What stops is a task, the owner seat confirms it through the checkpoint, and proposing is a grant capability](#what-stops-is-a-task-the-owner-seat-confirms-it-through-the-checkpoint-and-proposing-is-a-grant-capability).
+- [Budget is a scope term that attenuates](#budget-is-a-scope-term-that-attenuates).
+- [Credit is a read model over attribution](#credit-is-a-read-model-over-attribution).
 
 Decided (README; the operator-authored section of the issue the header cites): initiative, proposal,
 approval, ownership, and reprioritization

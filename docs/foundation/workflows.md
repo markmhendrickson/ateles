@@ -1,7 +1,7 @@
 # Workflows: the core workflows, each from its own purpose
 
 **Authored companion (not on the review reading list; whether it is keyed is the operator's budget
-decision, recorded in `status.md`):** binds via the `workflow` entity for each (project, type) and
+decision, recorded in `status.md`):** binds via the `workflow` entity for each (declaration scope, type) and
 `execution/scripts/render_workflow_docs.py --check`; reviewers load the kernel and gates instead
 (`conformance.md`). **Kind:** foundation; states the design of each core workflow, why its steps exist,
 and which successors its tasks may enter, and never the state of a checkout. **Derived from:** `work_model.md`, `gates_and_workflows.md`, the `workflow` declarations on the
@@ -23,10 +23,10 @@ this document cannot give is a step to question.
 Fourteen core workflows: intake, feature, bug, security, copy, social content, release, outreach, payment,
 research and analysis, meeting processing, operator-only, planning, and postmortem, with session digestion
 beside them as the recovery path of the one execution mechanism that holds no lease. Each is a workflow type; a `workflow` entity
-is declared per (project, workflow type), so one type may have several declarations that share the design
+is declared per (declaration scope, workflow type), so one type may have several declarations that share the design
 stated here and differ in step owners and thresholds. A step owner is declared as a **role** and resolved
 to a principal at claim time: the declaration's `owner_role` holds the role, the roster binds that role to
-an agent per project (`swarm_roster`, by role), and the binding is read when the step is claimed, so a
+an agent per declaration scope (`swarm_roster`, by role), and the binding is read when the step is claimed, so a
 renamed or replaced agent leaves no stale name here or in the declaration (`vocabulary.md#step-owner`).
 The step-owner column of every table below is therefore a role, and a role that resolves to no principal
 raises a checkpoint (reason `unspawnable_assignee`) rather than falling through to any available agent. No section names an operator, a payee, a contact, or a channel; those are context entities the step
@@ -89,7 +89,7 @@ The design of each workflow lives here; the operative declaration is the `workfl
 kept from diverging the way the plan-mirrored documents are: the step table in each section is a render
 target, produced from the entity by `execution/scripts/render_workflow_docs.py`, whose `--check` mode
 exits non-zero when a table on disk differs from the record (the pattern of `render_plan_docs.py`,
-`conformance.md`). Each table sits between markers naming the (project, workflow type) it renders. The
+`conformance.md`). Each table sits between markers naming the (declaration scope, workflow type) it renders. The
 prose around a table (purpose, entry condition, stages, artifacts, successors, the reason for each step)
 is authored here and reviewed in PRs; a change to a step list is made to the entity and rendered, and a
 PR that edits a table by hand fails the check. A section whose workflow has no declaration yet carries a
@@ -111,7 +111,7 @@ is declared.
 | operator-facing agent | every step that carries a checkpoint or a task to the operator (`vocabulary.md#operator-facing-agent`) |
 | payer, verifier | the two disjoint roles of the payment workflow |
 | researcher, analyst | the working steps of research and of meeting processing |
-| planner | every step of the planning workflow, declared per project and once for the levels above a project (`#planning`) |
+| planner | every step of the planning workflow, declared per declaration scope and once for the levels above a project (`#planning`) |
 
 ## intake
 
@@ -267,7 +267,7 @@ every review step the change concerns.
 
 **Steps**
 
-<!-- rendered: workflow=<project>|feature steps -->
+<!-- rendered: workflow=<declaration_scope>|feature steps -->
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
@@ -292,7 +292,7 @@ than by a chronological default — is the design's answer to where a discipline
 not exiled to a gate of last resort (a public essay series, *The Human Inversion*, Part 3, on the
 pre-inversion shape where such disciplines "lived almost entirely at foundation … and review … but were
 exiled to the gates"), because `applies_when` seats it exactly where its relevance is decided, the same
-principle that fails an unclassified action type closed rather than passing it by default. A project whose
+principle that fails an unclassified action type closed rather than passing it by default. A declaration scope whose
 legal risk must be judged before implementation starts, not after, expresses that by seating `legal` in the
 design stage of its own workflow declaration instead — the design does not preclude it, and does not
 declare it here. `merge` is a step so that the merge
@@ -308,13 +308,13 @@ commit.
 
 **Typical action classes:** `build`, `docs`, `git_push`, `open_pr`, `merge_pr`.
 
-**Successors:** `release`; or none, where the declaration permits it (`none_permitted`) because the project
+**Successors:** `release`; or none, where the declaration permits it (`none_permitted`) because the scope
 deploys its default branch on its own cadence and the merge is the last effect the task needs — a
-declaration for a project that does not is written with none not permitted, and a closing sign-off naming
+declaration for a scope that does not is written with none not permitted, and a closing sign-off naming
 none under it is refused (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`).
 
 **Fast paths:** `bug` skips `ux`; `copy` skips `arch`; `security` skips `ux`, `qa`, and `legal`. Each is
-for a project that declares no dedicated workflow of that type; where the project does declare one,
+for a declaration scope that declares no dedicated workflow of that type; where the scope does declare one,
 intake routes to it and the fast path is never taken.
 
 ## bug
@@ -327,7 +327,7 @@ is wrong, ideally as a failing test.
 
 **Steps**
 
-<!-- rendered: workflow=<project>|bug steps -->
+<!-- rendered: workflow=<declaration_scope>|bug steps -->
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
@@ -367,7 +367,7 @@ is deployed.
 
 **Steps**
 
-<!-- rendered: workflow=<project>|security steps -->
+<!-- rendered: workflow=<declaration_scope>|security steps -->
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
@@ -404,7 +404,7 @@ repository that holds it.
 
 **Steps**
 
-<!-- rendered: workflow=<project>|copy steps -->
+<!-- rendered: workflow=<declaration_scope>|copy steps -->
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
@@ -445,7 +445,7 @@ the target platforms, from the `channel_config` entity retrieved by type.
 
 **Steps**
 
-<!-- rendered: workflow=<project>|social_content steps -->
+<!-- rendered: workflow=<declaration_scope>|social_content steps -->
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
@@ -489,11 +489,11 @@ workflow together, as one batch (`work_model.md#what-goes-through-a-workflow-is-
 
 **Steps**
 
-<!-- rendered: workflow=<project>|release steps -->
+<!-- rendered: workflow=<declaration_scope>|release steps -->
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
-| 1 | `criteria` | release steward | yes | | every criterion in the project's `release_criteria` entity, retrieved by type, is read and holds; a criterion that cannot be read is `unknown`, and unknown holds the batch (`principles.md`, invariant 7) |
+| 1 | `criteria` | release steward | yes | | every criterion in the `release_criteria` entity, retrieved by type, is read and holds; a criterion that cannot be read is `unknown`, and unknown holds the batch (`principles.md`, invariant 7) |
 | 2 | `release` | release steward | yes | on fail: `criteria` | the `release` action taken through the action gate; the tag, package, or deployment is read back at its terminal status (`principles.md`, invariant 2) |
 | 3 | `verify_deployed` | release steward | yes | on fail: `release` | the deployed checkout reports the released version; the sign-off closes the batch |
 
@@ -526,7 +526,7 @@ from the record and the mail archive before anything is drafted, never assumed.
 
 **Steps**
 
-<!-- rendered: workflow=<project>|outreach steps -->
+<!-- rendered: workflow=<declaration_scope>|outreach steps -->
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
@@ -589,7 +589,7 @@ profile, fails `classify` at intake.
 
 **Steps**
 
-<!-- rendered: workflow=<project>|payment steps -->
+<!-- rendered: workflow=<declaration_scope>|payment steps -->
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
@@ -635,7 +635,7 @@ sources permitted; a task that states a conclusion to confirm rather than a ques
 
 **Steps**
 
-<!-- rendered: workflow=<project>|research steps -->
+<!-- rendered: workflow=<declaration_scope>|research steps -->
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
@@ -675,7 +675,7 @@ to fails `classify` (`CLAUDE.md`, people-data processing).
 
 **Steps**
 
-<!-- rendered: workflow=<project>|meeting_processing steps -->
+<!-- rendered: workflow=<declaration_scope>|meeting_processing steps -->
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
@@ -770,7 +770,7 @@ is the case the workflow exists for, and waiting for a session to "finish" would
 
 **Steps**
 
-<!-- rendered: workflow=<project>|session_digestion steps -->
+<!-- rendered: workflow=<declaration_scope>|session_digestion steps -->
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
@@ -851,7 +851,7 @@ successor, as every recurring task's is.
 
 **Fast paths:** none.
 
-**Applicability:** a project may declare optional review steps between `judge` and `amend`, one per role
+**Applicability:** a declaration scope may declare optional review steps between `judge` and `amend`, one per role
 whose judgement the record's level warrants — the finance role on a plan whose criteria name a figure, the
 legal role on one whose scope names a jurisdiction — each with an `applies_when` over the record's type and
 statement, each closing on that role's findings, and each recorded inapplicable where its condition does
@@ -895,7 +895,7 @@ foundation document's own coverage rather than a gate, a check, or an instrument
 
 **Steps**
 
-<!-- rendered: workflow=<project>|postmortem steps -->
+<!-- rendered: workflow=<declaration_scope>|postmortem steps -->
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
@@ -958,7 +958,7 @@ intake and nothing about a proposed architecture change needs a fifteenth core w
 
 **Stages:** scoping (`pm`); investigation (`investigate`); review (`pr_review`); routing (`merge`).
 
-**Artifacts:** the issue that carries the account, where the project files one; none otherwise — the
+**Artifacts:** the issue that carries the account, where the scope's declaration files one; none otherwise — the
 finding and the tasks it produces are in the record.
 
 **Typical action classes:** none of its own; a recovery a finding names as unexercised is an action under

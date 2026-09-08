@@ -107,6 +107,10 @@ Authored companions (design prose; **not** inlined into review prompts):
   retire, introduce), the record primitive that carries it, the order and its dependencies, what is
   reversible, how the carrying is itself governed, and the gaps the mapping exposed in the foundation.
 
+- [**Revisions**](foundation/revisions.md) — the amendment history of every foundation document, one
+  table per document, one row per revision (decision 74). Provenance, never argument: it states no rule,
+  so no reviewer reads it to judge a change, and it is never keyed or inlined.
+
 Companion report (not a foundation design document; not in the review reading list):
 
 - [**Status**](foundation/status.md) — dated, perishable measurement of the gap between the foundation and
@@ -178,7 +182,7 @@ Companion report (not a foundation design document; not in the review reading li
 *Consult as needed.*
 
 - [**QA evals design**](swarm_qa_evals_design.md) · [**QE3 eval authoring**](swarm_qa_evals_qe3_design.md)
-- [**Multi-tenancy**](multi_tenant.md) — the out-of-scope-today multi-operator path.
+- [**Multi-tenancy**](foundation/multi_tenant.md) — the tenancy axis; in the foundation set since decision 77.
 - [**Data publishing transformation**](data_publishing_transformation.md) ·
   [**Privacy guidelines**](data_publishing_privacy_guidelines.md)
 - [**Operator runbooks**](runbooks/) — operator-specific operational notes.
