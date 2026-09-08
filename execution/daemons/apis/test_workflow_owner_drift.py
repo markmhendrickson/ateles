@@ -90,6 +90,34 @@ def test_handles_snapshot_wrapped_entities():
     assert drift[0][1:] == ("arch", "bombycilla")
 
 
+def test_reads_declaration_scope_and_falls_back_to_project():
+    """Decision 70 renames the scoping key; live rows still carry the old one.
+
+    The drift name is built from whichever key the row carries. A row written
+    under the new name reads `declaration_scope`; the 8 live `workflow_definition`
+    rows still carry `project`, so a hard cut would blank their display name.
+    Both paths are asserted so the fallback cannot be dropped silently before
+    `migration.md`'s re-type removes the need for it.
+    """
+    renamed = {
+        "snapshot": {
+            "declaration_scope": "ateles",
+            "workflow_type": "feature",
+            "gates": [{"gate_name": "arch", "owner_agent": "nobody"}],
+        }
+    }
+    assert sd.workflow_owner_drift([renamed], {"pavo"})[0][0] == "ateles|feature"
+
+    legacy = {
+        "snapshot": {
+            "project": "ateles",
+            "workflow_type": "feature",
+            "gates": [{"gate_name": "arch", "owner_agent": "nobody"}],
+        }
+    }
+    assert sd.workflow_owner_drift([legacy], {"pavo"})[0][0] == "ateles|feature"
+
+
 def test_tolerates_malformed_rows():
     """A missing gates list or blank owner must not crash the check."""
     assert sd.workflow_owner_drift([{"canonical_name": "x"}], {"pavo"}) == []

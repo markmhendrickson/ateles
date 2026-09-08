@@ -1007,8 +1007,16 @@ def workflow_owner_drift(
     drift: list[tuple[str, str, str]] = []
     for wf in workflows:
         snap = wf.get("snapshot") or wf
+        # Decision 70 renames the scoping key on `workflow` and `batch` to
+        # `declaration_scope`; the planning level keeps `project`. This reads
+        # the retired `workflow_definition` type, whose 8 live rows all still
+        # carry `project`, so the new name is read first and the old one is the
+        # fallback. A hard cut here would blank the display name on every
+        # existing row (`migration.md`, the `workflow_definition` -> `workflow`
+        # re-type, is what removes the fallback).
+        scope = snap.get("declaration_scope", snap.get("project", "?"))
         name = snap.get("canonical_name") or wf.get("canonical_name") or (
-            f"{snap.get('project', '?')}|{snap.get('workflow_type', '?')}"
+            f"{scope}|{snap.get('workflow_type', '?')}"
         )
         for gate in snap.get("gates") or []:
             owner = (gate.get("owner_agent") or "").strip()

@@ -1,0 +1,30 @@
+# Retired names still used as identifiers in code, as of the decision-70 pass (2026-09-08).
+#
+# Each line is '<path>	<retired name>': a (file, name) pair that already existed when the code scan in
+# check_foundation_vocabulary.py was added. They are migration debt, not drift this check introduced —
+# migration.md is the plan that retires them, and it has not run. The check reports them and does not
+# fail on them, so it is a ratchet: a NEW retired name in a NEW file fails immediately, while clearing
+# this list is migration work that proceeds on its own schedule.
+#
+# Remove a line when the code stops using that name. Never add one to silence a fresh hit: a new pair
+# here is the drift the check exists to catch.
+execution/daemons/anthus/orchestrator.py	operator_preview
+execution/daemons/anthus/orchestrator.py	workflow_definition
+execution/daemons/anthus/participation.py	participation_record
+execution/daemons/anthus/test_orchestrator.py	operator_preview
+execution/daemons/anthus/test_participation_terminal_write.py	participation_record
+execution/daemons/apis/apis.py	checkpoint_brief
+execution/daemons/apis/gate_waive.py	gate_status
+execution/daemons/apis/swarm_dispatch.py	checkpoint_brief
+execution/daemons/apis/swarm_dispatch.py	sign_off
+execution/daemons/apis/swarm_dispatch.py	workflow_definition
+execution/daemons/apis/test_foundation.py	review_panel
+execution/daemons/apis/test_gate_store_lookup.py	gate_status
+execution/daemons/apis/test_github_gateway.py	workflow_run
+execution/daemons/apis/test_swarm_dispatch.py	checkpoint_brief
+execution/daemons/apis/test_swarm_dispatch.py	sign_off
+execution/daemons/apis/test_workflow_owner_drift.py	workflow_definition
+execution/scripts/check_foundation_vocabulary.py	sign_off
+execution/scripts/render_agent_docs.py	calendar_routing_config
+execution/scripts/triage_backfill_sweep.py	gate_status
+lib/daemon_runtime/gating.py	checkpoint_brief

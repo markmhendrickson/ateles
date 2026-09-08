@@ -8,8 +8,8 @@ and the action gate), `authority_model.md` (credentials bind to principals; appr
 steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
 operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
 below as open; and revision 18: when an artifact comes into existence, and what holds an effect before
-it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: continual inbound named as the inbound side, and the record's subscriptions as what an intake rule evaluates through). What is built, and where the adapter and the engine are still one process, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: open decision 35). Revised by the memo-gap pass of 2026-09-06 (revision 31: the source is kept, not only named). Revised by the workflow-format pass of 2026-09-06 (revision 34: a system whose delivery surface is a local filesystem is admitted through the same contract; open decision 45 — whether the host a daemon runs on is an external system). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a merchant is a system of its own and a purchase its class, under *Admitting a new adapter*; open decision 55, whether a second instance of the record is an external system). Revised by the testability pass of 2026-09-06 (revision 37: the window declared on the binding and the per-window observation on the adapter's `agent_session`; a credential-less outbound operation is a denial, never a drop; the linkage section states what a verdict pins per kind). Revised by the rulings pass of 2026-09-06 (revision 38: decision 35 ruled as settled by the conformance suite — one binding type per external system, routing a field of it, the name and the substitution deferred to a vocabulary pass; decision 45 ruled — the host a daemon runs on is an external system). Revised by the event/signal/delivery pass of 2026-09-06 (revision 49: `vocabulary.md#event` cited where this document already used the word; one stray `gmail.md` anchor updated to the renamed section). Revised by the peering pass of 2026-09-06 (revision 56, rebased onto the checker-mechanism and self-awareness passes: decision 55 ruled — a peer instance is the record, extended by replication, not an external system; the interim `operator_only` rule retired for eligibility, replaced by `sync_peers`; a pointer added to the governance-write question decision 55 does not settle). Revised by the rendered-interface pass of 2026-09-06 (revision 61: a system reached only through a rendered interface — no event API, no stable record identifier — admitted under *Admitting a new adapter*; identity and linkage answered by obligation 3, extended from the dedup key to `external_id`; coverage answered by revision 34's filesystem finding, transferred without change; read-back argued as real but partial, naming what it cannot establish; freshness needing no new mechanism; a read-time planted-positive instrument named for the case a delivery-based drop counter cannot catch, a layout change that returns zero rows and reports nothing; the outbound default left to the existing fail-closed rule rather than special-cased; no decision opened). Revised by the host-configuration pass of 2026-09-06 (revision 65: a seventh obligation for an external system's own configuration considered and rejected — the contract judges the mapping, and configuration extends obligations 1 and 6 instead, read at the admission task's arch review step; the case carried through in full is `github.md`'s required host state). Revised by the agent-identity pass of 2026-09-06 (revision 66, **derived from** the operator's 2026-09-06 14:44 memo on agent identities across external systems: the general rule that an agent's identity lives in the record and an external system holds at most a credential that binds to it; the asymmetry between a system that issues a per-agent credential and one that does not; the outbound mark required where attribution cannot be external; decision 69 opened and ruled — a per-agent credential is an obligation where the system issues one; the binding declared on the `vendor_binding` on decision 42's pattern; AAuth established from the corpus as one of the credential kinds `authority_model.md#principals` already enumerates, not a second identity system). Revised by the deployment-target pass of 2026-09-08 (revision 83, **derived from** the operator's 2026-09-08 memo on deployment targets and teardown scope: decision 90 opened and ruled — a deployment names a target host and the instance of the record it will read and write, deploys a companion instance where it names none, and names its recovery path off the host it deploys to; the teardown guard stated as a property of the teardown rather than of the gate; deployment kept as the single name against installation; decision 91 opened, on the several-instance case).
-
+it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: continual inbound named as the inbound side, and the record's subscriptions as what an intake rule evaluates through). What is built, and where the adapter and the engine are still one process, is `status.md`.
+Amendment history: `revisions.md#adaptersmd`.
 ## Purpose
 
 State how an external system (a code host, a mail system, a chat channel, a calendar, a payment rail) is
@@ -41,6 +41,14 @@ under two names, `channel_config` and `vendor_binding`, that decision 35 rules o
 named here.
 
 ## The two invariants
+
+**The rules in this section.**
+
+- [The workflow engine never reads an external system; it reads the record](#the-workflow-engine-never-reads-an-external-system-it-reads-the-record).
+- [No external event advances a step by itself](#no-external-event-advances-a-step-by-itself).
+- [The adapter runs before and after a step, never during it](#the-adapter-runs-before-and-after-a-step-never-during-it).
+- [Where inbound delivery lands: the adapter verifies and identifies it, and the record's own subscriptions are not it](#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it).
+- [Continual inbound is the inbound side, and an intake rule evaluates downstream of it](#continual-inbound-is-the-inbound-side-and-an-intake-rule-evaluates-downstream-of-it).
 
 ### The workflow engine never reads an external system; it reads the record
 
@@ -461,6 +469,13 @@ indistinguishable, to every reader downstream, from an artifact for a record tha
 
 ## What the record supplies, and what an adapter therefore never builds
 
+**The rules in this section.**
+
+- An entity carries the external system and host it came from.
+- Provenance links an observation to the source it was interpreted from.
+- The source is kept, not only named, and the raw thing is what is kept.
+- Reconstruction as of a time, in two senses that must not be conflated.
+
 The rules above lean on the record having certain capabilities. They are named here abstractly — what the
 capability is and what it is for — because an adapter author's most common error is rebuilding one of them
 beside the record, and a rebuilt one is the maintained state principle 11 forbids. Which calls express them
@@ -534,7 +549,7 @@ taken (`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`). Th
 principal's hands at the boundary: on permit it performs the operation, reads the result back from the
 external system, and writes the confirmation on the action (`taken_at`, `result_ref`); the record the
 effect left is an artifact `PRODUCES` from the batch. On a checkpoint it performs nothing. The class is
-resolved under the project's `action_policy`; a class in neither set resolves to `NEVER`
+resolved under the instance's `action_policy`; a class in neither set resolves to `NEVER`
 (`gates_and_workflows.md#confidence-and-three-blast-tiers`), so a policy that wants a low-blast comment
 lists the class the comment carries. The class names in the tables below are the policy's data, not a
 closed set: `open_issue` and `notify_operator` are this document's, beside the classes the workflows
@@ -689,6 +704,18 @@ are satisfied has become a second engine (`gates_and_workflows.md#declaration-ba
 never performs an operation and reports success without reading the external system back.
 
 ## Admitting a new adapter
+
+**The rules in this section.**
+
+- [A system reached only through a rendered interface is admitted the same way, and three of its five rules were already answered by the filesystem case](#a-system-reached-only-through-a-rendered-interface-is-admitted-the-same-way-and-three-of-its-five-rules-were-already-answered-by-the-filesystem-case).
+- [The admission contract](#the-admission-contract).
+- [The obligations are the five rules, restated as failures](#the-obligations-are-the-five-rules-restated-as-failures).
+- [What an adapter's document must contain](#what-an-adapters-document-must-contain).
+- [Who may admit an adapter, and through what](#who-may-admit-an-adapter-and-through-what).
+- [Degrees of trust: the design distinguishes, and grants already express it](#degrees-of-trust-the-design-distinguishes-and-grants-already-express-it).
+- [Per-agent credentials where the system issues them, a shared credential where it does not](#per-agent-credentials-where-the-system-issues-them-a-shared-credential-where-it-does-not).
+- [When an adapter is wrong](#when-an-adapter-is-wrong).
+- [The relationship to decision 15, which rules adapter packaging](#the-relationship-to-decision-15-which-rules-adapter-packaging).
 
 Every rule above is written for an adapter that already exists. This section is the other direction: what
 a sixth adapter must satisfy before the record trusts what it writes, who admits it, and what admission
@@ -943,9 +970,9 @@ that is already answered: a write to `agent_grant` is a **governance write**, wh
 at the action gate (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`). The operator
 resolves the checkpoint the gate raises. Nothing here needs a new approver class, and adding one would be
 the second gate. That governance class is *reserved* to the operator by default (**decision 18**, ruled:
-`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`): a project with no
+`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`): an instance with no
 policy value for the class resolves it to `NEVER`, so an adapter is never granted its credential by default,
-and a project that wants the swarm to admit its second adapter under a checkpoint grants the class explicitly
+and an instance that wants the swarm to admit its second adapter under a checkpoint grants the class explicitly
 first. The first adapter's grant is the operator's own write in every case.
 
 **Its outbound classes are `action_policy` data, and that write is governance too.** An adapter that can
@@ -1216,6 +1243,12 @@ adapter's wherever the socket is.
 
 ## The adapter and the engine are two roles
 
+**The rules in this section.**
+
+- [Whether one binding type or two names an external system's instance](#whether-one-binding-type-or-two-names-an-external-systems-instance).
+- [Whether the host a daemon runs on is an external system](#whether-the-host-a-daemon-runs-on-is-an-external-system).
+- [Whether a second instance of the record is an external system](#whether-a-second-instance-of-the-record-is-an-external-system).
+
 Whether one process hosts both is an implementation choice; the design's requirement is that they meet
 only in the record. An adapter is a daemon in the sense of `work_model.md#the-four-execution-mechanisms`:
 it self-triggers on the external system's events, produces writes to the record, and receives no task.
@@ -1402,11 +1435,11 @@ a sweep enumerating what an exposure reached on a shared instance. `reads_to_ent
 `contact` is one — but the record's `contact` rows and the shared instance's are not the same rows, and
 nothing in a declaration says which record a read is of.
 
-**Why, from the design's own definitions.** A `vocabulary.md#artifact` is an entry an external system holds, reached
+**Why, from the design's own definitions.** An `vocabulary.md#artifact` is an entry an external system holds, reached
 only through that system's adapter and always identified by its `system` and `external_id`. A row a peered
 instance contributes has neither: it carries no `external_id` because it was never minted by an adapter's
 read-back, and it is reached the same way any local row is — retrieved from the record, not fetched through
-a system's own client. It enters through the same machinery a `vocabulary.md#observation` already names: "one
+a system's own client. It enters through the same machinery an `vocabulary.md#observation` already names: "one
 append-only, timestamped, provenance-bearing write to an entity in the record", with the peer that produced
 it on `source_peer_id` exactly as an adapter's write carries the host or instance it came from. The boundary
 the design draws is the record versus what an adapter must reach — the record's own peering does its
@@ -1559,6 +1592,134 @@ That is the change that reopens this.
 decision 45's classes when that adapter is declared. FP-13, which reads the restore obligation, gains one
 case: a binding whose `recovery_paths[]` names a path on the deployment's own target host is a defect that
 row reads, beside the path with no cadence it already reads.
+
+### Whether the instance of the record serving a swarm is an external system when the swarm operates it
+
+**Ruled (decision 78, 2026-09-07): the instance of the record serving a swarm is an external system when
+the swarm operates it, and decision 45's action classes extend to the substrate.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. Operating the serving instance — a restart, a
+redeploy, an upgrade, a snapshot, a migration to a new host — is an [action](vocabulary.md#action), reached
+through the host's adapter, gated like any other. The instance is the record when it is the place a write
+goes, and an external system when it is the object of the operation; the two are the same instance and
+never the same moment, and which one a sentence means is settled by whether the instance is being read and
+written or being operated on.
+
+**Three rules, stated here because a reader of this ruling needs all three.** An operation that suspends
+the serving instance is an action of the host's adapter, taken under a class the `action_policy` names.
+The permitting verdict and the [action gate](vocabulary.md#action-gate)'s decision are written **before**
+the operation begins, and the operation's completion is written **after** the instance answers again. An
+operation that does not complete leaves the permit standing and the completion unwritten, and what closes
+it is a person, not a retry.
+
+**Why the boundary sentence does not forbid it.** The objection is real and has to be met on the text, not
+around it. The boundary is stated once — "the swarm is the engine, the agents, the adapters, and the
+record they all read and write … Neotoma is not a second system on the far side of that line: it *is* the
+record" (`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`) — and that same section
+states the escape in its next clause: "an internal operational write to the record crosses nothing and is
+not an action, which is the same rule the two named exceptions above bend on purpose — a governance write
+and a lossy record mutation are actions **not because of where they go, but because of what they can
+destroy**." That clause is the design's own statement that the boundary is not the only thing that makes
+an action. Suspending the instance is the limiting case of what can destroy: it does not mutate a row, it
+removes the ability to write any row at all, and for the duration every verdict the design requires has
+nowhere to go. An operation that can destroy the record's availability wholesale, judged by the test the
+design already applies to a lossy mutation, is an action by that test and not by a relocation of the
+boundary.
+
+**So the classification is by moment, not by relocation.** Decision 45's *What would reopen it* says a
+boundary redefinition "would have to be stated once, in the action's home section, and would move the host
+inside for every rule at once," and the symmetric move — declaring the record outside for every rule at
+once — is what the boundary sentence forbids and what this ruling does **not** do. The record stays inside
+the boundary for every rule that reads or writes it: an internal operational write still crosses nothing,
+a step's read of an entity is still a read and not an adapter's, and `#the-two-invariants` is untouched for
+every ordinary use. What is outside is narrower and is bounded in time — the serving **process and its
+host state**, for the interval of an operation upon it, which is the same process decision 45 already
+placed outside without regard to what it serves. Decision 45 classified the host by ownership and its
+action classes reach "a process on a host whatever that process serves"; this ruling says the process
+serving the record is not carved out of that, and adds nothing to 45's list.
+
+**The `vocabulary.md#record` Not-for clause, met limb by limb.** The entry forbids three things and this
+ruling is tested against each. Its first limb forbids calling a foreign system's store by the bound term —
+nothing here does; the serving instance is the swarm's own. "'Database' for the record
+in foundation prose" is a wording ban and is not engaged. The third limb — "the record as something an
+adapter reaches across a boundary" — is the one that bites, and it survives because it is a ban on how the
+record is **reached**, not on whether the process serving it can be operated. Under this ruling no adapter
+reaches the record: every read and write of an entity goes to the record directly, as it always did, and
+the adapter reaches the **process**, whose artifact is a process and a host, never an entity. A sentence
+that said a step reads a `contact` through an adapter would violate the limb; a sentence that says the
+host's adapter restarts a process does not, and it is the sentence decision 45 already wrote. The entry is
+amended for clarity but not for substance: the See list gains this section, so a reader who meets the Not
+for clause and wonders about the lifecycle case is sent to the argument rather than left to infer it. The
+prohibition itself is unchanged, and had it needed changing this ruling would have said so rather than
+reading the limb narrowly to fit.
+
+**Write ordering: the permit is written before the record goes away, the completion after it returns.**
+This is the half `failure_posture.md` does not reach, and the ruling closes it. That document's rules 1, 2,
+and 4 are keyed to reachability and not to cause, so they bind an intentional suspension exactly as they
+bind an unexpected outage — no claim, no step opening, no gate decision, nothing claimed complete; the
+condition announced on the path that survives the outage; a mid-operation write failure leaving the task in
+its prior state, its verdict re-derived and never replayed. Nothing there needs amending. What is only
+present here is that this outage was **decided**, so something was owed a decision before it and something
+is owed a record of having caused it. The ordering follows from the substrate the write needs: the gate is
+evaluated and the permitting verdict is written while the instance still answers, because a verdict that
+cannot reach the record is not a verdict (`failure_posture.md#the-rules`, rule 4), and a permit obtained
+after the instance is down is not obtainable at all. The completion is written when the instance answers
+again, by the same principal, referring to the permit it was taken under. Between the two the halt governs
+unchanged, and the announcement path of rule 2 carries the interval as it carries any other.
+
+**Nothing is parked off-record in between.** The rejected disposition's cost was the write-ahead log rule 4
+names by name, and the ordering above does not incur it: the permit is a normal write made before the
+outage, not a parked verdict awaiting reconciliation, and the completion is a normal write made after it.
+The one thing that crosses the interval is what rule 2's capture already carries for every halt — the
+announcement — and it asserts nothing about the record's contents.
+
+**An operation that does not complete.** Two cases, and the design's existing postures answer both once the
+ordering above is in place. **The instance does not return.** The permit stands as written and no
+completion is ever written, which is the correct terminal state and not a defect: the halt of rule 1 holds
+for as long as the record is unreachable, the announcement of rule 2 carries each window on the surviving
+path, and recovery runs from the `recovery_paths[]` snapshot and cadence the record host's binding already
+declares (`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`). Nothing
+retries the operation on its own, because the swarm cannot read the permit to know it was taken; the
+operator resolves it, which is what a restore obligation over the substrate already presumed. **The
+instance returns in a state the permit did not approve** — a version other than the one approved, a
+migration that landed on the wrong host, data the snapshot did not carry. The completion write is where
+this is caught and the completion is not written: the divergence is a [finding](vocabulary.md#finding), the
+permitting verdict is not retro-fitted to what happened, and the gap between the permit and the state
+stands in the record as the evidence it is. A second operation to correct the state is a second action, a
+second permit, and a second pass of this same ordering — never a continuation of the first, because the
+first's permit judged an artifact state that no longer holds and a verdict is pinned to the artifact state
+it judged (`data_model.md#concepts`).
+
+**Why the other dispositions lost.** *Treat the serving instance as the record and put the operation
+outside the swarm as the operator's by hand* was eliminated by the operator's answer, which is that he
+wants the swarm operating its own infrastructure unattended as far as governance allows: this disposition
+caps unattended operation permanently by construction, and the operator's own act still leaves no record of
+itself, so it does not even purchase accountability with the autonomy it gives up. *Declare it out of scope
+for P1–P2 and revisit* was eliminated by the same answer for a different reason: an operation on the
+serving instance is being planned now, so a non-goal would leave the design silent about an operation that
+is imminent, which is the cost the disposition itself named. *Record the operation elsewhere and reconcile
+it after* was the closest rival and lost on the operator's qualifier, "within governance": it puts the
+deciding half outside the gate model and then owes a second write path its own authority rule, its own
+durability rule, and its own conflict rule against the record — governance-adjacent machinery rather than
+governance — and rule 4 names that shape as an anti-pattern by name. Extending 45 keeps the decision inside
+the one gate the design already has, and buys the ordering rule above at the price of one sentence about
+which moment the instance is which.
+
+**Cost accepted.** The boundary now has a case whose side depends on the moment rather than on the system,
+and a reader must ask which moment a sentence means. That is a genuine cost and it is bounded: the question
+arises only for the record's own serving process, only for the operations `action_policy` classes name, and
+the classification of every other read and write is unchanged. The alternative cost — a boundary that
+cannot express an operation the swarm is about to perform — is worse, and the operator's answer is that he
+wants the swarm to perform it.
+
+**What would reopen it.** A suspending operation the swarm needs to take on an instance it cannot reach
+beforehand to write the permit — a fail-over decided by something other than the swarm, or an operation
+triggered by the instance's own failure rather than by a plan. The ordering above presumes the instance
+answers when the decision is made, and an operation that begins after it has already stopped answering has
+no place to write its permit; that case would reopen the deciding half without disturbing the
+classification.
+
+**Matrix.** The host adapter's admission rows (AD-21 to AD-26) and its action-gate rows apply unchanged to
+a lifecycle operation on the serving instance; no new row is added, because no obligation is added.
 
 ## Prior art
 

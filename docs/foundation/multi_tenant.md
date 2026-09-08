@@ -1,6 +1,14 @@
-# Multi-Tenancy Design
+# Multi-tenancy: the isolation boundary, and going from one operator to many
 
-**Status: Design** (task #6 of plan `ent_aff87747b49e338790568af6` — "Task-spine loop + cloud-hosted swarm")
+**Keyed document:** read when tenant partitioning, per-tenant AAuth subject namespacing, grant
+admission's tenant match, per-human routing, or beneficiary ownership changes (`conformance.md`).
+**Kind:** foundation; states the tenancy axis whole and marks each undecided question **open** with its
+options, never resolving one to make the document complete. **Derived from:** the governing decision
+`multi_tenant_org_readiness`; Goal 6 of the swarm-architecture plan; task #6 of plan
+`ent_aff87747b49e338790568af6` ("Task-spine loop + cloud-hosted swarm"); the tenant/partition-now,
+isolation-later precedent of `docs/durable_execution_substrate.md`; and the decision-77 pass of
+2026-09-07, which moved this document into the foundation set. What is built is `status.md`.
+Amendment history: `revisions.md#multi_tenantmd`.
 
 Realizes Goal 6 of the swarm-architecture plan: *public ateles can be forked by a third party and deployed against their own Neotoma instance.* This document specifies how the Ateles swarm goes from one operator to many operators under one tenant (org/team), and what to build **now** vs **defer**.
 
@@ -20,9 +28,22 @@ The swarm must support a spectrum, not a binary. Three shapes matter:
 | **Fork** (Goal 6) | one (a *different* operator) | one (theirs) | Zero hardcoded operator identity. Everything operator-specific resolved from context entities at runtime: `operator_profile`, `locale_profile`, `swarm_roster`, `channel_config`, `payment_profile`, etc. A forker stands up their own Neotoma, supplies their own context entities, mints their own AAuth keys. **Mostly already true** — agent prompts are operator-agnostic by policy. |
 | **Org / team** | many | one (shared) | Multiple humans collaborate under one tenant: shared entity graph, but per-human routing, per-human identity, per-human capability scope, and per-customer ("for whom") visibility. This is the shape that, if not designed for now, forces a painful retrofit. |
 
+**The single-operator row's "current state" no longer describes the operator's own setup.** As of
+2026-09-07 the operator runs two instances of the record — a personal one and a second shared with a
+client engagement — kept apart by sensitivity, and expects more as further engagements arrive. That is
+neither of the two multiplications this section names: it does not multiply humans within a tenant, and
+it does not multiply tenants under separate forkers. It is one operator holding several instances that
+must not merge, which is decision 76's subject and is ruled at
+`authority_model.md#whether-one-operators-several-instances-of-the-record-are-one-record-or-several`:
+several records, not one, on the accountability ground. The table's "no isolation work needed beyond
+what already exists" is therefore true only of the axis this document partitions on, and section 6.2's
+deferral trigger is discussed below in the same light. Neither claim is edited here — a move is not the
+place to change a document's content — and both are read against decision 76's ruling until the pass
+that reworks this document for it.
+
 **Single-operator** and **fork** are the same code path with different context entities — the fork case is the validation that nothing operator-specific is baked into code (enforced today by `scripts/linters/check_hardcoded_config.py`). The genuinely new axis is **org/team**: more than one human acting inside one tenant.
 
-The critical framing: *fork* multiplies **tenants** (each forker is isolated by running their own Neotoma); *org* multiplies **humans within a tenant** (sharing one Neotoma). A single-Neotoma SaaS deployment serving multiple forkers is the case where both axes are live at once, and the one that makes tenant isolation a hard requirement rather than a deployment convenience.
+The critical framing: *fork* multiplies **tenants** (each forker is isolated by operating their own instance of the record); *org* multiplies **humans within a tenant** (sharing one Neotoma). A single-Neotoma SaaS deployment serving multiple forkers is the case where both axes are live at once, and the one that makes tenant isolation a hard requirement rather than a deployment convenience.
 
 ---
 
@@ -54,13 +75,13 @@ Add a `tenant_id` field to Neotoma entities, exactly as `docs/durable_execution_
 
 Every domain entity carries `tenant_id`. The query default is **scope every retrieve to the caller's tenant** — the "absent = denied" instinct from the AAuth grant model (`docs/aauth.md`) applied to rows: a query without a tenant scope is a bug, not a wildcard. Cross-tenant reads require an explicit, audited capability that no normal agent holds.
 
-Configuration entities that are inherently per-tenant — `operator_profile`, `locale_profile`, `swarm_roster`, `channel_config`, `priority_rubric`, `payment_profile`, `agent_definition`, `agent_grant` — are partitioned the same way. A forker's `swarm_roster` is theirs; an org's is shared across its operators.
+Configuration entities that are inherently per-tenant — `operator_profile`, `locale_profile`, `swarm_roster`, `channel_config`, `priority_rubric`, `payment_profile`, `agent`, `agent_grant` — are partitioned the same way. A forker's `swarm_roster` is theirs; an org's is shared across its operators.
 
 ---
 
 ## 3. Identity & isolation
 
-The isolation story is a product of three scoping layers, all of which AAuth already supports in shape (`docs/aauth.md`):
+Isolation is a product of three scoping layers, all of which AAuth already supports in shape (`docs/aauth.md`):
 
 ### 3.1 Three scoping dimensions
 
@@ -70,7 +91,7 @@ The isolation story is a product of three scoping layers, all of which AAuth alr
 
 ### 3.2 How grants scope to a tenant
 
-`agent_grant` entities today match on `(sub, iss)` and declare `capabilities`. Multi-tenant adds **`match_tenant`** (or derives tenant from `sub` when the subject encodes it, e.g. `monedula@acme-swarm`). Admission then requires: signature valid **and** `(sub, iss)` matches a grant **and** that grant's tenant equals the entity's `tenant_id`. The existing rule "absent = denied" extends cleanly: a write to a tenant the grant does not name fails at admission, before any side effect — the same boundary that already stops Monedula from writing `agent_definition`.
+`agent_grant` entities today match on `(sub, iss)` and declare `capabilities`. Multi-tenant adds **`match_tenant`** — matched on the grant and never derived from the subject, ruled as decision 80 at `#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject`. Admission then requires: signature valid **and** `(sub, iss)` matches a grant **and** that grant's tenant equals the entity's `tenant_id`. The existing rule "absent = denied" extends cleanly: a write to a tenant the grant does not name fails at admission, before the action is taken — the same boundary that already stops an operator-facing agent from writing an `agent`.
 
 ### 3.3 Cross-tenant isolation guarantees
 
@@ -127,7 +148,7 @@ This also respects the RGPD legitimate-interest discipline in `CLAUDE.md`: benef
 
 ## 6. Phased rollout
 
-The split follows the durable-execution discipline: **cheap design-time hedges now, expensive operational mechanisms deferred behind a trigger.** The trigger here is unambiguous: *a second operator or a multi-forker hosted deployment exists.*
+The partition follows the durable-execution discipline: **cheap design-time hedges now, expensive operational mechanisms deferred behind a trigger.** The trigger here is unambiguous: *a second operator or a multi-forker hosted deployment exists.*
 
 ### 6.1 Do NOW (cheap — schema/specification, ~no new infra)
 
@@ -144,10 +165,20 @@ These are the items that are impossible or painful to backfill once data and tru
 
 ### 6.2 DEFER until a second operator/org exists (expensive — operational)
 
+**On this section's trigger.** The trigger stated above is "*a second operator or a multi-forker hosted
+deployment exists*", and the deferrals below are keyed to it. Neither limb has fired: the operator's
+several instances are one operator, and each instance is its own deployment rather than one serving many
+forkers. What has fired is a third condition this document does not name — one principal holding several
+instances that must not merge — and the deferrals below are silent on it because the axis is not theirs.
+Decision 76 rules that case at
+`authority_model.md#whether-one-operators-several-instances-of-the-record-are-one-record-or-several`;
+what this document defers is unchanged by it.
+
+
 - **Team UX**: invite flow, per-operator onboarding, book-of-business assignment screens, shared-vs-private toggles.
 - **Soft-wall enforcement** of within-tenant beneficiary visibility (the owner-ref *gate*, as opposed to the owner-ref *field*).
 - **Per-tenant quotas, fairness, noisy-neighbor protection** (mirrors the deferred list in `docs/durable_execution_substrate.md`).
-- **Cross-tenant admin / multi-forker hosted control plane** (one Neotoma serving many tenants with per-tenant dashboards, bulk operations).
+- **Cross-tenant operator seat / multi-forker hosted control plane** (one Neotoma serving many tenants with per-tenant dashboards, bulk operations).
 - **Per-tenant key lifecycle tooling** (rotation, revocation at tenant granularity) beyond the per-agent minting that exists today.
 
 ### 6.3 The minimal now-work that avoids a painful retrofit
@@ -158,15 +189,94 @@ If only the cheapest possible subset is done, it must be: **(1) `tenant_id` part
 
 ## 7. Open decisions (require the operator)
 
+**Registered.** All five are rows 79 to 83 of `conformance.md#the-register-of-open-design-decisions`,
+in that order, since the decision-77 pass of 2026-09-07 brought this document into the foundation set and
+with it the obligation that every question a foundation document marks open is indexed there once. The
+register row states each question in one line and points here; the argument stays below, which is where a
+reader resolves it (principle 9). None was ruled by that pass. **Decision 2, registered as decision 80, has
+since been ruled**, on the operator's answer to the question it turned on; the other four remain open and
+are the operator's.
+
+
 1. **Tenant slug scheme.** Is `tenant_id` a UUID (opaque, stable) or a human slug (`acme`, readable in `sub` like `monedula@acme-swarm`)? Slug reads better in AAuth subjects and logs; UUID avoids rename pain. Recommendation leans slug-with-immutable-UUID-backing, but this is the operator's call.
 
-2. **Does tenant derive from `sub`, or is it a separate `match_tenant` on the grant?** Encoding tenant in the subject (`<name>@<tenant>-swarm`) is self-describing and needs no extra field; a separate field is more flexible if one identity ever spans tenants. Affects every key already minted (`<name>@ateles-swarm`) — decide before more keys are minted.
+2. **Does tenant derive from `sub`, or is it a separate `match_tenant` on the grant?** **Ruled (decision 80, 2026-09-07, on the operator's answer that a grant should govern everything an agent can do via tooling): the tenant is matched on the grant, as `match_tenant`, and is not derived from the subject.** The argument is `#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject` below. The question as first written — self-describing subject against a more flexible field, and the flexibility priced against one identity spanning tenants — is answered on neither of those grounds. What settles it is that the grant is the complete statement of what a principal may do, so authorization has one home.
+
 
 3. **Within-tenant default visibility.** When the org case arrives, is the default "see only my own book" (private-first) or "see everything in the tenant" (shared-first)? This is a product/RGPD posture decision, not a technical one, and shapes the soft-wall §5.
 
 4. **Single hosted Neotoma vs. per-forker Neotoma for the fork case.** Goal 6 says "their own Neotoma instance" (per-forker isolation = free tenant isolation). If a hosted multi-forker offering ever ships, tenant isolation moves from deployment-level to row-level and §3 becomes load-bearing rather than belt-and-suspenders. Confirm Goal 6 stays per-instance for launch.
 
-5. **Operator vs. agent capability ceiling within a tenant.** Should a non-owner operator be able to mint agent keys, edit `agent_definition`, or change `priority_rubric` for the whole tenant — or are those owner-only? Defines the org admin model; defer the *enforcement* but the *intended* ceiling should be recorded now so grants are shaped consistently.
+5. **Operator vs. agent capability ceiling within a tenant.** Should a non-owner operator be able to mint agent keys, amend an `agent`, or change `priority_rubric` for the whole tenant — or are those owner-only? Defines the org operator model; defer the *enforcement* but the *intended* ceiling should be recorded now so grants are shaped consistently.
+
+### The tenant is matched on the grant, not derived from the subject
+
+**Ruled (decision 80, 2026-09-07).** A grant carries the tenant it is scoped to, as `match_tenant`.
+Admission requires a valid signature, a grant matching the credential, and that grant's tenant equalling
+the entity's `tenant_id` — the three-part check §3.2 already states, with its parenthetical alternative
+now closed. Nothing is read out of the subject to reach the tenant.
+
+**The ground is that a grant is the whole statement of what a principal may do.** A capability names the
+tools a principal may invoke as well as the operations and types it may reach, and a harness's own
+allowlist is one *enforcement* of that and never its home (`vocabulary.md#grant`, decision 42). If the
+grant is where authorization is stated, then deriving the tenant from the subject while every other term
+of the same decision comes from the grant puts one authorization question in a second place. Invariant 9
+forbids exactly that: a value the swarm reads has one home, and where a copy is unavoidable it is derived
+at import or asserted equal in a test. A subject-derived tenant is not a copy that could be tested; it is
+a second source consulted at the same check, which is the condition the invariant exists to prevent.
+
+**A subject-derived tenant cannot scope what carries no subject.** A grant's capabilities are operation ×
+entity types × repositories with parameter constraints and an expiry (`vocabulary.md#grant`) — every term
+record-shaped — and a capability also names the tools a principal may invoke, which under the operator's
+answer is the half that matters most. A shell or filesystem capability has no subject inside it at all.
+Deriving the tenant from the subject would therefore leave the tool half of every grant outside the
+tenant boundary, and the tool half is precisely what the answer says a grant should govern. The
+record-shaped half would be tenant-scoped and the tool half would not, which is a boundary with a hole in
+it rather than a boundary.
+
+**`authority_model.md#grants` already says this for the human side.** Its rule that "a human's grant is
+bound to a principal and a tenant, never a wildcard" puts the tenant on the grant for one class of
+principal already. Deriving it from the subject for agents would give the two classes of principal two
+different homes for the same term, and a reader asking where a tenant is recorded would get an answer
+that depends on who is asking.
+
+**Decision 76 does not settle this the other way.** It ruled one identity per instance, on a case its own
+row states is one tenant — several stores kept apart by sensitivity rather than by tenancy. It bounds how
+many identities a principal holds; it says nothing about where authorization records the tenant, and the
+two are different questions (invariant 12).
+
+**The rejected alternative, and why its cheapness is not a reason.** Deriving the tenant from the subject
+is cheaper today: every agent subject is already minted in the `<name>@ateles-swarm` form, and that form
+would need no change. It was rejected anyway, and the cheapness is not a ground on either side. These
+documents state the design and the implementation follows it; a mechanism chosen because the existing keys
+already have its shape is the implementation choosing the design, which is the direction this corpus
+exists to refuse. The subject form is also not evidence about the design: `ateles` reads as a tenant slug
+in it only because there is one tenant, and a form that is self-describing only while the thing it
+describes is unique describes nothing.
+
+**What this does not decide.** The form of the tenant identifier — UUID or slug, and therefore what the
+subject's realm literal becomes — is decision 79 and remains the operator's. This ruling is compatible
+with either: `match_tenant` holds whatever value 79 settles on. Nor does it forbid the subject from
+continuing to carry a tenant-shaped realm literal; it rules that nothing reads the tenant out of it for an
+admission decision.
+
+**Sequencing: ruled now, buildable after decision 86.** The tool half this ruling turns on cannot be
+written at all until the grammar by which a capability names a tool exists, which is decision 86 and is
+open. `match_tenant` on the record-shaped half is implementable immediately; the tenant scoping of a
+shell or filesystem capability waits on 86, because there is no capability there to scope yet. The
+decision is settled; its full effect is not yet expressible.
+
+**The migration is a backfill, not a reshape.** No minted key is invalidated: the subject form is
+unchanged, and this ruling adds a field to grants rather than changing what a credential looks like. Every
+existing grant takes the single sentinel tenant §2.2 already prescribes for existing data — "a
+column/field is populated with one constant" — because there is exactly one tenant today and every
+existing grant belongs to it. The assignment is therefore **mechanical and needs no per-agent judgement**;
+per-agent judgement begins with the second tenant, when a grant is written for a principal that could
+belong to either. The one obligation the backfill carries is that it precede the check: a grant with no
+`match_tenant` must fail closed at admission and never read as any-tenant, which is `authority_model.md#grants`' rule that a
+degraded read never synthesizes a value more permissive than success would have returned.
+
+---
 
 ---
 

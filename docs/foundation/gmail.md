@@ -9,8 +9,8 @@ action gate; the three conclusion values), `workflows.md` (outreach, intake, ope
 `failure_posture.md` (the halt, the recovery per action class, the checkpoint reason classes), and the
 Gmail REST API v1 surface as exposed by the `gws` CLI, read 2026-09-05, and PR #745 operator review
 (2026-09-05, rulings 13–14, 16–18, 23–29: decision 23 ruled here). What is built, and which rows have
-no code path, is `status.md`. Revised by the testability pass of 2026-09-06 (revision 37: refusal 1's mechanical half, the field allowlist on the grant). Revised by the event/signal/delivery pass of 2026-09-06 (revision 38: "Every inbound signal, and what it becomes" and its table headers, Linkage, Identity, and the disposition sentence renamed to `event`, matching `github.md`'s "Event and action" precedent; `signal` kept only where the design means the record's reading of an event). Revised by the minimization-recalibration pass of 2026-09-06 (revision 50: refusal 1 narrowed to a third party's Article 9 data, capture generous otherwise under the broadened purpose).
-
+no code path, is `status.md`.
+Amendment history: `revisions.md#gmailmd`.
 ## Purpose
 
 Be the Gmail adapter in full: every state change the mail system can deliver or that a reader can discover
@@ -22,7 +22,7 @@ from this document and never restated in it (principle 9, one home).
 The mail system differs from the code host in three ways that shape everything below, and they are stated
 first because each one decides several rows.
 
-**Mail carries the operator's personal correspondence, not a project's public record.** Every artifact in
+**Mail carries the operator's personal correspondence, not the code host's public record.** Every artifact in
 this system is presumptively about identifiable people, some of it about people who never agreed to be
 processed by a swarm. Where `github.md` narrows one class of inbound event for disclosure reasons, this
 document narrows a different surface: capture itself is generous, on the broadened purpose the record
@@ -81,6 +81,12 @@ identity.
 
 ## What arrives, and what must be asked for
 
+**The rules in this section.**
+
+- The notification is not the event; the history entry is.
+- The history log expires, and an expired cursor is `unknown` rather than a resynchronization.
+- The marker is not the adapter's to keep.
+
 This section exists because a reader carrying `github.md`'s model into this document will expect an event
 stream and there is not one. The distinction decides how nearly every row below is worded, so it is drawn
 before the tables rather than inside them.
@@ -116,6 +122,13 @@ in this system where an adapter is most tempted to break it. **The drift note be
 path does keep such state.**
 
 ## Every inbound event, and what it becomes
+
+**The rules in this section.**
+
+- [Messages](#messages).
+- [Threads and labels](#threads-and-labels).
+- [Mailbox settings, which change what the adapter can see or do](#mailbox-settings-which-change-what-the-adapter-can-see-or-do).
+- [Everything else the mail system exposes](#everything-else-the-mail-system-exposes).
 
 The `system`/`external_id` pair identifies each artifact as the table above states. Rows are marked
 **handled**, **deliberately ignored**, or **unhandled** — the third being a gap, which is a `status.md` row
@@ -365,6 +378,17 @@ observation from a list states the query and the window. Without that, a thread 
 and a thread with nothing further are the same record.
 
 ## What this adapter refuses
+
+**The rules in this section.**
+
+1. Capture is generous under the broadened purpose; what is bounded is a third party's Article 9 data,
+and what leaves the record.
+2. It never sends without an action that passed the gate.
+3. It never updates a draft in place.
+4. It never creates, changes, or enables a forwarding rule, a filter, or a vacation responder.
+5. It never permanently deletes a message, a thread, or a label.
+6. It never treats a label as step state, and never writes a label to communicate one.
+7. It never adds a delegate, a send-as alias, or a forwarding address.
 
 Seven refusals. The first is a standing constraint on every write; the rest are operations the adapter does
 not perform.

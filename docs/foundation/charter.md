@@ -10,10 +10,8 @@ given checkout serves, and where each is unbuilt, is `status.md`. **Derived from
 its opening statement of the category, its *Why this exists*, *Vision and execution status*, and *What the
 design commits to* sections — and `docs/icp.md`, whose *Jobs they are hiring Ateles to do* is the source
 of the five objectives below. Nothing here is new: each clause points at the sentence in one of those two
-documents it restates. Revised by the charter pass of 2026-09-08 (revision 87: the document created, on
-`main` rather than on the stack it was drafted against; the operator benefits stated between the purpose and
-the objectives, each pinned to the objective that delivers it).
-
+documents it restates.
+Amendment history: `revisions.md#chartermd`.
 ## Purpose
 
 State, in one paragraph, what Ateles exists to do; say what an operator gets from it; and decompose both

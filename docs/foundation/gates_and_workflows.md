@@ -10,7 +10,8 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
 memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram), and the operator's 2026-09-05 12:52 memo (revision 21: the general claim about self-modification, stated in `work_model.md` and cross-referenced from decision 17), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 17 ruled here; the `dependency_cycle` reason class), and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: the next instance is a created task and not a successor), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: `intake_rule` joins the governance list). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).consistency pass of 2026-09-06 (revision 35: when the checkpoint a `consent` step carries is written, and what the gate evaluates at the take; the merge action's class named `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a step's bound may be declared as the task's `due_date`; an `operator_only` action inside a workflow is taken by the operator and its step closes on the confirmation, never on the resolution; a read dependency on a special-category type carries no marker of its own). Revised by the testability pass of 2026-09-06 (revision 37: the finding as an entity the rules bind on; `rounds_cap`; the recorded amendment; an optional step's condition reads what exists; `none_permitted`; the floor-list sentence retired; open decision 56 — where the enforcement point for a governance write sits). Revised by the rulings pass of 2026-09-06 (revision 38: decision 32 ruled — the `conclusion` stays a stored field, the verdict's own projection of its findings and its author, reconciled at the write). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 56 ruled here — the sole-writer grant, the engine acting for the gate; the checkpoint's raiser and resolver never one principal save the operator's marked self-resolution, decision 47; the finding-as-entity settlement marked reviewed and upheld). Revised by the planning pass of 2026-09-06 (revision 40: the amendment to a planning record as the third named class of internal writes that are actions, `amend_<level>`; a lesson at a planning record's scope filed one level up). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: open decision 59 — where a minimum model tier per action class or blast radius would live, should an instance choose to declare one). Revised by the session-reconciliation pass of 2026-09-06 (revision 46: two paragraphs added to the decision-40 section — "no session is persisted" is not what the ruling says, and a verdict may carry a `REFERS_TO` edge to the session or digest that produced it, proposed and not ruled). Revised by the rulings pass of 2026-09-06 (revision 47: decision 59 ruled in full — `min_tier` on `action_policy`, evaluated at the same take as blast, with the operator's values setting a floor only for irreversible classes: payments, sends, merges, governance writes; every other class unset). Revised by the event/signal/delivery pass of 2026-09-06 (revision 48: the host's review-token sentence renamed `signal` to `event`, matching `adapters.md`'s own Identity rule wording; one `gmail.md` anchor updated to the renamed section). Revised by the peering pass of 2026-09-06 (revision 56, rebased onto the checker-mechanism and self-awareness passes: a synced observation on a governance type is recorded and never takes effect — the reducer's tie-break ranking and decisions 41/56's admission together, no new mechanism; open decision 65, what surfaces an inert governance-type sync write, since neither a checkpoint nor a finding fits without stretching). Revised by the decision-65 ruling (revision 59, 2026-09-06, rebased onto the close-out and register-reconciliation passes: decision 65 ruled — the engine's existing write-back read (principle 2) extended by one field to check for an unreconciled `sync`-sourced observation on the governance type it just confirmed, carrying the new reason class `no_credential`, written aggregated per window on the engine's `agent_session` in the same shape `adapters.md`'s disposition rule already gives a drop; no new carrier invented). Revised by the sign-off-provenance pass of 2026-09-06 (revision 57: decision 40 narrowed to a verdict's shape at close; the sentence claiming a session's turns are "not an entity the design has" corrected against decision 63; a verdict's `REFERS_TO` → `session_digest` ruled, required where the signer is an agent). Revised by the write-readability pass of 2026-09-08 (revision 83, **derived from** the operator's 2026-09-08 stance on what a step may assume about a preceding step's write): decision 89 opened and ruled here — a step does not open until the write it depends on is readable by the principal that will execute it, stated as ordering and never as an interval, placed on the step's opening beside the hydration phase rather than on the declaration, because the reader is the only principal positioned to check it; principle 2's writer-side read-back is left untouched and is named as not covering the cross-principal case.
+is `status.md`; how each concept is recorded is `data_model.md`.
+Amendment history: `revisions.md#gates_and_workflowsmd`.
 ## Purpose
 
 State the step and gate model: `workflow` declares; a batch is the tasks going through it and the record
@@ -29,16 +30,41 @@ and the adapters that reach them: `adapters.md`.
 
 ## The invariants
 
+**The rules in this section.**
+
+- [Declaration, batch, projection](#declaration-batch-projection).
+- [What a step leaves at close: what it produced, and a reference to what it read](#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read).
+- [Findings, conclusions, and what a blocking finding obliges](#findings-conclusions-and-what-a-blocking-finding-obliges).
+- [Whether the conclusion is a stored field or a read over the findings and the author](#whether-the-conclusion-is-a-stored-field-or-a-read-over-the-findings-and-the-author).
+- [A finding is one-off or standing, and a standing one obliges a change to what produced it](#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it).
+- [Work is reviewed on the record, and a channel carries only what awaits the operator or cannot wait](#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait).
+- [Closed work is reviewed on the record and redone through intake, never reopened](#closed-work-is-reviewed-on-the-record-and-redone-through-intake-never-reopened).
+- [One step set, defined once, tested for parity](#one-step-set-defined-once-tested-for-parity).
+- [Sequencing is data: successors and the chain](#sequencing-is-data-successors-and-the-chain).
+- [Two questions: who may claim a step, and whether an action may be taken](#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken).
+- [Where the enforcement point for a governance write sits](#where-the-enforcement-point-for-a-governance-write-sits).
+- [A synced observation on a governance type is recorded, and never takes effect](#a-synced-observation-on-a-governance-type-is-recorded-and-never-takes-effect).
+- [Actions are entities; only actions are taken](#actions-are-entities-only-actions-are-taken).
+- [The action gate is PR-independent](#the-action-gate-is-pr-independent).
+- [The checkpoint is written where the gate first holds the action, and the permit is decided at the take](#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take).
+- [An `operator_only` action is taken by the operator, and the step that carries it closes on the confirmation, never on the resolution](#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution).
+- [Confidence and three blast tiers](#confidence-and-three-blast-tiers).
+- [Blast radius selects the gate; nothing yet selects the model a step runs at](#blast-radius-selects-the-gate-nothing-yet-selects-the-model-a-step-runs-at).
+- [An unreadable workflow is unknown, and unknown holds](#an-unreadable-workflow-is-unknown-and-unknown-holds).
+- [Non-code deliverables go through the same gate](#non-code-deliverables-go-through-the-same-gate).
+- [External systems are reached only through adapters](#external-systems-are-reached-only-through-adapters).
+- [The checkpoint](#the-checkpoint).
+
 ### Declaration, batch, projection
 
-`workflow` declares one entity per (project, workflow type): ordered `steps[]` (`step_name`,
+`workflow` declares one entity per (declaration scope, workflow type): ordered `steps[]` (`step_name`,
 `owner_role`, `parallel_group`, `join_step`, `required`, `applies_when` — the condition that decides
 whether an optional step opens at all, below — and `on_fail` — the earlier step a failing verdict
 opens again, with `rounds_cap`, the rounds that loop may take, below — plus `reads_to_enter`, `reads_to_close`, and `freshness`, the read dependencies below, and
 `unclaimed_after` and `hold_bound`, the two intervals below), plus `fast_paths` and `successors`, with
 `none_permitted` (`#sequencing-is-data-successors-and-the-chain`). `owner_role` holds a **role**, never an agent name: the
 roster resolves it to a principal when the step is claimed (`vocabulary.md#step-owner`), so one
-declaration serves every project and a renamed agent leaves no stale name in it. Step names are data: a workflow may declare steps
+declaration serves every scope and a renamed agent leaves no stale name in it. Step names are data: a workflow may declare steps
 beyond the review sequence (a draft step, a deterministic lint, an operator preview). A contiguous named
 group of steps is a stage.
 
@@ -145,6 +171,33 @@ could not read, reason `undeclared_dependency`, so a permanently unreadable depe
 indistinguishable from a slow one. This is rule 5's existing shape — deferral is bounded, exhaustion
 escalates — applied to a read rather than to a task, which is why it extends a mechanism instead of
 building a second one (principle 6).
+
+**A required read that resolves to nothing is not a failed read, and it stops the step for a different
+reason.** The rule above covers a read the swarm **could not make**: the record was unreachable, or the
+adapter could not fulfil it, and the value is `unknown`. This rule covers the read that **was made and came
+back empty** — the record holds no instance of the declared type for this task, and no adapter had one to
+import. The two are distinct by the same principle that separates `unknown` from empty above, and they owe
+the operator different things. An unreachable dependency is a condition that may resolve on its own, so it
+holds with backoff and escalates as `undeclared_dependency` when it does not. An input that does not exist
+resolves by nobody retrying: the record answered truthfully, and the answer is that the task does not say
+what it is asking for. So the step does not open, and one checkpoint is raised on the task, reason
+`underdetermined_inputs`, naming the read that resolved to nothing and what would satisfy it
+(`failure_posture.md#a-task-whose-inputs-cannot-be-resolved-is-put-to-the-operator-not-executed-on-a-guess`).
+Attaching a retry schedule to this condition would be the instrument error principle 3 names — a count that
+rises forever against a world that is not going to change.
+
+**Sufficiency is judged here, and this phase judges presence rather than adequacy.** Hydration is where a
+step's inputs are resolved, so it is where their absence is visible, and judging it here stops the task
+before a runner claims it and spends a lease discovering it never had what it needed. What hydration decides
+is mechanical and stays mechanical: a required read resolved to an instance, or it did not. It makes no
+judgement about whether an instance that *was* found says enough to act on — that is the step owner's, it is
+made with the work in front of it, and the design already carries it: the step owner holds on a condition
+discovered mid-flight, records the finding naming what it cannot yet judge, and the hold ends at its
+`hold_bound` in a checkpoint (`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`). Both
+paths exist because both conditions are real, and the line between them is which component can tell:
+hydration can tell that nothing was found, and only the principal doing the work can tell that what was
+found is too thin. Neither substitutes for the other, and a step owner discovering an inadequate input does
+not raise this class — it holds, as decision 13 says, because it is judging and not merely reading.
 
 **A degraded read never synthesizes a permissive value.** This holds however the declaration is written,
 and it is the one shape that is dangerous under every posture. A failed read that returns a value *more*
@@ -311,7 +364,7 @@ failing verdict opens the earlier step `on_fail` names, and the loop between the
 every other, so rule 5 gives it a ceiling (`failure_posture.md#the-rules`): at the cap, one checkpoint on
 a task of the batch, reason `rounds_exhausted`, carrying the last blocking finding. The cap is declared on
 the step, beside the target, because a loop's tolerable length is a property of what the two steps judge
-and not of the project; an undeclared cap is treated as an undeclared interval is — nothing is raised, and
+and not of the declaration scope; an undeclared cap is treated as an undeclared interval is — nothing is raised, and
 the absence is visible in the declaration, a defect caught in the pull request that introduced it and never
 a default supplied at runtime. The cap does not close anything: a step in a loop is closed by a verdict
 or it is open, and the checkpoint at the cap changes no conclusion.
@@ -633,7 +686,7 @@ preferences, which the agent reads by type through its `context_entity_types`; t
 instruction to read the type, and the write to the `task_policy` is an internal operational write, not a
 governance one. A finding whose defect is a property of a
 workflow — a step's condition too weak, a step missing, a `reads_to_enter` unstated — is standing **on the
-workflow**, and the change is to the `workflow` declaration for that (project, workflow type). A finding
+workflow**, and the change is to the `workflow` declaration for that (declaration scope, workflow type). A finding
 whose defect belongs to one step of one workflow is standing **on that step**, and the change is scoped to
 it. The three are ordered narrowest-first: a defect statable about a step is not written into an agent's
 prompt, where it would bind that agent across every workflow it handles and thereby assert more than the
@@ -851,7 +904,7 @@ is the batch's closing verdict and selects exactly one successor from the list, 
 declaration permits it. None is the normal close of a task that needs no further workflow, and a
 declaration that permits it says so reviewably: a closing verdict naming none under a declaration that does
 not permit it is refused at the write, so a security batch cannot end unreleased (`workflows.md#security`),
-and a feature declaration permits none only for a project that deploys its default branch on its own
+and a feature declaration permits none only for a declaration scope that deploys its default branch on its own
 cadence (`workflows.md#feature`) — which is what makes "landed" a derived read over the chain and not a
 status (`work_model.md#a-task-is-executed-only-through-a-workflow`). One: the tasks
 enter the successor, a new batch record opens for them, and it carries a `FOLLOWS` edge to the closed one.
@@ -882,7 +935,7 @@ be taken is the action policy's. Neither the declaration, the grants, nor the po
 writes to Neotoma, which are not actions — **except for three named classes, which are.**
 
 **Governance writes are actions, and the governance types are one closed list, stated here and nowhere
-else.** A write to any of these eight is an action, evaluated at the action gate under the project's
+else.** A write to any of these eight is an action, evaluated at the action gate under the instance's
 `action_policy`: `agent` (what a principal is), `agent_policy` (the behavioural rule an agent's prompt
 renders from), a `workflow` declaration (how every future batch of its type is executed), `action_policy`
 (which actions may be taken, and under what gate), `agent_grant` (which capabilities a principal holds),
@@ -941,7 +994,7 @@ that writes on nothing else.
 
 **Why.** Principle 6 — the question was which existing mechanism to extend, and the grant is the one the
 design already has for who may write what. The record's admission check reading the action would ask the
-record's project to evaluate a permit, a dependency of the kind `migration.md` counts as G25 and a feature the
+team that builds the record to evaluate a permit, a dependency of the kind `migration.md` counts as G25 and a feature the
 record does not have; a proxy in front of the record would be a second gate on the write path to the swarm's
 own record, which principle 6 forbids by name; the grant is enforced at the write already, by the record, with
 no new feature on either side. Principle 1 places the check at the write, and this is the one option where the
@@ -982,7 +1035,7 @@ or 56 was stated with a synced write in mind — 18 reserves each governance cla
 operator grants it a policy value, 41 makes the `agent_grant` the allowlist a write is checked against, and
 56 gives the engine's grant the only write capability on a governance type — and a write whose
 `observation_source` is `sync` fits none of their examples, because it names no principal's credential at
-all: it lands the way the record's own replication surface lands any row, keyed to the local project and
+all: it lands the way the record's own replication surface lands any row, keyed to the local instance and
 carrying the producing peer on its provenance, not to a `sub` and `iss` `authority_model.md#grants` can check
 a capability against.
 
@@ -1155,7 +1208,9 @@ and its task. The consent gate for outbound non-code work is this gate: a policy
 `send_external_comms` and `publish` as high blast, the content agents' actions carry those classes, the
 runner subscribes to the checkpoint, and the task is re-claimed on resolution. Do not build a second
 gate (principle 6). PR-shaped review machinery (`step_status`, review conclusions, the steward's merge
-action) is a separate mechanism layered on GitHub; the PR is an artifact of the batch.
+action) is a separate mechanism layered on GitHub; the PR is an artifact of the batch. One authorization
+traced through this gate and the grant checker together is
+`authority_model.md#two-examples-the-same-three-decisions-at-each-of-the-two-decision-points`.
 
 ### The checkpoint is written where the gate first holds the action, and the permit is decided at the take
 

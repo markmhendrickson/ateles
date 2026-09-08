@@ -6,8 +6,8 @@ models. Runtime claim/lifecycle/gating paths load the kernel instead (`conforman
 **Kind:** foundation; walks the design through concrete batches so the invariants can be read in motion,
 and never states the state of a checkout. **Derived from:** `work_model.md`, `gates_and_workflows.md`,
 `failure_posture.md`, `authority_model.md`, and PR #745 operator review (2026-09-04). Structure follows
-Neotoma's `docs/subsystems/` flow documents: one paragraph, one diagram, the invariants exercised. Revised by the simplification pass of 2026-09-05 (revision 29: walkthroughs (e)–(j) merged back from `scenarios_extended.md`, whose only reason to exist — a reading-block budget — no longer applied to a document that is not on the reading list). Revised by the consistency pass of 2026-09-06 (revision 35: scenario (j)'s garbled clause, left when `lens` was retired, repaired).
-
+Neotoma's `docs/subsystems/` flow documents: one paragraph, one diagram, the invariants exercised.
+Amendment history: `revisions.md#scenariosmd`.
 ## Purpose
 
 Show each invariant doing work. A reviewer who cannot say which scenario a change alters has not found the
@@ -52,9 +52,9 @@ sequenceDiagram
 ```
 
 **Invariants:** [`work_model.md#the-claim-and-the-lease-are-one-primitive`](work_model.md#the-claim-and-the-lease-are-one-primitive),
-[`work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields`](work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields),
-[`work_model.md#liveness-is-derived-from-activity-at-read-time-never-declared`](work_model.md#liveness-is-derived-from-activity-at-read-time-never-declared),
-[`work_model.md#the-transition-vocabulary`](work_model.md#the-transition-vocabulary); `principles.md` invariants 2 and 11.
+[`#the-lease-is-a-relationship-not-a-set-of-task-fields`](work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields),
+[`#liveness-is-derived-from-activity-at-read-time-never-declared`](work_model.md#liveness-is-derived-from-activity-at-read-time-never-declared),
+[`#the-transition-vocabulary`](work_model.md#the-transition-vocabulary); `principles.md` invariants 2 and 11.
 
 ## (b) Lapse, re-claim, repeated lapse, checkpoint
 
@@ -82,10 +82,10 @@ flowchart TD
 ```
 
 **Invariants:** [`work_model.md#a-lapsed-lease-is-not-reaped-repeated-lapse-raises-a-checkpoint`](work_model.md#a-lapsed-lease-is-not-reaped-repeated-lapse-raises-a-checkpoint),
-[`work_model.md#at-least-once-implies-effect-dedup`](work_model.md#at-least-once-implies-effect-dedup),
+[`#at-least-once-implies-effect-dedup`](work_model.md#at-least-once-implies-effect-dedup),
 [`failure_posture.md#repeated-lapse-raises-a-checkpoint`](failure_posture.md#repeated-lapse-raises-a-checkpoint),
-[`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`](failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol),
-[`failure_posture.md#refuse-resume-by-replay-where-actions-are-consent-gated`](failure_posture.md#refuse-resume-by-replay-where-actions-are-consent-gated).
+[`#checkpoints-on-tasks-one-queue-one-protocol`](failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol),
+[`#refuse-resume-by-replay-where-actions-are-consent-gated`](failure_posture.md#refuse-resume-by-replay-where-actions-are-consent-gated).
 
 ## (c) Assignment, then the named principal claims
 
@@ -113,13 +113,14 @@ sequenceDiagram
 ```
 
 **Invariants:** [`work_model.md#pull-is-the-only-delivery-assignment-constrains-eligibility`](work_model.md#pull-is-the-only-delivery-assignment-constrains-eligibility),
-[`work_model.md#assignment-restricts-eligibility-it-never-creates-a-lease`](work_model.md#assignment-restricts-eligibility-it-never-creates-a-lease),
-[`work_model.md#what-a-claim-predicate-treats-as-claimable`](work_model.md#what-a-claim-predicate-treats-as-claimable).
+[`#assignment-restricts-eligibility-it-never-creates-a-lease`](work_model.md#assignment-restricts-eligibility-it-never-creates-a-lease),
+[`#what-a-claim-predicate-treats-as-claimable`](work_model.md#what-a-claim-predicate-treats-as-claimable).
 
 ## (d) Several tasks enter one workflow as a batch, review through release
 
-Three tasks belong in one change. They enter the project's `workflow` together: a batch record is opened
-and each task gets an `ADDRESSED_BY` edge to it. The batch advances from step to step: each step opens,
+Three tasks belong in one change. They enter one workflow together because the closing verdict of their
+intake batch named it as successor and carried them into it: a batch record is opened and each task gets
+an `ADDRESSED_BY` edge to it. The batch advances from step to step: each step opens,
 its step owner claims it (a lease on the step), and closes it with a `verdict`; `step_status` on each
 task projects the same state, so it is read in one retrieval. The pull request that carries the change is an `artifact`
 attached to the batch by edge; no step is taken on it. When every required review step is signed off,
@@ -154,12 +155,13 @@ flowchart LR
 ```
 
 **Invariants:** [`work_model.md#what-goes-through-a-workflow-is-a-batch-of-tasks`](work_model.md#what-goes-through-a-workflow-is-a-batch-of-tasks),
-[`work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject`](work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject),
-[`work_model.md#a-task-is-in-at-most-one-batch-at-a-time`](work_model.md#a-task-is-in-at-most-one-batch-at-a-time),
+[`#how-a-batch-is-formed-and-what-chooses-its-workflow`](work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow),
+[`#artifacts-are-records-a-batch-leaves-never-its-subject`](work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject),
+[`#a-task-is-in-at-most-one-batch-at-a-time`](work_model.md#a-task-is-in-at-most-one-batch-at-a-time),
 [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection),
-[`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken),
-[`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`](gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken),
-[`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`](gates_and_workflows.md#sequencing-is-data-successors-and-the-chain);
+[`#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken),
+[`#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`](gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken),
+[`#sequencing-is-data-successors-and-the-chain`](gates_and_workflows.md#sequencing-is-data-successors-and-the-chain);
 [`workflows.md#feature`](workflows.md#feature).
 
 ## (e) A task detached from a batch
@@ -190,8 +192,9 @@ flowchart TD
 ```
 
 **Invariants:** [`work_model.md#what-goes-through-a-workflow-is-a-batch-of-tasks`](work_model.md#what-goes-through-a-workflow-is-a-batch-of-tasks),
-[`work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject`](work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject),
-[`work_model.md#a-task-is-in-at-most-one-batch-at-a-time`](work_model.md#a-task-is-in-at-most-one-batch-at-a-time);
+[`#how-a-batch-is-formed-and-what-chooses-its-workflow`](work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow),
+[`#artifacts-are-records-a-batch-leaves-never-its-subject`](work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject),
+[`#a-task-is-in-at-most-one-batch-at-a-time`](work_model.md#a-task-is-in-at-most-one-batch-at-a-time);
 `principles.md` invariant 11.
 
 ## (f) A parent task with children in independent batches
@@ -251,7 +254,7 @@ sequenceDiagram
 
 **Invariants:** [`work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent`](work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent),
 [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers),
-[`gates_and_workflows.md#the-checkpoint`](gates_and_workflows.md#the-checkpoint),
+[`#the-checkpoint`](gates_and_workflows.md#the-checkpoint),
 [`failure_posture.md#what-a-checkpoint-does-not-absorb`](failure_posture.md#what-a-checkpoint-does-not-absorb),
 [`authority_model.md#approval`](authority_model.md#approval); `principles.md` invariant 5.
 
@@ -282,9 +285,9 @@ flowchart TD
 ```
 
 **Invariants:** [`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken),
-[`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers),
-[`gates_and_workflows.md#the-action-gate-is-pr-independent`](gates_and_workflows.md#the-action-gate-is-pr-independent),
-[`gates_and_workflows.md#non-code-deliverables-go-through-the-same-gate`](gates_and_workflows.md#non-code-deliverables-go-through-the-same-gate);
+[`#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers),
+[`#the-action-gate-is-pr-independent`](gates_and_workflows.md#the-action-gate-is-pr-independent),
+[`#non-code-deliverables-go-through-the-same-gate`](gates_and_workflows.md#non-code-deliverables-go-through-the-same-gate);
 `principles.md` invariant 5.
 
 ## (i) Neotoma unreachable, halt
@@ -318,8 +321,8 @@ flowchart TD
 ```
 
 **Invariants:** [`failure_posture.md#the-decision`](failure_posture.md#the-decision),
-[`failure_posture.md#the-rules`](failure_posture.md#the-rules) (1 to 7),
-[`failure_posture.md#what-a-checkpoint-does-not-absorb`](failure_posture.md#what-a-checkpoint-does-not-absorb),
+[`#the-rules`](failure_posture.md#the-rules) (1 to 7),
+[`#what-a-checkpoint-does-not-absorb`](failure_posture.md#what-a-checkpoint-does-not-absorb),
 [`work_model.md#a-lapsed-lease-is-not-reaped-repeated-lapse-raises-a-checkpoint`](work_model.md#a-lapsed-lease-is-not-reaped-repeated-lapse-raises-a-checkpoint),
 [`authority_model.md#the-tuple`](authority_model.md#the-tuple) (`Indeterminate` is deny); `principles.md`
 invariants 2 and 7.
@@ -355,8 +358,8 @@ flowchart TD
 ```
 
 **Invariants:** [`work_model.md#intake-is-every-tasks-first-workflow`](work_model.md#intake-is-every-tasks-first-workflow),
-[`work_model.md#there-is-no-task-lifecycle-there-are-batches`](work_model.md#there-is-no-task-lifecycle-there-are-batches),
-[`work_model.md#pull-is-the-only-delivery-assignment-constrains-eligibility`](work_model.md#pull-is-the-only-delivery-assignment-constrains-eligibility),
+[`#there-is-no-task-lifecycle-there-are-batches`](work_model.md#there-is-no-task-lifecycle-there-are-batches),
+[`#pull-is-the-only-delivery-assignment-constrains-eligibility`](work_model.md#pull-is-the-only-delivery-assignment-constrains-eligibility),
 [`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`](gates_and_workflows.md#sequencing-is-data-successors-and-the-chain),
 [`workflows.md#intake`](workflows.md#intake); `principles.md` invariant 11.
 
