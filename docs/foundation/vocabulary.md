@@ -1427,7 +1427,7 @@ a [separation-of-duties](#separation-of-duties) constraint. `operator_profile` i
 locale, preferences — and carries none of them. [Credentials](#credential) bind to the `operator`,
 many-to-one, as they do to any principal.
 **See:** [`authority_model.md#principals`](authority_model.md#principals).
-**Never:** "admin".
+**Never:** "admin"; "forker".
 **Not for:** user when authority is meant; `operator_profile` for the principal (it is the descriptive
 record beside it).
 
@@ -1944,3 +1944,4 @@ foundation prose only on a line that says it is retired.
 | `blocked` (as a task status) | an open [checkpoint](#checkpoint) on the task, from which [claimable](#claimable) is derived | nothing wrote it and nothing cleared it; a task the swarm cannot advance is held by a checkpoint, and a status beside the checkpoint was a second held state (principle 6) that needed a process to keep true (principle 11) |
 | `sign-off`, `sign_off` | [verdict](#verdict), whose field is the [conclusion](#conclusion) | decision 72, [`#whether-the-record-that-closes-a-step-is-named-for-one-of-its-own-outcomes`](#whether-the-record-that-closes-a-step-is-named-for-one-of-its-own-outcomes): the record carries three conclusion values and `signed` was one of them, so the record was named for one of its own outcomes; the verb *to sign off* and the `signed` value are unchanged |
 | `pipeline` (the step-path publisher) | [engine](#engine) | decision 34, `work_model.md#whether-the-step-path-is-a-mechanism-of-its-own-and-what-the-engine-is-called`: "GitHub-hosted" named a fact about a checkout, not a design property, and `engine` was already used in three documents and defined in none |
+| `forker` | [operator](#operator) | decision 82, `multi_tenant.md#every-instance-may-have-one-operator-or-many-and-hosting-does-not-decide-it`: the word named a role nobody occupies, since a person who forks is an operator of the instance they then run; it survived only inside the question it was coined for, which is the condition principle 12 exists to catch |

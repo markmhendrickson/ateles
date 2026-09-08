@@ -25,14 +25,14 @@ The swarm must support a spectrum, not a binary. Three shapes matter:
 | Shape | Humans | Tenants | What it requires |
 |---|---|---|---|
 | **Single-operator** (launch) | one | one | Current state. One `operator_profile`, one pager (Ateles), one `swarm_roster`. No isolation work needed beyond what already exists. |
-| **Fork** (Goal 6) | one (a *different* operator) | one (theirs) | Zero hardcoded operator identity. Everything operator-specific resolved from context entities at runtime: `operator_profile`, `locale_profile`, `swarm_roster`, `channel_config`, `payment_profile`, etc. A forker stands up their own Neotoma, supplies their own context entities, mints their own AAuth keys. **Mostly already true** — agent prompts are operator-agnostic by policy. |
+| **Fork** (Goal 6) | one (a *different* operator) | one (theirs) | Zero hardcoded operator identity. Everything operator-specific resolved from context entities at runtime: `operator_profile`, `locale_profile`, `swarm_roster`, `channel_config`, `payment_profile`, etc. A different operator stands up their own Neotoma, supplies their own context entities, mints their own AAuth keys. **Mostly already true** — agent prompts are operator-agnostic by policy. |
 | **Org / team** | many | one (shared) | Multiple humans collaborate under one tenant: shared entity graph, but per-human routing, per-human identity, per-human capability scope, and per-customer ("for whom") visibility. This is the shape that, if not designed for now, forces a painful retrofit. |
 
 **The single-operator row's "current state" no longer describes the operator's own setup.** As of
 2026-09-07 the operator runs two instances of the record — a personal one and a second shared with a
 client engagement — kept apart by sensitivity, and expects more as further engagements arrive. That is
 neither of the two multiplications this section names: it does not multiply humans within a tenant, and
-it does not multiply tenants under separate forkers. It is one operator holding several instances that
+it does not multiply tenants under separate operators. It is one operator holding several instances that
 must not merge, which is decision 76's subject and is ruled at
 `authority_model.md#whether-one-operators-several-instances-of-the-record-are-one-record-or-several`:
 several records, not one, on the accountability ground. The table's "no isolation work needed beyond
@@ -43,7 +43,15 @@ that reworks this document for it.
 
 **Single-operator** and **fork** are the same code path with different context entities — the fork case is the validation that nothing operator-specific is baked into code (enforced today by `scripts/linters/check_hardcoded_config.py`). The genuinely new axis is **org/team**: more than one human acting inside one tenant.
 
-The critical framing: *fork* multiplies **tenants** (each forker is isolated by operating their own instance of the record); *org* multiplies **humans within a tenant** (sharing one Neotoma). A single-Neotoma SaaS deployment serving multiple forkers is the case where both axes are live at once, and the one that makes tenant isolation a hard requirement rather than a deployment convenience.
+The critical framing: *fork* multiplies **tenants** (each operator who forks is isolated by operating their own instance of the record); *org* multiplies **humans within a tenant** (sharing one Neotoma). A single-Neotoma deployment serving several tenants is the case where both axes are live at once.
+
+**The clause that made hosting decide isolation is retired with the word.** This paragraph used to close by
+calling the hosted-multi case "the one that makes tenant isolation a hard requirement rather than a
+deployment convenience". Decision 82 falsifies that: multi-operator is a property every instance has,
+whoever hosts it, so a hosting arrangement is not what promotes isolation from convenience to requirement.
+Section 3's dimensions are load-bearing on every deployment, which is that ruling's own conclusion, and the
+deployment-versus-row distinction survives only as a statement about **tenants**. The clause is dropped
+rather than reworded, because what it asserted has no true version on this axis.
 
 ---
 
@@ -75,7 +83,7 @@ Add a `tenant_id` field to Neotoma entities, exactly as `docs/durable_execution_
 
 Every domain entity carries `tenant_id`. The query default is **scope every retrieve to the caller's tenant** — the "absent = denied" instinct from the AAuth grant model (`docs/aauth.md`) applied to rows: a query without a tenant scope is a bug, not a wildcard. Cross-tenant reads require an explicit, audited capability that no normal agent holds.
 
-Configuration entities that are inherently per-tenant — `operator_profile`, `locale_profile`, `swarm_roster`, `channel_config`, `priority_rubric`, `payment_profile`, `agent`, `agent_grant` — are partitioned the same way. A forker's `swarm_roster` is theirs; an org's is shared across its operators.
+Configuration entities that are inherently per-tenant — `operator_profile`, `locale_profile`, `swarm_roster`, `channel_config`, `priority_rubric`, `payment_profile`, `agent`, `agent_grant` — are partitioned the same way. A solo operator's `swarm_roster` is theirs; an org's is shared across its operators.
 
 ---
 
@@ -148,7 +156,7 @@ This also respects the RGPD legitimate-interest discipline in `CLAUDE.md`: benef
 
 ## 6. Phased rollout
 
-The partition follows the durable-execution discipline: **cheap design-time hedges now, expensive operational mechanisms deferred behind a trigger.** The trigger here is unambiguous: *a second operator or a multi-forker hosted deployment exists.*
+The partition follows the durable-execution discipline: **cheap design-time hedges now, expensive operational mechanisms deferred behind a trigger.** The trigger here is unambiguous: *a second operator or a multi-tenant hosted deployment exists.*
 
 ### 6.1 Do NOW (cheap — schema/specification, ~no new infra)
 
@@ -165,10 +173,10 @@ These are the items that are impossible or painful to backfill once data and tru
 
 ### 6.2 DEFER until a second operator/org exists (expensive — operational)
 
-**On this section's trigger.** The trigger stated above is "*a second operator or a multi-forker hosted
+**On this section's trigger.** The trigger stated above is "*a second operator or a multi-tenant hosted
 deployment exists*", and the deferrals below are keyed to it. Neither limb has fired: the operator's
 several instances are one operator, and each instance is its own deployment rather than one serving many
-forkers. What has fired is a third condition this document does not name — one principal holding several
+tenants. What has fired is a third condition this document does not name — one principal holding several
 instances that must not merge — and the deferrals below are silent on it because the axis is not theirs.
 Decision 76 rules that case at
 `authority_model.md#whether-one-operators-several-instances-of-the-record-are-one-record-or-several`;
@@ -178,7 +186,7 @@ what this document defers is unchanged by it.
 - **Team UX**: invite flow, per-operator onboarding, book-of-business assignment screens, shared-vs-private toggles.
 - **Soft-wall enforcement** of within-tenant beneficiary visibility (the owner-ref *gate*, as opposed to the owner-ref *field*).
 - **Per-tenant quotas, fairness, noisy-neighbor protection** (mirrors the deferred list in `docs/durable_execution_substrate.md`).
-- **Cross-tenant operator seat / multi-forker hosted control plane** (one Neotoma serving many tenants with per-tenant dashboards, bulk operations).
+- **Cross-tenant operator seat / multi-tenant hosted control plane** (one Neotoma serving many tenants with per-tenant dashboards, bulk operations).
 - **Per-tenant key lifecycle tooling** (rotation, revocation at tenant granularity) beyond the per-agent minting that exists today.
 
 ### 6.3 The minimal now-work that avoids a painful retrofit
@@ -218,7 +226,7 @@ turned on. Decision 1, registered as decision 79, remains open and is the operat
 
 4. **Single hosted Neotoma vs. per-forker Neotoma for the fork case.** **The question is retired, not
    answered (decision 82, 2026-09-08).** Multi-operator is a property every instance has, independent of
-   who hosts it and where it runs, so the hosted-versus-per-forker axis does not determine it. Section 3 is
+   who hosts it and where it runs, so that axis (stated in the retired word "forker") does not determine it. Section 3 is
    **load-bearing**. The argument is
    `#every-instance-may-have-one-operator-or-many-and-hosting-does-not-decide-it` below.
 
@@ -236,8 +244,8 @@ answered. Every instance of a swarm may have one operator or many, whoever hosts
 Section 3 is therefore load-bearing, and not belt-and-suspenders.**
 
 **Why the question is retired.** The row asked whether the fork case is one hosted instance serving many
-forkers or one instance per forker, and made section 3's status turn on the answer: deployment-level
-isolation if per-forker, row-level if hosted-multi. That framing makes multi-operator a **consequence** of
+of what it called "forkers" — the retired word — or one instance per such person, and made section 3's
+status turn on the answer: deployment-level isolation if one each, row-level if hosted-multi. That framing makes multi-operator a **consequence** of
 a hosting arrangement. The operator's answer is that it is a **property**: regardless of whether the swarm
 is hosted by him or by the end user, and deployed locally or on a hosting service, each instance should be
 able to have one operator or many, interacting with it in any number of ways. A property every instance
@@ -246,7 +254,7 @@ which of two arrangements makes several operators possible, and the answer is th
 both do.
 
 This is the second time the framing has been rejected. Asked earlier the same day, the operator answered
-that he was not sure what "forker" meant. The word is this document's, not his: section 1's table coins it
+that he was not sure what the now-retired "forker" meant. The word is this document's, not his: section 1's table coined it
 for the row that multiplies tenants, and it names a role nobody occupies — a person who forks is an
 operator of the instance they then run, and calling them something else invents a class the design has no
 rule for. A term that survives only inside the question it was coined for is the condition
@@ -274,9 +282,11 @@ are the record's to set. This ruling says only that the several-operator case is
 instance, so those two questions are live everywhere rather than only under a hosting arrangement that has
 not shipped.
 
-**Section 1's table and section 6.2's trigger are now falsified twice, and are still not edited here.** The
+**Section 1's table and section 6.2's trigger are now falsified twice, and their substance is still not
+edited here.** The
 table's fork row reads "one" human and the single-operator row calls itself the current state; section 6.2
-defers on a trigger of "a second operator or a multi-forker hosted deployment exists". Decision 76 already
+defers on a trigger of "a second operator or a multi-tenant hosted deployment exists" (which read
+"multi-forker" — the retired word — when this ruling was written). Decision 76 already
 annotated both against one operator's several instances. This ruling adds the second falsification: the
 several-operator case is not a future trigger but a property the design now states every instance has, so a
 deferral keyed to its arrival is keyed to something that has no arrival. What section 6.2 defers is
@@ -288,7 +298,8 @@ a pass of its own, and this document's claims are read against decision 76 and t
 
 **What would reopen it.** An instance for which the design wants to state that a second operator is
 impossible rather than merely absent — which would be a new deployment shape, argued on its own, and not a
-re-run of the hosted-versus-per-forker question this row retires.
+re-run of the hosted-versus-per-instance question this row retires — along with the retired word "forker"
+that question was asked in.
 
 ### The tenant is matched on the grant, not derived from the subject
 

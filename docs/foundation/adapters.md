@@ -1584,7 +1584,7 @@ path reads as absent — and this ruling adds no second mechanism to catch late 
 late.
 
 **What would reopen it.** A deployment model in which the record is not per-deployment: one instance serving
-many deployments. Rules 2 and 3 are written for the per-instance shape, in which a forker stands up their
+many deployments. Rules 2 and 3 are written for the per-instance shape, in which an operator stands up their
 own instance and deployment-level separation is what isolates them; a hosted offering serving many
 deployments from one instance would make the companion rule conditional and move that isolation elsewhere.
 That is the change that reopens this.
