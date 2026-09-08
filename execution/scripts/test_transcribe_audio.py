@@ -264,6 +264,12 @@ def test_whisper_chunked_returns_corrected_text(tmp_path, monkeypatch):
     audio_path = tmp_path / "long_call.m4a"
     audio_path.write_bytes(b"fake-audio-bytes")
     monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    # This test exercises the OpenAI Whisper chunked path + corrector. Pin
+    # local whisper unavailable so engine selection does not call real
+    # Path.is_file() on the ggml model under the size-threshold Path.stat
+    # patch below (that global mock previously lacked st_mode and crashed
+    # _whisper_cpp_model() during select_transcription_engine).
+    _fake_local_whisper_available(monkeypatch, False)
 
     chunk_paths = [tmp_path / "chunk0.m4a", tmp_path / "chunk1.m4a"]
     for c in chunk_paths:
@@ -273,6 +279,18 @@ def test_whisper_chunked_returns_corrected_text(tmp_path, monkeypatch):
         "First half discusses the Zolium integration.",
         "Second half mentions Vex Corp's API and Vexcorb's release.",
     ]
+
+    real_stat = Path.stat
+
+    def _stat_force_chunk_threshold(self, *args, **kwargs):
+        # Only fake the source file's size so OpenAI chunking triggers.
+        # Other paths (model probes, exists checks) keep real filesystem stats.
+        if Path(self) == audio_path:
+            return types.SimpleNamespace(
+                st_size=30 * 1024 * 1024,
+                st_mode=0o100644,  # S_IFREG — required by Path.is_file()
+            )
+        return real_stat(self, *args, **kwargs)
 
     with patch.object(ta, "OpenAI") as mock_openai_cls, patch.object(
         ta, "get_audio_duration", return_value=1200.0
@@ -284,8 +302,7 @@ def test_whisper_chunked_returns_corrected_text(tmp_path, monkeypatch):
         side_effect=[_FakeTranscript(t) for t in chunk_texts],
     ):
         mock_openai_cls.return_value = MagicMock()
-        with patch.object(Path, "stat") as mock_stat:
-            mock_stat.return_value = types.SimpleNamespace(st_size=30 * 1024 * 1024)
+        with patch.object(Path, "stat", _stat_force_chunk_threshold):
             result = ta.transcribe_audio_file(
                 audio_path, language="en", use_diarization=False
             )
