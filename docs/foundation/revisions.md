@@ -374,8 +374,9 @@ A sweep over every remote branch's copy of this file on 2026-09-07 gives 79, so 
 
 ## Documents not yet migrated
 
-None. Decision 74's rollout is complete: every authored document in
-`docs/foundation/` carries a pointer to its table above instead of a chain in its own front matter.
-`status.md` is the one document with no table — it is a dated report, not a foundation design
-document, it is never keyed and never inlined, and its revisions are its own sections rather than a
-front-matter chain.
+None. Decision 74's rollout is complete: all nineteen documents in `docs/foundation/` that
+carried a front-matter chain now carry a pointer to their table above instead. Nineteen is the
+directory's twenty-one documents less the two with no table. `status.md` is one — a dated report,
+not a foundation design document, never keyed and never inlined, and its revisions are its own
+sections rather than a front-matter chain. This file is the other: it holds every other document's
+history and has none of its own.
