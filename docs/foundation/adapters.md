@@ -8,7 +8,7 @@ and the action gate), `authority_model.md` (credentials bind to principals; appr
 steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
 operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
 below as open; and revision 18: when an artifact comes into existence, and what holds an effect before
-it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: continual inbound named as the inbound side, and the record's subscriptions as what an intake rule evaluates through). What is built, and where the adapter and the engine are still one process, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: open decision 35). Revised by the memo-gap pass of 2026-09-06 (revision 31: the source is kept, not only named). Revised by the workflow-format pass of 2026-09-06 (revision 34: a system whose delivery surface is a local filesystem is admitted through the same contract; open decision 45 — whether the host a daemon runs on is an external system). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a merchant is a system of its own and a purchase its class, under *Admitting a new adapter*; open decision 55, whether a second instance of the record is an external system). Revised by the testability pass of 2026-09-06 (revision 37: the window declared on the binding and the per-window observation on the adapter's `agent_session`; a credential-less outbound operation is a denial, never a drop; the linkage section states what a sign-off pins per kind). Revised by the rulings pass of 2026-09-06 (revision 38: decision 35 ruled as settled by the conformance suite — one binding type per external system, routing a field of it, the name and the substitution deferred to a vocabulary pass; decision 45 ruled — the host a daemon runs on is an external system). Revised by the event/signal/delivery pass of 2026-09-06 (revision 49: `vocabulary.md#event` cited where this document already used the word; one stray `gmail.md` anchor updated to the renamed section). Revised by the peering pass of 2026-09-06 (revision 56, rebased onto the checker-mechanism and self-awareness passes: decision 55 ruled — a peer instance is the record, extended by replication, not an external system; the interim `operator_only` rule retired for eligibility, replaced by `sync_peers`; a pointer added to the governance-write question decision 55 does not settle). Revised by the rendered-interface pass of 2026-09-06 (revision 61: a system reached only through a rendered interface — no event API, no stable record identifier — admitted under *Admitting a new adapter*; identity and linkage answered by obligation 3, extended from the dedup key to `external_id`; coverage answered by revision 34's filesystem finding, transferred without change; read-back argued as real but partial, naming what it cannot establish; freshness needing no new mechanism; a read-time planted-positive instrument named for the case a delivery-based drop counter cannot catch, a layout change that returns zero rows and reports nothing; the outbound default left to the existing fail-closed rule rather than special-cased; no decision opened). Revised by the host-configuration pass of 2026-09-06 (revision 65: a seventh obligation for an external system's own configuration considered and rejected — the contract judges the mapping, and configuration extends obligations 1 and 6 instead, read at the admission task's arch review step; the case carried through in full is `github.md`'s required host state). Revised by the agent-identity pass of 2026-09-06 (revision 66, **derived from** the operator's 2026-09-06 14:44 memo on agent identities across external systems: the general rule that an agent's identity lives in the record and an external system holds at most a credential that binds to it; the asymmetry between a system that issues a per-agent credential and one that does not; the outbound mark required where attribution cannot be external; decision 69 opened and ruled — a per-agent credential is an obligation where the system issues one; the binding declared on the `vendor_binding` on decision 42's pattern; AAuth established from the corpus as one of the credential kinds `authority_model.md#principals` already enumerates, not a second identity system).
+it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: continual inbound named as the inbound side, and the record's subscriptions as what an intake rule evaluates through). What is built, and where the adapter and the engine are still one process, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: open decision 35). Revised by the memo-gap pass of 2026-09-06 (revision 31: the source is kept, not only named). Revised by the workflow-format pass of 2026-09-06 (revision 34: a system whose delivery surface is a local filesystem is admitted through the same contract; open decision 45 — whether the host a daemon runs on is an external system). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a merchant is a system of its own and a purchase its class, under *Admitting a new adapter*; open decision 55, whether a second instance of the record is an external system). Revised by the testability pass of 2026-09-06 (revision 37: the window declared on the binding and the per-window observation on the adapter's `agent_session`; a credential-less outbound operation is a denial, never a drop; the linkage section states what a sign-off pins per kind). Revised by the rulings pass of 2026-09-06 (revision 38: decision 35 ruled as settled by the conformance suite — one binding type per external system, routing a field of it, the name and the substitution deferred to a vocabulary pass; decision 45 ruled — the host a daemon runs on is an external system). Revised by the event/signal/delivery pass of 2026-09-06 (revision 49: `vocabulary.md#event` cited where this document already used the word; one stray `gmail.md` anchor updated to the renamed section). Revised by the peering pass of 2026-09-06 (revision 56, rebased onto the checker-mechanism and self-awareness passes: decision 55 ruled — a peer instance is the record, extended by replication, not an external system; the interim `operator_only` rule retired for eligibility, replaced by `sync_peers`; a pointer added to the governance-write question decision 55 does not settle). Revised by the rendered-interface pass of 2026-09-06 (revision 61: a system reached only through a rendered interface — no event API, no stable record identifier — admitted under *Admitting a new adapter*; identity and linkage answered by obligation 3, extended from the dedup key to `external_id`; coverage answered by revision 34's filesystem finding, transferred without change; read-back argued as real but partial, naming what it cannot establish; freshness needing no new mechanism; a read-time planted-positive instrument named for the case a delivery-based drop counter cannot catch, a layout change that returns zero rows and reports nothing; the outbound default left to the existing fail-closed rule rather than special-cased; no decision opened). Revised by the host-configuration pass of 2026-09-06 (revision 65: a seventh obligation for an external system's own configuration considered and rejected — the contract judges the mapping, and configuration extends obligations 1 and 6 instead, read at the admission task's arch review step; the case carried through in full is `github.md`'s required host state). Revised by the agent-identity pass of 2026-09-06 (revision 66, **derived from** the operator's 2026-09-06 14:44 memo on agent identities across external systems: the general rule that an agent's identity lives in the record and an external system holds at most a credential that binds to it; the asymmetry between a system that issues a per-agent credential and one that does not; the outbound mark required where attribution cannot be external; decision 69 opened and ruled — a per-agent credential is an obligation where the system issues one; the binding declared on the `vendor_binding` on decision 42's pattern; AAuth established from the corpus as one of the credential kinds `authority_model.md#principals` already enumerates, not a second identity system). Revised by the deployment-target pass of 2026-09-08 (revision 83, **derived from** the operator's 2026-09-08 memo on deployment targets and teardown scope: decision 90 opened and ruled — a deployment names a target host and the instance of the record it will read and write, deploys a companion instance where it names none, and names its recovery path off the host it deploys to; the teardown guard stated as a property of the teardown rather than of the gate; deployment kept as the single name against installation; decision 91 opened, on the several-instance case).
 
 ## Purpose
 
@@ -1452,6 +1452,113 @@ None of the ruling above turns on the type a synced row names, because eligibili
 provenance ranking are the same mechanism whatever type crosses. Whether such a row *takes effect* is a
 question of admission and the action gate, not of this decision, and is settled at
 `gates_and_workflows.md#a-synced-observation-on-a-governance-type-is-recorded-and-never-takes-effect`.
+
+### Where a swarm is deployed, and what its deployment names
+
+**Ruled (decision 90, 2026-09-08): a deployment names a target host and the instance of the record it will
+read and write, and it deploys a companion instance where it names none.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. Three rules, each a design statement and none of
+them a mechanism:
+
+1. **A deployment names its target host, and naming none selects the host it is run from.** The target is a
+   parameter of the deployment, never a property of the software: a swarm is not written for one host and
+   ported to others. Any host the operator can reach may be named. This says where the choice lives; which
+   hosts exist, and what any of them is called, is operational and belongs nowhere in this directory.
+2. **A deployment names the instance of the record it will read and write, and where it names none it
+   deploys a companion instance alongside itself.** Naming an existing instance is the ordinary case. A
+   deployment with no instance to name is not one that fails, and it is not one that runs recordless: the
+   design keeps no state outside the record — "a concept with no row here is a concept the design does not
+   persist" (`data_model.md#scope`) — so a swarm with nowhere to write has nowhere to put a sign-off, a gate
+   decision, or a task, and every rule in this directory is silent for it. Deploying the companion is what
+   makes the from-zero case a deployment rather than a half of one.
+3. **A deployment's recovery path lives off the host it deploys to, and is named at deployment rather than
+   after it.** `failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`
+   already requires `recovery_paths[]` on the binding entity for the system that holds the path, each with
+   its `cadence`, each exercised by a real restore, and already names "the record host's for a snapshot".
+   What this ruling adds is *when* the path is named and *where it may point*: at the deployment, and not at
+   the host being deployed to. A path held on the host whose loss it recovers from is not a recovery path,
+   and the restore obligation cannot catch that on its own — such a path passes every cadence check right up
+   to the moment it is needed.
+
+**Why rule 3 is what makes teardown bearable.** Destroying a deployment destroys what its host holds, and
+where the instance is a companion on that host, destroying the deployment destroys the instance. That is the
+one-way door, and it is not closed by making destruction gentler: destruction stays destructive, and the
+design does not soften it into a freeze. What rule 3 changes is the size of what is lost — with a path off
+the target host, a teardown costs the deployment and the interval since the last exercised restore; without
+one it costs everything the instance ever held. The design already refuses to count an unexercised path as a
+path (principle 4); this ruling refuses to count an on-host one.
+
+**The teardown guard: a teardown reaches only what its own deployment created.** Operating the host a
+deployment runs on is already an action — decision 45 rules the host an external system, and a restart, a
+redeploy, and a checkout update are its adapter's action classes — so a teardown reaches the [action
+gate](vocabulary.md#action-gate) the way a restart, a redeploy, and a migration do, under a class the
+`action_policy` names, and needs no second mechanism to be governed. What is stated here is the narrower
+property the gate does not supply: a teardown takes as its object only what its own deployment
+brought into existence, and refuses everything else. A companion instance that deployment created is within
+reach; an instance it merely named is not, and neither is anything else the host carries. The reason is that
+the gate judges whether an action may be taken and not what it is aimed at — a permitted teardown pointed at
+the wrong instance is permitted and wrong, and it carries the same blast tier it would carry when right.
+The guard is a property of the teardown, checkable before the gate is consulted.
+
+**Deployment, not installation — one name, because two would divide one act.** Placing the software on a
+host is a step within deploying a swarm to that host, not a separate act owed a separate name, and a corpus
+carrying both would owe a rule that turns on the difference. None does, and the swap test
+(`principles.md#12-as-few-terms-as-the-design-needs-and-no-fewer-no-term-overlaps-another`) run on this
+document's own sentences finds no use of either word whose meaning changes when the other is substituted.
+
+**What this states, and what it does not mint.** No term is added to `vocabulary.md` and no type is
+registered, because each piece has a home already. The host is an [external system](vocabulary.md#external-system)
+with a per-host binding (decision 45 above, and decision 35's one binding type, `#scope`) — this ruling adds
+a field's worth of obligation to that binding and no third name for it. The instance a deployment names is
+carried by an explicit binding that fails closed when ambiguous, which is the shape `authority_model.md`
+takes for a read that resolves to no instance — this ruling says a deployment is where that binding is
+stated, not that a new one exists. And the recovery
+path is `recovery_paths[]` on that binding, unchanged but for where it may point. The word *instance* is
+used here in the sense `conformance_suite.md` and the register already use it, and *the record* keeps
+`vocabulary.md#record`'s singular definition throughout.
+
+**What is deliberately out of this directory.** Which hosts a deployment can target, what any one of them is
+called, how a companion instance is placed relative to the swarm on a given provider, and the commands that
+carry any of it out. Those are per-instance bindings and belong in a `deployment_configuration` entity,
+which `migration.md#the-mapping` already lists among the context types the design resolves at runtime. The
+line is the one `conformance_suite.md#from-zero-the-disposable-instance-and-why-it-cannot-be-the-production-one`
+already draws for the suite's own instance: that document states the requirement — empty, per run,
+nonce-identified, run-credentialed, destroyed — and marks creating the instance as an infrastructure item
+named there and built elsewhere. This ruling states its requirement in the same voice and leaves the
+building where that one leaves it. A rule that could only be written by naming a provider would be a rule
+about that provider, and this directory holds none.
+
+**Why this is design and not operations, since the boundary is the obvious objection.** A list of hosts is
+operational; that a deployment must *name* one is not, because the naming is what makes the target a
+parameter rather than an assumption, and an assumed target is the coupling the design would otherwise carry
+silently. Likewise, that a swarm with no instance deploys one is a statement about what the design requires
+to exist before any of its rules apply — the same question
+`conformance_suite.md#the-bootstrap-sequence-what-must-exist-before-a-swarm-exists` answers for the thirteen
+records, one step earlier. That section's step 0 is "an empty instance", marked infrastructure; this ruling
+says who is obliged to bring it about when nobody has, and stops there.
+
+**What this leaves open.** Whether a deployment that names several instances — the several-records case
+an operator keeps apart — names one of them as where its own governance writes go, or whether the design
+requires a deployment to hold exactly one such instance, is not settled here. It turns on a routing question
+this ruling does not reach, no rule above depends on the answer, and inventing one would be design by
+omission. It is registered as decision 91.
+
+**Cost accepted.** A deployment-time obligation the design cannot check from inside a live swarm: a
+recovery path pointing at its own target host is a defect the record carries without contradiction, and only
+the restore exercise or the teardown discovers it. The existing answer applies unchanged — an unexercised
+path reads as absent — and this ruling adds no second mechanism to catch late what the first already catches
+late.
+
+**What would reopen it.** A deployment model in which the record is not per-deployment: one instance serving
+many deployments. Rules 2 and 3 are written for the per-instance shape, in which a forker stands up their
+own instance and deployment-level separation is what isolates them; a hosted offering serving many
+deployments from one instance would make the companion rule conditional and move that isolation elsewhere.
+That is the change that reopens this.
+
+**Matrix.** The host adapter's admission rows (AD-21 to AD-26) carry the teardown class with the rest of
+decision 45's classes when that adapter is declared. FP-13, which reads the restore obligation, gains one
+case: a binding whose `recovery_paths[]` names a path on the deployment's own target host is a defect that
+row reads, beside the path with no cadence it already reads.
 
 ## Prior art
 
