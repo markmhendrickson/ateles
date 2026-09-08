@@ -1576,6 +1576,27 @@ requires a deployment to hold exactly one such instance, is not settled here. It
 this ruling does not reach, no rule above depends on the answer, and inventing one would be design by
 omission. It is registered as decision 91.
 
+**The operator has since supplied that row's first disposition, and it stays open.** In the memo of
+2026-09-08 that retired decision 82's framing, he stated that an instance of a swarm will have at least one
+instance of the record or many; that where there is more than one, **one of them needs to be the controlling
+instance** for that swarm; and that the others stay relevant, because the swarm navigates and leverages them
+— a user may want some workflows in one instance and others in another. That names a disposition this row's
+question did not: not "one instance per deployment" and not "several, undistinguished", but several with one
+distinguished, and the rest reachable.
+
+It is recorded here rather than ruled, for two reasons. The memo answers the question the row asks and
+leaves the terms a ruling needs — what *controlling* governs beyond the governance writes the row names,
+whether the mark sits on the deployment or on the record, and what a deployment holding several instances
+and naming no controlling one does, which under principle 5 is the fail-closed case and under decision 90's
+rule 2 is the deploy-a-companion case, and those are different answers. And the pass that surfaced it was
+ruling decisions 81 to 83, whose subject is the tenancy axis; ruling another row inside it is the collision
+the register exists to prevent. What can be said now without settling it: the disposition is consistent with
+decision 76, since several instances that must not merge is what that ruling already holds, and with
+decision 97, whose *what a proxy is still for* names resolving which instance a request reaches as this
+row's routing need. Decision 98 depends on the answer for the narrow part of its own question — whether
+planning belonging to the swarm itself, rather than to any one instance, has a home
+(`planning_model.md#whether-an-instances-planning-records-are-per-instance-and-how-a-swarm-reading-several-relates-them`).
+
 **Cost accepted.** A deployment-time obligation the design cannot check from inside a live swarm: a
 recovery path pointing at its own target host is a defect the record carries without contradiction, and only
 the restore exercise or the teardown discovers it. The existing answer applies unchanged — an unexercised

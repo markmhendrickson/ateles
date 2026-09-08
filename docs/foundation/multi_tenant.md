@@ -189,13 +189,20 @@ If only the cheapest possible subset is done, it must be: **(1) `tenant_id` part
 
 ## 7. Open decisions (require the operator)
 
+**The rules in this section.**
+
+- One of the five stays open and is the operator's: item 1, the tenant slug scheme, registered as decision 79.
+- [The tenant is matched on the grant, not derived from the subject](#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject) — ruled, decision 80: `match_tenant` on the grant, nothing read out of a subject, and the migration a backfill.
+- [Every instance may have one operator or many, and hosting does not decide it](#every-instance-may-have-one-operator-or-many-and-hosting-does-not-decide-it) — decision 82: the row's framing retired rather than answered, and section 3 load-bearing.
+- [What this design requires of the record's sharing model, and of an operator's reach within it](#what-this-design-requires-of-the-records-sharing-model-and-of-an-operators-reach-within-it) — ruled, decisions 81 and 83: both belong to the record's design, and what this corpus states instead is the non-narrowing read rule and the non-exceedance reach rule; an operator is not a tenant owner.
+
 **Registered.** All five are rows 79 to 83 of `conformance.md#the-register-of-open-design-decisions`,
 in that order, since the decision-77 pass of 2026-09-07 brought this document into the foundation set and
 with it the obligation that every question a foundation document marks open is indexed there once. The
 register row states each question in one line and points here; the argument stays below, which is where a
-reader resolves it (principle 9). None was ruled by that pass. **Decision 2, registered as decision 80, has
-since been ruled**, on the operator's answer to the question it turned on; the other four remain open and
-are the operator's.
+reader resolves it (principle 9). None was ruled by that pass. **Decisions 2, 3, 4, and 5 — registered as
+decisions 80, 81, 82, and 83 — have since been ruled**, each on the operator's answer to the question it
+turned on. Decision 1, registered as decision 79, remains open and is the operator's.
 
 
 1. **Tenant slug scheme.** Is `tenant_id` a UUID (opaque, stable) or a human slug (`acme`, readable in `sub` like `monedula@acme-swarm`)? Slug reads better in AAuth subjects and logs; UUID avoids rename pain. Recommendation leans slug-with-immutable-UUID-backing, but this is the operator's call.
@@ -203,11 +210,85 @@ are the operator's.
 2. **Does tenant derive from `sub`, or is it a separate `match_tenant` on the grant?** **Ruled (decision 80, 2026-09-07, on the operator's answer that a grant should govern everything an agent can do via tooling): the tenant is matched on the grant, as `match_tenant`, and is not derived from the subject.** The argument is `#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject` below. The question as first written — self-describing subject against a more flexible field, and the flexibility priced against one identity spanning tenants — is answered on neither of those grounds. What settles it is that the grant is the complete statement of what a principal may do, so authorization has one home.
 
 
-3. **Within-tenant default visibility.** When the org case arrives, is the default "see only my own book" (private-first) or "see everything in the tenant" (shared-first)? This is a product/RGPD posture decision, not a technical one, and shapes the soft-wall §5.
+3. **Within-tenant default visibility.** When the org case arrives, is the default "see only my own book"
+   (private-first) or "see everything in the tenant" (shared-first)? **Ruled (decision 81, 2026-09-08): the
+   default is the record's to set, and what this design states is what it requires of whatever the record
+   sets.** The argument is
+   `#what-this-design-requires-of-the-records-sharing-model-and-of-an-operators-reach-within-it` below.
 
-4. **Single hosted Neotoma vs. per-forker Neotoma for the fork case.** Goal 6 says "their own Neotoma instance" (per-forker isolation = free tenant isolation). If a hosted multi-forker offering ever ships, tenant isolation moves from deployment-level to row-level and §3 becomes load-bearing rather than belt-and-suspenders. Confirm Goal 6 stays per-instance for launch.
+4. **Single hosted Neotoma vs. per-forker Neotoma for the fork case.** **The question is retired, not
+   answered (decision 82, 2026-09-08).** Multi-operator is a property every instance has, independent of
+   who hosts it and where it runs, so the hosted-versus-per-forker axis does not determine it. Section 3 is
+   **load-bearing**. The argument is
+   `#every-instance-may-have-one-operator-or-many-and-hosting-does-not-decide-it` below.
 
-5. **Operator vs. agent capability ceiling within a tenant.** Should a non-owner operator be able to mint agent keys, amend an `agent`, or change `priority_rubric` for the whole tenant — or are those owner-only? Defines the org operator model; defer the *enforcement* but the *intended* ceiling should be recorded now so grants are shaped consistently.
+5. **Operator vs. agent capability ceiling within a tenant.** Should a non-owner operator be able to mint
+   agent keys, amend an `agent`, or change `priority_rubric` for the whole tenant — or are those
+   owner-only? **Ruled (decision 83, 2026-09-08): the ceiling is the record's to set, and this design
+   states what it requires of it — and separately holds that an operator is not a tenant owner.** The
+   argument is
+   `#what-this-design-requires-of-the-records-sharing-model-and-of-an-operators-reach-within-it` below.
+
+### Every instance may have one operator or many, and hosting does not decide it
+
+**Ruled (decision 82, 2026-09-08, on the operator's answer). The row's question is retired rather than
+answered. Every instance of a swarm may have one operator or many, whoever hosts it and wherever it runs.
+Section 3 is therefore load-bearing, and not belt-and-suspenders.**
+
+**Why the question is retired.** The row asked whether the fork case is one hosted instance serving many
+forkers or one instance per forker, and made section 3's status turn on the answer: deployment-level
+isolation if per-forker, row-level if hosted-multi. That framing makes multi-operator a **consequence** of
+a hosting arrangement. The operator's answer is that it is a **property**: regardless of whether the swarm
+is hosted by him or by the end user, and deployed locally or on a hosting service, each instance should be
+able to have one operator or many, interacting with it in any number of ways. A property every instance
+has is not decided by an axis, so there is no answer to give on the axis the row named — the row asked
+which of two arrangements makes several operators possible, and the answer is that neither does, because
+both do.
+
+This is the second time the framing has been rejected. Asked earlier the same day, the operator answered
+that he was not sure what "forker" meant. The word is this document's, not his: section 1's table coins it
+for the row that multiplies tenants, and it names a role nobody occupies — a person who forks is an
+operator of the instance they then run, and calling them something else invents a class the design has no
+rule for. A term that survives only inside the question it was coined for is the condition
+`principles.md#12-as-few-terms-as-the-design-needs-and-no-fewer-no-term-overlaps-another` exists to catch.
+So the retirement is stated here rather than left implicit in a ruling on the old question: a row answered
+on its own terms would have recorded a preference between two arrangements, and the design would still
+carry the premise that one of them is what makes several operators possible.
+
+**What follows for section 3: load-bearing.** The row's own text ties section 3's status to this question,
+and the answer settles it in the direction the row reserved for the hosted-multi case, by a different
+route. Section 3's three scoping dimensions — per-tenant, per-operator, per-agent — are requirements of
+every deployment, because any instance may have several operators, and per-operator scoping is what
+distinguishes them. Nothing in it is a hedge held against an offering that might ship. The distinction the
+row drew between deployment-level and row-level isolation survives as a statement about **tenants** and is
+silent about operators: several operators under one tenant share the instance by design, and what
+separates them is section 3's per-operator dimension and section 5's owner ref, neither of which a
+deployment boundary supplies. A design that treated section 3 as belt-and-suspenders would be one where
+the only separation between two humans sharing an instance is that the code happens not to mix them up,
+which is principle 1's defect: a mechanism that does not bind is not a control.
+
+**What this does not decide.** Whether an instance's several operators are one tenant or several is
+unchanged and remains the tenant question section 2 partitions on. The **default** visibility between them
+is decision 81, and the **ceiling** on a non-owner operator is decision 83; both are ruled below, and both
+are the record's to set. This ruling says only that the several-operator case is available on every
+instance, so those two questions are live everywhere rather than only under a hosting arrangement that has
+not shipped.
+
+**Section 1's table and section 6.2's trigger are now falsified twice, and are still not edited here.** The
+table's fork row reads "one" human and the single-operator row calls itself the current state; section 6.2
+defers on a trigger of "a second operator or a multi-forker hosted deployment exists". Decision 76 already
+annotated both against one operator's several instances. This ruling adds the second falsification: the
+several-operator case is not a future trigger but a property the design now states every instance has, so a
+deferral keyed to its arrival is keyed to something that has no arrival. What section 6.2 defers is
+unchanged in substance — team UX, soft-wall *enforcement*, quotas, a multi-tenant control plane, key
+lifecycle tooling are all still expensive and still deferred — and what changes is the ground: they are
+deferred because no instance has a second operator **yet**, which is a fact about today's deployments and
+not a property of the design. The rewrite that carries both falsifications into section 1 and section 6.2 is
+a pass of its own, and this document's claims are read against decision 76 and this ruling until it lands.
+
+**What would reopen it.** An instance for which the design wants to state that a second operator is
+impossible rather than merely absent — which would be a new deployment shape, argued on its own, and not a
+re-run of the hosted-versus-per-forker question this row retires.
 
 ### The tenant is matched on the grant, not derived from the subject
 
@@ -278,6 +359,100 @@ per-agent judgement begins with the second tenant, when a grant is written for a
 belong to either. The one obligation the backfill carries is that it precede the check: a grant with no
 `match_tenant` must fail closed at admission and never read as any-tenant, which is `authority_model.md#grants`' rule that a
 degraded read never synthesizes a value more permissive than success would have returned.
+
+### What this design requires of the record's sharing model, and of an operator's reach within it
+
+**Ruled (decisions 81 and 83, 2026-09-08, on the operator's answer). Both questions belong to the record's
+design and not to this corpus. What belongs here is what this design *requires* of whatever model the
+record applies, and that requirement is stated as two rules below rather than deferred.** The two rows are
+ruled together because they are one question asked of two subjects — 81 of a read, 83 of an operator's
+authority — and the same reasoning settles both.
+
+**Why they are the record's.** The operator's answer is that a given instance of the record may hold
+different graphs per user and also a shared graph, that there is planned work on the sharing model against
+the private model, and that this swarm "basically needs to work around whatever sharing model is applied to
+the particular instance it is configured with". On the ceiling he added that it depends on how an operator
+is configured, and that an operator may itself need configuration data in the record.
+
+That is the same allocation `conformance.md#scope` and `conformance.md#what-the-design-requires-of-the-substrate-regardless-of-who-builds-it`
+already make: this corpus states what it requires of the record, and the record's own foundation commits to
+providing it. Default visibility between two principals holding one instance is a property of the store's
+own model — it decides what a read returns before any component of this design sees a row — and a ceiling on
+what a non-owner principal may do is that model's authority semantics. Deciding either here would put one
+answer in two places, which invariant 9 forbids, and would decide it in the corpus that does not enforce it:
+decision 97 ruled the enforcement point for a read and a write **at the record**, against the requesting
+principal's grant, and a rule about what a read returns, written where the check does not run, is a rule
+nothing reads.
+
+The record's planned work is where these belong and is live rather than hypothetical. Its own roadmap for
+the multi-principal direction sets out four phases; the second is authority over state — domain ownership,
+correction rights, policy ownership, authoritative overrides, temporary grants, disclosure logs — and
+records that corrections-win exists as a mechanism while authority *semantics* do not. Decision 83's
+question is a case of exactly that gap, and decision 81's is the visibility half of the phase beneath it. A
+second issue there names the neighbouring gap for instance-scoped capability. Naming the substance rather
+than the numerals is deliberate: what this corpus depends on is that the record's model states a default
+and a ceiling, not which issue carries the work.
+
+**Rule 1 — a read this design performs never narrows what the record admits, and never widens it.** Where
+the record admits a read to a principal, no component of this design withholds the result on a visibility
+judgement of its own; where the record refuses one, nothing here supplies it from a cache, a projection, a
+digest, or a second store. This is decision 97's reasoning applied to visibility. That ruling put the
+enforcement point at the record and permitted a proxy on the express condition that it is never the
+enforcement point, and a component that narrowed an admitted read would be exactly the second gate 97
+rejected — a parallel mechanism under principle 6, and one whose refusal disappears whenever the component
+does (principle 1). The direction that widens is the graver of the two and is refused on the same ground: a
+projection that returns what the record would refuse is an enforcement point that fails **open**, which
+principle 5 forbids on the field carrying the safety meaning. Section 3's guarantees are unaffected — they
+state what the record must enforce, and this rule states that nothing here enforces a different thing
+beside it.
+
+**Rule 2 — a principal's reach through this design never exceeds what the record's own model permits it.**
+Every action this design takes on the record is taken as some principal, under that principal's grant, and
+the record admits it or refuses it. No component holds a credential that reaches further than the principal
+on whose behalf it acts, and no ceiling is enforced here that the record does not enforce. The ground is
+decision 41's default-deny — zero grants is deny, and the `agent_grant` is the allowlist read at every
+enforcement point — together with decision 97's location of that point. An agent acting for an operator
+reaches what that operator's grant admits and nothing beyond it, which is what makes the ceiling question
+the record's to answer: whatever ceiling its model sets, this design inherits by construction rather than
+by discipline.
+
+**What the two rules cost, and what they buy.** They cost this corpus the ability to state a posture — an
+operator who wants private-first cannot get it by configuring this swarm, and must get it from the record,
+which is the correct place and may not be the convenient one. What they buy is that a sharing model changes
+in one place: an instance that later switches from shared-first to private-first, or that tightens what a
+non-owner may do, changes the record's configuration and nothing here, and no component of this design has
+to be re-audited for a visibility rule it was independently applying. Under decision 82 every instance may
+have several operators, so both rules are live on every deployment rather than only on an org one.
+
+**A degraded read is a refusal, not a default.** Where this design cannot determine what the record admits —
+the model is unreadable, the grant does not resolve, the instance binding is ambiguous — the read fails
+closed and the work is put to the operator, never resolved to the more permissive reading. This is principle
+5 and `authority_model.md#grants`' rule that a degraded read never synthesizes a value more permissive than
+success would have returned, and it is the same posture decision 76 takes for an ambiguous instance binding.
+
+**An operator is not a tenant owner, and this corpus already says so.** The operator invited a challenge on
+holding them distinct; the challenge does not succeed, and the corpus is already on his side. `operator` is
+a **principal** type whose only job is to be one, carrying identity and holding the authority edges
+(`authority_model.md#principals`, decision C9). Owning is a **relation**, carried by an `ownership_grant`
+edge to an object, and decision 46 rules what it confers: the required approver's seat on a checkpoint whose
+subject concerns that object, and nothing else
+(`authority_model.md#what-owning-confers-the-required-seat`). A principal and a relation are different
+kinds of thing, so no principal *is* an owner; a principal *holds* ownership of particular objects. Section
+2.1 of this document enumerates tenant, operator, agent, and beneficiary as four distinct actors, with the
+tenant as the isolation boundary rather than a party, and `vocabulary.md#tenant` defines it as the boundary
+"that no read, write, routing, or key crosses" — a boundary is not something a person can be. **No
+conflation was found.** The one place the phrase "tenant owner" appears is section 4.1's routing example,
+where a generic alert pages "the tenant owner or on-call" — a role resolved through the roster, which is the
+seat-holder sense and not a fifth kind of actor. What the operator adds beyond the corpus is that an
+operator may itself need configuration data in the record, and that is consistent with what is already
+there: `operator_profile` is the descriptive record beside the `operator` principal, and section 2.3 lists
+it among the per-tenant configuration types. That an operator's configuration would say which objects it
+owns is the ceiling question, and by the ruling above it is the record's model to state.
+
+**What would reopen these.** A record whose model states no default and no ceiling, leaving a read admitted
+or refused with nothing to inherit — which would first be a gap in the record, not a reason to decide it
+here — or a requirement of this design that neither rule above can express, which would be argued as a third
+rule rather than as a posture.
 
 ---
 
