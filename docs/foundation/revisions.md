@@ -56,7 +56,7 @@ A sweep over every remote branch's copy of this file on 2026-09-07 gives 79, so 
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
 | 70 | the several-instances pass of 2026-09-07 | decision 76 opened here — whether one operator's several instances of the record are one record or several, with the three questions it holds and the dispositions the operator named; no mechanism proposed and no term introduced |
 | 73 | the decisions 76 and 77 pass of 2026-09-07 | decision 76 ruled here — one operator's several instances are several records, not one, on the accountability ground; one identity per instance; an explicit binding whose ambiguity fails closed; the non-merge rule stated rather than left to a component's discipline |
-| 80 | the harness-non-exceedance pass of 2026-09-07 | open decision 87 — whether a harness may provide a principal any capability its grant does not name, argued as a new subsection under Grants; the decision-41 rule paragraph and the section's rule list given a pointer to it |
+| 80 | the decision-80 ruling of 2026-09-07 | the tenant stated as a term of the grant for every principal in `#grants`, added to that section's rule list, with the ground and a pointer to the argument; the two places reserving decisions 79 and 80 to the operator narrowed to 79 alone, in `#principals` and in the several-instances ruling; the Tenant bullet's open set corrected from five decisions to four |
 
 
 ## `adapters.md`
@@ -246,6 +246,7 @@ A sweep over every remote branch's copy of this file on 2026-09-07 gives 79, so 
 | Revision | Pass | What changed |
 |---|---|---|
 | 73 | the decisions 76 and 77 pass of 2026-09-07 | moved into the foundation set by decision 77 (`docs/multi_tenant.md` → `docs/foundation/multi_tenant.md`, with history); given the decision-74 front-matter form and a pointer to this table; section 1's "current state" row and section 6.2's deferral trigger annotated against decision 76's ruling, with neither claim edited; section 7 noted as registered at `conformance.md` rows 79 to 83. Amendments before this one were made outside the set and are not reconstructed here |
+| 80 | the decision-80 ruling of 2026-09-07 | section 7 item 2 ruled and its argument added as `#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject` — the grant as the whole statement of what a principal may do, the tool half that carries no subject, decision 76 tested and found not to settle it, the rejected alternative and why its cheapness is not a ground, what decision 79 still governs, the sequencing behind decision 86, and the backfill verdict; section 3.2's parenthetical alternative closed; section 7's header note corrected from five open to four |
 
 ## `payments.md`
 

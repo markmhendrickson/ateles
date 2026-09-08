@@ -127,16 +127,20 @@ through that agent's `principal_binding` — which is what joins the two credent
 missing while no type sat above them.
 
 **What stays open, and it is not this document's to close.** The shape of the identifier on the `operator`
-entity, and whether a tenant is derived from the `sub` or matched on the grant, are `multi_tenant.md`
-section 7's decisions 1 and 2, registered as decisions 79 and 80 in `conformance.md`. They are the operator's and are not settled here. Until they are, the
-mapping above states which credential binds to which principal, and does not state the identifier's form
-or the tenant derivation. Every other statement in this document is written against "the principal entity"
-and is unchanged by this ruling.
+entity is `multi_tenant.md` section 7's decision 1, registered as decision 79 in `conformance.md`. It is
+the operator's and is not settled here. Until it is, the mapping above states which credential binds to
+which principal, and does not state the identifier's form. The second of that pair — whether a tenant is
+derived from the `sub` or matched on the grant — **is now settled**: decision 80 rules it **matched on the
+grant**, as `match_tenant`, so nothing is read out of a subject to reach a tenant, and the mapping above is
+unaffected because the `sub` binds an agent to its principal and never to a tenant
+(`multi_tenant.md#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject`). Every other statement
+in this document is written against "the principal entity" and is unchanged by this ruling.
 
 **Tenant.** The isolation boundary; `tenant_id` and `user_id` are separate fields; default-deny tenant
 scoping at the access layer; per-tenant AAuth namespacing; no cross-tenant read, write, routing, or key
-reuse (`multi_tenant.md` sections 2 and 3). Open: section 7's five decisions, registered as decisions 79
-to 83 in `conformance.md` since that document joined the set (decision 77).
+reuse (`multi_tenant.md` sections 2 and 3). A grant carries the tenant it is scoped to, as `match_tenant`,
+and no tenant is derived from a subject (decision 80). Open: section 7's other four decisions, registered
+as decisions 79 and 81 to 83 in `conformance.md` since that document joined the set (decision 77).
 
 **Ownership.** Named accountability for a workflow, [domain](vocabulary.md#domain), queue, or configuration
 entity, as an edge from
@@ -240,8 +244,10 @@ the way the writes are.
 task or a step, the form of a per-instance credential, and how the read partition is enforced are each a
 mechanism, and none is named in this ruling (invariant 12). What is ruled is the shape the mechanism must
 satisfy: several records, one identity per instance, an explicit binding, a fail-closed ambiguity, and a
-stated non-merge rule. `multi_tenant.md#7-open-decisions-require-the-operator` decisions 1 and 2 —
-registered as decisions 79 and 80 — bear on the credential form and are the operator's.
+stated non-merge rule. `multi_tenant.md#7-open-decisions-require-the-operator` decision 1 —
+registered as decision 79 — bears on the credential form and is the operator's. Its decision 2, registered
+as decision 80, is ruled: the tenant is matched on the grant and not derived from the subject, which leaves
+the credential form here untouched, since the several-instance case this ruling concerns is one tenant.
 
 
 ## Grants
@@ -252,6 +258,7 @@ registered as decisions 79 and 80 — bear on the credential form and are the op
 - Write admission per entity type is default-deny, and the grant is the allowlist (ruled, decision 41, 2026-09-06).
 - Whether a harness may provide a capability the grant does not name is open (decision 87).
 - A parameter constraint on a write capability is a field allowlist.
+- The tenant a grant is scoped to is carried on the grant, and is never derived from the credential's subject (ruled, decision 80, 2026-09-07).
 - The grant is read at every enforcement point.
 - The decision precedes the effect.
 - A denial raises a checkpoint, and the denied principal does not route around it.
@@ -261,7 +268,12 @@ registered as decisions 79 and 80 — bear on the credential form and are the op
 
 An `agent_grant` is matched on the credential (`sub`, `iss`) and lists capabilities as operation × entity
 types × repositories with parameter constraints; a human's grant is bound to a principal and a tenant, never
-a wildcard. The per-agent pattern is the template a principal dimension extends: a loader keyed on the
+a wildcard. The tenant is a term of the grant for every principal, agent and human alike, and is not read
+out of the subject: decision 80 rules it matched on the grant as `match_tenant`, on the ground that a
+grant is the whole statement of what a principal may do, so a tenant taken from the subject would give one
+authorization question a second home (invariant 9) and would leave a grant's tool half — which carries no
+subject — outside the tenant boundary
+(`multi_tenant.md#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject`). The per-agent pattern is the template a principal dimension extends: a loader keyed on the
 agent name, a grant checker and a tool proxy keyed on the `sub`, a per-agent keypair threaded into signed
 writes, a per-agent policy override, per-agent GitHub logins, a workflow resolved per declaration scope. A failed
 agent load is a stub: the loader marks it, and no caller starts a runner from one (principle
