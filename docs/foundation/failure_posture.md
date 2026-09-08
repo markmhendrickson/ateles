@@ -10,7 +10,7 @@ from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-12 to PR-15, C5, C17), prio
 `deferral_must_be_bounded_and_escalate_off_neotoma`, `unknown_must_stay_distinct_from_a_verdict`,
 `nyctea_635_becomes_load_bearing`, PR #745 operator review (2026-09-04), and the operator memos of
 2026-09-05 (the `undetermined_scope` reason class), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: a hold on a discovered condition is a deferral under rule 5; the `dependency_cycle` reason class). What is built is `status.md`;Revised by the consistency pass of 2026-09-06 (revision 35: the merge action's class named `merge_pr` in the recovery table). What is built is `status.md`;
-how a checkpoint is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: a condition of a batch is raised on one of its tasks, never on the batch). Revised by the workflow-format pass of 2026-09-06 (revision 34: rule 5's ceiling for a holding step, and the unclaimed-step interval, each named as a field on the step). Revised by the testability pass of 2026-09-06 (revision 37: the announcement path's own outage and the capture of last resort; the window observation; `action_policy.recoveries`; recovery paths and their cadence on the binding; `lapse_cap`; which checkpoints hold a task from claim; `AWAITS` names principals). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: open decision 60 — a runner's lease-held step losing its model or harness mid-execution; the tier-eligibility half ruled as a consequence of decision 59). Revised by the rulings pass of 2026-09-06 (revision 44: decision 60 ruled in full — unavailability holds and raises under the existing `lapse_cap`, no second clock; `capability_unavailable` named as a reason class distinct from `capability_denied`).
+how a checkpoint is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: a condition of a batch is raised on one of its tasks, never on the batch). Revised by the workflow-format pass of 2026-09-06 (revision 34: rule 5's ceiling for a holding step, and the unclaimed-step interval, each named as a field on the step). Revised by the testability pass of 2026-09-06 (revision 37: the announcement path's own outage and the capture of last resort; the window observation; `action_policy.recoveries`; recovery paths and their cadence on the binding; `lapse_cap`; which checkpoints hold a task from claim; `AWAITS` names principals). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: open decision 60 — a runner's lease-held step losing its model or harness mid-execution; the tier-eligibility half ruled as a consequence of decision 59). Revised by the rulings pass of 2026-09-06 (revision 44: decision 60 ruled in full — unavailability holds and raises under the existing `lapse_cap`, no second clock; `capability_unavailable` named as a reason class distinct from `capability_denied`). Revised by the reason-class enumeration repair of 2026-09-08 (revision 86: `capability_unavailable`, ruled a reason class of its own by decision 60, added to the canonical enumeration in *Checkpoints on tasks: one queue, one protocol* and to the recital of which checkpoints hold a task from claim, both of which had omitted it; no decision opened or ruled, and what the class means is unchanged).
 
 ## Purpose
 
@@ -299,7 +299,9 @@ at the gate), `repeated_lapse` (above), `unreadable_workflow` (`gates_and_workfl
 (`work_model.md`, an `assigned_to` nobody can run, and a declared `owner_role` the roster resolves to
 nobody), `unclaimed_step` (above), `undeclared_dependency` (a step could not read a type it declared, and
 the hold reached its bound — `gates_and_workflows.md#declaration-batch-projection`), `capability_denied`
-(a principal was denied a capability its step needed — `authority_model.md#grants`), and
+(a principal was denied a capability its step needed — `authority_model.md#grants`),
+`capability_unavailable` (above, the model or harness a lease holder started under stopped answering
+mid-step, the runner eligible throughout), and
 `lossy_record_mutation` (a write to the record whose blast exceeds the declared count —
 `gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`), and `undetermined_scope` (a
 standing finding whose right scope — the agent, the workflow, or one step — cannot be determined from the
@@ -340,7 +342,8 @@ been open, and stops there.
 
 **An open checkpoint whose subject is a task holds that task from claim, and `unclaimed_step` is the one
 class that does not.** A task with an open checkpoint on it — `repeated_lapse`, `rounds_exhausted`,
-`undeclared_dependency`, `capability_denied`, `undetermined_scope`, `dependency_cycle`, or a class a policy
+`undeclared_dependency`, `capability_denied`, `capability_unavailable`, `undetermined_scope`,
+`dependency_cycle`, or a class a policy
 declares — is not claimable until the checkpoint is terminal, because each of those is raised where a
 re-claim would restart the condition the checkpoint exists to stop; on resolution the task is re-claimed or
 closed (`gates_and_workflows.md#the-checkpoint`). `unclaimed_step` is the exception by its own rule above:
