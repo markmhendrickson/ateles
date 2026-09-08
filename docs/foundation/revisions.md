@@ -89,6 +89,13 @@ A sweep over every remote branch's copy of this file on 2026-09-07 gives 79, so 
 | 71 | the substrate-lifecycle pass of 2026-09-07 | decision 78 opened here, beside 45 and 55 — whether the instance of the record serving a swarm is an external system when the swarm operates it, and what writes the record of an operation that suspends the record; the four dispositions stated, none chosen, no mechanism proposed and no term introduced |
 
 
+## `charter.md`
+
+| Revision | Pass | What changed |
+|---|---|---|
+| 81 | the charter pass of 2026-09-08 | the document created — the purpose the corpus serves and the five objectives it decomposes into, derived from the README and `docs/icp.md`, placed as an authored companion beside the kernel rather than in it. Records the three delegation-audit findings rather than filling them: comprehensively is open at intake and admission but unstated at `route`; securely is stated as design and measured as checkout enforcement in `status.md`; autonomously has no rule that treats an unnecessary return to the operator as a defect |
+
+
 ## `conformance.md`
 
 | Revision | Pass | What changed |

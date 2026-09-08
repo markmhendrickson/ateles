@@ -22,7 +22,8 @@ Everything is built around [Neotoma](https://github.com/markmhendrickson/neotoma
 and state layer. Agents are Neotoma entities, act under signed identities, and are audited through the same
 observations they write. Open source. Local-first. MIT licensed.
 
-**Who it's for:** [docs/icp.md](docs/icp.md) · **The design of record:** [docs/foundation/](docs/foundation/)
+**Who it's for:** [docs/icp.md](docs/icp.md) · **What the rules are for:** [docs/foundation/charter.md](docs/foundation/charter.md)
+· **The design of record:** [docs/foundation/](docs/foundation/)
 · **Architecture:** [docs/architecture.md](docs/architecture.md) · **Taxonomy:** [docs/taxonomy.md](docs/taxonomy.md)
 · **Implementation phases:** [docs/phases.md](docs/phases.md)
 
