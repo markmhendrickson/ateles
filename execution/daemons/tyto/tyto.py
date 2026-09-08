@@ -4,7 +4,7 @@ Tyto — Screenshot watcher + meeting recording transcription daemon.
 
 Tyto genus: barn owls. T3 daemon in the Ateles swarm.
 
-Tyto watches two directories:
+Tyto watches up to four directories:
   1. TYTO_SCREENSHOTS_DIR — new image files (PNG/JPG/etc.), stored as
      `screenshot` entities in Neotoma. Phase 3: OCR dispatch.
   2. TYTO_RECORDINGS_DIR — new meeting recording files (*remote*.aac/.m4a),
@@ -13,6 +13,12 @@ Tyto watches two directories:
      TYTO_NATIVE_RECORDINGS_DIR for platform-native (Zoom/Meet/Teams)
      recordings, which carry the platform's built-in consent disclosure.
      Each transcription is stamped with capture_method for consent auditing.
+  3. TYTO_VOICE_MEMOS_DIR — macOS Voice Memos. Unlike the two above these are
+     single-file, single-speaker recordings the operator made alone, so there
+     is no mic/remote pair to merge and no third-party consent dimension:
+     they are stamped capture_method=voice_memo. A backlog guard (startup
+     seeding + an mtime age window) keeps the existing memo archive from being
+     transcribed on the first poll.
 
 Lives at: launchd on the operator's machine (no external endpoint required)
 
@@ -37,6 +43,21 @@ Environment variables:
                             through the identical transcribe+analyze pipeline but
                             are stamped capture_method=platform_native for
                             consent-posture auditing. Unset → not watched.
+  TYTO_VOICE_MEMOS_DIR      Directory to watch for macOS Voice Memos (default: the
+                            standard ~/Library/Group Containers/
+                            group.com.apple.VoiceMemos.shared/Recordings path).
+                            Memos are single-speaker, single-file recordings by the
+                            operator alone, so they are never sent down the two-file
+                            mic+remote merge path and are stamped
+                            capture_method=voice_memo. Set to "" to disable.
+  TYTO_VOICE_MEMO_MAX_AGE_SECS  Only memos modified within this many seconds are
+                            eligible (default: 3600). Together with startup seeding
+                            this is the backlog guard that stops an existing memo
+                            archive from being transcribed en masse on first poll.
+                            0 disables the age window (seeding still applies).
+  TYTO_VOICE_MEMO_INCLUDE_QTA  Set to 1 to also watch .qta files (default: 0).
+                            transcribe_audio.py converts .qta via ffmpeg, but every
+                            .qta on disk is old by construction, so it is opt-in.
   TYTO_TRANSCRIBE_ENABLED   Set to 0 to disable auto-transcription (default: 1)
   TYTO_TRANSCRIBE_SCRIPT    Path to transcribe_audio.py (auto-detected from repo root)
   ELEVENLABS_API_KEY        When set, enables diarization via ElevenLabs
@@ -140,6 +161,42 @@ NATIVE_RECORDINGS_DIR = (
     if os.environ.get("TYTO_NATIVE_RECORDINGS_DIR", "").strip()
     else None
 )
+
+# Optional third watch dir for macOS Voice Memos. These are the operator's own
+# self-recorded single-speaker memos: no second party, so no third-party consent
+# dimension at all — hence a distinct capture_method=voice_memo rather than
+# reusing audio_hijack_system (system capture, no disclosure) or platform_native
+# (Zoom/Meet/Teams, built-in disclosure).
+#
+# Set TYTO_VOICE_MEMOS_DIR="" to disable. The default is the fixed, documented
+# macOS group-container path — a per-OS constant, not operator config, so it
+# carries no portability or PII concern the way an email or calendar ID would.
+_default_voice_memos_dir = str(
+    Path.home()
+    / "Library"
+    / "Group Containers"
+    / "group.com.apple.VoiceMemos.shared"
+    / "Recordings"
+)
+_voice_memos_env = os.environ.get("TYTO_VOICE_MEMOS_DIR", _default_voice_memos_dir)
+VOICE_MEMOS_DIR = Path(_voice_memos_env) if _voice_memos_env.strip() else None
+
+# Backlog guard. The Voice Memos directory holds the operator's entire memo
+# archive (hundreds of files). Without a cutoff, the first poll would fire one
+# transcription + notification per archived memo. Only memos modified within
+# this many seconds of daemon start are eligible; everything older is recorded
+# as already-handled at startup and never transcribed. 0 disables the age
+# window (startup seeding still applies).
+VOICE_MEMO_MAX_AGE_SECS = int(
+    os.environ.get("TYTO_VOICE_MEMO_MAX_AGE_SECS", "3600")
+)
+
+# Whether to treat .qta (QuickTime Audio, older Voice Memos format) as eligible.
+# transcribe_audio.py converts .qta → .m4a via ffmpeg, so it is genuinely
+# transcribable — but every .qta in the archive is old by construction (the
+# format was retired years ago), so including it only widens the backlog the
+# guard has to hold back. Default off; set to 1 to opt in.
+VOICE_MEMO_INCLUDE_QTA = os.environ.get("TYTO_VOICE_MEMO_INCLUDE_QTA", "0") == "1"
 TRANSCRIBE_ENABLED = os.environ.get("TYTO_TRANSCRIBE_ENABLED", "1") != "0"
 
 # Auto-detect transcribe_audio.py — check ateles repo first, then personal repo
@@ -515,16 +572,60 @@ class RecordingWatcher:
         watch_dir: Path,
         notifier: Notifier,
         capture_method: str = "audio_hijack_system",
+        *,
+        paired: bool = True,
+        extensions: set[str] | None = None,
+        max_age_secs: int = 0,
+        seed_existing: bool = False,
     ) -> None:
         self._dir = watch_dir
         self._notifier = notifier
         # Consent-posture provenance stamped on every transcription this watcher
         # produces. "audio_hijack_system" = local system capture (no built-in
         # disclosure); "platform_native" = Zoom/Meet/Teams recording (carries the
-        # platform's own consent notice). See record_meeting SKILL.md disclosure ladder.
+        # platform's own consent notice); "voice_memo" = the operator's own
+        # single-speaker memo (no second party at all). See record_meeting
+        # SKILL.md disclosure ladder.
         self._capture_method = capture_method
+        # Paired watchers use the Audio Hijack "<prefix> remote|system|mic"
+        # convention: only the remote/system track is eligible, and its mic
+        # counterpart is merged in. Unpaired watchers (Voice Memos) have no such
+        # convention — every audio file is a self-contained single-speaker
+        # recording, so the filename predicate is extension-only and the
+        # two-file merge path is never attempted.
+        self._paired = paired
+        self._extensions = (
+            {e.lower() for e in extensions}
+            if extensions is not None
+            else set(self.RECORDING_EXTENSIONS)
+        )
+        # Only files whose mtime is within this many seconds of "now" are
+        # eligible. 0 = no age limit (the meeting-recording watchers' behavior).
+        self._max_age_secs = max_age_secs
         self._seen: dict[Path, float] = {}    # path → mtime at first sight
         self._transcribed: set[Path] = set() # remote paths already transcribed
+        # Backlog guard: record everything already on disk at construction time
+        # as handled, so an existing archive is never transcribed. Belt and
+        # braces with _max_age_secs — seeding covers a file whose mtime is
+        # touched after startup, the age window covers a file that appears
+        # later bearing an old mtime (e.g. an iCloud sync landing an archive).
+        if seed_existing:
+            self._seed_existing()
+
+    def _seed_existing(self) -> None:
+        """Mark every currently-present eligible file as already handled."""
+        try:
+            existing = [p for p in self._dir.iterdir() if self._is_eligible_file(p)]
+        except OSError:
+            return
+        for path in existing:
+            self._transcribed.add(path)
+        if existing:
+            log.info(
+                f"[{DAEMON_NAME}] Backlog guard: {len(existing)} pre-existing "
+                f"file(s) in {self._dir} marked as handled; they will not be "
+                "transcribed."
+            )
 
     # Audio Hijack recorder block names that represent the far-end / system audio track.
     # "remote" = original naming, "system" = after session rename to "Tyto".
@@ -533,10 +634,40 @@ class RecordingWatcher:
     def _is_remote_file(self, path: Path) -> bool:
         name_lower = path.name.lower()
         return (
-            path.suffix.lower() in self.RECORDING_EXTENSIONS
+            path.suffix.lower() in self._extensions
             and any(t in name_lower for t in self._REMOTE_TRACK_NAMES)
             and "mic" not in name_lower  # never confuse mic track
         )
+
+    def _is_eligible_file(self, path: Path) -> bool:
+        """Per-watcher file-matching test.
+
+        Paired watchers (Audio Hijack, platform-native) keep the original
+        predicate: the filename must name the remote/system track. Unpaired
+        watchers (Voice Memos) match on extension alone — memo filenames carry
+        no track name, so the paired predicate would reject every one of them,
+        and the non-audio sidecars the directory also holds (.waveform,
+        .composition, .db, and the extensionless CaptureRecovery/Capture
+        directories) fall out because their suffixes are not in _extensions.
+        """
+        if self._paired:
+            return self._is_remote_file(path)
+        if not path.is_file():
+            return False
+        return path.suffix.lower() in self._extensions
+
+    def _is_within_age_window(self, path: Path, now: float) -> bool:
+        """Return True when path is new enough to be eligible.
+
+        With _max_age_secs == 0 every file passes (meeting-recording behavior).
+        """
+        if self._max_age_secs <= 0:
+            return True
+        try:
+            st = path.stat()
+        except OSError:
+            return False
+        return (now - st.st_mtime) <= self._max_age_secs
 
     def _find_mic_pair(self, remote_path: Path) -> Path | None:
         """
@@ -589,9 +720,13 @@ class RecordingWatcher:
         now = datetime.now(tz=UTC).timestamp()
 
         for path in sorted(self._dir.iterdir()):
-            if not self._is_remote_file(path):
+            if not self._is_eligible_file(path):
                 continue
             if path in self._transcribed:
+                continue
+            # Backlog guard: an old file is never a fresh recording. Checked
+            # before settling so a stale archive file is not even logged.
+            if not self._is_within_age_window(path, now):
                 continue
 
             # Ensure remote file is settled
@@ -600,8 +735,9 @@ class RecordingWatcher:
                     log.info(f"[{DAEMON_NAME}] New recording detected (settling): {path.name}")
                 continue
 
-            # Find matching mic file
-            mic_path = self._find_mic_pair(path)
+            # Find matching mic file. Unpaired watchers (Voice Memos) are
+            # always single-file — never attempt the two-file merge path.
+            mic_path = self._find_mic_pair(path) if self._paired else None
 
             # If mic file exists, wait for it to settle too
             if mic_path is not None and not self._is_settled(mic_path, now):
@@ -811,6 +947,19 @@ async def main() -> None:
                     f"[{DAEMON_NAME}] Watching native recordings (platform_native): "
                     f"{NATIVE_RECORDINGS_DIR}"
                 )
+        if VOICE_MEMOS_DIR is not None:
+            if not VOICE_MEMOS_DIR.exists():
+                log.warning(
+                    f"[{DAEMON_NAME}] Voice Memos dir does not exist: "
+                    f"{VOICE_MEMOS_DIR} — will retry on each poll"
+                )
+            else:
+                log.info(
+                    f"[{DAEMON_NAME}] Watching voice memos (voice_memo): "
+                    f"{VOICE_MEMOS_DIR} "
+                    f"(max age {VOICE_MEMO_MAX_AGE_SECS}s, "
+                    f"qta={'on' if VOICE_MEMO_INCLUDE_QTA else 'off'})"
+                )
     else:
         log.info(f"[{DAEMON_NAME}] Auto-transcription disabled (TYTO_TRANSCRIBE_ENABLED=0)")
 
@@ -834,6 +983,19 @@ async def main() -> None:
             recording_watchers.append(
                 RecordingWatcher(
                     NATIVE_RECORDINGS_DIR, notifier, capture_method="platform_native"
+                )
+            )
+        if VOICE_MEMOS_DIR is not None:
+            memo_exts = {".m4a", ".wav"} | ({".qta"} if VOICE_MEMO_INCLUDE_QTA else set())
+            recording_watchers.append(
+                RecordingWatcher(
+                    VOICE_MEMOS_DIR,
+                    notifier,
+                    capture_method="voice_memo",
+                    paired=False,
+                    extensions=memo_exts,
+                    max_age_secs=VOICE_MEMO_MAX_AGE_SECS,
+                    seed_existing=True,
                 )
             )
     log.info(f"[{DAEMON_NAME}] Poll interval: {POLL_INTERVAL}s")
