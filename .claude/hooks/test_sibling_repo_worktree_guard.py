@@ -473,6 +473,231 @@ class TestFailOpenLogging:
         assert logged  # something was logged, not silent
 
 
-def test_readme_mentions_override_var():
-    readme = Path(__file__).resolve().parent / "README.md"
-    assert "ATELES_ALLOW_SHARED_REPO_WRITES" in readme.read_text()
+def test_readme_documents_inline_override_form():
+    """The README must document the override in the form that actually works.
+
+    A bare mention of the variable name passes against stale guidance telling
+    the operator to export it — which is precisely the defect of ateles#829, an
+    override that could not be supplied as documented. Assert the inline form
+    and the refusal of the exported one.
+    """
+    readme = (Path(__file__).resolve().parent / "README.md").read_text()
+    assert "ATELES_ALLOW_SHARED_REPO_WRITES" in readme
+    assert "prefix `ATELES_ALLOW_SHARED_REPO_WRITES=1` inline" in readme
+    assert "exported/ambient value is deliberately ignored" in readme
+
+
+# ---------------------------------------------------------------------------
+# ateles#829 — the nine alternations that carried no trailing word boundary
+# matched as substrings anywhere in a command, including inside a path. That
+# denied the read-only git the module docstring promises to allow.
+# ---------------------------------------------------------------------------
+class TestWordBoundaryRegressions:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # The two the issue verified failing. These are the point of the fix.
+            "git log -- checkouts.md",
+            "git show origin/main:src/switcher.ts",
+            # The same defect across the remaining seven alternations.
+            "git log -- reverted.txt",
+            "git diff -- applyfix.ts",
+            "git log -- merged_notes.md",
+            "git log -- rebaseline.md",
+            "git log --format=%h -- commitlint.config.js",
+            "git log -- resetter.go",
+            "git show HEAD:ambient.py",
+            # A path segment ending in a mutation word is equally read-only.
+            "git log -- docs/precommit.md",
+        ],
+    )
+    def test_readonly_git_with_mutation_word_in_path_is_allowed(self, command):
+        assert guard._GIT_MUTATION_RE.search(
+            guard._scrub_arg_payloads(command)
+        ) is None, f"read-only command wrongly matched as a mutation: {command}"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git commit -m x",
+            "git checkout main",
+            "git switch -c feature",
+            "git reset --hard HEAD~1",
+            "git merge origin/main",
+            "git rebase main",
+            "git revert abc123",
+            "git apply patch.diff",
+            "git am patch.mbox",
+        ],
+    )
+    def test_real_mutations_still_match(self, command):
+        """The boundary must not disarm the guard: every whole-word invocation
+        of the nine still matches."""
+        assert guard._GIT_MUTATION_RE.search(guard._scrub_arg_payloads(command))
+
+
+# ---------------------------------------------------------------------------
+# ateles#829 — `worktree remove` is the counterpart of the `worktree add` this
+# guard recommends as its remedy, and mutates no repository state. `--force`
+# stays blocked.
+# ---------------------------------------------------------------------------
+class TestWorktreeRemove:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git worktree remove /Users/x/repos/sibling-wt-slug",
+            "git -C /Users/x/repos/sibling worktree remove /Users/x/repos/sibling-wt-slug",
+            # A removal path containing a mutation word must survive too.
+            "git worktree remove /Users/x/repos/sibling-wt-amend",
+            "git worktree remove /Users/x/repos/sibling-wt-restore",
+        ],
+    )
+    def test_unforced_remove_is_permitted(self, command):
+        assert guard._is_permitted_worktree_call(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git worktree remove --force /Users/x/repos/sibling-wt-slug",
+            "git worktree remove /Users/x/repos/sibling-wt-slug --force",
+            "git worktree remove -f /Users/x/repos/sibling-wt-slug",
+        ],
+    )
+    def test_forced_remove_is_not_permitted(self, command):
+        assert not guard._is_permitted_worktree_call(command)
+
+    def test_add_is_still_permitted(self):
+        assert guard._is_permitted_worktree_call(
+            "git worktree add /Users/x/repos/sibling-wt-slug origin/main"
+        )
+
+    def test_remove_as_text_in_a_commit_message_is_not_permitted(self):
+        """`worktree` must be the actual subcommand token, never quoted text."""
+        assert not guard._is_permitted_worktree_call(
+            'git commit -m "clean up after worktree remove"'
+        )
+
+
+# ---------------------------------------------------------------------------
+# ateles#829 (b) — the override is supplied as an inline prefix, parsed from
+# the command text, and never read from the hook process's environment.
+# ---------------------------------------------------------------------------
+class TestInlineOverride:
+    def test_inline_prefix_allows_the_segment_it_prefixes(self, tmp_path, monkeypatch):
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.delenv("ATELES_ALLOW_SHARED_REPO_WRITES", raising=False)
+        cmd = f"ATELES_ALLOW_SHARED_REPO_WRITES=1 git -C {sibling} commit -m x"
+        assert guard.check_bash(cmd, ateles) is None
+
+    def test_env_form_of_the_inline_prefix_is_accepted(self, tmp_path, monkeypatch):
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.delenv("ATELES_ALLOW_SHARED_REPO_WRITES", raising=False)
+        cmd = f"env ATELES_ALLOW_SHARED_REPO_WRITES=1 git -C {sibling} reset --hard"
+        assert guard.check_bash(cmd, ateles) is None
+
+    def test_exported_variable_is_ignored(self, tmp_path, monkeypatch):
+        """The anti-regression that keeps the session-wide disarm closed: an
+        exported override reached main() before this change and allowed
+        everything for the rest of the session."""
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.setenv("ATELES_ALLOW_SHARED_REPO_WRITES", "1")
+        cmd = f"git -C {sibling} reset --hard"
+        assert guard.check_bash(cmd, ateles) is not None
+
+    def test_override_on_an_earlier_segment_does_not_vouch_for_a_later_mutation(
+        self, tmp_path, monkeypatch
+    ):
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.delenv("ATELES_ALLOW_SHARED_REPO_WRITES", raising=False)
+        cmd = (
+            "ATELES_ALLOW_SHARED_REPO_WRITES=1 echo ok && "
+            f"git -C {sibling} reset --hard"
+        )
+        assert guard.check_bash(cmd, ateles) is not None
+
+    def test_file_edit_has_no_override_even_when_exported(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(ateles))
+        monkeypatch.setenv("ATELES_ALLOW_SHARED_REPO_WRITES", "1")
+        event = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(sibling / "notes.md")},
+        }
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
+        monkeypatch.chdir(ateles)
+        assert guard.main() == 2
+
+    def test_guidance_shows_the_inline_form(self, tmp_path):
+        text = guard.guidance(tmp_path / "sibling")
+        assert "ATELES_ALLOW_SHARED_REPO_WRITES=1 <the same command>" in text
+        assert "exported variable is deliberately ignored" in text
+
+
+# ---------------------------------------------------------------------------
+# End-to-end for the two commands ateles#829 verified denying. These exercise
+# main()'s exit code, not the regex alone — a fix that repaired the pattern but
+# broke the segment walk would still pass the regex tests above.
+# ---------------------------------------------------------------------------
+class TestReadonlyGitEndToEnd:
+    @pytest.mark.parametrize(
+        "command_tpl",
+        [
+            "git -C {sibling} log -- checkouts.md",
+            "git -C {sibling} show origin/main:src/switcher.ts",
+        ],
+    )
+    def test_readonly_git_against_a_shared_clone_is_allowed(
+        self, tmp_path, monkeypatch, capsys, command_tpl
+    ):
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(ateles))
+        event = {
+            "tool_name": "Bash",
+            "tool_input": {"command": command_tpl.format(sibling=sibling)},
+        }
+        code, out = _run_main(monkeypatch, capsys, event, cwd=ateles)
+        assert code == 0
+        assert out == ""
+
+    def test_worktree_remove_against_a_shared_clone_is_allowed(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(ateles))
+        event = {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": f"git -C {sibling} worktree remove {tmp_path}/sibling-wt-amend"
+            },
+        }
+        code, out = _run_main(monkeypatch, capsys, event, cwd=ateles)
+        assert code == 0
+        assert out == ""
+
+    def test_forced_worktree_remove_against_a_shared_clone_is_denied(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(ateles))
+        event = {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": (
+                    f"git -C {sibling} worktree remove --force "
+                    f"{tmp_path}/sibling-wt-amend"
+                )
+            },
+        }
+        code, out = _run_main(monkeypatch, capsys, event, cwd=ateles)
+        assert code == 2
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"

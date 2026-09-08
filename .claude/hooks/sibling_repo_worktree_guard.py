@@ -31,15 +31,20 @@ Covered:
 Explicitly NOT covered (allowed):
   - Anything inside the Ateles repo itself (this is our home).
   - Anything inside a dedicated linked worktree (the safe path).
-  - Read-only git (status/log/diff/show/rev-parse/worktree list) and all reads.
-  - An actual `git worktree add` invocation itself (that is the remedy) —
-    but only the segment(s) that ARE that invocation; a compound command
-    mixing `worktree add` with an unrelated mutating segment still blocks
-    on the mutating segment.
+  - Read-only git (status/log/diff/show/rev-parse/worktree list) and all reads,
+    including one whose path, rev, or pathspec merely CONTAINS a mutation word
+    (`git log -- checkouts.md`, `git show origin/main:src/switcher.ts`).
+  - An actual `git worktree add` invocation itself (that is the remedy), and
+    `git worktree remove` without `--force`, which is its counterpart and
+    mutates no repository state — but only the segment(s) that ARE such an
+    invocation; a compound command mixing one with an unrelated mutating
+    segment still blocks on the mutating segment.
 
 Fail-open: any error, missing git, or unparseable input → exit 0 (never block a
-session on our own bug). Deliberate override: set
-ATELES_ALLOW_SHARED_REPO_WRITES=1 in the environment.
+session on our own bug). Deliberate override for ONE Bash command: prefix it
+inline, `ATELES_ALLOW_SHARED_REPO_WRITES=1 <the command>`. An exported/ambient
+variable is deliberately ignored — it would disarm the guard for the whole
+session. A file edit carries no prefix and has no override; target a worktree.
 """
 import json
 import os
@@ -57,17 +62,31 @@ from _session_integrity import read_hook_input, log  # noqa: E402
 # HEAD/working tree (the exact failure that opened this incident — a switch that
 # aborted mid-way left the session on another branch), so those are matched too,
 # not only the branch-CREATING forms.
+#
+# EVERY word-shaped alternation carries a TRAILING \b. Without it the group
+# matches as a PREFIX anywhere in the segment, including inside a path — so
+# `git log -- checkouts.md` matched `checkout` and `git show
+# origin/main:src/switcher.ts` matched `switch`, denying the read-only git
+# this file's own docstring promises to allow. `clean`, `push`, and `restore`
+# carried the boundary from the start; the other nine did not, and the
+# inconsistency was visible within one expression (ateles#829).
 _GIT_MUTATION_RE = re.compile(
     r"\bgit\b[^\n;|&]*?\b("
-    r"commit|merge|rebase|cherry-pick|revert|"
-    r"reset|apply|am|"
-    r"checkout|switch|"                           # any checkout/switch (incl. plain branch move)
+    r"commit\b|merge\b|rebase\b|cherry-pick\b|revert\b|"
+    r"reset\b|apply\b|am\b|"
+    r"checkout\b|switch\b|"                       # any checkout/switch (incl. plain branch move)
     r"branch\s+-\w*[fDdm]|"                       # force/delete/move branch
     r"stash\s+(pop|apply|drop|push|save)|"
     r"clean\b|"
     r"rm\s+--cached|"
     r"push\b|tag\s+-\w*[df]|"
-    r"restore\b"
+    r"restore\b|"
+    # A FORCED worktree removal, which is the one form of `worktree remove`
+    # that discards work rather than deleting an already-clean directory. The
+    # unforced form is permitted by `_is_permitted_worktree_call`, which runs
+    # first; this alternation is what makes the forced form reachable by the
+    # deny path at all, since `worktree` is otherwise absent from this set.
+    r"worktree\s+remove\b[^\n;|&]*?(?:--force\b|(?<=\s)-f\b)"
     r")",
     re.IGNORECASE,
 )
@@ -82,19 +101,59 @@ _GIT_MUTATION_RE = re.compile(
 # `git log --grep=res.et`) no longer trips the guard. Verified by the
 # readonly cases in tests/hooks/. Removed per the #245 review panel.
 
-# The remedy itself: an actual `git ... worktree add` INVOCATION, not a bare
-# substring match. A bare "worktree add" anywhere in command TEXT (e.g. a
-# commit message `git commit -am "prep for worktree add"`, or that phrase
-# appearing in a LATER, unrelated segment) must never be treated as the
-# remedy — that was a real bypass in the prior substring-based check.
-# `worktree` must be the actual subcommand token: only -C/--git-dir (the
-# flags this hook itself parses) may appear between `git` and `worktree`;
-# any other token there (a different subcommand, a quoted argument) means
-# "worktree add" is just text, not an invocation.
-_GIT_WORKTREE_ADD_RE = re.compile(
-    r"\bgit\b\s*(?:-C\s+\S+\s*|--git-dir[=\s]\S+\s*)*\bworktree\s+add\b",
+# The remedy, and its counterpart: an actual `git ... worktree add` or
+# `git ... worktree remove` INVOCATION, not a bare substring match. A bare
+# "worktree add" anywhere in command TEXT (e.g. a commit message
+# `git commit -am "prep for worktree add"`, or that phrase appearing in a
+# LATER, unrelated segment) must never be treated as permitted — that was a
+# real bypass in the prior substring-based check. `worktree` must be the
+# actual subcommand token: only -C/--git-dir (the flags this hook itself
+# parses) may appear between `git` and `worktree`; any other token there (a
+# different subcommand, a quoted argument) means the phrase is just text, not
+# an invocation.
+#
+# `remove` is here because it mutates no repository state: it deletes a
+# directory and prunes an administrative entry under `.git/worktrees/`,
+# changing no commit, branch, ref, index, or working tree in the shared clone.
+# It is the counterpart of the `worktree add` this guard recommends as its own
+# remedy, and without it every session that follows that advice leaves a
+# directory nobody may clean up (ateles#829).
+#
+# `--force` stays blocked: it is what lets a removal discard uncommitted work
+# in the target tree, and git's own refusal without the flag is the check that
+# makes the unforced form safe. The flag is matched anywhere in the segment
+# rather than at a fixed position, so `worktree remove --force <p>` and
+# `worktree remove <p> --force` are both excluded.
+_GIT_WORKTREE_ALLOWED_RE = re.compile(
+    r"\bgit\b\s*(?:-C\s+\S+\s*|--git-dir[=\s]\S+\s*)*\bworktree\s+(?:add|remove)\b",
     re.IGNORECASE,
 )
+_GIT_WORKTREE_FORCE_RE = re.compile(r"(?:^|\s)(?:--force|-f)(?:\s|=|$)")
+
+OVERRIDE_ENV = "ATELES_ALLOW_SHARED_REPO_WRITES"
+
+# An override must PREFIX the mutating segment itself (optionally after `env`),
+# which is the only form an operator can actually supply. Anchored at the
+# segment start so an override on an unrelated earlier segment cannot vouch for
+# a later mutation — `ATELES_ALLOW_SHARED_REPO_WRITES=1 echo ok && git -C
+# <sibling> reset --hard` must still be refused.
+#
+# Deliberately NOT read from os.environ. An inline `VAR=1 git …` prefix sets the
+# variable for the invoked command, never for the PreToolUse hook that inspects
+# the command beforehand, so the documented advice could not be followed at all
+# (ateles#829). An exported variable would reach the hook, but one `export`
+# would then disarm the guard for the remainder of the session — the
+# carries-forward failure this class of guard exists to close. This is the same
+# reasoning, and the same mechanism, as `gmail_send_gate.py` in this directory.
+_OVERRIDE_PREFIX = re.compile(rf"^(?:env\s+)?{OVERRIDE_ENV}=1\b")
+
+
+def _is_permitted_worktree_call(segment: str) -> bool:
+    """True for a `worktree add`/`worktree remove` invocation this guard lets
+    through. A forced removal is not permitted — see `_GIT_WORKTREE_FORCE_RE`."""
+    if not _GIT_WORKTREE_ALLOWED_RE.search(segment):
+        return False
+    return not _GIT_WORKTREE_FORCE_RE.search(segment)
 
 
 def _run(args, cwd=None):
@@ -180,8 +239,11 @@ def guidance(toplevel: Path) -> str:
         f"dedicated worktree first, then target that path:\n"
         f"  git worktree add ~/repos/{name}-wt-<slug> origin/main\n"
         f"  cd ~/repos/{name}-wt-<slug>\n"
-        f"Do all edits/commits there. (Override for a deliberate case: set "
-        f"ATELES_ALLOW_SHARED_REPO_WRITES=1.)"
+        f"Do all edits/commits there. (Override one deliberate Bash command by "
+        f"prefixing it inline:\n"
+        f"  {OVERRIDE_ENV}=1 <the same command>\n"
+        f"An exported variable is deliberately ignored, and a file edit carries "
+        f"no prefix — target a worktree path instead.)"
     )
 
 
@@ -292,9 +354,15 @@ def check_bash(command: str, ateles: Path):
         m_cd = re.search(r"\bcd\s+([^\s;&|]+)", segment)
         if m_cd:
             cd_state = _resolve_cand(m_cd.group(1))
-        if _GIT_WORKTREE_ADD_RE.search(segment):
+        if _is_permitted_worktree_call(segment):
             continue
         if not _GIT_MUTATION_RE.search(_scrub_arg_payloads(segment)):
+            continue
+        # The inline override, evaluated PER SEGMENT so it vouches solely for
+        # the segment it prefixes. Checked after the mutation match so an
+        # override on a segment that mutates nothing costs nothing.
+        if _OVERRIDE_PREFIX.match(" ".join(segment.split())):
+            log(f"inline override prefixes this segment; allowing: {segment[:60]}")
             continue
         target_dir = None
         m_c = re.search(r"\bgit\b[^\n;|&]*?\s-C\s+([^\s;&|]+)", segment)
@@ -316,8 +384,9 @@ def check_bash(command: str, ateles: Path):
 
 
 def main() -> int:
-    if os.environ.get("ATELES_ALLOW_SHARED_REPO_WRITES") == "1":
-        return 0
+    # No ambient `os.environ[OVERRIDE_ENV]` check: the inline prefix, parsed
+    # per segment in check_bash, is the only approval path. See _OVERRIDE_PREFIX
+    # for why an exported variable is refused rather than honoured.
     ev = read_hook_input()
     tool = ev.get("tool_name", "")
     ti = ev.get("tool_input", {}) or {}
@@ -329,7 +398,7 @@ def main() -> int:
     # `worktree add` segment AND a separate mutating segment (e.g. `git
     # worktree add ... && git -C <sibling> reset --hard`), so only skip when
     # EVERY mutation-matching segment is itself an actual `worktree add`
-    # invocation (_GIT_WORKTREE_ADD_RE, not a bare substring match — a
+    # invocation (_is_permitted_worktree_call, not a bare substring match — a
     # mutating command whose commit message/branch name merely CONTAINS the
     # text "worktree add" must not be treated as the remedy); otherwise fall
     # through to check_bash for the real per-segment check.
@@ -337,10 +406,10 @@ def main() -> int:
         cmd = ti.get("command", "")
         if not _GIT_MUTATION_RE.search(_scrub_arg_payloads(cmd)):
             return 0
-        if _GIT_WORKTREE_ADD_RE.search(cmd):
+        if _GIT_WORKTREE_ALLOWED_RE.search(cmd):
             segments = _split_segments(cmd)
             if all(
-                _GIT_WORKTREE_ADD_RE.search(seg)
+                _is_permitted_worktree_call(seg)
                 or not _GIT_MUTATION_RE.search(_scrub_arg_payloads(seg))
                 for seg in segments
             ):
