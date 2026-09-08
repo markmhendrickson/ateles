@@ -804,9 +804,11 @@ reads across to write one brief; whether a declared, attributed read across inst
 not stated, and the operator's "the swarm needs to navigate and leverage them" suggests he wants something
 across them. Second, whether a swarm holding several instances has any planning of **its own** — records
 about its operation that belong to no one instance — or whether every planning record is some instance's.
-An answer to the second interacts with decision 91: if a controlling instance is where a deployment's
-governance writes go, it is the candidate home for swarm-level planning, and if there is no such thing then
-the swarm's own planning has nowhere to live.
+An answer to the second interacts with decision 91, which has since been ruled: a deployment naming several
+instances names one of them as controlling, and the controlling instance is where that deployment's governance
+writes go. So a candidate home for swarm-level planning exists. What that ruling does not supply, and what keeps
+this half open, is whether the swarm has planning of its own at all — a home being available is not a record
+needing one.
 
 **What would decide it.** Whether any rule in this document reads a planning record from outside the
 record its task ascends to. None does today, which is why the row is open rather than ruled: the design is

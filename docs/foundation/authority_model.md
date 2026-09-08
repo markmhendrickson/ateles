@@ -867,7 +867,7 @@ what is built, never a ground for the design.
 **What a proxy is still for.** Permitting a proxy is not damning it with the word convenience: it holds
 real value, and the value is real precisely because none of it is enforcement. It is one place to rotate a
 credential rather than one per harness. It is one place to resolve which instance of the record a request
-reaches, which is the routing need decision 91 leaves open. And it is one place from which requests are
+reaches, which is the routing need decision 91's several-instance case creates. And it is one place from which requests are
 observable. A deployment that wants any of these puts a proxy in the path and loses nothing, because the
 record refuses what it would have refused anyway; a deployment that does not is no less bound.
 
