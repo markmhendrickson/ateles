@@ -4161,8 +4161,9 @@ measured by the instrument in its row on this branch on 2026-09-06.
 read admission per entity type: default-deny, the grant as the allowlist, checked at the read, symmetric
 with the write side decision 41 ruled — argued at `authority_model.md#grants`. Decision **95** states that
 a harness reaches the record through the swarm's own MCP proxy and holds no direct instance credential,
-because the proxy is the only interposition point where admission can be refused — argued at
-`authority_model.md#the-swarm-reaches-the-record-through-a-proxy-that-admits-never-through-per-harness-credentials`.
+because the proxy is the only interposition point where admission can be refused — **a reason revision 71 finds
+false and amends** — argued at
+`authority_model.md#admission-is-checked-at-the-record-and-the-proxy-is-a-second-place-it-is-checked`.
 Decision **96** is opened and left open: how the proxy authenticates to the instance on an agent's behalf.
 
 **What is built, against what is now ruled.** Nothing in this revision was built by it; these rows record
@@ -4170,8 +4171,8 @@ the gap the rulings create, on the same footing as every earlier revision's.
 
 | Design term / rule (revision 70) | Replaces | Built state | Where the gap lives |
 |---|---|---|---|
-| read admission per entity type, default-deny, grant as allowlist, read at the read (decision 94) | the record-usage contract's "Must not read" column, which described a boundary and admitted nothing | unchanged from the revision 8 row: no mechanism reads or enforces the contract, and `context_entity_types[]` bounds no runtime read — the rule now exists where before there was not one to be unenforced | the Neotoma client; the tool proxy, which is where decision 95 puts the check |
-| the harness reaches the record through the proxy, never a direct instance credential (decision 95) | nothing stated; the question was open | not assessed as a topology on this branch; what is recorded is that the proxy exists and is the nearest thing to a real enforcement point, and that its empty-identity branch admits | `mcp_tool_grant_proxy/proxy.py`; per-harness MCP configuration |
+| read admission per entity type, default-deny, grant as allowlist, read at the read (decision 94) | the record-usage contract's "Must not read" column, which described a boundary and admitted nothing | unchanged from the revision 8 row: no mechanism reads or enforces the contract, and `context_entity_types[]` bounds no runtime read — the rule now exists where before there was not one to be unenforced | the Neotoma client; the record's own capability check, which decision 95 as amended (revision 71) makes authoritative, and where the `retrieve` op is declarable and unenforced; the tool proxy, which checks in front of it |
+| the harness reaches the record through the proxy, never a direct instance credential (decision 95) | nothing stated; the question was open | not assessed as a topology on this branch; what is recorded is that the proxy exists and that its empty-identity branch admits. The claim in this row's original wording that the proxy is "the nearest thing to a real enforcement point" is corrected by revision 71: the record enforces writes per entity type today, and the proxy does not | `mcp_tool_grant_proxy/proxy.py`; per-harness MCP configuration |
 | an unresolved caller identity is refused at the proxy (decision 95's first consequence) | nothing stated; principle 5's general rule reached the stub loader and not this branch | `enforce()` returns `(True, "")` on an empty `agent_sub` — the fail-open branch already enumerated below, now contradicting a stated rule rather than only a principle | `mcp_tool_grant_proxy/proxy.py` |
 | multi-instance routing resolves at the proxy from the deployment's binding (decision 95's third consequence) | nothing stated; decision 91 left the several-instance case open | not built; no deployment names several instances today | the proxy; decision 91, still open on which instance takes governance writes |
 
@@ -4238,3 +4239,45 @@ condition). `status.md` grows by this entry alone. **Decision 73 stays open** an
 **Checks on this revision:** the vocabulary check reports 0 Never hits (106 Never items, 81 Not-for), the
 anchor check 0 broken links, `link_vocabulary_terms.py --check` every linkable first mention linked,
 `render_reading_projection.py --check` 20 files matching the matrix, and `test_foundation.py` 112 passed.
+
+## Revision 71 (2026-09-08): decision 95 amended — the record admits, and the proxy is not the only place it can
+
+**What was amended, and why.** Decision 95 was ruled earlier the same day on the claim that a proxy is *the
+only* place in the path where a request can be refused, and that under per-harness credentials decisions 41
+and 94 would be "unenforceable *by construction* … with nowhere for the check to run." The operator
+disproved it the same day. The claim is false: the substrate the swarm actually writes to reads the
+requesting principal's grant and refuses writes it does not admit. The ruling's conclusion is amended at
+`authority_model.md#admission-is-checked-at-the-record-and-the-proxy-is-a-second-place-it-is-checked` and
+its register row rewritten; the record's own check is stated authoritative, the proxy's a second refusal in
+front of it, and decision **97** is opened on which the corpus should require of a deployment. Decision 95
+keeps its number: it is amended, not renumbered. Decision 96 is not ruled here.
+
+**This row is the design-versus-checkout accounting, and the substrate's state is evidence about what is
+built and never a design argument.** It is recorded because the amended decision turns on a factual claim
+about enforcement that the corpus had wrong, and a reader meeting the amendment needs to see what was
+measured. Read on 2026-09-08 from the shared `neotoma` checkout at
+`b8febaf48ae4e63ac2c8600f2bef4f0c13032c57`, which is **not** current with that repository's `main` — so a
+row saying "no call site" means none was found at that commit, not that none exists on `main` today.
+
+| Design term / rule | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| write admission per entity type, default-deny, grant as allowlist, read at the write (decision 41) | the revision 8 row's "no mechanism reads or enforces the contract", which was true of the contract and not of the substrate | **built, and this is what the amendment turns on.** A capability check reads the requesting agent's grant and refuses an operation on an entity type the grant does not name, raising a distinct denial reason at HTTP 403. It is reached on four production paths — two for `store` (one HTTP, one over the tool protocol), one for `create_relationship`, one for `correct` — and default-deny is unconditional for an admitted agent on those paths. A grant may widen to every type with an explicit wildcard, which is the fail-open shape decision 41 already names | the substrate's capability service; the four call sites |
+| read admission per entity type, default-deny, grant as allowlist, read at the read (decision 94) | the revision 70 row, which recorded the rule as newly existing and unenforced | **declared and unenforced — a missing call, not a missing design.** `retrieve` is a declarable capability op: grant validation accepts it, the public API type exposes it, and the substrate's own documentation puts a narrowly scoped `retrieve` capability in its canonical example grant. No read path consults it. An agent whose grant names one type for reading reads every type its owner holds | the read handlers, which have no capability call; the substrate's own docs, which imply a confinement that does not exist |
+| what confines an agent's reads today | nothing stated | **owner scoping, which is not capability enforcement and must not be read as it.** Read handlers filter rows to the authenticated user, and for an admitted agent that user is the grant's owner. So an agent is confined to its owner's graph — the whole of it — and not to the types its grant names. This narrows cross-operator exposure and does nothing for the within-operator boundary decision 94 rules | the read handlers' owner filter |
+| the proxy as an enforcement point | the revision 70 row calling it "the nearest thing to a real enforcement point" | **corrected.** The proxy enforces less than the record does, not more: the record refuses writes per entity type on four paths, and the proxy's empty-identity branch admits, which the fail-open row below already records | `mcp_tool_grant_proxy/proxy.py` |
+
+**Two things this revision deliberately does not do.** It does not fix the substrate — the missing read
+enforcement is that repository's work, with its own issue and its own test, and a corpus revision that
+edited code would be the design-follows-implementation inversion this file exists to prevent. And it does
+not rule decision 96 or 97; 96 is the operator's, and 97 is opened by this pass and left open.
+
+**What did not hold from the brief that opened this pass.** Default-deny is not unconditional everywhere:
+for an *admitted* agent on a path that reaches a call site it is, but an unadmitted caller falls through to
+an environment-gated branch that allows when the flag is unset, and guests skip grant capability enforcement
+on one of the four sites. None of this changes the amendment — the record demonstrably refuses a write a
+grant does not admit, which is all the false claim needed to be false — and it sharpens what "enforced at
+the record" means today.
+
+**Checks on this revision:** the anchor check 0 broken links, the citation check 0 violations, the
+vocabulary check 0 Never hits, `link_vocabulary_terms.py --check` every linkable first mention linked,
+`render_reading_projection.py --check` 20 files matching the matrix, and `test_foundation.py` 125 passed.

@@ -602,7 +602,7 @@ unenforceable while the grant grammar cannot name what the harness provides: tod
 shell or the harness's own tools at all, so the reach that most needs bounding is the reach the rule could
 not reach.
 
-### The swarm reaches the record through a proxy that admits, never through per-harness credentials
+### Admission is checked at the record, and the proxy is a second place it is checked
 
 **A harness reaches the record through the swarm's own MCP proxy, and does not hold a credential to the
 instance directly (ruled, decision 95, 2026-09-08).** Registered in
@@ -613,16 +613,39 @@ not settle *what the harness points at*, and after decision 90 named the instanc
 writes, and decision 91 left open which instance takes governance writes where several are named, the
 question is live.
 
-**The reason is admission, not convenience.** A proxy is the only place in the path where a request can be
-refused. If each harness holds a bearer token to the instance, then every agent in the swarm holds a
-credential to the whole graph, and decisions 41 and 94 are unenforceable *by construction* — not
-imperfectly enforced, not enforced late, but with nowhere for the check to run, because the request reaches
-the record without passing anything that reads a grant. A rule the topology gives no enforcement point to
-is a report, and principle 1 has already rejected controls that only record. Every other argument for a
-proxy — one place to configure, one place to rotate, fewer secrets on disk — is real and is not the reason;
-tidiness would not justify a hop, and the absence of an interposition point does.
+**Amended (2026-09-08, revision 71): the reason first given was false, and the conclusion does not stand on
+what remains.** As ruled, this section said that a proxy is *the only* place in the path where a request can
+be refused, and that under per-harness credentials decisions 41 and 94 would be unenforceable *by
+construction*, with nowhere for the check to run. That is not true, and it was not true when it was written.
+Admission per entity type, matched on the credential the request presents, is a check the record itself can
+run and does — the substrate's built state is measured in `status.md#revision-71-2026-09-08-decision-95-amended--the-record-admits-and-the-proxy-is-not-the-only-place-it-can`, and it belongs there and not here, because what the corpus states is the design and not the checkout. The design point
+is the one the false claim obscured: **admission is default-deny per entity type matched on the credential
+(decisions 41 and 94), and nothing in that rule names where the check runs.** Any component that holds both
+the request and the credential it was matched on can run it, and the record holds both by definition.
 
-**Three consequences follow, and each is a rule.**
+**What the ruling now states, and what it no longer claims.** A harness still reaches the record through the
+proxy and still holds no direct instance credential — that much stands. It no longer stands as a consequence
+of admission having nowhere else to run, because it does. It stands on the reasons the original ruling named
+and then disowned, and they carry a weaker conclusion than the one they were made to support: one place to
+configure and rotate credentials, one place that sees every request, and a second refusal in front of the
+record's own. That is a deployment posture with real value, not a property the design requires. **The
+record's own check is authoritative.** A check at the record holds however a harness connects, cannot be
+bypassed by connecting directly, and does not make every access depend on a component of the swarm being up;
+a check that exists only at a proxy has all three weaknesses, and calling the proxy the boundary invites the
+record's own check to be built as though it were redundant, which is the failure principle 1 names — a
+control that only records. Where the two disagree, the record refuses.
+
+**Why the conclusion was not simply restated on the surviving reasons.** The original ruling said of them:
+"tidiness would not justify a hop, and the absence of an interposition point does." The corpus had already
+judged the remaining reasons insufficient to carry a rule, so restating the same conclusion on them would
+contradict this section in the paragraph above it. And the ruling wrote its own reopening condition — an
+instance whose admission check reads the requesting principal and enforces decisions 41 and 94 at the record,
+"which would make the proxy one enforcement point rather than the only one, and would turn this from a rule
+of the design into a deployment preference." That condition is met. This amendment is that turn, taken by the
+decision's own test rather than against it, and what the test leaves open is registered as decision 97 below
+rather than settled here.
+
+**Three consequences follow. Two are rules; the third was stated on the false premise and is narrowed.**
 
 **Empty identity fails closed.** A request the proxy cannot resolve to a principal is refused, not passed
 through. Principle 5 puts the default on the field carrying the safety meaning, and at an admission point
@@ -633,11 +656,23 @@ more permissive than success would have returned — and it is the same defect o
 `status.md#authority_modelmd` records the built proxy doing the opposite, which is a gap and not
 a posture choice.
 
-**The read boundary lives here.** Decision 94 rules that a principal reads only the types its grant admits,
-and the proxy is where that check runs, because it is the only component every read passes through and the
-only one holding both the request and the credential it was matched on. Under direct credentials the rule
-would have had to be enforced by the record itself against a token that names no principal, or by each
-agent against itself, and the second is not enforcement.
+**The read boundary is checked here too, and is not located here.** Decision 94 rules that a principal reads
+only the types its grant admits. As first stated, this consequence put that check at the proxy "because it is
+the only component every read passes through and the only one holding both the request and the credential it
+was matched on" — which is false on both counts: a read that reaches the record passes the record, and the
+record holds the credential it was matched on, that being what matching a grant means. Decision 94 is
+therefore not a rule about the proxy at all. It states an admission and leaves the topology to this decision,
+and this decision now answers: **the check runs at the record, and the proxy checking it as well is defence in
+depth, not the enforcement point.** The distinction is load-bearing rather than pedantic, because a read
+boundary held only at the proxy is defeated by any principal that can open a connection the proxy is not on,
+and a design that named the proxy as the boundary would have no objection to make to that connection existing.
+
+**A refusal at the record is what the design requires; a second refusal at the proxy is permitted and never
+substitutes.** Two independent refusals are better than one, and the proxy's is genuinely earlier and can
+refuse what the record would have to receive first. But the two are not interchangeable, and where a
+deployment builds only one, it builds the record's. This is the direction principle 5 gives for a control that
+might be absent: the safe way to be wrong about which component is enforcing is to have the one that cannot be
+bypassed.
 
 **Multi-instance routing is the proxy's concern.** Where a deployment names several instances, which one a
 request reaches is resolved at the proxy from the deployment's own binding, not configured per harness.
@@ -654,12 +689,26 @@ one principal and the A-for-B attribution the design already requires of an adap
 principal's decision (`adapters.md#no-external-event-advances-a-step-by-itself`) must be carried in the
 write. Pass-through keeps the record's own admission meaningful and duplicates the check; proxy-held makes
 the proxy a principal whose compromise reaches everything and puts the whole boundary on one hop. Nothing
-in this ruling depends on which — the interposition point exists either way — and the question becomes
-load-bearing the moment a second operator's data is on the instance under decision 82.
+in this ruling depends on which — a request reaches the record either way — and the question becomes
+load-bearing the moment a second operator's data is on the instance under decision 82. **The amendment above
+does not rule it, and changes what one branch costs:** once the record's own check is authoritative, a
+proxy-held credential is the branch that disables it, because the instance then matches grants on the proxy's
+`sub` and every agent behind it is admitted as one principal holding the union of their capabilities. That is
+an argument within decision 96, which stays the operator's to answer.
 
-**What would reopen it:** an instance whose own admission check reads the requesting principal and enforces
-decisions 41 and 94 at the record, which would make the proxy one enforcement point rather than the only
-one, and would turn this from a rule of the design into a deployment preference.
+**What this ruling leaves open: which check is authoritative where both exist, and whether a deployment may
+run only the proxy's.** Registered as decision 97, open, by this amendment. The amendment above states the
+record's check as authoritative and the proxy's as defence in depth, which is the answer that follows from the
+record's being unbypassable; what is open is whether the corpus should require the record's check of every
+deployment, or permit a deployment whose instance cannot enforce to rely on the proxy alone and record the
+weaker posture. The first makes conformance testable at one component; the second admits substrates that
+cannot check and is the case a deployment against a third-party record would present.
+
+**What would reopen it:** this decision has already been amended once on exactly that ground — the reopening
+condition originally written here (an instance whose own admission check reads the requesting principal and
+enforces decisions 41 and 94 at the record) had been met at the time of the ruling and was not checked. What
+would reopen it now is the converse: a substrate that cannot run the check at the record, which would make the
+proxy the only place it can run for that deployment and would put the design's requirement back on the hop.
 
 ## Attribution
 
