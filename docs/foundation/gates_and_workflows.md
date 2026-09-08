@@ -1172,8 +1172,10 @@ successful recurrences — no PR, issue, or repository. The checkpoint the gate 
 and its task. The consent gate for outbound non-code work is this gate: a policy lists
 `send_external_comms` and `publish` as high blast, the content agents' actions carry those classes, the
 runner subscribes to the checkpoint, and the task is re-claimed on resolution. Do not build a second
-gate (principle 6). PR-shaped review machinery (`step_status`, review conclusions, the steward's merge
-action) is a separate mechanism layered on GitHub; the PR is an artifact of the batch.
+gate (principle 6). PR-shaped review machinery (`step_status`, review verdicts, the steward's merge
+action) is a separate mechanism layered on GitHub; the PR is an artifact of the batch. One authorization
+traced through this gate and the grant checker together is
+`authority_model.md#two-examples-the-same-three-decisions-at-each-of-the-two-decision-points`.
 
 ### The checkpoint is written where the gate first holds the action, and the permit is decided at the take
 
