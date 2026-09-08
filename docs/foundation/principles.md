@@ -220,54 +220,50 @@ rule that turns on it, or without having run the swap test against its neighbour
 review, the same way a PR that opens a decision without registering it is incomplete under
 `conformance.md`.
 
-**Whether a term should prefer a single word, and what the exception is — open (decision 73).** The
-operator's question (2026-09-06): *"it also seems best to prefer single words for terms versus multiple
-words per term. Because whenever we have multiple words, we risk having non-term based qualifiers confused
-with actual term definitions."* The risk is real and is this invariant's own subject: where a term is
-several words, a reader cannot tell from the page whether the extra word is part of the bound term or an
-author's ordinary adjective, and `vocabulary.md`'s linker resolves that only for the entries that exist.
-37 of `vocabulary.md`'s 124 terms are multi-word.
+**A term takes as many words as the design's distinction requires, and no more — ruled (decision 73,
+2026-09-07).** There is no single-word preference. The operator's question (2026-09-06) was whether to
+prefer one: *"whenever we have multiple words, we risk having non-term based qualifiers confused with
+actual term definitions."* The risk it names is real and is this invariant's own subject, but the remedy is
+not a preference for brevity. It is a requirement that **the qualifier be load-bearing**, tested the way
+this invariant already tests everything else:
 
-**The tension that must be stated with it: multi-word terms are currently load-bearing for this very
-invariant.** They are how the corpus discharges the no-overlap half. `owner` carries five meanings and is
-forbidden standing alone (`vocabulary.md#owner-five-meanings-one-word-forbidden-alone`) precisely because
-the bare noun was ambiguous — and `step owner` is the qualified compound that replaced it. The same
-pattern produced `waiver scope`, `finding scope`, and `permission scope`, three of bare `scope`'s four
-senses, which `vocabulary.md#scope` states are deliberately kept as qualified compounds because no fifth,
-unifying sense exists to define; `parent task` and `child task`, which qualify a bare `task` that has
-its own distinct entry; and `planning level`, `planning record`, and `planning decision`. Collapsing those
-to single words would recreate exactly the overlap this invariant exists to prevent. So the rule cannot be
-absolute, and the candidate form is a **preference with a stated exception**: prefer a single word; require
-a qualifier where the bare word is banned, or where it is already bound to a different sense.
+**Drop the qualifier.** If what remains is a term already bound elsewhere in the corpus, or no longer names
+what the entry defines, the qualifier is load-bearing and the compound stands. If what remains names the
+same thing, the compound is redundant with its head and the swap test above retires it.
 
-**Candidates that look genuinely collapsible**, to be swap-tested individually rather than taken as a set:
-`read dependency`, `fast path`, `blast radius`, `effect dedup`, and `reachability probe` — each of whose
-head nouns (`dependency`, `path`, `radius`, `dedup`, `probe`) is bound by no other entry. Two apparent
-candidates are not: `as-of read` and `derived read` share the head noun `read`, and `decision point` and
-`enforcement point` share `point` — and `enforcement point` is *defined in terms of* `decision point`, so
-collapsing either member of either pair reintroduces the overlap.
+That is not new machinery. It is the swap test applied to the *qualifier* rather than to the whole term,
+and it was always sufficient for this question — which is why the ruling names no exception. There was
+never a rule to except from. A single-word preference was rejected because the corpus's own compounds
+defeat it three ways. It would hide kinship: [parent task](vocabulary.md#parent-task),
+[child task](vocabulary.md#child-task), and [recurring task](vocabulary.md#recurring-task) are each defined
+as a kind of [task](vocabulary.md#task), and coined single words would conceal that. It would collide with
+bound terms: [decision point](vocabulary.md#decision-point) and
+[enforcement point](vocabulary.md#enforcement-point) both reduce to `point`, and the second is *defined in
+terms of* the first; [gate](vocabulary.md#gate) is already bound, as the abbreviation of
+[action gate](vocabulary.md#action-gate) and nothing else;
+[separation of duties](vocabulary.md#separation-of-duties) has no single-word form in any control
+vocabulary. And it would undercut the no-overlap half of this invariant, which is the decisive one:
+[declaration scope](vocabulary.md#declaration-scope), [waiver scope](vocabulary.md#waiver-scope),
+[finding scope](vocabulary.md#finding-scope), and [permission scope](vocabulary.md#permission-scope) are
+four distinct terms *because* the qualifier distinguishes them, each entry's own **Not for:** line
+forbidding its use for the others. Collapsing them yields either four coinages that no longer show they are
+scopes of one kind, or one word `scope` overlapping four ways — the exact violation this invariant exists
+to prevent. Where a preference and the invariant pull against each other, the invariant wins.
 
-**A third convention neither memo names, and it is part of this question:** three entries take a
-parenthesized object. Two are the work model's verb entries, `execute (a task)` and the entry for what is
-done to an action; the third is the planning model's, `amend (a planning record)`. Each is a verb whose
-bound sense depends on the object named in its parentheses, and whether that form survives a single-word
-preference has to be decided with the question rather than after it.
+The ruling renames nothing. `owner`, forbidden standing alone
+(`vocabulary.md#owner-five-meanings-one-word-forbidden-alone`), keeps
+[step owner](vocabulary.md#step-owner) as the qualified compound that replaced it; the three parenthesized-object
+verb entries — [execute (a task)](vocabulary.md#execute-a-task), the entry for what is done to an action,
+and [amend (a planning record)](vocabulary.md#amend-a-planning-record) — are single-word terms carrying a
+disambiguating object, and the test does not reach them. What the test governs is the next term proposed,
+and any existing compound whose head noun turns out to name the same thing.
 
-**A separate defect this question surfaced, recorded and not fixed here.** `vocabulary.md`'s
-`### Two things a reader is looking at, and how they are written` is a prose subsection of `## Scope`
-explaining the file's own writing conventions — not a term. But it is set at `###`, the level every real
-entry uses, and `link_vocabulary_terms.py` extracts a term from *every* `###` heading, so it is read as a
-term whose name is a sentence. It is a structural defect in the file, not a multi-word term, and fixing it
-is not this decision's work; it is noted so that the count above is read correctly — the file carries 125
-`###` headings, of which 38 are multi-word, but one of the 38 is this heading, leaving 124 terms and 37
-multi-word ones.
-
-**What ruling this costs, and why it is registered rather than applied.** Any collapse is a rename across
-these documents and their generated projection, and other unmerged work amends the same files.
-The single-word preference is the same standard decision 72 turned on. Decision 72 has since been ruled and
-executed on its own (2026-09-07, `conformance.md#the-register-of-open-design-decisions`) — the record renamed to `verdict` and
-its field to `conclusion` — which shows the shape a collapse takes here but settles nothing about this one.
-This decision stays open, to be ruled and executed as its own pass.
+**A defect recorded here and not fixed by this ruling.** `vocabulary.md`'s
+`### Two things a reader is looking at, and how they are written` is a prose subsection of `## Scope`, set
+at the `###` level every real entry uses, so `link_vocabulary_terms.py` extracts a term from it whose name
+is a sentence. It is a structural defect in that file, not a multi-word term. Measured on this branch the
+file carries 136 `###` headings, of which 41 are multi-word; that heading is the only non-term among the
+136, leaving 135 terms and 40 multi-word ones.
 
 ## Contradictions this document settles
 
