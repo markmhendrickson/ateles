@@ -146,12 +146,13 @@ code." Carried by `data_model.md` (agents, grants, and workflows are entities), 
 (a `workflow` declares), and principle 6 (extend the mechanism that already generalizes; do not build a
 parallel one).
 
-## The three properties of delegation
+## Delegation audit: the three properties
 
 The operator states three properties the delegation this design enables must have: it must be possible to
-delegate **comprehensively**, **securely**, and **autonomously**. They are not a fourth, fifth, and sixth
-objective — they are adverbs on all five, and their use is as a test: a proposed rule that serves an
-objective while working against one of the three is a defect the objective alone would not catch.
+delegate **comprehensively**, **securely**, and **autonomously**. This section is the audit of the corpus
+against those properties. They are not a fourth, fifth, and sixth objective — they are adverbs on all five,
+and their use is as a test: a proposed rule that serves an objective while working against one of the three
+is a defect the objective alone would not catch.
 
 | Property | What it asks of a rule | Where the design answers it |
 |---|---|---|
@@ -167,6 +168,18 @@ directory would close. *Comprehensively* is stated at both ends and unstated in 
 without ever stating that an unnecessary return is a defect, so a proposal that adds a checkpoint can be
 checked against no rule. This charter names the three; closing any of them is the operator's decision, not
 this document's.
+
+## Applying this charter
+
+**Proposed rule:** every new inbound adapter must name the workflow set it can route to, and must produce
+an operator-owned checkpoint when no declared workflow fits.
+
+**Property checked:** comprehensively. The rule serves objective 1 because it lets work arrive from another
+surface without quietly narrowing the kinds of work the swarm can receive.
+
+**Outcome:** belongs in the foundation only if it binds the `route` gap named above. A prose reminder that
+agents should choose a reasonable workflow would not belong here, because no mechanism would fail when a
+novel kind of work reached the swarm and matched none of the declared successors.
 
 ## Where this document sits
 

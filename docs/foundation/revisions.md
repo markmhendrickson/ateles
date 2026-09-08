@@ -85,7 +85,7 @@ free number is 69, which this pass takes.
 
 | Revision | Pass | What changed |
 |---|---|---|
-| 81 | the charter pass of 2026-09-08 | the document created — the purpose the corpus serves and the five objectives it decomposes into, derived from the README and `docs/icp.md`, placed as an authored companion beside the kernel rather than in it. Records one design silence rather than filling it: the corpus states what forces a return to the operator and nowhere states that an unnecessary return is a defect, so "autonomously" has no rule to check a proposal against |
+| 81 | the charter pass of 2026-09-08 | the document created — the purpose the corpus serves and the five objectives it decomposes into, derived from the README and `docs/icp.md`, placed as an authored companion beside the kernel rather than in it. Records the three delegation-audit findings rather than filling them: comprehensively is open at intake and admission but unstated at `route`; securely is stated as design and measured as checkout enforcement in `status.md`; autonomously has no rule that treats an unnecessary return to the operator as a defect |
 
 
 ## `conformance.md`
