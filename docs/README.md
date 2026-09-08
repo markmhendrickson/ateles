@@ -96,6 +96,10 @@ Keyed (read when matching paths change — see `conformance.md`):
 
 Authored companions (design prose; **not** inlined into review prompts):
 
+- [**Charter**](foundation/charter.md) — what Ateles is for: the purpose the rest of the directory serves,
+  what an operator gets from it, and the five objectives that purpose decomposes into, each pinned to the
+  documents that carry it. States no rule a reviewer applies to a diff; read to orient, not to judge a
+  change.
 - [**Scenarios**](foundation/scenarios.md) — ten walkthroughs of the work model and gate model in motion:
   claim/lease/lapse, assignment, several tasks going through a workflow as one batch, a task detached
   from a batch, a parent with children in independent batches, an operator-only task, an action

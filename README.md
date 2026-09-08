@@ -11,7 +11,7 @@ life end to end, with the governance substrate (identity, capability, gating, au
 against the vision.
 
 Ateles is a design and a working example of it. The design is
-[`docs/foundation/`](docs/foundation/): twenty documents that state how work is created, taken,
+[`docs/foundation/`](docs/foundation/): twenty-one documents that state how work is created, taken,
 executed, and approved, and what the swarm does when it cannot reach its own record. The example is what
 runs against that design — background daemons and skills that already automate code review, releases,
 issue triage, email, calendar, recurring payments (fiat + Bitcoin), meeting capture and recap, health
@@ -21,7 +21,8 @@ Everything is built around [Neotoma](https://github.com/markmhendrickson/neotoma
 and state layer. Agents are Neotoma entities, act under signed identities, and are audited through the same
 observations they write. Open source. Local-first. MIT licensed.
 
-**Who it's for:** [docs/icp.md](docs/icp.md) · **The design of record:** [docs/foundation/](docs/foundation/)
+**Who it's for:** [docs/icp.md](docs/icp.md) · **What the rules are for:** [docs/foundation/charter.md](docs/foundation/charter.md)
+· **The design of record:** [docs/foundation/](docs/foundation/)
 · **Architecture:** [docs/architecture.md](docs/architecture.md) · **Taxonomy:** [docs/taxonomy.md](docs/taxonomy.md)
 · **Implementation phases:** [docs/phases.md](docs/phases.md)
 
@@ -691,6 +692,7 @@ gate model is in [docs/foundation/gates_and_workflows.md](docs/foundation/gates_
 Full documentation lives in `docs/` — index at [docs/README.md](docs/README.md). Start here:
 
 **The design of record:** [Foundation](docs/foundation/) —
+[Charter](docs/foundation/charter.md) ·
 [Principles](docs/foundation/principles.md) · [Work model](docs/foundation/work_model.md) ·
 [Gates and workflows](docs/foundation/gates_and_workflows.md) ·
 [Failure posture](docs/foundation/failure_posture.md) ·
