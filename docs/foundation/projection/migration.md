@@ -9,7 +9,7 @@ Every rule `migration.md` owns, one entry each: the rule's own statement from `c
 
 ## [Dispositions, and the primitive that carries each](../migration.md#dispositions-and-the-primitive-that-carries-each)
 
-- **MG-1** — no entity deleted and recreated; no verdict written for a principal that did not write it; no field bulk-rewritten to a new spelling; no write to an entity a process that does not know the new shape is still writing *[M]*
+- **MG-1** — no entity deleted and recreated; no conclusion written for a principal that did not write it; no field bulk-rewritten to a new spelling; no write to an entity a process that does not know the new shape is still writing *[M]*
 - **MG-2** — the same: re-type is three primitives — register, interpret over the same source, merge — and the old id redirects; every inbound edge is repointed by the merge *[M (decision 31 ruled 2026-09-06: the merge form is the mechanism — `migration.md#how-a-registered-entity-type-is-renamed-on-a-live-record`)]*
 - **MG-3** — the same: retire means freeze — no writer produces the type after its stage, nothing is deleted, and the freeze is verified by the count not moving *[M]*
 

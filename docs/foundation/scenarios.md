@@ -125,7 +125,7 @@ its step owner claims it (a lease on the step), and closes it with a `sign-off`;
 task projects the same state, so it is read in one retrieval. The pull request that carries the change is an `artifact`
 attached to the batch by edge; no step is taken on it. When every required review step is signed off,
 the `merge` step opens and the steward claims it; the merge is an `action` the steward evaluates at the
-action gate; on permit it is taken, the merged PR is the record it leaves, and the steward's sign-off
+action gate; on permit it is taken, the merged PR is the record it leaves, and the steward's verdict
 closes the batch naming `release` as its successor. The tasks leave the feature workflow and enter the
 release workflow: a new batch record opens for them with a `FOLLOWS` edge to the closed one, and the
 release is its artifact. The subject of every step was the tasks.
@@ -145,7 +145,7 @@ flowchart LR
     M -->|yes| S6[step merge: steward claims]
     S6 --> ACT[action: merge]
     ACT --> G{action gate}
-    G -->|permit| X[merge taken; sign-off names release]
+    G -->|permit| X[merge taken; verdict names release]
     X --> R2[batch: release workflow]
     R2 -.->|FOLLOWS| R
     REL[artifact: release] -.-> R2
@@ -168,8 +168,8 @@ flowchart LR
 
 Review finds that one of the three tasks does not belong in the change. The task is split out: its
 `ADDRESSED_BY` edge to the batch is ended and it enters the workflow again as a new batch of one, from
-the first step, with no sign-offs carried over. The original batch continues with the two tasks still
-attached and loses no sign-off; its pull request stays attached to it as an artifact, and the new batch
+the first step, with no verdicts carried over. The original batch continues with the two tasks still
+attached and loses no verdict; its pull request stays attached to it as an artifact, and the new batch
 will leave its own. Nothing on either task or either batch records the detachment as a field; the two
 edges, one ended and one live, are the record.
 
@@ -295,7 +295,7 @@ flowchart TD
 A runner about to claim a task performs the reachability probe, a real read of what the work will read.
 The read fails. The runner claims nothing, evaluates no gate, writes no checkpoint (there is nothing to
 write to), and announces the halt on the off-Neotoma path, aggregated per window. A second runner already
-mid-task attempts its sign-off write, which fails; it leaves the task in its prior state, writes its
+mid-task attempts its verdict write, which fails; it leaves the task in its prior state, writes its
 diagnostic capture to local disk, and stops. Its lease lapses on its own. When the probe succeeds again,
 the halt is announced as lifted, the task is claimable, and a re-claim finds the effects already taken by
 their dedup keys; a lapse count that reached its cap during the outage becomes a checkpoint now. Any grant
@@ -306,7 +306,7 @@ flowchart TD
     R1[runner 1: about to claim] --> P{reachability probe: real read}
     P -->|fails| H[halt: no claim, no gate decision, no checkpoint]
     H --> AN[announce halt off-Neotoma, per window]
-    R2[runner 2: mid-task] --> W{sign-off write}
+    R2[runner 2: mid-task] --> W{verdict write}
     W -->|fails| L[leave prior state; capture to local disk; stop]
     L --> LP[lease lapses on its own]
     P -->|succeeds later| U[announce halt lifted]
@@ -331,10 +331,10 @@ invariants 2 and 7.
 
 A task is created; that is its publication. It has no intake batch, so it is unrouted by that fact, and
 nothing else records it as such. The task enters intake: a batch record opens for it, and the `pm` step
-owner claims each step in turn — a lease on the step, and a sign-off to close it: `classify` writes the
+owner claims each step in turn — a lease on the step, and a verdict to close it: `classify` writes the
 task's `action_type` and, where a named principal is the point, `assigned_to`; `link` attaches the issue
 the task already concerns as an artifact; `dedupe` finds no open duplicate; `prioritize` sets the
-priority from the `priority_rubric` entity; `route`'s sign-off, the closing sign-off of the batch, names
+priority from the `priority_rubric` entity; `route`'s verdict, the closing verdict of the batch, names
 `feature` as the successor. The task leaves intake and enters the feature workflow: a new batch record
 opens with a `FOLLOWS` edge to the intake batch, and from there the scenario is (d). At any moment the
 task's chain is read along `FOLLOWS` from its live batch back to intake; nothing on the task records
@@ -348,7 +348,7 @@ flowchart TD
     S1 --> S2[link: existing issue attached as artifact]
     S2 --> S3[dedupe: no open duplicate]
     S3 --> S4[prioritize: from the priority_rubric entity]
-    S4 --> S5[route: closing sign-off names feature]
+    S4 --> S5[route: closing verdict names feature]
     S5 --> F[task enters feature; batch record opens]
     F -.->|FOLLOWS| I
     F --> D[from here, scenario d]

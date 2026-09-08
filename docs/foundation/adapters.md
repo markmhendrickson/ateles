@@ -8,7 +8,7 @@ and the action gate), `authority_model.md` (credentials bind to principals; appr
 steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
 operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
 below as open; and revision 18: when an artifact comes into existence, and what holds an effect before
-it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: continual inbound named as the inbound side, and the record's subscriptions as what an intake rule evaluates through). What is built, and where the adapter and the engine are still one process, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: open decision 35). Revised by the memo-gap pass of 2026-09-06 (revision 31: the source is kept, not only named). Revised by the workflow-format pass of 2026-09-06 (revision 34: a system whose delivery surface is a local filesystem is admitted through the same contract; open decision 45 — whether the host a daemon runs on is an external system). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a merchant is a system of its own and a purchase its class, under *Admitting a new adapter*; open decision 55, whether a second instance of the record is an external system). Revised by the testability pass of 2026-09-06 (revision 37: the window declared on the binding and the per-window observation on the adapter's `agent_session`; a credential-less outbound operation is a denial, never a drop; the linkage section states what a sign-off pins per kind). Revised by the rulings pass of 2026-09-06 (revision 38: decision 35 ruled as settled by the conformance suite — one binding type per external system, routing a field of it, the name and the substitution deferred to a vocabulary pass; decision 45 ruled — the host a daemon runs on is an external system). Revised by the event/signal/delivery pass of 2026-09-06 (revision 49: `vocabulary.md#event` cited where this document already used the word; one stray `gmail.md` anchor updated to the renamed section). Revised by the peering pass of 2026-09-06 (revision 56, rebased onto the checker-mechanism and self-awareness passes: decision 55 ruled — a peer instance is the record, extended by replication, not an external system; the interim `operator_only` rule retired for eligibility, replaced by `sync_peers`; a pointer added to the governance-write question decision 55 does not settle). Revised by the rendered-interface pass of 2026-09-06 (revision 61: a system reached only through a rendered interface — no event API, no stable record identifier — admitted under *Admitting a new adapter*; identity and linkage answered by obligation 3, extended from the dedup key to `external_id`; coverage answered by revision 34's filesystem finding, transferred without change; read-back argued as real but partial, naming what it cannot establish; freshness needing no new mechanism; a read-time planted-positive instrument named for the case a delivery-based drop counter cannot catch, a layout change that returns zero rows and reports nothing; the outbound default left to the existing fail-closed rule rather than special-cased; no decision opened). Revised by the host-configuration pass of 2026-09-06 (revision 65: a seventh obligation for an external system's own configuration considered and rejected — the contract judges the mapping, and configuration extends obligations 1 and 6 instead, read at the admission task's arch review step; the case carried through in full is `github.md`'s required host state). Revised by the agent-identity pass of 2026-09-06 (revision 66, **derived from** the operator's 2026-09-06 14:44 memo on agent identities across external systems: the general rule that an agent's identity lives in the record and an external system holds at most a credential that binds to it; the asymmetry between a system that issues a per-agent credential and one that does not; the outbound mark required where attribution cannot be external; decision 69 opened and ruled — a per-agent credential is an obligation where the system issues one; the binding declared on the `vendor_binding` on decision 42's pattern; AAuth established from the corpus as one of the credential kinds `authority_model.md#principals` already enumerates, not a second identity system).
+it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: continual inbound named as the inbound side, and the record's subscriptions as what an intake rule evaluates through). What is built, and where the adapter and the engine are still one process, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: open decision 35). Revised by the memo-gap pass of 2026-09-06 (revision 31: the source is kept, not only named). Revised by the workflow-format pass of 2026-09-06 (revision 34: a system whose delivery surface is a local filesystem is admitted through the same contract; open decision 45 — whether the host a daemon runs on is an external system). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a merchant is a system of its own and a purchase its class, under *Admitting a new adapter*; open decision 55, whether a second instance of the record is an external system). Revised by the testability pass of 2026-09-06 (revision 37: the window declared on the binding and the per-window observation on the adapter's `agent_session`; a credential-less outbound operation is a denial, never a drop; the linkage section states what a verdict pins per kind). Revised by the rulings pass of 2026-09-06 (revision 38: decision 35 ruled as settled by the conformance suite — one binding type per external system, routing a field of it, the name and the substitution deferred to a vocabulary pass; decision 45 ruled — the host a daemon runs on is an external system). Revised by the event/signal/delivery pass of 2026-09-06 (revision 49: `vocabulary.md#event` cited where this document already used the word; one stray `gmail.md` anchor updated to the renamed section). Revised by the peering pass of 2026-09-06 (revision 56, rebased onto the checker-mechanism and self-awareness passes: decision 55 ruled — a peer instance is the record, extended by replication, not an external system; the interim `operator_only` rule retired for eligibility, replaced by `sync_peers`; a pointer added to the governance-write question decision 55 does not settle). Revised by the rendered-interface pass of 2026-09-06 (revision 61: a system reached only through a rendered interface — no event API, no stable record identifier — admitted under *Admitting a new adapter*; identity and linkage answered by obligation 3, extended from the dedup key to `external_id`; coverage answered by revision 34's filesystem finding, transferred without change; read-back argued as real but partial, naming what it cannot establish; freshness needing no new mechanism; a read-time planted-positive instrument named for the case a delivery-based drop counter cannot catch, a layout change that returns zero rows and reports nothing; the outbound default left to the existing fail-closed rule rather than special-cased; no decision opened). Revised by the host-configuration pass of 2026-09-06 (revision 65: a seventh obligation for an external system's own configuration considered and rejected — the contract judges the mapping, and configuration extends obligations 1 and 6 instead, read at the admission task's arch review step; the case carried through in full is `github.md`'s required host state). Revised by the agent-identity pass of 2026-09-06 (revision 66, **derived from** the operator's 2026-09-06 14:44 memo on agent identities across external systems: the general rule that an agent's identity lives in the record and an external system holds at most a credential that binds to it; the asymmetry between a system that issues a per-agent credential and one that does not; the outbound mark required where attribution cannot be external; decision 69 opened and ruled — a per-agent credential is an obligation where the system issues one; the binding declared on the `vendor_binding` on decision 42's pattern; AAuth established from the corpus as one of the credential kinds `authority_model.md#principals` already enumerates, not a second identity system).
 
 ## Purpose
 
@@ -52,9 +52,9 @@ named here.
 
 ### The workflow engine never reads an external system; it reads the record
 
-One engine opens steps from the entities and reads the sign-offs
+One engine opens steps from the entities and reads the verdicts
 (`gates_and_workflows.md#declaration-batch-projection`). At the boundary that means: the engine's inputs
-are batches, leases, sign-offs, actions, checkpoints, and artifacts, all in the record, and nothing else.
+are batches, leases, verdicts, actions, checkpoints, and artifacts, all in the record, and nothing else.
 It does not call a code host to ask whether a pull request is approved, a mail system to ask whether a
 reply arrived, or a rail to ask whether a transfer settled. Only the adapter touches the external system,
 and what it learns there it writes to the record as a signal about an artifact, with provenance
@@ -69,7 +69,7 @@ in the external system that nobody wrote to the record changes no step.
 
 An inbound event is a signal about an artifact. It can yield exactly one of four things in the record:
 
-1. **a sign-off by a named principal**: the event is that principal's verdict on a step the batch has
+1. **a verdict by a named principal**: the event is that principal's conclusion on a step the batch has
    open, and the principal is the step owner. A principal's approval on a checkpoint it is required on
    is the same outcome in its other form, a decision attributed to a named principal and authorized
    against the required approvers (`authority_model.md#approval`);
@@ -79,10 +79,10 @@ An inbound event is a signal about an artifact. It can yield exactly one of four
 4. **a new task for intake**: with the artifact it concerns attached to it.
 
 Nothing else. An event never opens, claims, or closes a step, never names a successor, and never advances
-a batch; the sign-off it may yield does that, by the rules the step model already states. A verdict from
+a batch; the verdict it may yield does that, by the rules the step model already states. A conclusion from
 a credential that binds to no principal, or to a principal who does not own the step, is an observation on
-the artifact and never a sign-off: an automated credential's approval never stands in for a review step's owner. A CI
-result is a condition a step owner reads before signing, never a sign-off. This is
+the artifact and never a verdict: an automated credential's approval never stands in for a review step's owner. A CI
+result is a condition a step owner reads before signing, never a verdict. This is
 `work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject` applied to events: the artifact is
 the entry an external system holds; what happens to it is information about the batch's tasks, not a
 step taken on them.
@@ -93,7 +93,7 @@ delivery reaches:
 ```mermaid
 flowchart TD
     E["one inbound delivery"] --> C{"whose credential is the actor, resolved through the binding?"}
-    C -->|"the step owner of a step this batch has open"| O1["1. a sign-off by a named principal"]
+    C -->|"the step owner of a step this batch has open"| O1["1. a verdict by a named principal"]
     C -->|"a required approver on an open checkpoint"| O1b["the same outcome in its other form: that approval"]
     C -->|"a principal in neither role, or no principal"| REST{"what does the delivery concern?"}
     REST -->|"an artifact the record tracks"| O2["2. an observation on an artifact"]
@@ -153,7 +153,7 @@ flowchart TD
         STEP["the step works on what hydration resolved"]
         STEP --> NO["it reaches no external system itself"]
     end
-    NO --> RC["reads_to_close resolved by the same phase, then the sign-off"]
+    NO --> RC["reads_to_close resolved by the same phase, then the verdict"]
     subgraph AFTER["at the step's closing edge"]
         RC --> A["the actions the step produced"]
         A --> G{"the action gate, per action"}
@@ -175,7 +175,7 @@ part of hydration.
 **A read the adapter cannot fulfil fails the phase, and therefore the step.** The adapter does not return an
 empty result standing in for a system it could not reach — that is the permissive synthesis
 `gates_and_workflows.md#declaration-batch-projection` forbids. It returns `unknown`, the hydration phase
-does not proceed, and the step does not open (or, for `reads_to_close`, the sign-off is not written). What
+does not proceed, and the step does not open (or, for `reads_to_close`, the verdict is not written). What
 happens next is the rule that section already states — **hold, bounded, then escalate**: the condition is
 announced off-record while it may be transient, and the bound raises one checkpoint naming the dependency
 the step could not read. No separate failure path is defined here, because a step held on an unreachable
@@ -329,14 +329,14 @@ The four outcomes above are the adapter's whole vocabulary. Five rules decide am
 
 **Identity.** The actor of an external event is a credential (a login, an address, a chat id), never a
 principal; the adapter resolves it through the credential binding (`authority_model.md#principals`).
-Resolved to the step owner of an open step: the event may be that step owner's sign-off. Resolved to a
+Resolved to the step owner of an open step: the event may be that step owner's verdict. Resolved to a
 required approver on an open checkpoint: the event may be that approval. Resolved to a principal in
 neither role, or to no principal: the event is an observation. The adapter never invents a binding, and
 it never resolves an unrecognized credential to the operator, which is the fallthrough the claim
 predicate forbids (`work_model.md#pull-is-the-only-delivery-assignment-constrains-eligibility`). This is
-also the path by which a human principal signs: an agent step owner writes its sign-off to the record
+also the path by which a human principal signs: an agent step owner writes its verdict to the record
 directly and needs no event, while a principal whose only interface is the host signs through the host,
-and the adapter carries the verdict in.
+and the adapter carries the conclusion in.
 
 **Linkage.** An event names an artifact; the adapter finds the artifact for it by `system` and
 `external_id` (`data_model.md#concepts`) — the pair that identifies every artifact, because an artifact
@@ -357,7 +357,7 @@ ruled where those systems are tabled (decisions 23 and 24;
 not track: a new-record event on such a record (an issue opened, a message received) yields a task for
 intake with the artifact attached; any other event on it is dropped with that reason, counted and
 surfaced under the disposition rule below. The adapter never attaches an
-artifact to a batch on its own guess: intake's `link` step and the implementer's `impl` sign-off do that
+artifact to a batch on its own guess: intake's `link` step and the implementer's `impl` verdict do that
 (`workflows.md#intake`, `workflows.md#feature`).
 
 **Dedup.** Every inbound event carries the external system's delivery id as the idempotency key of the
@@ -396,7 +396,7 @@ external system, the reason goes back to that system as an observation the perso
 the operator does not read is not feedback.
 
 **Provenance and read-back.** Every write names the adapter, the external system, and the delivery id;
-every write that carries a decision (a sign-off, a resolution, a confirmation) is read back before the
+every write that carries a decision (a verdict, a resolution, a confirmation) is read back before the
 adapter acknowledges the event (principle 2). During a halt the adapter writes nothing, acknowledges
 nothing, and lets the external system redeliver; a signal the record cannot hold is not a signal the
 engine may act on (`failure_posture.md#the-rules`).
@@ -507,7 +507,7 @@ adapter's summary of it (principle 2): a reader who doubts an observation reads 
 is the read-back the record can still give after the external system has moved on. And the source is what
 **as-of** reconstruction (below) bottoms out on: an entity's state at time T along ingestion time is the
 observations readable then, each linking to the source read then, so a past state is traceable to the raw
-things the swarm had actually read at that moment, and a step's sign-off, judged on those, is traceable
+things the swarm had actually read at that moment, and a step's verdict, judged on those, is traceable
 through them to the external system's own words. What the source is not is a second copy of the external
 record's current state: it is the record of one read, at one time, with the coverage that read had, and the
 artifact's current state is the observations over all of them.
@@ -526,9 +526,9 @@ Three things in this design need that, and none of them can be answered by readi
 - **Freshness.** Whether an interval was ever completely read is a question about observations over time,
   and it is asked against ingestion time. This is why freshness is derived and never stored: the derivation
   has a real answer, where a stored field has only its last value.
-- **What a sign-off judged.** A sign-off is pinned to the artifact state it judged
+- **What a verdict judged.** A verdict is pinned to the artifact state it judged
   (`data_model.md#record-conventions`), and reconstructing that state means reconstructing what the record
-  held when the verdict was written — as it was readable then, not as it reads now. A verdict reviewed
+  held when the conclusion was written — as it was readable then, not as it reads now. A conclusion reviewed
   later, against a state that includes observations that arrived after it, is judged on information its
   step owner never had.
 - **A drop or a hold, reconstructed after the fact.** An adapter that dropped a delivery, or a step that
@@ -586,8 +586,8 @@ would otherwise look for here: what the adapter withholds from an inbound securi
 derived condition such as mergeability is an observation from a read rather than a fifth outcome.
 
 The two rules of this section that a reader should carry into it, because they are what the host most
-often erodes: a review's `APPROVE` becomes a sign-off only through identity — the same verdict from the
-same login is a sign-off when the login binds to the step owner of an open step and an observation
+often erodes: a review's `APPROVE` becomes a verdict only through identity — the same conclusion from the
+same login is a verdict when the login binds to the step owner of an open step and an observation
 otherwise, and nothing in the payload changes that. And every host state that looks like step state (a
 label, a review decision, a check, a closed pull request) reaches the step only through a principal who
 reads it and signs.
@@ -595,15 +595,15 @@ reads it and signs.
 **An artifact with no batch never receives retroactive step state.** No step of any workflow is opened on
 an artifact that no batch addresses, and neither an adapter nor the workflow engine may initialize a step
 on its behalf — not as `not_required`, not as `not_applicable`, not as clear, not as anything. Step state
-is derived from a batch, a lease, and a sign-off (`gates_and_workflows.md#declaration-batch-projection`);
+is derived from a batch, a lease, and a verdict (`gates_and_workflows.md#declaration-batch-projection`);
 where there is no batch there is nothing to derive it from, and a value written in place of that
-derivation is a fabricated verdict on work no principal judged. A pull request opened before any task
+derivation is a fabricated conclusion on work no principal judged. A pull request opened before any task
 exists for it is therefore an artifact with no batch, and it yields a task for intake like any other
 untracked record. The batch that later addresses that task opens its own steps, from the beginning of its
-workflow, and its `impl` sign-off cites the existing pull request in `artifact_refs[]` — the earlier
+workflow, and its `impl` verdict cites the existing pull request in `artifact_refs[]` — the earlier
 existence of the artifact buys the batch nothing and skips nothing. A companion rule of the same kind: a
-pull request whose shipped change exceeds the scope a review step signed does not inherit that narrower sign-off,
-because a sign-off is pinned to the artifact state it judged (`data_model.md#record-conventions`).
+pull request whose shipped change exceeds the scope a review step signed does not inherit that narrower verdict,
+because a verdict is pinned to the artifact state it judged (`data_model.md#record-conventions`).
 
 ## Gmail
 
@@ -673,7 +673,7 @@ series, which is the two-level rule under linkage above applied to a thing with 
 The rails hold artifacts of kind `transfer`, and a `receipt` where the rail issues one. A balance is **not**
 an artifact; it is an observation on the account's artifact, carrying the point it was read at. The
 separation of duties the payment workflow names applies to the adapter as to any principal: the adapter that
-takes a `pay` action never writes the `reconcile` sign-off (`workflows.md#payment`).
+takes a `pay` action never writes the `reconcile` verdict (`workflows.md#payment`).
 
 **The payment adapter is `payments.md`, in full.** That document maps every signal the rail classes can
 produce, tables the outbound operations with their action classes and confirmations, and answers at length
@@ -727,7 +727,7 @@ The framing matters, because the obvious one is wrong. Admitting an adapter look
 the mapping, get the credential, deploy the daemon — and treating it that way is what makes it dangerous.
 An adapter is the only component that touches a system the swarm does not own; it holds a credential; its
 writes are what every downstream step reads as fact; and its identity rule decides whether a stranger's
-comment becomes a sign-off. So admission is a **governance decision about what the record will believe**,
+comment becomes a verdict. So admission is a **governance decision about what the record will believe**,
 and the build is what follows it.
 
 **A system whose delivery surface is a local filesystem is admitted the same way, and the contract already
@@ -881,7 +881,7 @@ for exactly that reason (below).
 | # | What the adapter must demonstrate | What checks it, rather than the author asserting it |
 |---|---|---|
 | 1 | **Every delivery it can receive resolves to one of the four outcomes or to `dropped` with a reason.** Its document enumerates the external system's own event list, not the subset the swarm subscribes to, each row marked handled, deliberately ignored, or unhandled | The disposition rule itself, which is a **counter**, not a promise: an event outside the mapping resolves to `dropped` with reason `unmapped`, is counted per window and announced off-record. Coverage is therefore a number that should be zero and rises on its own when the enumeration is wrong (`github.md#the-property-that-makes-this-a-control-and-not-a-list`). An adapter whose drop counter is not wired has not satisfied this obligation, because nothing then distinguishes it from an adapter with nothing to do |
-| 2 | **Its identity rule resolves actors through the credential binding and nowhere else**, and it can produce, for its system, the enumeration of which credential kind binds to a principal | A negative test the adapter must fail on: a verdict-shaped delivery from a credential that binds to no principal, and one from a principal who does not own the open step, each yield an **observation** and never a sign-off (`authority_model.md#principals`). The check is that the test exists and goes red when the fallthrough is reintroduced — principle 4's revert test, applied to the one rule whose failure fabricates authority |
+| 2 | **Its identity rule resolves actors through the credential binding and nowhere else**, and it can produce, for its system, the enumeration of which credential kind binds to a principal | A negative test the adapter must fail on: a conclusion-shaped delivery from a credential that binds to no principal, and one from a principal who does not own the open step, each yield an **observation** and never a verdict (`authority_model.md#principals`). The check is that the test exists and goes red when the fallthrough is reintroduced — principle 4's revert test, applied to the one rule whose failure fabricates authority |
 | 3 | **Its dedup key is the external system's own delivery id inbound, and the action's `dedup_key` outbound** | A redelivery of one captured delivery produces exactly one write, asserted by reading the record back; and an outbound action whose key is already confirmed is refused. Both are read-backs of the record, not of the adapter's return codes (principle 2). Where the system issues no stable delivery id, that is a finding stated in the document, not a key the adapter invents |
 | 4 | **Every observation it writes carries source, sourced time, and coverage**, and it maintains no freshness field of its own | The absence check runs in the other direction and is the sharper one: the adapter holds **no** sync log, no last-seen cursor table, no local artifact cache (**What the record supplies**, above). A schema or a table that would need a process to stay true is the failure, caught in the pull request that introduces it, because principle 11 makes it reviewable by inspection rather than by intuition |
 | 5 | **Every write carrying a decision is read back before the delivery is acknowledged**, and during a halt it writes nothing, acknowledges nothing, and lets the system redeliver | Exercised against an unreachable record: the adapter must leave the delivery unacknowledged rather than acknowledge and drop it (`failure_posture.md`, rules 1 and 4). An adapter that acknowledges what it could not write turns an outage into silent data loss, which is the one failure the redelivery mechanism exists to prevent and the one this test catches |
@@ -892,7 +892,7 @@ external system's own *configuration*: a code host that permits an unreviewed me
 no sender verification, looks like a system whose adapter reports guarantees the system does not enforce.
 The contract does not take it, because the contract judges whether an adapter's **mapping** is fit to be
 believed, and a mapping is fit or unfit on its own terms — a host with no branch protection still yields
-sign-offs that are the step owners' own and merges that are still actions, because the identity rule
+verdicts that are the step owners' own and merges that are still actions, because the identity rule
 resolves through the credential binding and never through the host's own approval count. What a system's
 configuration genuinely governs is two things the contract already owns: whether the enumeration the
 mapping declares is the enumeration the system will actually deliver, which extends **obligation 1** with a
@@ -907,7 +907,7 @@ the required host state row by row, each row naming the claim it serves.
 Two other things this list deliberately does **not** contain, named so their absence reads as a decision rather
 than an oversight. There is no "the adapter is tested against the live system" obligation: what would fail
 is nothing the record can read, and an integration test's passing says nothing about the next delivery.
-And there is no sign-off by an adapter review board; the checks above are the review, and a second
+And there is no verdict by an adapter review board; the checks above are the review, and a second
 approving body would be the second gate principle 6 forbids.
 
 ### The obligations are the five rules, restated as failures
@@ -931,8 +931,8 @@ adapter whose system is small enough to sit as a section of this document carrie
 |---|---|---|
 | **Scope, and the enumeration's boundary** | which of the system's surfaces the document covers, and which are named as one class with one disposition rather than omitted | 1 — an omission that is not written down cannot be told from a gap |
 | **The inbound table** | every event and action the system can deliver, with its status (handled, deliberately ignored, unhandled) and its outcome or its drop reason | 1 |
-| **The identity section** | which credential kinds this system presents, which bind to principals, and what a verdict from an unbound credential becomes | 2 |
-| **The linkage section** | what `system` and `external_id` are for this system's artifact kinds, what a sign-off pins for each kind (`data_model.md#record-conventions`), and what happens when an identifier moves | 1, 3 |
+| **The identity section** | which credential kinds this system presents, which bind to principals, and what a conclusion from an unbound credential becomes | 2 |
+| **The linkage section** | what `system` and `external_id` are for this system's artifact kinds, what a verdict pins for each kind (`data_model.md#record-conventions`), and what happens when an identifier moves | 1, 3 |
 | **The outbound table** | per step, the operation, the action class, and **what confirms it landed**, read back from the system and never from a return code | 6, 5 |
 | **Recoveries** | per action class, what undoes an effect already taken, or that the class is forward-only | 6 — a recovery is an outbound operation like any other |
 | **What this adapter never does, at this system specifically** | the host-specific erosions: the operation that would grant the system a permit the gate did not issue | 2, 6 |
@@ -985,7 +985,7 @@ outward class until a principal permits it.
 **What is genuinely missing is smaller than it looks, and it is a declaration.** The three mechanisms
 above govern the adapter's *authority*; none of them governs whether its *mapping* is fit to be believed.
 A grant can be written, a policy listed, and a gate satisfied by an adapter whose identity rule is wrong —
-and the six obligations are what stand between that adapter and a fabricated sign-off. What closes the gap
+and the six obligations are what stand between that adapter and a fabricated verdict. What closes the gap
 is not a fourth mechanism but making the obligations reviewable at the moment the grant is written: the
 admission task's specification states its design basis against this section, and the arch review step
 checks the six obligations against the adapter's document before the grant's governance write is permitted
@@ -1081,8 +1081,8 @@ rather than of a log.
 
 **Why this is a rule and not a preference.** The design's honesty rules already forbid implying more than
 it can prove, in every place the question has come up. An adapter never resolves an unrecognized credential
-to the operator, because that fallthrough fabricates authority. A verdict from an automated credential is
-never a sign-off, because an automated account standing in for a review step's owner is authority the
+to the operator, because that fallthrough fabricates authority. A conclusion from an automated credential is
+never a verdict, because an automated account standing in for a review step's owner is authority the
 design did not confer (`github.md#outbound-the-operations-the-code-workflows-take-on-the-host`). A payment
 adapter refuses to supply identity material to a rail, because that is *an agent acting as the operator's
 identity to a financial institution* (`payments.md#what-the-adapter-refuses-and-why`). An unmarked outbound
@@ -1113,9 +1113,9 @@ Per-agent credentials are the narrow case of the rule the authority model states
 
 **What fails when it is absent, concretely.** A merge, a comment, or a branch update from a shared host account
 resolves through the binding to no single agent, so the four outcomes the adapter decides among lose their
-identity input: a verdict-shaped delivery from that credential binds to a principal the swarm cannot
-narrow, and the honest disposition is an **observation** rather than a sign-off — which means the shared
-credential does not merely weaken attribution, it makes the host unable to carry a sign-off at all
+identity input: a conclusion-shaped delivery from that credential binds to a principal the swarm cannot
+narrow, and the honest disposition is an **observation** rather than a verdict — which means the shared
+credential does not merely weaken attribution, it makes the host unable to carry a verdict at all
 (`#what-the-adapter-does-with-every-event`). Revocation stops every agent. And the graduated-trust argument
 collapses: what an adapter may reach is its grant, matched on the credential (`sub`, `iss`), so two agents
 on one credential cannot hold different grants on that system — the finer instrument the design chose
@@ -1183,7 +1183,7 @@ report, not this document's.
 
 ### When an adapter is wrong
 
-An adapter that mis-resolves identity could turn a stranger's comment into a sign-off. That is the worst
+An adapter that mis-resolves identity could turn a stranger's comment into a verdict. That is the worst
 case and it is worth stating plainly, because what limits it is not one guard but the structure the design
 already has. `failure_posture.md` covers the case where the adapter *cannot* write; this is the case where
 it writes something wrong, and the two are different failures.
@@ -1192,28 +1192,28 @@ Four properties bound the blast radius, and each is stated elsewhere:
 
 - **The adapter's reach is four outcomes, and one of them is the only dangerous one.** An adapter cannot
   open, claim, or close a step, name a successor, or advance a batch. Three of the four outcomes are
-  informational; only a sign-off carries a decision, and only where identity resolved to the step owner of
+  informational; only a verdict carries a decision, and only where identity resolved to the step owner of
   an open step. So a mis-mapped delivery is overwhelmingly a wrong observation, which is a bad fact, not a
-  false verdict.
-- **A wrong verdict is attributed, and attribution is what makes it recoverable.** Every write names the
-  adapter, the system, and the delivery id; a sign-off names the principal it is attributed to. So a
-  sign-off no principal actually made is *findable* — by reading the provenance of the writes an adapter
+  false conclusion.
+- **A wrong conclusion is attributed, and attribution is what makes it recoverable.** Every write names the
+  adapter, the system, and the delivery id; a verdict names the principal it is attributed to. So a
+  verdict no principal actually made is *findable* — by reading the provenance of the writes an adapter
   made in a window — rather than indistinguishable from a real one. An unattributed record could not be
   audited at all, which is why attribution is an authority-model requirement and not a convenience.
-- **A sign-off is pinned to the artifact state it judged.** A false sign-off does not silently cover later
-  work: the head moves and the pinned sign-off reads as stale by a derived read
+- **A verdict is pinned to the artifact state it judged.** A false verdict does not silently cover later
+  work: the head moves and the pinned verdict reads as stale by a derived read
   (`data_model.md#record-conventions`). The damage does not grow after the fact.
-- **The outward effects are gated separately.** A false sign-off closes a step; it does not take an action.
+- **The outward effects are gated separately.** A false verdict closes a step; it does not take an action.
   Every effect that leaves the swarm passes the action gate on its own class at the moment it would be
   taken, so the worst inbound failure still meets the outbound gate before anything irreversible happens.
   This is why the gate is per action and evaluated late rather than per task and evaluated early.
 
-**And the recovery is the ordinary one.** A sign-off written on a false identity is corrected the way any
-wrong write is: it is not deleted to make the record look clean. A verdict is terminal and a new judgement
-is a new sign-off (`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`), and an
+**And the recovery is the ordinary one.** A verdict written on a false identity is corrected the way any
+wrong write is: it is not deleted to make the record look clean. A conclusion is terminal and a new judgement
+is a new verdict (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`), and an
 effect already taken is undone by a recovery action of its own class through the same gate
 (`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`). Both the wrong
-verdict and its correction stay readable, which is the property that lets the adapter's defect be diagnosed
+conclusion and its correction stay readable, which is the property that lets the adapter's defect be diagnosed
 rather than only its symptom repaired.
 
 **Withdrawal is revocation, and its reach is already stated.** An adapter found to be wrong is stopped by
@@ -1387,7 +1387,7 @@ binding (`#whether-one-binding-type-or-two-names-an-external-systems-instance`),
 table enumerates a poll's differences as the system's events. The second keeps the boundary short and costs
 the record the ability to say which checkout a daemon was on when it signed — the gap the runner's
 self-report leaves whenever the runner is the thing that has stopped. **What would decide it,** as the question
-was opened: whether a step's sign-off is ever judged on host state — if a daemon-incident `verify` step must
+was opened: whether a step's verdict is ever judged on host state — if a daemon-incident `verify` step must
 attest that the fixed version is what the process itself reports, that read is a declared read, and a declared
 read of the host is an adapter's.
 
@@ -1402,7 +1402,7 @@ and an action on a system the swarm does not own is an adapter's to take. Princi
 reason the design wants the read at all, which was the half left to the operator: "a merged PR is not
 evidence it is fixed until the deployed checkout moves", so the deployed checkout's state is evidence the
 design already demands, and the deciding test is met by every daemon-incident `verify` step that must attest
-the fixed version is what the process itself reports. A read a sign-off is judged on is a declared read, and a
+the fixed version is what the process itself reports. A read a verdict is judged on is a declared read, and a
 declared read of a system outside the boundary is an adapter's. The second option would have left the
 runner's account of itself as the only record of the runner in exactly the case that needs the read — the one
 where the runner has stopped.

@@ -43,11 +43,11 @@ from the declarations (below).
   (`work_model.md#intake-is-every-tasks-first-workflow`).
 - **Steps**: the ordered list, each with its step owner by role, whether it is required, and its parallel group
   and join where it has one. A workflow's last step is always a single step, never a parallel group; its
-  sign-off is the batch's closing sign-off and names the successor
+  verdict is the batch's closing verdict and names the successor
   (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`). A step's state within a batch
-  is open, claimed, or signed, derived from edges (`gates_and_workflows.md`). A sign-off carries a
-  verdict; a failing verdict does not advance the batch, and the workflow declares per step which earlier
-  step opens again (`on_fail`), the failing sign-off staying in the record as history; a declared cap on
+  is open, claimed, or signed, derived from edges (`gates_and_workflows.md`). A verdict carries a
+  conclusion; a failing conclusion does not advance the batch, and the workflow declares per step which earlier
+  step opens again (`on_fail`), the failing verdict staying in the record as history; a declared cap on
   such rounds, when reached, escalates the batch's tasks (`failure_posture.md`, reason `rounds_exhausted`).
   Two intervals are declared on every step and shown in no table: `unclaimed_after`, after which an
   unclaimed step raises `unclaimed_step`, and `hold_bound`, the most a claimed step may hold on a condition
@@ -69,7 +69,7 @@ from the declarations (below).
   evaluated at the action gate at the moment it would be taken, whatever the workflow
   (`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`); the list is what to expect, not
   a bound.
-- **Successors**: the workflows the closing sign-off may name, and whether it may name none
+- **Successors**: the workflows the closing verdict may name, and whether it may name none
   (`none_permitted` — `gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`). A batch's
   tasks enter exactly one successor or, where the declaration permits it, none.
 - **Fast paths**: the declared skips and the condition that permits each. A fast path's condition is a
@@ -107,7 +107,7 @@ is declared.
 | release steward | every step of the release workflow |
 | copywriter | the `copy` step |
 | content author | the drafting and posting steps of social content and outreach |
-| lint runner | a deterministic step whose work is a script and whose sign-off is the script's result |
+| lint runner | a deterministic step whose work is a script and whose verdict is the script's result |
 | operator-facing agent | every step that carries a checkpoint or a task to the operator (`vocabulary.md#operator-facing-agent`) |
 | payer, verifier | the two disjoint roles of the payment workflow |
 | researcher, analyst | the working steps of research and of meeting processing |
@@ -133,7 +133,7 @@ state (`work_model.md#intake-is-every-tasks-first-workflow`).
 | 2 | `link` | `pm` step owner | yes | | every existing record the task **names** is attached by edge: an artifact (an issue, a pull request, a thread, a page), and a record already in the record (a transcription, an obligation, a profile, a plan, a contact) by `REFERS_TO` from the task; nothing is attached on relevance alone (`#what-link-attaches-and-what-it-leaves-to-hydration`); finding none is a valid close |
 | 3 | `dedupe` | `pm` step owner | yes | | the task is compared against tasks that are not terminal; a duplicate closes terminal with a `DUPLICATE_OF` edge to the task it duplicates (`data_model.md#relationships`) and this batch closes with no successor |
 | 4 | `prioritize` | `pm` step owner | yes | | the task's priority is set from the `priority_rubric` entity, retrieved by type, never from the classifier's own sense of urgency |
-| 5 | `route` | `pm` step owner | yes | | the closing sign-off names one successor workflow, or none, or `operator-only` |
+| 5 | `route` | `pm` step owner | yes | | the closing verdict names one successor workflow, or none, or `operator-only` |
 
 <!-- /rendered -->
 
@@ -151,7 +151,7 @@ and an `action_policy` is per class of effect. What carries it is the entity its
 observation on the `contact`, with provenance naming the message or the meeting that stated it and the time
 it was stated (`data_model.md#record-conventions`), and `link` attaches that contact because the task names
 it (`#what-link-attaches-and-what-it-leaves-to-hydration`). `route` then closes the batch with no successor,
-its sign-off carrying a finding that names the constraint, so that the refusal is a recorded verdict and not
+its verdict carrying a finding that names the constraint, so that the refusal is a recorded conclusion and not
 a silent skip; a step of a later workflow whose `reads_to_enter` names the type reads the same observation
 and holds the same way. The shape is principle 11's: a constraint written once on the thing it constrains
 needs no process to keep it true, where a prohibition list kept beside the record is the second source that
@@ -278,12 +278,12 @@ every review step the change concerns.
 | 5 | `pr_review` | `pr_review` step owner | yes | | the full diff is read and judged for correctness |
 | 6 | `qa` | `qa` step owner | yes | group `verification`, joins `legal` | the tests can fail on the thing they watch (`principles.md`, invariant 4) |
 | 7 | `legal` | `legal` step owner | no | group `verification`, joins `qa` | licensing, data-handling, and disclosure are judged where the change touches them |
-| 8 | `merge` | steward | yes | | the merge action taken through the action gate and the merged pull request read back; the sign-off names the successor |
+| 8 | `merge` | steward | yes | | the merge action taken through the action gate and the merged pull request read back; the verdict names the successor |
 
 <!-- /rendered -->
 
 The two parallel groups exist because their reviewing step owners judge independent things and neither
-needs the other's verdict; the join is what makes the batch wait for both. `legal` is the one optional
+needs the other's conclusion; the join is what makes the batch wait for both. `legal` is the one optional
 step, and it carries an `applies_when` condition: it opens where the change touches licensing,
 data-handling, or disclosure, and is recorded inapplicable where it does not, with the condition that
 ruled it out (`gates_and_workflows.md#declaration-batch-projection`). Every other step here is required
@@ -296,7 +296,7 @@ principle that fails an unclassified action type closed rather than passing it b
 legal risk must be judged before implementation starts, not after, expresses that by seating `legal` in the
 design stage of its own workflow declaration instead — the design does not preclude it, and does not
 declare it here. `merge` is a step so that the merge
-action has a step owner to claim it, a taking to record, and a sign-off to close the batch with; the
+action has a step owner to claim it, a taking to record, and a verdict to close the batch with; the
 action itself is governed by action policy, not by the step
 (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`).
 
@@ -310,7 +310,7 @@ commit.
 
 **Successors:** `release`; or none, where the declaration permits it (`none_permitted`) because the scope
 deploys its default branch on its own cadence and the merge is the last effect the task needs — a
-declaration for a scope that does not is written with none not permitted, and a closing sign-off naming
+declaration for a project that does not is written with none not permitted, and a closing verdict naming
 none under it is refused (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`).
 
 **Fast paths:** `bug` skips `ux`; `copy` skips `arch`; `security` skips `ux`, `qa`, and `legal`. Each is
@@ -335,13 +335,13 @@ is wrong, ideally as a failing test.
 | 2 | `impl` | implementer | yes | | a pull request exists with the fix, mergeable as read, and the red-then-green result recorded in its body |
 | 3 | `pr_review` | `pr_review` step owner | yes | | the full diff is read; the fix addresses the cause, not the symptom |
 | 4 | `qa` | `qa` step owner | yes | | the test fails on the reverted fix (`principles.md`, invariant 4) |
-| 5 | `merge` | steward | yes | | the merge action taken through the action gate and read back; the sign-off names the successor |
+| 5 | `merge` | steward | yes | | the merge action taken through the action gate and read back; the verdict names the successor |
 
 <!-- /rendered -->
 
 There is no `ux` or `arch` step because a fix restores stated behaviour and does not choose new
 behaviour; a bug whose fix requires a design choice is not carried by adding steps here: this batch closes
-without a successor, its closing sign-off carrying the finding that names the choice, and the design work is
+without a successor, its closing verdict carrying the finding that names the choice, and the design work is
 a **new** task through intake, referring to this batch's artifacts and produced from that finding
 (`gates_and_workflows.md#closed-work-is-reviewed-on-the-record-and-redone-through-intake-never-reopened`)
 — no task enters intake twice (`#intake`).
@@ -374,13 +374,13 @@ is deployed.
 | 1 | `pm` | `pm` step owner | yes | | the affected surface and the fix's scope are stated in the record; the public artifacts carry no exploit detail |
 | 2 | `impl` | implementer | yes | | a pull request exists with the fix, mergeable as read; its body describes the change, not the exploit |
 | 3 | `pr_review` | `pr_review` step owner | yes | | the full diff is read and the fix is judged complete for the stated surface |
-| 4 | `merge` | steward | yes | | the merge action taken through the action gate and read back; the sign-off names `release` |
+| 4 | `merge` | steward | yes | | the merge action taken through the action gate and read back; the verdict names `release` |
 
 <!-- /rendered -->
 
 The review steps that are absent (`ux`, `qa`, `legal`) are absent for speed, and the workflow compensates
 by never closing without a successor: a security fix that is merged and not released is not fixed, and
-the closing sign-off's only permitted successor is `release`. Disclosure hygiene is a property of the
+the closing verdict's only permitted successor is `release`. Disclosure hygiene is a property of the
 artifacts, checked at `pm` and `pr_review`, because the pull request and the release are public records.
 
 **Stages:** scoping (`pm`); implementation (`impl`); review (`pr_review`); integration (`merge`).
@@ -390,7 +390,7 @@ artifacts, checked at `pm` and `pr_review`, because the pull request and the rel
 **Typical action classes:** `build`, `git_push`, `open_pr`, `merge_pr`.
 
 **Successors:** `release`, always: the declaration does not permit none (`none_permitted`), so a closing
-sign-off naming none is refused at the write (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`).
+verdict naming none is refused at the write (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`).
 
 **Fast paths:** none.
 
@@ -414,12 +414,12 @@ repository that holds it.
 | 4 | `impl` | implementer | yes | | a pull request carries the words into the surface |
 | 5 | `pr_review` | `pr_review` step owner | yes | | the diff changes only the words the task names |
 | 6 | `legal` | `legal` step owner | no | | claims, comparisons, and regulated wording are judged where the copy makes them |
-| 7 | `merge` | steward | yes | | the merge action taken through the action gate and read back; the sign-off names the successor |
+| 7 | `merge` | steward | yes | | the merge action taken through the action gate and read back; the verdict names the successor |
 
 <!-- /rendered -->
 
 `copy` precedes `impl` because the words are the deliverable and the implementation is their carriage;
-`ux` is optional and scoped to layout so that the copy step's verdict on the words is not re-litigated by
+`ux` is optional and scoped to layout so that the copy step's conclusion on the words is not re-litigated by
 a second reviewing step, and its `applies_when` opens it where the change alters the surface the words sit
 in rather than only the words. `legal` is optional on the same footing as on feature. There is no `arch`
 step: copy changes no behaviour.
@@ -452,7 +452,7 @@ the target platforms, from the `channel_config` entity retrieved by type.
 | 1 | `draft` | content author | yes | | complete drafts exist for every targeted platform, stored in the record, against the `brand_voice` entity |
 | 2 | `draft_lint` | lint runner | yes | on fail: `draft` | the deterministic checks pass: no relative-time anchors, a substance floor per platform, no near-duplicate text across platforms, every targeted platform present |
 | 3 | `consent` | operator-facing agent | yes | on fail: `draft` | the checkpoint on the `publish` action, carrying the drafts inline, is resolved by the operator; feedback reopens `draft` |
-| 4 | `post` | content author | yes | | the `publish` action taken through the action gate on each platform and the posts read back; the sign-off closes the batch |
+| 4 | `post` | content author | yes | | the `publish` action taken through the action gate on each platform and the posts read back; the verdict closes the batch |
 
 <!-- /rendered -->
 
@@ -495,14 +495,14 @@ workflow together, as one batch (`work_model.md#what-goes-through-a-workflow-is-
 |---|---|---|---|---|---|
 | 1 | `criteria` | release steward | yes | | every criterion in the `release_criteria` entity, retrieved by type, is read and holds; a criterion that cannot be read is `unknown`, and unknown holds the batch (`principles.md`, invariant 7) |
 | 2 | `release` | release steward | yes | on fail: `criteria` | the `release` action taken through the action gate; the tag, package, or deployment is read back at its terminal status (`principles.md`, invariant 2) |
-| 3 | `verify_deployed` | release steward | yes | on fail: `release` | the deployed checkout reports the released version; the sign-off closes the batch |
+| 3 | `verify_deployed` | release steward | yes | on fail: `release` | the deployed checkout reports the released version; the verdict closes the batch |
 
 <!-- /rendered -->
 
 `verify_deployed` is a separate step because "released" and "landed" are different claims
 (`principles.md`, invariant 10), and a batch that closed on the release action's success would record
 the first as the second. `criteria` is separate from `release` so that the read of the criteria and the
-taking of the release are two sign-offs, and a release taken against criteria nobody read is visible as a
+taking of the release are two verdicts, and a release taken against criteria nobody read is visible as a
 batch missing one.
 
 **Stages:** readiness (`criteria`); shipping (`release`, `verify_deployed`).
@@ -535,7 +535,7 @@ from the record and the mail archive before anything is drafted, never assumed.
 | 3 | `review` | `pr_review` step owner | yes | on fail: `draft` | the draft is judged for facts, voice, and scope (it answers what was asked and nothing else) |
 | 4 | `consent` | operator-facing agent | yes | on fail: `draft` | the checkpoint on the `send_external_comms` action, carrying the full draft, is resolved by the operator |
 | 5 | `send` | content author | yes | | the `send_external_comms` action taken through the action gate and the sent message read back from the mail system, never inferred from the send call's return |
-| 6 | `follow_up` | content author | no | | a reply is linked as an artifact, or the declared follow-up interval passes and one follow-up was sent through the same gate, or the operator ends the follow-up; the sign-off closes the batch |
+| 6 | `follow_up` | content author | no | | a reply is linked as an artifact, or the declared follow-up interval passes and one follow-up was sent through the same gate, or the operator ends the follow-up; the verdict closes the batch |
 
 <!-- /rendered -->
 
@@ -595,9 +595,9 @@ profile, fails `classify` at intake.
 |---|---|---|---|---|---|
 | 1 | `prepare` | payer | yes | | the payee, amount, currency, rail, and reference are assembled from the profile and the obligation and stored on the task; the profile's constraints (no memo, attendance gate, cadence) are applied |
 | 2 | `verify` | verifier | yes | on fail: `prepare` | payee and amount match the profile and the obligation; the verifier is a principal disjoint from the payer (`authority_model.md#structural-checks-quorum-and-separation-of-duties`) |
-| 3 | `consent` | operator-facing agent | yes | on fail: `prepare` | the checkpoint on the `payment` action is resolved by the operator; it carries the payee, amount, currency, period, and rail exactly as the `verify` sign-off recorded them, and refers to that sign-off (`payments.md#a-payments-approver-is-shown-exactly-what-the-verifier-signed`, decision 27) |
+| 3 | `consent` | operator-facing agent | yes | on fail: `prepare` | the checkpoint on the `payment` action is resolved by the operator; it carries the payee, amount, currency, period, and rail exactly as the `verify` verdict recorded them, and refers to that verdict (`payments.md#a-payments-approver-is-shown-exactly-what-the-verifier-signed`, decision 27) |
 | 4 | `pay` | payer | yes | | the `payment` action taken through the action gate, keyed on its dedup key so a re-claim never pays twice (`work_model.md#at-least-once-implies-effect-dedup`) |
-| 5 | `reconcile` | verifier | yes | on fail: `pay` | the transfer is read back from the rail at its terminal status, matched to the obligation, and recorded as a `transaction` entity; the sign-off closes the batch |
+| 5 | `reconcile` | verifier | yes | on fail: `pay` | the transfer is read back from the rail at its terminal status, matched to the obligation, and recorded as a `transaction` entity; the verdict closes the batch |
 
 <!-- /rendered -->
 
@@ -630,7 +630,7 @@ gate, which changes whether `consent` carries a checkpoint, not whether the step
 trace to what was read, and delivered to whoever asked.
 
 **Entry condition:** intake closed naming `research`; the task states the question, the scope, and the
-sources permitted; a task that states a conclusion to confirm rather than a question to answer fails
+sources permitted; a task that states an answer to confirm rather than a question to answer fails
 `classify`.
 
 **Steps**
@@ -643,7 +643,7 @@ sources permitted; a task that states a conclusion to confirm rather than a ques
 | 2 | `gather` | researcher | yes | | every source read is recorded with its provenance; a source that could not be read is recorded as unread, not omitted |
 | 3 | `synthesize` | researcher | yes | on fail: `gather` | the analysis is written with each claim traced to a gathered source; a claim with no source is marked as the author's |
 | 4 | `persist` | researcher | yes | | an `analysis` entity holds the full body and is read back; the task refers to it |
-| 5 | `deliver` | researcher | yes | | the analysis reaches its audience in the briefed form: a rendered page, a message, or nothing beyond the entity; the sign-off closes the batch |
+| 5 | `deliver` | researcher | yes | | the analysis reaches its audience in the briefed form: a rendered page, a message, or nothing beyond the entity; the verdict closes the batch |
 
 <!-- /rendered -->
 
@@ -682,7 +682,7 @@ to fails `classify` (`CLAUDE.md`, people-data processing).
 | 1 | `ingest` | analyst | yes | | the transcript is in the record as a source with provenance, linked to the calendar event where one is found |
 | 2 | `summarize` | analyst | yes | | a `meeting_analysis` entity holds the summary, the decisions, and the open questions |
 | 3 | `extract` | analyst | yes | on fail: `summarize` | the action items, commitments, and participants are extracted; each participant is a `contact` entity holding what serves the relationship and nothing incidental or sensitive (RGPD Art. 9 categories are summarized or omitted, never transcribed); the fields a `contact` may take from a transcript are the allowlist on the analyst's grant, and a write outside them is denied at admission (`authority_model.md#grants`) |
-| 4 | `persist` | analyst | yes | | every extracted task is created in the record and enters its own intake; every entity is read back; the sign-off closes the batch |
+| 4 | `persist` | analyst | yes | | every extracted task is created in the record and enters its own intake; every entity is read back; the verdict closes the batch |
 | 5 | `deliver` | analyst | no | | a recap per participant is drafted as an outreach task, where the brief asked for one; never sent from this batch |
 
 <!-- /rendered -->
@@ -726,8 +726,8 @@ an `operator_only` action with reason `gate_hold`; the checkpoint is what this w
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
 | 1 | `present` | operator-facing agent | yes | | the task, its context, and the exact operator action it needs are carried to the operator through the channel the `channel_config` entity names; where an action exists, its checkpoint is what is carried, through the one decision queue |
-| 2 | `await` | operator-facing agent | yes | | the confirmation, never the resolution alone, closes the step — an adapter's read-back, an arriving artifact, or, where declared, the operator's report of the action taken, written as a report attributed to the operator principal (`gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`); a `denied` resolution closes the step on its failing verdict instead, with no confirmation to wait for; the lease is renewed throughout; the deferral is bounded and its exhaustion escalates the task with reason `rounds_exhausted` (`failure_posture.md#the-rules`, rule 5) |
-| 3 | `record` | operator-facing agent | yes | | the confirmation `await` closed on, or the failing verdict, is where the outcome lands: written on the task and read back; the sign-off closes the batch and names the successor the outcome calls for |
+| 2 | `await` | operator-facing agent | yes | | the confirmation, never the resolution alone, closes the step — an adapter's read-back, an arriving artifact, or, where declared, the operator's report of the action taken, written as a report attributed to the operator principal (`gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`); a `denied` resolution closes the step on its failing conclusion instead, with no confirmation to wait for; the lease is renewed throughout; the deferral is bounded and its exhaustion escalates the task with reason `rounds_exhausted` (`failure_posture.md#the-rules`, rule 5) |
+| 3 | `record` | operator-facing agent | yes | | the confirmation `await` closed on, or the failing conclusion, is where the outcome lands: written on the task and read back; the verdict closes the batch and names the successor the outcome calls for |
 
 <!-- /rendered -->
 
@@ -735,7 +735,7 @@ The workflow has three steps rather than one so that "presented and awaiting" is
 batch and not a notification's delivery status, and so that a task the operator never answers is
 visible as a batch whose `await` step has been open past its bound. That bound is `await`'s `hold_bound`, and
 because the step's close condition names no alternative to the confirmation but a `denied` resolution's
-failing verdict, reaching the bound with neither is rule 5's ceiling
+failing conclusion, reaching the bound with neither is rule 5's ceiling
 (`gates_and_workflows.md#declaration-batch-projection`).
 
 A single step of another workflow whose action is `operator_only` does not route here. It carries the
@@ -752,7 +752,7 @@ in this batch is taken without the operator (`gates_and_workflows.md#confidence-
 
 **Successors:** whichever workflow the operator's decision calls for, or none. A task the operator
 completed by hand closes with none; a task the operator redirected is routed by this batch's closing
-sign-off, not by a new intake, because the classification did not change.
+verdict, not by a new intake, because the classification did not change.
 
 **Fast paths:** none.
 
@@ -777,7 +777,7 @@ is the case the workflow exists for, and waiting for a session to "finish" would
 | 1 | `digest` | analyst | yes | | each session in scope has one digest in the record, stating what it claimed to do and what it left open; a session whose transcript cannot be read is recorded as unread, never as empty |
 | 2 | `verify` | analyst | yes | on fail: `digest` | every claim the digest carries is checked against the system of record that would hold its effect, and each is marked confirmed, refuted, or unverifiable; an unverifiable claim stays unverifiable and is never promoted to confirmed |
 | 3 | `reconcile` | analyst | yes | | claims that survive verification are reconciled against the tasks that already exist, so that a claim already tracked produces no duplicate |
-| 4 | `file` | analyst | yes | | every unreconciled item is created as a task and enters its own intake; each is read back; the sign-off closes the batch |
+| 4 | `file` | analyst | yes | | every unreconciled item is created as a task and enters its own intake; each is read back; the verdict closes the batch |
 
 <!-- /rendered -->
 
@@ -804,14 +804,14 @@ the workflow that owns it.
 **Purpose:** keep one planning record consistent with the work beneath it and the record above it — its
 completion criteria judged against its descendants' derived state, its decisions recorded as entities, the
 work it still owes created as tasks, and the lessons that belong to its parent filed upward — so that the
-layers of the planning hierarchy are held together by sign-offs rather than by a session's convention
+layers of the planning hierarchy are held together by verdicts rather than by a session's convention
 (`planning_model.md#maintenance-is-work-the-planning-workflow`).
 
 **Entry condition:** intake closed naming `planning`; the task is `PART_OF` exactly one planning record,
 which is the batch's subject and the first record on the task's ascent; it is the record's one live
 recurring instance (`work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next`),
 carrying a `recurrence` rule read from the record's `cadence`, whose `due_date` a descendant task's closing
-sign-off corrects to now and whose next instance this batch's closing sign-off creates. A planning task
+verdict corrects to now and whose next instance this batch's closing verdict creates. A planning task
 `PART_OF` no record, or two, fails `classify`.
 
 **Steps**
@@ -820,13 +820,13 @@ sign-off corrects to now and whose next instance this batch's closing sign-off c
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
-| 1 | `survey` | `planner` | yes | | the record's statement and its parent's, the derived reads over its descendants (completion, the open and terminal counts, the descendants held by a checkpoint, the open tasks in priority order, the child records with no live `planning` task), and the `decision` entities under it are read, resolved along the task's ascent and down the record's edges, and named on the sign-off as what was read |
+| 1 | `survey` | `planner` | yes | | the record's statement and its parent's, the derived reads over its descendants (completion, the open and terminal counts, the descendants held by a checkpoint, the open tasks in priority order, the child records with no live `planning` task), and the `decision` entities under it are read, resolved along the task's ascent and down the record's edges, and named on the verdict as what was read |
 | 2 | `judge` | `planner` | yes | | findings are recorded, one each: a completion criterion met that nothing closed on; a criterion the descendants cannot meet as stated; a descendant the statement does not describe; a decision under the record the work has since contradicted; a lesson that belongs to the parent; a child record no batch maintains |
-| 3 | `amend` | `planner` | yes | on fail: `judge` | every finding's remedy is written through the record's own primitives and read back: a correction to the statement and each new `decision` entity `PART_OF` the record as `amend_<level>` actions through the action gate, written by the engine on the permit; a task `PART_OF` the record for each criterion still owed; a task `PART_OF` the parent for each lesson that lands there; the next `planning` instance created before the sign-off; the sign-off closes the batch naming no successor |
+| 3 | `amend` | `planner` | yes | on fail: `judge` | every finding's remedy is written through the record's own primitives and read back: a correction to the statement and each new `decision` entity `PART_OF` the record as `amend_<level>` actions through the action gate, written by the engine on the permit; a task `PART_OF` the record for each criterion still owed; a task `PART_OF` the parent for each lesson that lands there; the next `planning` instance created before the verdict; the verdict closes the batch naming no successor |
 
 <!-- /rendered -->
 
-`survey` is separate from `judge` so that what the batch read is named on one sign-off and what it
+`survey` is separate from `judge` so that what the batch read is named on one verdict and what it
 concluded on another, and a finding is checkable against the reads it was made on (decision 40). `judge`
 writes nothing to the record but findings, so that a planner cannot amend a statement on a judgement it
 did not record. `amend` is the only step that writes authored content, and it writes through the gate: an
@@ -846,7 +846,7 @@ document rendered from a statement is a render target, not an artifact of this b
 
 **Typical action classes:** `amend_<level>`, one class per planning level the instance registers.
 
-**Successors:** none. The closing sign-off creates the next instance, which is a task creation and not a
+**Successors:** none. The closing verdict creates the next instance, which is a task creation and not a
 successor, as every recurring task's is.
 
 **Fast paths:** none.
@@ -902,7 +902,7 @@ foundation document's own coverage rather than a gate, a check, or an instrument
 | 1 | `pm` | `pm` step owner | yes | | the triggering halt, checkpoint, or standing finding is named, with its subject and reason class, and the scope of the review is stated on the task |
 | 2 | `investigate` | analyst | yes | | the observations that should have caught the drift before it compounded are named by reference, resolved as of the incident's time, and a finding is recorded stating what was missing — a gate, a check, a declared read, an instrument — not merely what happened |
 | 3 | `pr_review` | `pr_review` step owner | yes | | the finding names an executed check or a resolvable reference for every claim, per principle 2, and is judged complete for the incident's scope |
-| 4 | `merge` | steward | yes | | the finding's remedy is routed: an implementation-only fix as a task through intake, referring to this batch's finding; a decision-or-attestation gap as the institutionalization task of decision 17, referring to the same finding; the sign-off names the successor |
+| 4 | `merge` | steward | yes | | the finding's remedy is routed: an implementation-only fix as a task through intake, referring to this batch's finding; a decision-or-attestation gap as the institutionalization task of decision 17, referring to the same finding; the verdict names the successor |
 
 <!-- /rendered -->
 
@@ -964,7 +964,7 @@ finding and the tasks it produces are in the record.
 **Typical action classes:** none of its own; a recovery a finding names as unexercised is an action under
 its own class, taken through the action gate like any other recovery.
 
-**Successors:** none. The closing sign-off's effect is the routed task or the institutionalization task it
+**Successors:** none. The closing verdict's effect is the routed task or the institutionalization task it
 refers to, not a workflow this batch itself enters.
 
 **Fast paths:** none.
@@ -992,7 +992,7 @@ disclosed as a limitation because it is one: nothing above closes the recursion,
 **Ruled (2026-09-06).** Registered in `conformance.md#the-register-of-open-design-decisions`. Drop the
 `steps[].phase` field. Every workflow section above carries a **Stages** line, and
 `gates_and_workflows.md#declaration-batch-projection` defined a stage as a contiguous named group of steps
-and gave each declared step a `phase` field. No rule reads either: no gate, verdict, fast path,
+and gave each declared step a `phase` field. No rule reads either: no gate, conclusion, fast path,
 `applies_when`, successor, or checkpoint keys on a stage, and where a batch is is already its current step
 (`vocabulary.md#owner-five-meanings-one-word-forbidden-alone`). The grouping was stated in two homes — the
 prose line and the declaration's field — with no mechanism behind either, the shape principle 9 names, and

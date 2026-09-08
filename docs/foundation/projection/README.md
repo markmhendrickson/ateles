@@ -17,24 +17,24 @@ Generated from `conformance_suite.md`'s conformance matrix by `execution/scripts
 
 | Projected document | Rules | Chars | Against `MAX_DOC_CHARS` |
 |---|---|---|---|
-| `adapters.md` | 42 | 9,711 | under |
+| `adapters.md` | 42 | 9,722 | under |
 | `authority_model.md` | 21 | 4,099 | under |
-| `calendar.md` | 8 | 2,688 | under |
-| `conformance.md` | 8 | 7,774 | under |
+| `calendar.md` | 8 | 2,687 | under |
+| `conformance.md` | 8 | 7,776 | under |
 | `conformance_suite.md` | — | 522 | under |
-| `data_model.md` | 28 | 3,916 | under |
-| `failure_posture.md` | 25 | 3,467 | under |
-| `gates_and_workflows.md` | 58 | 10,185 | under |
-| `github.md` | 18 | 4,082 | under |
-| `gmail.md` | 11 | 3,505 | under |
+| `data_model.md` | 28 | 3,914 | under |
+| `failure_posture.md` | 25 | 3,470 | under |
+| `gates_and_workflows.md` | 58 | 10,199 | under |
+| `github.md` | 18 | 4,078 | under |
+| `gmail.md` | 11 | 3,504 | under |
 | `lenses.md` | — | 4,179 | n/a — an index, never a selected reading |
-| `migration.md` | 13 | 6,131 | under |
+| `migration.md` | 13 | 6,134 | under |
 | `payments.md` | 17 | 6,117 | under |
-| `planning_model.md` | 12 | 3,982 | under |
-| `principles.md` | 11 | 3,011 | under |
+| `planning_model.md` | 12 | 3,980 | under |
+| `principles.md` | 11 | 3,017 | under |
 | `telegram.md` | 17 | 4,779 | under |
 | `vocabulary.md` | 4 | 939 | under |
-| `work_model.md` | 53 | 10,156 | under |
-| `workflows.md` | 26 | 5,886 | under |
+| `work_model.md` | 53 | 10,149 | under |
+| `workflows.md` | 26 | 5,868 | under |
 
-372 rules projected, 90,948 chars in total across the set. `MAX_DOC_CHARS` = 12,000 bounds each file above; `MAX_BLOCK_CHARS` = 40,000 bounds one review's block, which is the kernel plus the documents keyed to the changed paths — never the whole set.
+372 rules projected, 90,954 chars in total across the set. `MAX_DOC_CHARS` = 12,000 bounds each file above; `MAX_BLOCK_CHARS` = 40,000 bounds one review's block, which is the kernel plus the documents keyed to the changed paths — never the whole set.

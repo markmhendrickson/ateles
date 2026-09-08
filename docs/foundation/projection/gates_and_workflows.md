@@ -12,8 +12,8 @@ Every rule `gates_and_workflows.md` owns, one entry each: the rule's own stateme
 - **GW-1** — one `workflow` per (declaration_scope, type) *[M]*
 - **GW-2** — the same: `owner_role` holds a role, never an agent name *[M]*
 - **GW-3** — the same: step state is derived; no step entity *[M]*
-- **GW-3a** — the same: `step_status` is the projection of the batch's sign-offs, proved equal to them by a reconciler; neither is deleted, neither is a second source of truth; no transition event type *[M]*
-- **GW-4** — the same: a rejected sign-off write is an error, never swallowed *[M]*
+- **GW-3a** — the same: `step_status` is the projection of the batch's verdicts, proved equal to them by a reconciler; neither is deleted, neither is a second source of truth; no transition event type *[M]*
+- **GW-4** — the same: a rejected verdict write is an error, never swallowed *[M]*
 - **GW-5** — the same: a step does not proceed when a declared read is unreadable *[M]*
 - **GW-6** — the same: a step that reads an undeclared type is a declaration error *[M (declaration); D at runtime (U-9: the grant is the outer bound, AU-21, and the design keeps no read log)]*
 - **GW-7** — the same: freshness for adapter-sourced types is derived *[M]*
@@ -21,7 +21,7 @@ Every rule `gates_and_workflows.md` owns, one entry each: the rule's own stateme
 - **GW-9** — the same: a hydration failure holds, bounded, then escalates `undeclared_dependency` *[M]*
 - **GW-10** — the same: a degraded read never synthesizes a permissive value *[M]*
 - **GW-11** — the same: `unknown` distinct from empty at every read *[M]*
-- **GW-12** — the same: only a sign-off closes a required step; no principal signs for another *[M]*
+- **GW-12** — the same: only a verdict closes a required step; no principal signs for another *[M]*
 - **GW-13** — the same: only the operator may waive; one `waived` per step; scoped to one batch's unsigned required steps *[M]*
 - **GW-14** — the same: `applies_when` has three values; unevaluable opens; an optional step's condition reads what exists when it would open *[M]*
 - **GW-15** — the same: the condition is declared on the workflow and never read from the artifact *[M]*
@@ -29,14 +29,14 @@ Every rule `gates_and_workflows.md` owns, one entry each: the rule's own stateme
 - **GW-17** — the same: no step is closed by elapsed time *[M]*
 - **GW-18** — the same: scope amendment versus scope creep *[M for the record; R for whether a change exceeds the criteria (U-8 closed)]*
 
-## [Findings, verdicts, and what a blocking finding obliges](../gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges)
+## [Findings, conclusions, and what a blocking finding obliges](../gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges)
 
-- **GW-19** — findings bind; a contradictory verdict is refused at submission *[M (U-6 closed)]*
-- **GW-20** — the same: three verdict values *[M]*
-- **GW-21** — the same: a verdict is terminal, never revised *[M]*
-- **GW-22** — the same: a verdict carries no condition *[M for shape; R for a condition written in prose (U-5 closed)]*
-- **GW-23** — the same: routing a remedy never transfers the verdict; a decision-kind finding is not routable *[M (U-6 closed)]*
-- **GW-24** — the same: a blocking verdict names its evidence *[M (U-6 closed)]*
+- **GW-19** — findings bind; a contradictory conclusion is refused at submission *[M (U-6 closed)]*
+- **GW-20** — the same: three conclusion values *[M]*
+- **GW-21** — the same: a conclusion is terminal, never revised *[M]*
+- **GW-22** — the same: a conclusion carries no condition *[M for shape; R for a condition written in prose (U-5 closed)]*
+- **GW-23** — the same: routing a remedy never transfers the conclusion; a decision-kind finding is not routable *[M (U-6 closed)]*
+- **GW-24** — the same: a blocking conclusion names its evidence *[M (U-6 closed)]*
 
 ## [A finding is one-off or standing, and a standing one obliges a change to what produced it](../gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it)
 
@@ -102,14 +102,14 @@ Every rule `gates_and_workflows.md` owns, one entry each: the rule's own stateme
 - **GW-48** — the same: deferral bounded; timeout terminal, never continues *[M]*
 - **GW-49** — the same: one queue, one protocol *[M]*
 
-## [Whether the verdict is a stored field or a read over the findings and the author](../gates_and_workflows.md#whether-the-verdict-is-a-stored-field-or-a-read-over-the-findings-and-the-author)
+## [Whether the conclusion is a stored field or a read over the findings and the author](../gates_and_workflows.md#whether-the-conclusion-is-a-stored-field-or-a-read-over-the-findings-and-the-author)
 
-- **GW-51** — the rule this heading states *[closed: decision 32 ruled 2026-09-06 — the field stays as the sign-off's own projection of its findings and its author, reconciled at the write (`gates_and_workflows.md#whether-the-verdict-is-a-stored-field-or-a-read-over-the-findings-and-the-author`); GW-19, GW-20, and GW-21 stand as its rows, unchanged]*
+- **GW-51** — the rule this heading states *[closed: decision 32 ruled 2026-09-06 — the field stays as the verdict's own projection of its findings and its author, reconciled at the write (`gates_and_workflows.md#whether-the-conclusion-is-a-stored-field-or-a-read-over-the-findings-and-the-author`); GW-19, GW-20, and GW-21 stand as its rows, unchanged]*
 
 ## [What a step leaves at close: what it produced, and a reference to what it read](../gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read)
 
-- **GW-52** — (ruling 40): what a step produced is written as the entities it is; what it read is named on the sign-off (`REFERS_TO` → entity, `artifact_refs[]` with heads) and reproduced by an as-of read at `signed_at`; its reasoning is not written; `agent_session` gains no transcript *[M]*
-- **DM-28** — (decision 40, the sign-off-provenance narrowing): a sign-off's `REFERS_TO` → `session_digest`, required where `SIGNED_BY` resolves to an agent and a digest exists for the session that produced the sign-off; permitted, never required, where the signer is not an agent (a human sign-off carried in through an adapter, [`adapters.md#what-the-adapter-does-with-every-event`](../adapters.md#what-the-adapter-does-with-every-event)) *[M]*
+- **GW-52** — (ruling 40): what a step produced is written as the entities it is; what it read is named on the verdict (`REFERS_TO` → entity, `artifact_refs[]` with heads) and reproduced by an as-of read at `signed_at`; its reasoning is not written; `agent_session` gains no transcript *[M]*
+- **DM-28** — (decision 40, the verdict-provenance narrowing): a verdict's `REFERS_TO` → `session_digest`, required where `SIGNED_BY` resolves to an agent and a digest exists for the session that produced the verdict; permitted, never required, where the signer is not an agent (a human verdict carried in through an adapter, [`adapters.md#what-the-adapter-does-with-every-event`](../adapters.md#what-the-adapter-does-with-every-event)) *[M]*
 
 ## [Work is reviewed on the record, and a channel carries only what awaits the operator or cannot wait](../gates_and_workflows.md#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait)
 

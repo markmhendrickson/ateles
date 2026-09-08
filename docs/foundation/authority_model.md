@@ -337,9 +337,9 @@ follow is their write, not the checkpoint's effect.
 
 And the negative, collected here because a denied principal reading one rule should find all three:
 **an agent denied a capability does not route around the denial.** It does not ask another principal to
-make the write on its behalf — no principal signs for another, and a verdict attributed to a principal that
-did not reach it is a false record. It does not park the result on an artifact — a verdict that reached
-only the artifact is an observation and never a sign-off (`failure_posture.md` rule 4). And it does not act
+make the write on its behalf — no principal signs for another, and a conclusion attributed to a principal that
+did not reach it is a false record. It does not park the result on an artifact — a conclusion that reached
+only the artifact is an observation and never a verdict (`failure_posture.md` rule 4). And it does not act
 under another principal's credential — that is impersonation, which delegation forbids by name (below). Each
 of the three is forbidden elsewhere; what was missing is one place a denied agent would actually read them.
 
@@ -554,7 +554,7 @@ document's first revision, says why the exception is marked and not silent: one 
 from itself, so the check is recorded as unsatisfied rather than pretended — a marked self-resolution is
 inspectable, a reader counting the operator's self-approvals reads the mark, and an unmarked one would be the
 side door 43 closes, reopened at the resolution. The mark is the resolver's own assertion at the write,
-reconciled against `RAISED_BY` and `RESOLVED_BY` by the refusal, in the shape decision 32 gave the `verdict`:
+reconciled against `RAISED_BY` and `RESOLVED_BY` by the refusal, in the shape decision 32 gave the `conclusion`:
 not derived state a process keeps true, but a claim the record checks once, at the write.
 
 **Cost accepted.** For a solo operator the check is ceremony on the operator's own writes, made readable
@@ -770,7 +770,7 @@ that checkpoint by decision 46 (`#what-owning-confers-the-required-seat`) — th
 because the object it owns is what the decision concerns — and the operator is that seat where nobody else
 holds it. The resolution is the confirmation: the README's "what stops? confirmed by a principal" is a
 resolver recorded on a checkpoint whose subject names the stops, and nothing else records it. What the
-resolution confirms is a decision; the stop is then made and read back (principle 2) — the closing sign-off
+resolution confirms is a decision; the stop is then made and read back (principle 2) — the closing verdict
 or the priority correction retrieved and asserted before the initiative's own batch proceeds — so a stop
 asserted and not read back is not a stop, in the shape revision 36 gave the `operator_only` action
 (`#approval`).
@@ -837,7 +837,7 @@ why it is spent off the record.
 ### Credit is a read model over attribution
 
 **Ruled (decision 54, the brief's Q8, 2026-09-06): credit is a read model over attribution — the
-sign-offs, actions, and observations with the principals they carry — and is never stored.** Registered as
+verdicts, actions, and observations with the principals they carry — and is never stored.** Registered as
 ruled in `conformance.md#the-register-of-open-design-decisions`.
 
 **Why.** Principle 11, and a precedent this document already set: the `authority_chain` is "a derived read
