@@ -787,10 +787,29 @@ there:
   either the endpoint is retired, or its output is generated from the same source the snapshot reads,
   making disagreement structurally impossible rather than a standing caution. Until either is true, the
   operator rule to distrust the description stands as the swarm-side mitigation, not a fix.
+- **The record admits a read against the requesting principal's grant, per entity type, default-deny.**
+  This is decision 94's rule stated as what the substrate owes, which is where it belongs: the rule is the
+  design's, and the enforcement point is the record's. Observable: a principal whose grant names one type
+  and asks for another is refused by the record, with the refusal naming the type and not the row. The
+  write half of the same rule (decision 41) is the precedent — it is enforced at the record already — and
+  the read half is the same check on the same grant at the other verb.
 
-These three are stated as obligations on the substrate; none is asserted as built today, and none is a
+These four are stated as obligations on the substrate; none is asserted as built today, and none is a
 claim about which release of Neotoma satisfies them (principles.md's evidence rules govern that
 separately, `#phases-and-implementation-state`).
+
+**An obligation stated here is not weakened by the substrate not yet meeting it, and not answered by the
+swarm building a compensating layer.** Where the record does not yet do what this section requires, that is
+work in the record's own repository, and this corpus records it in `status.md` as design-versus-checkout
+accounting. It is never a ground for a design claim here — neither for stating a rule differently, nor for
+interposing a component of the swarm's own to do the substrate's job. This is the general form of the
+reasoning decision 80 already used against the swarm's own implementation ("a mechanism chosen because the
+existing keys already have its shape is the implementation choosing the design"), extended to the case
+where the implementation being reasoned from belongs to another repository — which decision 95 did, and
+which is why it was reopened (`status.md`, revision 72). The distinction the section turns on is that a
+design states what it requires of a record and the record's foundation commits to providing it; a gap
+between the two is a defect in one of them, located and fixed where it lives, and not a fact either design
+may reason from.
 
 ## What belongs to the migration, not the design
 
