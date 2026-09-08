@@ -774,46 +774,161 @@ hardest to review afterwards.
 
 **What would reopen it.** Decision 43 or 56 reopening; nothing about planning records in particular.
 
-### Whether an instance's planning records are per instance, and how a swarm reading several relates them
+## Whether an instance's planning records are per instance, and how a swarm reading several relates them
 
-**Open (decision 98, opened 2026-09-08 by the decisions 81 to 83 pass).** Registered in
-`conformance.md#the-register-of-open-design-decisions`. The operator raised the question in the memo that
-retired decision 82's framing, and it is registered here rather than absorbed into that ruling because the
-subject is this document's and not the tenancy axis's (invariant 12).
+**The rules in this section.**
 
-**The question.** Where a swarm is configured with several instances of the record, does each instance carry
-its own planning records — its own missions, strategies, projects, and plans, representative of that
+- [Planning records are per instance, and this is a consequence of rules already ruled](#planning-records-are-per-instance-and-this-is-a-consequence-of-rules-already-ruled).
+- [A declared read may name another instance, and three conditions hold it](#a-declared-read-may-name-another-instance-and-three-conditions-hold-it).
+- [What this does not reach: a read is not a write, and the separation still binds](#what-this-does-not-reach-a-read-is-not-a-write-and-the-separation-still-binds).
+
+**Ruled in part (decision 98, opened 2026-09-08 by the decisions 81 to 83 pass, ruled the same day).**
+Registered in `conformance.md#the-register-of-open-design-decisions`. The operator raised the question in
+the memo that retired decision 82's framing, and it is registered here rather than absorbed into that
+ruling because the subject is this document's and not the tenancy axis's (invariant 12). Two of the three
+halves the row carried are ruled here. The third — whether the swarm has planning of its own belonging to
+no one instance — is split out and registered as its own row rather than left as a remainder of this one,
+for the reason stated at the end of this section.
+
+**The question.** Where a swarm is configured with several instances of the record, does each instance
+carry its own planning records — its own missions, strategies, projects, and plans, representative of that
 instance — or does the swarm hold one hierarchy that spans them? The operator's framing: his personal
 instance would carry his own planning, and an instance shared with a client engagement would carry that
 engagement's, so the set of instances represents not only his own world but the collaborative worlds he
 works within.
 
-**What is already settled and constrains any answer.** Decision 76 rules that one operator's several
-instances are **several records** that must not merge, with an explicit binding that fails closed when
-ambiguous. `#the-mechanism-against-cross-record-collision-is-the-subject` already makes a planning write
-land only on the record the writing batch's task is `PART_OF`, refused at the write by the engine where the
-referred record is not the first on the producing task's ascent. Both point toward per-instance planning
-being what the design already implies rather than a new mechanism — a hierarchy spanning instances would
-need an ascent that crosses a boundary decision 76 says nothing may cross.
+### Planning records are per instance, and this is a consequence of rules already ruled
 
-**What is genuinely open, and why the row is not ruled by derivation.** Two things the settled rules do not
-reach. First, whether a swarm reading several instances may **relate** their planning records at all — read
-one instance's strategy as context for a task bound to another — or whether the ascent is closed at the
-instance boundary in both directions. Decision 76 forbids a *write* that merges and an orchestrator that
-reads across to write one brief; whether a declared, attributed read across instances is the same thing is
-not stated, and the operator's "the swarm needs to navigate and leverage them" suggests he wants something
-across them. Second, whether a swarm holding several instances has any planning of **its own** — records
-about its operation that belong to no one instance — or whether every planning record is some instance's.
-An answer to the second interacts with decision 91, which has since been ruled: a deployment naming several
-instances names one of them as controlling, and the controlling instance is where that deployment's governance
-writes go. So a candidate home for swarm-level planning exists. What that ruling does not supply, and what keeps
-this half open, is whether the swarm has planning of its own at all — a home being available is not a record
-needing one.
+**Each instance of the record carries the planning records for the work that lives in it.** An instance's
+missions, strategies, projects, and plans are that instance's; no hierarchy spans two of them.
 
-**What would decide it.** Whether any rule in this document reads a planning record from outside the
-record its task ascends to. None does today, which is why the row is open rather than ruled: the design is
-currently indifferent, and the operator's own use — several engagements, each with its own planning, acted
-within rather than merged — is the fact that settles it, as it settled decision 76.
+**This is derived, not chosen, and the distinction matters for what may later change it.** The rules that
+settle it were each ruled for another purpose, and the conclusion falls out of them without a preference
+being exercised. `#the-hierarchy-is-edges-and-a-task-has-one-line-upward` gives a planning record at most
+one `PART_OF` edge upward and a task at most one, so a hierarchy is a chain of edges terminating at a root.
+`#the-mechanism-against-cross-record-collision-is-the-subject` makes the engine refuse an `amend_<level>`
+write whose referred record is not the first record on the producing task's ascent — a check at the write,
+over one edge. Decision 76 rules that one operator's several instances are **several records** that must
+not merge (`authority_model.md#whether-one-operators-several-instances-of-the-record-are-one-record-or-several`).
+A hierarchy spanning two instances would need a `PART_OF` edge from a planning record in one to a planning
+record in the other; that edge would put two records on one ascent, and the first record on the ascent — the
+thing the collision check reads — would no longer be well defined. The check does not fail such a write
+after deliberating; there is nothing for it to compute. So the spanning hierarchy is not a shape the design
+refuses on a ground it might later reconsider. It is a shape the ruled mechanism cannot express.
+
+**What follows from it being a consequence rather than a choice.** This half reopens only if one of its
+premises does — decision 76 ceasing to hold that several instances are several records, or the ascent
+ceasing to be one edge per record — and not on a use case for spanning hierarchies. A use case would be an
+argument to change those rules, made in their own sections, and this half would then follow whatever they
+became. Nothing is owed to the operator's memo here beyond the fact it supplied: that the several-instance
+case is live, which is what made the question worth asking rather than what settles it. This is the same
+posture decision 76 itself took toward that fact.
+
+**What the operator wanted, checked against what this gives him.** A personal instance carrying his own
+planning and an engagement's instance carrying that engagement's is exactly the per-instance shape, and it
+is what the design already produced. The half of his framing that is not settled by this — the swarm
+navigating and leveraging the set rather than being partitioned by it — is the next rule.
+
+### A declared read may name another instance, and three conditions hold it
+
+**A step's declared read may name an instance other than the one its task is bound to, and the read is
+admitted or refused by the named instance.** This is a read, and only a read.
+
+**Why the fail-closed binding does not forbid it.** The contrary reading — that decision 76's fail-closed
+rule already refuses every cross-instance read — mistakes what that rule is about. Decision 76 rules that
+the binding is **explicit** and that an **ambiguous** binding fails closed: a read resolving to no instance,
+or to several with no rule to pick between them, is put to the operator rather than resolved to whichever
+instance is configured first. A read that names its instance is the opposite of the case that rule
+addresses. It is the explicit binding the rule asks for, exercised over a value that happens not to be the
+task's own instance. Reading "an ambiguous binding fails closed" as "a cross-instance binding fails closed"
+substitutes the conclusion for the condition, and the ruled text supports neither substitution: what it
+refuses by name is resolution *by configuration order*, on the ground that configuration order is not a
+declaration and cannot be reviewed. A named instance is a declaration and can be.
+
+**Why the corpus already permits the further case.** A declaration's step already declares reads reaching
+systems outside the boundary entirely — a mailbox, a calendar, a repository — through the admission
+contract this design states for adapters, each with a stated freshness
+(`adapters.md#the-adapter-runs-before-and-after-a-step-never-during-it`). Decision 55 rules that a second instance
+of the record's own software is **not** an external system but the same record extended by replication
+(`adapters.md#whether-a-second-instance-of-the-record-is-an-external-system`), and its ruling states
+directly that a read of a peered entity is a read like any other, dated by its own `observed_at` and
+attributable through `source_peer_id`. So the corpus permits a declared read of a mailbox and permits a
+read of a peered instance, and forbidding the nearer case — a second instance the same operator is
+accountable in — while permitting both would be incoherent. The distance argument runs the wrong way for
+the prohibition.
+
+**The three conditions, each already ruled elsewhere.**
+
+| The condition | Where it is already ruled |
+|---|---|
+| The read **names its instance explicitly**. A read that does not, and resolves to no instance or to several, fails closed exactly as before | decision 76 (`authority_model.md#whether-one-operators-several-instances-of-the-record-are-one-record-or-several`) |
+| The read **declares a freshness**, as any declared read whose subject lives elsewhere does; and freshness stays a derived read over sourcing and coverage, never a stored field | `adapters.md#the-adapter-runs-before-and-after-a-step-never-during-it`, `vocabulary.md#freshness` |
+| **Admission applies at the named instance.** The read is admitted or refused by that instance's grant for the requesting principal, per entity type, default-deny | decisions 94 and 97 (`authority_model.md#grants`, `authority_model.md#where-a-harness-reaches-the-record-and-what-admits-the-request`) |
+
+**The third condition is what makes the mechanism safe, and it should be read as the substance of this
+ruling rather than as a procedural rider.** Decision 97 puts the enforcement point at the record's own
+admission check against the requesting principal's grant, and rules that a proxy in front of the record is
+never the enforcement point. Decision 94 makes read admission default-deny per entity type, with the grant
+as the allowlist. Together they mean a cross-instance read is not something the reading side grants itself.
+The far instance decides, against the grant it holds for that principal, with the check made at the
+read and no component of the reader's needing to be correct or even alive for a refusal to hold. Decision 76
+gave a principal a distinct identity in each instance; this is what that identity is for. An engagement's
+instance that has admitted nothing to the operator's personal principal answers a read from it with a
+refusal, and the refusal is the far instance's, not a policy the reader was trusted to apply to itself.
+
+**What this costs, accepted.** A step that declares a cross-instance read fails where the far instance's
+grant does not admit the type, and fails at hydration rather than degrading
+(`adapters.md#the-adapter-runs-before-and-after-a-step-never-during-it`), so the work stops and the operator is
+asked for a grant. Accepted: the alternative is a read that succeeds because the reader decided it should,
+which is the shape principle 1 calls reporting without binding.
+
+### What this does not reach: a read is not a write, and the separation still binds
+
+**This is a read, and a write across instances is not ruled here and is not permitted by it.** Decision 91
+rules that a deployment naming several instances names one of them as **controlling**, and that the
+deployment's governance writes go there
+(`adapters.md#which-of-a-deployments-several-instances-takes-its-governance-writes`). A write from one
+instance's work into another's planning records would put one instance's governance in the hands of a task
+bound to a different one, which is what decision 91's ruling and this document's collision mechanism each
+place elsewhere. Reading across is what this section permits. Writing across is refused by the mechanism in
+`#the-mechanism-against-cross-record-collision-is-the-subject`, unchanged by anything here — the engine
+still refuses an `amend_<level>` whose referred record is not the first on the producing task's ascent, and
+a cross-instance read does not put the far record on that ascent.
+
+**Decision 76's separation rule survives this ruling intact, and the two are about different questions.**
+That rule says an orchestrator reading across two of the operator's stores to write **one brief** has
+crossed the separation, and that the design refuses it there rather than relying on the orchestrator's
+care; it closes by saying the reads are partitioned the way the writes are. What that rule protects is a
+sensitivity boundary between an operator's own instances — personal data and a client engagement's not
+being combined into a single artifact by a component whose only guarantee is its own diligence. Whether the
+*mechanism* for a declared, attributed, admitted read exists is a different question, and the two answers do
+not collide: the mechanism may exist and that separation may still bind every use of it. A step that names
+an instance, declares a freshness, and is admitted by that instance's grant is not the orchestrator decision
+76 refuses — it is not deciding for itself what it may see, and it is not synthesizing across the boundary
+under its own care. A step that does combine two instances' content into one brief has crossed the
+separation whether it got there by a declared read or by any other route, and decision 76 refuses it on
+that ground and not on how the bytes arrived. The partition sentence is a statement about what may be
+*combined*, enforced where combining happens; it is not a second, wider prohibition on a read ever naming a
+second instance, which would make decision 55's peered read unreachable for the same operator's own two
+instances while leaving it available across accountable parties.
+
+**The third half is split out rather than left open here.** Whether the swarm holding several instances has
+planning of its **own** — records about its operation belonging to no one instance — is registered as its
+own row in `conformance.md#the-register-of-open-design-decisions` rather than kept as an unruled remainder
+of this one. Two reasons, and the first is precedent: decision 82 and decision 91 each divided a compound
+question rather than half-ruling it, and a row whose subject is partly ruled and partly open is a row whose
+status field cannot be read without reading its prose. The second is that the remaining half does not share
+this one's premises. What is ruled above turns on the ascent, the collision check, and the admission point;
+what remains turns on whether a class of record exists at all that is about the swarm's operation rather
+than any operator's work — a question decision 91 supplies a *home* for without supplying a tenant, as that
+ruling says of itself. Those are not two answers to one question. Keeping them in one row would make the
+next pass re-read a settled argument to find the open one.
+
+**What would reopen what is ruled.** The per-instance half: decision 76 ceasing to hold, or the ascent
+ceasing to be one edge per record. The cross-instance read: decision 55 being reversed so that a second
+instance is an external system after all — which would not forbid the read but would move it behind an
+adapter and an action class — or decision 94 or 97 moving the admission point off the record, which would
+remove the property this ruling rests on and would have to be reargued here.
 
 ## What this document does not decide
 

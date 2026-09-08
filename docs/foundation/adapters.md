@@ -1724,11 +1724,13 @@ records under decision 76, and this ruling picks which of them takes one class o
 is real.
 
 **What this leaves open, and what it does not reach.** Decision 98 — whether an instance's planning records
-are per instance, and whether a swarm holding several has planning of its own — depends on this ruling for
-the narrow part of its own question and is not ruled here. What this supplies is that the controlling
-instance exists and is well-defined, so swarm-level planning has a *candidate* home rather than none;
-whether planning belonging to the swarm itself is a thing the design has at all, and whether a declared read
-may relate one instance's planning to a task bound to another, are 98's and are untouched. This ruling also
+are per instance, and whether a declared read may relate one instance's planning to a task bound to another
+— depended on this ruling for the narrow part of its own question and was not ruled here; it has since been
+ruled in `planning_model.md#whether-an-instances-planning-records-are-per-instance-and-how-a-swarm-reading-several-relates-them`,
+per instance and with the cross-instance read admitted at the instance it names. What this supplies is that
+the controlling instance exists and is well-defined, so swarm-level planning has a *candidate* home rather
+than none; whether planning belonging to the swarm itself is a thing the design has at all is decision 99,
+split from 98 when 98's other halves were ruled, and is untouched here. This ruling also
 does not say how a deployment states which instance is controlling, or what the field is called — that is a
 mechanism, and it belongs with the `deployment_configuration` entity decision 90 already sends the
 per-instance bindings to.
