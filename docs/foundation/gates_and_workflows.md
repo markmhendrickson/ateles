@@ -113,6 +113,41 @@ reaches an external system mid-execution reintroduces the second source of truth
 to remove, and its inputs stop being a fixed set any reader can name. So a step's inputs are resolved,
 recorded, and readable before it runs, and what the step then works on is the record.
 
+**A step does not open until the write it depends on is readable by the principal that will execute it**
+(decision 89). The read side of a dependency is already stated twice over: the declaration names the types
+(`reads_to_enter`), and for an adapter-sourced type it names the coverage it requires. This states the write
+side of the same dependency, for the case the read side cannot see — where what the step must read is a
+**preceding step's own write**, and the principal that must read it is not the principal that wrote it.
+Principle 2 already obliges the writer to retrieve its write and assert the field holds the value, but a
+writer's successful read-back is evidence about the writer's own view and about nothing else. The two
+principals reach the record over different seats, under different grants, through different harnesses, and
+a write the writer can read back is not thereby a write the next step's owner can read. So the condition on
+opening is stated where it binds — on the reader, at the moment the step would open — and the writer's
+read-back stays what principle 2 makes it.
+
+**It states ordering, never immediacy.** The design asserts no interval and no substrate guarantee: how
+long a write takes to become readable is a property of the instance and of its health, and
+`failure_posture.md` exists because the swarm sometimes cannot reach its own record at all. What the design
+states is the order — the write is readable, then the step opens — which is checkable at the moment it
+matters by the principal it binds, and which holds on a degraded record as it holds on a healthy one. A
+write the next step's owner cannot yet read is the `unknown` its declared read already returns, so the step
+holds, bounded, and escalates on the bound (above); it is never an empty result and never a smaller
+success (principle 5, principle 7). Under a degraded record this fails closed: the step that cannot read
+its predecessor's write does not open, where a step that assumed the write landed would proceed on a gap.
+
+**Two records made the gap visible.** A correction written at the highest priority the record accepts was
+overwritten by another principal about three seconds later, so the value the next step would have read was
+not the value the writer read back — maximum priority proved not to be terminal, and the writer's own
+read-back said nothing about what any later reader would see. And a review step's owner, unable to persist
+its verdict to the record because its harness refused the write, posted that verdict where a person could
+read it but the record could not: the pull requests it judged carry review-step verdicts of approval while
+their gate state stays pending, and the merge step, which reads gate state and not those comments, never
+opened. In the second the write did not happen at all, and the point is what the design could not say
+about it — the
+writer treated its work as complete, and no rule named the readability the dependent step needed. The
+second record is also an instance of the question of whether a harness may provide less than the grant it
+was issued names, which is registered separately and is not ruled here.
+
 **A read dependency on a type marked special-category is declared like any other and carries no marker of
 its own.** Health data and the other categories the people-data rule names are bounded differently from a
 contact — in who may be granted the type, in what may be copied out of it, in what a writer persists — but
