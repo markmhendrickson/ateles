@@ -174,7 +174,7 @@ mark's reach (the type, per revision 36's F23 — a session type carrying third-
 inherits the mark, no per-row flag needed). Decision 64 did not rule the field-by-field shape, and its
 register row does not stay open for that shape either: naming `conversation`'s fields, normalizing them, and
 writing a `reducer_config` for each of the three types is schema authoring for the owner just named, the same
-kind of write `#type-registration-is-an-owned-decision-write-read-back-tests-never-register-into-the-shared-registry`
+kind of write `data_model.md#record-conventions`
 already requires of any registration — not a design fork the register exists to hold open.
 
 **What must be authored.** One schema row per type — `conversation`, `conversation_message`, and

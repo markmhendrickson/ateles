@@ -841,7 +841,7 @@ and `operator_only` is reserved by default for a governance class with no policy
 fail-closed rule (invariant 5), and one that wants the swarm sending through such a surface at all sets the
 class's tier explicitly, informed by the read-back's limits stated above — this document does not set that
 tier itself, because the tier is `action_policy` data belonging to the instance, never a constant of the
-design (`#what-is-kept-current-and-at-what-cadence`). A read-only binding — a `channel_config` or
+design (`#continual-inbound-is-the-inbound-side-and-an-intake-rule-evaluates-downstream-of-it`). A read-only binding — a `channel_config` or
 equivalent that grants the adapter no send capability — is the narrower and simpler case, and needs nothing
 beyond an ordinary grant that confers no outbound capability (`#degrees-of-trust-the-design-distinguishes-and-grants-already-express-it`).
 
@@ -1402,11 +1402,11 @@ a sweep enumerating what an exposure reached on a shared instance. `reads_to_ent
 `contact` is one — but the record's `contact` rows and the shared instance's are not the same rows, and
 nothing in a declaration says which record a read is of.
 
-**Why, from the design's own definitions.** An `#artifact` is an entry an external system holds, reached
+**Why, from the design's own definitions.** A `vocabulary.md#artifact` is an entry an external system holds, reached
 only through that system's adapter and always identified by its `system` and `external_id`. A row a peered
 instance contributes has neither: it carries no `external_id` because it was never minted by an adapter's
 read-back, and it is reached the same way any local row is — retrieved from the record, not fetched through
-a system's own client. It enters through the same machinery an `#observation` already names: "one
+a system's own client. It enters through the same machinery a `vocabulary.md#observation` already names: "one
 append-only, timestamped, provenance-bearing write to an entity in the record", with the peer that produced
 it on `source_peer_id` exactly as an adapter's write carries the host or instance it came from. The boundary
 the design draws is the record versus what an adapter must reach — the record's own peering does its
@@ -1423,7 +1423,7 @@ external system a step takes. What actually controls whether an entity crosses a
 "tagged"` and the `sync_peers` array on the entity's own snapshot — eligibility chosen by the writer, per
 entity, at the substrate the record's own peer-sync subsystem provides — and what controls whether a synced
 write takes effect once it lands is the reducer's provenance-ranking and, for a governance type, the
-admission and action-gate rules stated below (`#a-synced-observation-on-a-governance-type-is-recorded-and-never-takes-effect`).
+admission and action-gate rules stated below (`gates_and_workflows.md#a-synced-observation-on-a-governance-type-is-recorded-and-never-takes-effect`).
 The `operator_only` mechanism is retired for this case; the tag and the two rules it names replace it.
 
 **What follows for reads and writes.** A read of a peered entity is a read like any other, dated by its own

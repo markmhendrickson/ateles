@@ -194,7 +194,7 @@ changes, a due date arrives — and a stored value on the task does not move wit
 re-writes every task under the changed record, which is the watchdog principle 11 refuses to require. What
 already exists in this design confirms the shape rather than inventing it: a planning record's `next_steps`
 is already "a derived read: the record's open descendants in priority order"
-(`#maintenance-is-work-the-planning-workflow`) — the design derives ordering at the plan level today and has
+(`planning_model.md#maintenance-is-work-the-planning-workflow`) — the design derives ordering at the plan level today and has
 never stored it there. The everyday claim-ordering question this section answers is the same read, one level
 down: for the pool of tasks one principal may legitimately take, order by what is already on the record and
 already read elsewhere — the standing of the task's ascent (an objective's declared weight, a plan's), a
@@ -272,7 +272,7 @@ never got, and an unset class here is not bound by a "must" it never got either.
 **The observable, tightened for a "must" class.** The repeated-pattern read this section already defines for
 "may" — a principal repeatedly claiming lower-standing work while higher-standing work of the same class
 sits claimable and undeclined, read from the record rather than a stored flag
-(`#the-observable-that-catches-a-violation`) — tightens to a per-instance check where the class's policy says
+(`#priority-orders-the-claimable-pool-it-does-not-enter-it`) — tightens to a per-instance check where the class's policy says
 "must": a single instance of a bound principal claiming anything but the highest-standing claimable task of
 that class, with none of the ordinary fitness exceptions available (there are none once the class says
 "must" — that is what binding the class means), is itself the violation, not merely the pattern. The read is
