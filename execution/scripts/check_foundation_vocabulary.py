@@ -44,9 +44,19 @@ allowlist — and never affects the exit code; pass ``--no-undefined-words`` to 
 
 Usage:
     check_foundation_vocabulary.py [--root DIR] [--quiet-advisory] [--top N] [--no-undefined-words]
+                                   [--no-code]
 
-Exit 1 on any Never hit, on a ``PATTERNS`` key that names no entry (an incomplete check is not a pass),
-or on a missing corpus; 0 otherwise. Stdlib only; ``conformance.md#mechanical-checks-on-this-directory``.
+A fourth scan reads **code, not prose**: every name in vocabulary.md's Retired-names table is looked for
+in identifier positions across ``execution/daemons``, ``execution/scripts``, and ``lib``. Prose bans stop
+at the directory edge, so a decision that renames a field the swarm reads can land across the documents
+while the code keeps the old identifier and nothing fails — decision 70's ``project`` ->
+``declaration_scope`` changed nine documents and no code. The watched list is derived from the table, so
+retiring a name arms the check in the same change; a line that says "retired", cites its decision, or
+carries ``# vocab-ok:`` is skipped, which is how a documented compatibility fallback stays legal.
+Pass ``--no-code`` to skip it.
+
+Exit 1 on any Never hit, on a retired name used as an identifier in code, on a ``PATTERNS`` key that names
+no entry (an incomplete check is not a pass), or on a missing corpus; 0 otherwise. Stdlib only; ``conformance.md#mechanical-checks-on-this-directory``.
 """
 
 from __future__ import annotations
@@ -596,11 +606,125 @@ def scan(root: Path, never: list[Ban], not_for: list[Ban]) -> tuple[list[Hit], l
     return never_hits, advisory
 
 
+# ── Retired identifiers in code ───────────────────────────────────────────────
+#
+# The Never/Not-for scan above reads `docs/foundation/*.md` only. That is the right scope for prose bans,
+# but it leaves a whole class of drift uncaught: a decision renames a *field or type the swarm actually
+# reads*, the rename lands across the documents, and the code keeps the old identifier. Nothing compares
+# the two, so the corpus and the daemons disagree and the check stays green — exactly what happened to
+# decision 70's `project` -> `declaration_scope`, where nine documents changed and no code did.
+#
+# This scan closes that gap with the narrowest thing that would have caught it: the **Retired names** table
+# in vocabulary.md is the corpus's own list of names that must no longer be used, so a retired identifier
+# appearing as a dict key or attribute in daemon code is a hit. Deriving the list from the table rather
+# than hand-keeping one here means retiring a name arms the check in the same change.
+#
+# Deliberately narrow, because the alternative is noise that gets suppressed:
+#   * Only quoted/attribute identifier positions (`snap.get("project")`, `wf.project`) — never free prose
+#     in a comment or docstring, where naming a retired term to explain it is correct.
+#   * Only multi-word or underscored names, plus an explicit CODE_WATCHED set. Single ordinary words like
+#     `escalation` or `passage` are common English and carry no rename signal in a Python file.
+#   * A line carrying "retired", "decision NN", or a `# vocab-ok:` note is skipped: naming the old key in
+#     the comment that explains a compatibility fallback is the documented practice, not a defect.
+CODE_DIRS = ("execution/daemons", "execution/scripts", "lib")
+
+# The scan is a RATCHET, not a gate on the existing tree. 20 (file, name) pairs already used a retired name
+# when this check was written — `checkpoint_brief`, `participation_record`, `workflow_definition` and the
+# rest are live entity types the daemons genuinely read, and `migration.md` is the plan that retires them.
+# Failing on those would block every unrelated change on migration work that has not run. So the baseline
+# below is reported and not failed on, while any NEW pair fails immediately. Clearing the baseline is
+# migration work; adding to it to silence a fresh hit defeats the check.
+CODE_BASELINE = Path(__file__).with_name("retired_names_in_code_baseline.tsv")
+
+
+def load_code_baseline(path: Path = CODE_BASELINE) -> set[tuple[str, str]]:
+    """The (file, retired name) pairs that predate this check. Missing file means an empty baseline."""
+    out: set[tuple[str, str]] = set()
+    if not path.is_file():
+        return out
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) == 2:
+            out.add((parts[0].strip(), parts[1].strip()))
+    return out
+
+# Retired names worth watching in code even though they are single ordinary words: each is a field or type
+# the swarm reads, so the old spelling in an identifier position is real drift rather than English.
+CODE_WATCHED = frozenset({"project", "sign_off", "signoff"})
+
+_CODE_IDENT_RE = re.compile(
+    r"""(?:["'](?P<q>[A-Za-z_][A-Za-z0-9_]*)["']|\.(?P<a>[A-Za-z_][A-Za-z0-9_]*))"""
+)
+_CODE_EXEMPT_RE = re.compile(r"retired|vocab-ok|decision\s+\d+", re.I)
+
+
+def retired_identifiers(vocab_text: str) -> set[str]:
+    """Every name in vocabulary.md's Retired-names table, as a code identifier.
+
+    Reads the first column of the ``## Retired names`` table — the corpus's own statement of what may no
+    longer be used — and normalizes each backticked name to its identifier spelling (``sign-off`` and
+    ``sign off`` both become ``sign_off``). Derived, never hand-kept: retiring a name arms this check in
+    the same change that retires it.
+    """
+    out: set[str] = set()
+    in_table = False
+    for line in vocab_text.splitlines():
+        if line.startswith("## "):
+            in_table = "retired names" in line.lower()
+            continue
+        if not in_table or not line.startswith("|"):
+            continue
+        first = line.split("|")[1] if line.count("|") > 1 else ""
+        for raw in re.findall(r"`([^`]+)`", first):
+            name = raw.strip().lower().replace("-", "_").replace(" ", "_")
+            if not re.fullmatch(r"[a-z_][a-z0-9_]*", name):
+                continue
+            if "_" in name or name in CODE_WATCHED:
+                out.add(name)
+    return out
+
+
+def scan_code(root: Path, retired: set[str]) -> list[tuple[str, int, str, str]]:
+    """Retired names used as identifiers in the code the foundation describes.
+
+    Returns ``(file, line_no, name, text)`` per hit. Only identifier positions are examined, and a line
+    that names the term as retired, cites the decision, or carries ``# vocab-ok:`` is skipped — a
+    compatibility fallback that explains itself is the practice this check is meant to protect, not break.
+    """
+    hits: list[tuple[str, int, str, str]] = []
+    for d in CODE_DIRS:
+        base = root / d
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*.py")):
+            rel = str(path.relative_to(root))
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for no, line in enumerate(lines, 1):
+                if _CODE_EXEMPT_RE.search(line):
+                    continue
+                for m in _CODE_IDENT_RE.finditer(line):
+                    name = m.group("q") or m.group("a")
+                    if name and name.lower() in retired:
+                        hits.append((rel, no, name, line.strip()))
+    return hits
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     ap.add_argument("--quiet-advisory", action="store_true", help="print only the advisory summary")
     ap.add_argument("--top", type=int, default=5, help="most common advisory terms to list")
+    ap.add_argument(
+        "--no-code",
+        action="store_true",
+        help="skip the retired-identifier scan of daemon and script code",
+    )
     ap.add_argument(
         "--no-undefined-words",
         action="store_true",
@@ -666,7 +790,20 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"undefined-word candidates (advisory, threshold {UNDEFINED_WORD_THRESHOLD}): none"
             )
-    return 1 if never_hits or stale else 0
+    retired = retired_identifiers(vocab_text)
+    code_hits = scan_code(args.root, retired) if not args.no_code else []
+    baseline = load_code_baseline()
+    new_hits = [h for h in code_hits if (h[0], h[2]) not in baseline]
+    for f, no, name, text in new_hits:
+        print(f"RETIRED-IN-CODE {f}:{no}: {name!r} is a retired name: {text[:110]}")
+    if not args.no_code:
+        known = len(code_hits) - len(new_hits)
+        print(
+            f"code check: {len(retired)} retired name(s) watched across {', '.join(CODE_DIRS)}; "
+            f"{len(new_hits)} new hit(s), {known} baselined (migration debt, see "
+            f"{CODE_BASELINE.name})"
+        )
+    return 1 if never_hits or stale or new_hits else 0
 
 
 if __name__ == "__main__":
