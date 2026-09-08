@@ -12,7 +12,7 @@ for changing the swarm's own operation), and PR #745 operator review (2026-09-05
 23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default),
 and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: one live instance,
 completion creates the next, `FOLLOWS` task to task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the task-sources index, the intake rule, and open decision 36). Supersedes `docs/archive/task_execution_loop.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a status and claimability read from the checkpoint; the declared terminal set; two moments open a batch; `tasks_attached[]`; the next recurring instance created and read back before the closing verdict; a terminal status only where the declaration permits none; the writer as the cross-type cycle check's enforcement point; C2 settled by the write contract). Revised by the rulings pass of 2026-09-06 (revision 38: a `signed` or blocking verdict is written under a held lease, cited from decision 44's ruling; the bootstrap set as the closed list decision 43 rules). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 36 ruled here — a rule keys on no work-model record type, the operator's lean toward every type considered and set aside; decision 43's second half cited as ruled; the C2 and `blocked` settlements marked reviewed and upheld). Revised by the planning pass of 2026-09-06 (revision 40: a task's one `PART_OF` edge targets its parent task or a planning record; the ascent as a derived read distinct from the chain; unplanned work admitted). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: `runner`, already defined in `vocabulary.md`, settled as the seat a step's outcome depends on — no new type introduced). Revised by the priority pass of 2026-09-06 (revision 47: ordering within the claimable pool given a home beside `claimable`, argued as a derived read over the ascent, `due_date`, workflow urgency, and blast radius rather than a maintained field, on the operator's connection from the ancestry reversal; a principal's "may" rather than "must" toward the highest-standing task, with decision 62 opened on whether an instance may bind the stronger form). Revised by the rulings pass of 2026-09-06 (revision 48: decision 34 ruled — `engine` defined, `pipeline` retired for the step-path publisher; the count of four execution mechanisms unchanged). Revised by the event/signal/delivery pass of 2026-09-06 (revision 49: one `calendar.md` anchor updated to its renamed section). Revised by the rulings-61-62-64 pass of 2026-09-06 (decision 62 ruled — "must" per class as `action_policy` data, default "may", on the shape `min_tier` and `metered_resources[]` already carry). Revised by the task-liveness pass of 2026-09-08 (revision 84: decision 92 ruled — a task is live when some principal could claim it now, `claimable` read existentially over the backlog rather than from one principal's seat; no term minted, the partition stated beside the claimable predicate, and the count of rows holding the retired status routed to `status.md`).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a status and claimability read from the checkpoint; the declared terminal set; two moments open a batch; `tasks_attached[]`; the next recurring instance created and read back before the closing verdict; a terminal status only where the declaration permits none; the writer as the cross-type cycle check's enforcement point; C2 settled by the write contract). Revised by the rulings pass of 2026-09-06 (revision 38: a `signed` or blocking verdict is written under a held lease, cited from decision 44's ruling; the bootstrap set as the closed list decision 43 rules). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 36 ruled here — a rule keys on no work-model record type, the operator's lean toward every type considered and set aside; decision 43's second half cited as ruled; the C2 and `blocked` settlements marked reviewed and upheld). Revised by the planning pass of 2026-09-06 (revision 40: a task's one `PART_OF` edge targets its parent task or a planning record; the ascent as a derived read distinct from the chain; unplanned work admitted). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: `runner`, already defined in `vocabulary.md`, settled as the seat a step's outcome depends on — no new type introduced). Revised by the priority pass of 2026-09-06 (revision 47: ordering within the claimable pool given a home beside `claimable`, argued as a derived read over the ascent, `due_date`, workflow urgency, and blast radius rather than a maintained field, on the operator's connection from the ancestry reversal; a principal's "may" rather than "must" toward the highest-standing task, with decision 62 opened on whether an instance may bind the stronger form). Revised by the rulings pass of 2026-09-06 (revision 48: decision 34 ruled — `engine` defined, `pipeline` retired for the step-path publisher; the count of four execution mechanisms unchanged). Revised by the event/signal/delivery pass of 2026-09-06 (revision 49: one `calendar.md` anchor updated to its renamed section). Revised by the rulings-61-62-64 pass of 2026-09-06 (decision 62 ruled — "must" per class as `action_policy` data, default "may", on the shape `min_tier` and `metered_resources[]` already carry). Revised by the task-liveness pass of 2026-09-08 (revision 84: decision 92 ruled — a task is live when some principal could claim it now, `claimable` read existentially over the backlog rather than from one principal's seat; no term minted, the partition stated beside the claimable predicate, and the count of rows holding the retired status routed to `status.md`). Revised by the liveness-partition amendment of 2026-09-08 (revision 89: decision 92's partition corrected from two parts to three — a nonterminal task under a held lease is claimable by nobody and is neither terminal nor checkpointed, so the two-part statement accounted for no actively executing task; the middle part described in the existing `lease`/`held` terms and given no name, and no term minted).
 
 ## Purpose
 
@@ -146,10 +146,26 @@ record already carries onto `open` or terminal, permanently. Live status distrib
 **The ruling.** A task is **live** when it is [claimable](vocabulary.md#claimable) by some principal: not
 terminal, no lease held on it, and no open checkpoint holding it from claim. "Live" names no new property.
 It is the claimable predicate above read over the whole backlog rather than from one principal's seat —
-existentially, over every principal, instead of the 1:1 "is this mine" a claim asks. A backlog partitions
-into exactly two parts on it: the live tasks, which some principal could take now, and the rest, each of
-which is terminal or held by an open checkpoint that says by what. Nothing else is a third case, and there
-is no state a task can occupy that this read cannot classify.
+existentially, over every principal, instead of the 1:1 "is this mine" a claim asks.
+
+**What the predicate partitions the backlog into.** A backlog partitions on it into exactly three parts,
+because a task fails to be claimable for exactly three reasons and each is a different thing to have
+happened. It is **live** — claimable now by some principal. Or it is **under a held lease** — nonterminal,
+claimable by nobody because a principal already took it, which is not work nothing is advancing but work
+being advanced right now. Or it is **finished or held** — terminal, or held from claim by an open
+checkpoint that says by what. Nothing else is a fourth case, and there is no state a task can occupy that
+this read cannot classify. The middle part is why the partition is three parts and not two: a task under a
+held lease is neither live nor terminal nor checkpointed, and a partition stated as live-and-the-rest with
+the rest described as terminal-or-checkpointed loses every actively executing task in the gap between its
+two halves.
+
+A queue reading for work to hand out reads the first part alone, and that is the read *live* is for. The
+other two are distinguished because they answer different questions and lead to different acts: a task
+under a held lease needs nothing done to it and resolves itself when the lease is returned or lapses (a
+lapsed lease is not a held one, so the task is live again with no process acting —
+`vocabulary.md#lease`), whereas a terminal task is done and a checkpointed one is the operator's decision
+queue. Collapsing the second into the third would report executing work as held and put it in front of the
+operator; collapsing it into the first would hand out work another principal is already executing.
 
 **Why claimability and not the alternatives.** *Has an open checkpoint* is exact and matches the record,
 but it says nothing about a task that is merely unclaimed: an unheld, uncheckpointed task and a task
@@ -168,12 +184,22 @@ is the one that is not terminal and not held, read and never stored.
 for a second word meaning what `claimable` means is the overlap invariant 12 forbids, and a `live` status
 field would be the stored held-state principle 11 and the `blocked` retirement above already refuse.
 
+The middle part of the partition is likewise described and not named. The corpus has no single word for a
+task being executed, and this ruling mints none: *under a held lease* says it in terms already defined —
+[`lease`](vocabulary.md#lease) and its derived `held` state — and a task's being executed is exactly its
+lease being held, so a new word would name a thing the existing two already say together. A term would
+also invite the field: the one-word version of "executing" is a status value, and a status beside the
+lease edge is the second held state principle 6 refuses and the process-dependent field principle 11
+refuses, on the same reasoning that retired `blocked`. Should an instance find the phrase too long to
+write where it is read constantly, that is an argument for a term and belongs in a decision, not in this
+ruling's silence.
+
 **What this settles about a retired status.** A task carrying `blocked` is neither live nor legibly held:
 the status is retired (`vocabulary.md#retired-names`), so no claim predicate reads it, and it raises no
 checkpoint, so nothing holds it either — it reaches no queue and no decision queue, which is the shape
 principle 1 calls a report rather than a control. Under this predicate such a row is not an ambiguous
-third case: it is claimable if nothing else holds it, and every one of them resolves one of exactly two
-ways — it is genuinely unadvanceable, and an open checkpoint is raised on it naming the reason class that
+part beside the three: it is claimable if nothing else holds it, and every one of them resolves one of
+exactly two ways — it is genuinely unadvanceable, and an open checkpoint is raised on it naming the reason class that
 says by what (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`), or it is not, and it
 loses the retired status and returns to the claimable pool. Which rows a given checkout holds, and how
 many, is a measurement and belongs to `status.md`, never here.
