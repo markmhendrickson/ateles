@@ -2,9 +2,13 @@
 """
 Audio Transcription Script
 
-Transcribes audio with ElevenLabs speech-to-text (diarization or multichannel)
-when ELEVENLABS_API_KEY is set and diarization is not disabled; otherwise OpenAI
-Whisper. Persists each result as a Neotoma ``transcription`` entity with the WAV
+Routes each recording to the engine that suits the AUDIO, not to whichever API
+key happens to be set. Multi-channel audio (a mic+system meeting capture, so more
+than one speaker is plausible) goes to ElevenLabs speech-to-text for diarization
+or channel labels. Mono audio (a voice memo) is transcribed on-device with
+whisper.cpp and never leaves the machine. ``--engine`` / ``--diarize`` /
+``--no-diarize`` override the routing; TRANSCRIBE_ENGINE_LEGACY_ROUTING=1 restores
+the old key-presence behaviour. Persists each result as a Neotoma ``transcription`` entity with the WAV
 attached (``neotoma store`` combined file + entities). Optional: after store,
 creates ``REFERS_TO`` edges from the new ``transcription`` to ``contact`` and/or
 ``feedback_analysis`` entities (CLI flags, env vars, or ``<stem>_neotoma_relations.json``
@@ -12,7 +16,13 @@ next to the WAV — see ``save_transcription`` / ``record_meeting`` skill).
 
 Usage:
     python transcribe_audio.py <audio_file_path> [--language <language_code>]
-    python transcribe_audio.py file.wav --no-diarize   # force Whisper only
+    python transcribe_audio.py file.wav --no-diarize     # plain transcription
+    python transcribe_audio.py file.wav --engine local   # force local whisper.cpp
+
+Environment:
+    WHISPER_CPP_BIN     Path to the whisper.cpp CLI (default: whisper-cli on PATH)
+    WHISPER_CPP_MODEL   Path to a ggml model (default: ~/.cache/whisper-cpp/ggml-medium.bin)
+    TRANSCRIBE_ENGINE_LEGACY_ROUTING=1  Restore key-presence routing (no local Whisper)
 
 Examples:
     python transcribe_audio.py data/imports/audio/recording.wav
@@ -777,7 +787,13 @@ def _format_multichannel_transcripts_chronologically(transcripts: list) -> str |
 
 
 def get_audio_channel_count(audio_path: Path) -> int | None:
-    """Return channel count for WAV via stdlib wave; else pydub if available."""
+    """
+    Number of audio channels: stdlib ``wave`` for WAV, then pydub, then ffprobe.
+
+    None means "could not determine" and must never be read as mono. The ffprobe
+    fallback matters for engine routing: Audio Hijack writes .m4a/.mp4, which
+    stdlib wave cannot read, and pydub is not a hard dependency here.
+    """
     try:
         if audio_path.suffix.lower() == ".wav":
             import wave
@@ -792,7 +808,45 @@ def get_audio_channel_count(audio_path: Path) -> int | None:
         segment = AudioSegment.from_file(str(audio_path))
         return int(segment.channels)
     except Exception:
+        pass
+    return _ffprobe_channel_count(audio_path)
+
+
+def _ffprobe_channel_count(audio_path: Path) -> int | None:
+    """Channel count of the first audio stream via ffprobe; None when unknown."""
+    ffprobe_path = shutil.which("ffprobe")
+    if not ffprobe_path:
         return None
+    try:
+        pr = subprocess.run(
+            [
+                ffprobe_path,
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=channels",
+                "-of",
+                "csv=p=0",
+                str(audio_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception:
+        return None
+    if pr.returncode != 0:
+        return None
+    raw = (pr.stdout or "").strip().splitlines()
+    if not raw:
+        return None
+    try:
+        channels = int(raw[0].strip().rstrip(","))
+    except ValueError:
+        return None
+    return channels if channels > 0 else None
 
 
 def _elevenlabs_request_timeout() -> tuple[float, float]:
@@ -1546,6 +1600,216 @@ def split_audio_file(
         raise RuntimeError(f"Failed to split audio file: {e}") from e
 
 
+# ── Local Whisper (whisper.cpp) engine ────────────────────────────────────────
+# Engine identifiers recorded on the stored transcription entity.
+ENGINE_LOCAL_WHISPER = "local_whisper_cpp"
+ENGINE_ELEVENLABS = "elevenlabs_stt"
+ENGINE_OPENAI_WHISPER = "openai_whisper_api"
+
+# Default model path. Overridable via WHISPER_CPP_MODEL; the binary via
+# WHISPER_CPP_BIN (else resolved from PATH).
+_DEFAULT_WHISPER_CPP_MODEL = "~/.cache/whisper-cpp/ggml-medium.bin"
+
+
+def _whisper_cpp_binary() -> str | None:
+    """Resolve the whisper.cpp CLI, or None when it is not installed."""
+    override = os.environ.get("WHISPER_CPP_BIN", "").strip()
+    if override:
+        return override if Path(override).expanduser().is_file() else None
+    return shutil.which("whisper-cli") or shutil.which("whisper.cpp")
+
+
+def _whisper_cpp_model() -> Path | None:
+    """Resolve the ggml model path, or None when it is missing on disk."""
+    raw = os.environ.get(
+        "WHISPER_CPP_MODEL", _DEFAULT_WHISPER_CPP_MODEL  # config-source-ok: env-overridable default install path
+    ).strip()
+    if not raw:
+        return None
+    model = Path(raw).expanduser()
+    return model if model.is_file() else None
+
+
+def local_whisper_available() -> bool:
+    """True when both the whisper.cpp binary and a ggml model are present."""
+    return bool(_whisper_cpp_binary()) and _whisper_cpp_model() is not None
+
+
+def _convert_to_whisper_wav(audio_path: Path, verbose: bool = False) -> tuple[Path, Path]:
+    """
+    Transcode to the 16 kHz mono 16-bit PCM WAV whisper.cpp requires.
+
+    Returns (wav_path, temp_dir). Caller shutil.rmtree(temp_dir) when done.
+    """
+    ffmpeg_path = shutil.which("ffmpeg")
+    if not ffmpeg_path:
+        raise RuntimeError(
+            "ffmpeg is required to prepare audio for local Whisper but was not "
+            "found on PATH."
+        )
+    temp_dir = Path(tempfile.mkdtemp(prefix="whisper_cpp_"))
+    out = temp_dir / "input16k.wav"
+    cmd = [
+        ffmpeg_path,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(audio_path),
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        "-c:a",
+        "pcm_s16le",
+        str(out),
+    ]
+    if verbose:
+        print(f"    Converting to 16 kHz mono WAV for local Whisper: {out.name}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 or not out.is_file():
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise RuntimeError(
+            f"ffmpeg failed to prepare audio for local Whisper: "
+            f"{result.stderr.strip()[:300]}"
+        )
+    return out, temp_dir
+
+
+def transcribe_with_local_whisper(
+    audio_path: Path,
+    language: str | None = None,
+    verbose: bool = False,
+) -> dict:
+    """
+    Transcribe on-device with whisper.cpp — no audio leaves the machine.
+
+    Single-speaker only: whisper.cpp does not diarize, so this is the engine for
+    mono/single-source recordings. Raises RuntimeError when the binary or model
+    is missing so the caller can fall back to an API engine.
+    """
+    binary = _whisper_cpp_binary()
+    if not binary:
+        raise RuntimeError(
+            "whisper.cpp CLI not found (looked for WHISPER_CPP_BIN, then "
+            "whisper-cli / whisper.cpp on PATH)."
+        )
+    model = _whisper_cpp_model()
+    if model is None:
+        raise RuntimeError(
+            "whisper.cpp model not found; set WHISPER_CPP_MODEL to a ggml model file."
+        )
+
+    wav_path, temp_dir = _convert_to_whisper_wav(audio_path, verbose=verbose)
+    try:
+        cmd = [
+            binary,
+            "-m",
+            str(model),
+            "-f",
+            str(wav_path),
+            "-l",
+            language or "auto",
+            "-nt",
+        ]
+        if verbose:
+            print(f"    Transcribing locally with whisper.cpp (model: {model.name})...")
+        timeout_s = int(os.environ.get("WHISPER_CPP_TIMEOUT_SECONDS", "3600"))
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout_s
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"whisper.cpp failed (rc={result.returncode}): "
+                f"{result.stderr.strip()[:300]}"
+            )
+        text = "\n".join(
+            line.strip() for line in (result.stdout or "").splitlines() if line.strip()
+        ).strip()
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    return {
+        "transcription_text": _postprocess_transcript(text),
+        "language": language or "auto",
+        "transcription_engine": ENGINE_LOCAL_WHISPER,
+        "transcription_model": model.name,
+    }
+
+
+def select_transcription_engine(
+    audio_path: Path,
+    use_diarization: bool | None = None,
+    engine: str = "auto",
+) -> str:
+    """
+    Decide which engine transcribes this file — the single routing decision.
+
+    The rule follows the AUDIO, not the presence of an API key:
+
+    * multi-channel (channels >= 2) → ElevenLabs (a mic+system capture, so more
+      than one speaker is plausible and diarization/channel labels earn their cost)
+    * mono or unknown-channel-count → local Whisper (a voice memo: one speaker,
+      no reason to send it off the machine)
+
+    Explicit intent still wins: ``engine`` forces a specific engine, and
+    ``use_diarization`` True/False (the --diarize / --no-diarize flags) forces
+    the diarization path on or off. Setting TRANSCRIBE_ENGINE_LEGACY_ROUTING=1
+    restores the pre-routing behaviour (ElevenLabs whenever the key is set).
+
+    Returns one of the ENGINE_* constants. A choice of ElevenLabs or the OpenAI
+    API that cannot actually run (missing key, missing binary) is downgraded here
+    rather than raising, so a missing dependency degrades instead of failing.
+    """
+    has_elevenlabs = bool(os.environ.get("ELEVENLABS_API_KEY", "").strip())
+
+    def _fallback_api() -> str:
+        # Preferred non-local fallback when local Whisper cannot run.
+        return ENGINE_ELEVENLABS if has_elevenlabs else ENGINE_OPENAI_WHISPER
+
+    def _resolve_local() -> str:
+        return (
+            ENGINE_LOCAL_WHISPER if local_whisper_available() else _fallback_api()
+        )
+
+    engine = (engine or "auto").strip().lower()
+    if engine == "local":
+        # Explicit --engine local: still degrade rather than crash.
+        return _resolve_local()
+    if engine == "elevenlabs":
+        return ENGINE_ELEVENLABS if has_elevenlabs else _resolve_local()
+    if engine == "openai":
+        return ENGINE_OPENAI_WHISPER
+    if engine not in ("auto", ""):
+        raise ValueError(f"Unknown engine: {engine!r}")
+
+    # --no-diarize: the operator asked for plain transcription. Prefer local.
+    if use_diarization is False:
+        return _resolve_local()
+
+    # --diarize: the operator asked for speaker labels; only ElevenLabs does that.
+    if use_diarization is True:
+        return ENGINE_ELEVENLABS if has_elevenlabs else _resolve_local()
+
+    # Escape hatch: restore the old key-presence routing without a code change.
+    if os.environ.get("TRANSCRIBE_ENGINE_LEGACY_ROUTING", "0") == "1":
+        if has_elevenlabs and os.environ.get("RECORD_MEETING_DIARIZE", "1") != "0":
+            return ENGINE_ELEVENLABS
+        return ENGINE_OPENAI_WHISPER
+
+    if os.environ.get("RECORD_MEETING_DIARIZE", "1") == "0":
+        return _resolve_local()
+
+    channels = get_audio_channel_count(audio_path)
+    if channels is not None and channels >= 2:
+        # Multi-channel: a mic+system capture — more than one person is plausible.
+        return ENGINE_ELEVENLABS if has_elevenlabs else _resolve_local()
+
+    # Mono, or channel count unknown: treat as a single-speaker recording.
+    return _resolve_local()
+
+
 def transcribe_two_files(
     mic_path: Path,
     remote_path: Path,
@@ -1599,6 +1863,8 @@ def transcribe_two_files(
 
     result["mic_file"] = str(mic_path)
     result["remote_file"] = str(remote_path)
+    result["transcription_engine"] = ENGINE_ELEVENLABS
+    result["transcription_model"] = "scribe_v1"
     return result
 
 
@@ -1607,29 +1873,29 @@ def transcribe_audio_file(
     language: str | None = None,
     verbose: bool = False,
     use_diarization: bool | None = None,
+    engine: str = "auto",
 ) -> dict:
     """
-    Transcribe an audio file using ElevenLabs (diarization / multichannel) when
-    ELEVENLABS_API_KEY is set and diarization is enabled; otherwise OpenAI Whisper.
+    Transcribe an audio file with the engine that suits the AUDIO.
+
+    Routing lives in ``select_transcription_engine``: multi-channel audio (a
+    mic+system capture, so more than one speaker is plausible) goes to ElevenLabs
+    for diarization / channel labels; mono audio (a voice memo) is transcribed
+    on-device with whisper.cpp and never leaves the machine.
 
     Args:
         audio_path: Path to audio file
         language: Optional language code (e.g., 'en', 'es'). If None, auto-detect.
-        use_diarization: If True, use ElevenLabs when key is set. If False, Whisper only.
-            If None (default), use ElevenLabs when ELEVENLABS_API_KEY is set and
-            RECORD_MEETING_DIARIZE is not ``0``.
+        use_diarization: True forces the diarization path, False forces plain
+            transcription. None (default) routes on the audio.
+        engine: ``auto`` (default), ``local``, ``elevenlabs`` or ``openai``.
 
     Returns:
-        Dictionary with transcription results including text and metadata
+        Dictionary with transcription results including text and metadata,
+        plus ``transcription_engine`` / ``transcription_model`` naming what ran.
     """
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
-
-    if use_diarization is None:
-        use_diarization = (
-            bool(os.environ.get("ELEVENLABS_API_KEY", "").strip())
-            and os.environ.get("RECORD_MEETING_DIARIZE", "1") != "0"
-        )
 
     # Convert .qta files to .m4a for OpenAI compatibility
     converted_file = None
@@ -1658,8 +1924,14 @@ def transcribe_audio_file(
     chunk_files = []
     chunk_temp_dir = None
 
+    selected_engine = select_transcription_engine(
+        audio_path, use_diarization=use_diarization, engine=engine
+    )
+    if verbose:
+        print(f"    Transcription engine: {selected_engine}")
+
     try:
-        if use_diarization and os.environ.get("ELEVENLABS_API_KEY", "").strip():
+        if selected_engine == ENGINE_ELEVENLABS:
             if verbose:
                 print(
                     "    Transcribing with ElevenLabs (diarization or multichannel)..."
@@ -1676,9 +1948,51 @@ def transcribe_audio_file(
                 # Carry the raw ElevenLabs response through so the single-file
                 # path also writes the .stt_raw.json sidecar for offline re-merge.
                 "raw_response": el.get("raw_response"),
+                "transcription_engine": ENGINE_ELEVENLABS,
+                "transcription_model": "scribe_v1",
             }
 
-        # OpenAI Whisper path
+        if selected_engine == ENGINE_LOCAL_WHISPER:
+            try:
+                local = transcribe_with_local_whisper(
+                    audio_path, language=language, verbose=verbose
+                )
+            except Exception as e:
+                # A missing binary/model, or a local failure, degrades to the API
+                # path rather than losing the recording.
+                log_msg = f"    Local Whisper unavailable ({e}); falling back to API."
+                print(log_msg, file=sys.stderr)
+                selected_engine = (
+                    ENGINE_ELEVENLABS
+                    if os.environ.get("ELEVENLABS_API_KEY", "").strip()
+                    else ENGINE_OPENAI_WHISPER
+                )
+                if selected_engine == ENGINE_ELEVENLABS:
+                    el = transcribe_with_elevenlabs_speech_to_text(
+                        audio_path, language=language, verbose=verbose
+                    )
+                    metadata_path = original_path if converted_file else audio_path
+                    return {
+                        "transcription_text": el["transcription_text"],
+                        "language": el["language"],
+                        "audio_duration_seconds": get_audio_duration(metadata_path),
+                        "file_size_bytes": metadata_path.stat().st_size,
+                        "raw_response": el.get("raw_response"),
+                        "transcription_engine": ENGINE_ELEVENLABS,
+                        "transcription_model": "scribe_v1",
+                    }
+            else:
+                metadata_path = original_path if converted_file else audio_path
+                return {
+                    "transcription_text": local["transcription_text"],
+                    "language": local["language"],
+                    "audio_duration_seconds": get_audio_duration(metadata_path),
+                    "file_size_bytes": metadata_path.stat().st_size,
+                    "transcription_engine": local["transcription_engine"],
+                    "transcription_model": local["transcription_model"],
+                }
+
+        # OpenAI Whisper API path
         try:
             client = OpenAI()
         except Exception as e:
@@ -1838,6 +2152,8 @@ def transcribe_audio_file(
             "language": transcript_language,
             "audio_duration_seconds": audio_duration,
             "file_size_bytes": file_size,
+            "transcription_engine": ENGINE_OPENAI_WHISPER,
+            "transcription_model": "whisper-1",
         }
 
     finally:
@@ -2347,6 +2663,18 @@ def save_transcription(
         "source_directory": source_directory,
         "data_source": data_source,
     }
+
+    # Record which engine produced this transcript so local (on-device) results
+    # are later distinguishable from API ones. Not in the declared transcription
+    # schema (9 fields, none for engine), so stored as extra fields the same way
+    # capture_method and audio_content_sha256 already are.
+    engine_name = transcription_result.get("transcription_engine")
+    if engine_name:
+        entity["transcription_engine"] = engine_name
+    engine_model = transcription_result.get("transcription_model")
+    if engine_model:
+        entity["transcription_model"] = engine_model
+
     if extra_entity_fields:
         entity.update(extra_entity_fields)
 
@@ -2493,7 +2821,7 @@ def save_transcription(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Transcribe audio via ElevenLabs (when key + diarization) or OpenAI Whisper"
+        description="Transcribe audio — local whisper.cpp for mono, ElevenLabs for multi-channel"
     )
     parser.add_argument("audio_file", type=str, help="Path to audio file")
     parser.add_argument(
@@ -2510,7 +2838,14 @@ def main():
     parser.add_argument(
         "--no-diarize",
         action="store_true",
-        help="Force OpenAI Whisper even if ELEVENLABS_API_KEY is set.",
+        help="Force plain (non-diarized) transcription even if ELEVENLABS_API_KEY is set.",
+    )
+    parser.add_argument(
+        "--engine",
+        choices=["auto", "local", "elevenlabs", "openai"],
+        default="auto",
+        help="Force a transcription engine. 'auto' (default) routes on the audio: "
+        "multi-channel to ElevenLabs, mono to local whisper.cpp.",
     )
     parser.add_argument(
         "--relate-contact-entity-id",
@@ -2617,6 +2952,7 @@ def main():
                 audio_path,
                 language=args.language,
                 use_diarization=use_diarization,
+                engine=args.engine,
             )
 
         # Always drop sidecars next to the audio: a .txt of the merged transcript
@@ -2653,6 +2989,10 @@ def main():
 
         print("\nTranscription complete:")
         print(f"  File: {audio_path.name}")
+        print(
+            f"  Engine: {transcription_result.get('transcription_engine', 'unknown')}"
+            f" ({transcription_result.get('transcription_model', 'unknown')})"
+        )
         print(f"  Neotoma entity ID: {transcription_record['entity_id']}")
         print(f"  Language: {transcription_record['language']}")
         print(

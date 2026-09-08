@@ -39,8 +39,10 @@ Environment variables:
                             consent-posture auditing. Unset → not watched.
   TYTO_TRANSCRIBE_ENABLED   Set to 0 to disable auto-transcription (default: 1)
   TYTO_TRANSCRIBE_SCRIPT    Path to transcribe_audio.py (auto-detected from repo root)
-  ELEVENLABS_API_KEY        When set, enables diarization via ElevenLabs
+  ELEVENLABS_API_KEY        Required for the diarization path (multi-source audio)
   RECORD_MEETING_DIARIZE    Set to 0 to force plain transcription (default: 1)
+  TRANSCRIBE_ENGINE_LEGACY_ROUTING  Set to 1 to restore key-presence routing
+                            (diarize everything whenever the key is set)
   TYTO_ANALYZE_ENABLED      Set to 0 to disable post-transcription meeting analysis (default: 1)
   TYTO_ANALYZE_MEETING_SKILL  Path to analyze-meeting/SKILL.md (auto-detected from repo root)
   TYTO_ANALYZE_NEOTOMA_SKILL  Path to analyze-neotoma-feedback/SKILL.md (auto-detected)
@@ -52,6 +54,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -157,11 +160,70 @@ TRANSCRIBE_SCRIPT = Path(
     os.environ.get("TYTO_TRANSCRIBE_SCRIPT", _find_transcribe_script())
 )
 
-# Diarization: enabled by default when ELEVENLABS_API_KEY is set
-def _should_diarize() -> bool:
+def _audio_channel_count(path: Path) -> int | None:
+    """
+    Channels in the first audio stream, via ffprobe. None when unknown.
+
+    None means "could not determine" and must never be read as mono — callers
+    below treat unknown the same as mono only because a single-file recording
+    with no probe is far more often a voice memo than a meeting, and the
+    diarization path costs money.
+    """
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        pr = subprocess.run(
+            [
+                ffprobe, "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=channels",
+                "-of", "csv=p=0",
+                str(path),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        return None
+    if pr.returncode != 0:
+        return None
+    lines = (pr.stdout or "").strip().splitlines()
+    if not lines:
+        return None
+    try:
+        channels = int(lines[0].strip().rstrip(","))
+    except ValueError:
+        return None
+    return channels if channels > 0 else None
+
+
+def _should_diarize(
+    audio_path: Path | None = None, mic_path: Path | None = None
+) -> bool:
+    """
+    Whether this recording warrants the diarization (ElevenLabs) path.
+
+    The question is asked of the AUDIO, not of the API key: a mic-pair or a
+    multi-channel file means more than one person is plausible and speaker
+    labels earn their cost; a mono single file is a voice memo and goes to
+    local Whisper instead.
+
+    RECORD_MEETING_DIARIZE=0 still forces plain transcription, and
+    TRANSCRIBE_ENGINE_LEGACY_ROUTING=1 restores the old key-presence rule.
+    """
     if os.environ.get("RECORD_MEETING_DIARIZE", "1") == "0":
         return False
-    return bool(os.environ.get("ELEVENLABS_API_KEY", ""))
+    if not os.environ.get("ELEVENLABS_API_KEY", "").strip():
+        return False
+    if os.environ.get("TRANSCRIBE_ENGINE_LEGACY_ROUTING", "0") == "1":
+        return True
+    # A mic-pair is two separate sources: two speakers by construction.
+    if mic_path is not None and mic_path.exists():
+        return True
+    if audio_path is None:
+        return False
+    channels = _audio_channel_count(audio_path)
+    return channels is not None and channels >= 2
 
 # ── Meeting analysis config ───────────────────────────────────────────────────
 # Set TYTO_ANALYZE_ENABLED=0 to disable post-transcription analysis.
@@ -708,11 +770,15 @@ class RecordingWatcher:
             python, str(TRANSCRIBE_SCRIPT), str(remote_path),
             "--capture-method", self._capture_method,
         ]
-        if _should_diarize():
+        diarize = _should_diarize(remote_path, mic_path)
+        if diarize:
             cmd.append("--diarize")
-            log.info(f"[{DAEMON_NAME}] Single-file diarization mode.")
+            log.info(f"[{DAEMON_NAME}] Single-file diarization mode (multi-source audio).")
         else:
-            log.info(f"[{DAEMON_NAME}] Single-file plain transcription mode.")
+            log.info(
+                f"[{DAEMON_NAME}] Single-file local transcription mode "
+                f"(single-source audio)."
+            )
 
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
@@ -720,7 +786,7 @@ class RecordingWatcher:
                 f"[{DAEMON_NAME}] Transcription failed (rc={result.returncode}): "
                 f"{result.stderr.strip()[:300]}"
             )
-            if _should_diarize():
+            if diarize:
                 log.info(f"[{DAEMON_NAME}] Retrying without diarization...")
                 cmd_fallback = [
                     python, str(TRANSCRIBE_SCRIPT), str(remote_path), "--no-diarize",
