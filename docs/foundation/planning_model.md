@@ -13,33 +13,8 @@ approved instance plan `ent_d10ad28dffb8c6604a4151c2` and its decision keys `enf
 `data_model.md`, and `workflows.md`; decisions 17, 18, 30, 36, 39, 41, 43, 46, 47, 51, 52, and 56; and gaps G9, G10, and G31
 (`migration.md`), which this document closes. Written against the second rulings pass (revision 39), whose
 rulings of 36, 43, 47, 52, and 56 it carries. What is built is `status.md`; how each concept is recorded
-is `data_model.md`. Revised by the ancestry pass of 2026-09-06 (revision 45: the operator's question on
-missing ancestry — whether the swarm derives an absent parent, or finds the gap — settled against
-`#authority-per-level-an-amendment-is-an-action-and-its-class-is-the-levels` and decisions 17, 41, 51, and
-52; `judge`'s and `route`'s defect lists extended by one item each, with no new step or type; decision 61
-opened). Revised by the priority pass of 2026-09-06 (revision 47: the permissive orphan default reversed on
-the operator's argument that explicit ancestry serves both execution and prioritization — every task now
-expects an ancestor by default, satisfied at near-zero noise by a default ancestor per intake class rather
-than a finding on every orphan; the no-authoring refusal restated as the line the default and the refusal
-meet at; decision 61 reframed from a per-level expectation to a per-class default, still open and still
-blocked on decision 57). Revised by the rulings pass of 2026-09-06 (revision 48: decision 57 ruled — five
-levels, task → plan → project → strategy → mission, on the operator's word; objective settled as content
-within a strategy record and not a sixth level. Decision 61 not ruled: the priority pass (revision 47)
-reframed the question after this ruling was drafted against the pre-reversal framing, from "where a
-per-level ancestry expectation is declared" to "where an intake class's default ancestor is declared," and
-the reframed question is left as revision 47 stated it, still open and still blocked on 57, since ruling on
-the superseded framing would rule a question that no longer exists in that shape). Revised by the
-rulings-61-62-64 pass of 2026-09-06 (decision 61 ruled — the default ancestor named on the `intake_rule`,
-unblocked now that decision 57 fixes the levels). Revised by the project-term pass of 2026-09-06 (revision 67:
-decision 70 opened — `project` names decision 57's planning level and is also the scoping key on `workflow`
-and `batch`, and nothing yet says whether the two are one thing; the possessives that read the key as
-ownership are resolved to the owners the rules name, in this document and across the corpus). Revised by the
-decision-70 ruling of 2026-09-06 (revision 68, the operator's word: decision 70 ruled — two concepts share
-one word; the planning level keeps `project`, the scoping key on `workflow` and `batch` is renamed
-`declaration_scope`, and the section that posed the question now argues the ruling, with G20's global
-roster as the evidence a planning record cannot be the key and invariant 12 as what obliges the rename
-rather than a note; three existing terms swap-tested and rejected before the compound was coined).
-
+is `data_model.md`.
+Amendment history: `revisions.md#planning_modelmd`.
 ## Purpose
 
 State how the swarm holds a hierarchy of planning records — a task under a plan, a plan under whatever

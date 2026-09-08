@@ -9,8 +9,8 @@ action gate; the three conclusion values), `workflows.md` (outreach, intake, ope
 `failure_posture.md` (the halt, the recovery per action class, the checkpoint reason classes), and the
 Gmail REST API v1 surface as exposed by the `gws` CLI, read 2026-09-05, and PR #745 operator review
 (2026-09-05, rulings 13–14, 16–18, 23–29: decision 23 ruled here). What is built, and which rows have
-no code path, is `status.md`. Revised by the testability pass of 2026-09-06 (revision 37: refusal 1's mechanical half, the field allowlist on the grant). Revised by the event/signal/delivery pass of 2026-09-06 (revision 38: "Every inbound signal, and what it becomes" and its table headers, Linkage, Identity, and the disposition sentence renamed to `event`, matching `github.md`'s "Event and action" precedent; `signal` kept only where the design means the record's reading of an event). Revised by the minimization-recalibration pass of 2026-09-06 (revision 50: refusal 1 narrowed to a third party's Article 9 data, capture generous otherwise under the broadened purpose).
-
+no code path, is `status.md`.
+Amendment history: `revisions.md#gmailmd`.
 ## Purpose
 
 Be the Gmail adapter in full: every state change the mail system can deliver or that a reader can discover

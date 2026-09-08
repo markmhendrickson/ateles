@@ -8,8 +8,8 @@ intake, the four execution mechanisms), `gates_and_workflows.md` (step state fro
 action gate; the three conclusion values), `workflows.md` (the code workflows, release, and security),
 `failure_posture.md` (the halt, the recovery per action class, the checkpoint reason classes), and GitHub's
 own webhook event and payload documentation, read 2026-09-04, and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). What is built, and which rows have no code
-path, is `status.md`. Revised by the testability pass of 2026-09-06 (revision 37: the host's assignment never writes `assigned_to`; `impl` closes on a mergeable pull request, stated in `workflows.md`). Revised by the host-configuration pass of 2026-09-06 (revision 65: what the host must be configured to be, ruled an extension of obligations 1 and 6 rather than a seventh obligation — the subscription reconciliation obligation 1's drop counter structurally cannot perform, and the host's merge-permitting configuration as the standing form of the permit the gate never issued; the required state per repository, and the reporting-permission row that belongs to neither obligation; open decision 69, whether a difference at admission blocks the grant or is a finding on the review step).
-
+path, is `status.md`.
+Amendment history: `revisions.md#githubmd`.
 ## Purpose
 
 Be the GitHub adapter in full: every event the code host can deliver, mapped to exactly one of the four

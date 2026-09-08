@@ -13,7 +13,7 @@ Every rule `workflows.md` owns, one entry each: the rule's own statement from `c
 
 ## [Roles named in this document](../workflows.md#roles-named-in-this-document)
 
-- **WF-2** — every role resolves against the roster per declaration scope *[M]*
+- **WF-2** — every role resolves against the roster per project *[M]*
 
 ## [intake](../workflows.md#intake)
 

@@ -705,7 +705,8 @@ Full documentation lives in `docs/` — index at [docs/README.md](docs/README.md
 [Conformance](docs/foundation/conformance.md) ·
 [Conformance suite](docs/foundation/conformance_suite.md) ·
 [Scenarios](docs/foundation/scenarios.md) · [Workflows](docs/foundation/workflows.md) ·
-[Migration](docs/foundation/migration.md) · [Revisions](docs/foundation/revisions.md) ·
+[Migration](docs/foundation/migration.md) · [Multi-tenant](docs/foundation/multi_tenant.md) ·
+[Revisions](docs/foundation/revisions.md) ·
 [Status](docs/foundation/status.md)
 
 **Orientation:** [Who it's for (ICP)](docs/icp.md) · [Architecture](docs/architecture.md) ·

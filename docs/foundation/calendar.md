@@ -9,8 +9,8 @@ actions and the action gate), `workflows.md` (meeting processing, outreach, oper
 `failure_posture.md` (the halt, the recovery per action class), `gmail.md` (the sibling system, whose
 identity and minimization rules this document shares), and the Google Calendar REST API v3 surface as
 exposed by the `gws` CLI, read 2026-09-05, and PR #745 operator review (2026-09-05, rulings 13–14, 16–18,
-23–29: decision 24 ruled here). What is built, and which rows have no code path, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `calendar_routing_config` replaced by `channel_config`, the binding type `adapters.md` names). Revised by the testability pass of 2026-09-06 (revision 37: refusal 1's mechanical half, the field allowlist on the grant). Revised by the event/signal/delivery pass of 2026-09-06 (revision 38: "Every inbound signal, and what it becomes" and its table headers, Linkage, Identity, and the disposition sentence renamed to `event`, matching `github.md`'s and `gmail.md`'s precedent; `signal` kept only in its ordinary-English sense).
-
+23–29: decision 24 ruled here). What is built, and which rows have no code path, is `status.md`.
+Amendment history: `revisions.md#calendarmd`.
 ## Purpose
 
 Be the calendar adapter in full: every state change the calendar can deliver or that a reader can discover

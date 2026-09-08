@@ -10,8 +10,8 @@ checkpoint), `authority_model.md` (credential custody by revocability; separatio
 `workflows.md` (the payment workflow's five steps and its two disjoint roles), `failure_posture.md`
 (recovery per action class; the rules on read-back, unknown, and bounded deferral), and the published API
 surfaces of bank-transfer and crypto rails, read 2026-09-05, and PR #745 operator review (2026-09-05,
-rulings 13–14, 16–18, 23–29: decisions 27, 28, and 29 ruled here). What is built is `status.md`. Revised by the second workflow-format pass of 2026-09-06 (revision 36: a purchase or a booking with a merchant is out of scope here, being an effect on the merchant's system and not on a rail). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser-resolves and quorum pointers cite decisions 47 and 50 as ruled). Revised by the event/signal/delivery pass of 2026-09-06 (revision 40: the Purpose sentence, "Inbound: every signal a rail can produce," its two subsection headings, its table headers, and the Linkage rule renamed to `event`; `signal` kept only in its ordinary-English sense).
-
+rulings 13–14, 16–18, 23–29: decisions 27, 28, and 29 ruled here). What is built is `status.md`.
+Amendment history: `revisions.md#paymentsmd`.
 ## Purpose
 
 Be the payment adapter in full, across the rail classes the design contemplates: what the rails hold as

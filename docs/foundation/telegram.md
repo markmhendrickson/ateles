@@ -10,8 +10,8 @@ to principals; approval is authorized against the required approvers), `workflow
 workflow, and the consent step of every workflow that has one), `failure_posture.md` (the halt; the
 off-record announcement path; retry classification), and Telegram's own chat-platform API documentation, read
 2026-09-05, and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decisions 25 and 26 ruled
-here). What is built is `status.md`. Revised by the testability pass of 2026-09-06 (revision 37: every uncorrelated message from a bound principal is a task; the start-time binding is a cache with a declared staleness bound). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser-resolves pointer cites decision 47 as ruled).
-
+here). What is built is `status.md`.
+Amendment history: `revisions.md#telegrammd`.
 ## Purpose
 
 Be the chat adapter in full: every kind of update the chat API can deliver, mapped to one of the four

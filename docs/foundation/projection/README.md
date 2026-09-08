@@ -35,6 +35,6 @@ Generated from `conformance_suite.md`'s conformance matrix by `execution/scripts
 | `telegram.md` | 17 | 4,779 | under |
 | `vocabulary.md` | 4 | 939 | under |
 | `work_model.md` | 53 | 10,151 | under |
-| `workflows.md` | 26 | 5,887 | under |
+| `workflows.md` | 26 | 5,880 | under |
 
-372 rules projected, 90,977 chars in total across the set. `MAX_DOC_CHARS` = 12,000 bounds each file above; `MAX_BLOCK_CHARS` = 40,000 bounds one review's block, which is the kernel plus the documents keyed to the changed paths — never the whole set.
+372 rules projected, 90,970 chars in total across the set. `MAX_DOC_CHARS` = 12,000 bounds each file above; `MAX_BLOCK_CHARS` = 40,000 bounds one review's block, which is the kernel plus the documents keyed to the changed paths — never the whole set.
