@@ -4155,6 +4155,51 @@ than carries.
 **One decision opened and ruled (69).** No figure above is carried from an earlier revision; each was
 measured by the instrument in its row on this branch on 2026-09-06.
 
+## Revision 71 (2026-09-08): decision 95 reopened as 97, decision 94 narrowed, and what the substrate actually enforces
+
+**Why this pass.** Revision 70 ruled two decisions the same day and both carried defects. Decision 95's
+justification was false and contradicted a decision ruled two days earlier; decision 94 overstated its
+exposure, cited an open decision as ruled, and retired a standing rule without arguing the retirement. This
+pass corrects each, and records what the record's substrate enforces today — which revision 70 stated
+wrongly.
+
+**Decision 95 is reopened, and decision 97 replaces it.** Its ground was that a proxy is the only place a
+request can be refused, leaving decisions 41 and 94 unenforceable by construction under per-harness
+credentials. Decision 56 (2026-09-06) had already put that question, named *a proxy in front of the record*
+among its three candidates, rejected it on principle 6, and located the refusal **at the record**; decision
+95 did not cite it. The conclusion is not preserved by a new justification — the fork is reopened as
+decision 97 with both branches stated. Nothing in decision 94 depended on it.
+
+**Decision 94 is narrowed and kept.** Three corrections: the exposure is unbounded read across entity types
+within one owner's data, not a cross-operator one; decision 82 is not ruled and asks the fork-case
+question — whether a forker gets its own instance or shares a hosted one — rather than the
+several-operators-per-instance one, and when decision 94 was ruled its row was not yet on `main` at all
+(the multi-operator rows are 81 and 83, both open; all three arrived with the register-gap pass); and `context_entity_types[]` is demoted only from being the *admission mechanism*, with the inner
+bound decision 41 and `data_model.md#what-each-actor-reads-and-writes` state left standing — a read must
+satisfy both. The ruling itself — default-deny per entity type, the grant as the allowlist, checked at the
+read — is unchanged.
+
+**What the substrate enforces, read 2026-09-08 against the record's source.** Revision 70's table said "no
+mechanism reads or enforces the contract". That is wrong for the write side, and the row below replaces it.
+This is evidence about what is *built*; it is not a ground for any design claim above.
+
+| Rule | Built state, read 2026-09-08 | Where the gap lives |
+|---|---|---|
+| write admission per entity type, default-deny by grant (decision 41) | **enforced.** The record has a capability service that admits an operation against the entity types a matched grant names, denies with a structured refusal and a 403, and carries an explicit default-deny path for a signature-verified but unadmitted caller. It is called on three write operations — the entity write, the relationship write, and the correction — at five call sites across the two transports | wildcard capabilities, which are the fail-open shape decision 41 names; the fail-open branch for callers matching no grant at all |
+| read admission per entity type, default-deny by grant (decision 94) | **declared and not enforced.** The retrieval operation is a member of the capability service's own operation enumeration, so the substrate models it, and no call site enforces it on the agent path — the only read enforcement in place is the guest one, on a separate policy path. Revision 8's finding that `context_entity_types[]` bounds no runtime read is unchanged | the record's retrieval handlers. This is the record's own work, with a containment test that fails when containment is absent, and it is not this corpus's to fix |
+| which rows an admitted read returns (the tenancy question, decisions 81 and 83) | **scoped by owner, with three exceptions.** The session's owner is set from the matched grant and never from the request, retrieval queries carry an owner predicate, and a request naming a different owner is refused explicitly on both transports — the message states that grants only resolve to their owner. Three MCP read handlers (the entity snapshot, field provenance, and the relationship snapshot) query by id with no owner predicate or a hardcoded default one, where their HTTP equivalents gate correctly | the record's own read handlers; a transport asymmetry, not a design gap |
+
+**Decision 95's three consequences survive only as conditionals** — an unresolved caller identity refused, the
+read boundary checked, multi-instance routing resolved — each a correct statement about a proxy and none an
+argument for one. The proxy's empty-identity branch that revision 70 recorded as contradicting a stated rule
+now contradicts a conditional; it remains a fail-open path and remains unfixed here.
+
+**Also amended.** `conformance_suite.md`'s U-9 kept its **D** mark on a reason decision 94 undoes: a read
+outside the grant now leaves a refusal, which is an artefact, so that half is testable and only the
+inside-the-grant, outside-the-declaration half stays definitional.
+
+**Checks on this revision:** reported in the pull request that carries it.
+
 ## Revision 70 (2026-09-08): decisions 94 and 95 ruled — read admission, and the proxy as the interposition point
 
 **What was ruled.** Two halves of one hole, raised by the operator on 2026-09-08. Decision **94** states
@@ -4162,7 +4207,7 @@ read admission per entity type: default-deny, the grant as the allowlist, checke
 with the write side decision 41 ruled — argued at `authority_model.md#grants`. Decision **95** states that
 a harness reaches the record through the swarm's own MCP proxy and holds no direct instance credential,
 because the proxy is the only interposition point where admission can be refused — argued at
-`authority_model.md#the-swarm-reaches-the-record-through-a-proxy-that-admits-never-through-per-harness-credentials`.
+`authority_model.md#where-a-harness-reaches-the-record-and-what-admits-the-request`.
 Decision **96** is opened and left open: how the proxy authenticates to the instance on an agent's behalf.
 
 **What is built, against what is now ruled.** Nothing in this revision was built by it; these rows record

@@ -386,8 +386,8 @@ here once however many agents fill it. Two documents supply the boundaries the c
 per entity type against the reading principal's grant, checked at the read
 (`authority_model.md#grants`). These rows state what an actor of a kind reads *within* what its grant
 already admits, and a step's `reads_to_enter[]` and `reads_to_close[]` narrow it further. Neither may
-widen a grant, and an actor's `context_entity_types[]` — the types a runner puts in front of it — is a
-provisioning list, not an admission rule.
+widen a grant, and an actor's `context_entity_types[]` — the types a runner puts in front of it — is not the
+admission mechanism, though it remains the inner bound the section below states.
 
 ### Retrieval contract
 
