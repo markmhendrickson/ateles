@@ -64,7 +64,7 @@ opens again, with `rounds_cap`, the rounds that loop may take, below — plus `r
 `unclaimed_after` and `hold_bound`, the two intervals below), plus `fast_paths` and `successors`, with
 `none_permitted` (`#sequencing-is-data-successors-and-the-chain`). `owner_role` holds a **role**, never an agent name: the
 roster resolves it to a principal when the step is claimed (`vocabulary.md#step-owner`), so one
-declaration serves every project and a renamed agent leaves no stale name in it. Step names are data: a workflow may declare steps
+declaration serves every scope and a renamed agent leaves no stale name in it. Step names are data: a workflow may declare steps
 beyond the review sequence (a draft step, a deterministic lint, an operator preview). A contiguous named
 group of steps is a stage.
 

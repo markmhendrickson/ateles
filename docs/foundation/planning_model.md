@@ -30,7 +30,15 @@ per-level ancestry expectation is declared" to "where an intake class's default 
 the reframed question is left as revision 47 stated it, still open and still blocked on 57, since ruling on
 the superseded framing would rule a question that no longer exists in that shape). Revised by the
 rulings-61-62-64 pass of 2026-09-06 (decision 61 ruled — the default ancestor named on the `intake_rule`,
-unblocked now that decision 57 fixes the levels).
+unblocked now that decision 57 fixes the levels). Revised by the project-term pass of 2026-09-06 (revision 67:
+decision 70 opened — `project` names decision 57's planning level and is also the scoping key on `workflow`
+and `batch`, and nothing yet says whether the two are one thing; the possessives that read the key as
+ownership are resolved to the owners the rules name, in this document and across the corpus). Revised by the
+decision-70 ruling of 2026-09-06 (revision 68, the operator's word: decision 70 ruled — two concepts share
+one word; the planning level keeps `project`, the scoping key on `workflow` and `batch` is renamed
+`declaration_scope`, and the section that posed the question now argues the ruling, with G20's global
+roster as the evidence a planning record cannot be the key and invariant 12 as what obliges the rename
+rather than a note; three existing terms swap-tested and rejected before the compound was coined).
 
 ## Purpose
 
