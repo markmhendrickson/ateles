@@ -597,7 +597,16 @@ def _routing_env(monkeypatch):
 
 
 def _fake_local_whisper_available(monkeypatch, available: bool = True):
+    """Fake local-whisper availability independent of the real machine's
+    install state. Patches local_whisper_available() AND the two resolvers
+    it wraps, since select_transcription_engine() also calls
+    _whisper_cpp_binary()/_whisper_cpp_model() directly to build the
+    unavailable-reason message — leaving those real would make tests pass
+    or fail based on whether whisper.cpp happens to be installed on the
+    machine running them, rather than on the code under test."""
     monkeypatch.setattr(ta, "local_whisper_available", lambda: available)
+    monkeypatch.setattr(ta, "_whisper_cpp_binary", lambda: (None if not available else "whisper-cli"))
+    monkeypatch.setattr(ta, "_whisper_cpp_model", lambda: (None if not available else Path("/fake/ggml-model.bin")))
 
 
 def test_mono_audio_routes_to_local_whisper(tmp_path, _routing_env):
@@ -681,8 +690,9 @@ def test_diarize_flag_forces_elevenlabs_on_mono(tmp_path, _routing_env):
     )
 
 
-def test_missing_local_whisper_falls_back_to_api(tmp_path, _routing_env):
-    """No binary/model installed → degrade to an API engine, never crash."""
+def test_missing_local_whisper_falls_back_to_api(tmp_path, _routing_env, capsys):
+    """No binary/model installed → degrade to an API engine, never crash — and
+    never silently: a stderr line names the reason and the fallback engine."""
     mono = tmp_path / "m.wav"
     if not _make_synthetic_audio(mono, 1):
         pytest.skip("ffmpeg not available to generate a synthetic fixture")
@@ -690,9 +700,44 @@ def test_missing_local_whisper_falls_back_to_api(tmp_path, _routing_env):
 
     _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
     assert ta.select_transcription_engine(mono) == ta.ENGINE_ELEVENLABS
+    stderr = capsys.readouterr().err
+    assert "Local Whisper unavailable" in stderr
+    assert ta.ENGINE_ELEVENLABS in stderr
 
     _routing_env.delenv("ELEVENLABS_API_KEY", raising=False)
     assert ta.select_transcription_engine(mono) == ta.ENGINE_OPENAI_WHISPER
+    stderr = capsys.readouterr().err
+    assert "Local Whisper unavailable" in stderr
+    assert ta.ENGINE_OPENAI_WHISPER in stderr
+
+
+def test_engine_local_raises_when_local_whisper_unavailable(tmp_path, _routing_env):
+    """--engine local fails closed: no silent downgrade to a paid API."""
+    mono = tmp_path / "m.wav"
+    if not _make_synthetic_audio(mono, 1):
+        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    _fake_local_whisper_available(_routing_env, False)
+    _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
+
+    with pytest.raises(RuntimeError, match="whisper.cpp not found"):
+        ta.select_transcription_engine(mono, engine="local")
+
+
+def test_engine_local_degrade_escape_hatch_still_warns(
+    tmp_path, _routing_env, capsys
+):
+    """TRANSCRIBE_ENGINE_ALLOW_LOCAL_DEGRADE=1 restores the degrade — loudly."""
+    mono = tmp_path / "m.wav"
+    if not _make_synthetic_audio(mono, 1):
+        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    _fake_local_whisper_available(_routing_env, False)
+    _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
+    _routing_env.setenv("TRANSCRIBE_ENGINE_ALLOW_LOCAL_DEGRADE", "1")
+
+    assert (
+        ta.select_transcription_engine(mono, engine="local") == ta.ENGINE_ELEVENLABS
+    )
+    assert "Local Whisper unavailable" in capsys.readouterr().err
 
 
 def test_missing_binary_and_model_report_unavailable(_routing_env, tmp_path):

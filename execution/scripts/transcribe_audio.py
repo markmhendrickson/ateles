@@ -1761,6 +1761,15 @@ def select_transcription_engine(
     Returns one of the ENGINE_* constants. A choice of ElevenLabs or the OpenAI
     API that cannot actually run (missing key, missing binary) is downgraded here
     rather than raising, so a missing dependency degrades instead of failing.
+
+    A local-whisper degrade (bin/model missing) at selection time is never
+    silent: it prints one stderr line naming the missing piece and the engine
+    it fell back to, matching the mid-run degrade in
+    ``transcribe_audio_file()``. ``--engine local`` explicitly is fail-closed
+    instead — it raises rather
+    than silently downgrading to a paid API the operator did not ask for —
+    unless TRANSCRIBE_ENGINE_ALLOW_LOCAL_DEGRADE=1 is set, in which case it
+    still degrades but still warns.
     """
     has_elevenlabs = bool(os.environ.get("ELEVENLABS_API_KEY", "").strip())
 
@@ -1768,15 +1777,44 @@ def select_transcription_engine(
         # Preferred non-local fallback when local Whisper cannot run.
         return ENGINE_ELEVENLABS if has_elevenlabs else ENGINE_OPENAI_WHISPER
 
+    def _local_available_and_reason() -> tuple[bool, str]:
+        # Single source of truth for both "is it available" and "why not" —
+        # derived from the same two checks local_whisper_available() makes,
+        # so the two can never disagree.
+        missing = []
+        if not _whisper_cpp_binary():
+            missing.append("binary (WHISPER_CPP_BIN / whisper-cli on PATH)")
+        if _whisper_cpp_model() is None:
+            missing.append("model (WHISPER_CPP_MODEL)")
+        return (not missing, " and ".join(missing))
+
     def _resolve_local() -> str:
-        return (
-            ENGINE_LOCAL_WHISPER if local_whisper_available() else _fallback_api()
+        available, reason = _local_available_and_reason()
+        if available:
+            return ENGINE_LOCAL_WHISPER
+        fallback = _fallback_api()
+        print(
+            f"    Local Whisper unavailable ({reason}); "
+            f"selecting {fallback} instead.",
+            file=sys.stderr,
         )
+        return fallback
 
     engine = (engine or "auto").strip().lower()
     if engine == "local":
-        # Explicit --engine local: still degrade rather than crash.
-        return _resolve_local()
+        available, reason = _local_available_and_reason()
+        if available:
+            return ENGINE_LOCAL_WHISPER
+        if os.environ.get("TRANSCRIBE_ENGINE_ALLOW_LOCAL_DEGRADE", "0") == "1":
+            # Explicit escape hatch: still degrade, but never silently.
+            return _resolve_local()
+        # Explicit --engine local with no working local install: fail closed
+        # rather than silently billing an API the operator did not ask for.
+        raise RuntimeError(
+            f"whisper.cpp not found — need {reason}. Install it, or set "
+            "TRANSCRIBE_ENGINE_ALLOW_LOCAL_DEGRADE=1 to fall back to an API "
+            "engine instead."
+        )
     if engine == "elevenlabs":
         return ENGINE_ELEVENLABS if has_elevenlabs else _resolve_local()
     if engine == "openai":
