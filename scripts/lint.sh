@@ -90,11 +90,22 @@ python scripts/linters/check_agent_roster.py || ERRORS=$((ERRORS + 1))
 echo "  - Checking foundation anchors (every intra-foundation link resolves)..."
 python execution/scripts/check_foundation_anchors.py || ERRORS=$((ERRORS + 1))
 
+echo "  - Checking foundation decision 78 is ruled in the corpus..."
+python execution/scripts/check_foundation_decision_78.py || ERRORS=$((ERRORS + 1))
+
 echo "  - Checking foundation vocabulary (no Never word in the prose)..."
 python execution/scripts/check_foundation_vocabulary.py || ERRORS=$((ERRORS + 1))
 
 echo "  - Checking vocabulary term links (first mentions link their definition)..."
 python execution/scripts/link_vocabulary_terms.py --check || ERRORS=$((ERRORS + 1))
+
+# Decision 74: a document's amendment history lives in revisions.md, and a section
+# stating three or more rules opens with the list of them. Both were fixed once by
+# hand and neither stays fixed on its own — the amendment obligation grows a chain
+# one clause per pass, and a section grows one rule at a time. This is what stops
+# the pattern re-accreting.
+echo "  - Checking foundation front matter (no revision chain; rule sections indexed)..."
+python execution/scripts/check_foundation_front_matter.py || ERRORS=$((ERRORS + 1))
 
 # Reading projection (decision 66): docs/foundation/projection/ is generated from
 # conformance_suite.md's matrix and is what a review prompt inlines. A rule edited in its
@@ -131,4 +142,3 @@ else
     echo "Run with --fix to auto-fix some issues: ./scripts/lint.sh --fix"
     exit 1
 fi
-

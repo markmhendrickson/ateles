@@ -30,7 +30,15 @@ per-level ancestry expectation is declared" to "where an intake class's default 
 the reframed question is left as revision 47 stated it, still open and still blocked on 57, since ruling on
 the superseded framing would rule a question that no longer exists in that shape). Revised by the
 rulings-61-62-64 pass of 2026-09-06 (decision 61 ruled — the default ancestor named on the `intake_rule`,
-unblocked now that decision 57 fixes the levels).
+unblocked now that decision 57 fixes the levels). Revised by the project-term pass of 2026-09-06 (revision 67:
+decision 70 opened — `project` names decision 57's planning level and is also the scoping key on `workflow`
+and `batch`, and nothing yet says whether the two are one thing; the possessives that read the key as
+ownership are resolved to the owners the rules name, in this document and across the corpus). Revised by the
+decision-70 ruling of 2026-09-06 (revision 68, the operator's word: decision 70 ruled — two concepts share
+one word; the planning level keeps `project`, the scoping key on `workflow` and `batch` is renamed
+`declaration_scope`, and the section that posed the question now argues the ruling, with G20's global
+roster as the evidence a planning record cannot be the key and invariant 12 as what obliges the rename
+rather than a note; three existing terms swap-tested and rejected before the compound was coined).
 
 ## Purpose
 
@@ -50,6 +58,16 @@ is `work_model.md`; steps, hydration, and the gate are `gates_and_workflows.md`;
 holds, and what it calls them, is the instance's (`#which-levels-an-instance-declares-and-what-it-calls-them`).
 
 ## The invariants
+
+**The rules in this section.**
+
+- [The hierarchy is edges, and a task has one line upward](#the-hierarchy-is-edges-and-a-task-has-one-line-upward).
+- [Upward context is a declared read, resolved along the ascent at hydration](#upward-context-is-a-declared-read-resolved-along-the-ascent-at-hydration).
+- [Downward state is derived; upward content is authored, as entities](#downward-state-is-derived-upward-content-is-authored-as-entities).
+- [Maintenance is work: the `planning` workflow](#maintenance-is-work-the-planning-workflow).
+- [Authority per level: an amendment is an action, and its class is the level's](#authority-per-level-an-amendment-is-an-action-and-its-class-is-the-levels).
+- [Binding dissolves: a task's ascent is its binding](#binding-dissolves-a-tasks-ascent-is-its-binding).
+- [The mechanism against cross-record collision is the subject](#the-mechanism-against-cross-record-collision-is-the-subject).
 
 ### The hierarchy is edges, and a task has one line upward
 
@@ -419,7 +437,79 @@ needing its own lifecycle, its own verdict, independent of its parent strategy's
 be the same argument decision 51 already settled against a second `initiative`-shaped entity, re-litigated
 here.
 
+### `project` names a planning level; the scoping key on a declaration is a different term
+
+**Ruled (decision 70, 2026-09-06, the operator's): they are two concepts sharing one word. The planning
+level keeps the name `project`. The scoping key on `workflow` and `batch` is renamed
+`declaration_scope`, and the concept is `declaration scope` (`vocabulary.md#declaration-scope`).**
+
+**The planning level has the stronger claim to the word.** Decision 57 registers five levels — task, plan,
+project, strategy, mission — and makes `project` the tier above `plan`: an ancestry mark a task reaches by
+its `PART_OF` line, read for justification and for relative standing
+(`#the-hierarchy-is-edges-and-a-task-has-one-line-upward`). That is a settled ruling with rules turning on
+it: the ascent is a derived read on the task (`data_model.md#concepts`), the `amend_<level>` class is the
+level's (`#authority-per-level-an-amendment-is-an-action-and-its-class-is-the-levels`), and a missing
+ancestor is a finding rather than something the swarm may author
+(`#the-swarm-may-not-author-a-missing-ancestor`). A level owns its own record, its own `planning` batch,
+and the child records its `amend` step creates, and it owns nothing else: no policy, no workflow
+declaration, no roster.
+
+**The scoping key is not that, and one piece of evidence settles it rather than merely suggesting it.**
+`migration.md`'s gap G20 records that the roster "binds per project in `workflows.md`" while being **one
+global map on the instance**. A planning record cannot key a global map: there are many project records on
+an instance and one roster, so under the planning reading the map would have to be either per-record (which
+is not what the instance holds) or keyed on a record chosen arbitrarily from many (which is not a key at
+all). The same reading fails a second time on what the key selects. `workflow` declares one entity per
+scope and workflow type (`gates_and_workflows.md#declaration-batch-projection`), and a declaration says how
+work of a type is executed — its steps, its owner roles, its thresholds, whether its closing verdict may
+name no successor because the branch it deploys is deployed on its own cadence
+(`workflows.md#feature`). None of that is a property of a justification. A project record states what the
+operator is pursuing and why; it does not state a deployment cadence, and a rule that read the two as one
+thing would make every planning record carry deployment facts it has no reason to hold.
+
+**Invariant 12 is what obliges the rename rather than a note.** One word carrying two distinct senses is
+the overlap the invariant forbids by name, and its swap test decides which way the rename runs: run on the
+corpus's own sentences, "a task acquires its `project` from its ascent" and "a task acquires its
+`declaration_scope` from its ascent" do not mean the same thing — the ascent yields a planning record, and
+the scope is not one. Two sentences that resist substitution are two terms
+(`principles.md#12-as-few-terms-as-the-design-needs-and-no-fewer-no-term-overlaps-another`).
+
+**Why a compound rather than an existing term.** Three candidates were tested before one was coined.
+`instance` is the closest and fails on cardinality: an instance may declare several workflow types under
+several scopes, and "one entity per (instance, workflow type)" would forbid the several declarations of one
+type that `workflows.md` states exist. `domain` is taken, for the region an authority covers
+(`vocabulary.md#domain`), and swapping it in would assert that which declaration applies is decided by what
+a principal may act on, which the design denies — the gate and the declaration are separate mechanisms.
+`tenant` is the isolation boundary no read or write crosses (`vocabulary.md#tenant`), which is coarser
+than a scope by construction: one tenant runs several. `declaration scope` follows the pattern the corpus
+already uses for exactly this problem — bare `scope` carries four senses, and each is disambiguated by a
+qualifier rather than by argument (`vocabulary.md#waiver-scope`, `#finding-scope`, `#permission-scope`).
+
+**What the ruling does not decide.** How a task acquires the `declaration_scope` its intake batch carries.
+The task's row carries no such field and no rule states the derivation, so the intake batch opened at a
+task's creation still has one from nowhere
+(`conformance_suite.md#what-the-documents-leave-unspecified-here-and-how-each-is-recorded`). The ruling removes one candidate answer —
+it cannot be read off the ascent, since the ascent yields planning records and the scope is not one — and
+the derivation that fits the model is that intake's `classify` writes it, as it writes `action_type`. That
+remains recorded as a gap rather than ruled here, because it is a rule about intake and belongs where
+intake is stated. Whether `*|intake`'s `*` is a wildcard the resolver understands or a rendering
+convenience is likewise untouched: it was never a question about which sense the word carried.
+
+**What reopens it.** A rule of the design coming to read a declaration's scope off a planning record —
+none does today, and the roster's global map is the standing evidence against one. Or the operator
+choosing to bind exactly one declaration scope per project record, which would make the two coextensive in
+practice; that would still be two terms, since coextension is not identity, and the invariant's test is
+whether a sentence changes meaning, not whether the two sets happen to match on one instance.
+
 ## Missing ancestry: whether the swarm derives an absent parent, or finds the gap
+
+**The rules in this section.**
+
+- [The swarm may not author a missing ancestor](#the-swarm-may-not-author-a-missing-ancestor).
+- [What happens instead: a finding, with a proposal riding beside it](#what-happens-instead-a-finding-with-a-proposal-riding-beside-it).
+- [Before or after: whether a step declared the read](#before-or-after-whether-a-step-declared-the-read).
+- [Whether an orphan is a defect at all](#whether-an-orphan-is-a-defect-at-all).
+- [Transitivity: judged edge by edge, not over the whole chain](#transitivity-judged-edge-by-edge-not-over-the-whole-chain).
 
 **The operator's question (2026-09-06):** whether the swarm should derive higher-level planning materials
 when lower-level ones lack them — a task serving no plan, a plan serving no project, a project with no
@@ -623,12 +713,12 @@ governance write reserved under decision 18 — writing an intake rule is reserv
 gated at the same class as a `workflow` declaration — so declaring a default ancestor there inherits that
 authority without inventing a new gate for it. The class-default write `classify` makes when it finds one is
 the identical `PART_OF` write it makes today when a task names its own parent by identifier
-(`#whether-an-orphan-is-a-defect-at-all`); naming the
+(`#where-the-volume-goes-a-default-ancestor-per-intake-class-not-a-finding-on-every-orphan`); naming the
 default on the rule that already produces the task keeps that write and its authorization in one place.
 Revision 45's refusal survives unchanged: the swarm still may not author a missing ancestor
 (`#the-swarm-may-not-author-a-missing-ancestor`); an `intake_rule`'s default is a record the operator
 pre-authored once, for the class, before any orphan of that class existed, exactly as
-`#whether-an-orphan-is-a-defect-at-all` already states —
+`#where-the-volume-goes-a-default-ancestor-per-intake-class-not-a-finding-on-every-orphan` already states —
 this ruling only fixes where that pre-authored value is written down, not who may write it.
 
 **Confirmed: the `intake_rule` declaration shape carries it.** The shape `work_model.md` states — "It names

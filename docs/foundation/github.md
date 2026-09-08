@@ -34,7 +34,7 @@ events the swarm's own operations produce or depend on. In scope: the inbound ma
 the outbound operation per step, and the two properties that make the mapping auditable. Out of scope: the
 general adapter rules (`adapters.md`), the workflows whose steps take these operations (`workflows.md`),
 the gate's decision function (`gates_and_workflows.md`), what the adapter is granted
-(`authority_model.md#grants`), and the per-instance binding of a repository to a project, which is a
+(`authority_model.md#grants`), and the per-instance binding of a repository to a declaration scope, which is a
 `vendor_binding` context entity resolved at runtime and never named here.
 
 Events outside those classes — the host's organization, membership, sponsorship, marketplace, project
@@ -412,7 +412,7 @@ host back** — never by the operation's return code.
 
 | Step or workflow | Operation on the host | Action class | What the action gate does with the class | What confirms it landed |
 |---|---|---|---|---|
-| `pm` (feature, bug, security, copy) | open an issue, where the task has none and the project keeps its specification on the host | `open_issue` | low blast under a policy that lists it; unlisted resolves to `NEVER` | the issue read back by number; artifact attached to the batch |
+| `pm` (feature, bug, security, copy) | open an issue, where the task has none and the declaration scope keeps its specification on the host | `open_issue` | low blast under a policy that lists it; unlisted resolves to `NEVER` | the issue read back by number; artifact attached to the batch |
 | `pm`, `impl` | edit an issue; apply or remove a label; request review from an account | `external_api_write` | as the policy lists it | the host reflects the change, read back |
 | `impl` | commits reach a branch | `git_push` | as the policy lists it | the branch head, read back, equals the commit the adapter sent |
 | `impl` | open a pull request | `open_pr` | as the policy lists it | the pull request read back by number; artifact attached |
@@ -435,7 +435,80 @@ or a comment to make the record look clean — a superseded effect stays readabl
 recovery is an action a principal takes through the gate
 (`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`).
 
+**Which of these rows a principal's own artifact takes — its own comment, or a merged body several
+principals rewrite — is open (decision 85, 2026-09-07, on the operator's question).** Registered in
+`conformance.md#the-register-of-open-design-decisions`, argued below.
+
+## Where an agent's artifact about an issue or a pull request lives
+
+**Open (decision 85, 2026-09-07, on the operator's question).** Registered in
+`conformance.md#the-register-of-open-design-decisions`. The outbound table above gives a step one row for
+editing an issue and one row for commenting on it, and says nothing about which of the two an agent's own
+contribution takes. Where several agents each produce something about the same issue, that silence decides
+itself: today they are merged into one block in the issue description, rewritten in full by whichever agent
+contributed last, and the merged text names the review step that produced each part but never the
+principal that wrote it.
+
+The question is general and not only about a specification: **where does an artifact a principal produces
+about an issue or a pull request live — in its own place on the host, or merged into a body several
+principals rewrite?** It applies equally to a specification section, a review verdict, and a triage summary.
+
+**What already bears on it, and does not settle it.** Five rules touch the shape without deciding it.
+
+- **Invariant 9, one source defined once.** A value the swarm reads has one home. A merged body is one
+  value with several writers rather than one value with several homes, which is the neighbouring fault and
+  not the one the invariant names; whether the invariant reaches it is part of the question.
+- **C1 and `work_model.md#there-is-no-task-lifecycle-there-are-batches`.** A task carries status and edges
+  only, because a fact about a batch or a verdict written onto the task needs a process to keep it true.
+  A merged block is the same shape one level up — several principals' output on one field, kept correct by
+  each writer's discipline rather than by the record — but the rule is stated about a task's fields, and
+  extending it to an external system's body is an argument this section does not make for it.
+- **Attribution (`authority_model.md#attribution`).** Every write carries the agent that made it and the
+  principal it acted for. That rule binds writes to the record; whether the artifact rendered onto the host
+  must carry the same attribution is not stated, and the merged body is where the two come apart.
+- **The four outcomes (`adapters.md`).** They classify what arrives *inbound*, so they constrain how the
+  host's own comments and reviews are read, not where an agent's outbound artifact is put. The outbound
+  half is this document's table, which is where the silence is.
+- **Decision 69, ruled** (`adapters.md#a-per-agent-credential-is-an-obligation-where-the-system-issues-one`).
+  Where the host issues per-agent credentials, each agent holds its own, because a shared one leaves the
+  host unable to carry a verdict at all. That ruling is about *who writes*; this question is about *what
+  is written into*, and the two meet here — a body several principals rewrite loses on the content side
+  what a shared credential loses on the identity side. Whether the same ground decides both is the
+  question, and 69 did not reach it.
+
+**The dispositions, none of them taken here.**
+
+- **One artifact, one home, per author.** Each agent's contribution is its own comment on the host and its
+  own record entity; nothing merges, and any combined reading is a projection derived at read time. The
+  cost is that a reader of the issue sees a sequence of comments rather than one document, and a
+  specification loses the single ordered text a later build step reads as its source.
+- **Merged body, attribution preserved.** Sections stay in one body, each carrying the principal that
+  wrote it, and only that principal may write its own. This keeps the assembled document and adds the
+  attribution the merge currently drops; the cost is that the body still has several writers, so the
+  ownership is a convention the writers keep rather than a property the host enforces.
+- **Record-first.** Each contribution is an entity in the record, which is the source; the host carries a
+  rendering, and a rendering may merge because merging a projection loses nothing. This is close to what
+  the specification mechanism already does — the per-agent field is corrected in the record and the body
+  rewritten from it — and the question it leaves is whether a rendering several agents rewrite is
+  distinguishable, to a reader on the host, from a source they share.
+- **Nothing.** A specification is one document with several authors, so a shared block is the right shape
+  for it, and the concern is answered by attribution rather than by separation. The cost is that the rule
+  stays unstated, and the next artifact class to arrive settles it again by whichever mechanism is built.
+
+**What is settled, and is not part of this question:** an artifact attaches to its task by an edge, every
+outbound operation is an `action` evaluated at the gate, and a superseded effect stays readable rather than
+being deleted. The question is which outbound row a principal's own artifact takes, and whether the answer
+is the same for every artifact class.
+
 ## What the host must be configured to be, for this mapping to mean what it says
+
+**The rules in this section.**
+
+- [The argument that host configuration makes the mapping true, and why the design rejects it](#the-argument-that-host-configuration-makes-the-mapping-true-and-why-the-design-rejects-it).
+- [What it is instead: obligation 1's inbound half, and obligation 6's outbound half](#what-it-is-instead-obligation-1s-inbound-half-and-obligation-6s-outbound-half).
+- [The rule, stated once](#the-rule-stated-once).
+- [The required state, per repository](#the-required-state-per-repository).
+- [What this section does not decide](#what-this-section-does-not-decide).
 
 The operator's 2026-09-06 14:44 memo asked whether admitting the GitHub adapter should carry a plan to
 configure the host holistically, so the host is "compatible and appropriate for the adapter." It should,

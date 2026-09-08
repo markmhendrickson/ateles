@@ -87,6 +87,13 @@ from the batch. **A balance is not an artifact**, for reasons given in its own s
 
 ## What gates a payment, and why it is not a new mechanism
 
+**The rules in this section.**
+
+- The answer is that the existing mechanisms already compose into something stronger, and building a second
+gate would make the boundary weaker rather than safer.
+- What a second gate would cost, stated because the temptation is real.
+- One thing was missing rather than composed, and it is ruled below (decision 27).
+
 The question this section answers: a payment is the least reversible action in the system, so is the action
 gate plus a checkpoint enough, or does it need something stronger?
 
@@ -123,6 +130,13 @@ the approval rests on rather than as a step that happened.
 
 ## The dedup key, and what it is keyed on
 
+**The rules in this section.**
+
+- The key is keyed on the obligation being settled, not on the submission attempt.
+- The key is written before the first attempt, and this is load-bearing.
+- A payment whose key the adapter has already confirmed is refused.
+- A key present but unconfirmed is the unknown case.
+
 `work_model.md#at-least-once-implies-effect-dedup` places the `dedup_key` on the action and keys it on the
 intended effect. This section says what "the intended effect" means for a payment, because getting it wrong
 is how a payment is made twice.
@@ -158,6 +172,15 @@ this boundary the refusal is the whole point.
 **A key present but unconfirmed is the unknown case**, and it is not a refusal. It is the next section.
 
 ## The unknown case: a transfer submitted whose confirmation never returned
+
+**The rules in this section.**
+
+- [The two questions, which must not be conflated](#the-two-questions-which-must-not-be-conflated).
+- [What the record holds while it is unknown](#what-the-record-holds-while-it-is-unknown).
+- [How the read resolves it, per rail class](#how-the-read-resolves-it-per-rail-class).
+- [Terminal is not permanent, and the design must not assume it is](#terminal-is-not-permanent-and-the-design-must-not-assume-it-is).
+- [When the read cannot resolve it](#when-the-read-cannot-resolve-it).
+- [The complete rule, stated once](#the-complete-rule-stated-once).
 
 This is the hardest dedup case in the design, and it deserves the space. The situation: the adapter
 submitted a transfer, and no confirmation came back. The connection reset, the process ended, the rail
@@ -344,6 +367,14 @@ gate in the adapter, which is the second gate principle 6 forbids and the wrong 
 
 ## Fees, rates, and what the operator consented to
 
+**The rules in this section.**
+
+- On a bank rail the fee and rate are properties of a quote, and a quote expires.
+- The rule: the adapter never widens what was approved, and the boundary is a policy value whose default is
+zero.
+- On a crypto rail there is no quote and no lock.
+- A fee is disclosed, not absorbed.
+
 Fees deserve their own treatment because they are where the amount a principal approved and the amount that
 moves come apart, and neither rail class makes them a simple number.
 
@@ -375,6 +406,14 @@ differ where intermediaries deduct along the way and the rail cannot say in adva
 figure would be presenting the operator a number the design knows may not be the one that matters.
 
 ## The reference field, and a policy that suppresses it
+
+**The rules in this section.**
+
+- What the field is, per class.
+- The general principle: a payment's metadata is visible to third parties, and the design must let a policy
+suppress it.
+- The refusal, stated as a refusal and not as a capability.
+- The mirror rule: what the adapter writes about a payment into the record is narrowed too.
 
 Both rail classes offer a way to attach text to a payment, and the two are not equivalent in who can read
 it. This section states the general rule, and then the refusal it produces.
@@ -422,6 +461,12 @@ holds them and are referenced rather than copied. A checkpoint presented to the 
 operator needs to decide, which is not the same as everything the adapter read.
 
 ## Inbound: every event a rail can produce
+
+**The rules in this section.**
+
+- [Events about a transfer the swarm submitted](#events-about-a-transfer-the-swarm-submitted).
+- [Events about money the swarm did not send](#events-about-money-the-swarm-did-not-send).
+- [Delivery, and what the dedup rule keys on inbound](#delivery-and-what-the-dedup-rule-keys-on-inbound).
 
 The rails deliver fewer distinct event kinds than a code host or a chat channel, and most of what matters
 arrives by a read rather than by a notification the rail sends. The disposition rule holds regardless: every delivery resolves to one
@@ -561,6 +606,19 @@ prior commit than a success response is of the present one).
 
 ## What the adapter refuses, and why
 
+**The rules in this section.**
+
+- It refuses to submit twice for one obligation.
+- It refuses to construct a second transaction where it holds a signed one.
+- It refuses to treat a timeout as a failure, or as a success.
+- It refuses to confirm from a submission's return, or from a notification.
+- It refuses to advise a manual payment as a fallback for an unresolved submission.
+- It refuses to attach metadata a policy suppressed, or a neutral placeholder in its stead.
+- It refuses to write the `reconcile` verdict.
+- It refuses to take a payment on any signal that is not a resolved checkpoint.
+- It refuses to supply identity or compliance material to a rail.
+- It refuses to hold rail state of its own.
+
 Collected, each with what would break if it did not hold.
 
 **It refuses to submit twice for one obligation.** Any second submission is preceded by a read of the rail
@@ -660,7 +718,7 @@ payee receives or to what the operator pays, relative to the figures the checkpo
 requires a new checkpoint. A re-quote that moves either figure by any amount is outside a zero tolerance and
 is not taken; the adapter records the re-quote as an observation, `consent`'s `on_fail` opens `verify` again
 on the new figures, and the operator decides again on what the verifier signed the second time. The operator
-may later set a non-zero tolerance for a class of action in the project's `action_policy`, and from then on a
+may later set a non-zero tolerance for a class of action in the instance's `action_policy`, and from then on a
 change within it is taken and one outside it is a new checkpoint. What the number is, per class, is policy
 data; that the shape is a per-class tolerance whose absence reads as zero is the design
 (`data_model.md#concepts`, the `action_policy` row).
@@ -673,7 +731,7 @@ per class, with a record of having written it, and reversible by deleting it. Th
 the operator owns the number, which is the same division `work_model.md` draws for the governance classes
 (decision 18) and `gates_and_workflows.md` draws for the bulk-mutation count. The open question feared that
 exact match makes routine payments unresolvable on a rail whose prices expire. It does not make them
-unresolvable; it makes each expiry a decision, and a project for which that is too many decisions writes a
+unresolvable; it makes each expiry a decision, and an instance for which that is too many decisions writes a
 tolerance, once, and has recorded that it did.
 
 **Where the value lives, and why not the other two candidates.** On the `action_policy`, keyed by action

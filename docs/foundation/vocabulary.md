@@ -7,7 +7,7 @@ art `ent_08460968e6f49dac21510f4a` (A2A `TaskState`, RFC 8693, Camunda), [task](
 `ent_da60df3beccb675ef8c8c0c5`, the ateles#378 glossary ([operator](#operator) section, and the ux-signed swarm section
 cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 operator review (2026-09-04),
 and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14,
-16–18, 23–29: the hold verb, a condition a step holds on, the `dependency_cycle` reason class, the consent
+16–18, 23–29: the hold verb, a condition a step holds on, the `dependency_cycle` [reason class](#reason-class), the consent
 tolerance on `action_policy`, and an [artifact](#artifact) `PART_OF` its containing artifact), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the `intake rule` entry). Format
 follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by [role](#role); `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a task status; the terminal set declared on the type; the `finding` and `verdict` fields; `rounds_cap` and `none_permitted`). Revised by the rulings pass of 2026-09-06 (revision 38: the [conclusion](#conclusion) as the [verdict](#verdict)'s reconciled [projection](#projection); a `signed` or blocking verdict written under a held [lease](#lease); what owning confers; the counting rule and the thresholds' home on the [quorum](#quorum) and separation entries; an initiative as a task by class; the host as an external system; a budget as a grant's and a [delegation](#delegation)'s scope term). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser never the resolver save the operator's marked self-resolution, on the [approval](#approval) entry; the right to propose as a grant capability and what stops as a task, on the proposal and [reprioritization](#reprioritization) entries; metered resources and the engine's sole governance grant, on the [grant](#grant) entry; a rule naming a work-model type refused at the write). Revised by the planning pass of 2026-09-06 (revision 40: the planning-model section — [planning record](#planning-record), [planning level](#planning-level), [ascent](#ascent), [unplanned](#unplanned), [planning decision](#planning-decision), [planner](#planner), and the [amend](#amend-a-planning-record) verb). Revised by the record-sense pass of 2026-09-06 (revision 41: the [artifact](#artifact) definition and five other sentences that read "record" against an external system rephrased to "an entry an external system holds," closing the [record](#record) Not-for collision; the Not-for scoped to a Never for `docs/foundation/adapters.md` and the five per-system [adapter](#adapter) documents). Revised by the Human Inversion mapping pass of 2026-09-06 (revision 44: two term collisions with a public essay series disambiguated — [reconciler](#reconciler) as this design's projection-parity check, never the essay's adjudicating role, and [replay](#replay) as the essay's [as-of-read](#as-of-read) sense, never this design's refused re-execution sense). Revised by the priority pass of 2026-09-06 (revision 47: the [`priority`](#priority) entry added, giving the term a home beside [`claimable`](#claimable) as a [derived read](#derived-read) a [principal](#principal) consults and is never bound to obey). Revised by the rulings pass of 2026-09-06 (revision 48: decision 34 ruled — the [pipeline](#retired-names) entry replaced by [engine](#engine), defined once; decision 33 ruled — the [stage](#stage) entry rewritten to authored prose only, with no `steps[].phase` field). Revised by the event/signal/delivery pass of 2026-09-06 (revision 49: the [event](#event) entry added — the delivery's payload, distinct from the [delivery](#delivery) that carried it and the [signal](#signal) the adapter reads it into — and the [delivery](#delivery) and [signal](#signal) entries cross-referenced against it; the operator's question of whether events, signals, and deliveries are properly distinguished). Revised by the transport-and-delivery pass of 2026-09-06 (revision 50: [mapping](#mapping), [receiver](#receiver), [signature](#signature), and [idempotency key](#idempotency-key) entries added; [effect dedup](#effect-dedup) tightened to name the key by reference; [cursor](#freshness) and capability left as prose on the [grant](#grant) entry, the latter checked for collision and found none). Revised by the operator's 2026-09-06 terminology review of role, domain, and scope (revision 52: the [role](#role) entry added, beside [step owner](#step-owner); the [domain](#domain) and [permission scope](#permission-scope) entries added for the [authority](#authority) tuple's second and third terms; [finding scope](#finding-scope) and [waiver scope](#waiver-scope) added as qualified compounds rather than one entry for bare `scope`'s four senses, with bare scope left to the author and the `## Scope` heading untouched). Revised by the adversarial term audit of 2026-09-06 (revision 53: the [governance write](#governance-write) entry added — cited by name across six documents with no entry of its own, its definition already stated verbatim in `gates_and_workflows.md`; ten Not-for/Never violations fixed by unambiguous rephrasing, the `record`-for-external-system pattern found again in three new sites and a stale `steps[].phase` field removed from `data_model.md`). Revised by the checker-mechanism pass of 2026-09-06 (revision 54: `check_foundation_vocabulary.py`'s `record` ban rebuilt as a structural, corpus-wide check — a bound term possessed by, or governed by a preposition or relative clause pointing at, a foreign-system noun — after the literal-phrase, six-document-scoped version missed two more rounds of paraphrase; 28 further Not-for/Never violations this rebuilt check found across `adapters.md`, `calendar.md`, `conformance.md`, `data_model.md`, `gmail.md`, `migration.md`, `payments.md`, `work_model.md`, and `workflows.md` fixed by the same unambiguous rephrasing; one `adapters.md` heading renamed with its four cross-references, its anchor confirmed unused outside `docs/foundation`; `as_read` extended to strip `**bold**`/`*italic*` emphasis, closing a second escape the fix found live in `data_model.md`). Revised by the peering pass of 2026-09-06 (revision 56, rebased onto the checker-mechanism and self-awareness passes: decision 55 ruled on the [external system](#external-system) entry — a second instance of the record is not one; the [governance write](#governance-write) entry's admission sentence extended to name a synced write's own, unattributed shape). Revised by the verdict-rename pass of 2026-09-08 (revision 88: decision 72 ruled — the record that closes a step is the [verdict](#verdict) and the field it carries is the [conclusion](#conclusion); `sign-off` and `sign_off` retired as names of the record, kept under [Retired names](#retired-names); the ruling argued in a section of its own beside the [Owner](#owner-five-meanings-one-word-forbidden-alone) section).
 
@@ -225,7 +225,7 @@ The task's own transition vocabulary is `created` plus its status; [lease](#leas
 
 ### claimable
 **Definition:** the derived property of a [task](#task) whose status is not terminal, on which no [lease](#lease) is
-held, which no open [checkpoint](#checkpoint) holds from claim (every task-subject reason class but
+held, which no open [checkpoint](#checkpoint) holds from claim (every task-subject [reason class](#reason-class) but
 `unclaimed_step` — `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`), and whose
 `assigned_to` is unset or names the [principal](#principal) about to [claim](#claim).
 **See:** [`work_model.md#what-a-claim-predicate-treats-as-claimable`](work_model.md#what-a-claim-predicate-treats-as-claimable).
@@ -276,6 +276,22 @@ branch, and head, related to the [task](#task) it executes.
 [`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`](gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read).
 **Never:** "run history", "dispatch record".
 **Not for:** the session's transcript or reasoning as a field on it; a copy of what the step read (the verdict names it, and an as-of read returns it).
+
+### session_digest
+**Definition:** the summarized content of one [runner](#runner)'s session — what the session covered and
+concluded — as distinct from the [`agent_session`](#agent_session) that names where it ran and the raw turn
+store that holds every message.
+It carries one rule: **an [agent](#agent)'s [verdict](#verdict) `REFERS_TO` the digest of the session
+that produced it**, required where a digest exists for that session and permitted otherwise, so a reader
+can resolve what the signer was working from as of `signed_at`. Never the `agent_session` (which carries no
+content) and never the raw turns (the wrong grain for a reference resolved as of a time). A registered type
+whose rows may carry a third party's special-category content, so the mark applies at the type.
+**See:** [`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`](gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read),
+[`data_model.md#record-conventions`](data_model.md#record-conventions).
+**Never:** "session summary" as a second name for it.
+**Not for:** the [`agent_session`](#agent_session) for the digest (the first is identity, the second is
+content); a transcript for a digest (a digest summarizes; the turns are `conversation_message` rows and are
+not what a [verdict](#verdict) references).
 
 ### observation
 **Definition:** one append-only, timestamped, provenance-bearing write to an entity in the record, from
@@ -361,8 +377,8 @@ that word for the socket a delivery lands on.
 rule, or "template" (the rule authors the created task's text; classification is intake's).
 
 ### operator-facing agent
-**Definition:** the [agent](#agent) the roster resolves to the operator-facing [role](#role) — bound per project in
-`swarm_roster`, never named in the design — which [claims](#claim) operator-only [tasks](#task),
+**Definition:** the [agent](#agent) the roster resolves to the operator-facing [role](#role) — bound per
+[declaration scope](#declaration-scope) in `swarm_roster`, never named in the design — which [claims](#claim) operator-only [tasks](#task),
 carries them and their [checkpoints](#checkpoint) to the [operator](#operator), and records the outcome.
 **See:** [`work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent`](work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent).
 **Never:** —
@@ -406,8 +422,31 @@ declared [workflow](#workflow) with an owning [role](#role) rather than an emerg
 
 ## Gate model (`gates_and_workflows.md`)
 
+### declaration scope
+**Definition:** the key, paired with a workflow type, that selects which [workflow](#workflow) declaration a
+[batch](#batch) is run under — the body of work one instance runs, against which its declarations and its
+roster are keyed.
+Selecting is not owning: a declaration scope says which declaration applies, never that anything owns it
+(decision 70, ruled 2026-09-06). It is **not** the [planning level](#planning-level) named `project`, which
+is an ancestry mark read for justification and owns only its own record — the two share a word in ordinary
+use and the design distinguishes them, which is what invariant 12 obliges a rename for. The swap test:
+"a [task](#task) acquires its `project` from its ascent" and "a task acquires its `declaration_scope`
+from its ascent" do not mean the same thing, because an [ascent](#ascent) yields [planning records](#planning-record)
+and a scope is not one.
+**Field:** `workflow.declaration_scope`, `batch.declaration_scope`.
+**See:** [`planning_model.md#project-names-a-planning-level-the-scoping-key-on-a-declaration-is-a-different-term`](planning_model.md#project-names-a-planning-level-the-scoping-key-on-a-declaration-is-a-different-term),
+[`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
+**Never:** `project` for a declaration scope (retired in this sense: the word is the planning level's).
+**Not for:** [domain](#domain) for a declaration scope (a domain is the region an [authority](#authority)
+covers, and which declaration applies is not decided by what a [principal](#principal) may act on);
+[tenant](#tenant) for a declaration scope (a tenant is the isolation boundary, and runs several scopes); a
+whole instance for a declaration scope (an instance may run several scopes, which is what lets one workflow
+type have several declarations); a declaration scope as an owner of anything — of a
+[planning record](#planning-record), a policy, a declaration, or an [agent](#agent) — since selecting which
+declaration applies confers no ownership.
+
 ### workflow
-**Definition:** the declaration, per (project, workflow type), of an ordered list of [steps](#step), the [fast paths](#fast-path)
+**Definition:** the declaration, per ([declaration scope](#declaration-scope), workflow type), of an ordered list of [steps](#step), the [fast paths](#fast-path)
 a [batch](#batch) may take, and the [successors](#successor) a closing [verdict](#verdict) may name.
 **See:** [`workflows.md`](workflows.md),
 [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
@@ -422,8 +461,15 @@ a [batch](#batch) may take, and the [successors](#successor) a closing [verdict]
 parallel-group and join fields, [claimed](#claim) by its step owner on a [batch](#batch) and closed by that
 step owner's
 [verdict](#verdict).
-Step names are data (`pm`, `ux`, `arch`, `impl`, `pr_review`, `qa`, `legal`, `release`, and any a workflow
-declares).
+Step names are data (`pm`, `ux`, `arch`, `impl`, `pr_review`, `qa`, `legal`, `release`,
+`verify_deployed`, and any a [workflow](#workflow) declares), and no name carries an entry of its own: each is
+declared on one workflow, its [step owner](#step-owner)'s [role](#role) is tabled at
+`workflows.md#roles-named-in-this-document`, and the reason the [workflow](#workflow) separates it from its
+neighbours is argued in that workflow's own section — three homes a per-name entry would duplicate
+(principle 9). Where a name's separation is the point, the section says so: `verify_deployed` is a step
+apart from `release` because released and landed are different claims (`principles.md`, invariant 10), and
+a [batch](#batch) that closed on the release [action](#action)'s success would record the first as the
+second.
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** "gate owner".
 **Not for:** gate, phase, or check for a step — neither after a step name (a qa gate, an impl phase) nor
@@ -461,9 +507,9 @@ type marked special-category (the mark is the type's — `data_model.md#record-c
 ### step owner
 **Definition:** the **role** declared on a [step](#step), which the roster resolves to a [principal](#principal) at [claim](#claim) time;
 that principal claims the step on a [batch](#batch) and its [verdict](#verdict) closes it. The declaration names a [role](#role) so that
-one [workflow](#workflow) serves every project and a renamed or replaced [agent](#agent) leaves no stale name in it; the
+one [workflow](#workflow) serves every [declaration scope](#declaration-scope) and a renamed or replaced [agent](#agent) leaves no stale name in it; the
 resolution to a principal happens when the step is claimed, against `swarm_roster` for the batch's
-project, and a step whose role resolves to no principal raises a [checkpoint](#checkpoint) (reason
+scope, and a step whose role resolves to no principal raises a [checkpoint](#checkpoint) (reason
 `unspawnable_assignee`) rather than falling through to any available agent.
 **Field:** `workflow.steps[].owner_role` (the design's name; the field is `owner_agent` in the built
 declarations and holds a role there too — `status.md`).
@@ -473,8 +519,8 @@ declarations and holds a role there too — `status.md`).
 
 ### role
 **Definition:** a name a declaration carries in place of a [principal](#principal), resolved to one at the moment the
-declaration is acted on — `swarm_roster` per project, and once for the levels above a project
-(`vocabulary.md#planner`) — so that one declaration serves every project and a renamed or replaced
+declaration is acted on — `swarm_roster` per [declaration scope](#declaration-scope), and once for the levels above a [project](#project)
+(`vocabulary.md#planner`) — so that one declaration serves every scope and a renamed or replaced
 [agent](#agent) leaves no stale name in it.
 [Step owner](#step-owner) is a role, resolved when a [step](#step) is [claimed](#claim); an [approval](#approval)'s required
 principal may also be a role the roster resolves, carried in `needed_input` because an `AWAITS`
@@ -640,7 +686,8 @@ confidence); "requirement" for an acceptance criterion of a [batch](#batch).
 **Definition:** the state of one [step](#step) within one [batch](#batch), derived at read time from [edges](#edge)
 and never stored: open (the batch and the step), [claimed](#claim) (a [lease](#lease) from the
 [step owner](#step-owner) to the step on that batch), or signed (a [verdict](#verdict)).
-The concept is written in spaced words, "step state"; the map that projects it onto the [task](#task) is the field
+The concept is written in spaced words, "step state"; the map that renders it onto the [task](#task) as a
+[projection](#projection) is the field
 [`step_status`](#step_status), and the two are not the same thing.
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** "gate status".
@@ -648,11 +695,11 @@ The concept is written in spaced words, "step state"; the map that projects it o
 other the projection of it).
 
 ### step_status
-**Definition:** the map on the [task](#task) projecting each [step](#step)'s
+**Definition:** the map on the [task](#task) holding, as a [projection](#projection), each [step](#step)'s
 [step state](#step-state) on its [batch](#batch) so that it is read in one retrieval, derived from the
 [verdicts](#verdict) and proved equal to them by a [reconciler](#reconciler).
 Written as the field the record names, in code font, because that is what a reader queries; the state it
-projects is the spaced concept step state.
+holds is the spaced concept step state.
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** "gate_status".
 **Not for:** history for the projection; a second source of truth; `step_status` as the name of the
@@ -726,7 +773,17 @@ repository.
 always-checkpoint boundaries, the [permission scope](#permission-scope), and the consent tolerance per action class — the change
 to an action's consented figures that may be taken without a new [checkpoint](#checkpoint), zero where the
 policy declares none (`payments.md#tolerance-is-an-action_policy-value-and-its-default-is-zero`).
-**See:** [`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`](gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken).
+**Its fields are values, not terms.** The policy's every field is named and defined once in its
+`data_model.md#concepts` row, and this file mints no term for any of them: `lapse_cap` (the per-task lapse
+count at which [`repeated_lapse`](#repeated_lapse) is raised, undeclared raising none), `min_tier` (the
+minimum model tier a class's [action](#action) may be taken at, evaluated at the same take as
+[blast radius](#blast-radius) and set by the [operator](#operator) only for irreversible classes),
+`confidence_threshold` (the policy floor a scored [confidence](#confidence) is compared with — not a second
+term beside `confidence`), `recoveries`, `metered_resources[]`, `quorum`, and `disjoint_roles[]` are the
+policy's data. A reader meets each on the policy's row; naming one here would be a second home for a value
+that already has one (principle 9).
+**See:** [`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`](gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken),
+[`data_model.md#concepts`](data_model.md#concepts).
 **Never:** "execution_policy", "execution policy", "workflow policy" (retired: the step owners a workflow
 declares together with the grants in force decide who may claim a step, and nothing stands beside them
 under a name of its own).
@@ -736,7 +793,7 @@ declaration and the grants).
 ### governance write
 **Definition:** a write to one of eight closed, named record types — `agent`, `agent_policy`, a [workflow](#workflow)
 declaration, [`action_policy`](#action_policy), an [agent grant](#grant), `swarm_roster`, the schema registry, or an
-[intake rule](#intake-rule) — evaluated as an [action](#action) at the [action gate](#action-gate) under the project's
+[intake rule](#intake-rule) — evaluated as an [action](#action) at the [action gate](#action-gate) under the instance's
 `action_policy`, because each of the eight defines what the swarm may do, what a [principal](#principal) is, or how
 work reaches the swarm.
 The list is stated once, at its one home, and never restated elsewhere in this document or any other; a type a
@@ -772,11 +829,16 @@ once in the [action](#action)'s home section. The host a [daemon](#daemon) runs 
 are [artifacts](#artifact), and process control is its adapter's action classes (decision 45). A second
 instance of the record's own software, owned by another party, is **not** one: decision 55 rules it the
 same record, extended by replication, reached through the record's own peer-sync substrate rather than an
-adapter, with no [artifact](#artifact) at the seam.
+adapter, with no [artifact](#artifact) at the seam. The swarm's **own** serving instance is one only while it is
+the object of an operation upon it — decision 78 rules a restart, a redeploy, or a migration of that
+instance an action of the host's adapter, the [artifact](#artifact) being the process and its host and
+never an entity, while every read and write of the record remains inside the boundary as before.
 **See:** [`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken),
 [`adapters.md#the-two-invariants`](adapters.md#the-two-invariants),
 [`adapters.md#whether-the-host-a-daemon-runs-on-is-an-external-system`](adapters.md#whether-the-host-a-daemon-runs-on-is-an-external-system),
-[`adapters.md#whether-a-second-instance-of-the-record-is-an-external-system`](adapters.md#whether-a-second-instance-of-the-record-is-an-external-system).
+[`adapters.md#whether-a-second-instance-of-the-record-is-an-external-system`](adapters.md#whether-a-second-instance-of-the-record-is-an-external-system),
+[`adapters.md#whether-the-instance-of-the-record-serving-a-swarm-is-an-external-system-when-the-swarm-operates-it`](adapters.md#whether-the-instance-of-the-record-serving-a-swarm-is-an-external-system-when-the-swarm-operates-it)
+(decision 78: the serving instance is an external system only while the swarm operates it).
 **Never:** —
 **Not for:** "the Ateles system" or "the Neotoma system" as the thing an effect is outside of (there is one
 boundary, and the record is inside it); external for a component the swarm runs.
@@ -789,7 +851,10 @@ handle on a thing that does not. The word is also ordinary English for a thing w
 [step owner](#step-owner) writes, the record an effect leaves — and those uses stand; where the store is
 meant and the sentence could be read either way, say the record and name what is in it.
 **See:** [`data_model.md#scope`](data_model.md#scope),
-[`failure_posture.md#the-decision`](failure_posture.md#the-decision).
+[`failure_posture.md#the-decision`](failure_posture.md#the-decision),
+[`adapters.md#whether-the-instance-of-the-record-serving-a-swarm-is-an-external-system-when-the-swarm-operates-it`](adapters.md#whether-the-instance-of-the-record-serving-a-swarm-is-an-external-system-when-the-swarm-operates-it)
+(decision 78: the process serving the record is operated through the host's adapter, and the third **Not
+for** limb below is unaffected because no [adapter](#adapter) reaches the record itself).
 **Never:** —
 **Not for:** the record for an [external system](#external-system); "database" for the record in foundation
 prose; the record as something an [adapter](#adapter) reaches across a boundary.
@@ -805,11 +870,18 @@ auto-execute, in any form, spelled with or without the hyphen.
 ### action_type
 **Definition:** the class an [action](#action) belongs to, on which [blast radius](#blast-radius) keys, and which a [task](#task) declares at
 creation as the classes of action it expects to produce.
-Values include `build`, `docs`, `publish`, `send_external_comms`, `merge_pr`, and `operator_only`; a
-declared but unclassified value fails closed.
+Values include `build`, `docs`, `publish`, `external_api_write` (a write to an
+[external system](#external-system) that reaches nobody but the system itself), `send_external_comms`,
+`merge_pr`, and `operator_only`; a declared but unclassified value fails closed.
 The set of values is `action_policy` data and has no list in the foundation: each [adapter](#adapter)'s
 document tables the classes its [outbound](#outbound) operations carry, every class an adapter can produce is listed in
 the policy (`adapters.md#the-admission-contract`, obligation 6), and the values named here are examples.
+**No individual class carries an entry of its own**, for the same reason the set has no list: a class is
+policy data, its [blast radius](#blast-radius) is the policy's to resolve, and an entry per class would be
+a second home for a value the policy already declares (principle 9). Where one class's boundary against
+another is load-bearing — the same calendar write being `external_api_write` on a solo event and
+`send_external_comms` on one with attendees, because the second mails people — the
+[adapter](#adapter)'s own document argues it, at the row where the operation appears.
 **See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers),
 [`adapters.md#what-an-adapters-document-must-contain`](adapters.md#what-an-adapters-document-must-contain).
 **Never:** —
@@ -856,7 +928,7 @@ preventing it).
 cannot advance — awaiting a [principal](#principal)'s decision.
 Two cases, one term, because both are work stopped short of a decision only a principal can make; what
 resumes differs and is read from the subject [edge](#edge), not from a second term. Recorded as an entity linked to
-its subject, carrying a reason class, the needed input, the options, whom it awaits, and who resolved it,
+its subject, carrying a [reason class](#reason-class), the needed input, the options, whom it awaits, and who resolved it,
 and ending in a terminal approval. To checkpoint a subject is to write one and hold. The reason classes
 — `gate_hold` for a held action, and the classes a task is [escalated](#escalate) under — are enumerated once, each
 with what raises it, in `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`; a policy may
@@ -1116,7 +1188,15 @@ to no outcome, recorded with the reason that decided it and counted per window.
 A drop is announced on the same off-record path a [halt](#halt) uses, aggregated rather than one message each;
 where the drop concerns a request a person made on the [external system](#external-system), the reason goes back to that
 system as an [observation](#observation) the person can see.
-**See:** [`adapters.md#what-the-adapter-does-with-every-event`](adapters.md#what-the-adapter-does-with-every-event).
+**The drop reason is the [adapter](#adapter)'s value, declared per [external system](#external-system).**
+Unlike a [reason class](#reason-class), whose members the design enumerates once, the reasons a drop
+carries are declared in each adapter document's [inbound](#inbound) table beside the surface each covers, because what
+an adapter can be delivered and chooses not to handle is that system's question and not the design's. The
+one reason every adapter carries is `out_of_scope_class`: the delivered class says nothing about an
+[artifact](#artifact) the work model names. It is counted like every other drop, so a class becoming
+relevant appears as a rising count rather than as silence.
+**See:** [`adapters.md#what-the-adapter-does-with-every-event`](adapters.md#what-the-adapter-does-with-every-event),
+[`adapters.md#what-an-adapters-document-must-contain`](adapters.md#what-an-adapters-document-must-contain).
 **Never:** —
 **Not for:** "swallowed" or "ignored" for a drop (each names the failure this disposition exists to
 prevent, and each is used in the documents only to name it); dropped without a reason; dropped for an
@@ -1200,6 +1280,23 @@ descendants and whose statement and [planning decisions](#planning-decision) are
 **Not for:** "roadmap item" or "portfolio item" for a planning record; a parent task for a planning record (a parent task groups tasks and holds no statement); a
 batch for a planning record; a matter or a case for one (that is what work concerns, not what it is for).
 
+### project
+**Definition:** the [planning level](#planning-level) one rank above `plan` and one below `strategy`, among
+the five decision 57 registers — an [ascent](#ascent) mark a [task](#task) reaches along `PART_OF`, read
+for justification and for relative standing.
+It is a [planning record](#planning-record) and nothing more: it owns its own statement, its own `planning`
+[batch](#batch), and the child records its `amend` [step](#step) creates, and it owns no policy, no
+[workflow](#workflow) declaration, and no roster. Which declaration a [batch](#batch) runs under is the
+[declaration scope](#declaration-scope), a different term the design distinguishes (decision 70, ruled
+2026-09-06).
+**See:** [`planning_model.md#which-levels-an-instance-declares-and-what-it-calls-them`](planning_model.md#which-levels-an-instance-declares-and-what-it-calls-them),
+[`planning_model.md#project-names-a-planning-level-the-scoping-key-on-a-declaration-is-a-different-term`](planning_model.md#project-names-a-planning-level-the-scoping-key-on-a-declaration-is-a-different-term).
+**Never:** `project` as the scoping key on a `workflow` or a `batch` (that is the
+[declaration scope](#declaration-scope)).
+**Not for:** "epic" for a project; a project as the owner of an `action_policy`, a `workflow`, or a
+`swarm_roster`; a project as a fixed level every instance must register (decision 57 is one instance's
+choice, and the design reads the mark and the ascent, never a level by name).
+
 ### planning level
 **Definition:** the rank the registry's planning mark carries on a type, by which a [planning record](#planning-record)'s
 `PART_OF` [edge](#edge) points only to a record of a higher rank, and which names the `amend_<level>` [action](#action) class
@@ -1241,7 +1338,7 @@ or task); a register decision of this directory for a planning decision.
 
 ### planner
 **Definition:** the [role](#role) that [claims](#claim) every [step](#step) of the planning [workflow](#workflow), resolved by the roster per
-project, and once for the levels above a project.
+[declaration scope](#declaration-scope), and once for the levels above a [project](#project).
 **See:** [`workflows.md#planning`](workflows.md#planning),
 [`planning_model.md#maintenance-is-work-the-planning-workflow`](planning_model.md#maintenance-is-work-the-planning-workflow).
 **Never:** —
@@ -1303,6 +1400,24 @@ principal itself.
 **See:** [`authority_model.md#principals`](authority_model.md#principals).
 **Never:** —
 **Not for:** identity for the principal; account for a credential.
+
+### principal binding
+**Definition:** the [edge](#edge) from an [agent](#agent) to the [principal](#principal) whose interest it
+acts in, recorded as `principal_binding`.
+Not a [credential](#credential): a credential binds a login, key, or address **to** a principal, while
+this binds one principal to another, and it is what joins the two credential systems — an AAuth `sub`
+binds to the agent that presented it and reaches the human principal only through the agent's binding.
+It carries one rule the design turns on: **for a [quorum](#quorum) or a
+[separation-of-duties](#separation-of-duties) check, an agent counts as the principal its binding names**
+— one interest, so two agents bound to one [operator](#operator) cannot satisfy a check meant to require
+two. Attribution is unaffected: the agent is recorded as itself, A-for-B.
+**See:** [`authority_model.md#principals`](authority_model.md#principals),
+[`authority_model.md#the-counting-rule-an-agent-counts-as-its-bound-principal`](authority_model.md#the-counting-rule-an-agent-counts-as-its-bound-principal).
+**Never:** —
+**Not for:** a [credential](#credential) for the binding (the credential binds to a principal; this binds
+between two); the binding for [delegation](#delegation) (a delegation is granted and expires, a binding is
+what the agent is); the binding for `vendor_binding` (that binds a [role](#role) to a model and harness,
+and carries no [authority](#authority)).
 
 ### operator
 **Definition:** a human [principal](#principal) who directs [agents](#agent), recorded as an `operator`
@@ -1520,8 +1635,105 @@ Never coerced to pending or to clear; at an [enforcement point](#enforcement-poi
 **Never:** "legacy fail-open" (no such category exists).
 **Not for:** pending or clear for a failed read.
 
+### reason class
+**Definition:** the named value on a [checkpoint](#checkpoint) saying what stopped its
+[subject](#subject) — `gate_hold` for an [action](#action) held at the [action gate](#action-gate), and one
+of the classes a [task](#task) is [escalated](#escalate) under.
+The set is enumerated once, each member with what raises it, in
+`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`; the instance's
+[`action_policy`](#action_policy) may declare more, and this file defines only the members whose meaning is
+not readable from the name. The class is what a reader routes on — which classes hold a task from
+[claim](#claim), and which merely reorder — so it is a value the design names rather than free text.
+**See:** [`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`](failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol),
+[`gates_and_workflows.md#the-checkpoint`](gates_and_workflows.md#the-checkpoint).
+**Never:** "error code", "failure code".
+**Not for:** a reason class for a [dropped](#dropped) [delivery](#delivery)'s reason (that is the
+[adapter](#adapter)'s value, declared per [external system](#external-system) in its inbound table, not one
+of the classes this term names).
+
+### repeated_lapse
+**Definition:** the [reason class](#reason-class) raised on a [task](#task) whose [lease](#lease) has
+[lapsed](#lapsed) as many times as the instance's [`action_policy`](#action_policy) declares in `lapse_cap`.
+Raised by the [watchdog](#watchdog), carrying the count and the last lease holders; an undeclared
+`lapse_cap` raises none, and the absence is visible in the policy rather than defaulted at runtime. It
+holds the task from [claim](#claim), because a re-claim would restart the condition it exists to stop.
+**See:** [`failure_posture.md#repeated-lapse-raises-a-checkpoint`](failure_posture.md#repeated-lapse-raises-a-checkpoint).
+**Never:** —
+**Not for:** a lapse count for the class (`lapse_cap` is the declared ceiling, the class is what reaching
+it raises); [recovery](#recovery) for a re-claim after a lapse (no effect was taken).
+
+### rounds_exhausted
+**Definition:** the [reason class](#reason-class) raised when a bounded loop reaches its declared ceiling
+without resolving — a deferral repeated to its bound, or a [step](#step)'s `on_fail` loop reaching the
+`rounds_cap` its [workflow](#workflow) declares.
+Carries the [finding](#finding) naming what the [batch](#batch) was waiting on. It holds the [task](#task) from
+[claim](#claim): the loop stopped because repeating it changed nothing.
+**See:** [`failure_posture.md#the-rules`](failure_posture.md#the-rules),
+[`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
+**Never:** "retry limit", "max retries".
+**Not for:** a timeout for the class (nothing here is bounded by elapsed time — a round is a repetition,
+not an interval); the ceiling itself for the class (that is `rounds_cap`, declared on the [step](#step)).
+
+### unreadable_workflow
+**Definition:** the [reason class](#reason-class) raised when the [workflow](#workflow) declaration a
+[batch](#batch) needs cannot be read, so no [step](#step) of it opens or is [claimed](#claim).
+One [checkpoint](#checkpoint) for the batch, never one per [task](#task), and never an empty step tuple
+proceeding: an unreadable declaration is [unknown](#unknown), and unknown holds.
+**See:** [`gates_and_workflows.md#an-unreadable-workflow-is-unknown-and-unknown-holds`](gates_and_workflows.md#an-unreadable-workflow-is-unknown-and-unknown-holds),
+[`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`](failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol).
+**Never:** —
+**Not for:** a missing workflow for the class (a declaration that does not exist and one that will not
+read are the same [unknown](#unknown), and both raise this); the class for a workflow whose steps read
+fine but whose [read dependencies](#read-dependency) do not (that is `undeclared_dependency`).
+
+### capability_denied
+**Definition:** the [reason class](#reason-class) raised when a [principal](#principal) was refused a
+capability its [step](#step) needed — the [grant](#grant) checker's `Deny`.
+Names the principal, the exact capability, and what asked for it. The [step](#step) waits rather than
+borrowing another principal's [credential](#credential). It holds the [task](#task) from
+[claim](#claim), since a re-claim asks the same [grant](#grant) the same question.
+**See:** [`authority_model.md#grants`](authority_model.md#grants),
+[`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`](failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol).
+**Never:** "permission error", "403".
+**Not for:** the class for a capability that exists but cannot be reached
+([`capability_unavailable`](#capability_unavailable) is that one); the class for a credential the swarm
+never held (`no_credential`).
+
+### capability_unavailable
+**Definition:** the [reason class](#reason-class) raised when a capability a [runner](#runner) had is no
+longer reachable mid-[step](#step) — the model or harness it started under going away.
+Distinct from [`capability_denied`](#capability_denied) because the two put different questions to the
+[operator](#operator): denial asks whether to grant something, unavailability asks whether to wait, switch
+vendor, or accept the [step](#step) at a lower tier. Its timing is the existing `lapse_cap`, not a second
+clock, and a re-[claim](#claim) reads the same `min_tier` floor a first claim does.
+**See:** [`failure_posture.md#a-runners-model-or-harness-going-unavailable-mid-step`](failure_posture.md#a-runners-model-or-harness-going-unavailable-mid-step).
+**Never:** —
+**Not for:** the class for a refusal ([`capability_denied`](#capability_denied) is that one); "outage" for
+the class (the [halt](#halt) is the swarm-wide state, and this is one [step](#step)'s capability); a second
+lapse clock beside `lapse_cap`.
+
+### underdetermined_inputs
+**Definition:** the [reason class](#reason-class) raised when a [step](#step)'s required read resolved to no instance — the
+record holds none and no [adapter](#adapter) could import one — so the step cannot be entered on what the
+[task](#task) states and what the record holds together.
+Raised at [hydration](#hydration), before the step opens, so no [lease](#lease) is spent on work that was
+never enterable; it holds the task from [claim](#claim), and its `needed_input` names the read, the step
+that declared it, and what would satisfy it. Distinct from
+`undetermined_scope`, which asks how widely a [finding](#finding)'s lesson binds
+where this asks what the work is acting on. Distinct from `undeclared_dependency`, which is a read the
+swarm could not **make**: that one may resolve on a retry, and this one resolves only by a [principal](#principal)
+supplying what is missing. The swarm may carry candidate values as options on the [checkpoint](#checkpoint); it never
+resolves the class by choosing one itself.
+**See:** [`failure_posture.md#a-task-whose-inputs-cannot-be-resolved-is-put-to-the-operator-not-executed-on-a-guess`](failure_posture.md#a-task-whose-inputs-cannot-be-resolved-is-put-to-the-operator-not-executed-on-a-guess),
+[`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
+**Never:** "missing context", "insufficient context".
+**Not for:** the class for an input that exists and is too thin to act on (that is a judgement, and the
+[step owner](#step-owner) **holds** on it under decision 13); the class for a read that could not be made
+(`undeclared_dependency`); a scope for an input (`undetermined_scope` names a finding's reach, never a
+task's inputs).
+
 ### escalate
-**Definition:** to raise a [checkpoint](#checkpoint) on a [task](#task) the swarm cannot advance, with the reason class that says
+**Definition:** to raise a [checkpoint](#checkpoint) on a [task](#task) the swarm cannot advance, with the [reason class](#reason-class) that says
 why.
 The [watchdog](#watchdog) escalates on repeated lapse; the [engine](#engine) escalates on an unreadable [workflow](#workflow); a bounded loop
 escalates when its rounds are exhausted; a [claim](#claim) predicate escalates on an `assigned_to` nobody can run.

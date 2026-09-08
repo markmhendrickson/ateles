@@ -37,6 +37,37 @@ below; steps and gates are `gates_and_workflows.md`; core workflows (including i
 
 ## The invariants
 
+**The rules in this section.**
+
+- [Pull is the only delivery; assignment constrains eligibility](#pull-is-the-only-delivery-assignment-constrains-eligibility).
+- [Assignment restricts eligibility; it never creates a lease](#assignment-restricts-eligibility-it-never-creates-a-lease).
+- [The claim and the lease are one primitive](#the-claim-and-the-lease-are-one-primitive).
+- [The lease is a relationship, not a set of task fields](#the-lease-is-a-relationship-not-a-set-of-task-fields).
+- [Liveness is derived from activity at read time, never declared](#liveness-is-derived-from-activity-at-read-time-never-declared).
+- [No assignment log; history is the task's own observations](#no-assignment-log-history-is-the-tasks-own-observations).
+- [The transition vocabulary](#the-transition-vocabulary).
+- [There is no task lifecycle; there are batches](#there-is-no-task-lifecycle-there-are-batches).
+- [Intake is every task's first workflow](#intake-is-every-tasks-first-workflow).
+- [What distinguishes a task being assembled from one intake has not reached](#what-distinguishes-a-task-being-assembled-from-one-intake-has-not-reached).
+- [What a claim predicate treats as claimable](#what-a-claim-predicate-treats-as-claimable).
+- [Priority orders the claimable pool; it does not enter it](#priority-orders-the-claimable-pool-it-does-not-enter-it).
+- [A lapsed lease is not reaped; repeated lapse raises a checkpoint](#a-lapsed-lease-is-not-reaped-repeated-lapse-raises-a-checkpoint).
+- [At-least-once implies effect dedup](#at-least-once-implies-effect-dedup).
+- [Operator-only tasks are claimed by the operator-facing agent](#operator-only-tasks-are-claimed-by-the-operator-facing-agent).
+- [A task is executed only through a workflow](#a-task-is-executed-only-through-a-workflow).
+- [Changing the swarm is work, and it goes through a workflow like any other](#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other).
+- [What goes through a workflow is a batch of tasks](#what-goes-through-a-workflow-is-a-batch-of-tasks).
+- [How a batch is formed, and what chooses its workflow](#how-a-batch-is-formed-and-what-chooses-its-workflow).
+- [A batch may hold on a condition discovered mid-flight](#a-batch-may-hold-on-a-condition-discovered-mid-flight).
+- [A batch may depend on a task it created](#a-batch-may-depend-on-a-task-it-created).
+- [Artifacts are records a batch leaves, never its subject](#artifacts-are-records-a-batch-leaves-never-its-subject).
+- [A task is in at most one batch at a time](#a-task-is-in-at-most-one-batch-at-a-time).
+- [Parent and child tasks](#parent-and-child-tasks).
+- [A recurring task is one live instance, and its completion creates the next](#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next).
+- [Where tasks come from: every source, indexed](#where-tasks-come-from-every-source-indexed).
+- [An intake rule turns a described change in the record into a task, and nothing else](#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else).
+- [Whether an intake rule may key on the work model's own records](#whether-an-intake-rule-may-key-on-the-work-models-own-records).
+
 ### Pull is the only delivery; assignment constrains eligibility
 
 Work reaches an agent only by claim. No router chooses lease holders; no principal delivers a task; a workflow
@@ -123,6 +154,50 @@ beyond that is hydration's, per step (`workflows.md#what-link-attaches-and-what-
 Tasks a batch creates
 (children, detached tasks, tasks extracted from a meeting) enter intake themselves; a child may take
 intake's declared fast path and never skips intake.
+
+**What a task being assembled looks like is open (decision 84, 2026-09-07, on the operator's question).**
+Registered in `conformance.md#the-register-of-open-design-decisions`, argued below.
+
+### What distinguishes a task being assembled from one intake has not reached
+
+**Open (decision 84, 2026-09-07).** Registered in
+`conformance.md#the-register-of-open-design-decisions`. The rule above makes an unrouted task a task with no
+intake batch, and that one definition covers two situations the design does not currently separate: a task
+with no intake batch **because it is still being written** — several agents each contributing part of it,
+the operator's case — and a task with no intake batch **because intake has not yet picked it up**. Both are
+unrouted. Nothing in the record says which is which, and so nothing says whether the first is finished
+enough to be claimed and executed.
+
+**The operator's proposal was a `draft` status**, and a status is disfavoured on three independent grounds,
+none of which touch the need itself:
+
+- **C1 and invariant 11.** `#there-is-no-task-lifecycle-there-are-batches` states that a task carries status
+  and edges only, and that writing a batch, lease, or verdict fact onto the task is the defect a process
+  then has to keep true. A status meaning "still being written" is a fact about what an assembler is doing,
+  maintained on the task by whoever remembers to clear it.
+- **Invariant 12's no-overlap half.** `draft` is already a bound step name in two workflows —
+  `draft` → `draft_lint` → `consent` → `post`, and `draft` → `disclosure_lint` → `review` → `consent`
+  (`workflows.md`). A `draft` status would carry a second, unrelated sense of the same word.
+- **The status vocabulary's scope.** `#the-transition-vocabulary` and
+  `#what-a-claim-predicate-treats-as-claimable` give the vocabulary two meanings, `open` and terminal, with
+  a closing verdict writing only a declared value and a terminal value outside the set refused at the
+  write. Statuses are how a task ends, not how it is prepared.
+
+**The dispositions, none of them taken here.**
+
+- **Nothing.** The absence of an intake batch already is the state, and being assembled is a fact about the
+  assembler rather than about the task. The cost is that the two situations stay indistinguishable to any
+  reader of the record.
+- **An edge, not a status.** A relationship marking a task as under assembly, cleared when intake starts,
+  leaving the task's own fields untouched — the shape invariant 11 prefers, and the one `held`-from-claim
+  already takes.
+- **A held intake batch.** The task enters intake immediately and intake's first step holds on the
+  condition that the task is not yet fully written, using
+  `#a-batch-may-hold-on-a-condition-discovered-mid-flight`, which exists and needs no new record.
+- **A status after all**, accepting the three costs above, and under a word other than `draft`.
+
+**What is settled, and is not part of this question:** every task enters intake, and a task with no intake
+batch is unrouted. The question is whether the design says anything further about *why* it has none.
 
 ### What a claim predicate treats as claimable
 
@@ -220,7 +295,7 @@ changes, a due date arrives — and a stored value on the task does not move wit
 re-writes every task under the changed record, which is the watchdog principle 11 refuses to require. What
 already exists in this design confirms the shape rather than inventing it: a planning record's `next_steps`
 is already "a derived read: the record's open descendants in priority order"
-(`planning_model.md#maintenance-is-work-the-planning-workflow`) — the design derives ordering at the plan level today and has
+(`#maintenance-is-work-the-planning-workflow`) — the design derives ordering at the plan level today and has
 never stored it there. The everyday claim-ordering question this section answers is the same read, one level
 down: for the pool of tasks one principal may legitimately take, order by what is already on the record and
 already read elsewhere — the standing of the task's ascent (an objective's declared weight, a plan's), a
@@ -298,7 +373,7 @@ never got, and an unset class here is not bound by a "must" it never got either.
 **The observable, tightened for a "must" class.** The repeated-pattern read this section already defines for
 "may" — a principal repeatedly claiming lower-standing work while higher-standing work of the same class
 sits claimable and undeclined, read from the record rather than a stored flag
-(`#priority-orders-the-claimable-pool-it-does-not-enter-it`) — tightens to a per-instance check where the class's policy says
+(`#the-observable-that-catches-a-violation`) — tightens to a per-instance check where the class's policy says
 "must": a single instance of a bound principal claiming anything but the highest-standing claimable task of
 that class, with none of the ordinary fitness exceptions available (there are none once the class says
 "must" — that is what binding the class means), is itself the violation, not merely the pattern. The read is
@@ -324,7 +399,7 @@ a re-claimed task is never replayed (`failure_posture.md`). The dedup key lives 
 ### Operator-only tasks are claimed by the operator-facing agent
 
 A task with `operator_only` actions is an ordinary task claimed by the operator-facing agent — the agent
-the roster resolves to that role for the batch's project (`vocabulary.md#operator-facing-agent`) — which
+the roster resolves to that role for the batch's declaration scope (`vocabulary.md#operator-facing-agent`) — which
 carries it to the operator and holds the lease while the operator decides. It is not itself a checkpoint: it raises one
 only when an action inside it reaches the action gate, which resolves `operator_only` to `NEVER`
 (`gates_and_workflows.md`). The task path stays pull; only the action waits on a human.
@@ -348,7 +423,7 @@ under a declaration that does not permit it is refused at the write, and the tas
 "landed" is therefore a derived read over the chain and not a status anyone writes: a task whose batch
 produced a `merge_pr` action is terminal when its chain ended under a declaration that permits its ending
 there — a `release` batch's `verify_deployed` signed, or a `feature` or `bug` declaration that permits none
-because the project deploys its default branch on its own cadence (`workflows.md#feature`) — and a terminal
+because the declaration scope deploys its default branch on its own cadence (`workflows.md#feature`) — and a terminal
 task whose last batch closed naming none under a declaration that permits no such end is the failing
 artefact. Which terminal value the verdict writes is drawn from the set the registered type declares
 (`#what-a-claim-predicate-treats-as-claimable`).
@@ -398,7 +473,7 @@ workflow, and the writes the work makes — to an `agent`, an `agent_policy`, a 
 `gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken` states once,
 and already actions at the action gate. So a batch may declare a new workflow, add a step,
 change a step's `owner_role`, or retire a declaration, and each such write is an action carrying its
-class, scored for confidence, resolved to a blast tier under the project's `action_policy`, and held as a
+class, scored for confidence, resolved to a blast tier under the instance's `action_policy`, and held as a
 checkpoint where the tier and the confidence say to hold it. The same holds for a change to what an agent
 is. A workflow that changes a workflow is not a special kind of workflow; it is a workflow whose steps
 produce governance writes.
@@ -435,12 +510,12 @@ and enforceable rather than to make it.
 **Ruled (decision 18, 2026-09-05): a governance write is reserved to the operator by default.** Registered
 in `conformance.md#the-register-of-open-design-decisions`. Each governance class (the closed list in
 `gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`) resolves to
-`NEVER` until the operator has written a policy value for it: a class with no value in the project's
+`NEVER` until the operator has written a policy value for it: a class with no value in the instance's
 `action_policy` is not the policy default and not a high tier, it is `operator_only`, and no confidence and
 no action series clears it. That is what the unclassified case already did — a declared class in neither set
 resolves to `NEVER` (`gates_and_workflows.md#confidence-and-three-blast-tiers`) — promoted from the accident
 of an absent value to the rule for this class of write, so that a reader no longer infers the posture from
-the fail-closed default, and a project no longer behaves as reserved only until someone writes a policy that
+the fail-closed default, and an instance no longer behaves as reserved only until someone writes a policy that
 forgets a class. The loosening is a **grant**, class by class: the operator lists the class in the policy
 with the tier they want, and from then on the gate resolves it as any other class. The operator reserves it
 again by removing the value.
@@ -449,13 +524,13 @@ again by removing the value.
 defaults are not symmetric in what they cost to undo. Reserved-then-loosened is reversible one class at a
 time, each loosening a deliberate write with an author and a date, and each undone by deleting what was
 written. Gated-then-reserved is not: a governance class held at a high tier is a class the swarm may change
-once a checkpoint is approved, and by the time a project decides the tier should have been a reservation the
+once a checkpoint is approved, and by the time an instance decides the tier should have been a reservation the
 swarm may already have changed itself under it — a rewritten agent, a widened grant, a workflow with a step
 removed — and undoing *those* is a set of recoveries through the gate, not a policy edit. The open question
 proposed to decide this on whether the checkpoint queue is actually consumed, a measured property. That
-measurement matters, and it decides something else: whether to **grant** a given class, for a project whose
-operator has watched the queue and trusts it. It cannot decide the default, because a default is what a
-project has before anyone has measured anything, and the safe direction to be unmeasured in is the reserved
+measurement matters, and it decides something else: whether to **grant** a given class, for an instance whose
+operator has watched the queue and trusts it. It cannot decide the default, because a default is what an
+instance has before anyone has measured anything, and the safe direction to be unmeasured in is the reserved
 one. The recursion is worth naming, because it is where the default does its work: `action_policy` is itself
 one of the governance classes, so the write that grants any class is a governance write, and the class covering it
 is reserved like the others. An operator therefore grants classes by writing the policy themselves, and the
@@ -466,7 +541,7 @@ it is granted by no one's forgetting.
 machinery sits unused until the operator grants a class, and an unexercised path is one nobody has tested
 (`failure_posture.md`). Accepted, because the alternative exercises the path by letting the swarm change
 itself before anyone decided it should, and a path tested that way is tested on the operator's swarm. What
-follows for a project that wants the swarm to institutionalize its own findings (decision 17,
+follows for an instance that wants the swarm to institutionalize its own findings (decision 17,
 `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`)
 is one explicit grant per governance class the institutionalization writes reach, before the first such
 batch can take its action — which is the price of knowing, by reading the policy, exactly which classes of
@@ -476,7 +551,7 @@ operator makes the change by hand (`#operator-only-tasks-are-claimed-by-the-oper
 
 **What would reopen it:** an operator finding that the grant friction on a specific class exceeds the value
 of reserving it — and the remedy is a grant on that class, which the ruling already provides, not a change of
-the default. The default itself would reopen only if the grants proved to be ceremony: if every project
+the default. The default itself would reopen only if the grants proved to be ceremony: if every instance
 wrote the same five grants on its first day, a default that everyone overrides identically is the wrong
 default.
 
@@ -490,7 +565,7 @@ sequencing between two batches when one of them produced the other. Neither depe
 both leaves the general rule here unchanged.
 
 **Bootstrapping: the first workflow is not created by a workflow, and this is a stated limitation.** If
-workflows are how workflows change, then the first declaration for a project has no workflow to come
+workflows are how workflows change, then the first declaration for a declaration scope has no workflow to come
 through, and a workflow broken badly enough that no step of it opens cannot be repaired by a batch going
 through it. The design does not resolve this, and inventing a mechanism for it would be inventing a side
 door — a privileged path that creates or repairs a declaration outside the model is exactly the thing the

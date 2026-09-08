@@ -694,7 +694,7 @@ inspected.
 `agent_policy` entities **without a per-change human gate**, by its own module docstring, writing them
 through plain `/store` and `/correct` calls. It is a self-modification path that reaches no action gate:
 under the design every one of those writes is a governance write and therefore an action, evaluated at the
-gate under the project's `action_policy`. The module carries its own safety apparatus instead — a
+gate under the instance's `action_policy`. The module carries its own safety apparatus instead — a
 confidence threshold, agent-local scope only, `provisional` status graduating by exposure, a per-agent cap,
 and a refusal to supersede an operator-authored policy — which is a thoughtful set of controls and is not
 the gate. It is a second mechanism answering the question the gate exists to ask (principle 6), it is
@@ -1483,7 +1483,7 @@ with its instrument. Read 2026-09-06 on this branch at `22343f7`.
 | every daemon's outbound effect an `action` through the gate (GW-44, GW-45, AD-18) | of 18 daemon directories, **3** name the gate module (`apis`, `neotoma-agent`, `turdus`) and **15** reference an outbound surface and no gate; the instrument over-counts, since its outbound pattern includes any subprocess call, and the per-daemon disposition is the adapter documents' drift tables | `ls execution/daemons`; per directory `grep -rqE 'gating\|evaluate_gate'` and `grep -rqE 'notify\|telegram\|gws\|send_message\|subprocess\|\bgh\b\|transfer\|smtp'` |
 | a payment's `dedup_key` derived from the obligation and written before the first attempt (PY-1) | the bank handler sends a **fresh `uuid4()` per attempt** as the rail's transaction id; no key exists on the record and none is derived from the obligation | `execution/daemons/monedula/handlers/wise_transfer.py`, the `customerTransactionId` field |
 | a standing finding whose scope cannot be determined is classified `unknown` and raises `undetermined_scope`, never the one-off default (GW-27) | `classify_finding` returns `one_off` for anything its heuristics do not match — exactly the coercion revision 31 forbids by name; the token `undetermined_scope` appears nowhere under `lib/` or `execution/` | `execution/daemons/apis/review_learning.py`, `classify_finding`; `grep -rn undetermined_scope lib execution` → 0 |
-| the design's edge types writable on the record (bootstrap step 1; `LEASE`, `ADDRESSED_BY`, `FOLLOWS`, `CLOSES`, `SIGNED_BY`, `PRODUCES`, `CHECKPOINTS`, `AWAITS`, `RESOLVED_BY`, `RAISED_BY`, `principal_binding`, `ownership_grant`, `delegation_edge`) | the record's relationship-type vocabulary is a closed list that holds none of the thirteen and no primitive registers one (the revision-28 reading above; `migration.md`, G25) — the first dependency of the suite and of the migration alike, and the record project's to resolve (neotoma#1972) | `list_relationships` and the MCP's relationship-type enum, prod, 2026-09-05 (not re-read) |
+| the design's edge types writable on the record (bootstrap step 1; `LEASE`, `ADDRESSED_BY`, `FOLLOWS`, `CLOSES`, `SIGNED_BY`, `PRODUCES`, `CHECKPOINTS`, `AWAITS`, `RESOLVED_BY`, `RAISED_BY`, `principal_binding`, `ownership_grant`, `delegation_edge`) | the record's relationship-type vocabulary is a closed list that holds none of the thirteen and no primitive registers one (the revision-28 reading above; `migration.md`, G25) — the first dependency of the suite and of the migration alike, and for the record's own project to resolve (neotoma#1972) | `list_relationships` and the MCP's relationship-type enum, prod, 2026-09-05 (not re-read) |
 | an `intake_rule` entity type, and an evaluator fed by the record's subscriptions (WM-40) | no such type; the predicates that create a task on an entity change live in daemon code, which `migration.md`'s new row names as the type's drift | `grep -rn intake_rule lib execution` → 0 |
 | the isolation layers (a run-minted credential the production instance does not know; a nonce-identified empty instance; a refusal on a non-empty store; no other record credential in the environment) | no disposable-instance provisioning exists; every test on this branch that touches a record touches the one the environment names | `test_foundation.py` reads only files; no test provisions an instance |
 
@@ -1587,7 +1587,7 @@ scope term or tier; credit as object or read) as **51–54**. Each register row 
 section, as the open rows of 25–29 once did; none was folded, because no existing open row duplicates one.
 `conformance_suite.md`'s three pending cells (AU-17, AU-19, AU-20) and its two prose pointers now cite the
 numbers. The next free number is 55. Not touched: the tenant questions `authority_model.md#principals`
-defers to `docs/multi_tenant.md` section 7, which are argued outside this directory and were outside this
+defers to `multi_tenant.md` section 7, which were argued outside this directory until decision 77 moved that document in, and were outside this
 pass's list.
 
 **Gate timing.** `consent` precedes `send`, `pay`, and `post`, yet the gate was stated as evaluated "at the
@@ -2315,7 +2315,7 @@ orphan is a defect at all is answered permissively: no expectation declared, no 
 existing unplanned-work admission and from decision 57 already reserving the hierarchy's shape to the
 operator, against the usual fail-closed instinct, which here would assert by finding-volume that the
 operator's own instance is wrong to have chores. Transitivity is judged edge by edge, never over the whole
-chain to a root, because "root" is `planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward`'s description of
+chain to a root, because "root" is `#the-hierarchy-is-edges-and-a-task-has-one-line-upward`'s description of
 wherever a chain ends and not a level every instance must register — judging "reaches a strategy" would name
 a level, which no rule above does, and decision 57 is exactly the reservation against naming one.
 
@@ -2427,7 +2427,7 @@ registered class default, and only a task in an undefaulted or unclassifiable cl
 unplanned, where the existing revision-45 mechanism applies unchanged — a `decision_or_attestation` finding,
 `scope: unknown`, a proposal riding beside it, and the task still routed to its successor on the same batch;
 the finding never holds ordinary work. The no-authoring refusal from revision 45
-(`planning_model.md#the-swarm-may-not-author-a-missing-ancestor`) is restated and made explicit against the new default: a
+(`#the-swarm-may-not-author-a-missing-ancestor`) is restated and made explicit against the new default: a
 class default is a record the operator pre-authored once, before any orphan of that class existed, and
 `classify` writing `PART_OF` to it is the identical write it makes today when a task names its own parent —
 never a write to the plan's statement, `completion_criteria[]`, or existence. Decision 61 is reframed from a
@@ -2442,7 +2442,7 @@ already lists `priority` as a field, `workflows.md#intake`'s `prioritize` step a
 governance-scale "stop," and `planning_model.md` already derives a plan's `next_steps` as "the open
 descendants in priority order" — but no vocabulary entry existed, and nothing connected any of this to
 `claimable` or bound a claiming principal to anything. `work_model.md#priority-orders-the-claimable-pool-it-does-not-enter-it`,
-placed immediately after `work_model.md#what-a-claim-predicate-treats-as-claimable`, settles: **priority is a derived
+placed immediately after `#what-a-claim-predicate-treats-as-claimable`, settles: **priority is a derived
 read for the everyday ordering question**, argued from principle 11 (a stored value the ascent should track
 but does not is exactly the watchdog-needing field the principle refuses) and from the existing derived
 `next_steps` precedent, applied one level down to the pool a single principal may claim from — read together
@@ -2472,7 +2472,7 @@ mechanisms rather than proposing a fifth).
 
 **Size.** Measured 2026-09-06 with `wc -c` against revision 45 as the predecessor. `planning_model.md`
 +6.4k (the orphan-default section rewritten; decision 61 reframed); `work_model.md` +6.6k (one new section,
-`work_model.md#priority-orders-the-claimable-pool-it-does-not-enter-it`); `vocabulary.md` +2.3k (the `priority` entry);
+`#priority-orders-the-claimable-pool-it-does-not-enter-it`); `vocabulary.md` +2.3k (the `priority` entry);
 `conformance.md` +1.3k (decision 61's row reframed; decision 62 opened; the register's summary paragraph and
 next-number line updated to 63). Net **+16.6k** across the four files touched; no other foundation document
 was edited.

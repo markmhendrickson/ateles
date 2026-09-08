@@ -19,7 +19,12 @@ from pathlib import Path
 FOUNDATION_DIR = Path("docs/foundation")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _LINK_RE = re.compile(r"\]\(([^)\s]+)\)")
-_CITE_RE = re.compile(r"`([\w./-]+\.md#[\w.-]+)`")
+_CITE_RE = re.compile(r"`([\w./-]+\.md#[\w.-]+|#[\w.-]+)`")
+# A citation written as the display text of a markdown link -- [`#anchor`](other.md#anchor) --
+# names the *link's* target, not a heading in the citing document. _LINK_RE already checks the
+# real target in the parentheses, so strip these before scanning for bare `#anchor` citations;
+# reading the display text as a same-document citation reports a break that does not exist.
+_LINK_DISPLAY_RE = re.compile(r"\[(`[^`\]]*`|[^\]]*)\]\(([^)\s]+)\)")
 
 
 def anchor(heading: str) -> str:
@@ -78,7 +83,10 @@ def check(root: Path) -> list[str]:
     for path in files:
         rel = str(path.relative_to(root))
         for no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            targets = _LINK_RE.findall(line) + _CITE_RE.findall(line)
+            # Bare `#anchor` citations are read from the line with markdown-link display
+            # text removed, so a cross-document link never reads as a same-document citation.
+            outside_links = _LINK_DISPLAY_RE.sub("", line)
+            targets = _LINK_RE.findall(line) + _CITE_RE.findall(outside_links)
             for t in targets:
                 if t.startswith(("http://", "https://", "mailto:")):
                     continue
