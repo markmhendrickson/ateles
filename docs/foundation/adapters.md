@@ -1486,6 +1486,134 @@ provenance ranking are the same mechanism whatever type crosses. Whether such a 
 question of admission and the action gate, not of this decision, and is settled at
 `gates_and_workflows.md#a-synced-observation-on-a-governance-type-is-recorded-and-never-takes-effect`.
 
+### Whether the instance of the record serving a swarm is an external system when the swarm operates it
+
+**Ruled (decision 78, 2026-09-07): the instance of the record serving a swarm is an external system when
+the swarm operates it, and decision 45's action classes extend to the substrate.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. Operating the serving instance — a restart, a
+redeploy, an upgrade, a snapshot, a migration to a new host — is an [action](vocabulary.md#action), reached
+through the host's adapter, gated like any other. The instance is the record when it is the place a write
+goes, and an external system when it is the object of the operation; the two are the same instance and
+never the same moment, and which one a sentence means is settled by whether the instance is being read and
+written or being operated on.
+
+**Three rules, stated here because a reader of this ruling needs all three.** An operation that suspends
+the serving instance is an action of the host's adapter, taken under a class the `action_policy` names.
+The permitting sign-off and the [action gate](vocabulary.md#action-gate)'s decision are written **before**
+the operation begins, and the operation's completion is written **after** the instance answers again. An
+operation that does not complete leaves the permit standing and the completion unwritten, and what closes
+it is a person, not a retry.
+
+**Why the boundary sentence does not forbid it.** The objection is real and has to be met on the text, not
+around it. The boundary is stated once — "the swarm is the engine, the agents, the adapters, and the
+record they all read and write … Neotoma is not a second system on the far side of that line: it *is* the
+record" (`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`) — and that same section
+states the escape in its next clause: "an internal operational write to the record crosses nothing and is
+not an action, which is the same rule the two named exceptions above bend on purpose — a governance write
+and a lossy record mutation are actions **not because of where they go, but because of what they can
+destroy**." That clause is the design's own statement that the boundary is not the only thing that makes
+an action. Suspending the instance is the limiting case of what can destroy: it does not mutate a row, it
+removes the ability to write any row at all, and for the duration every sign-off the design requires has
+nowhere to go. An operation that can destroy the record's availability wholesale, judged by the test the
+design already applies to a lossy mutation, is an action by that test and not by a relocation of the
+boundary.
+
+**So the classification is by moment, not by relocation.** Decision 45's *What would reopen it* says a
+boundary redefinition "would have to be stated once, in the action's home section, and would move the host
+inside for every rule at once," and the symmetric move — declaring the record outside for every rule at
+once — is what the boundary sentence forbids and what this ruling does **not** do. The record stays inside
+the boundary for every rule that reads or writes it: an internal operational write still crosses nothing,
+a step's read of an entity is still a read and not an adapter's, and `#the-two-invariants` is untouched for
+every ordinary use. What is outside is narrower and is bounded in time — the serving **process and its
+host state**, for the interval of an operation upon it, which is the same process decision 45 already
+placed outside without regard to what it serves. Decision 45 classified the host by ownership and its
+action classes reach "a process on a host whatever that process serves"; this ruling says the process
+serving the record is not carved out of that, and adds nothing to 45's list.
+
+**The `vocabulary.md#record` Not-for clause, met limb by limb.** The entry forbids three things and this
+ruling is tested against each. Its first limb forbids calling a foreign system's store by the bound term —
+nothing here does; the serving instance is the swarm's own. "'Database' for the record
+in foundation prose" is a wording ban and is not engaged. The third limb — "the record as something an
+adapter reaches across a boundary" — is the one that bites, and it survives because it is a ban on how the
+record is **reached**, not on whether the process serving it can be operated. Under this ruling no adapter
+reaches the record: every read and write of an entity goes to the record directly, as it always did, and
+the adapter reaches the **process**, whose artifact is a process and a host, never an entity. A sentence
+that said a step reads a `contact` through an adapter would violate the limb; a sentence that says the
+host's adapter restarts a process does not, and it is the sentence decision 45 already wrote. The entry is
+amended for clarity but not for substance: the See list gains this section, so a reader who meets the Not
+for clause and wonders about the lifecycle case is sent to the argument rather than left to infer it. The
+prohibition itself is unchanged, and had it needed changing this ruling would have said so rather than
+reading the limb narrowly to fit.
+
+**Write ordering: the permit is written before the record goes away, the completion after it returns.**
+This is the half `failure_posture.md` does not reach, and the ruling closes it. That document's rules 1, 2,
+and 4 are keyed to reachability and not to cause, so they bind an intentional suspension exactly as they
+bind an unexpected outage — no claim, no step opening, no gate decision, nothing claimed complete; the
+condition announced on the path that survives the outage; a mid-operation write failure leaving the task in
+its prior state, its sign-off re-derived and never replayed. Nothing there needs amending. What is only
+present here is that this outage was **decided**, so something was owed a decision before it and something
+is owed a record of having caused it. The ordering follows from the substrate the write needs: the gate is
+evaluated and the permitting sign-off is written while the instance still answers, because a sign-off that
+cannot reach the record is not a sign-off (`failure_posture.md#the-rules`, rule 4), and a permit obtained
+after the instance is down is not obtainable at all. The completion is written when the instance answers
+again, by the same principal, referring to the permit it was taken under. Between the two the halt governs
+unchanged, and the announcement path of rule 2 carries the interval as it carries any other.
+
+**Nothing is parked off-record in between.** The rejected disposition's cost was the write-ahead log rule 4
+names by name, and the ordering above does not incur it: the permit is a normal write made before the
+outage, not a parked verdict awaiting reconciliation, and the completion is a normal write made after it.
+The one thing that crosses the interval is what rule 2's capture already carries for every halt — the
+announcement — and it asserts nothing about the record's contents.
+
+**An operation that does not complete.** Two cases, and the design's existing postures answer both once the
+ordering above is in place. **The instance does not return.** The permit stands as written and no
+completion is ever written, which is the correct terminal state and not a defect: the halt of rule 1 holds
+for as long as the record is unreachable, the announcement of rule 2 carries each window on the surviving
+path, and recovery runs from the `recovery_paths[]` snapshot and cadence the record host's binding already
+declares (`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`). Nothing
+retries the operation on its own, because the swarm cannot read the permit to know it was taken; the
+operator resolves it, which is what a restore obligation over the substrate already presumed. **The
+instance returns in a state the permit did not approve** — a version other than the one approved, a
+migration that landed on the wrong host, data the snapshot did not carry. The completion write is where
+this is caught and the completion is not written: the divergence is a [finding](vocabulary.md#finding), the
+permitting sign-off is not retro-fitted to what happened, and the gap between the permit and the state
+stands in the record as the evidence it is. A second operation to correct the state is a second action, a
+second permit, and a second pass of this same ordering — never a continuation of the first, because the
+first's permit judged an artifact state that no longer holds and a sign-off is pinned to the artifact state
+it judged (`data_model.md#concepts`).
+
+**Why the other dispositions lost.** *Treat the serving instance as the record and put the operation
+outside the swarm as the operator's by hand* was eliminated by the operator's answer, which is that he
+wants the swarm operating its own infrastructure unattended as far as governance allows: this disposition
+caps unattended operation permanently by construction, and the operator's own act still leaves no record of
+itself, so it does not even purchase accountability with the autonomy it gives up. *Declare it out of scope
+for P1–P2 and revisit* was eliminated by the same answer for a different reason: an operation on the
+serving instance is being planned now, so a non-goal would leave the design silent about an operation that
+is imminent, which is the cost the disposition itself named. *Record the operation elsewhere and reconcile
+it after* was the closest rival and lost on the operator's qualifier, "within governance": it puts the
+deciding half outside the gate model and then owes a second write path its own authority rule, its own
+durability rule, and its own conflict rule against the record — governance-adjacent machinery rather than
+governance — and rule 4 names that shape as an anti-pattern by name. Extending 45 keeps the decision inside
+the one gate the design already has, and buys the ordering rule above at the price of one sentence about
+which moment the instance is which.
+
+**Cost accepted.** The boundary now has a case whose side depends on the moment rather than on the system,
+and a reader must ask which moment a sentence means. That is a genuine cost and it is bounded: the question
+arises only for the record's own serving process, only for the operations `action_policy` classes name, and
+the classification of every other read and write is unchanged. The alternative cost — a boundary that
+cannot express an operation the swarm is about to perform — is worse, and the operator's answer is that he
+wants the swarm to perform it.
+
+**What would reopen it.** A suspending operation the swarm needs to take on an instance it cannot reach
+beforehand to write the permit — a fail-over decided by something other than the swarm, or an operation
+triggered by the instance's own failure rather than by a plan. The ordering above presumes the instance
+answers when the decision is made, and an operation that begins after it has already stopped answering has
+no place to write its permit; that case would reopen the deciding half without disturbing the
+classification.
+
+**Matrix.** The host adapter's admission rows (AD-21 to AD-26) and its action-gate rows apply unchanged to
+a lifecycle operation on the serving instance; no new row is added, because no obligation is added.
+
 ## Prior art
 
 The anti-corruption layer (Evans) is the shape: a translation layer at the boundary, so that the external

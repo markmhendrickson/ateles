@@ -90,6 +90,9 @@ python scripts/linters/check_agent_roster.py || ERRORS=$((ERRORS + 1))
 echo "  - Checking foundation anchors (every intra-foundation link resolves)..."
 python execution/scripts/check_foundation_anchors.py || ERRORS=$((ERRORS + 1))
 
+echo "  - Checking foundation decision 78 is ruled in the corpus..."
+python execution/scripts/check_foundation_decision_78.py || ERRORS=$((ERRORS + 1))
+
 echo "  - Checking foundation vocabulary (no Never word in the prose)..."
 python execution/scripts/check_foundation_vocabulary.py || ERRORS=$((ERRORS + 1))
 
@@ -139,4 +142,3 @@ else
     echo "Run with --fix to auto-fix some issues: ./scripts/lint.sh --fix"
     exit 1
 fi
-
