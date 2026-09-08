@@ -50,7 +50,9 @@ retired-name binding pass takes 99, one number across all four documents it amen
 A later sweep the same day gives 99 — that pass having landed while this one was being written — so the
 decision-98 ruling takes 100, one number across all three documents it amends.
 A sweep over every remote branch's copy of every document here on 2026-09-08 gives 100, so the decisions 96
-and 79 pass takes 101, one number across all three documents it amends.
+and 79 pass takes 101, one number across all three documents it amends. A later sweep the same day gives
+101 — the decision-73 pass having taken it while this one was being written — so the decisions 96 and 79
+pass takes 102, one number across all three documents it amends.
 
 ## `authority_model.md`
 

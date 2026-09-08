@@ -75,7 +75,7 @@ tenant ─┬─ operator(s)        (humans who direct the swarm)
 
 Add a `tenant_id` field to Neotoma entities, exactly as `docs/durable_execution_substrate.md` §"Do now" item 5 prescribes for run/step/wake entities ("*even if always `operator`*"). The principle generalizes from execution entities to **all** domain entities.
 
-- **Type:** opaque string (UUID or slug). Single sentinel value for the existing single-operator deployment.
+- **Type:** opaque UUID, immutable — decision 79 (`#the-tenant-identifier-is-a-human-slug-with-an-immutable-uuid-behind-it`). The human slug is a display/addressing form read in the AAuth subject and operational output; it is never what this field holds. Single sentinel value for the existing single-operator deployment.
 - **Default for all existing data:** the current single-tenant user is `user_id 00000000-0000-0000-0000-000000000000`. The migration is: **`tenant_id` defaults to a single well-known sentinel derived from that user_id** (e.g. `tenant_00000000`). No data moves; a column/field is populated with one constant. This is a backfill, not a reshape — the same property that made it cheap in the durable-execution design.
 - **Relationship to `user_id`:** `user_id` identifies the *human/principal* who authenticated; `tenant_id` identifies the *isolation boundary*. In single-operator they are 1:1 (one user, one tenant). In an org they diverge: many `user_id`s (operators) share one `tenant_id`. Keeping them as **separate fields from day one** is the whole hedge — collapsing them now is what forces the retrofit later. Today's `user_id 0` becomes operator-0 inside `tenant_00000000`.
 
@@ -99,7 +99,7 @@ Isolation is a product of three scoping layers, all of which AAuth already suppo
 
 ### 3.2 How grants scope to a tenant
 
-`agent_grant` entities today match on `(sub, iss)` and declare `capabilities`. Multi-tenant adds **`match_tenant`** — matched on the grant and never derived from the subject, ruled as decision 80 at `#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject`. Admission then requires: signature valid **and** `(sub, iss)` matches a grant **and** that grant's tenant equals the entity's `tenant_id`. The existing rule "absent = denied" extends cleanly: a write to a tenant the grant does not name fails at admission, before the action is taken — the same boundary that already stops an operator-facing agent from writing an `agent`.
+`agent_grant` entities today match on `(sub, iss)` and declare `capabilities`. Multi-tenant adds **`match_tenant`** — matched on the grant and never derived from the subject, ruled as decision 80 at `#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject`. Admission then requires: signature valid **and** `(sub, iss)` matches a grant **and** that grant's `match_tenant` (the immutable UUID, per decision 79) equals the entity's `tenant_id` (the same UUID). Neither side of that comparison is the human slug. The existing rule "absent = denied" extends cleanly: a write to a tenant the grant does not name fails at admission, before the action is taken — the same boundary that already stops an operator-facing agent from writing an `agent`.
 
 ### 3.3 Cross-tenant isolation guarantees
 
@@ -195,7 +195,7 @@ If only the cheapest possible subset is done, it must be: **(1) `tenant_id` part
 
 ---
 
-## 7. Open decisions (require the operator)
+## 7. Settled decisions (were the operator's)
 
 **The rules in this section.**
 
@@ -305,9 +305,15 @@ that question was asked in.
 ### The tenant identifier is a human slug, with an immutable UUID behind it
 
 **Ruled (decision 79, 2026-09-08, the operator taking the lean this document recorded as his to take).**
-`tenant_id` is a human slug — `acme`, read in an AAuth subject as `monedula@acme-swarm` and read as itself
-wherever the swarm's operational output names a tenant — and every tenant carries an immutable UUID behind
-that slug, which is what a stored reference keys on. This is not a new position: §7 item 1 has recorded the slug-with-immutable-UUID-backing lean since the
+A tenant has two forms, each with one job:
+
+| Form | Holds | Used for |
+|---|---|---|
+| Human slug (`acme`) | display / addressing | AAuth subject realm (`monedula@acme-swarm`); diagnostics and other operational output that names a tenant |
+| Immutable UUID | stable identity | the entity field **`tenant_id`**, the grant field **`match_tenant`**, and every stored reference |
+
+The entity field named `tenant_id` is the opaque UUID, not the slug — the slug is never what a stored reference
+keys on. This is not a new position: §7 item 1 has recorded the slug-with-immutable-UUID-backing lean since the
 document was written, and marked the choice the operator's. What follows states why the lean was the right
 one to take rather than re-arguing it from nothing.
 

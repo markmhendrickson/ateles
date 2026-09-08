@@ -318,8 +318,8 @@ the way the writes are.
 task or a step, the form of a per-instance credential, and how the read partition is enforced are each a
 mechanism, and none is named in this ruling (invariant 12). What is ruled is the shape the mechanism must
 satisfy: several records, one identity per instance, an explicit binding, a fail-closed ambiguity, and a
-stated non-merge rule. `multi_tenant.md#7-open-decisions-require-the-operator` decision 1 —
-registered as decision 79 — bears on the credential form and is the operator's. Its decision 2, registered
+stated non-merge rule. `multi_tenant.md#7-settled-decisions-were-the-operators` decision 1 —
+registered as decision 79 — bears on the credential form and is ruled. Its decision 2, registered
 as decision 80, is ruled: the tenant is matched on the grant and not derived from the subject, which leaves
 the credential form here untouched, since the several-instance case this ruling concerns is one tenant.
 
