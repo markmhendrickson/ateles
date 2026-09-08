@@ -126,6 +126,19 @@ jobs:
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           python3 "$f" --check
 
+      # Register narrative: the decision register's prose held to its own table.
+      # The rule-coverage contract binds a decision opened in a DOCUMENT to a
+      # register row; nothing read the narrative around the table, so the prose
+      # drifted from rows three paragraphs below it and a "next free number"
+      # line went stale on five consecutive passes. Dated history is skipped by
+      # design — see the script's docstring for what it does not cover.
+      - name: Register narrative — prose agrees with the register table
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_register_narrative.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
       # Front matter and rule indexes: decision 74's two halves — no revision
       # chain in front matter, and a section stating 3+ rules opens with the
       # index of them.
