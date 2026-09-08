@@ -318,8 +318,8 @@ the way the writes are.
 task or a step, the form of a per-instance credential, and how the read partition is enforced are each a
 mechanism, and none is named in this ruling (invariant 12). What is ruled is the shape the mechanism must
 satisfy: several records, one identity per instance, an explicit binding, a fail-closed ambiguity, and a
-stated non-merge rule. `multi_tenant.md#7-open-decisions-require-the-operator` decision 1 —
-registered as decision 79 — bears on the credential form and is the operator's. Its decision 2, registered
+stated non-merge rule. `multi_tenant.md#7-settled-decisions-were-the-operators` decision 1 —
+registered as decision 79 — bears on the credential form and is ruled. Its decision 2, registered
 as decision 80, is ruled: the tenant is matched on the grant and not derived from the subject, which leaves
 the credential form here untouched, since the several-instance case this ruling concerns is one tenant.
 
@@ -882,12 +882,63 @@ proxy and none is an argument *for* having one, which is the distinction 95 did 
 grant, and a stolen one is a principal. This ruling does not reduce that; it declines to answer it with a
 second gate, and answers it where the design already answers custody — grants kept narrow and revocable
 under `#grants`, and attribution on every write. A deployment that wants the credential held in one place
-may put a proxy there, and decision 96 is what that deployment then answers.
+may put a proxy there, and decision 96 — ruled below — is what that deployment then answers: the proxy
+passes the agent's own credential through and holds none of its own, so one place to rotate is the one thing
+it forfeits.
 
 **What would reopen it.** A record whose admission check cannot read the requesting principal's grant —
 which would first be a gap in the record, not a reason for a proxy — or a deployment in which a harness
-cannot hold a credential at all. Decision 96, how a proxy authenticates on an agent's behalf, stays open
-beneath this one and is answered by any deployment that puts a proxy in the path.
+cannot hold a credential at all. How a proxy authenticates on an agent's behalf is decision 96, ruled
+immediately below on this ruling's own consequences.
+
+### A proxy passes through the agent's own credential, and holds none of its own
+
+**Ruled (decision 96, 2026-09-08): a proxy in the path authenticates to the instance by passing through
+the agent's own credential. It holds no credential of its own and acts for no agent, so the instance
+matches grants on the `sub` actually presented and attribution is the agent's directly.** Registered as
+ruled in `conformance.md#the-register-of-open-design-decisions`. The rejected alternative was a proxy
+holding its own credential and acting for the agent, with the A-for-B attribution `#attribution` and
+`#delegation` already require carried in the write.
+
+**Why pass-through.** Three grounds, in the order they bind.
+
+*It is what makes the record's own check run on the principal the check is for.* Decision 97 ruled the
+enforcement point at the record and never at the proxy: the record admits or refuses a request by matching
+the requesting principal's grant. A pass-through presents the agent's `sub`, so the grant the record reads
+is the agent's, which is the grant the admission decision is about. A proxy-held credential presents the
+proxy's, so the record would match the proxy's grant against a request made for an agent — which either
+defeats the check, if the proxy's grant is wide enough to cover every agent it fronts, or forces a second
+identity resolution inside the request so that the record can recover the principal it was supposed to have
+been given. The first is the enforcement point failing open at the moment it is reached; the second is the
+proxy becoming load-bearing for admission, which is exactly what 97 ruled it is not.
+
+*One source, defined once.* Invariant 9 gives a value the swarm reads one home. Under pass-through, the
+answer to which principal made a request is the credential presented, and there is nowhere else to look.
+Under a proxy credential, the answer is in two places — the credential the record authenticates, and the
+A-for-B attribution the write carries — and the two can disagree. A disagreement there is not a data defect
+that a later read repairs; it is the record having admitted a request as one principal and recorded it as
+another, with nothing in the path obliged to notice.
+
+*It keeps every credential scoped to one principal.* Decision 97 named the proxy as "a single point of
+compromise for every operator's data", whose "credential is the one whose theft is not scoped to a
+principal", and declined to rest the boundary on it. A proxy holding its own credential is that hazard
+realized rather than merely present: the credential exists, it is the one every request travels under, and
+its blast radius is the union of everything the proxy fronts. Pass-through leaves the blast radius of any
+one stolen credential exactly one principal's grant, which is the bound `#grants` already states.
+
+**Cost accepted.** Decision 97 lists as a real benefit of a proxy that it is "one place to rotate a
+credential rather than one per harness". Pass-through forfeits that benefit and no other: credentials are
+issued and rotated per principal, so a rotation is per principal too, and a deployment fronting many agents
+rotates many. This is accepted rather than answered, because the alternative buys the convenience by making
+one credential authoritative for many principals, which is the property the third ground refuses. The two
+other benefits 97 names survive untouched — a proxy is still one place to resolve which instance a request
+reaches (decision 91's routing need) and still one place from which requests are observable, and neither
+requires the proxy to hold a credential.
+
+**What would reopen it.** A deployment topology in which a harness genuinely cannot hold its own credential
+— not one where holding it is inconvenient, but one where the credential cannot reach the harness at all —
+since that would make pass-through unimplementable rather than merely costly, and a rule nothing can satisfy
+relocates the reach rather than bounding it.
 
 ## Attribution
 

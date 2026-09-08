@@ -75,7 +75,7 @@ tenant ─┬─ operator(s)        (humans who direct the swarm)
 
 Add a `tenant_id` field to Neotoma entities, exactly as `docs/durable_execution_substrate.md` §"Do now" item 5 prescribes for run/step/wake entities ("*even if always `operator`*"). The principle generalizes from execution entities to **all** domain entities.
 
-- **Type:** opaque string (UUID or slug). Single sentinel value for the existing single-operator deployment.
+- **Type:** opaque UUID, immutable — decision 79 (`#the-tenant-identifier-is-a-human-slug-with-an-immutable-uuid-behind-it`). The human slug is a display/addressing form read in the AAuth subject and operational output; it is never what this field holds. Single sentinel value for the existing single-operator deployment.
 - **Default for all existing data:** the current single-tenant user is `user_id 00000000-0000-0000-0000-000000000000`. The migration is: **`tenant_id` defaults to a single well-known sentinel derived from that user_id** (e.g. `tenant_00000000`). No data moves; a column/field is populated with one constant. This is a backfill, not a reshape — the same property that made it cheap in the durable-execution design.
 - **Relationship to `user_id`:** `user_id` identifies the *human/principal* who authenticated; `tenant_id` identifies the *isolation boundary*. In single-operator they are 1:1 (one user, one tenant). In an org they diverge: many `user_id`s (operators) share one `tenant_id`. Keeping them as **separate fields from day one** is the whole hedge — collapsing them now is what forces the retrofit later. Today's `user_id 0` becomes operator-0 inside `tenant_00000000`.
 
@@ -99,7 +99,7 @@ Isolation is a product of three scoping layers, all of which AAuth already suppo
 
 ### 3.2 How grants scope to a tenant
 
-`agent_grant` entities today match on `(sub, iss)` and declare `capabilities`. Multi-tenant adds **`match_tenant`** — matched on the grant and never derived from the subject, ruled as decision 80 at `#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject`. Admission then requires: signature valid **and** `(sub, iss)` matches a grant **and** that grant's tenant equals the entity's `tenant_id`. The existing rule "absent = denied" extends cleanly: a write to a tenant the grant does not name fails at admission, before the action is taken — the same boundary that already stops an operator-facing agent from writing an `agent`.
+`agent_grant` entities today match on `(sub, iss)` and declare `capabilities`. Multi-tenant adds **`match_tenant`** — matched on the grant and never derived from the subject, ruled as decision 80 at `#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject`. Admission then requires: signature valid **and** `(sub, iss)` matches a grant **and** that grant's `match_tenant` (the immutable UUID, per decision 79) equals the entity's `tenant_id` (the same UUID). Neither side of that comparison is the human slug. The existing rule "absent = denied" extends cleanly: a write to a tenant the grant does not name fails at admission, before the action is taken — the same boundary that already stops an operator-facing agent from writing an `agent`.
 
 ### 3.3 Cross-tenant isolation guarantees
 
@@ -195,11 +195,11 @@ If only the cheapest possible subset is done, it must be: **(1) `tenant_id` part
 
 ---
 
-## 7. Open decisions (require the operator)
+## 7. Settled decisions (were the operator's)
 
 **The rules in this section.**
 
-- One of the five stays open and is the operator's: item 1, the tenant slug scheme, registered as decision 79.
+- [The tenant identifier is a human slug, with an immutable UUID behind it](#the-tenant-identifier-is-a-human-slug-with-an-immutable-uuid-behind-it) — ruled, decision 79, the operator taking the lean this document already recorded: the slug is what is read, the UUID is what is keyed on, and neither is what a grant matches.
 - [The tenant is matched on the grant, not derived from the subject](#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject) — ruled, decision 80: `match_tenant` on the grant, nothing read out of a subject, and the migration a backfill.
 - [Every instance may have one operator or many, and hosting does not decide it](#every-instance-may-have-one-operator-or-many-and-hosting-does-not-decide-it) — decision 82: the row's framing retired rather than answered, and section 3 load-bearing.
 - [What this design requires of the record's sharing model, and of an operator's reach within it](#what-this-design-requires-of-the-records-sharing-model-and-of-an-operators-reach-within-it) — ruled, decisions 81 and 83: both belong to the record's design, and what this corpus states instead is the non-narrowing read rule and the non-exceedance reach rule; an operator is not a tenant owner.
@@ -208,12 +208,13 @@ If only the cheapest possible subset is done, it must be: **(1) `tenant_id` part
 in that order, since the decision-77 pass of 2026-09-07 brought this document into the foundation set and
 with it the obligation that every question a foundation document marks open is indexed there once. The
 register row states each question in one line and points here; the argument stays below, which is where a
-reader resolves it (principle 9). None was ruled by that pass. **Decisions 2, 3, 4, and 5 — registered as
-decisions 80, 81, 82, and 83 — have since been ruled**, each on the operator's answer to the question it
-turned on. Decision 1, registered as decision 79, remains open and is the operator's.
+reader resolves it (principle 9). None was ruled by that pass. **All five have since been ruled** — decisions 2, 3, 4, and
+5, registered as decisions 80, 81, 82, and 83, each on the operator's answer to the question it turned on;
+and decision 1, registered as decision 79, on the operator taking the lean this section already recorded as
+his to take.
 
 
-1. **Tenant slug scheme.** Is `tenant_id` a UUID (opaque, stable) or a human slug (`acme`, readable in `sub` like `monedula@acme-swarm`)? Slug reads better in AAuth subjects and logs; UUID avoids rename pain. Recommendation leans slug-with-immutable-UUID-backing, but this is the operator's call.
+1. **Tenant slug scheme.** Is the tenant identifier an opaque UUID or a human slug (`acme`, readable in `sub` like `monedula@acme-swarm`)? **Ruled (decision 79, 2026-09-08): a human slug for AAuth/diagnostics, with an immutable UUID as entity `tenant_id` and grant `match_tenant` — the lean this item recorded, taken by the operator whose call it was.** The argument is `#the-tenant-identifier-is-a-human-slug-with-an-immutable-uuid-behind-it` below. The rename pain the UUID side was priced against is not accepted as a cost: it is paid off by the backing identifier, and decision 80 is what makes paying it off sufficient.
 
 2. **Does tenant derive from `sub`, or is it a separate `match_tenant` on the grant?** **Ruled (decision 80, 2026-09-07, on the operator's answer that a grant should govern everything an agent can do via tooling): the tenant is matched on the grant, as `match_tenant`, and is not derived from the subject.** The argument is `#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject` below. The question as first written — self-describing subject against a more flexible field, and the flexibility priced against one identity spanning tenants — is answered on neither of those grounds. What settles it is that the grant is the complete statement of what a principal may do, so authorization has one home.
 
@@ -301,6 +302,58 @@ impossible rather than merely absent — which would be a new deployment shape, 
 re-run of the hosted-versus-per-instance question this row retires — along with the retired word "forker"
 that question was asked in.
 
+### The tenant identifier is a human slug, with an immutable UUID behind it
+
+**Ruled (decision 79, 2026-09-08, the operator taking the lean this document recorded as his to take).**
+A tenant has two forms, each with one job:
+
+| Form | Holds | Used for |
+|---|---|---|
+| Human slug (`acme`) | display / addressing | AAuth subject realm (`monedula@acme-swarm`); diagnostics and other operational output that names a tenant |
+| Immutable UUID | stable identity | the entity field **`tenant_id`**, the grant field **`match_tenant`**, and every stored reference |
+
+The entity field named `tenant_id` is the opaque UUID, not the slug — the slug is never what a stored reference
+keys on. This is not a new position: §7 item 1 has recorded the slug-with-immutable-UUID-backing lean since the
+document was written, and marked the choice the operator's. What follows states why the lean was the right
+one to take rather than re-arguing it from nothing.
+
+**The slug is read by people, in the two places tenancy surfaces.** It appears in the AAuth subject every
+key is minted under and in the operational output an operator reads while working out which tenant a request
+belonged to. Readability there is not a preference about aesthetics: it is whether an operator reading a
+subject or a diagnostic can tell which tenant it names without a lookup, and an opaque identifier cannot be
+read at all without one. The design has no other surface where the tenant identifier is presented to a person, so
+this is the whole of what the human form buys — and it is bought where the alternative offers nothing.
+
+**The immutable UUID pays the rename cost rather than accepting it.** The ground against a slug has always
+been rename pain: a mutable human name that other records key on cannot be changed without re-keying every
+one of them. The backing identifier removes the premise. Nothing keys on the slug; stored references carry
+the UUID, so a rename rewrites the display form and re-keys nothing. The two-identifier shape is what makes
+the slug affordable, which is why the lean was never for a bare slug and why this ruling does not admit one.
+
+**Decision 80 is what makes the slug safe to rename, and is the load-bearing ground.** That ruling matched
+the tenant on the grant, as `match_tenant`, and settled that nothing is derived from the subject to reach a
+tenant for an admission decision. So the slug in `monedula@acme-swarm` is an addressing and display
+convenience and is never an identity source: no admission decision reads it, and the realm literal a subject
+carries is not what a grant is matched against. That is precisely what makes a rename survivable rather than
+a re-keying of the authorization boundary — without 80, a renamed slug would silently change what a
+credential resolves to, and no backing identifier would help, because the thing being read would still be
+the name. With 80, the slug can change and nothing that decides anything changes with it. Decision 80 stated
+this compatibility from its own side: `match_tenant` holds whatever value this decision settles on, and it
+holds a UUID here.
+
+**Cost accepted.** A tenant now has two identifiers, and the discipline they require is real: the slug is
+never the thing matched on, and never the thing a stored reference carries. That discipline is not enforced
+by the shape itself — nothing prevents a future consumer from keying on the readable form, which is the
+cheaper thing to do at the moment of writing it — so it is stated here as a rule rather than left as a
+convention. The alternative cost, a bare UUID, was refused because it makes every subject and every diagnostic
+unreadable to remove a rename problem that the backing identifier removes anyway.
+
+**What would reopen it.** A consumer that matches on the slug rather than on the grant's `match_tenant`.
+That would make the slug identity-bearing, which reintroduces exactly the rename problem decision 80
+currently prevents, and the shape would then have to be reconsidered as a whole rather than repaired at the
+consumer — because a slug something matches on is a mutable identifier in an authorization path, whatever is
+stored behind it.
+
 ### The tenant is matched on the grant, not derived from the subject
 
 **Ruled (decision 80, 2026-09-07).** A grant carries the tenant it is scoped to, as `match_tenant`.
@@ -347,8 +400,9 @@ in it only because there is one tenant, and a form that is self-describing only 
 describes is unique describes nothing.
 
 **What this does not decide.** The form of the tenant identifier — UUID or slug, and therefore what the
-subject's realm literal becomes — is decision 79 and remains the operator's. This ruling is compatible
-with either: `match_tenant` holds whatever value 79 settles on. Nor does it forbid the subject from
+subject's realm literal becomes — is decision 79, which was the operator's and which he has since taken
+(`#the-tenant-identifier-is-a-human-slug-with-an-immutable-uuid-behind-it`). This ruling was compatible with
+either, and `match_tenant` holds what 79 settled on: the immutable UUID behind the slug. Nor does it forbid the subject from
 continuing to carry a tenant-shaped realm literal; it rules that nothing reads the tenant out of it for an
 admission decision.
 
