@@ -118,10 +118,10 @@ sequenceDiagram
 
 ## (d) Several tasks enter one workflow as a batch, review through release
 
-Three tasks belong in one change. They enter one workflow together because the closing sign-off of their
+Three tasks belong in one change. They enter one workflow together because the closing verdict of their
 intake batch named it as successor and carried them into it: a batch record is opened and each task gets
 an `ADDRESSED_BY` edge to it. The batch advances from step to step: each step opens,
-its step owner claims it (a lease on the step), and closes it with a `sign-off`; `step_status` on each
+its step owner claims it (a lease on the step), and closes it with a `verdict`; `step_status` on each
 task projects the same state, so it is read in one retrieval. The pull request that carries the change is an `artifact`
 attached to the batch by edge; no step is taken on it. When every required review step is signed off,
 the `merge` step opens and the steward claims it; the merge is an `action` the steward evaluates at the

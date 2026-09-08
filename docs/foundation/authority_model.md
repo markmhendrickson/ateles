@@ -209,7 +209,7 @@ and the design has none.
 
 **The asymmetry inbound and outbound is deliberate, and is not a gap.** Outbound, an operation with no
 credential is a **denial** (`adapters.md#what-the-adapter-does-with-every-event`). Inbound, a verdict from
-a credential that binds to no principal is **an observation on the artifact, never a sign-off** — not a
+a credential that binds to no principal is **an observation on the artifact, never a verdict** — not a
 denial, because the delivery is still evidence about an artifact and dropping it would lose what the
 external system reported. Both are the same fail-closed rule (principle 5) applied to what each direction
 can safely fall back to: outbound has no safe fallback, inbound has one that claims less. Obligation 2
@@ -498,7 +498,7 @@ either and the sequencing between them is unruled.
 **What decides it.** Whether the record is meant to answer "under what reach did this principal execute" for
 every principal and every harness, or only for the harnesses that can enforce a bound. The first requires a
 grammar that can express reach a harness cannot enforce, and accepts that some capabilities are recorded and
-reporting-only; the second lets the grammar stop where enforcement stops, and accepts that a sign-off against
+reporting-only; the second lets the grammar stop where enforcement stops, and accepts that a verdict against
 a non-enforcing harness attests a prompt and not a reach. Decision 42 leaned toward the first in its cost
 clause — naming the reporting-only case rather than hiding it — without ruling the grammar that would make it
 writable.

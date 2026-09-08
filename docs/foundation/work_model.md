@@ -172,7 +172,7 @@ enough to be claimed and executed.
 none of which touch the need itself:
 
 - **C1 and invariant 11.** `#there-is-no-task-lifecycle-there-are-batches` states that a task carries status
-  and edges only, and that writing a batch, lease, or sign-off fact onto the task is the defect a process
+  and edges only, and that writing a batch, lease, or verdict fact onto the task is the defect a process
   then has to keep true. A status meaning "still being written" is a fact about what an assembler is doing,
   maintained on the task by whoever remembers to clear it.
 - **Invariant 12's no-overlap half.** `draft` is already a bound step name in two workflows —
@@ -180,7 +180,7 @@ none of which touch the need itself:
   (`workflows.md`). A `draft` status would carry a second, unrelated sense of the same word.
 - **The status vocabulary's scope.** `#the-transition-vocabulary` and
   `#what-a-claim-predicate-treats-as-claimable` give the vocabulary two meanings, `open` and terminal, with
-  a closing sign-off writing only a declared value and a terminal value outside the set refused at the
+  a closing verdict writing only a declared value and a terminal value outside the set refused at the
   write. Statuses are how a task ends, not how it is prepared.
 
 **The dispositions, none of them taken here.**

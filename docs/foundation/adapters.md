@@ -1486,6 +1486,113 @@ provenance ranking are the same mechanism whatever type crosses. Whether such a 
 question of admission and the action gate, not of this decision, and is settled at
 `gates_and_workflows.md#a-synced-observation-on-a-governance-type-is-recorded-and-never-takes-effect`.
 
+### Where a swarm is deployed, and what its deployment names
+
+**Ruled (decision 90, 2026-09-08): a deployment names a target host and the instance of the record it will
+read and write, and it deploys a companion instance where it names none.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. Three rules, each a design statement and none of
+them a mechanism:
+
+1. **A deployment names its target host, and naming none selects the host it is run from.** The target is a
+   parameter of the deployment, never a property of the software: a swarm is not written for one host and
+   ported to others. Any host the operator can reach may be named. This says where the choice lives; which
+   hosts exist, and what any of them is called, is operational and belongs nowhere in this directory.
+2. **A deployment names the instance of the record it will read and write, and where it names none it
+   deploys a companion instance alongside itself.** Naming an existing instance is the ordinary case. A
+   deployment with no instance to name is not one that fails, and it is not one that runs recordless: the
+   design keeps no state outside the record — "a concept with no row here is a concept the design does not
+   persist" (`data_model.md#scope`) — so a swarm with nowhere to write has nowhere to put a verdict, a gate
+   decision, or a task, and every rule in this directory is silent for it. Deploying the companion is what
+   makes the from-zero case a deployment rather than a half of one.
+3. **A deployment's recovery path lives off the host it deploys to, and is named at deployment rather than
+   after it.** `failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`
+   already requires `recovery_paths[]` on the binding entity for the system that holds the path, each with
+   its `cadence`, each exercised by a real restore, and already names "the record host's for a snapshot".
+   What this ruling adds is *when* the path is named and *where it may point*: at the deployment, and not at
+   the host being deployed to. A path held on the host whose loss it recovers from is not a recovery path,
+   and the restore obligation cannot catch that on its own — such a path passes every cadence check right up
+   to the moment it is needed.
+
+**Why rule 3 is what makes teardown bearable.** Destroying a deployment destroys what its host holds, and
+where the instance is a companion on that host, destroying the deployment destroys the instance. That is the
+one-way door, and it is not closed by making destruction gentler: destruction stays destructive, and the
+design does not soften it into a freeze. What rule 3 changes is the size of what is lost — with a path off
+the target host, a teardown costs the deployment and the interval since the last exercised restore; without
+one it costs everything the instance ever held. The design already refuses to count an unexercised path as a
+path (principle 4); this ruling refuses to count an on-host one.
+
+**The teardown guard: a teardown reaches only what its own deployment created.** Operating the host a
+deployment runs on is already an action — decision 45 rules the host an external system, and a restart, a
+redeploy, and a checkout update are its adapter's action classes — so a teardown reaches the [action
+gate](vocabulary.md#action-gate) the way a restart, a redeploy, and a migration do, under a class the
+`action_policy` names, and needs no second mechanism to be governed. What is stated here is the narrower
+property the gate does not supply: a teardown takes as its object only what its own deployment
+brought into existence, and refuses everything else. A companion instance that deployment created is within
+reach; an instance it merely named is not, and neither is anything else the host carries. The reason is that
+the gate judges whether an action may be taken and not what it is aimed at — a permitted teardown pointed at
+the wrong instance is permitted and wrong, and it carries the same blast tier it would carry when right.
+The guard is a property of the teardown, checkable before the gate is consulted.
+
+**Deployment, not installation — one name, because two would divide one act.** Placing the software on a
+host is a step within deploying a swarm to that host, not a separate act owed a separate name, and a corpus
+carrying both would owe a rule that turns on the difference. None does, and the swap test
+(`principles.md#12-as-few-terms-as-the-design-needs-and-no-fewer-no-term-overlaps-another`) run on this
+document's own sentences finds no use of either word whose meaning changes when the other is substituted.
+
+**What this states, and what it does not mint.** No term is added to `vocabulary.md` and no type is
+registered, because each piece has a home already. The host is an [external system](vocabulary.md#external-system)
+with a per-host binding (decision 45 above, and decision 35's one binding type, `#scope`) — this ruling adds
+a field's worth of obligation to that binding and no third name for it. The instance a deployment names is
+carried by an explicit binding that fails closed when ambiguous, which is the shape `authority_model.md`
+takes for a read that resolves to no instance — this ruling says a deployment is where that binding is
+stated, not that a new one exists. And the recovery
+path is `recovery_paths[]` on that binding, unchanged but for where it may point. The word *instance* is
+used here in the sense `conformance_suite.md` and the register already use it, and *the record* keeps
+`vocabulary.md#record`'s singular definition throughout.
+
+**What is deliberately out of this directory.** Which hosts a deployment can target, what any one of them is
+called, how a companion instance is placed relative to the swarm on a given provider, and the commands that
+carry any of it out. Those are per-instance bindings and belong in a `deployment_configuration` entity,
+which `migration.md#the-mapping` already lists among the context types the design resolves at runtime. The
+line is the one `conformance_suite.md#from-zero-the-disposable-instance-and-why-it-cannot-be-the-production-one`
+already draws for the suite's own instance: that document states the requirement — empty, per run,
+nonce-identified, run-credentialed, destroyed — and marks creating the instance as an infrastructure item
+named there and built elsewhere. This ruling states its requirement in the same voice and leaves the
+building where that one leaves it. A rule that could only be written by naming a provider would be a rule
+about that provider, and this directory holds none.
+
+**Why this is design and not operations, since the boundary is the obvious objection.** A list of hosts is
+operational; that a deployment must *name* one is not, because the naming is what makes the target a
+parameter rather than an assumption, and an assumed target is the coupling the design would otherwise carry
+silently. Likewise, that a swarm with no instance deploys one is a statement about what the design requires
+to exist before any of its rules apply — the same question
+`conformance_suite.md#the-bootstrap-sequence-what-must-exist-before-a-swarm-exists` answers for the thirteen
+records, one step earlier. That section's step 0 is "an empty instance", marked infrastructure; this ruling
+says who is obliged to bring it about when nobody has, and stops there.
+
+**What this leaves open.** Whether a deployment that names several instances — the several-records case
+an operator keeps apart — names one of them as where its own governance writes go, or whether the design
+requires a deployment to hold exactly one such instance, is not settled here. It turns on a routing question
+this ruling does not reach, no rule above depends on the answer, and inventing one would be design by
+omission. It is registered as decision 91.
+
+**Cost accepted.** A deployment-time obligation the design cannot check from inside a live swarm: a
+recovery path pointing at its own target host is a defect the record carries without contradiction, and only
+the restore exercise or the teardown discovers it. The existing answer applies unchanged — an unexercised
+path reads as absent — and this ruling adds no second mechanism to catch late what the first already catches
+late.
+
+**What would reopen it.** A deployment model in which the record is not per-deployment: one instance serving
+many deployments. Rules 2 and 3 are written for the per-instance shape, in which a forker stands up their
+own instance and deployment-level separation is what isolates them; a hosted offering serving many
+deployments from one instance would make the companion rule conditional and move that isolation elsewhere.
+That is the change that reopens this.
+
+**Matrix.** The host adapter's admission rows (AD-21 to AD-26) carry the teardown class with the rest of
+decision 45's classes when that adapter is declared. FP-13, which reads the restore obligation, gains one
+case: a binding whose `recovery_paths[]` names a path on the deployment's own target host is a defect that
+row reads, beside the path with no cadence it already reads.
+
 ### Whether the instance of the record serving a swarm is an external system when the swarm operates it
 
 **Ruled (decision 78, 2026-09-07): the instance of the record serving a swarm is an external system when
@@ -1499,7 +1606,7 @@ written or being operated on.
 
 **Three rules, stated here because a reader of this ruling needs all three.** An operation that suspends
 the serving instance is an action of the host's adapter, taken under a class the `action_policy` names.
-The permitting sign-off and the [action gate](vocabulary.md#action-gate)'s decision are written **before**
+The permitting verdict and the [action gate](vocabulary.md#action-gate)'s decision are written **before**
 the operation begins, and the operation's completion is written **after** the instance answers again. An
 operation that does not complete leaves the permit standing and the completion unwritten, and what closes
 it is a person, not a retry.
@@ -1513,7 +1620,7 @@ not an action, which is the same rule the two named exceptions above bend on pur
 and a lossy record mutation are actions **not because of where they go, but because of what they can
 destroy**." That clause is the design's own statement that the boundary is not the only thing that makes
 an action. Suspending the instance is the limiting case of what can destroy: it does not mutate a row, it
-removes the ability to write any row at all, and for the duration every sign-off the design requires has
+removes the ability to write any row at all, and for the duration every verdict the design requires has
 nowhere to go. An operation that can destroy the record's availability wholesale, judged by the test the
 design already applies to a lossy mutation, is an action by that test and not by a relocation of the
 boundary.
@@ -1550,11 +1657,11 @@ This is the half `failure_posture.md` does not reach, and the ruling closes it. 
 and 4 are keyed to reachability and not to cause, so they bind an intentional suspension exactly as they
 bind an unexpected outage — no claim, no step opening, no gate decision, nothing claimed complete; the
 condition announced on the path that survives the outage; a mid-operation write failure leaving the task in
-its prior state, its sign-off re-derived and never replayed. Nothing there needs amending. What is only
+its prior state, its verdict re-derived and never replayed. Nothing there needs amending. What is only
 present here is that this outage was **decided**, so something was owed a decision before it and something
 is owed a record of having caused it. The ordering follows from the substrate the write needs: the gate is
-evaluated and the permitting sign-off is written while the instance still answers, because a sign-off that
-cannot reach the record is not a sign-off (`failure_posture.md#the-rules`, rule 4), and a permit obtained
+evaluated and the permitting verdict is written while the instance still answers, because a verdict that
+cannot reach the record is not a verdict (`failure_posture.md#the-rules`, rule 4), and a permit obtained
 after the instance is down is not obtainable at all. The completion is written when the instance answers
 again, by the same principal, referring to the permit it was taken under. Between the two the halt governs
 unchanged, and the announcement path of rule 2 carries the interval as it carries any other.
@@ -1576,10 +1683,10 @@ operator resolves it, which is what a restore obligation over the substrate alre
 instance returns in a state the permit did not approve** — a version other than the one approved, a
 migration that landed on the wrong host, data the snapshot did not carry. The completion write is where
 this is caught and the completion is not written: the divergence is a [finding](vocabulary.md#finding), the
-permitting sign-off is not retro-fitted to what happened, and the gap between the permit and the state
+permitting verdict is not retro-fitted to what happened, and the gap between the permit and the state
 stands in the record as the evidence it is. A second operation to correct the state is a second action, a
 second permit, and a second pass of this same ordering — never a continuation of the first, because the
-first's permit judged an artifact state that no longer holds and a sign-off is pinned to the artifact state
+first's permit judged an artifact state that no longer holds and a verdict is pinned to the artifact state
 it judged (`data_model.md#concepts`).
 
 **Why the other dispositions lost.** *Treat the serving instance as the record and put the operation

@@ -461,7 +461,7 @@ an instance and one roster, so under the planning reading the map would have to 
 is not what the instance holds) or keyed on a record chosen arbitrarily from many (which is not a key at
 all). The same reading fails a second time on what the key selects. `workflow` declares one entity per
 scope and workflow type (`gates_and_workflows.md#declaration-batch-projection`), and a declaration says how
-work of a type is executed — its steps, its owner roles, its thresholds, whether its closing sign-off may
+work of a type is executed — its steps, its owner roles, its thresholds, whether its closing verdict may
 name no successor because the branch it deploys is deployed on its own cadence
 (`workflows.md#feature`). None of that is a property of a justification. A project record states what the
 operator is pursuing and why; it does not state a deployment cadence, and a rule that read the two as one

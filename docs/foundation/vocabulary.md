@@ -281,7 +281,7 @@ branch, and head, related to the [task](#task) it executes.
 **Definition:** the summarized content of one [runner](#runner)'s session — what the session covered and
 concluded — as distinct from the [`agent_session`](#agent_session) that names where it ran and the raw turn
 store that holds every message.
-It carries one rule: **an [agent](#agent)'s [sign-off](#sign-off) `REFERS_TO` the digest of the session
+It carries one rule: **an [agent](#agent)'s [verdict](#verdict) `REFERS_TO` the digest of the session
 that produced it**, required where a digest exists for that session and permitted otherwise, so a reader
 can resolve what the signer was working from as of `signed_at`. Never the `agent_session` (which carries no
 content) and never the raw turns (the wrong grain for a reference resolved as of a time). A registered type
@@ -447,7 +447,7 @@ declaration applies confers no ownership.
 
 ### workflow
 **Definition:** the declaration, per ([declaration scope](#declaration-scope), workflow type), of an ordered list of [steps](#step), the [fast paths](#fast-path)
-a [batch](#batch) may take, and the [successors](#successor) a closing [sign-off](#sign-off) may name.
+a [batch](#batch) may take, and the [successors](#successor) a closing [verdict](#verdict) may name.
 **See:** [`workflows.md`](workflows.md),
 [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** "workflow_definition".
@@ -460,7 +460,7 @@ a [batch](#batch) may take, and the [successors](#successor) a closing [sign-off
 `gates_and_workflows.md#declaration-batch-projection`), and
 parallel-group and join fields, [claimed](#claim) by its step owner on a [batch](#batch) and closed by that
 step owner's
-[sign-off](#sign-off).
+[verdict](#verdict).
 Step names are data (`pm`, `ux`, `arch`, `impl`, `pr_review`, `qa`, `legal`, `release`,
 `verify_deployed`, and any a [workflow](#workflow) declares), and no name carries an entry of its own: each is
 declared on one workflow, its [step owner](#step-owner)'s [role](#role) is tabled at
@@ -506,7 +506,7 @@ type marked special-category (the mark is the type's — `data_model.md#record-c
 
 ### step owner
 **Definition:** the **role** declared on a [step](#step), which the roster resolves to a [principal](#principal) at [claim](#claim) time;
-that principal claims the step on a [batch](#batch) and its [sign-off](#sign-off) closes it. The declaration names a [role](#role) so that
+that principal claims the step on a [batch](#batch) and its [verdict](#verdict) closes it. The declaration names a [role](#role) so that
 one [workflow](#workflow) serves every [declaration scope](#declaration-scope) and a renamed or replaced [agent](#agent) leaves no stale name in it; the
 resolution to a principal happens when the step is claimed, against `swarm_roster` for the batch's
 scope, and a step whose role resolves to no principal raises a [checkpoint](#checkpoint) (reason
@@ -685,7 +685,7 @@ confidence); "requirement" for an acceptance criterion of a [batch](#batch).
 ### step state
 **Definition:** the state of one [step](#step) within one [batch](#batch), derived at read time from [edges](#edge)
 and never stored: open (the batch and the step), [claimed](#claim) (a [lease](#lease) from the
-[step owner](#step-owner) to the step on that batch), or signed (a [sign-off](#sign-off)).
+[step owner](#step-owner) to the step on that batch), or signed (a [verdict](#verdict)).
 The concept is written in spaced words, "step state"; the map that renders it onto the [task](#task) as a
 [projection](#projection) is the field
 [`step_status`](#step_status), and the two are not the same thing.

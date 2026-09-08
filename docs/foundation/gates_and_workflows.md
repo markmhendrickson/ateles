@@ -34,8 +34,8 @@ and the adapters that reach them: `adapters.md`.
 
 - [Declaration, batch, projection](#declaration-batch-projection).
 - [What a step leaves at close: what it produced, and a reference to what it read](#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read).
-- [Findings, verdicts, and what a blocking finding obliges](#findings-verdicts-and-what-a-blocking-finding-obliges).
-- [Whether the verdict is a stored field or a read over the findings and the author](#whether-the-verdict-is-a-stored-field-or-a-read-over-the-findings-and-the-author).
+- [Findings, conclusions, and what a blocking finding obliges](#findings-conclusions-and-what-a-blocking-finding-obliges).
+- [Whether the conclusion is a stored field or a read over the findings and the author](#whether-the-conclusion-is-a-stored-field-or-a-read-over-the-findings-and-the-author).
 - [A finding is one-off or standing, and a standing one obliges a change to what produced it](#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it).
 - [Work is reviewed on the record, and a channel carries only what awaits the operator or cannot wait](#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait).
 - [Closed work is reviewed on the record and redone through intake, never reopened](#closed-work-is-reviewed-on-the-record-and-redone-through-intake-never-reopened).

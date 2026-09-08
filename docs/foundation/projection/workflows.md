@@ -9,7 +9,7 @@ Every rule `workflows.md` owns, one entry each: the rule's own statement from `c
 
 ## [How to read a workflow section](../workflows.md#how-to-read-a-workflow-section)
 
-- **WF-1** — a failing conclusion does not advance; `on_fail` reopens; the cap escalates *[M]*
+- **WF-1** — a failing verdict does not advance; `on_fail` reopens; the cap escalates *[M]*
 
 ## [Roles named in this document](../workflows.md#roles-named-in-this-document)
 

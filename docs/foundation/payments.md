@@ -614,7 +614,7 @@ prior commit than a success response is of the present one).
 - It refuses to confirm from a submission's return, or from a notification.
 - It refuses to advise a manual payment as a fallback for an unresolved submission.
 - It refuses to attach metadata a policy suppressed, or a neutral placeholder in its stead.
-- It refuses to write the `reconcile` sign-off.
+- It refuses to write the `reconcile` verdict.
 - It refuses to take a payment on any signal that is not a resolved checkpoint.
 - It refuses to supply identity or compliance material to a rail.
 - It refuses to hold rail state of its own.

@@ -459,7 +459,7 @@ principals rewrite?** It applies equally to a specification section, a review ve
   value with several writers rather than one value with several homes, which is the neighbouring fault and
   not the one the invariant names; whether the invariant reaches it is part of the question.
 - **C1 and `work_model.md#there-is-no-task-lifecycle-there-are-batches`.** A task carries status and edges
-  only, because a fact about a batch or a sign-off written onto the task needs a process to keep it true.
+  only, because a fact about a batch or a verdict written onto the task needs a process to keep it true.
   A merged block is the same shape one level up — several principals' output on one field, kept correct by
   each writer's discipline rather than by the record — but the rule is stated about a task's fields, and
   extending it to an external system's body is an argument this section does not make for it.
@@ -471,7 +471,7 @@ principals rewrite?** It applies equally to a specification section, a review ve
   half is this document's table, which is where the silence is.
 - **Decision 69, ruled** (`adapters.md#a-per-agent-credential-is-an-obligation-where-the-system-issues-one`).
   Where the host issues per-agent credentials, each agent holds its own, because a shared one leaves the
-  host unable to carry a sign-off at all. That ruling is about *who writes*; this question is about *what
+  host unable to carry a verdict at all. That ruling is about *who writes*; this question is about *what
   is written into*, and the two meet here — a body several principals rewrite loses on the content side
   what a shared credential loses on the identity side. Whether the same ground decides both is the
   question, and 69 did not reach it.

@@ -160,7 +160,7 @@ with them.
   "which agent, at which version" to "which model, observed at this write" — and not a docs correction.
   Decision 59 (`gates_and_workflows.md#blast-radius-selects-the-gate-nothing-yet-selects-the-model-a-step-runs-at`),
   ruled 2026-09-06, is the adjacent question of whether a class's minimum model tier is checked at the gate;
-  a per-sign-off model pin would be the attribution-side counterpart, and is named here as absent rather
+  a per-verdict model pin would be the attribution-side counterpart, and is named here as absent rather
   than added.
 - **Tolerant readers, canonical writers.** Where one concept has been written under several field names,
   the remedy is a tolerant reader and a canonical writer, never a bulk migration. Every new write uses the
