@@ -189,6 +189,13 @@ If only the cheapest possible subset is done, it must be: **(1) `tenant_id` part
 
 ## 7. Open decisions (require the operator)
 
+**The rules in this section.**
+
+- One of the five stays open and is the operator's: item 1, the tenant slug scheme, registered as decision 79.
+- [The tenant is matched on the grant, not derived from the subject](#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject) — ruled, decision 80: `match_tenant` on the grant, nothing read out of a subject, and the migration a backfill.
+- [Every instance may have one operator or many, and hosting does not decide it](#every-instance-may-have-one-operator-or-many-and-hosting-does-not-decide-it) — decision 82: the row's framing retired rather than answered, and section 3 load-bearing.
+- [What this design requires of the record's sharing model, and of an operator's reach within it](#what-this-design-requires-of-the-records-sharing-model-and-of-an-operators-reach-within-it) — ruled, decisions 81 and 83: both belong to the record's design, and what this corpus states instead is the non-narrowing read rule and the non-exceedance reach rule; an operator is not a tenant owner.
+
 **Registered.** All five are rows 79 to 83 of `conformance.md#the-register-of-open-design-decisions`,
 in that order, since the decision-77 pass of 2026-09-07 brought this document into the foundation set and
 with it the obligation that every question a foundation document marks open is indexed there once. The
