@@ -10,6 +10,29 @@
 > *provisioning* (create the VM, generate the per-host age key, supply the
 > Tailscale auth key + `ateles-private` read access) — not decisions.
 
+> **2026-09-08 — the host choice above is superseded.** The operator has since
+> answered the cloud target as Fly, on the ground that a new platform is not worth
+> introducing unless it is significantly better. The 2026-06-23 acceptance of a
+> Hetzner VM plus Tailscale is recorded above as what was decided then, and is no
+> longer the target; everything below that depends on the VM shape — the host
+> bootstrap, the per-host age key, and the Tailscale network — is stale against
+> the current target and is not re-derived here.
+>
+> Two things this note deliberately does not do. It does not rewrite the
+> recommendations below, because reworking this document against a different
+> platform is its own change with its own verification, and a half-converted
+> runbook is worse than one that says plainly which target it was written for.
+> And it records no per-instance deploy binding — the Fly app, its domain, its
+> region, its build arguments and secret names live in a `deployment_configuration`
+> entity and never in this repository, which is public.
+>
+> The design-level rule this sits under is
+> [`docs/foundation/adapters.md#where-a-swarm-is-deployed-and-what-its-deployment-names`](foundation/adapters.md#where-a-swarm-is-deployed-and-what-its-deployment-names):
+> a deployment names a target host, defaulting to the host it is run from, so a
+> named target is a parameter and never a property of the software. Fly is one
+> target under that rule, not the answer to it, and a later change of target is a
+> change of parameter rather than a change of design.
+
 Decision under execution: `cloud_hosted_device_agnostic_swarm` — move the swarm's
 loop bodies to always-on cloud/self-hosting so the swarm is device-agnostic. The
 operator's devices become clients/channels. **Exception:** device-bound work
