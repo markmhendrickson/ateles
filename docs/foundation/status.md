@@ -4155,6 +4155,53 @@ than carries.
 **One decision opened and ruled (69).** No figure above is carried from an earlier revision; each was
 measured by the instrument in its row on this branch on 2026-09-06.
 
+## Revision 72 (2026-09-08): what the record's own foundation commits to, and the fourth substrate obligation
+
+**Why this pass.** Revisions 70 and 71 both argued from what the record's code does — 70 to justify a proxy,
+71 to withdraw that justification. The operator's standing correction is that neither is legitimate: this
+corpus states what it requires of a record, the record's own foundation commits to providing it, and a
+divergence between them is a defect located where it lives rather than a constraint on either design. That
+rule is now stated at `conformance.md#what-the-design-requires-of-the-substrate-regardless-of-who-builds-it`,
+and this revision records what is on the other side of it — which no prior pass had established.
+
+**The record has a foundation layer, and it is a real counterpart.** Read 2026-09-08 against the record's
+own `origin/main`. It carries a numbered constitutional register with a stated amendment process, an
+invariant list in MUST / MUST NOT form, and a commitments table with evidence columns — structurally the
+same three instruments this corpus uses. Two of the four guarantees this design leans on are committed
+there in that register's own voice:
+
+| Guarantee this design requires | The record's own foundation | Standing |
+|---|---|---|
+| append-only, corrections as new observations overriding prior ones | its first redline, protecting its immutability invariant, and refusing the "convenience mode" case by name | **committed.** The strongest of the four; a second redline extends it to funding pressure |
+| provenance — every value traces to what produced it | an invariant requiring records to trace to source, timestamp, and user, and a redline against silent pipeline transformations | **committed** |
+| attribution — every write attributable to a principal | present only as the trailing clause of the provenance invariant; no invariant and no redline of its own | **partial.** Stated firmly in the record's operator documentation and its README, which are description of current behaviour, not its commitment layer |
+| admission — which principals may read and write which entity types | **nothing.** The term does not appear anywhere in that foundation tree; the nearest invariant hedges isolation as future work, and the record's own phase table classes authority semantics as future | **not committed** |
+
+**The load-bearing finding is the fourth row.** The record's foundation commits to *what was true* and
+leaves *who was authorized* unstated — a division its README names explicitly, pairing the two systems, but
+which its foundation layer has not absorbed. So on admission there is currently no commitment on the other
+side for this corpus to meet. That is not a reason to state the rule more weakly here, and under the rule
+above it is not a reason to build a compensating layer either: it is a gap in the record's foundation, and
+the fourth obligation added to `conformance.md` this revision is the statement of what this design requires
+so that the gap has something to be measured against. Raising it belongs to that repository.
+
+**Bearing on decisions 94, 95, and 97.** Decision 94's rule is unaffected and is now also stated as a
+substrate obligation, which is where its enforcement point belongs. Decision 95's reopening (revision 71)
+is confirmed on a second and independent ground: not only did it contradict decision 56, it reasoned from a
+checkout, which the rule above forbids. Decision 97 is untouched and stays open — the fork it states is a
+design question about where the enforcement point sits, answerable without reference to what any checkout
+enforces today, and nothing in this revision answers it.
+
+**Not registered as a decision.** The rule was considered for its own register row and is not given one. Its
+Ateles-facing half is already ruled — decision 80 refused a mechanism chosen because the existing keys
+already had its shape, on the ground that these documents state the design and the implementation follows —
+and invariant 9 forbids stating one source twice. What this revision adds is the extension of that settled
+rule to an implementation in another repository, which is a scope clarification of decision 80 rather than
+a new question, and it is stated once, in the section that already governs what this design requires of the
+substrate.
+
+**Checks on this revision:** reported in the pull request that carries it.
+
 ## Revision 71 (2026-09-08): decision 95 reopened as 97, decision 94 narrowed, and what the substrate actually enforces
 
 **Why this pass.** Revision 70 ruled two decisions the same day and both carried defects. Decision 95's
