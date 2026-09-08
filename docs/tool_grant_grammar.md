@@ -1,8 +1,12 @@
 # The grammar by which an `agent_grant` expresses a tool
 
-**A design, not an implementation.** No grant is changed, no parity test is written, no dispatch code is
-touched by this pass. The output is a proposal precise enough that the test and the migration become
-mechanical, and a decision registered for the operator to rule.
+**Ratified by decision 86 (2026-09-08), and still not an implementation.** The rule this document's
+mechanics serve is stated in
+`foundation/authority_model.md#a-capability-names-a-tool-as-toolsurfaceoperation-and-that-is-what-a-harness-allowlist-is-compared-against`,
+which ruled the grammar and named this document as the mapping's home. Read the rule there; read the
+mapping, the migration path, and the parity test's two sides here. No grant is changed, no parity test is
+written, and no dispatch code is touched by this document — what it makes mechanical is the test and the
+migration, which are separate work.
 
 **Derived from:** decision 42's ruling in `migration.md#where-a-skills-harness-mechanics-live`; the
 parity measurement of 2026-09-07 (issue #803) and its report; `authority_model.md#grants` and `#the-tuple`;
