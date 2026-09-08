@@ -390,6 +390,54 @@ Whether the same default-deny governs the capability surface a harness provides,
 writes alone, is open decision 87
 (`#whether-a-harness-may-provide-a-capability-the-grant-does-not-name`).
 
+**Read admission per entity type is default-deny, and the grant is the allowlist, read at the read
+(ruled, decision 94, 2026-09-08).** Registered in `conformance.md#the-register-of-open-design-decisions`.
+Decision 41 ruled the write side and said the read side "has the same shape, stated where reads are",
+pointing at the record-usage contract (`data_model.md#what-each-actor-reads-and-writes`). That pointer
+described a boundary; it did not rule one, and nothing in the design admitted or refused a read. This rules
+it: a principal reads an entity type only where a capability on its grant names that type, the check runs
+at the read rather than at the step's declaration, and zero grants denies.
+
+**Why `context_entity_types[]` is not already this rule.** An `agent`'s `context_entity_types[]` declares
+what the agent is *given* — the types a runner resolves and puts in front of it when a step opens. It is a
+provisioning list, authored to make an agent useful, and it is silent on what that agent may *fetch*
+once it is active. The two differ in the direction they fail: a type absent from the list still gets read if the
+agent asks for it, because nothing consults the list at the read, and a type present on it is not thereby
+something the agent's grant admits. A field that says what to hand over is not a field that says what to
+refuse, and the corpus already measured the consequence — `status.md`'s revision 8 row records that
+`context_entity_types[]` exists on the agent's registered type and "nothing bounds a runtime read to it". Reading
+it as the admission rule would also put the boundary on the wrong record: admission is matched on the
+credential (`#grants`), and the field is on the `agent`, so a second credential bound to the same agent
+would inherit a boundary nobody granted it.
+
+**Reads and writes are admitted symmetrically, and the asymmetry argument does not survive decision 82.**
+The case against symmetry is real and worth stating: a denied read and an absent entity are often
+indistinguishable to the caller, so a per-type read refusal leaks the existence of types a principal may
+not read, and an enforcement point that leaks on denial is a poor one. But that objection prices the wrong
+thing. What a per-type denial discloses is that *the instance registers a type* — the registry is design
+data, enumerated in `data_model.md` and readable by anyone reading this corpus — and not that any
+particular row exists. The disclosure is a schema fact already public, which is why the leak is small.
+What symmetry buys is not small. Decision 82 put several operators on one instance, so a principal that
+can read every type reads across the tenancy boundary, and the exposure is another operator's `contact`,
+`payment_profile`, and `conversation_message` rather than untidiness within one operator's own graph. The
+special-category mark (`data_model.md#record-conventions`) already states that a marked type is admitted
+only to roles whose declarations give a reason to read it — which is this rule, stated for one class of
+type and left unstated for the rest. Principle 5 settles the direction: the safe way to be wrong about a
+read is to refuse it, and the cost of a wrong refusal is a grant, while the cost of a wrong admission is a
+fact about a person reaching a principal with no reason to hold it, which no later write can retract.
+Asymmetric admission would also be a second mechanism where the tuple already supplies one — a capability
+is operation × entity types × repositories, and *operation* is where read and write differ, so ruling them
+symmetric adds nothing to the model and ruling them asymmetric would require inventing a reason the tuple
+does not carry.
+
+**What the rule does not reach.** It admits a type, not a row: which rows of an admitted type a principal
+sees is the tenancy and ownership question decision 82 opens, and this ruling neither answers it nor
+depends on it. And a step's declared reads (`reads_to_enter[]`, `reads_to_close[]`) stay what they are —
+they narrow what an admitted principal reads for that step, and they never widen a grant, which the
+retrieval contract already states. **What would reopen it:** an enforcement point where the existence
+disclosure is not a schema fact — a per-row read refusal that leaks whether a named person is in the
+record — which is the tenancy question above and would be argued there, not here.
+
 **A parameter constraint on a write capability is a field allowlist.** The grant that admits a principal's
 writes to a type may name the fields it may write, and a write carrying a field outside them is denied at
 admission exactly as a write to a type the grant does not name is — read at the write, structured, and never
@@ -553,6 +601,65 @@ access, not only tool-mediated access — is on the record as framing for this r
 unenforceable while the grant grammar cannot name what the harness provides: today it cannot express the
 shell or the harness's own tools at all, so the reach that most needs bounding is the reach the rule could
 not reach.
+
+### The swarm reaches the record through a proxy that admits, never through per-harness credentials
+
+**A harness reaches the record through the swarm's own MCP proxy, and does not hold a credential to the
+instance directly (ruled, decision 95, 2026-09-08).** Registered in
+`conformance.md#the-register-of-open-design-decisions`. Decision 42 ruled where a skill's harness mechanics
+live — tools on the grant, harness preference and model tier on a `vendor_binding`, hook wiring and
+environment in the harness's own configuration — and it settled *which tools* a harness may invoke. It did
+not settle *what the harness points at*, and after decision 90 named the instance a deployment reads and
+writes, and decision 91 left open which instance takes governance writes where several are named, the
+question is live.
+
+**The reason is admission, not convenience.** A proxy is the only place in the path where a request can be
+refused. If each harness holds a bearer token to the instance, then every agent in the swarm holds a
+credential to the whole graph, and decisions 41 and 94 are unenforceable *by construction* — not
+imperfectly enforced, not enforced late, but with nowhere for the check to run, because the request reaches
+the record without passing anything that reads a grant. A rule the topology gives no enforcement point to
+is a report, and principle 1 has already rejected controls that only record. Every other argument for a
+proxy — one place to configure, one place to rotate, fewer secrets on disk — is real and is not the reason;
+tidiness would not justify a hop, and the absence of an interposition point does.
+
+**Three consequences follow, and each is a rule.**
+
+**Empty identity fails closed.** A request the proxy cannot resolve to a principal is refused, not passed
+through. Principle 5 puts the default on the field carrying the safety meaning, and at an admission point
+that field is identity: an unresolved caller is exactly the case the check exists for, so admitting it
+inverts the mechanism into one that admits precisely what it cannot judge. This is the shape decision 41
+already named for a failed agent load returning a wildcard allowlist — a degraded read synthesizing a value
+more permissive than success would have returned — and it is the same defect one layer out.
+`status.md#authority_modelmd` records the built proxy doing the opposite, which is a gap and not
+a posture choice.
+
+**The read boundary lives here.** Decision 94 rules that a principal reads only the types its grant admits,
+and the proxy is where that check runs, because it is the only component every read passes through and the
+only one holding both the request and the credential it was matched on. Under direct credentials the rule
+would have had to be enforced by the record itself against a token that names no principal, or by each
+agent against itself, and the second is not enforcement.
+
+**Multi-instance routing is the proxy's concern.** Where a deployment names several instances, which one a
+request reaches is resolved at the proxy from the deployment's own binding, not configured per harness.
+This is what decision 91 needs: a routing rule held in one place has a single author and a single failure,
+where the same rule copied into every harness's configuration is state that drifts and that nothing
+reconciles (principle 11). Whether a deployment naming several instances names one as its governance-write
+target stays decision 91's to answer; this ruling only settles that the answer is executed at the proxy.
+
+**What this does not settle: how the proxy authenticates to the instance on an agent's behalf.** Registered
+as decision 96, open. The fork is stated: the proxy **passes through** the agent's own credential, so the
+instance matches grants on the `sub` that presented it and attribution at the record is the agent's
+directly; or the proxy **holds its own** credential and acts for the agent, in which case the instance sees
+one principal and the A-for-B attribution the design already requires of an adapter carrying another
+principal's decision (`adapters.md#no-external-event-advances-a-step-by-itself`) must be carried in the
+write. Pass-through keeps the record's own admission meaningful and duplicates the check; proxy-held makes
+the proxy a principal whose compromise reaches everything and puts the whole boundary on one hop. Nothing
+in this ruling depends on which — the interposition point exists either way — and the question becomes
+load-bearing the moment a second operator's data is on the instance under decision 82.
+
+**What would reopen it:** an instance whose own admission check reads the requesting principal and enforces
+decisions 41 and 94 at the record, which would make the proxy one enforcement point rather than the only
+one, and would turn this from a rule of the design into a deployment preference.
 
 ## Attribution
 

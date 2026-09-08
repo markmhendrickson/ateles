@@ -381,6 +381,14 @@ here once however many agents fill it. Two documents supply the boundaries the c
 `adapters.md` (the engine never reads an external system; the adapter never reads a workflow) and
 `authority_model.md#grants` (an actor reads what its grant admits, and nothing else).
 
+**What admits a read is the grant, and this contract narrows it (decision 94, ruled 2026-09-08).** The
+"Must not read" column below is not the admission mechanism and never was: read admission is default-deny
+per entity type against the reading principal's grant, checked at the read
+(`authority_model.md#grants`). These rows state what an actor of a kind reads *within* what its grant
+already admits, and a step's `reads_to_enter[]` and `reads_to_close[]` narrow it further. Neither may
+widen a grant, and an actor's `context_entity_types[]` — the types a runner puts in front of it — is a
+provisioning list, not an admission rule.
+
 ### Retrieval contract
 
 The rows below are the general form of a per-step **read dependency**
