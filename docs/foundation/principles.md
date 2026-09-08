@@ -29,7 +29,7 @@ that class exists, and which instances are missing, is `status.md`.
 
 ### 1. A mechanism that does not bind is not a control
 
-Before treating a linter, gate, review, verdict, or status as enforcement, name the thing that fails when it
+Before treating a linter, gate, review, conclusion, or status as enforcement, name the thing that fails when it
 is violated. If nothing fails, it is reporting. A queue of checkpoints that nothing consumes is a
 report. Sources: #727 rule 1; synthesis PR-14 (analysis `ent_8104c890c581ccf9094eab25`).
 
@@ -107,13 +107,13 @@ reversed in `gates_and_workflows.md`, because the name was not accurate); agent_
 design-basis check on every issue and PR (`conformance.md`) — both of which bind at review, weakly. What
 binds mechanically is the registry's closure over the design's singletons, named once, here: one decision
 queue (`checkpoint`), one gate (the action gate), one lease primitive (`LEASE`), one succession edge
-(`FOLLOWS`), one engine that opens steps, one home for step state (the sign-off, projected as
+(`FOLLOWS`), one engine that opens steps, one home for step state (the verdict, projected as
 `step_status`), and one record of an intended effect (`action`). A registered second type for any of them —
 a held-decision type beside `checkpoint`, a claim-history type, a per-step status row, a transition-event
 type — is the parallel mechanism this invariant forbids, and a census of the registry
 (`data_model.md#concepts`) is the check that fails on it.
 
-### 7. Unknown stays distinct from a verdict
+### 7. Unknown stays distinct from a conclusion
 
 "We could not tell" and "we can tell and it is bad" are different claims. A reader of gate, grant, drift, or
 reachability state carries a third value and never coerces an error to pending or to clear. Sources:
@@ -175,7 +175,7 @@ updated it died. The lease is the canonical case: an edge from principal to task
 `held` or `lapsed` state is derived at read time, needs no process to expire it; a `claimed_by` field on
 the task needs one. A task's attachment to a batch, parent and child, the attachment of an action or an
 artifact to its task, a checkpoint's link to its subject, and a step's state within a batch (open,
-claimed, or signed, read from the batch, a lease, and a sign-off) are edges for the same reason
+claimed, or signed, read from the batch, a lease, and a verdict) are edges for the same reason
 (`work_model.md`, `gates_and_workflows.md`, `data_model.md`). Sources: PR #745 operator review;
 synthesis PR-02 and PR-05 (liveness derived, no assignment log) are earlier instances of the same rule.
 
@@ -194,7 +194,7 @@ overlap:** two words that read as synonyms in ordinary English may be genuinely 
 the qualifier is the operator's own, and it is the load-bearing half. The test is whether the *design*
 distinguishes the pair, never whether English does. Conversely, two words the design does not distinguish
 are one term under two names, whatever their ordinary connotations: the term retired in revision 19 for
-[review step](vocabulary.md#review-step) named nothing that step does not, on owner, sequence, verdict, and
+[review step](vocabulary.md#review-step) named nothing that step does not, on owner, sequence, conclusion, and
 blocking — 64 uses replaced with no loss (`vocabulary.md#retired-names`; invariant 9, one source defined
 once, is this same rule applied to a term rather than a value). This invariant states as a standing rule what revision 29's
 simplification pass already applied without naming it: "a term is redundant if every use can be replaced
@@ -268,10 +268,10 @@ alone: "the reservation is per action class, it lives in the policy, and it is t
 are [review steps](vocabulary.md#review-step), and nothing distinguishes one from a working step but what
 its owner does. The human's presence at review is the [checkpoint](vocabulary.md#checkpoint) and the
 [finding](vocabulary.md#finding): the operator's input on reviewed work is itself a finding, judged on the
-same severity and standing axes as any other (`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`).
+same severity and standing axes as any other (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`).
 So an agent-staffed review step is not an accident this design tolerates — it is what "humans at the ends"
 becomes once the end in question is a checkpoint rather than a step: the human sits at the standard (the
-policy an agent's verdict is checked against) and at the decision (the checkpoint, the finding), and by
+policy an agent's conclusion is checked against) and at the decision (the checkpoint, the finding), and by
 default not at the review step itself.
 
 **Attention as the protected constraint.** Part 2 (*The Attention Ceiling*) names the binding constraint as

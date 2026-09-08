@@ -38,7 +38,7 @@ Every rule `gmail.md` owns, one entry each: the rule's own statement from `confo
 
 ## [A thread and its messages are each artifacts, related by `PART_OF`](../gmail.md#a-thread-and-its-messages-are-each-artifacts-related-by-part_of)
 
-- **GM-9** — both levels are artifacts; a history entry lands on the message, minted `PART_OF` its thread; a send's confirmation mints the message `PART_OF` the thread; a sign-off on a thread pins the message set the read returned with its coverage; a regrouped message ends one edge and writes another, never a re-identification *[M]*
+- **GM-9** — both levels are artifacts; a history entry lands on the message, minted `PART_OF` its thread; a send's confirmation mints the message `PART_OF` the thread; a verdict on a thread pins the message set the read returned with its coverage; a regrouped message ends one edge and writes another, never a re-identification *[M]*
 
 ## [What artifacts this system holds](../gmail.md#what-artifacts-this-system-holds)
 

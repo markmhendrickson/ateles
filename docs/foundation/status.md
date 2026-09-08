@@ -93,7 +93,7 @@ design.
 |---|---|---|
 | `workflow` | `workflow_definition` (8 entities on prod) | `lib/daemon_runtime/workflow_resolver`, Anthus, the gate-state plan's `keep_the_name_workflow_definition` |
 | `step`, `steps[]`, `step_name`, `join_step` | `gates[]`, `gate_name`, `join_gate` | the same entities and resolver |
-| `sign-off` (the one record a step owner writes) | `participation_record` | Anthus writer; the stranded rows under C15 |
+| `verdict` (the one record a step owner writes) | `participation_record` | Anthus writer; the stranded rows under C15 |
 | step state derived from edges (open / claimed / signed) | none; `participation_record` rows hold a per-step status | Anthus writer |
 | `passage` (one passage of tasks through a workflow) | none | no entity records one passage; the issue stands in for it |
 | the passage's subject is the task; issues and PRs are `artifact`s attached by edge | the pipeline sequences issues and PRs, not tasks; `gate_status` lives on the issue | `swarm_dispatch.py`, `lib/issue_labels.py`; the task dashboard's task-to-issue and task-to-PR links are the artifact edges, unnamed as such |
@@ -108,10 +108,10 @@ design.
 | workflow policy versus execution policy | `execution_policy` only; step-claim rights are implicit in `owner_agent` | `gating.py`, `workflow_resolver` |
 | operator-only tasks claimed by the operator-facing agent | pushed to the operator by notification; no claim | `notifier.py`, `email_channel.py` |
 | `ADDRESSED_BY`, `PART_OF` edges for aggregation and parents | no `ADDRESSED_BY` relationship type in use; `PART_OF` exists for plan membership | relationship types on prod |
-| `successors` on a `workflow`; the closing sign-off names one or none | none built; no `workflow_definition` carries a `successors` field (prod, 2026-09-04); the built pipeline hardcodes issue → PR → merge, and the `feature` declarations carry `release` as an in-line final step rather than a successor | `swarm_dispatch.py`, `workflow_definition.gates[]` |
+| `successors` on a `workflow`; the closing verdict names one or none | none built; no `workflow_definition` carries a `successors` field (prod, 2026-09-04); the built pipeline hardcodes issue → PR → merge, and the `feature` declarations carry `release` as an in-line final step rather than a successor | `swarm_dispatch.py`, `workflow_definition.gates[]` |
 | intake as every task's first passage | none built; tasks are created directly into assignee routing, `assigned_to` read by `routing.py`, with no classify, link, dedupe, prioritize, or route record | `routing.py`, `task_lifecycle.py`, the MCP server's `route_task` |
 | `FOLLOWS` edge between passages; the chain derived | none; no passage entity exists to carry one, and `FOLLOWS` is not a relationship type in use (prod, 2026-09-04) | relationship types on prod |
-| `on_fail` on a step (the earlier step a failing sign-off reopens) | one declaration carries it: `ateles|social_content`'s `draft_lint` (`on_fail: revision_requested`); no engine reads it | `workflow_definition.gates[]` |
+| `on_fail` on a step (the earlier step a failing verdict reopens) | one declaration carries it: `ateles|social_content`'s `draft_lint` (`on_fail: revision_requested`); no engine reads it | `workflow_definition.gates[]` |
 
 The agent prompts and skills rendered from `agent_policy` entities still say "dispatch" and "gate owner";
 the correction is to the entities (`conformance.md`, direction of truth), then a re-render. The terms
@@ -206,15 +206,15 @@ record holds and where each step list in the document came from.
 | outreach | none | envisioned; no entity yet | the email agent's hourly sweep drafts and never sends (`email-triage-auto`), which is the `draft` step without a passage; the Gmail send gate is the `consent` step's enforcement, outside any workflow |
 | payment | none | envisioned; no entity yet | payments run as skills against `payment_profile` entities with a checkpoint on the `payment` class; no `verify` by a disjoint principal and no `reconcile` record exist |
 | research and analysis | none | envisioned; no entity yet | the `analyze` skill persists `analysis` entities; no `brief` or `gather` record |
-| meeting processing | none | envisioned; no entity yet | `analyze-meeting` performs `ingest` through `persist` as one skill run with no passage or sign-offs |
+| meeting processing | none | envisioned; no entity yet | `analyze-meeting` performs `ingest` through `persist` as one skill run with no passage or verdicts |
 | operator-only | none | envisioned; no entity yet | operator-only work is pushed by notification (`notifier.py`, `email_channel.py`); no claim, no `await` bound |
 
 **Unbuilt, named by the document:** `execution/scripts/render_workflow_docs.py` (`--check`), the step
 tables' render contract; no file by that name exists on `origin/main` (`git ls-tree`, 2026-09-04). No
 `workflow_definition` carries `successors`; only `social_content` carries an `on_fail`. No entity of
-type `workflow`, `passage`, or `sign-off` exists (the renames table above). The design's `merge` step
+type `workflow`, `passage`, or `verdict` exists (the renames table above). The design's `merge` step
 has no built counterpart: the steward's merge is `_gates_green()` plus code in `swarm_dispatch.py`,
-with no sign-off written.
+with no verdict written.
 
 ## `failure_posture.md`
 
@@ -268,7 +268,7 @@ answer most of the 123 human-assuming sites at once: `notifier.py:116-118` (who 
 **Extension points, judged against the inventory.** A second `operator_profile`: changes nothing, zero
 readers. Agent-to-principal binding: `agent_grant` keys on the agent's `sub` with no principal or tenant
 dimension; a second human today is another wildcard grant. Ownership edges: no principal entity exists to
-draw one to. Attenuating delegation: #561. **Verdict:** the README's extension-not-rewrite claim is true
+draw one to. Attenuating delegation: #561. **Assessment:** the README's extension-not-rewrite claim is true
 of the entity model (the per-agent pattern is a real template) and false of the substrate (123 of 138 sites
 resolve "the operator" without asking, concentrated in the notify, approve, and checkpoint paths); the
 first change is a principal that is an entity.
@@ -289,7 +289,7 @@ yield before a schema PR opens; recorded for #378's owner.
 names the GitHub pipeline's spawn-by-role and the notification path throughout the code and the rendered
 agent prompts; the design has no delivery but the claim, and its word for the eligibility field is
 assignment (the renames table above). `gate owner`, `workflow_definition`, `participation_record`, and
-`gate_status` are likewise the checkout's names for the design's step owner, `workflow`, `sign-off`, and
+`gate_status` are likewise the checkout's names for the design's step owner, `workflow`, `verdict`, and
 `step_status`; the design's `passage` and derived step state have no built counterpart. Retired agent
 names persist in design entities (C4, above).
 `docs/aauth.md` is to be rewritten against verified state (#471, open).
@@ -1749,7 +1749,7 @@ documents, never the code, which is judged below as drift.
 | U-2 (no parallel mechanism) | closed — the singletons listed once; the registry census is the check | `principles.md#6-extend-the-mechanism-that-already-generalizes-do-not-build-a-parallel-one` |
 | U-3 (a figure's date; state in a foundation doc) | closed — a syntactic rule the lint reads: no hash outside `status.md`; issue and PR numbers only where a document names its sources; three citations rephrased | `conformance.md#phases-and-implementation-state`; the *Decision citations* contract row |
 | U-4 (handing work over is not completion) | closed — "landed" is a derived read: the chain ended under a declaration that permits its ending there | `work_model.md#a-task-is-executed-only-through-a-workflow` |
-| U-5 (a verdict carries no condition) | closed for shape, review-only for prose, and the rule now says which is which | `gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges` |
+| U-5 (a verdict carries no condition) | closed for shape, review-only for prose, and the rule now says which is which | `gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges` |
 | U-6 (a blocking verdict names its evidence; the finding's shape, G15) | closed — the `finding` row: severity, kind, scope, evidence, text; `PART_OF` the sign-off, `REFERS_TO` the batch | `data_model.md#concepts` |
 | U-7 (where a standing finding lands) | closed for attribution, review-only for the judgement — the chosen scope is the finding's `scope`, and the change `REFERS_TO` it | `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it` |
 | U-8 (amendment versus creep) | closed — an amendment is a finding plus a correction to `acceptance_criteria[]` whose key names the finding (G6 closed) | `gates_and_workflows.md#declaration-batch-projection` |
@@ -1982,7 +1982,7 @@ are upheld, and marked "reviewed and upheld 2026-09-06" in that revision's parag
 gate, and the sole pre-authorized exception is the announcement path of last resort; the reason recorded is that a
 daemon acting directly is a side door around the workflow, no step, no sign-off, no lease, and the gate checks
 policy, not the work); `blocked` retired as a task status (`work_model.md#the-transition-vocabulary`); and the
-finding as an entity (`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`). The veto
+finding as an entity (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`). The veto
 window on decisions 37 to 41, ruled by derivation in revision 31, is closed the same way: the operator reviewed
 all five and upheld them, recorded in one line under the register in `conformance.md`, and nothing in those
 rulings changed.
@@ -4154,3 +4154,61 @@ than carries.
 
 **One decision opened and ruled (69).** No figure above is carried from an earlier revision; each was
 measured by the instrument in its row on this branch on 2026-09-06.
+
+## Revision 69 (2026-09-07): decision 72 ruled — the record that closes a step is the `verdict`, its field the `conclusion`
+
+**Ruled and executed as one pass.** The record a step owner writes to close a step is renamed from
+`sign-off` to **`verdict`**, and the field it carries — formerly `verdict` — to **`conclusion`**. The three
+values are unchanged: `signed`, a blocking value, and `waived`. The argument is
+`vocabulary.md#whether-the-record-that-closes-a-step-is-named-for-one-of-its-own-outcomes`; the register row
+is `conformance.md#the-register-of-open-design-decisions`, decision 72, now **ruled**.
+
+**Why the first-choice field name failed.** `outcome` was proposed on both sides and failed the swap test on
+two grounds found in the corpus, not reasoned from memory. A verdict *is* one of the four inbound outcomes
+`data_model.md#concepts` enumerates ("an observation, an artifact, a verdict, or a task"), so `verdict.outcome`
+would have reproduced one level out the same recursive defect the decision removes. And `outcome` is already
+named on the planning record's forbidden-field list in the same document ("a stored `status`, `outcome`, or
+progress"), so the word would have sat on a forbidden list and a required one at once. `resolution` failed on
+three bound senses over 220 uses with `disposition` already downstream of *resolve*; `type` failed earlier on
+~858 uses in a different sense. `conclusion` occurred once corpus-wide, in generic prose, with no entry,
+anchor, field, or plural use.
+
+**The section's own reasoning was unsound and is corrected in the same pass.** It had recommended `outcome`
+because the word "carries no entry of its own in this file." Having no `###` entry is not what makes a word
+free: `outcome` had no entry and was bound three ways over. The sounder test is now stated in the section —
+a term is bound if the corpus **enumerates, numbers, anchors, or forbids** it, whether or not it has an entry
+— so that the next rename does not walk into the same trap.
+
+**What changed, and what deliberately did not.** Roughly 970 sites carried the retired spellings. Four
+headings changed anchors and every citation of them moved with them: `gates_and_workflows.md`'s findings
+section and its decision-32 section, `principles.md`'s invariant 7, and `conformance_suite.md`'s lapsed-lease
+question; a fifth, `vocabulary.md`'s argued section, was rewritten from a question into a ruling. Left
+unrenamed: the `signed` conclusion value (it is the value and stays one), the `SIGNED_BY` edge, the
+`signed_at` timestamp, and the verb phrase *to sign off*, which is still what a step owner does when writing
+a verdict. Ten pre-existing noun uses spelled "sign off" without the hyphen — a defect the vocabulary's own
+style rule already named — were converted with the rest. That style rule's hyphen exception is retired with
+the term it existed for: every multi-word term in the file is now spaced.
+
+**A past pass keeps its own name.** Seven sites name "the sign-off-provenance pass," which is what that
+2026-09-06 pass was called when it ran. Renaming it would falsify provenance for the same reason the log
+below is left alone, so the name stands and each site says the spelling is since retired — which is also
+what keeps the new Never ban on `sign-off` green without exempting the term from it.
+
+**This revision log is left verbatim below line 333.** Entries above record what past passes said at the
+time, and rewriting them would falsify the record; the same rule #766's rename pass applied when it touched
+`status.md` zero times. Two anchor *fragments* in the log were repaired, because a dead link is a defect and
+a fragment is machinery rather than the record's words — no prose in any historical entry changed. Seven
+live rows in the renames tables above (lines 93–217) do carry the new names, because those rows state what
+the design says now against what the checkout does.
+
+**Size.** Measured 2026-09-07 with `wc -c` against `f7b6994` as the predecessor: `vocabulary.md` 138,556 →
+141,876 (+3,320, the ruling replacing the question, the `conclusion` entry's field and ban lines, the retired
+row, and the rewritten style rule); `conformance.md` 103,526 → 104,798 (+1,272, register row 72 rewritten as
+ruled); `principles.md` 30,213 → 30,492 (+279, the decision-73 sequencing note corrected now that 72 is ruled
+alone); `gates_and_workflows.md` 134,028 → 134,118 (+90); `data_model.md` 73,489 → 73,514 (+25);
+`work_model.md` 119,526 → 119,539 (+13); `workflows.md` 79,470 → 79,455 (−15, the reworded research entry
+condition). `status.md` grows by this entry alone. **Decision 73 stays open** and is untouched by this pass.
+
+**Checks on this revision:** the vocabulary check reports 0 Never hits (106 Never items, 81 Not-for), the
+anchor check 0 broken links, `link_vocabulary_terms.py --check` every linkable first mention linked,
+`render_reading_projection.py --check` 20 files matching the matrix, and `test_foundation.py` 112 passed.

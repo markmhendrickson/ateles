@@ -11,7 +11,7 @@ Every rule `data_model.md` owns, one entry each: the rule's own statement from `
 
 - **DM-1** — every type, field, and edge the table names *[M (X-3 and X-11 closed)]*
 - **DM-26** — `intake_rule`: subject types never a work-model record type; change kinds; the two predicates; the task text; ceiling and window; `ended_at`; no edge; deliberately no cursor, fired count, successor, workflow, step, action class, or `assigned_to` *[M]*
-- **DM-27** — `finding`: severity, kind, scope, evidence, text; `PART_OF` the sign-off, `REFERS_TO` the batch; a hold's finding with no sign-off; a task `REFERS_TO` the finding it was produced from; deliberately no verdict, no condition, no discharged flag *[M (U-6 and X-14 closed)]*
+- **DM-27** — `finding`: severity, kind, scope, evidence, text; `PART_OF` the verdict, `REFERS_TO` the batch; a hold's finding with no verdict; a task `REFERS_TO` the finding it was produced from; deliberately no conclusion, no condition, no discharged flag *[M (U-6 and X-14 closed)]*
 
 ## [Record conventions](../data_model.md#record-conventions)
 
@@ -19,10 +19,10 @@ Every rule `data_model.md` owns, one entry each: the rule's own statement from `
 - **DM-3** — the same: corrections re-read and merge *[M]*
 - **DM-4** — the same: idempotency keys; mismatch refused *[M]*
 - **DM-5** — the same: read-back after every decision write *[M]*
-- **DM-6** — the same: a sign-off is pinned; a later head does not invalidate automatically; staleness is derived *[M for every kind (U-21 closed)]*
+- **DM-6** — the same: a verdict is pinned; a later head does not invalidate automatically; staleness is derived *[M for every kind (U-21 closed)]*
 - **DM-7** — the same: tolerant readers, canonical writers *[M]*
 - **DM-8** — the same: a registered type declares `reducer_config` *[M]*
-- **DM-9** — the same: schema versions; a sign-off pins the agent version *[M]*
+- **DM-9** — the same: schema versions; a verdict pins the agent version *[M]*
 - **DM-10** — the same: `raw_fragments` for undeclared fields; the read-back asserts the declared field *[M]*
 - **DM-10b** — `conformance.md`, schema drift mode 1 (decision 67): the substrate refuses a write naming an undeclared field, rather than accepting it into `raw_fragments` *[M — expected-failing (xfail) on every Neotoma checkout that returns 200 today, per principle 4; the row stays red until the store itself refuses the write at the API, and DM-10's client-side read-back check is not a substitute]*
 - **DM-11** — the same: adapter writes keyed on the delivery id, provenance naming adapter and system *[M]*
@@ -37,7 +37,7 @@ Every rule `data_model.md` owns, one entry each: the rule's own statement from `
 
 ## [Retrieval contract](../data_model.md#retrieval-contract)
 
-- **DM-20** — the adapter never reads a `workflow`; the engine never reads an external system; the daemon reads no step state; the review step owner reads no host review state as sign-off *[M]*
+- **DM-20** — the adapter never reads a `workflow`; the engine never reads an external system; the daemon reads no step state; the review step owner reads no host review state as verdict *[M]*
 
 ## [Write contract](../data_model.md#write-contract)
 

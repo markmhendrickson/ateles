@@ -31,7 +31,7 @@ Every rule `principles.md` owns, one entry each: the rule's own statement from `
 
 - **PR-6** — the rule this heading states *[M — the singletons are named once in the invariant, and DM-19 is the census (U-2 closed)]*
 
-## [7. Unknown stays distinct from a verdict](../principles.md#7-unknown-stays-distinct-from-a-verdict)
+## [7. Unknown stays distinct from a conclusion](../principles.md#7-unknown-stays-distinct-from-a-conclusion)
 
 - **PR-7** — the rule this heading states *[M]*
 

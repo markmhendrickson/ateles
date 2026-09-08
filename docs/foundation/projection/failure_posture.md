@@ -24,7 +24,7 @@ Every rule `failure_posture.md` owns, one entry each: the rule's own statement f
 - **FP-2** — rule 1: halt work, never stop observing; capture to local disk *[M]*
 - **FP-3** — rule 2: announce entering and leaving, aggregated per window *[M (U-19 closed)]*
 - **FP-4** — rule 3: the probe is a real read at claim, never the health endpoint *[M]*
-- **FP-5** — rule 4: a mid-task write failure leaves the prior state; the lease lapses; no verdict posted elsewhere *[M]*
+- **FP-5** — rule 4: a mid-task write failure leaves the prior state; the lease lapses; no conclusion posted elsewhere *[M]*
 - **FP-6** — rule 5: deferral is bounded; exhaustion escalates `rounds_exhausted` *[M (`rounds_cap` on the step; U-20 closed)]*
 - **FP-7** — rule 6: every write is read back *[M]*
 - **FP-8** — rule 7: unknown stays distinct *[M]*
