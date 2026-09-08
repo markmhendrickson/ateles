@@ -43,7 +43,7 @@ that reworks this document for it.
 
 **Single-operator** and **fork** are the same code path with different context entities — the fork case is the validation that nothing operator-specific is baked into code (enforced today by `scripts/linters/check_hardcoded_config.py`). The genuinely new axis is **org/team**: more than one human acting inside one tenant.
 
-The critical framing: *fork* multiplies **tenants** (each forker is isolated by running their own Neotoma); *org* multiplies **humans within a tenant** (sharing one Neotoma). A single-Neotoma SaaS deployment serving multiple forkers is the case where both axes are live at once, and the one that makes tenant isolation a hard requirement rather than a deployment convenience.
+The critical framing: *fork* multiplies **tenants** (each forker is isolated by operating their own instance of the record); *org* multiplies **humans within a tenant** (sharing one Neotoma). A single-Neotoma SaaS deployment serving multiple forkers is the case where both axes are live at once, and the one that makes tenant isolation a hard requirement rather than a deployment convenience.
 
 ---
 
@@ -75,13 +75,13 @@ Add a `tenant_id` field to Neotoma entities, exactly as `docs/durable_execution_
 
 Every domain entity carries `tenant_id`. The query default is **scope every retrieve to the caller's tenant** — the "absent = denied" instinct from the AAuth grant model (`docs/aauth.md`) applied to rows: a query without a tenant scope is a bug, not a wildcard. Cross-tenant reads require an explicit, audited capability that no normal agent holds.
 
-Configuration entities that are inherently per-tenant — `operator_profile`, `locale_profile`, `swarm_roster`, `channel_config`, `priority_rubric`, `payment_profile`, `agent_definition`, `agent_grant` — are partitioned the same way. A forker's `swarm_roster` is theirs; an org's is shared across its operators.
+Configuration entities that are inherently per-tenant — `operator_profile`, `locale_profile`, `swarm_roster`, `channel_config`, `priority_rubric`, `payment_profile`, `agent`, `agent_grant` — are partitioned the same way. A forker's `swarm_roster` is theirs; an org's is shared across its operators.
 
 ---
 
 ## 3. Identity & isolation
 
-The isolation story is a product of three scoping layers, all of which AAuth already supports in shape (`docs/aauth.md`):
+Isolation is a product of three scoping layers, all of which AAuth already supports in shape (`docs/aauth.md`):
 
 ### 3.1 Three scoping dimensions
 
@@ -91,7 +91,7 @@ The isolation story is a product of three scoping layers, all of which AAuth alr
 
 ### 3.2 How grants scope to a tenant
 
-`agent_grant` entities today match on `(sub, iss)` and declare `capabilities`. Multi-tenant adds **`match_tenant`** — matched on the grant and never derived from the subject, ruled as decision 80 at `#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject`. Admission then requires: signature valid **and** `(sub, iss)` matches a grant **and** that grant's tenant equals the entity's `tenant_id`. The existing rule "absent = denied" extends cleanly: a write to a tenant the grant does not name fails at admission, before any side effect — the same boundary that already stops Monedula from writing `agent_definition`.
+`agent_grant` entities today match on `(sub, iss)` and declare `capabilities`. Multi-tenant adds **`match_tenant`** — matched on the grant and never derived from the subject, ruled as decision 80 at `#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject`. Admission then requires: signature valid **and** `(sub, iss)` matches a grant **and** that grant's tenant equals the entity's `tenant_id`. The existing rule "absent = denied" extends cleanly: a write to a tenant the grant does not name fails at admission, before the action is taken — the same boundary that already stops an operator-facing agent from writing an `agent`.
 
 ### 3.3 Cross-tenant isolation guarantees
 
@@ -148,7 +148,7 @@ This also respects the RGPD legitimate-interest discipline in `CLAUDE.md`: benef
 
 ## 6. Phased rollout
 
-The split follows the durable-execution discipline: **cheap design-time hedges now, expensive operational mechanisms deferred behind a trigger.** The trigger here is unambiguous: *a second operator or a multi-forker hosted deployment exists.*
+The partition follows the durable-execution discipline: **cheap design-time hedges now, expensive operational mechanisms deferred behind a trigger.** The trigger here is unambiguous: *a second operator or a multi-forker hosted deployment exists.*
 
 ### 6.1 Do NOW (cheap — schema/specification, ~no new infra)
 
@@ -178,7 +178,7 @@ what this document defers is unchanged by it.
 - **Team UX**: invite flow, per-operator onboarding, book-of-business assignment screens, shared-vs-private toggles.
 - **Soft-wall enforcement** of within-tenant beneficiary visibility (the owner-ref *gate*, as opposed to the owner-ref *field*).
 - **Per-tenant quotas, fairness, noisy-neighbor protection** (mirrors the deferred list in `docs/durable_execution_substrate.md`).
-- **Cross-tenant admin / multi-forker hosted control plane** (one Neotoma serving many tenants with per-tenant dashboards, bulk operations).
+- **Cross-tenant operator seat / multi-forker hosted control plane** (one Neotoma serving many tenants with per-tenant dashboards, bulk operations).
 - **Per-tenant key lifecycle tooling** (rotation, revocation at tenant granularity) beyond the per-agent minting that exists today.
 
 ### 6.3 The minimal now-work that avoids a painful retrofit
@@ -207,7 +207,7 @@ are the operator's.
 
 4. **Single hosted Neotoma vs. per-forker Neotoma for the fork case.** Goal 6 says "their own Neotoma instance" (per-forker isolation = free tenant isolation). If a hosted multi-forker offering ever ships, tenant isolation moves from deployment-level to row-level and §3 becomes load-bearing rather than belt-and-suspenders. Confirm Goal 6 stays per-instance for launch.
 
-5. **Operator vs. agent capability ceiling within a tenant.** Should a non-owner operator be able to mint agent keys, edit `agent_definition`, or change `priority_rubric` for the whole tenant — or are those owner-only? Defines the org admin model; defer the *enforcement* but the *intended* ceiling should be recorded now so grants are shaped consistently.
+5. **Operator vs. agent capability ceiling within a tenant.** Should a non-owner operator be able to mint agent keys, amend an `agent`, or change `priority_rubric` for the whole tenant — or are those owner-only? Defines the org operator model; defer the *enforcement* but the *intended* ceiling should be recorded now so grants are shaped consistently.
 
 ### The tenant is matched on the grant, not derived from the subject
 

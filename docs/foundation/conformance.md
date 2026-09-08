@@ -92,16 +92,13 @@ and ruling them is a separate pass. Its two falsified readings are annotated in 
 76's ruling and are **not** edited: a move is not the occasion to change a document's content, and
 trimming or rewriting under cover of one is how a relocation becomes an unreviewed amendment.
 
-**One consequence the move surfaces immediately, left unfixed here.** With the document in the directory,
+**One consequence the move surfaces immediately.** With the document in the directory,
 `check_foundation_vocabulary.py` reads it for the first time and reports nine **Never** hits in prose
-authored outside the set — `admin` and `story` where the vocabulary has entries, `agent_definition` used
-as a bare noun, `running`, `side effect`, and a bare `split`. Every one is a term the vocabulary already
-governs, and none was caught before because no checker looked. That is the audit gap this ruling is
-about, demonstrated on the first run. They are **not** fixed in this pass: a move that also rewrites the
-document's terms is an unreviewed amendment wearing a relocation's diff, and the substitutions are a
-vocabulary pass's under invariant 12, on the same reasoning decision 35 gave for leaving two names
-standing in the text until that pass lands. The checker reports them from now on, which is the change
-that matters.
+authored outside the set: six retired or forbidden names, each of which the vocabulary already governs
+with an entry of its own. None was caught before because no checker looked. That is the audit gap this
+ruling is about, demonstrated on the first run, and each hit is repaired here by substituting the term
+the vocabulary prescribes — the substitutions are mechanical, and none changes what the document
+claims. The checker reports the class from now on, which is the change that matters.
 
 **What it costs decision 66's reading budget: nothing.** The document is 18,792 bytes, which would have
 been a real objection under the pre-66 reading of the caps. Since decision 66, `MAX_DOC_CHARS` and
@@ -608,7 +605,7 @@ open rather than ruled deliberately, on two grounds. First, both are the operato
 memo, 72 carries his proposed rename with a counter-proposal recorded beside it, and neither turns on a
 principle the documents already settle — the standing instruction is to rule what the design's own logic
 decides and to leave him what turns on his judgement. Second, both would execute as a corpus-wide rename of
-the exact files other work in flight is amending, so ruling either now would conflict with all
+the exact files other unmerged work is amending, so ruling either now would conflict with all
 three; they are to be ruled and executed as one pass after those merge, which is also why they are recorded
 now, while the evidence is gathered, rather than left to be re-derived later. **The open rows: 72 and 73.**
 

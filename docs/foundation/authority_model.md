@@ -488,7 +488,7 @@ every surface is the fail-open shape this section already names, and the same sh
 entity types; a wildcard over one surface is a domain with an enumerable membership, and the harder question
 is the shell, whose reachable commands are not a list anyone can read back. *A non-enumerable harness*: a
 provider that receives no allowlist at all has a reach that is the ambient configuration, and where the
-provider is chosen at dispatch by capacity, the same grant yields different reach on different days — which
+provider is chosen at run time by capacity, the same grant yields different reach on different days — which
 makes the divergence a question about what a grant *means*, not only about what a test can see; principle 7
 keeps that third value distinct from a verdict and principle 5 keeps it out of the permissive branch.
 *Direction of derivation*: whether the allowlist is eventually derived from the grant at load, which removes
