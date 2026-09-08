@@ -47,11 +47,18 @@ linked worktree (safe).
 | Ateles repo itself | any | allow |
 | Sibling repo, dedicated linked worktree | any | allow |
 | Sibling repo, shared main clone | read-only git (`status`, `log`, `diff`, …) | allow |
-| Sibling repo, shared main clone | `git worktree add` (the remedy) | allow |
+| Sibling repo, shared main clone | `git worktree add` (the remedy), `git worktree remove` without `--force` (its counterpart) | allow |
 | Sibling repo, shared main clone | mutating (`Edit`/`Write`/`NotebookEdit`, or git `commit`/`checkout -b`/`reset`/`merge`/`push`/…) | **deny** |
 
-**Override:** set `ATELES_ALLOW_SHARED_REPO_WRITES=1` in the environment for a
-deliberate, one-off case. The deny message always names this variable.
+**Override:** prefix `ATELES_ALLOW_SHARED_REPO_WRITES=1` inline to that single
+Bash invocation, for a deliberate, one-off case. The deny message always names
+this variable. Hooks fire *before* the shell runs, so an inline `VAR=1 cmd`
+prefix never reaches `os.environ` in the hook's own process — the prefix is
+parsed out of the command string itself, following the gmail gate. An
+exported/ambient value is deliberately ignored: one `export` would disarm the
+guard for the rest of the session. The prefix is scoped to the segment it
+prefixes and is re-typed per command. `Edit`/`Write`/`NotebookEdit` carry no
+command text and so have no override — target a worktree path instead.
 
 **Fail-open:** any internal error, missing `git`, or unparseable hook input
 allows the call through (never blocks a session on the hook's own bug). The
@@ -75,7 +82,9 @@ session may be using it (this exact hazard landed a commit on another session's 
 on 2026-07-21, see ateles#246). Create a dedicated worktree first, then target that path:
   git worktree add ~/repos/neotoma-wt-<slug> origin/main
   cd ~/repos/neotoma-wt-<slug>
-Do all edits/commits there. (Override for a deliberate case: set ATELES_ALLOW_SHARED_REPO_WRITES=1.)
+Do all edits/commits there. (Override one deliberate Bash command by prefixing it inline:
+  ATELES_ALLOW_SHARED_REPO_WRITES=1 <the same command>
+An exported variable is deliberately ignored, and a file edit carries no prefix — target a worktree path instead.)
 ```
 
 The remedy:
@@ -143,9 +152,8 @@ Text-bearing leaders (`git commit -m`, `echo`, `printf`, `grep`, `rg`,
 own segment, so a real invocation chained after one is still caught.
 
 **Override:** prefix `ATELES_ALLOW_GIT_STASH=1` to that single invocation.
-Unlike `sibling_repo_worktree_guard.py`'s exported
-`ATELES_ALLOW_SHARED_REPO_WRITES=1`, this is parsed out of the command string
-itself, following the gmail gate. Hooks fire *before* the shell runs, so an
+As with `sibling_repo_worktree_guard.py` and the gmail gate, this is parsed out
+of the command string itself. Hooks fire *before* the shell runs, so an
 inline `VAR=1 cmd` prefix never reaches `os.environ` in the hook's own process —
 only an `export` would, and an export approves every stash for the rest of the
 session. The inline prefix is scoped to the segment it prefixes and is re-typed
