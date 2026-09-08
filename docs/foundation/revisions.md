@@ -40,6 +40,9 @@ free number is 69, which the front-matter rollout takes; a later sweep the same 
 several-instances pass takes 70. A sweep over the remotes on 2026-09-07 gives 72, so the decisions 76
 and 77 pass takes 73 — one number across all four documents it amends, per the rule above.
 A sweep over every remote branch's copy of this file on 2026-09-07 gives 79, so the harness-non-exceedance pass takes 80 — one number across both documents it amends.
+A sweep over every remote branch's copy of every document here on 2026-09-08 gives 92 — the
+decision-86 ruling having taken 92 while this pass was being written — so the enforcement-point
+ruling takes 93, one number across both documents it amends.
 
 ## `authority_model.md`
 
@@ -60,6 +63,7 @@ A sweep over every remote branch's copy of this file on 2026-09-07 gives 79, so 
 | 67 | the identity-scoping pass of 2026-09-07 | **derived from** the operator's 2026-09-07 question of whether the identity model needs foundational documentation of its own: decision 75 opened and ruled — identity is answered here and in `adapters.md`, and no `identity_model.md` is owed; provenance, idempotency, and signature established from their own definitions as not identity questions; the inbound/outbound asymmetry stated as deliberate. No new term, no new type, no matrix row |
 | 81 | the decision-86 ruling of 2026-09-08 | decision 86 ruled — a capability names a tool as `tool:<surface>:<operation>`, one grammar for all five senses of the word, with `param_constraints` carrying the argument bound; the open subsection replaced by the rule, under a heading that states it. The one-grammar argument turns on invariants 6, 9, and 12: a second entry form is a second home for one bound, the differences between the five are differences of enforcement rather than of statement, and a record operation keeps its own capability rather than being re-expressed as a `tool:` op. Two reserved surfaces, `harness` and `shell`; filesystem reach ruled to be what those capabilities do rather than a domain beside them. `tool:*` expressible and refused at the write, `tool:<surface>:*` admissible where the surface is enumerable at check time, `tool:shell:*` admitted knowing its bound cannot be met. The parity test's two sides stated. An unnamed tool denied, with breadth written by enumeration so that "any possible access" stays expressible. `docs/tool_grant_grammar.md` ratified as the mapping's home. Decision 87's sequencing note rewritten from blocked to unblocked-and-open, with two of its dispositions sharpened by what 86 admitted |
 
+| 93 | the enforcement-point ruling of 2026-09-08 | decision 97 ruled here — the enforcement point for an agent's read and write to the record is the record's own admission check against the requesting principal's grant, and a proxy in front of the record is permitted and is never the enforcement point; the section reframed from reopened to ruled, with the three grounds (decision 56's standing ruling and its principle 6 rejection of the proxy, a refusal that needs no component alive, and the single point of compromise decision 96 names), what a proxy keeps stated as real and none of it enforcement, decision 95's three consequences kept as conditionals, the bearer-credential cost accepted, and a reopening condition; no term introduced and no mechanism added |
 ## `adapters.md`
 
 | Revision | Pass | What changed |
@@ -156,6 +160,7 @@ A sweep over every remote branch's copy of this file on 2026-09-07 gives 79, so 
 | 91 | the register-narrative pass of 2026-09-08 | the register's prose bound to its own table: the present-tense "The open rows: 72 and 73" — stale in both directions, 72 having been ruled by revision 88 while the table carried twelve open rows — reworded to read the status column rather than restate it, on the principle 9 grounds that already removed the next-free-number value; the register's dated statements left as the history they are; `check_foundation_register_narrative.py` added with fail-then-pass coverage and wired into the foundation-checks lane, closing the half of the register nothing read |
 | 92 | the decision-86 ruling of 2026-09-08 | row 86 moved from open to ruled, with the one grammar, the two reserved surfaces, the wildcard tiers, the parity test's two sides, and what an unnamed tool resolves to; row 87's blocking clause rewritten from not-implementable-before-86 to unblocked-and-still-open; row 80's sequencing clause rewritten from buildable-after-86 to buildable-in-full, its ruling untouched |
 
+| 93 | the enforcement-point ruling of 2026-09-08 | decision 97 moved to ruled — the record's own admission check, a proxy permitted and never the enforcement point; decision 95's row noted as superseded by a ruling rather than by an open row, and decision 96's blocker corrected from whether a proxy is in the path at all to the deployments that put one there |
 ## `conformance_suite.md`
 
 | Revision | Pass | What changed |
