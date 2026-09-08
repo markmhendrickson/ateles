@@ -3,7 +3,7 @@
 **Kernel document:** read on every review (`conformance.md`). **Kind:** foundation; states the design and
 never the state of a checkout. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (phase 0 of plan
 `ent_533d4ec2f7bfb60f66fb3fce`), prior art `ent_08460968e6f49dac21510f4a` (phase 3), ateles#727, the
-decision keys cited per invariant, and PR #745 operator review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Revised by the testability pass of 2026-09-06 (revision 37: invariants 3, 6, 8, and 10 given their mechanical form — the named instruments, the singletons' closure, the citation lint, and "landed" as a derived read). Revised by the Human Inversion mapping pass of 2026-09-06 (revision 44: where the human sits, operator attention as the protected constraint, and the sovereignty reason for the owned record, stated beside the invariants; the cross-disciplinary rubric named as out of scope until P4). Revised by the vocabulary-standard pass of 2026-09-06 (revision 49: invariant 12 added, stating the operator's own standard for the vocabulary's size and overlap as a design invariant, generalizing the substitution test `status.md` revision 29 already applied to the term retired for `review step` in revision 19). Which mechanisms exist on a given checkout, and where nothing fires, is
+decision keys cited per invariant, and PR #745 operator review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Revised by the testability pass of 2026-09-06 (revision 37: invariants 3, 6, 8, and 10 given their mechanical form — the named instruments, the singletons' closure, the citation lint, and "landed" as a derived read). Revised by the Human Inversion mapping pass of 2026-09-06 (revision 44: where the human sits, operator attention as the protected constraint, and the sovereignty reason for the owned record, stated beside the invariants; the cross-disciplinary rubric named as out of scope until P4). Revised by the vocabulary-standard pass of 2026-09-06 (revision 49: invariant 12 added, stating the operator's own standard for the vocabulary's size and overlap as a design invariant, generalizing the substitution test `status.md` revision 29 already applied to the term retired for `review step` in revision 19). Revised by the autonomy-goal pass of 2026-09-08 (revision 82, **derived from** the operator's 2026-09-08 stance on the autonomy goal: decision 88 opened and ruled — the operator is involved wherever involvement is needed and nowhere it is not, bootstrap inside the rule; stated as a goal beside the invariants and not as a thirteenth invariant, since it is a test applied per return rather than a property every change holds; the attention paragraph qualified in scope rather than contradicted — it governs what a return costs, the goal governs whether it happens). Which mechanisms exist on a given checkout, and where nothing fires, is
 measured in `status.md`, not here.
 
 ## Purpose
@@ -287,6 +287,69 @@ Read together, these are one rule applied three times: operator attention is a f
 input, and a mechanism that touches what reaches the operator declares what it is protecting the operator
 from doing instead — re-deriving what a script already checked, watching a channel for what a declared
 subset already surfaces, or resolving one decision at a time when several share one shape.
+
+**What that paragraph does and does not cover.** All three mechanisms lower the *cost* of an interaction
+the design has already decided to have. None of them asks whether that interaction should exist. The
+paragraph is therefore not the whole of the design's position on operator involvement, and it is not
+contradicted by the goal below: the goal judges whether a return happens at all, the paragraph governs what
+a return costs once it does, and a return that passes the goal is still owed every reduction in cost the
+paragraph names. Neither is stated as an invariant, and the reason differs. Attention is not an invariant
+because nothing in the design fails when the operator spends more of it. The goal below is not an invariant
+because an invariant is a property every change must hold true, and this one is a test applied to a
+particular return — a change that adds a necessary return conforms to it exactly as a change that adds
+none does.
+
+### The autonomy the design is for: the operator is involved wherever involvement is needed, and nowhere it is not
+
+**The goal, in the operator's own terms.** The operational goal is for the swarm to have as much autonomy
+as possible, which the operator has stated in its operative form: *the operator is involved always wherever
+it is needed, and never when it is not*. Bootstrap is inside that rule and not an exception to it — a fresh
+instance cannot configure its own first grants, so the involvement it requires is needed involvement and
+passes the test, but it passes by meeting the test rather than by being exempt from it. Sources: the
+operator's 2026-09-08 stance on the autonomy goal.
+
+**It is a criterion, not a target.** The design does not converge toward a number of returns, and states no
+quantity of them as good or bad. Each thing that pulls the operator in is judged on its own against
+necessity, and the corpus already distinguishes the classes that pass. A return is **necessary** when only a
+principal can supply what the swarm lacks: an action the policy places in the never-set, where `NEVER`
+short-circuits ahead of confidence and ahead of any recurrence graduation
+(`gates_and_workflows.md#confidence-and-three-blast-tiers`); a capability the grant does not name, where
+denial is `capability_denied` and the checkpoint it raises is a request and never a grant
+(`authority_model.md#grants`); an input the record cannot resolve, of which `undetermined_scope` is the
+design's own stated case — a scope put to the operator rather than guessed
+(`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`); a staffing decision nobody else may make
+(`unclaimed_step`); and a write whose blast exceeds the declared count (`lossy_record_mutation`). What these
+share is that the swarm is missing authority, judgement, or a fact, and no amount of correct execution
+supplies it. A return with none of those properties is not necessary, whatever produced it.
+
+**An unnecessary return is a defect, and is recorded as one.** This is what gives the goal teeth, and it is
+the first rule in this corpus that constrains *adding* a return rather than handling one. A return that
+reaches the operator because a class was left unclassified, because a dependency was undeclared, because a
+retry budget ran out, or because the roster resolves a declared `owner_role` to nobody, is a defect in the
+declaration, the infrastructure, or the budget — and the operator resolving it is the symptom, never the
+fix. Such a return
+is a finding against whatever produced it, judged on the same severity and standing axes as any other
+(`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`),
+and a standing one obliges the change. This is not a licence to suppress the return while the defect stands:
+the checkpoint is still raised and still resolved, because the alternative is the failure the next paragraph
+names. It is an obligation to fix the thing that made the return necessary-looking.
+
+**A return that does not reach the operator is worse than an unnecessary one.** An unnecessary return spends
+attention; an unreachable one spends the work. The design's own instrument for this is the edge: a task the
+swarm cannot advance is held by an open checkpoint on it, read from that edge and never from a status a
+process would have to clear (`work_model.md#the-transition-vocabulary`), which is why `blocked` as a status
+is retired (`vocabulary.md#retired-names`). Work parked in a status raises no checkpoint, so it enters no
+queue, so it reaches nobody — it is not autonomy, it is a return that failed silently, and it is invisible to
+exactly the count a target would measure. The migration's own disposition for the retired escalation type
+turns on this: a daemon that cannot act on something the record says it should act on has produced work for
+someone, and work is a task (`migration.md#the-work-model`). Whether any instance currently holds such rows,
+and how many, is measurement and belongs to `status.md`, never here.
+
+**Why this is not stated as a count.** A rule reading "reduce the number of returns" would create pressure to
+route a return somewhere it does not have to be counted, which is precisely the silent failure above, and it
+would make the attention paragraph's three cost-reducing mechanisms look like evasions rather than the
+obligations they are. The goal makes each return justifiable, not scarce. Nothing here caps, budgets, or
+scores returns, and no mechanism reads a count of them.
 
 **Why the record is owned.** Part 6 (unpublished; *The Inversion's Bill*) argues that the act which makes
 judgement usable — writing it down so agents and successors can act on it — is the same act that makes it
