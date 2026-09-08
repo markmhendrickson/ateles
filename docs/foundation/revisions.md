@@ -151,6 +151,7 @@ A sweep over every remote branch's copy of this file on 2026-09-07 gives 79, so 
 | 84 | the deployment-target pass of 2026-09-08 | decisions 90 and 91 registered — 90 ruled, 91 open |
 | 85 | — | Revised by the task-liveness pass of 2026-09-08 (revision 85): decision 92 opened and ruled — a task is live when some principal could claim it now, `claimable` read over the backlog rather than from one principal's seat, with no term minted beside it; argued in `work_model.md`. |
 | 88 | the verdict-rename pass of 2026-09-08 | decision 72 ruled and executed — the record that closes a step is the `verdict` and the field it carries is the `conclusion`, `sign-off` and `sign_off` retired as names of the record; argued in `vocabulary.md` |
+| 90 | the register-gap rollup of 2026-09-08 | register rows 70 to 88 carried in, the register contiguous at 13-93; the `multi_tenant.md` move's nine vocabulary hits repaired rather than deferred; 12 citation state-claims reworded; decision 74 completed — every surviving front-matter chain moved into `revisions.md` |
 
 ## `conformance_suite.md`
 
@@ -270,6 +271,7 @@ A sweep over every remote branch's copy of this file on 2026-09-07 gives 79, so 
 |---|---|---|
 | 73 | the decisions 76 and 77 pass of 2026-09-07 | moved into the foundation set by decision 77 (`docs/multi_tenant.md` → `docs/foundation/multi_tenant.md`, with history); given the decision-74 front-matter form and a pointer to this table; section 1's "current state" row and section 6.2's deferral trigger annotated against decision 76's ruling, with neither claim edited; section 7 noted as registered at `conformance.md` rows 79 to 83. Amendments before this one were made outside the set and are not reconstructed here |
 | 80 | the decision-80 ruling of 2026-09-07 | section 7 item 2 ruled and its argument added as `multi_tenant.md#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject` — the grant as the whole statement of what a principal may do, the tool half that carries no subject, decision 76 tested and found not to settle it, the rejected alternative and why its cheapness is not a ground, what decision 79 still governs, the sequencing behind decision 86, and the backfill verdict; section 3.2's parenthetical alternative closed; section 7's header note corrected from five open to four |
+| 90 | the register-gap rollup of 2026-09-08 | the document moved into `docs/foundation/`, which subjects it to the vocabulary rules for the first time; the nine Never hits that surfaced repaired by substituting the term the vocabulary prescribes, changing no claim |
 
 ## `payments.md`
 
@@ -292,7 +294,7 @@ A sweep over every remote branch's copy of this file on 2026-09-07 gives 79, so 
 | 67 | the project-term pass of 2026-09-06 | decision 70 opened — `project` names decision 57's planning level and is also the scoping key on `workflow` and `batch`, and nothing yet says whether the two are one thing; the possessives that read the key as ownership are resolved to the owners the rules name, in this document and across the corpus |
 | 68 | the decision-70 ruling of 2026-09-06 | decision 70 ruled — two concepts share one word; the planning level keeps `project`, the scoping key on `workflow` and `batch` is renamed `declaration_scope`, and the section that posed the question now argues the ruling, with G20's global roster as the evidence a planning record cannot be the key and invariant 12 as what obliges the rename rather than a note; three existing terms swap-tested and rejected before the compound was coined |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
-
+| 90 | the register-gap rollup of 2026-09-08 | decision 70's rename carried through — `project` names the planning level, and the scoping key on a declaration is the [declaration scope](vocabulary.md#declaration-scope) |
 
 ## `principles.md`
 
@@ -354,6 +356,7 @@ A sweep over every remote branch's copy of this file on 2026-09-07 gives 79, so 
 | 77 | the decision-78 ruling of 2026-09-07 | the [external system](vocabulary.md#external-system) entry extended to name the swarm's own serving instance as one only while it is the object of an operation, beside the decision 45 and 55 sentences it already carried; the [record](vocabulary.md#record) entry's **See** list pointed at the ruling, with a note that the third **Not for** limb is unaffected because no [adapter](vocabulary.md#adapter) reaches the record under it — the prohibition itself unchanged |
 | 56 | the peering pass of 2026-09-06 | rebased onto the checker-mechanism and self-awareness passes: decision 55 ruled on the [external system](vocabulary.md#external-system) entry — a second instance of the record is not one; the [governance write](vocabulary.md#governance-write) entry's admission sentence extended to name a synced write's own, unattributed shape |
 | 88 | the verdict-rename pass of 2026-09-08 | decision 72 ruled — the record that closes a step is the [verdict](vocabulary.md#verdict) and the field it carries is the [conclusion](vocabulary.md#conclusion); `sign-off` and `sign_off` retired as names of the record, kept under [Retired names](vocabulary.md#retired-names); the ruling argued in a section of its own beside the [Owner](vocabulary.md#owner-five-meanings-one-word-forbidden-alone) section |
+| 90 | the register-gap rollup of 2026-09-08 | the [session_digest](vocabulary.md#session_digest) entry added; the scoping key renamed [declaration scope](vocabulary.md#declaration-scope) per decision 70; `verify_deployed` named on the step-names entry; decision 72's section given the rules index decision 74 requires |
 
 ## `work_model.md`
 
