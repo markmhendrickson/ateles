@@ -272,6 +272,34 @@ PATTERNS: dict[str, dict[str, list[tuple[str, str]]]] = {
         ],
     },
     "claimable": {
+        # `blocked` is retired as a stored task status; a task the swarm cannot advance is held by an open
+        # checkpoint edge, and claimability is read from that edge. The word itself is ordinary English and
+        # appears 61 times in the corpus as a verb or as an adjective on something that is not a status —
+        # "a step blocked on a step owner", "blocked claims per window", "a PR is blocked on this section",
+        # "a bank transfer may be blocked pending". A bare phrase ban would fire on every one of those, so
+        # what is banned is the STATUS sense structurally, in the five shapes the corpus and the retirement
+        # rows actually use: `blocked` qualified as a status; a status said to be `blocked`; `blocked`
+        # attributive on a task; a task predicated as blocked with no preposition following (which is what
+        # separates "the task is blocked" from the legitimate "a step blocked on its owner"); and a write
+        # setting or marking something to/as `blocked`. Run unscoped over the whole corpus at the revision
+        # that added it, this matches 7 lines, all of them the retired sense and none of them the ordinary
+        # one — four already carrying "retired" on the line (skipped by the retired-line rule) and three
+        # reworded in the same pass to name the retirement on their own line.
+        "never": [
+            (r"`blocked`\s+(?:task\s+)?status\b", ""),
+            (r"\bstatus\s+(?:value\s+)?`?blocked`?\b", ""),
+            (r"\b(?:a|an|the|its|one|any)\s+`blocked`\s+tasks?\b", ""),
+            (
+                r"\btasks?\s+(?:is|are|was|were|be|been|being|stays?|stayed|remains?)\s+`?blocked`?"
+                r"(?!\s+(?:on|by|from|for|pending|until))\b",
+                "",
+            ),
+            (
+                r"\b(?:sets?|set|writes?|written|wrote|marks?|marked|stores?|stored)\s+(?:\w+\s+){0,3}"
+                r"(?:to|as)\s+`?blocked`?\b",
+                "",
+            ),
+        ],
         "not_for": [
             (r"\bopen\s+(?:tasks?|pool)\b", "open for claimable; `open` is a status value"),
             (r"\btasks?\s+(?:is|are)\s+open\b", "open for claimable; `open` is a status value"),
@@ -307,6 +335,30 @@ PATTERNS: dict[str, dict[str, list[tuple[str, str]]]] = {
     "checkpoint": {
         "not_for": [
             (r"\bcheckpoint\s+step\b", "checkpoint for a step"),
+        ],
+    },
+    "action_type": {
+        # `merge` is retired as the name of an action class for `merge_pr`. The step is named `merge` and
+        # the ordinary verb is everywhere, so only the class sense is banned: `merge` presented as an
+        # action class or action type, in either order.
+        "never": [
+            (r"\baction[\s_-]?(?:class|type)\s+`?merge`?(?!_)\b", ""),
+            (r"`merge`(?!_)\s+(?:action\s+)?(?:class|action[\s_-]?type)\b", ""),
+            (r"\bactions?\s+of\s+(?:the\s+)?class\s+`?merge`?(?!_)\b", ""),
+        ],
+    },
+    "action series": {
+        # `recurring series` is retired for `action series` — but only in the swarm's sense, the series of
+        # successfully taken actions of one class that graduates that class out of checkpointing. An
+        # EXTERNAL system's own recurring event series is that system's concept and its correct name:
+        # `calendar.md` and `adapters.md` use the phrase seven times for a Google Calendar series and its
+        # occurrences, which decision 24 rules are artifacts. A bare phrase ban fired on all seven. What is
+        # banned is therefore the graduation sense structurally — the phrase tied to the members, the count,
+        # the policy, or graduating — which none of the seven external-calendar uses is anywhere near.
+        "never": [
+            (r"\brecurring\s+series\b[^.;:|]{0,60}\b(?:graduat\w*|checkpoint\w*|action_policy|count)", ""),
+            (r"\b(?:graduat\w*|checkpoint\w*|action_policy)\b[^.;:|]{0,60}\brecurring\s+series\b", ""),
+            (r"\brecurring\s+series\s+of\s+(?:successfully\s+)?(?:taken\s+)?actions?\b", ""),
         ],
     },
     "escalate": {
