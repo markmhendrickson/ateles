@@ -37,7 +37,7 @@ unblocked now that decision 57 fixes the levels).
 State how the swarm holds a hierarchy of planning records — a task under a plan, a plan under whatever
 the operator's instance holds above it, up to the record with no parent — so that a step reads the
 context above and below its task while executing, and so that the layers are kept consistent with each
-other by work the swarm does, under sign-offs, rather than by a convention a session is asked to remember.
+other by work the swarm does, under verdicts, rather than by a convention a session is asked to remember.
 
 ## Scope
 
@@ -133,7 +133,7 @@ task's *content* — what another task under the same plan decided, what its acc
 reading a task, declares `task`, and hydration resolves the siblings from the plan anchor's inbound
 `PART_OF` edges by the same bounded retrieval that resolves everything else. It never reads a sibling's
 in-progress reasoning, because there is none in the record (`data_model.md#what-each-actor-reads-and-writes`);
-what a sibling has decided is in its sign-offs and the entities its batches produced.
+what a sibling has decided is in its verdicts and the entities its batches produced.
 
 **Intake reads the ascent twice, and writes it once.** At `classify`, the task's `PART_OF` to a planning
 record is written where the task names one — an issue filed against a plan, an ask the operator made
@@ -185,7 +185,7 @@ list beside the `task` type, and the migration held plans until the design said 
 that failed to be filed or a plan's own record. It is the first. A todo is work owed under the plan; work
 is a task; a task under a plan is `PART_OF` it; and everything the convention asked of a todo — mark it
 done only citing an artifact that resolves, carry the entity ids and paths in a `notes` field — is what a
-task's chain and its closing sign-off already carry, with the artifact by edge and "landed" derived rather
+task's chain and its closing verdict already carry, with the artifact by edge and "landed" derived rather
 than asserted (principle 10). New writes make tasks; the `todos` field and the counts beside it are read by
 the tolerant reader as history and written by no canonical writer (`data_model.md#record-conventions`);
 plans are no longer outside the four models, because a plan is a planning record and its todos are tasks.
@@ -217,9 +217,9 @@ each step may write, and what none of them may.
 **It is entered by a recurring task, one live instance per record, and a child's close pulls the instance
 forward.** Every planning record has exactly one live `planning` task under it, carrying a `recurrence`
 rule read from the record's `cadence` and a `due_date` on the schedule (`work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next`,
-decision 30); the closing sign-off of one instance creates the next, and the first is created with the
+decision 30); the closing verdict of one instance creates the next, and the first is created with the
 record. What makes maintenance follow the work rather than the calendar is one correction: **the closing
-sign-off of a task's last batch, where the task is `PART_OF` a planning record, corrects the `due_date` of
+verdict of a task's last batch, where the task is `PART_OF` a planning record, corrects the `due_date` of
 that record's live `planning` instance to now.** A postponement by correcting `due_date` is already the
 ordinary way to say an occurrence is expected later (`work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next`);
 this is the same write in the other direction, idempotent on the record and the closing task, and it
@@ -236,7 +236,7 @@ is required, because the pull-forward above already covers the case a child's cl
 **Its steps are three, and they divide what is read from what is judged from what is written.** `survey`
 reads: the record and the statement of its parent, the derived reads over its descendants, and the
 decisions under it — the declared reads of the step, resolved by hydration along the task's ascent and
-down the record's edges, and named on its sign-off as what it read (decision 40). `judge` records
+down the record's edges, and named on its verdict as what it read (decision 40). `judge` records
 findings, one defect each: a completion criterion met that nobody closed on; a criterion the descendants
 cannot meet as stated; a descendant whose work the statement does not describe; a decision under the
 record that the work has since contradicted; a learning the descendants produced that belongs to the
@@ -248,8 +248,8 @@ each finding whose remedy is a change to the parent's statement — which is the
 and it is the standing-finding rule one level up: a lesson at the plan's scope is a finding whose change
 lands on what the plan was derived from, and it travels as a task through intake exactly as an
 institutionalization task does (`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`,
-decision 17), with the batch that raised it not waiting. `amend`'s sign-off is the batch's closing
-sign-off; it names no successor and creates the next `planning` instance before it is written.
+decision 17), with the batch that raised it not waiting. `amend`'s verdict is the batch's closing
+verdict; it names no successor and creates the next `planning` instance before it is written.
 
 **What the workflow never writes.** A descendant's status: a task is closed by its own chain, and a plan
 that judges a task done writes a finding on the task's batch or a task for the redo, never the status. A
@@ -262,9 +262,9 @@ anything. And nothing on a record the batch's task is not `PART_OF`, which is th
 dozen roles on the instance carried a plan-participation protocol — subscribe to plan events, check the
 plan against the role's predicate, file a contribution record — which the migration found to be recurring
 work with no target. Its target is here: a role's predicate is an `applies_when` on an optional review step
-of the `planning` declaration, seated between `judge` and `amend`, whose sign-off carries that role's
+of the `planning` declaration, seated between `judge` and `amend`, whose verdict carries that role's
 findings on the record (`gates_and_workflows.md#declaration-batch-projection`); a contribution is a finding;
-a concern is a blocking finding, which `amend` cannot sign around; a sign-off is a sign-off. The
+a concern is a blocking finding, which `amend` cannot sign around; a verdict is a verdict. The
 `plan_contribution` type the instance holds is the retired shape of exactly this, and the migration carries
 it as the gate-model table carries the other contribution records.
 
@@ -327,7 +327,7 @@ it, and maintain only that plan for the rest of the session. Under this model a 
 is the one execution mechanism holding no lease (`work_model.md#the-four-execution-mechanisms`), its output
 becomes tasks, and each task it creates names the planning record it is under at creation, written at
 `classify`. The plan a piece of work reports to is a property of the task, fixed at intake by a step
-owner's sign-off, and read by anyone who reads the task's ascent; it is not a property of the session that
+owner's verdict, and read by anyone who reads the task's ascent; it is not a property of the session that
 happened to produce the task, and two sessions producing tasks under two plans are two sets of edges and no
 collision. What a session may not do is what the convention had it do on every turn — correct the plan's
 fields directly. A session that has learned something a plan should record creates a task under the plan;
@@ -343,7 +343,7 @@ statement of need, and each has a home here:
 |---|---|
 | bind one plan per session, matching the workstream | a task's `PART_OF` to its planning record, written at `classify`; no session binding |
 | re-read and merge before correcting `decisions` or `todos` | nothing is merged: a decision is a `decision` entity, a todo is a task, each its own write |
-| mark a todo done only citing an artifact that resolves | the task's closing sign-off, its artifacts by edge, and "landed" as a derived read over its chain |
+| mark a todo done only citing an artifact that resolves | the task's closing verdict, its artifacts by edge, and "landed" as a derived read over its chain |
 | record a settled decision as one sentence under a snake_case key | a `decision` entity `PART_OF` the record, written at `amend` as an `amend_<level>` action |
 | correct `next_steps` when blockers change | a derived read: the record's open descendants in priority order, and those held by a checkpoint |
 | create a task and link it `PART_OF` the plan | unchanged, and the only way work enters a plan |
@@ -415,7 +415,7 @@ every batch that declares it, a statement that long changes the reading budget o
 
 **What reopens it.** A rule of the design coming to read a level by name — none does today — or the
 operator later finding objective-shaped content outgrowing what a strategy record can carry (a criterion
-needing its own lifecycle, its own sign-off, independent of its parent strategy's amendment), which would
+needing its own lifecycle, its own verdict, independent of its parent strategy's amendment), which would
 be the same argument decision 51 already settled against a second `initiative`-shaped entity, re-litigated
 here.
 
@@ -449,8 +449,8 @@ it already has, never a child inferring a parent it lacks.
 
 **Missing ancestry is a finding, not a report.** A "report to the operator" outside the record is the
 reporting-without-binding shape the finding mechanism replaces everywhere else in this design
-(`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`): it has no author of
-record, no severity that binds a verdict, and no edge a later reader can check the disposition against. A
+(`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`): it has no author of
+record, no severity that binds a conclusion, and no edge a later reader can check the disposition against. A
 finding has all three, and the design already gives it a route to the checkpoint queue where the defect
 cannot be classified alone (`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
 Missing ancestry is recorded the same way, at the point each shape below names.
@@ -458,7 +458,7 @@ Missing ancestry is recorded the same way, at the point each shape below names.
 **Its kind is `decision_or_attestation`, never `implementation_only`.** Whether a task should serve a plan,
 or a plan a project, is a judgement about what the operator is pursuing — exactly the judgement
 `implementation_only` excludes, because routing it to an implementer would ask the implementer to supply
-the statement the finding exists to demand (`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`).
+the statement the finding exists to demand (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`).
 The swarm may propose the shape of the missing record; it may not decide that the shape is correct and
 write it.
 
@@ -669,7 +669,7 @@ ascent... the design is indifferent") even where a level's name and count are no
 So the only judgement the design makes is local: does *this* record have a `PART_OF` to a record one level
 up, where the instance's own registered order says one belongs — the same test `survey` already runs for
 the single parent it reads (`workflows.md#planning`), applied at whichever edge is being walked, and never
-accumulated into a single verdict about the whole ascent. **This is independent of any instance's level
+accumulated into a single judgement about the whole ascent. **This is independent of any instance's level
 count:** the judgement is per-edge whether an instance registers two levels or five, because no rule reads
 a level by name — only the mark and the ascent.
 

@@ -12,7 +12,7 @@ for changing the swarm's own operation), and PR #745 operator review (2026-09-05
 23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default),
 and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: one live instance,
 completion creates the next, `FOLLOWS` task to task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the task-sources index, the intake rule, and open decision 36). Supersedes `docs/archive/task_execution_loop.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a status and claimability read from the checkpoint; the declared terminal set; two moments open a batch; `tasks_attached[]`; the next recurring instance created and read back before the closing sign-off; a terminal status only where the declaration permits none; the writer as the cross-type cycle check's enforcement point; C2 settled by the write contract). Revised by the rulings pass of 2026-09-06 (revision 38: a `signed` or blocking sign-off is written under a held lease, cited from decision 44's ruling; the bootstrap set as the closed list decision 43 rules). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 36 ruled here — a rule keys on no work-model record type, the operator's lean toward every type considered and set aside; decision 43's second half cited as ruled; the C2 and `blocked` settlements marked reviewed and upheld). Revised by the planning pass of 2026-09-06 (revision 40: a task's one `PART_OF` edge targets its parent task or a planning record; the ascent as a derived read distinct from the chain; unplanned work admitted). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: `runner`, already defined in `vocabulary.md`, settled as the seat a step's outcome depends on — no new type introduced). Revised by the priority pass of 2026-09-06 (revision 47: ordering within the claimable pool given a home beside `claimable`, argued as a derived read over the ascent, `due_date`, workflow urgency, and blast radius rather than a maintained field, on the operator's connection from the ancestry reversal; a principal's "may" rather than "must" toward the highest-standing task, with decision 62 opened on whether an instance may bind the stronger form). Revised by the rulings pass of 2026-09-06 (revision 48: decision 34 ruled — `engine` defined, `pipeline` retired for the step-path publisher; the count of four execution mechanisms unchanged). Revised by the event/signal/delivery pass of 2026-09-06 (revision 49: one `calendar.md` anchor updated to its renamed section). Revised by the rulings-61-62-64 pass of 2026-09-06 (decision 62 ruled — "must" per class as `action_policy` data, default "may", on the shape `min_tier` and `metered_resources[]` already carry). Revised by the task-liveness pass of 2026-09-08 (revision 84: decision 92 ruled — a task is live when some principal could claim it now, `claimable` read existentially over the backlog rather than from one principal's seat; no term minted, the partition stated beside the claimable predicate, and the count of rows holding the retired status routed to `status.md`).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a status and claimability read from the checkpoint; the declared terminal set; two moments open a batch; `tasks_attached[]`; the next recurring instance created and read back before the closing verdict; a terminal status only where the declaration permits none; the writer as the cross-type cycle check's enforcement point; C2 settled by the write contract). Revised by the rulings pass of 2026-09-06 (revision 38: a `signed` or blocking verdict is written under a held lease, cited from decision 44's ruling; the bootstrap set as the closed list decision 43 rules). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 36 ruled here — a rule keys on no work-model record type, the operator's lean toward every type considered and set aside; decision 43's second half cited as ruled; the C2 and `blocked` settlements marked reviewed and upheld). Revised by the planning pass of 2026-09-06 (revision 40: a task's one `PART_OF` edge targets its parent task or a planning record; the ascent as a derived read distinct from the chain; unplanned work admitted). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: `runner`, already defined in `vocabulary.md`, settled as the seat a step's outcome depends on — no new type introduced). Revised by the priority pass of 2026-09-06 (revision 47: ordering within the claimable pool given a home beside `claimable`, argued as a derived read over the ascent, `due_date`, workflow urgency, and blast radius rather than a maintained field, on the operator's connection from the ancestry reversal; a principal's "may" rather than "must" toward the highest-standing task, with decision 62 opened on whether an instance may bind the stronger form). Revised by the rulings pass of 2026-09-06 (revision 48: decision 34 ruled — `engine` defined, `pipeline` retired for the step-path publisher; the count of four execution mechanisms unchanged). Revised by the event/signal/delivery pass of 2026-09-06 (revision 49: one `calendar.md` anchor updated to its renamed section). Revised by the rulings-61-62-64 pass of 2026-09-06 (decision 62 ruled — "must" per class as `action_policy` data, default "may", on the shape `min_tier` and `metered_resources[]` already carry). Revised by the task-liveness pass of 2026-09-08 (revision 84: decision 92 ruled — a task is live when some principal could claim it now, `claimable` read existentially over the backlog rather than from one principal's seat; no term minted, the partition stated beside the claimable predicate, and the count of rows holding the retired status routed to `status.md`).
 
 ## Purpose
 
@@ -20,7 +20,7 @@ State how work is created, taken, executed, and returned: pull-only delivery; as
 claim and lease as one primitive (lease as relationship); liveness derived at read time; no assignment
 log; a task carries only status and edges; intake is every task's first workflow; tasks go through
 workflows in batches, are attached to and detached from them, and nest under parents; a batch is opened
-by a closing sign-off naming a successor and goes through exactly one workflow; a batch may hold on a
+by a closing verdict naming a successor and goes through exactly one workflow; a batch may hold on a
 condition discovered mid-flight, and may depend on a task it created, under its held lease and with no held
 state; a change to the swarm's own operation is a task like any other, governed by the action gate the
 governance writes already reach, and reserved to the operator by default; artifacts are records a batch
@@ -64,11 +64,11 @@ Two agents must not both take a task; a killed runner must not leave one held fo
 on the task; the holder is read back after the write: an agent holds only if the persisted lease names
 its runner id (principle 2). Atomicity is proven by the implementation, never assumed of the store: a
 last-writer-wins snapshot and a name-collision policy that de-duplicates into one row do not raise. The
-lease is load-bearing for the verdict as well as for exclusion: a sign-off carrying `signed` or a blocking
-verdict is written by a signer whose lease on the step is held at the write, and one from a lapsed or
-returned lease is refused at submission, so two runners of one role cannot each leave a standing verdict on
+lease is load-bearing for the conclusion as well as for exclusion: a verdict carrying `signed` or a blocking
+conclusion is written by a signer whose lease on the step is held at the write, and one from a lapsed or
+returned lease is refused at submission, so two runners of one role cannot each leave a standing conclusion on
 one head (decision 44,
-`conformance_suite.md#whether-a-sign-off-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`).
+`conformance_suite.md#whether-a-verdict-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`).
 
 ### The lease is a relationship, not a set of task fields
 
@@ -104,10 +104,10 @@ assigned-and-unclaimed. Definitions: `vocabulary.md`.
 
 ### There is no task lifecycle; there are batches
 
-A task carries status and edges only. Other state is a batch, lease, sign-off, or activity entity. A
+A task carries status and edges only. Other state is a batch, lease, verdict, or activity entity. A
 task is never routed, executing, verified, or in review as a status; the batch it is in and that batch's
 `FOLLOWS` chain say which of those is true (`gates_and_workflows.md`). This is C1: the states of the
-archived loop document were facts about a batch, a lease, or a sign-off written onto the task, where a
+archived loop document were facts about a batch, a lease, or a verdict written onto the task, where a
 process then had to keep them true (principle 11). The same rule holds at the end: a closed batch is never
 reopened and a terminal task never returns to open; the operator's input on closed work is a finding, and
 the redo it calls for is a new task through intake
@@ -116,7 +116,7 @@ the redo it calls for is a new task through intake
 ### Intake is every task's first workflow
 
 Every task enters intake before any other workflow (`workflows.md#intake`): `classify`, `link`,
-`dedupe`, `prioritize`, `route` (closing sign-off names one successor, none, or operator-only). An
+`dedupe`, `prioritize`, `route` (closing verdict names one successor, none, or operator-only). An
 unrouted task is a task with no intake batch — no separate unrouted state. `link` attaches what the task
 names, a record in the record and an external one alike, and nothing on relevance alone; what a step needs
 beyond that is hydration's, per step (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`).
@@ -136,8 +136,8 @@ not what an enum in code declares: a predicate is written against the record (pr
 normalizer that fails to map a live value onto a terminal one makes finished work claimable. **The reader is
 tolerant and the writer is canonical** (`data_model.md#record-conventions`): the registered `task` type
 declares its terminal set, one spelling per meaning — the design relies on two meanings, completed and
-closed without completion, the reason for the second being the closing sign-off's and the edges'
-(`DUPLICATE_OF` for a duplicate) — and a closing sign-off writes only a declared value, a terminal value
+closed without completion, the reason for the second being the closing verdict's and the edges'
+(`DUPLICATE_OF` for a duplicate) — and a closing verdict writes only a declared value, a terminal value
 outside the set being refused at the write as any undeclared value is; the reader maps every spelling the
 record already carries onto `open` or terminal, permanently. Live status distribution: `status.md`.
 
@@ -306,25 +306,25 @@ only when an action inside it reaches the action gate, which resolves `operator_
 ### A task is executed only through a workflow
 
 There is no path by which a task is executed outside a workflow. Every task enters intake, and intake's
-closing sign off names the successor workflow it goes to, or none, or operator-only; whatever it does
+closing verdict names the successor workflow it goes to, or none, or operator-only; whatever it does
 after that, it does inside a batch going through a declared workflow, with that workflow's steps, step
-owners, and sign offs. The design offers no side door: no status a principal sets that means "done
+owners, and verdicts. The design offers no side door: no status a principal sets that means "done
 without a workflow", no direct-execution mode for small work, no class of task exempt because it is
 urgent or trivial. Work small enough that most steps are unnecessary takes a declared fast path
 (`gates_and_workflows.md`), which is a workflow saying which steps it skips — a decision recorded in the
 declaration, judged once, and visible to every reader — rather than a task escaping the model.
 
-**A terminal status is written by a closing sign-off, and only where the declaration permits closing with
+**A terminal status is written by a closing verdict, and only where the declaration permits closing with
 no successor.** A task's chain ends when a batch closes naming none, and a declaration says whether its
 batches may — `none_permitted` beside `successors`
-(`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`) — so a closing sign-off naming none
+(`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`) — so a closing verdict naming none
 under a declaration that does not permit it is refused at the write, and the task stays open. Principle 10's
 "landed" is therefore a derived read over the chain and not a status anyone writes: a task whose batch
 produced a `merge_pr` action is terminal when its chain ended under a declaration that permits its ending
 there — a `release` batch's `verify_deployed` signed, or a `feature` or `bug` declaration that permits none
 because the project deploys its default branch on its own cadence (`workflows.md#feature`) — and a terminal
 task whose last batch closed naming none under a declaration that permits no such end is the failing
-artefact. Which terminal value the sign-off writes is drawn from the set the registered type declares
+artefact. Which terminal value the verdict writes is drawn from the set the registered type declares
 (`#what-a-claim-predicate-treats-as-claimable`).
 
 **What this means for the self-triggering daemons.** A daemon produces tasks, and it receives no task itself
@@ -391,7 +391,7 @@ Two more constraints hold without being added here. The principal making the cha
 for it, read at the enforcement point on every check (`authority_model.md#grants`), so an agent cannot
 widen its own grant by writing one — that write is itself a governance write to `agent_grant`, gated as
 one. And a change proposed by a step owner is judged by a step owner: no principal signs for another, so
-the batch that proposes a change to an agent does not also supply the sign-off that accepts it unless
+the batch that proposes a change to an agent does not also supply the verdict that accepts it unless
 the declaration puts both in one role, which is a property of the declaration a reader can see.
 
 **Which class of change the swarm may never make to itself without the operator is a policy value, not a
@@ -508,8 +508,8 @@ by a mechanism the model already has, and stating them together is what stops th
 differently at each call site.
 
 **A batch comes into existence at one of two moments, and at no other: a task's creation, which opens its
-intake batch, and a closing sign-off naming a successor, which opens the successor's.** Two causes, both
-recorded, and no third. Intake's `route` step closes on a sign-off naming one successor workflow, none,
+intake batch, and a closing verdict naming a successor, which opens the successor's.** Two causes, both
+recorded, and no third. Intake's `route` step closes on a verdict naming one successor workflow, none,
 or operator-only; every later batch closes the same way (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`).
 Where a successor is named, the batch for it opens and carries a `FOLLOWS` edge back to the batch that
 named it. Where none is named, the task's chain ends. Nothing else opens a batch: no daemon opens one
@@ -518,39 +518,39 @@ work to group. The one batch with no predecessor is a task's intake batch, opene
 which is the universal entry (`#intake-is-every-tasks-first-workflow`, above) and the reason every chain
 has a first link.
 
-The consequence worth naming: a batch is always opened **by a principal's recorded verdict**, never by a
-process acting on its own reading of the record. The sign-off names the successor, so the decision has an
+The consequence worth naming: a batch is always opened **by a principal's recorded conclusion**, never by a
+process acting on its own reading of the record. The verdict names the successor, so the decision has an
 author, a timestamp, and a reason, and a reader asking why these tasks are in this workflow is answered by
-a verdict rather than by inferring what some sweeper's predicate must have matched.
+a conclusion rather than by inferring what some sweeper's predicate must have matched.
 
-**A batch's tasks are the tasks the closing sign-off carried, and grouping beyond that is a step's
+**A batch's tasks are the tasks the closing verdict carried, and grouping beyond that is a step's
 judgement, recorded as one.** The default is the simple one: the tasks attached to the closing batch move
 together into the successor, and a batch of one stays a batch of one. Two operations change a task set,
 both already defined and both edges (principle 11): **detach**, which ends a task's `ADDRESSED_BY` edge and
 opens a new batch for it from the first step of its workflow, and **attach**, which writes that edge. What
 this section adds is who may do them and on what basis. Attaching a task to a batch that is already open,
-part-way through its steps, is a step owner's judgement written into that step's sign-off — `tasks_attached[]`
+part-way through its steps, is a step owner's judgement written into that step's verdict — `tasks_attached[]`
 names them (`data_model.md#concepts`), so an `ADDRESSED_BY` edge written after the batch opened that no
-sign-off names is the failing artefact — never an adapter's guess and never a matcher's inference — the
+verdict names is the failing artefact — never an adapter's guess and never a matcher's inference — the
 adapter rule already forbids the first
 (`adapters.md#what-the-adapter-does-with-every-event`), and the second is the routing fallthrough the pull
 rule forbids. A task attached part-way through enters at the batch's current step and inherits the
-sign-offs already written on it, which is exactly why the judgement is a recorded one: those sign-offs were made
+verdicts already written on it, which is exactly why the judgement is a recorded one: those verdicts were made
 against a task set that did not include it, and a step owner who attaches is asserting that they still
 hold. Where that assertion is not safe, the task is its own batch.
 
-**The workflow is chosen once, by the sign-off that names the successor, from the declared list.** The
+**The workflow is chosen once, by the verdict that names the successor, from the declared list.** The
 choice is not open-ended: `workflow.successors` names the workflows a closing batch's tasks may enter, and
-the closing sign-off selects exactly one from that list or none. So the workflow for a batch is fixed
+the closing verdict selects exactly one from that list or none. So the workflow for a batch is fixed
 before the batch opens, by a named principal, bounded by a declaration that was reviewed when it was
 written. There is no run-time selection inside the batch, no re-selection, and no workflow chosen by
 matching a property of the tasks after the fact.
 
 **A batch goes through exactly one workflow, for its whole life.** The workflow is a field of the batch
 record (`data_model.md#concepts`), fixed at open. A batch that needed a different workflow does not switch:
-it closes, and its closing sign-off names the one the tasks go to, which opens a new batch. This is what
-makes the chain readable — each link is one workflow, entered by one verdict — and a batch that changed
-workflow mid-flight would leave its earlier sign-offs pinned to steps that no longer exist in its
+it closes, and its closing verdict names the one the tasks go to, which opens a new batch. This is what
+makes the chain readable — each link is one workflow, entered by one conclusion — and a batch that changed
+workflow mid-flight would leave its earlier verdicts pinned to steps that no longer exist in its
 declaration.
 
 **And a task is in one batch at a time but many over its life, which is the distinction to hold.** The
@@ -563,14 +563,14 @@ The three questions and their one answer each, with the paths the rules above ex
 ```mermaid
 flowchart TD
     CR["task created"] --> IB["its intake batch opens: the one batch with no predecessor"]
-    IB --> CS["closing sign-off of a batch"]
+    IB --> CS["closing verdict of a batch"]
     CS --> SEL{"does it name a successor?"}
     SEL -->|"none"| END["the task's chain ends"]
     SEL -->|"one, selected from workflow.successors"| OPEN["a batch opens, FOLLOWS the batch that named it"]
     OPEN --> W["its workflow is fixed at open, and never switched"]
-    OPEN --> TASKS["its tasks are the tasks that sign-off carried"]
+    OPEN --> TASKS["its tasks are the tasks that verdict carried"]
     TASKS --> MID{"a task attached part-way through?"}
-    MID -->|"a step owner's judgement, written into that step's sign-off"| INH["it enters at the current step and inherits the sign-offs already written"]
+    MID -->|"a step owner's judgement, written into that step's verdict"| INH["it enters at the current step and inherits the verdicts already written"]
     MID -->|"the assertion is not safe"| OWN["it is its own batch, from the first step"]
     W --> LIFE["one workflow for the batch's whole life; a batch needing another closes and names it"]
     X1["a daemon noticing eligible tasks"] -.->|"opens no batch"| OPEN
@@ -579,13 +579,13 @@ flowchart TD
     X4["a label an external system carries"] -.->|"chooses no workflow"| W
 ```
 
-Every arrow into a batch is a principal's recorded verdict; every dotted one is a path the rules above
+Every arrow into a batch is a principal's recorded conclusion; every dotted one is a path the rules above
 close.
 
 **What this deliberately does not do is let batch formation key on anything discovered later.** A
 declaration's conditional may turn only on a property of the task set at intake, never on a label an
 external system carries (`workflows.md`), and the rules above are the same constraint stated for
-formation: the successor is named by a verdict at a close, from a list fixed in the declaration, on tasks
+formation: the successor is named by a conclusion at a close, from a list fixed in the declaration, on tasks
 whose properties intake established. A formation rule that grouped tasks by a label an adapter wrote, or
 that chose a workflow from an artifact's state, would put the choice back into an external system's hands
 through the side door the boundary rules close.
@@ -601,13 +601,13 @@ decision the foundation has opened or ruled is indexed in
 
 **Ruled (decision 13, 2026-09-05): yes — and the hold is not a state.** Registered in
 `conformance.md#the-register-of-open-design-decisions`. A step owner who, part-way through a batch, meets a
-condition that was not knowable when the batch was formed and that the step must satisfy before its verdict
+condition that was not knowable when the batch was formed and that the step must satisfy before its conclusion
 can be written — a rail's quote has expired and a re-quote is pending, an external system is returning
 `unknown` rather than an answer, a second batch is producing the artifact this one's next step reads —
-neither signs nor fails. It **holds**: it records a finding naming the condition, it writes no sign-off, and
+neither signs nor fails. It **holds**: it records a finding naming the condition, it writes no verdict, and
 it keeps renewing its lease. Nothing else is written. The step stays open, the batch stays at that step, and
 the lease's `expires_at` keeps moving, which is what every claimed step already does between its claim and
-its sign-off.
+its verdict.
 
 **What the finding carries, and what it does not.** The finding names the condition (what the step is
 waiting on), what would resolve it (a re-quote arriving, a read returning a value, a named task reaching a
@@ -615,14 +615,14 @@ terminal status), and when it was recorded; each renewal of the hold is a furthe
 finding, so the duration of a hold is readable from the record rather than reconstructed. It is a
 **non-blocking** finding, because it asserts no defect in the work — a block says a defect is present, and a
 hold says only that the step's condition cannot yet be judged
-(`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`). It carries no verdict, and
-no verdict is written until the condition resolves; the rule that a verdict is unconditional
-(`vocabulary.md#condition`) is untouched, because a hold is the absence of a verdict, not a verdict with a
+(`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`). It carries no conclusion, and
+no conclusion is written until the condition resolves; the rule that a conclusion is unconditional
+(`vocabulary.md#condition`) is untouched, because a hold is the absence of a conclusion, not a conclusion with a
 clause.
 
 **There is no held state, no waiting value, and no field on the batch or the task.** A held step is read
 from the record as every other claimed step is: a held lease on the step, a finding on it naming an unmet
-condition, and no sign-off. That derivation is what principle 11 asks for — a stored hold would need a
+condition, and no verdict. That derivation is what principle 11 asks for — a stored hold would need a
 process to clear it, and a step owner that died would leave it asserting a hold nobody holds, where the lease
 lapses on its own and the step is claimable again with no process acting. It is also why a hold is not a
 second waiting mechanism beside the checkpoint (principle 6), which was the cost the open question weighed:
@@ -639,7 +639,7 @@ and the bound it holds under is the `hold_bound` its declaration carries
 
 **A hold is bounded, and it is bounded by mechanisms that already exist.** Three ends, no new one. Where the
 condition **resolves** — the re-quote arrives, the read returns, the task completes — the step owner reads
-that from the record and signs or blocks on its own judgement; the hold ends because the sign-off is written.
+that from the record and signs or blocks on its own judgement; the hold ends because the verdict is written.
 Where the condition **owes a principal a decision** — the re-quote is outside what was consented to, the
 second batch's owner must be asked — the step owner raises a checkpoint on the task, which is the existing
 protocol and already ends in a terminal approval or a terminal timeout
@@ -650,12 +650,12 @@ checkpoint on the task with reason `rounds_exhausted`, carrying the finding so t
 step was waiting on rather than asked to diagnose it. A step owner that stops renewing lets the lease lapse,
 the step is claimable again, and repeated lapse raises `repeated_lapse` — so a hold whose holder has died is
 not a hold, it is a lapsed lease, and the design already knows what to do with one. **No hold ends by elapsed
-time into a pass**: the ends above are a sign-off, a checkpoint, or a lapse, never a clearance
+time into a pass**: the ends above are a verdict, a checkpoint, or a lapse, never a clearance
 (`failure_posture.md#repeated-lapse-raises-a-checkpoint`).
 
 **Why not the alternative.** The other answer was that a step owner who cannot sign either raises a
 checkpoint or fails, the batch closes, and the work re-enters through a new batch when the condition has
-changed. It discards what the batch already holds: every sign-off written on the earlier steps was made
+changed. It discards what the batch already holds: every verdict written on the earlier steps was made
 against these tasks, and a new batch starts from the first step and asks every step owner to judge again
 what they already judged. It contradicts a rule the design already keeps — *unknown holds the step*
 (`gates_and_workflows.md#an-unreadable-workflow-is-unknown-and-unknown-holds`), stated for a declared read
@@ -668,8 +668,8 @@ returned holds `reconcile` open, bounded, then escalates
 operator-only workflow's `await` step holds the batch with the lease renewed throughout while the operator
 decides (`workflows.md#operator-only`). Each of those is a hold on a condition discovered mid-flight. This
 ruling names the general case they are instances of and adds no mechanism to them (principle 6). The
-alternative's own interim reading also named a verdict the design does not have — a sign-off of `unknown` —
-where the verdict values are `signed`, a blocking value, and `waived` (`vocabulary.md#verdict`); `unknown`
+alternative's own interim reading also named a conclusion the design does not have — a verdict of `unknown` —
+where the conclusion values are `signed`, a blocking value, and `waived` (`vocabulary.md#conclusion`); `unknown`
 is what a read returns, and what a step does with a read that returns it is hold.
 
 **The cost accepted** is a held lease: a step that holds is a claimed step for as long as it holds, its step
@@ -692,7 +692,7 @@ itself created; and, with it, the sequencing half of decision 17
 field.** Registered in `conformance.md#the-register-of-open-design-decisions`. A batch that, part-way
 through, creates a task and whose step owner judges that the step cannot honestly be signed until that task
 is done, holds on it: the created task's completion is a condition read from the record, and the hold is the
-one the rule above defines — a finding naming the condition, no sign-off, the lease renewed. What this
+one the rule above defines — a finding naming the condition, no verdict, the lease renewed. What this
 section adds is how the condition is recorded, because a dependency between two pieces of work is the one
 condition whose shape the record should be able to see without reading prose.
 
@@ -707,13 +707,13 @@ state principle 11 forbids — it asserts a dependency that some process must cl
 and it is invisible to a reader walking the record's edges — where a `DEPENDS_ON` edge is read from either
 end: the batch's open dependencies, and every batch a task is holding up.
 
-**What binds.** The sign-off on the step that recorded the dependency is refused at submission while any
-`DEPENDS_ON` edge from the batch to a non-terminal task is unended — the same shape as a verdict
+**What binds.** The verdict on the step that recorded the dependency is refused at submission while any
+`DEPENDS_ON` edge from the batch to a non-terminal task is unended — the same shape as a conclusion
 contradicting its own findings, which is refused rather than swallowed
-(`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`). That is what makes the edge
+(`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`). That is what makes the edge
 a control rather than a report (principle 1): a step owner that recorded a dependency cannot sign around it
 without first ending it, and ending it is written. When the task is terminal, the hold ends the way every
-hold does — the step owner reads the outcome and signs on its own judgement, which may be a blocking verdict
+hold does — the step owner reads the outcome and signs on its own judgement, which may be a blocking conclusion
 if the task ended without doing what the batch needed.
 
 **A cycle fails closed, at the write and after it, and two checks make it so.** The record refuses a
@@ -737,7 +737,7 @@ same walk runs at attach, and an attach that would close a cycle is refused too.
 found — by a reader, by the watchdog, by a step owner about to hold — each batch in it has its tasks
 escalated with one checkpoint, reason `dependency_cycle`, naming the batches and edges in the loop, and every
 step owner in the loop holds until a principal breaks it: by ending an edge, detaching a task, or closing a
-batch on a blocking verdict. Nothing in the swarm chooses which; a cycle is two step owners each waiting on
+batch on a blocking conclusion. Nothing in the swarm chooses which; a cycle is two step owners each waiting on
 the other, and which of them was wrong is a judgement only a principal can make.
 
 **Why an edge, and not the readable-but-unenforced link.** The open question weighed a third answer: a link
@@ -745,7 +745,7 @@ from the created task back to the batch that created it, with nothing holding, s
 readable and no batch's lifetime changes. That link already exists — every task a batch creates carries
 provenance back to the batch — and the question principle 1 asks of it is answered by the rule above: a link
 nothing fails on is a report. The `DEPENDS_ON` edge is the same readability with one thing that fails, the
-sign-off. And it is why the cycle risk the open question named is acceptable now where it was not before:
+verdict. And it is why the cycle risk the open question named is acceptable now where it was not before:
 **with an edge, a deadlock is detectable by inspection** — a walk over `DEPENDS_ON` and `ADDRESSED_BY` finds
 it, the record's write-time check prevents most of it, and the checkpoint names the rest — where with a field
 it would be two batches quietly not advancing, indistinguishable from two batches that are slow.
@@ -757,7 +757,7 @@ intake on its own, goes through its own workflow, and is prioritized on its own 
 lift its priority, and a batch that depends on a low-priority task is a batch whose step owner chose to wait
 on one. A task is still in at most one batch at a time. And the default is unchanged: **most tasks a batch
 creates are peers**, filed with provenance and left to their own intake, and a step owner records a
-dependency only where its sign-off would be a lie without it. The standing finding's institutionalization
+dependency only where its verdict would be a lie without it. The standing finding's institutionalization
 task is the named case where the design rules that the batch does **not** depend on it (decision 17,
 `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
 
@@ -780,7 +780,7 @@ design; how that system's events and operations map onto the record is `adapters
 **The word is bound, and it is not a catch-all for outputs.** An artifact is an entry an
 external system holds, reachable only through that system's adapter, and always identified by the pair `system`
 and `external_id` — a thing the swarm can point at but does not hold. Anything the swarm produces that
-lives in the record is an **entity**, not an artifact: a sign off, an analysis, a draft, a checkpoint, a
+lives in the record is an **entity**, not an artifact: a verdict, an analysis, a draft, a checkpoint, a
 plan, a page the swarm rendered into the record. The test is where the thing lives and how it is reached,
 never how output-shaped it feels: if reading it means asking an external system through an adapter, it is
 an artifact; if reading it is a retrieval from the record, it is an entity. Keeping the word this narrow
@@ -831,12 +831,12 @@ already says about it and the three hazards it has to survive.
 **One live instance, never zero and never two.** A recurring task is an ordinary `task` that carries a
 `recurrence` rule and a `due_date`. At any moment exactly one instance of it is non-terminal, the closing
 interval below excepted. When the
-live instance's chain ends — its last batch closes with a closing sign-off naming no successor — the
-step owner who writes that sign-off also creates the next instance: a new task, copying the completed
+live instance's chain ends — its last batch closes with a closing verdict naming no successor — the
+step owner who writes that verdict also creates the next instance: a new task, copying the completed
 one's rule and description, entering intake as every created task does
 (`#intake-is-every-tasks-first-workflow`). The completed instance is never reopened and never edited
 into the next; it stays in the record as the immutable account of that occurrence, with its own batches,
-sign-offs, and terminal status. So a recurring task has no more state than a task does
+verdicts, and terminal status. So a recurring task has no more state than a task does
 (`#there-is-no-task-lifecycle-there-are-batches`): each occurrence is a task, each task has a chain, and
 the recurrence is a relationship between tasks rather than a state either of them holds.
 
@@ -855,30 +855,30 @@ entity sits above the instances, no instance carries a count or a series id, and
 instance is live: the live one is the one that is not terminal, and there is only ever one (principle 11).
 
 **Sequencing is unchanged, because the next instance is a created task and not a successor.** The
-successor rule says a closing sign-off names one workflow from `workflow.successors` or none, and that a
+successor rule says a closing verdict names one workflow from `workflow.successors` or none, and that a
 list naming intake is a declaration error (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`).
-A recurring task's closing sign-off names **none** — the completed instance's chain ends — and creates a
+A recurring task's closing verdict names **none** — the completed instance's chain ends — and creates a
 task, which is a thing a batch may already do (`#intake-is-every-tasks-first-workflow`: children, detached
 tasks, tasks extracted from a meeting all enter intake themselves). The created instance's intake batch
 opens on its creation, as the one batch with no predecessor
 (`#how-a-batch-is-formed-and-what-chooses-its-workflow`), and nothing about formation changes: the batch
-is still opened by a principal's recorded verdict, since the creation is written by the sign-off that
-closed the previous instance. The one sentence this adds to the model is that a closing sign-off on a
+is still opened by a principal's recorded conclusion, since the creation is written by the verdict that
+closed the previous instance. The one sentence this adds to the model is that a closing verdict on a
 recurring task's last batch **creates the next instance as part of its close**, and that the creation is
 an internal write to the record like every other write a step makes about tasks, not an action. Nor is
 this the case decision 14 rules on: the creating batch does not hold on the task it created; it closes,
 and the created instance is a peer with its own intake.
 
-**The creation precedes the sign-off, and is read back first.** The two are two writes, and the record
+**The creation precedes the verdict, and is read back first.** The two are two writes, and the record
 gives them no transaction, so the order is the rule. The step owner creates the next instance — after the
 bounded retrieval every create makes (`data_model.md#record-conventions`), which on a re-claim finds a live
 instance already `FOLLOWS` this one and creates nothing — reads it back, and only then writes the closing
-sign-off (principle 2). A creation that fails leaves the step open, the sign-off unwritten, and the series
-with its one live instance; a sign-off that fails after the creation leaves a claimed step whose re-claim
+verdict (principle 2). A creation that fails leaves the step open, the verdict unwritten, and the series
+with its one live instance; a verdict that fails after the creation leaves a claimed step whose re-claim
 finds the successor and signs. So "never zero" holds at every moment, and "never two" is stated precisely:
 at no moment are two instances live but the closing interval — a predecessor whose step is claimed and not
 yet signed, and the successor its step owner has just created — and the live instance is the latest on the
-`FOLLOWS` path. The other order, sign then create, is the one the design refuses: a sign-off that lands and
+`FOLLOWS` path. The other order, sign then create, is the one the design refuses: a verdict that lands and
 a creation that fails leaves a completed series with zero live instances, readable only as an absence, which
 is the silent stop this section exists to make loud.
 
@@ -896,7 +896,7 @@ checkpoint after the interval the workflow declares (`failure_posture.md#checkpo
 reason `unclaimed_step`). A claimed step whose owner keeps dying raises one on repeated lapse. And a step
 that **holds** on a condition discovered mid-flight — which decision 13 permits
 (`#a-batch-may-hold-on-a-condition-discovered-mid-flight`) — is bounded by mechanisms that already exist
-and by nothing new: the hold ends in a sign-off when the condition resolves, in a checkpoint when the
+and by nothing new: the hold ends in a verdict when the condition resolves, in a checkpoint when the
 condition owes a principal a decision, or, when it owes nobody a decision and does not resolve, in the
 rule-5 deferral ceiling and one checkpoint with reason `rounds_exhausted` carrying the finding; a lease
 holder that stops renewing is a lapsed lease, and repeated lapse raises its own. There is no held state that a
@@ -923,7 +923,7 @@ instance is *created* at completion but its `due_date` is *computed from the rul
 the schedule after the completed instance's `due_date`. The schedule is a fixed grid the rule defines,
 and completion time is never an input to it. Three consequences follow, each of them the visible one. A
 late instance is visibly late, because its `due_date` stayed where the schedule put it while its closing
-sign-off's `signed_at` did not. There is never overlap and never a gap, because exactly one instance is
+verdict's `signed_at` did not. There is never overlap and never a gap, because exactly one instance is
 live and its date is the next owed point. And where an instance completes so late that the next point on
 the grid has already passed, the next instance is created already late, because that occurrence was owed
 and the record does not smooth over a missed one; a rule under which a missed occurrence is *not* owed —
@@ -1019,10 +1019,10 @@ but a side door, which the model does not have (`#a-task-is-executed-only-throug
 | 2 | a message on a channel that reads as an ask, from a bound principal | the adapter's fourth outcome applied to a chat: an ask is a task, never an instruction | `telegram.md#a-chat-message-is-not-an-instruction` |
 | 3 | a new artifact the swarm does not track | the adapter's fourth outcome, with the artifact attached; per system, the rows of the adapter's document | `adapters.md#no-external-event-advances-a-step-by-itself`; `github.md`, `gmail.md`, `calendar.md`, `telegram.md`, `payments.md` |
 | 4 | a self-triggering daemon's own loop | the daemon writes the tasks its poll produces, each entering intake, and holds no privilege over them | `#the-four-execution-mechanisms` (2); `data_model.md#write-contract` |
-| 5 | a step of a batch | a child split from a parent; a task detached; a task extracted from a meeting; a reply that needs other work; a confirmation owed to a payee; a recap owed to a participant; an item digestion found unfiled; the routed remedy for an implementation-only blocking finding | `#intake-is-every-tasks-first-workflow`; `#parent-and-child-tasks`; `workflows.md#meeting-processing`, `workflows.md#outreach`, `workflows.md#payment`, `workflows.md#session-digestion`; `gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges` |
+| 5 | a step of a batch | a child split from a parent; a task detached; a task extracted from a meeting; a reply that needs other work; a confirmation owed to a payee; a recap owed to a participant; an item digestion found unfiled; the routed remedy for an implementation-only blocking finding | `#intake-is-every-tasks-first-workflow`; `#parent-and-child-tasks`; `workflows.md#meeting-processing`, `workflows.md#outreach`, `workflows.md#payment`, `workflows.md#session-digestion`; `gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges` |
 | 6 | a batch that cannot honestly sign until a task it created is done | a case of 5 whose creating batch holds on the task by a `DEPENDS_ON` edge | `#a-batch-may-depend-on-a-task-it-created` (decision 14) |
 | 7 | a standing finding | the institutionalization task, entering intake independently of the batch that raised the finding | `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it` (decision 17) |
-| 8 | the completion of a recurring task | the closing sign-off of the live instance's last batch creates the next instance, dated from the schedule | `#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next` (decision 30) |
+| 8 | the completion of a recurring task | the closing verdict of the live instance's last batch creates the next instance, dated from the schedule | `#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next` (decision 30) |
 | 9 | a change in the record that an intake rule describes | the rule's evaluator writes one task per matching change, with provenance naming the rule and the change | `#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else` |
 
 Two things the index makes visible that the sources stated apart did not. Sources 4 through 8 are the
@@ -1102,7 +1102,7 @@ The component that evaluates intake rules is exactly such an actor: it creates a
 **declared** predicate — whether a change matched it is checkable by anyone who reads the rule and the
 change, and a match asserts nothing about what the change means, only that it is of the described kind.
 Meaning is supplied where the design already puts every judgement about a task: at intake's `classify`
-step, by a step owner, in a sign-off. So the division is **rules fire; intake judges.** Inference has one
+step, by a step owner, in a verdict. So the division is **rules fire; intake judges.** Inference has one
 legitimate place in this arrangement, and it is upstream of the rule rather than inside it: an agent that
 notices the swarm hand-filing the same kind of task after the same kind of change has a standing finding,
 and its institutionalization task proposes a rule (decision 17). Inference proposes rules, through a
@@ -1153,12 +1153,12 @@ rule's subject is any entity type — an artifact an adapter wrote, or an entity
 persisted, a contact stored, a transcription ingested — and the record's subscriptions deliver both kinds
 of change alike. The hazard is the loop: a task the rule created is itself a created entity, and a rule on
 `task` would fire on its own output. What closes it is the exclusion ruled in decision 36 below: a
-rule keys on no record of the work model — not `task`, `batch`, `lease`, `sign_off`, `action`,
+rule keys on no record of the work model — not `task`, `batch`, `lease`, `verdict`, `action`,
 `checkpoint`, or `agent_session` — so a rule's output is never a rule's input. Chains through workflows
 remain possible and are not forbidden: a rule-created task whose batch writes an entity another rule
 describes fires that rule, and the second task enters intake like the first. That is any workflow creating
 work, priced at intake and signed at every step by a principal; it is readable end to end through
-provenance; and its rate is bounded by the ceiling. A chain that runs through principals' recorded verdicts
+provenance; and its rate is bounded by the ceiling. A chain that runs through principals' recorded conclusions
 is not a runaway, and one that would be is stopped at the ceiling and announced.
 
 **A rule may key on a field a step wrote on a type it may name, and the writer is named in the rule's
@@ -1174,7 +1174,7 @@ named principal recorded that the entity is of this kind. Two things keep it hon
 `provenance_predicate` names the writer — the step, or the role — so the rule keys on the classification a
 workflow's step owner recorded and not on the same field written by anything else, and a classification with
 no accountable writer fires nothing. And the field lands **before** the rule reads it, in a step's write, so
-the judgement has an author, a time, and a sign-off that refers to it, and the task the rule creates carries
+the judgement has an author, a time, and a verdict that refers to it, and the task the rule creates carries
 provenance naming both the rule and the write that fired it. A rule whose predicate needs a judgement nobody
 has written down cannot be written; the remedy is a step that writes the judgement as a field, never a rule
 that makes it. The chain this permits — a rule's task enters a workflow whose step writes the field another
@@ -1212,7 +1212,7 @@ beneath them.
 ### Whether an intake rule may key on the work model's own records
 
 **Ruled (decision 36, 2026-09-06): an intake rule may not key on the work model's own record types —
-`task`, `batch`, `lease`, `sign_off`, `action`, `checkpoint`, `agent_session` — and may key on any other
+`task`, `batch`, `lease`, `verdict`, `action`, `checkpoint`, `agent_session` — and may key on any other
 type, a field a step wrote on an ordinary entity included.** Registered as ruled in
 `conformance.md#the-register-of-open-design-decisions`. The exclusion the section above is written under is
 the rule: a rule naming one of the seven in `subject_types[]` is refused at the write, as a write carrying a
@@ -1235,8 +1235,8 @@ loop by a counter — the ceiling — which is the weaker control, since a bound
 state (principle 11) and the form that needs none is the closed one (principle 5). Every change to a
 work-model record already has the mechanism that answers it (principle 6) — `unclaimed_step`,
 `repeated_lapse`, `successors`, `on_fail`, the checkpoint's terminal timeout, a step creating a task — and
-each routes the change through a principal's recorded verdict, as rulings 13, 14, 17, 30, 37, and 38 do; a
-rule there would be a matcher standing in for that verdict, which
+each routes the change through a principal's recorded conclusion, as rulings 13, 14, 17, 30, 37, and 38 do; a
+rule there would be a matcher standing in for that conclusion, which
 `#how-a-batch-is-formed-and-what-chooses-its-workflow` closes for sequencing and
 `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol` closes for the queue. What stays permitted
 is what the operator asked for: chains through workflows — a rule-created task whose batch writes an entity
@@ -1299,7 +1299,7 @@ tool availability, and model tier are properties of the runner that executes a s
 resolves each without inventing a runner-specific record: which tools a runner's agent may invoke is a
 dimension of its `agent_grant` (decision 41; `authority_model.md#grants`); which harness a role prefers and
 its model tier are a `vendor_binding`'s, bound to the role the runner fills (decision 42,
-`migration.md#where-a-skills-harness-mechanics-live`). A sign-off pins `agent_version`
+`migration.md#where-a-skills-harness-mechanics-live`). A verdict pins `agent_version`
 (`data_model.md#concepts`), so "under what allowlist, and at what tier, did the runner execute" is an
 as-of read of the grant and the binding at `signed_at` — attestable because the grant and the binding are
 in the record already, exactly the reasoning decision 42 used to reject a new context type for harness
@@ -1326,13 +1326,13 @@ claimed with. What the third mechanism adds is not a new delivery shape but *who
 task is published by its creation, a step by the engine that opens it from the declaration. Two names stood
 for that publisher, one now retired: the GitHub-hosted mechanism that
 opens steps (`vocabulary.md#retired-names`), and "the engine", used throughout `gates_and_workflows.md`, `adapters.md`, and `data_model.md`
-for the component that opens steps from the entities and reads the sign-offs, defined nowhere. `engine` is
+for the component that opens steps from the entities and reads the verdicts, defined nowhere. `engine` is
 used in three documents and defined in none of them — a term load-bearing enough to need a home, missing
 one.
 
 **`engine`, defined.** The component that opens each declared [step](vocabulary.md#step) of a
 [workflow](vocabulary.md#workflow) for a [batch](vocabulary.md#batch) as claimable step work, which the
-step owner claims, and reads the [sign-offs](vocabulary.md#sign-off) that close them; it writes no task
+step owner claims, and reads the [verdicts](vocabulary.md#verdict) that close them; it writes no task
 status. It is the publisher the third execution mechanism names — the same pull, over steps, that a task
 already has over itself.
 
@@ -1360,7 +1360,7 @@ self-triggering daemons, whose effects were said to pass through no task. **Sett
 produces and observations, and nothing else, so it takes no action of its own — every effect is an action
 `PRODUCES` from a task, and a daemon that wants one creates the task
 (`#a-task-is-executed-only-through-a-workflow`). The reason the review recorded: a daemon acting directly is a
-side door around the workflow — no step, no sign-off, no lease — and the gate checks policy, not the work. Of the two options the open question named — unify the
+side door around the workflow — no step, no verdict, no lease — and the gate checks policy, not the work. Of the two options the open question named — unify the
 daemon loop with the task path, or keep both under an explicit contract (digest
 `ent_e04244959daf92416597ce28`) — this is the second, the contract being the write contract's daemon row.
 The announcement path is the one exemption, and it is not an action.

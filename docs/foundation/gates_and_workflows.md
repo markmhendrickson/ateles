@@ -1,4 +1,4 @@
-# Gates and workflows: the workflow's steps, the batch, the sign-off, the projection, and the gate that decides
+# Gates and workflows: the workflow's steps, the batch, the verdict, the projection, and the gate that decides
 
 **Kernel document:** read on every review (`conformance.md`). **Kind:** foundation; states the design and
 never the state of a checkout. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-04 to PR-08,
@@ -10,17 +10,17 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
 memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram), and the operator's 2026-09-05 12:52 memo (revision 21: the general claim about self-modification, stated in `work_model.md` and cross-referenced from decision 17), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 17 ruled here; the `dependency_cycle` reason class), and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: the next instance is a created task and not a successor), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: `intake_rule` joins the governance list). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).consistency pass of 2026-09-06 (revision 35: when the checkpoint a `consent` step carries is written, and what the gate evaluates at the take; the merge action's class named `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a step's bound may be declared as the task's `due_date`; an `operator_only` action inside a workflow is taken by the operator and its step closes on the confirmation, never on the resolution; a read dependency on a special-category type carries no marker of its own). Revised by the testability pass of 2026-09-06 (revision 37: the finding as an entity the rules bind on; `rounds_cap`; the recorded amendment; an optional step's condition reads what exists; `none_permitted`; the floor-list sentence retired; open decision 56 — where the enforcement point for a governance write sits). Revised by the rulings pass of 2026-09-06 (revision 38: decision 32 ruled — the `verdict` stays a stored field, the sign-off's own projection of its findings and its author, reconciled at the write). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 56 ruled here — the sole-writer grant, the engine acting for the gate; the checkpoint's raiser and resolver never one principal save the operator's marked self-resolution, decision 47; the finding-as-entity settlement marked reviewed and upheld). Revised by the planning pass of 2026-09-06 (revision 40: the amendment to a planning record as the third named class of internal writes that are actions, `amend_<level>`; a lesson at a planning record's scope filed one level up). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: open decision 59 — where a minimum model tier per action class or blast radius would live, should an instance choose to declare one). Revised by the session-reconciliation pass of 2026-09-06 (revision 46: two paragraphs added to the decision-40 section — "no session is persisted" is not what the ruling says, and a sign-off may carry a `REFERS_TO` edge to the session or digest that produced it, proposed and not ruled). Revised by the rulings pass of 2026-09-06 (revision 47: decision 59 ruled in full — `min_tier` on `action_policy`, evaluated at the same take as blast, with the operator's values setting a floor only for irreversible classes: payments, sends, merges, governance writes; every other class unset). Revised by the event/signal/delivery pass of 2026-09-06 (revision 48: the host's review-token sentence renamed `signal` to `event`, matching `adapters.md`'s own Identity rule wording; one `gmail.md` anchor updated to the renamed section). Revised by the peering pass of 2026-09-06 (revision 56, rebased onto the checker-mechanism and self-awareness passes: a synced observation on a governance type is recorded and never takes effect — the reducer's tie-break ranking and decisions 41/56's admission together, no new mechanism; open decision 65, what surfaces an inert governance-type sync write, since neither a checkpoint nor a finding fits without stretching). Revised by the decision-65 ruling (revision 59, 2026-09-06, rebased onto the close-out and register-reconciliation passes: decision 65 ruled — the engine's existing write-back read (principle 2) extended by one field to check for an unreconciled `sync`-sourced observation on the governance type it just confirmed, carrying the new reason class `no_credential`, written aggregated per window on the engine's `agent_session` in the same shape `adapters.md`'s disposition rule already gives a drop; no new carrier invented). Revised by the sign-off-provenance pass of 2026-09-06 (revision 57: decision 40 narrowed to a sign-off's shape at close; the sentence claiming a session's turns are "not an entity the design has" corrected against decision 63; a sign-off's `REFERS_TO` → `session_digest` ruled, required where the signer is an agent). Revised by the write-readability pass of 2026-09-08 (revision 83, **derived from** the operator's 2026-09-08 stance on what a step may assume about a preceding step's write): decision 89 opened and ruled here — a step does not open until the write it depends on is readable by the principal that will execute it, stated as ordering and never as an interval, placed on the step's opening beside the hydration phase rather than on the declaration, because the reader is the only principal positioned to check it; principle 2's writer-side read-back is left untouched and is named as not covering the cross-principal case.
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).consistency pass of 2026-09-06 (revision 35: when the checkpoint a `consent` step carries is written, and what the gate evaluates at the take; the merge action's class named `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a step's bound may be declared as the task's `due_date`; an `operator_only` action inside a workflow is taken by the operator and its step closes on the confirmation, never on the resolution; a read dependency on a special-category type carries no marker of its own). Revised by the testability pass of 2026-09-06 (revision 37: the finding as an entity the rules bind on; `rounds_cap`; the recorded amendment; an optional step's condition reads what exists; `none_permitted`; the floor-list sentence retired; open decision 56 — where the enforcement point for a governance write sits). Revised by the rulings pass of 2026-09-06 (revision 38: decision 32 ruled — the `conclusion` stays a stored field, the verdict's own projection of its findings and its author, reconciled at the write). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 56 ruled here — the sole-writer grant, the engine acting for the gate; the checkpoint's raiser and resolver never one principal save the operator's marked self-resolution, decision 47; the finding-as-entity settlement marked reviewed and upheld). Revised by the planning pass of 2026-09-06 (revision 40: the amendment to a planning record as the third named class of internal writes that are actions, `amend_<level>`; a lesson at a planning record's scope filed one level up). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: open decision 59 — where a minimum model tier per action class or blast radius would live, should an instance choose to declare one). Revised by the session-reconciliation pass of 2026-09-06 (revision 46: two paragraphs added to the decision-40 section — "no session is persisted" is not what the ruling says, and a verdict may carry a `REFERS_TO` edge to the session or digest that produced it, proposed and not ruled). Revised by the rulings pass of 2026-09-06 (revision 47: decision 59 ruled in full — `min_tier` on `action_policy`, evaluated at the same take as blast, with the operator's values setting a floor only for irreversible classes: payments, sends, merges, governance writes; every other class unset). Revised by the event/signal/delivery pass of 2026-09-06 (revision 48: the host's review-token sentence renamed `signal` to `event`, matching `adapters.md`'s own Identity rule wording; one `gmail.md` anchor updated to the renamed section). Revised by the peering pass of 2026-09-06 (revision 56, rebased onto the checker-mechanism and self-awareness passes: a synced observation on a governance type is recorded and never takes effect — the reducer's tie-break ranking and decisions 41/56's admission together, no new mechanism; open decision 65, what surfaces an inert governance-type sync write, since neither a checkpoint nor a finding fits without stretching). Revised by the decision-65 ruling (revision 59, 2026-09-06, rebased onto the close-out and register-reconciliation passes: decision 65 ruled — the engine's existing write-back read (principle 2) extended by one field to check for an unreconciled `sync`-sourced observation on the governance type it just confirmed, carrying the new reason class `no_credential`, written aggregated per window on the engine's `agent_session` in the same shape `adapters.md`'s disposition rule already gives a drop; no new carrier invented). Revised by the sign-off-provenance pass of 2026-09-06 (revision 57: decision 40 narrowed to a verdict's shape at close; the sentence claiming a session's turns are "not an entity the design has" corrected against decision 63; a verdict's `REFERS_TO` → `session_digest` ruled, required where the signer is an agent). Revised by the write-readability pass of 2026-09-08 (revision 83, **derived from** the operator's 2026-09-08 stance on what a step may assume about a preceding step's write): decision 89 opened and ruled here — a step does not open until the write it depends on is readable by the principal that will execute it, stated as ordering and never as an interval, placed on the step's opening beside the hydration phase rather than on the declaration, because the reader is the only principal positioned to check it; principle 2's writer-side read-back is left untouched and is named as not covering the cross-principal case.
 ## Purpose
 
 State the step and gate model: `workflow` declares; a batch is the tasks going through it and the record
-of that; step state is derived from edges and closed by a `sign-off`; `step_status` projects; one step
+of that; step state is derived from edges and closed by a `verdict`; `step_status` projects; one step
 set; sequencing is data (`successors` + `FOLLOWS`); `gate` names the action gate only; actions are
 entities and only actions are taken; two policies; the checkpoint.
 
 ## Scope
 
-Workflow engines, the action gate, and the concepts `workflow`, batch, `sign-off`, `action`,
+Workflow engines, the action gate, and the concepts `workflow`, batch, `verdict`, `action`,
 `checkpoint`, `action_policy`. Checkpoint resolution and approval attribution: `authority_model.md`.
 Unreadable workflow and the checkpoints the swarm raises on tasks: `failure_posture.md`. Tasks in
 batches, artifacts: `work_model.md`. Per-workflow step lists: `workflows.md` (authored companion; binds
@@ -33,7 +33,7 @@ and the adapters that reach them: `adapters.md`.
 
 `workflow` declares one entity per (project, workflow type): ordered `steps[]` (`step_name`,
 `owner_role`, `parallel_group`, `join_step`, `required`, `applies_when` — the condition that decides
-whether an optional step opens at all, below — and `on_fail` — the earlier step a failing sign-off
+whether an optional step opens at all, below — and `on_fail` — the earlier step a failing verdict
 opens again, with `rounds_cap`, the rounds that loop may take, below — plus `reads_to_enter`, `reads_to_close`, and `freshness`, the read dependencies below, and
 `unclaimed_after` and `hold_bound`, the two intervals below), plus `fast_paths` and `successors`, with
 `none_permitted` (`#sequencing-is-data-successors-and-the-chain`). `owner_role` holds a **role**, never an agent name: the
@@ -46,9 +46,9 @@ A batch is one or more tasks going through a workflow, and the record of that (`
 subject is tasks; issues and pull requests are artifacts by edge, never the thing a step is taken on.
 
 A step has no entity of its own. Derived state: batch + step → **open**; lease from step owner →
-**claimed**; `sign-off` → **signed**. Opening a step publishes claimable step work; the step owner claims it
-with the same lease primitive as a task (`work_model.md`). A `sign-off` is the terminal write that closes
-a step (verdict, timestamps, agent, artifact refs, pinned `agent` version); a rejected write is
+**claimed**; `verdict` → **signed**. Opening a step publishes claimable step work; the step owner claims it
+with the same lease primitive as a task (`work_model.md`). A `verdict` is the terminal write that closes
+a step (conclusion, timestamps, agent, artifact refs, pinned `agent` version); a rejected write is
 an error, never swallowed. This is principle 11 applied to steps: a per-step status row would need a
 process to keep it true, and the three edges are read.
 
@@ -56,7 +56,7 @@ process to keep it true, and the three edges are read.
 each author makes at each call site: **the swarm does not advance a batch, or continue within a step, when
 data the step depends on cannot be read.** What makes that enforceable rather than exhortative is the
 declaration. Each step names `reads_to_enter` — the entity types it must read before it opens — and
-`reads_to_close` — the types it must read before its sign-off is written. A step that cannot read a type it
+`reads_to_close` — the types it must read before its verdict is written. A step that cannot read a type it
 declared does not proceed; a step that reads a type it did not declare is a **declaration error**, caught
 the way an undeclared action class is, in the pull request that introduced it. That is the point of putting
 the dependency in the declaration rather than in the code: an undeclared dependency is visibly missing,
@@ -82,7 +82,7 @@ resolves every type in `reads_to_enter`: what the record already holds is read l
 external system holds is imported through that system's adapter, which writes it to the record as
 observations on artifacts (`adapters.md#the-adapter-runs-before-and-after-a-step-never-during-it`). Both
 halves resolve against the same declaration, and the step does not begin until they do. The same phase runs
-again for `reads_to_close` before the sign-off is written. Nothing hydrates *during* a step: a step that
+again for `reads_to_close` before the verdict is written. Nothing hydrates *during* a step: a step that
 reaches an external system mid-execution reintroduces the second source of truth the boundary rules exist
 to remove, and its inputs stop being a fixed set any reader can name. So a step's inputs are resolved,
 recorded, and readable before it runs, and what the step then works on is the record.
@@ -160,29 +160,29 @@ reader that collapses the two — an exception handler returning an empty list, 
 value — has destroyed the distinction before any rule can apply to it. The recorded shape of `unknown` is
 `data_model.md`.
 
-**A required step is closed only by a sign-off, and no principal signs for another.** The step owner named
-on the step is the only principal whose sign-off closes it; a second principal cannot supply the verdict,
-and a step with no sign-off is open however long it has been open and however clear its outcome looks. The
+**A required step is closed only by a verdict, and no principal signs for another.** The step owner named
+on the step is the only principal whose verdict closes it; a second principal cannot supply the conclusion,
+and a step with no verdict is open however long it has been open and however clear its outcome looks. The
 one way an unsigned required step is closed by someone other than its owner is the operator closing it,
-and that is not an exception to the rule but an instance of it: **the operator's close is a sign-off,
-attributed to the operator principal, with verdict `waived`, carrying the reason.** There is no waiver
+and that is not an exception to the rule but an instance of it: **the operator's close is a verdict,
+attributed to the operator principal, with conclusion `waived`, carrying the reason.** There is no waiver
 primitive, no override flag, and no field a principal sets on itself — a self-settable clearance re-states
 "probably fine" in one boolean, which is the shape this model exists to remove. Because the close is a
-sign-off, step state stays derived from edges (principle 11), the audit trail names who cleared the step
+verdict, step state stays derived from edges (principle 11), the audit trail names who cleared the step
 and why, and a waived step is visible as waived in `step_status` rather than indistinguishable from a
 signed one. The action gate is unaffected: a waived workflow step does not permit an action, which is
 evaluated on its own (below).
 
 **Only the operator principal may waive, and a waiver is scoped to one batch's unsigned required steps,
-written as one `waived` sign-off per step.** The right is not delegable: a step owner able to write
-`waived` on its own step is the self-settable clearance this model exists to remove, restated in a verdict
+written as one `waived` verdict per step.** The right is not delegable: a step owner able to write
+`waived` on its own step is the self-settable clearance this model exists to remove, restated in a conclusion
 value instead of a boolean. The scope is the batch — one invocation from the operator clears the unsigned
 required steps of one batch, which is the shape in use and costs the operator nothing — but the **record**
-is per step: one `waived` sign-off for each step cleared, each attributed to the operator principal, each
-naming its step and carrying the reason. That keeps step state derived from sign-offs rather than from a
+is per step: one `waived` verdict for each step cleared, each attributed to the operator principal, each
+naming its step and carrying the reason. That keeps step state derived from verdicts rather than from a
 batch-level flag (principle 11), and it makes a waived step queryable as waived: how often, which steps,
 and why, rather than a comment on an artifact that no reader reads. A clearance recorded only as prose on
-an artifact is an observation and never a sign-off (`failure_posture.md` rule 4).
+an artifact is an observation and never a verdict (`failure_posture.md` rule 4).
 
 **An optional step is relevant or not, and what decides that is a declared condition on the step, not a
 judgement made at the moment.** `required` has a false branch, and until this revision the design named
@@ -190,7 +190,7 @@ the field and stated nothing about it: every step table carries steps marked `no
 `ux` and `legal` on copy) and no rule said who decides such a step is skipped, on what, or where that
 decision is recorded. That silence is the hole. An optional step whose skip nobody declares is skipped
 by whoever notices, on grounds no reader can name, which is the self-settable clearance the waiver rule
-above exists to remove, restated one level up — at the step's existence rather than at its verdict.
+above exists to remove, restated one level up — at the step's existence rather than at its conclusion.
 
 So a step declares `applies_when`: a condition, evaluated against **what the batch's tasks are and what
 their change touches**, that decides whether the step opens at all. It is data on the declaration, judged
@@ -205,7 +205,7 @@ relevance test fails toward review and never toward skipping it (principle 5). A
 which steps did not open and why, the same way it records which were waived; a reader asking what judged
 this change gets three answers — signed, waived, inapplicable — and never one that hides the difference.
 "The arch step found nothing wrong" and "no arch step ever opened" are different claims about a change,
-and a projection that renders both as an absent blocking verdict has destroyed the distinction the same
+and a projection that renders both as an absent blocking conclusion has destroyed the distinction the same
 way an empty result destroys `unknown`.
 
 **A condition may read what the change touches, and this is the one place in the design where it may.**
@@ -278,11 +278,11 @@ inapplicable for want of a reply that has not yet arrived; and it is not a new f
 already states that a declared condition and a discovered one differ only in when they are recorded
 (`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`). So a planned wait is written where
 every step's condition is written — in the step's close condition, which names the arrival — and the
-step owner that has claimed it holds: lease renewed, a finding naming what is awaited, no sign-off. What
+step owner that has claimed it holds: lease renewed, a finding naming what is awaited, no verdict. What
 `hold_bound` adds is the end. Where the close condition declares an alternative close — `outreach`'s
 `follow_up` closes on a reply linked, or on the interval passed and one follow-up sent, or on the operator
 ending it (`workflows.md#outreach`) — reaching the bound is the step owner's cue to sign on that alternative,
-and the hold ends in a sign-off, which is decision 13's first end. Where the close condition declares none —
+and the hold ends in a verdict, which is decision 13's first end. Where the close condition declares none —
 the step cannot honestly close without the arrival — reaching the bound is rule 5's ceiling, and the hold
 ends in one checkpoint, reason `rounds_exhausted`, carrying the finding, which is decision 13's third end.
 Which of the two a step has is readable from its declaration, and in neither does the bound itself close the
@@ -300,35 +300,35 @@ So what the declaration states is not the date but that the step's bound **is** 
 tasks the earliest is the bound. Nothing else changes. Reaching a date-declared bound is reaching the bound —
 the step signs on its declared alternative close where it has one, or raises one checkpoint, reason
 `rounds_exhausted`, where it has none, and the checkpoint names the date that passed. What the date does
-**not** do is close the step, in either direction. A step closed as failed because a date passed is a verdict
+**not** do is close the step, in either direction. A step closed as failed because a date passed is a conclusion
 no principal made — the same shape as a gate that expires into a pass, with the sign read the other way — and
-it would open the `on_fail` step by a clock, which is sequencing by a timer rather than by a verdict. A
+it would open the `on_fail` step by a clock, which is sequencing by a timer rather than by a conclusion. A
 deadline missed is a fact the operator decides on — file late, contest, let it go — and the checkpoint is
-where that decision is made; the step owner then signs the verdict that follows from it.
+where that decision is made; the step owner then signs the conclusion that follows from it.
 
 **A step with an `on_fail` target declares `rounds_cap`, the number of rounds its loop may take.** A
-failing sign-off opens the earlier step `on_fail` names, and the loop between the two is a deferral like
+failing verdict opens the earlier step `on_fail` names, and the loop between the two is a deferral like
 every other, so rule 5 gives it a ceiling (`failure_posture.md#the-rules`): at the cap, one checkpoint on
 a task of the batch, reason `rounds_exhausted`, carrying the last blocking finding. The cap is declared on
 the step, beside the target, because a loop's tolerable length is a property of what the two steps judge
 and not of the project; an undeclared cap is treated as an undeclared interval is — nothing is raised, and
 the absence is visible in the declaration, a defect caught in the pull request that introduced it and never
-a default supplied at runtime. The cap does not close anything: a step in a loop is closed by a sign-off
-or it is open, and the checkpoint at the cap changes no verdict.
+a default supplied at runtime. The cap does not close anything: a step in a loop is closed by a verdict
+or it is open, and the checkpoint at the cap changes no conclusion.
 
 **Scope amendment versus scope creep.** A batch carries acceptance criteria — the `acceptance_criteria[]`
 its tasks carry, stated on each task at `pm` (`data_model.md#concepts`; `workflows.md#feature`) — and
 implementation regularly turns up work that was not in view when they were written. A scope boundary is a
 decision record, not a rule that outranks evidence gathered after it was written — so the addition
 **amends** the criterion when three conditions hold together: it is disclosed rather than absorbed, it is
-escalated to the step owner whose sign off the change touches, and it is defended against an acceptance
+escalated to the step owner whose verdict the change touches, and it is defended against an acceptance
 criterion the batch already carries. On all three the criterion is amended by that owner's ruling and the
 batch continues with the work inside it. Absent any one of them the addition is scope creep, and the
 unrelated work is split into its own batch, from the first step of its workflow
 (`work_model.md#a-task-is-in-at-most-one-batch-at-a-time`). What separates the two is not the size of the
 addition but whether the step owner ruled on it: undisclosed bundling is refused however small, and a
 large amendment the owner ruled on is legitimate. Scope moving silently is the failure — a batch whose
-shipped change exceeds what any principal judged carries sign offs pinned to an artifact state that no
+shipped change exceeds what any principal judged carries verdicts pinned to an artifact state that no
 longer describes it (`data_model.md#record-conventions`).
 
 **An amendment is recorded, or it is creep.** The three conditions leave a trace only if the ruling is a
@@ -336,61 +336,61 @@ write, so the ruling is two writes the record already has: the step owner record
 naming the addition and the criterion it is defended against; and it corrects the task's
 `acceptance_criteria[]` with a correction whose idempotency key names that finding — a correction names its
 intent in its key (`data_model.md#record-conventions`), and here the intent is the finding. Disclosed is the
-finding; escalated is the correction's attribution to the step owner whose sign off the change touches;
+finding; escalated is the correction's attribution to the step owner whose verdict the change touches;
 defended is the criterion the finding names. A correction to the criteria attributed to anyone but a step
 owner of the batch, or naming no finding, is refused at the write. Whether a shipped change exceeds the
 criteria stays the review step's judgement, and this section does not pretend otherwise; that it exceeded
 them with no amendment on the record is a read, and it is the failing artefact.
 
-`step_status` on the task is the projection of the batch's sign-offs, so "all required steps
-signed?" fails closed in one read. A reconciler proves it agrees with the sign-offs; neither is deleted,
+`step_status` on the task is the projection of the batch's verdicts, so "all required steps
+signed?" fails closed in one read. A reconciler proves it agrees with the verdicts; neither is deleted,
 neither is a second source of truth (`gate_status_map_should_remain`, under its former name). No
 transition event type; history is the record's observations (`no_gate_transition_event_type`). One engine
-opens steps from the entities and reads the sign-offs; a second engine that sequences from a code literal
+opens steps from the entities and reads the verdicts; a second engine that sequences from a code literal
 and cannot see the first is the defect this model removes (`real_defect_is_two_blind_engines`).
 
 ### What a step leaves at close: what it produced, and a reference to what it read
 
-**Ruled (decision 40, 2026-09-06; narrowed by the sign-off-provenance pass, 2026-09-06): a sign-off records
+**Ruled (decision 40, 2026-09-06; narrowed by the sign-off-provenance pass — the pass name keeps the since-retired spelling, 2026-09-06): a verdict records
 what its step produced and names what it read, as of the moment it signed; it does not itself carry the
 step's reasoning.** Registered in `conformance.md#the-register-of-open-design-decisions`. The operator
 asked that the session a step ran in, and everything that session saw, be stored when the step completes,
 so that later work — a later step of the same batch, or any other work — can use it. The design agrees with
-the aim and states precisely what a sign-off's own fields are for, because the three things a session "saw"
-have three different fates. **This ruling governs a sign-off's shape at close — what it records and what it
+the aim and states precisely what a verdict's own fields are for, because the three things a session "saw"
+have three different fates. **This ruling governs a verdict's shape at close — what it records and what it
 may point at — not whether a session is stored**; the session-reconciliation pass (revision 46) and decision
 63 settled that question separately, and the restatement below folds their answer in rather than leaving a
 reader to reassemble it from two documents.
 
-**What it produced is written, as the entities it is.** The sign-off with its findings; the observations its
+**What it produced is written, as the entities it is.** The verdict with its findings; the observations its
 work made; the entities its work created — an analysis, a draft, a `meeting_analysis`, a task for intake;
 and the `REFERS_TO` edges from the task to the record entities the step discovered the task concerns
 (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`). These are the write contract's rows
 (`data_model.md#what-each-actor-reads-and-writes`), and each is read back. They are what a later step reads
-first — the sign-offs already on the batch are in every step's retrieval — and they are how context found
+first — the verdicts already on the batch are in every step's retrieval — and they are how context found
 part-way through a batch reaches the next step without the next step finding it again.
 
-**What it read is named, not copied.** The sign-off refers to what the step judged on: every artifact, with
+**What it read is named, not copied.** The verdict refers to what the step judged on: every artifact, with
 the `head` it was observed at (`artifact_refs[]`), and every record entity it read, by reference
-(`REFERS_TO` sign-off → entity; `data_model.md#relationships`). The state of each at the moment of the
-verdict is not stored a second time, because the record already holds it and can return it: an as-of read
-along ingestion time at the sign-off's `signed_at` returns what was readable then and excludes what arrived
+(`REFERS_TO` verdict → entity; `data_model.md#relationships`). The state of each at the moment of the
+conclusion is not stored a second time, because the record already holds it and can return it: an as-of read
+along ingestion time at the verdict's `signed_at` returns what was readable then and excludes what arrived
 later (`adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`), and the
 hydration phase wrote every external read as observations with provenance before the step began
-(`#declaration-batch-projection`). So "what did this step see" is a read: the references on the sign-off,
+(`#declaration-batch-projection`). So "what did this step see" is a read: the references on the verdict,
 resolved as of its time. A copy would be the parallel log the record conventions forbid, and a copy that is
 also read is a second source of truth for what the step knew — the two answers diverge the first time an
 observation is corrected. **This is the check the ruling rests on:** reads are reproducible only if every
-read was either an observation in the record before the step ran or is named on the sign-off with a time,
+read was either an observation in the record before the step ran or is named on the verdict with a time,
 and both halves are already rules. Where a step read something it neither hydrated nor named, its reads are
 not reproducible, and that is a declaration error of the kind an undeclared read already is.
 
-**A sign-off does not itself carry the step's reasoning, and reasoning is not re-derived from one.** The
-turns of the session, the drafts it discarded, the paths it considered are not written onto the sign-off,
+**A verdict does not itself carry the step's reasoning, and reasoning is not re-derived from one.** The
+turns of the session, the drafts it discarded, the paths it considered are not written onto the verdict,
 and the retrieval contract states the consequence from the reader's side: another step owner's in-progress
-reasoning is not read from the sign-off, because a sign-off carries a verdict, findings, and references —
+reasoning is not read from the verdict, because a verdict carries a conclusion, findings, and references —
 never a transcript (`data_model.md#what-each-actor-reads-and-writes`). That is deliberate. A step is judged
-by its sign-off and findings, which are the claims a principal stands behind, pinned to what they judged;
+by its verdict and findings, which are the claims a principal stands behind, pinned to what they judged;
 reasoning written onto them would be read as a further kind of evidence with no author standing behind it,
 and a later step that read it would be reasoning from another principal's unfinished reasoning rather than
 from the record. **This no longer means the turns are absent from the design's record — decision 63
@@ -403,10 +403,10 @@ observations lack — host, checkout, branch, head — and its liveness, related
 itself the input to work, it is the source a task refers to, as session digestion already treats it
 (`workflows.md#session-digestion`), and not a property of the step whose session it was.
 
-**The cost accepted** is that a step owner cannot read how a previous step owner arrived at a verdict, only
-the verdict, the findings, and what they were made on. That is the cost the retrieval contract already
-chose, and the design's own view is that it is not one: a verdict whose grounds are not in its findings is a
-verdict that named too little evidence, and the remedy is a finding, not a transcript. **What would reopen
+**The cost accepted** is that a step owner cannot read how a previous step owner arrived at a conclusion, only
+the conclusion, the findings, and what they were made on. That is the cost the retrieval contract already
+chose, and the design's own view is that it is not one: a conclusion whose grounds are not in its findings is a
+conclusion that named too little evidence, and the remedy is a finding, not a transcript. **What would reopen
 it:** a reader in practice that needs a step's intermediate products — a draft rejected, a source read and
 set aside — and finds them in no entity; the remedy would be an entity for that product with an author,
 written by the step that made it, not a store of the session.
@@ -417,78 +417,78 @@ ruling would name. It persists a different pair of types than the one this secti
 `conversation`/`conversation_message` bookkeeping and the authored `session_digest` are registered types
 (decision 63, `data_model.md#record-conventions`) and neither is the `agent_session` this ruling constrains.
 What this ruling forecloses is narrower than it can read out of context: an `agent_session` — the
-step-linked, task-linked identity record — growing a transcript field, or a sign-off copying a session's
+step-linked, task-linked identity record — growing a transcript field, or a verdict copying a session's
 turns beside its findings. It does not foreclose a session's content existing as its own entity elsewhere,
 reached by its own path; `session_digest` is named below as exactly that path. A reader taking the ruling as
 "the design refuses to store reasoning" is reading past the paragraph above that corrects it.
 
-**Ruled: a sign-off may carry a `REFERS_TO` edge to the `session_digest` that produced it, and must where
+**Ruled: a verdict may carry a `REFERS_TO` edge to the `session_digest` that produced it, and must where
 the signer is an agent.** Naming a session is not copying one: the edge is the same reference-never-value
-shape decision 40 already applies to every other read a sign-off names (`artifact_refs[]`, and every
+shape decision 40 already applies to every other read a verdict names (`artifact_refs[]`, and every
 `REFERS_TO` to a record entity above), extended to one more source, and it writes no reasoning onto the
-sign-off — the digest, if read at all, is read where it lives, at whatever time the reader resolves it,
+verdict — the digest, if read at all, is read where it lives, at whatever time the reader resolves it,
 exactly as an artifact's `head` is resolved rather than copied. **The target is `session_digest`, not
 `agent_session`, and not raw `conversation`/`conversation_message`.** `session_digest` is the type this
 section already names as the licensed path for a session whose content is itself work input; `agent_session`
 carries no content to point past, only identity and liveness, so an edge to it would name the wrong thing —
 the reader would resolve an `agent_session` and find no turns, which is not what "what did this step read"
-promises. The raw turn store is the wrong grain for the same reason a sign-off's `artifact_refs[]` pins a
+promises. The raw turn store is the wrong grain for the same reason a verdict's `artifact_refs[]` pins a
 `head` and not a diff: a digest is the record's own summary of the session, produced once, at a stable
 grain, the way an artifact's pinned state is; the turns underneath remain reachable from the digest for a
 reader who needs them, exactly as a commit's contents remain reachable from its `head`. **Required, not only
 permitted, where the signer is an agent:** an agent step owner runs inside a session by construction — there
-is no agent sign-off without one — so an agent-authored sign-off omitting the edge when a `session_digest`
+is no agent verdict without one — so an agent-authored verdict omitting the edge when a `session_digest`
 exists for that session is an incomplete write of exactly the kind `artifact_refs[]` already refuses: a
 readable source the step in fact used, left unnamed. **Permitted, not required, for every other signer:** the
 identity rule states that a human principal signs "through the host," carried in by an adapter from a
 credential resolved to the step owner (`adapters.md#what-the-adapter-does-with-every-event`) — that
-sign-off has no `agent_session` and, ordinarily, no session at all to digest, because no agent process ran a
-session to produce the verdict. A required edge would make every sign-off depend on a session entity
-existing, and a human-through-adapter sign-off is the case where none does; making the edge required there
-would either fabricate a session that never ran or block a class of sign-off the design otherwise permits
+verdict has no `agent_session` and, ordinarily, no session at all to digest, because no agent process ran a
+session to produce the conclusion. A required edge would make every verdict depend on a session entity
+existing, and a human-through-adapter verdict is the case where none does; making the edge required there
+would either fabricate a session that never ran or block a class of verdict the design otherwise permits
 without qualification (`adapters.md#what-the-adapter-does-with-every-event`, obligation 2). Permitted for
 that signer preserves the shape for the rarer case where a human's own work did run inside a digested
 session (interactive use of a harness, for instance) without obliging one where it did not. **The cost** is
-one edge per agent sign-off and one `REFERS_TO` target the schema did not previously name; **what would
-reopen it:** a reader in practice needing the edge on a non-agent sign-off well enough to justify sessions
+one edge per agent verdict and one `REFERS_TO` target the schema did not previously name; **what would
+reopen it:** a reader in practice needing the edge on a non-agent verdict well enough to justify sessions
 being manufactured for signers who never ran one.
 
-### Findings, verdicts, and what a blocking finding obliges
+### Findings, conclusions, and what a blocking finding obliges
 
 A step owner judging a batch records **findings** (`vocabulary.md#finding`): one defect or objection each,
-each carrying its own severity. The sign off carries a **verdict** (`vocabulary.md#verdict`), the summary
+each carrying its own severity. The verdict carries a **conclusion** (`vocabulary.md#conclusion`), the summary
 token that closes the step and states whether the step's **condition** (`vocabulary.md#condition`) is met.
-**The findings bind, and a verdict that contradicts its own findings is rejected, not swallowed.** The
-severity of the findings, not the summary token, is what blocks. A sign-off carrying a blocking finding
-under a non-blocking verdict is a contradiction in one write, and the write is **refused at submission** —
-which is not a new rule but the existing one applied, since a rejected sign-off write is an error, never
-swallowed (above). The step owner is told its verdict contradicts its own finding and re-submits; the step
+**The findings bind, and a conclusion that contradicts its own findings is rejected, not swallowed.** The
+severity of the findings, not the summary token, is what blocks. A verdict carrying a blocking finding
+under a non-blocking conclusion is a contradiction in one write, and the write is **refused at submission** —
+which is not a new rule but the existing one applied, since a rejected verdict write is an error, never
+swallowed (above). The step owner is told its conclusion contradicts its own finding and re-submits; the step
 does not close in the meantime. Severity in the envelope is the only version an authoring mistake cannot
 defeat: where only the summary token is read, a step owner who files a blocker in the wrong envelope has
 blocked nothing, and the sole trace is prose no reader reads.
 
-**The design's verdict values are three, and a host's review tokens are the adapter's inbound mapping.**
-A verdict is `signed`, a blocking value, or `waived`, and nothing else. Where an external code host has its
+**The design's conclusion values are three, and a host's review tokens are the adapter's inbound mapping.**
+A conclusion is `signed`, a blocking value, or `waived`, and nothing else. Where an external code host has its
 own review vocabulary — approve, request changes, comment — those are **events** the adapter maps inbound
 to the record's three values, exactly as it maps every other inbound event (`adapters.md`), and they are
 never the record's vocabulary. A projection fed tokens the design does not define is a projection whose
 meaning is per-author, which is how one step set comes to speak two languages onto one field.
 
-**A verdict is terminal, and never revised in place.** A sign-off is the terminal write that closes a step.
-A step owner that reaches a different judgement writes a **new sign-off**, and the latest per step owner
-per artifact head is the one that stands; the superseded verdict stays readable, which the append-only
-record gives for free. Rewriting a verdict in place is forbidden for the reason a sign-off is pinned to the
-head it judged: a re-pointed verdict shows one approval of work its author never read, and destroys exactly
+**A conclusion is terminal, and never revised in place.** A verdict is the terminal write that closes a step.
+A step owner that reaches a different judgement writes a **new verdict**, and the latest per step owner
+per artifact head is the one that stands; the superseded conclusion stays readable, which the append-only
+record gives for free. Rewriting a conclusion in place is forbidden for the reason a verdict is pinned to the
+head it judged: a re-pointed conclusion shows one approval of work its author never read, and destroys exactly
 the reading the pinning exists to give. The cost is more rows and a read rule, and both are cheap against
 an audit trail that silently misreports what was judged.
 
-**A verdict carries no condition.** A verdict states whether the step's condition is met; it may not close
-its step while binding what a later step must do. A conditional block hands the verdict to the party being
+**A conclusion carries no condition.** A conclusion states whether the step's condition is met; it may not close
+its step while binding what a later step must do. A conditional block hands the conclusion to the party being
 blocked — a step owner blocking "provided the fix lands" has delegated its own judgement to the
 implementer, and the guarantee that a closed step was judged unconditionally is gone. A requirement that
 must hold later has two homes that already exist: a task, or an acceptance criterion the batch already
-carries. Neither is a clause in a verdict. The rule has a mechanical half and a reviewed half, and says which is
-which: neither `sign_off` nor `finding` declares a field a condition could be written in
+carries. Neither is a clause in a conclusion. The rule has a mechanical half and a reviewed half, and says which is
+which: neither `verdict` nor `finding` declares a field a condition could be written in
 (`data_model.md#concepts`), so none can be written as one, and what a finding obliges of later work is a
 task that refers to it or an amendment to the acceptance criteria (above), each readable; a condition
 written as prose inside a finding's text is what the review step that reads the finding refuses, and that
@@ -500,88 +500,88 @@ swarm's reach, so it may be routed to an implementer like any other task, and th
 result. A **decision or attestation** finding needs a judgement or a statement of fact that only a
 principal can make — that a trade-off is acceptable, that a risk was considered, that something is true of
 the world — and it is not routable at all, because routing it would ask an implementer to supply the
-judgement the finding exists to demand. In both kinds the step owner keeps the terminal sign off:
-**routing the remedy never transfers the verdict.** An implementer that fixes the named defect produces
+judgement the finding exists to demand. In both kinds the step owner keeps the terminal verdict:
+**routing the remedy never transfers the conclusion.** An implementer that fixes the named defect produces
 an artifact the step owner then judges; it does not close the step by having done the work.
 
-**A blocking verdict names its evidence.** A blocking finding cites an executed command and the output it
-produced — the check that was run and what it actually said. A verdict may rest on evidence another
-mechanism executed, a CI run or a deterministic lint, provided the sign off names that mechanism as its
-evidence and the result it read. What a blocking verdict may never do is present unexecuted reasoning as
+**A blocking conclusion names its evidence.** A blocking finding cites an executed command and the output it
+produced — the check that was run and what it actually said. A conclusion may rest on evidence another
+mechanism executed, a CI run or a deterministic lint, provided the verdict names that mechanism as its
+evidence and the result it read. What a blocking conclusion may never do is present unexecuted reasoning as
 an executed finding: a step owner that could not run the check files a **non-blocking** finding stating what it
 could not verify, and says so plainly, rather than blocking on a defect it inferred. Reasoning about a
 defect is a reason to look; it is not a reason to block, because a block asserts that the defect is there
 and a principal downstream will act on that assertion without re-deriving it. This is principle 2 at the
-verdict: a claim that was never read back is not evidence.
+conclusion: a claim that was never read back is not evidence.
 
 **A finding is an entity, and the rules above bind on its fields** (settled by the testability pass; reviewed
 and upheld by the operator 2026-09-06). A finding is recorded as a `finding`
-(`data_model.md#concepts`), carried by the sign-off that judges the batch — `PART_OF` it — and referring to
-the batch it judges; a hold's finding stands with no sign-off for as long as the hold does
+(`data_model.md#concepts`), carried by the verdict that judges the batch — `PART_OF` it — and referring to
+the batch it judges; a hold's finding stands with no verdict for as long as the hold does
 (`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`), and the operator's finding on
 closed work has none either (`#closed-work-is-reviewed-on-the-record-and-redone-through-intake-never-reopened`).
-Its `severity` is what blocks: the refusal at submission compares the verdict to the severities of the
-findings the sign-off carries, and nothing else. Its `kind` is what decides routability. Its `evidence` is
+Its `severity` is what blocks: the refusal at submission compares the conclusion to the severities of the
+findings the verdict carries, and nothing else. Its `kind` is what decides routability. Its `evidence` is
 required where it blocks, and a blocking finding written with none is refused at the write rather than read
 as a block on inferred reasoning. Its `scope` is the standing axis below. Nothing about the shape is
 restated here (principle 9): the row is the data model's, and this section says only which rule reads
 which field.
 
-### Whether the verdict is a stored field or a read over the findings and the author
+### Whether the conclusion is a stored field or a read over the findings and the author
 
-**Ruled (decision 32, 2026-09-06): the `verdict` stays a stored field, as the sign-off's own projection of
+**Ruled (decision 32, 2026-09-06): the `conclusion` stays a stored field, as the verdict's own projection of
 its findings and its author, reconciled at the write.** Registered as ruled in
 `conformance.md#the-register-of-open-design-decisions`. The field is not retired.
 
-**The question.** A sign-off stores a `verdict` — `signed`, a blocking value, or
-`waived` — and the rules above make it agree with what else the sign-off carries: the findings bind, a
-verdict contradicting them is refused at submission, and `waived` is the one value only the operator
+**The question.** A verdict stores a `conclusion` — `signed`, a blocking value, or
+`waived` — and the rules above make it agree with what else the verdict carries: the findings bind, a
+conclusion contradicting them is refused at submission, and `waived` is the one value only the operator
 principal may write, on a step it does not own. Everything the field states is therefore derivable from
-the sign-off's other contents: a sign-off carrying a blocking finding blocks; one carrying none is
+the verdict's other contents: a verdict carrying a blocking finding blocks; one carrying none is
 `signed`; one written by the operator principal on a step whose owner it is not is `waived`, carrying its
 reason. A stored value held equal to a derivation by a check at the write is the shape
 `data_model.md#concepts` names a projection, and principle 11 asks of every stored state whether a process
 is needed to keep it true — here the refusal at submission is that process.
 
 **The options.** Keep the field as the record's own projection, on the ground that "is this step signed"
-is the one-read question `step_status` exists for and the verdict is what `step_status` is built from. Or
-retire it: a sign-off carries its findings and its author, the three values become derived reads, and the
+is the one-read question `step_status` exists for and the conclusion is what `step_status` is built from. Or
+retire it: a verdict carries its findings and its author, the three values become derived reads, and the
 refusal-at-submission rule disappears because the contradiction it refuses can no longer be written.
 
-**What shifts, and why this is proposed rather than applied.** The guarantee that a verdict agrees with
+**What shifts, and why this is proposed rather than applied.** The guarantee that a conclusion agrees with
 its findings is kept either way, but by construction instead of by a refusal, which is a shift in what
 covers it and not an exact preservation; the adapters' inbound mapping of a host's review tokens onto the
-three values (`github.md#reviews-review-comments-and-threads`) would map onto a sign-off with or without
+three values (`github.md#reviews-review-comments-and-threads`) would map onto a verdict with or without
 a blocking finding instead; and the design's finding, which had no row in `data_model.md` when this was
-opened (`migration.md`, gap G15), now has one — so a derived verdict would rest on a type the record
+opened (`migration.md`, gap G15), now has one — so a derived conclusion would rest on a type the record
 declares, and the blocker the conformance matrix named for this decision is gone. What remained was the
 question itself. **What would decide it,** as the question was opened:
 whether any reader needs the three values faster than a read over the findings gives them — if
 `step_status` already serves that reader, the field is a second projection of one source. Opened by the simplification pass of 2026-09-05 without the conformance matrix, which had not landed; the proof above rested on principles 6 and 9 alone.
 
 **Why the field stays.** Principle 11 forbids stored state that needs a process to stay true, and names one
-exception — "a projection is the one exception, and it is reconciled" (`data_model.md#concepts`). The verdict is
+exception — "a projection is the one exception, and it is reconciled" (`data_model.md#concepts`). The conclusion is
 that exception in its cleanest form, because the reconciler runs at the only moment the field can change: a
-sign-off is a terminal write that supplies every field, the findings it carries are the `finding` entities
-written `PART_OF` it in that write, and a verdict is never revised in place — so the refusal at submission
-compares the verdict to the severities of exactly the findings the sign-off will ever carry, and nothing
+verdict is a terminal write that supplies every field, the findings it carries are the `finding` entities
+written `PART_OF` it in that write, and a conclusion is never revised in place — so the refusal at submission
+compares the conclusion to the severities of exactly the findings the verdict will ever carry, and nothing
 afterwards can make them disagree. A finding written later on the same work is the operator's finding on closed
 work (`#closed-work-is-reviewed-on-the-record-and-redone-through-intake-never-reopened`) or a hold's
-(`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`), and neither is `PART_OF` a sign-off.
-`step_status` is the same shape one level up — proved equal to the sign-offs by a reconciler, neither a second
-source of truth (`#declaration-batch-projection`) — and the verdict is what `step_status` is built from. So the
+(`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`), and neither is `PART_OF` a verdict.
+`step_status` is the same shape one level up — proved equal to the verdicts by a reconciler, neither a second
+source of truth (`#declaration-batch-projection`) — and the conclusion is what `step_status` is built from. So the
 deciding test is answered the other way round from the way it was posed: `step_status` does not serve the
-reader instead of the verdict, it is served *by* the verdict, and retiring the field would move the
+reader instead of the conclusion, it is served *by* the conclusion, and retiring the field would move the
 projection's source from a stated judgement to the absence of one.
 
-That absence is the reason of principle, and it is principle 5's. Under derivation a sign-off carrying no
+That absence is the reason of principle, and it is principle 5's. Under derivation a verdict carrying no
 finding is `signed`: silence is approval, and a step owner who recorded nothing has closed a step by omission.
-Under the field the step owner states `signed`, and a sign-off with no verdict is a rejected write, an error
-never swallowed — the fail-closed branch. The verdict is the step owner's stated judgement; the findings are its
+Under the field the step owner states `signed`, and a verdict with no conclusion is a rejected write, an error
+never swallowed — the fail-closed branch. The conclusion is the step owner's stated judgement; the findings are its
 evidence; the design asks for both because a claim never made cannot be read back (principle 2), and the
 refusal at submission is precisely the read-back of the one against the other. The rulings of revision 12 that
-the findings bind and a contradicting verdict is refused, and that a verdict is terminal and unconditional, are
-written against a stated verdict and lose their mechanic without one: the retirement case above says the
+the findings bind and a contradicting conclusion is refused, and that a conclusion is terminal and unconditional, are
+written against a stated conclusion and lose their mechanic without one: the retirement case above says the
 refusal "disappears because the contradiction it refuses can no longer be written", and what disappears with
 it is the statement the contradiction was measured against. Retirement would have bought one field fewer; it
 would have cost a step closing on evidence nobody summarized.
@@ -589,13 +589,13 @@ would have cost a step closing on evidence nobody summarized.
 **What the blocker was, and that it is gone.** The conformance matrix found this decision blocked on the
 finding having no recorded shape (U-6; `migration.md`, G15). The testability pass (revision 37) gave the
 `finding` its row, which is what made a ruling writable against a declared type; the shape did not decide the
-question — it made a derived verdict possible, and the ruling above is that it is not the right one.
+question — it made a derived conclusion possible, and the ruling above is that it is not the right one.
 
 **Cost accepted.** One stored value a derivation could reproduce, plus the reconciler at the write, which is
 the refusal the design already had. The inbound mapping of a host's review tokens onto the three values
 (`github.md#reviews-review-comments-and-threads`) stands as written.
 
-**What would reopen it.** A finding that may be attached to a sign-off after its write — which would make the
+**What would reopen it.** A finding that may be attached to a verdict after its write — which would make the
 reconciler a process rather than a moment, and the field the stored state principle 11 forbids. The design has
 no such write, and admitting one would reopen more than this decision.
 
@@ -701,7 +701,7 @@ because the correction the finding owes the batch is made in the batch, and the 
 workflow cannot reach *this* batch anyway: it changes how the next batch of the kind is executed. The crux the
 open question named — whether a review step that judged a workflow wrong can honestly sign that the
 workflow's step was satisfied — resolves the same way. They are two claims, and the design records them as
-two: the verdict states whether the step's condition is met for this batch's work, and the finding's standing
+two: the conclusion states whether the step's condition is met for this batch's work, and the finding's standing
 axis states that what produced the work will produce the defect again. A step owner that corrected the work
 and filed the finding as standing has signed nothing false; a step owner that signed without filing it has,
 and that is the failure the standing axis catches, not one that sequencing would.
@@ -714,7 +714,7 @@ on is read from where the task is filed
 (`planning_model.md#maintenance-is-work-the-planning-workflow`).
 
 **What decision 14 permits and this ruling declines.** A batch may hold on a task it created where its
-sign-off would be a lie without it. An institutionalization task is not such a case, by the reasoning above,
+verdict would be a lie without it. An institutionalization task is not such a case, by the reasoning above,
 so a step owner does not record a `DEPENDS_ON` edge to one, and a batch whose step owner believes its work
 cannot close until the swarm has changed has misclassified the finding — the defect in the work is one-off
 and is corrected in the batch; the defect in the producer is standing and is the task's. Where a step owner
@@ -737,14 +737,14 @@ declarations are (`workflows.md`).
 **Ruled (decision 37, 2026-09-06): the operator's view of work is a read of the record, and a channel
 carries a declared subset of it.** Registered in `conformance.md#the-register-of-open-design-decisions`. An
 operator wanting to see the results of all work — what is open, what is held, what closed and with which
-verdicts — reads the record: the batches and their chains, the sign-offs and the findings they carry, the
+conclusions — reads the record: the batches and their chains, the verdicts and the findings they carry, the
 checkpoints and who resolved them, the artifacts by edge. A dashboard is that read rendered for a
 principal, and it is nothing more than that read: it is made under the operator's credential and grant like
 every other read (`authority_model.md#grants`); it crosses no boundary, because the record is on the inside
 of the one boundary this design has (`#actions-are-entities-only-actions-are-taken`), so it is not an
 adapter and needs none; and it has no write contract of its own, because whatever the operator writes
 through it is one of the writes the design already attributes to the operator principal — a checkpoint's
-resolution, a finding on a batch (above), a `waived` sign-off, a task. The read is the review surface, not
+resolution, a finding on a batch (above), a `waived` verdict, a task. The read is the review surface, not
 a copy of it: a client that kept a picture of the queue beside the record would be a second source of truth
 for the operator's decisions, and stale in the direction that matters (principle 11).
 
@@ -798,7 +798,7 @@ artifacts.** Registered in `conformance.md#the-register-of-open-design-decisions
 any work the record holds, including work that closed without ever awaiting them, and record findings on it
 as on a held batch (above). What differs on a closed batch is only where the one-off half of a finding
 lands. On an open batch the correction is owed to the batch and made in it. On a closed batch there is no
-step to make it in: its sign-offs are written, its chain has ended, and its tasks are terminal. So the
+step to make it in: its verdicts are written, its chain has ended, and its tasks are terminal. So the
 correction is a **task** — created with provenance back to the finding, referring by `REFERS_TO` to the
 artifacts the closed batch left and to the entities it produced, and entering intake like every created
 task (`work_model.md#intake-is-every-tasks-first-workflow`). Intake routes it to whichever workflow the redo
@@ -812,11 +812,11 @@ closed: it produces an institutionalization task as decision 17 already rules.
 task returning to open is a status mutation a process would have to perform, and the `task` row already
 lists a reopened status among the things that are deliberately not a field (`data_model.md#concepts`).
 *Sequencing is data* (`#sequencing-is-data-successors-and-the-chain`): a batch is opened only by a closing
-sign-off naming a successor, or at intake for a created task, and a closed batch has no sign-off left to
-write, so reopening one would open a batch by a mechanism formation does not have. *A sign-off is terminal
-and pinned* (`data_model.md#record-conventions`): the closed batch's verdicts were made against the artifact
-heads they name and stay true as the account of what was judged then; a redo that wrote new sign-offs into
-the old batch would put verdicts on one batch that judged two different states of the work. The new task's
+verdict naming a successor, or at intake for a created task, and a closed batch has no verdict left to
+write, so reopening one would open a batch by a mechanism formation does not have. *A verdict is terminal
+and pinned* (`data_model.md#record-conventions`): the closed batch's conclusions were made against the artifact
+heads they name and stay true as the account of what was judged then; a redo that wrote new verdicts into
+the old batch would put conclusions on one batch that judged two different states of the work. The new task's
 batch is judged on its own, against the redone artifact's head, and the two accounts stand side by side,
 which is what an append-only record is for.
 
@@ -846,10 +846,10 @@ the rule. Migration is incremental, never a flag day (`migration_is_incremental_
 ### Sequencing is data: successors and the chain
 
 `workflow.successors` names the workflows a closing batch's tasks may enter next, and `none_permitted` says
-whether the closing sign-off may name none. The last step is singular (never a parallel group); its sign-off
-is the batch's closing sign-off and selects exactly one successor from the list, or none where the
+whether the closing verdict may name none. The last step is singular (never a parallel group); its verdict
+is the batch's closing verdict and selects exactly one successor from the list, or none where the
 declaration permits it. None is the normal close of a task that needs no further workflow, and a
-declaration that permits it says so reviewably: a closing sign-off naming none under a declaration that does
+declaration that permits it says so reviewably: a closing verdict naming none under a declaration that does
 not permit it is refused at the write, so a security batch cannot end unreleased (`workflows.md#security`),
 and a feature declaration permits none only for a project that deploys its default branch on its own
 cadence (`workflows.md#feature`) — which is what makes "landed" a derived read over the chain and not a
@@ -861,11 +861,11 @@ process to keep it true against the batches (principle 11). Parallel successors 
 names one or none, and work that needs two workflows at once is split into child tasks
 (`work_model.md#a-task-is-in-at-most-one-batch-at-a-time`). Intake is the universal entry
 (`work_model.md#intake-is-every-tasks-first-workflow`), so every chain begins with an intake batch, and a
-`successors` list that names intake is a declaration error. A recurring task's closing sign-off names none
+`successors` list that names intake is a declaration error. A recurring task's closing verdict names none
 and **creates** the next instance — a new task whose own intake batch opens on its creation — which is a
 task creation and not a successor; the instances are linked `FOLLOWS` task to task, and the rule is stated
 once in `work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next`. Core designs: `workflows.md`.
-What this sequencing means for a batch's formation — that a closing sign-off naming a successor is the
+What this sequencing means for a batch's formation — that a closing verdict naming a successor is the
 only thing that opens a batch, which tasks it carries, and that the workflow is fixed at open and never
 switched — is `work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow`, stated once there
 (principle 9).
@@ -1021,7 +1021,7 @@ takes it cleanly. A `vocabulary.md#checkpoint`'s subject is exactly one, an acti
 (`#the-checkpoint`), and a synced observation resting unread under a governance type's current value is
 neither: no batch is holding on it, no step needs it resolved to close, and there is no task to name as the
 subject. A `vocabulary.md#finding` is "one defect or objection a step owner records when judging a batch" — tied to a
-sign-off and a batch's review moment — and this condition exists whether or not any batch happens to be
+verdict and a batch's review moment — and this condition exists whether or not any batch happens to be
 judged that day; a peer could replicate a stale `agent_policy` on a Tuesday and the next review of anything
 might be weeks off. Forcing either shape onto this condition would be inventing a new use for a mechanism
 built for a different one, which is what principle 6 warns against as much as building a parallel mechanism
@@ -1154,7 +1154,7 @@ successful recurrences — no PR, issue, or repository. The checkpoint the gate 
 and its task. The consent gate for outbound non-code work is this gate: a policy lists
 `send_external_comms` and `publish` as high blast, the content agents' actions carry those classes, the
 runner subscribes to the checkpoint, and the task is re-claimed on resolution. Do not build a second
-gate (principle 6). PR-shaped review machinery (`step_status`, review verdicts, the steward's merge
+gate (principle 6). PR-shaped review machinery (`step_status`, review conclusions, the steward's merge
 action) is a separate mechanism layered on GitHub; the PR is an artifact of the batch.
 
 ### The checkpoint is written where the gate first holds the action, and the permit is decided at the take
@@ -1163,7 +1163,7 @@ action) is a separate mechanism layered on GitHub; the PR is an artifact of the 
 evaluated once more when the action is taken.** The gate is one decision function, asked whenever a
 principal needs to know whether an action may be taken, and for an action whose workflow places `consent`
 before `send`, `pay`, or `post` it is asked at two moments. The first is when the action becomes known and
-the `consent` step opens — the drafts have passed `review`, or the `verify` sign-off has recorded the
+the `consent` step opens — the drafts have passed `review`, or the `verify` verdict has recorded the
 figures: the gate is evaluated on the action's class, its confidence, the `action_policy`, and the class's
 action series, and where it would hold, **the checkpoint is written then**, reason `gate_hold`. That is the
 checkpoint the step carries to the operator and whose resolution it records (`workflows.md#outreach`,
@@ -1244,7 +1244,7 @@ decided early and a permit at the take, and for an `operator_only` class the tak
 permits, because the class resolves to `NEVER` whatever the resolution says (the third of its four
 conditions). So resolving the checkpoint `approved` releases no action to an agent — none can take it — and
 it does not record that the effect happened. It records that the operator decided the effect should happen
-and will take it themselves. A resolution of `denied` is the ground of the step's failing verdict: the effect
+and will take it themselves. A resolution of `denied` is the ground of the step's failing conclusion: the effect
 is refused, and the step owner signs on the `on_fail` step or the declared alternative close. Principle 2
 applies to the operator as to every principal: the operator saying the thing was done is a report of a
 write, and the write is what is read. What the record then needs is the **confirmation** — the observation
@@ -1265,7 +1265,7 @@ confirmation's provenance. A declaration whose step may close on the report says
 step whose declaration does not holds for the artifact and reaches its bound like any other. The
 operator-only workflow's own `await` and `record` divide this the same way: `await` closes on the
 confirmation under this rule, never on the resolution alone, and `record` is where that confirmation (or a
-`denied` resolution's failing verdict) is written onto the task
+`denied` resolution's failing conclusion) is written onto the task
 (`workflows.md#operator-only`).
 
 **What this adds is nothing, and what it removes is the hop.** No field and no type: the action, the
@@ -1376,10 +1376,10 @@ is delivery of the task (`work_model.md`), not a gate.
 
 Two invariants hold at the boundary; `adapters.md` states them in full and tables the mapping per
 system. First, the workflow engine never reads an external system; it reads the record (batches, leases,
-sign-offs, actions, checkpoints, artifacts), and only an adapter touches the external system, writing
+verdicts, actions, checkpoints, artifacts), and only an adapter touches the external system, writing
 what it learns there as a signal about an artifact, with provenance. This is "one engine sequences from
 the entities" applied to the boundary. Second, no external event advances a step by itself: an event can
-yield only a sign-off by a named principal, an observation on an artifact, an action confirmation, or a
+yield only a verdict by a named principal, an observation on an artifact, an action confirmation, or a
 new task for intake, and an automated account's approval never stands in for a review step's owner. Outbound, a step's
 effect on an external system is an action through this gate, which the adapter takes on permit and
 confirms by reading the system back.
@@ -1464,11 +1464,11 @@ gate to blast alone — a gap in the proposing agents, not a design change. **C4
 agent leaves no stale mirror, in code and in design entities alike; the data correction is the gate-state
 plan's, and whether it has been made is `status.md`.
 
-**The names `workflow`, batch, `sign-off`, `checkpoint`.** This reverses the recorded decision
+**The names `workflow`, batch, `verdict`, `checkpoint`.** This reverses the recorded decision
 `keep_the_name_workflow_definition` in the gate-state plan `ent_4222e5d52edd9bdba7b78cc1`. Reason:
 "definition", "record", and "brief" are redundant qualifiers when every entity in the store is a
 definition, a record, or a description of something; `workflow` declares, a batch is the tasks going
-through it and the record of that, a `sign-off` is what a step owner writes to close a step on it, and a
+through it and the record of that, a `verdict` is what a step owner writes to close a step on it, and a
 `checkpoint` is the held state itself; `participation_record` and `checkpoint_brief`, both retired, named
 the weakest of these. No entity carries `run` in its name: `run` collided with the retired liveness
 vocabulary, and a step's state is derived from edges rather than held in a per-step record.
@@ -1478,7 +1478,7 @@ recorded names.
 
 ## Prior art
 
-GitHub environment protection rules are the nearest declarative model of a step with a required sign-off;
+GitHub environment protection rules are the nearest declarative model of a step with a required verdict;
 Ateles shares the declarative definition and pre-step approval, not per-environment routing or the 1-of-n
 rule, since blast radius selects the gate. Cedar's rule (zero permits is deny; any forbid wins) is the
 semantics the advisory and enforcing paths share. A2A's `input-required` and `auth-required` are the

@@ -65,23 +65,23 @@ refuse-and-requeue-as-fallback, and the hardcoded step-list floor (C5, below).
    cannot record:
    finish the reasoning, attempt the write, and on failure leave the task as it was: the lease lapses on
    its own and the task is claimable again (`work_model.md`), with no process needed to return it. A
-   sign-off whose write failed is the unaccountable work this posture exists to prevent. Silence beats a
-   false verdict.
+   verdict whose write failed is the unaccountable work this posture exists to prevent. Silence beats a
+   false conclusion.
 
-   **The step owner does not post its verdict anywhere else.** A verdict that cannot reach the record is
-   not a verdict. The step stays open; the condition is announced on the off-record path of rule 2, along
+   **The step owner does not post its conclusion anywhere else.** A conclusion that cannot reach the record is
+   not a conclusion. The step stays open; the condition is announced on the off-record path of rule 2, along
    with every other blocked claim in the window; and the work is re-claimed when the record returns,
-   because the lease lapses on its own and publishes the step again. The verdict is re-derived then, not
-   replayed from wherever it was parked — the artifact may have moved under it, and a sign-off is pinned
+   because the lease lapses on its own and publishes the step again. The conclusion is re-derived then, not
+   replayed from wherever it was parked — the artifact may have moved under it, and a verdict is pinned
    to the artifact state it judged (`data_model.md#concepts`).
 
-   The anti-pattern, named so it is recognizable: the step owner writes the verdict to the code host as a
+   The anti-pattern, named so it is recognizable: the step owner writes the conclusion to the code host as a
    review or a comment, treats that comment as the authoritative record because it is the only surface
    that accepted the write, and a later reader — the steward, the engine, or the owner itself on a second
-   pass — replays the comment as though it were the sign-off. Every part of that is forbidden. A verdict
-   that reached only the artifact is an **observation** on the artifact and never a sign-off
+   pass — replays the comment as though it were the verdict. Every part of that is forbidden. A conclusion
+   that reached only the artifact is an **observation** on the artifact and never a verdict
    (`adapters.md#no-external-event-advances-a-step-by-itself`); the code host is not a write-ahead log
-   for the record; and a step is closed by a sign-off or it is open. The same holds for a verdict parked
+   for the record; and a step is closed by a verdict or it is open. The same holds for a conclusion parked
    on local disk, in a chat message, or in the runner's own scratch state: those are diagnostic capture
    under rule 1, which asserts nothing about the record.
 
@@ -105,7 +105,7 @@ refuse-and-requeue-as-fallback, and the hardcoded step-list floor (C5, below).
    the row without the field, and an idempotency-mismatch error is stronger proof of a prior commit than a
    success response (digest `ent_b31cad6074f79e8adfa6b2aa`).
 
-7. **Unknown stays distinct from a verdict.** A failed read is not a negative result. Any reader of gate,
+7. **Unknown stays distinct from a conclusion.** A failed read is not a negative result. Any reader of gate,
    grant, or drift state carries a third value; an error is never coerced to pending or to clear. Principle
    7 of `principles.md`; at a policy enforcement point the third value resolves to deny (`authority_model.md`).
 
@@ -149,7 +149,7 @@ the model or harness it started with partway through — the case that killed th
 one rate limit, one of them mid-rebase.
 
 **Ruled (2026-09-06).** Registered in `conformance.md#the-register-of-open-design-decisions`. Unknown stays
-distinct from a verdict (principle 7), and this is squarely an unknown: the step is neither confirmed
+distinct from a conclusion (principle 7), and this is squarely an unknown: the step is neither confirmed
 advanced nor confirmed failed when the runner under it disappears. Three shapes, and the design must pick
 one rather than let each runner's crash handler decide for itself:
 
@@ -171,7 +171,7 @@ one rather than let each runner's crash handler decide for itself:
    eligibility check decision 59 settles is evaluated at the take, not once per task. A re-claim at or
    above the required tier is unremarkable — it is the ordinary claim predicate finding a new eligible
    runner. A re-claim silently below it is the reporting-without-binding shape principle 1 names: the step
-   completes, a sign-off is written, and nothing in the record shows the work was done under a floor the
+   completes, a verdict is written, and nothing in the record shows the work was done under a floor the
    policy says it should not have cleared.
 
 **Why this is not decided by the shape above alone.** Options 1 and 2 differ only in the lapse timing and
@@ -332,9 +332,9 @@ checkpoint", wherever the documents say it, means this.
 
 **Escalation reorders; it never signs.** A checkpoint raised on a step nobody has claimed, or on a task
 the swarm cannot advance, changes the order in which claimable work is offered and what a principal
-attends to first. It changes no verdict and closes no step. A step blocked on a step owner who never
+attends to first. It changes no conclusion and closes no step. A step blocked on a step owner who never
 acted is a liveness condition, not an ordering one, and reordering the queue cannot release it: the step
-is closed by that step owner's sign off or it stays open. **No step is closed by elapsed time.** A gate that expires into
+is closed by that step owner's verdict or it stays open. **No step is closed by elapsed time.** A gate that expires into
 a pass is a gate that fails open on a timer, which is the shape this model exists to remove — the whole
 value of a required step is that its absence is visible, and a timer converts that absence into a silent
 permit. So a checkpoint raised on an unclaimed step names the step, its owner role, and how long it has
@@ -367,9 +367,9 @@ role, which is what naming the role in `needed_input` does, is what makes an abs
 one. The interval is declared on the step, as
 `unclaimed_after` (`gates_and_workflows.md#declaration-batch-projection`), not inferred; an undeclared
 interval raises no checkpoint. And the constraint above holds without exception:
-the checkpoint alerts, and **it never signs**. It changes no verdict, closes no step, and its resolution is
+the checkpoint alerts, and **it never signs**. It changes no conclusion, closes no step, and its resolution is
 the operator's decision about the role, not a clearance of the step — a step is closed by its owner's
-sign-off or by the operator's `waived` sign-off, and by nothing else.
+verdict or by the operator's `waived` verdict, and by nothing else.
 
 **A role that resolves to no principal is a declaration error, not only a claim-time failure.** A step
 whose `owner_role` the roster resolves to nobody raises a checkpoint with reason `unspawnable_assignee`

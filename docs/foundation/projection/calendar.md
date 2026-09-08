@@ -30,7 +30,7 @@ Every rule `calendar.md` owns, one entry each: the rule's own statement from `co
 
 ## [A series and its occurrences are each artifacts, related by `PART_OF`](../calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of)
 
-- **CA-7** — both levels are artifacts, the occurrence `PART_OF` the series; a signal lands on the unit whose id it carries; a rule change is an observation on the series and every held occurrence is re-read before a step depends on its time; a sign-off on an occurrence pins a dated fact, on the series the declaration as read *[M]*
+- **CA-7** — both levels are artifacts, the occurrence `PART_OF` the series; a signal lands on the unit whose id it carries; a rule change is an observation on the series and every held occurrence is re-read before a step depends on its time; a verdict on an occurrence pins a dated fact, on the series the declaration as read *[M]*
 
 ## [What the design uses, and what the API offers that it does not](../calendar.md#what-the-design-uses-and-what-the-api-offers-that-it-does-not)
 
