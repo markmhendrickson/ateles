@@ -81,6 +81,13 @@ free number is 69, which this pass takes.
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
 
 
+## `charter.md`
+
+| Revision | Pass | What changed |
+|---|---|---|
+| 81 | the charter pass of 2026-09-08 | the document created — the purpose the corpus serves and the five objectives it decomposes into, derived from the README and `docs/icp.md`, placed as an authored companion beside the kernel rather than in it. Records one design silence rather than filling it: the corpus states what forces a return to the operator and nowhere states that an unnecessary return is a defect, so "autonomously" has no rule to check a proposal against |
+
+
 ## `conformance.md`
 
 | Revision | Pass | What changed |
