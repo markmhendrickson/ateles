@@ -311,7 +311,7 @@ with them.
   turns (`vocabulary.md#runner` — "the process that runs an agent and holds a lease on the agent's behalf"),
   so a `conversation_message` or a `conversation` observation is written by the runner whose lease was live
   when the turn happened, the same attribution `agent_session` already carries for a step
-  (`#a-verdict-pins-the-agent-version-and-names-what-it-read-it-does-not-pin-the-model-that-read-it`). **The
+  (`#record-conventions`). **The
   reader is any step that declares the read**: nothing above restricts who may read a session or its digest
   beyond the ordinary declared-read discipline every type carries
   (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`) — a session's content is
@@ -338,7 +338,7 @@ with them.
   which of `conversation`'s 51 existing fields survive normalization, and the `reducer_config` each needs is
   schema authoring for the newly-named owner (the runner's `ownership_grant` principal, or whoever the
   operator names), made through the ordinary registration path
-  (`#type-registration-is-an-owned-decision-write-read-back-tests-never-register-into-the-shared-registry`)
+  (`#record-conventions`)
   and authored in `migration.md#session-types-the-field-by-field-shape-decision-64-left-to-the-schema` — not
   a design question this document decides in the abstract, and decision 64 is ruled in full, not in part.
   **One incoming edge is settled independently of that authoring:** decision 40 gives `session_digest` a

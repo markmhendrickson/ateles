@@ -948,7 +948,7 @@ shape one level up, applied reflexively to the architecture the swarm runs under
 record it maintains: survey (`pm`, `investigate`) before judging, judgement recorded as a finding rather
 than assumed, and the remedy written only through the record's own primitives — here, a PR against
 `docs/foundation/` that cites the finding and the decision it consolidates
-(`#amending-a-foundation-document`), not a write any agent makes to the directory directly. It is not
+(`conformance.md#amending-a-foundation-document`), not a write any agent makes to the directory directly. It is not
 literally an `amend_<level>` action, because `docs/foundation/` is not a planning record and carries no
 `amend_<level>` class of its own (`planning_model.md#authority-per-level-an-amendment-is-an-action-and-its-
 class-is-the-levels`); no new workflow is declared to make it one. The analogy is in the shape — survey,
@@ -972,7 +972,7 @@ refers to, not a workflow this batch itself enters.
 **The limit this does not resolve.** Revision 21 already states bootstrapping as a limitation, not a
 mechanism: a workflow too broken to open a step cannot repair itself, and the first declaration is an
 operator act by design, with no built counterpart standing in for it
-(`status.md`'s revision-21 table, `#an-unreadable-workflow-is-unknown-and-unknown-holds` in
+(`status.md`'s revision-21 table, `gates_and_workflows.md#an-unreadable-workflow-is-unknown-and-unknown-holds` in
 `gates_and_workflows.md`). An architecture gap that prevents the proposal itself from being expressed — no
 `intake_rule` classification fires because the gap is in what an `intake_rule` can name, or `postmortem`
 cannot be entered because the entry condition above does not cover the shape of gap found — is the same

@@ -2315,7 +2315,7 @@ orphan is a defect at all is answered permissively: no expectation declared, no 
 existing unplanned-work admission and from decision 57 already reserving the hierarchy's shape to the
 operator, against the usual fail-closed instinct, which here would assert by finding-volume that the
 operator's own instance is wrong to have chores. Transitivity is judged edge by edge, never over the whole
-chain to a root, because "root" is `#the-hierarchy-is-edges-and-a-task-has-one-line-upward`'s description of
+chain to a root, because "root" is `planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward`'s description of
 wherever a chain ends and not a level every instance must register — judging "reaches a strategy" would name
 a level, which no rule above does, and decision 57 is exactly the reservation against naming one.
 
@@ -2427,7 +2427,7 @@ registered class default, and only a task in an undefaulted or unclassifiable cl
 unplanned, where the existing revision-45 mechanism applies unchanged — a `decision_or_attestation` finding,
 `scope: unknown`, a proposal riding beside it, and the task still routed to its successor on the same batch;
 the finding never holds ordinary work. The no-authoring refusal from revision 45
-(`#the-swarm-may-not-author-a-missing-ancestor`) is restated and made explicit against the new default: a
+(`planning_model.md#the-swarm-may-not-author-a-missing-ancestor`) is restated and made explicit against the new default: a
 class default is a record the operator pre-authored once, before any orphan of that class existed, and
 `classify` writing `PART_OF` to it is the identical write it makes today when a task names its own parent —
 never a write to the plan's statement, `completion_criteria[]`, or existence. Decision 61 is reframed from a
@@ -2442,7 +2442,7 @@ already lists `priority` as a field, `workflows.md#intake`'s `prioritize` step a
 governance-scale "stop," and `planning_model.md` already derives a plan's `next_steps` as "the open
 descendants in priority order" — but no vocabulary entry existed, and nothing connected any of this to
 `claimable` or bound a claiming principal to anything. `work_model.md#priority-orders-the-claimable-pool-it-does-not-enter-it`,
-placed immediately after `#what-a-claim-predicate-treats-as-claimable`, settles: **priority is a derived
+placed immediately after `work_model.md#what-a-claim-predicate-treats-as-claimable`, settles: **priority is a derived
 read for the everyday ordering question**, argued from principle 11 (a stored value the ascent should track
 but does not is exactly the watchdog-needing field the principle refuses) and from the existing derived
 `next_steps` precedent, applied one level down to the pool a single principal may claim from — read together
@@ -2472,7 +2472,7 @@ mechanisms rather than proposing a fifth).
 
 **Size.** Measured 2026-09-06 with `wc -c` against revision 45 as the predecessor. `planning_model.md`
 +6.4k (the orphan-default section rewritten; decision 61 reframed); `work_model.md` +6.6k (one new section,
-`#priority-orders-the-claimable-pool-it-does-not-enter-it`); `vocabulary.md` +2.3k (the `priority` entry);
+`work_model.md#priority-orders-the-claimable-pool-it-does-not-enter-it`); `vocabulary.md` +2.3k (the `priority` entry);
 `conformance.md` +1.3k (decision 61's row reframed; decision 62 opened; the register's summary paragraph and
 next-number line updated to 63). Net **+16.6k** across the four files touched; no other foundation document
 was edited.

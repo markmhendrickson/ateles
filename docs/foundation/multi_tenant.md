@@ -273,7 +273,7 @@ column/field is populated with one constant" — because there is exactly one te
 existing grant belongs to it. The assignment is therefore **mechanical and needs no per-agent judgement**;
 per-agent judgement begins with the second tenant, when a grant is written for a principal that could
 belong to either. The one obligation the backfill carries is that it precede the check: a grant with no
-`match_tenant` must fail closed at admission and never read as any-tenant, which is `#grants`' rule that a
+`match_tenant` must fail closed at admission and never read as any-tenant, which is `authority_model.md#grants`' rule that a
 degraded read never synthesizes a value more permissive than success would have returned.
 
 ---
