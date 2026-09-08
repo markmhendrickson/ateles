@@ -1570,32 +1570,12 @@ to exist before any of its rules apply — the same question
 records, one step earlier. That section's step 0 is "an empty instance", marked infrastructure; this ruling
 says who is obliged to bring it about when nobody has, and stops there.
 
-**What this leaves open.** Whether a deployment that names several instances — the several-records case
-an operator keeps apart — names one of them as where its own governance writes go, or whether the design
-requires a deployment to hold exactly one such instance, is not settled here. It turns on a routing question
-this ruling does not reach, no rule above depends on the answer, and inventing one would be design by
-omission. It is registered as decision 91.
-
-**The operator has since supplied that row's first disposition, and it stays open.** In the memo of
-2026-09-08 that retired decision 82's framing, he stated that an instance of a swarm will have at least one
-instance of the record or many; that where there is more than one, **one of them needs to be the controlling
-instance** for that swarm; and that the others stay relevant, because the swarm navigates and leverages them
-— a user may want some workflows in one instance and others in another. That names a disposition this row's
-question did not: not "one instance per deployment" and not "several, undistinguished", but several with one
-distinguished, and the rest reachable.
-
-It is recorded here rather than ruled, for two reasons. The memo answers the question the row asks and
-leaves the terms a ruling needs — what *controlling* governs beyond the governance writes the row names,
-whether the mark sits on the deployment or on the record, and what a deployment holding several instances
-and naming no controlling one does, which under principle 5 is the fail-closed case and under decision 90's
-rule 2 is the deploy-a-companion case, and those are different answers. And the pass that surfaced it was
-ruling decisions 81 to 83, whose subject is the tenancy axis; ruling another row inside it is the collision
-the register exists to prevent. What can be said now without settling it: the disposition is consistent with
-decision 76, since several instances that must not merge is what that ruling already holds, and with
-decision 97, whose *what a proxy is still for* names resolving which instance a request reaches as this
-row's routing need. Decision 98 depends on the answer for the narrow part of its own question — whether
-planning belonging to the swarm itself, rather than to any one instance, has a home
-(`planning_model.md#whether-an-instances-planning-records-are-per-instance-and-how-a-swarm-reading-several-relates-them`).
+**What this ruling left open, and where it is now settled.** Whether a deployment that names several
+instances — the several-records case an operator keeps apart — names one of them as where its own
+governance writes go, or whether the design requires a deployment to hold exactly one such instance, is not
+settled here. It turns on a routing question this ruling does not reach, and no rule above depends on the
+answer. It was registered as decision 91 and is ruled in its own section below,
+[Which of a deployment's several instances takes its governance writes](#which-of-a-deployments-several-instances-takes-its-governance-writes).
 
 **Cost accepted.** A deployment-time obligation the design cannot check from inside a live swarm: a
 recovery path pointing at its own target host is a defect the record carries without contradiction, and only
@@ -1613,6 +1593,155 @@ That is the change that reopens this.
 decision 45's classes when that adapter is declared. FP-13, which reads the restore obligation, gains one
 case: a binding whose `recovery_paths[]` names a path on the deployment's own target host is a defect that
 row reads, beside the path with no cadence it already reads.
+
+### Which of a deployment's several instances takes its governance writes
+
+**Ruled (decision 91, 2026-09-08): a deployment that names several instances of the record names one of
+them as its controlling instance, the mark sits on the deployment and not on the record, and a deployment
+naming several instances and no controlling one fails closed.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. This settles the three terms decision 90's ruling
+named when it recorded the operator's disposition without ruling it.
+
+**The rules in this section.**
+
+1. The controlling instance is where the deployment's [governance writes](vocabulary.md#governance-write) go,
+   and that is all *controlling* governs.
+2. The mark is a parameter of the deployment, not a property of any instance.
+3. A deployment naming several instances and no controlling one fails closed.
+
+**The operator's disposition, which this ruling states in the design's own terms.** In the memo of
+2026-09-08 that retired decision 82's framing, he stated that an instance of a swarm will have at least one
+instance of the record or many; that where there is more than one, **one of them needs to be the controlling
+instance** for that swarm; and that the others stay relevant, because the swarm navigates and leverages them
+— a user may want some workflows in one instance and others in another. That named a disposition the row's
+question did not: not "one instance per deployment" and not "several, undistinguished", but several with one
+distinguished, and the rest reachable.
+
+#### 1. Controlling governs governance writes, and this is the narrow reading of a question that could be read wider
+
+The controlling instance is where the deployment's governance writes land: writes to the eight closed,
+named types `vocabulary.md#governance-write` lists, which the [engine](vocabulary.md#engine) alone may
+write (decision 56). Everything else a swarm writes — tasks, batches, artifacts, observations — may live in
+any instance the deployment names, bound by the explicit binding decision 76
+requires and by the cross-record collision rule that already makes a write land on the record its producing
+task ascends to.
+
+**Why narrow first, which is the operator's own reason and also the structural one.** Start narrow and
+widen if a use appears. The asymmetry is what makes that the right order rather than merely the cautious
+one: **narrowing later is a breaking change, and widening later is not.** If *controlling* is later found to
+need to cover the swarm's own working state, that extends the rule, and a deployment whose secondary
+instances hold only governance-free content keeps working unchanged. The reverse takes something back from a
+deployment that relied on the wider reading — instances it had been writing to become instances it may not
+write to, and every record already there is misplaced. A rule that can only be tightened by invalidating
+existing deployments is a rule to state at its narrowest and grow.
+
+**What a wide reading would add, named so a later widening amends a stated scope.** The wide reading is
+that the controlling instance also holds the swarm's own working state — the leases, checkpoints, and
+verdicts by which the swarm runs itself — while the secondary instances hold only domain content. That is a
+coherent rule and this ruling does not take it. Naming it here is the point: the scope above is stated as a
+choice among two readings and not as the only reading the words bear, so a pass that later widens it amends
+something the corpus says rather than reinterpreting a silence.
+
+**The corpus argument for admitting the secondaries rather than narrowing them into something lesser.**
+Decision 86 admitted `tool:shell:*` knowing its enumerability bound could not be met, because refusing it
+"leaves that reach outside the record entirely, where no reviewer sees it and no verdict attests it — the
+worse of the two failures" (`authority_model.md`). The same shape applies one level up. A wide reading of
+*controlling* makes every secondary instance not-quite-the-record — a place the swarm reads
+and writes but which the design treats as lesser — and that is the disposition decision 55 already refused,
+ruling that a peer instance **is** the record, extended by replication, not an external system and with a
+synced entity that is not an artifact. Keeping *controlling* to the governance writes is what keeps every
+named instance fully the record, which is where decision 55 put it.
+
+#### 2. The mark sits on the deployment, not on the record
+
+Which instance is controlling is a parameter of the deployment, stated where decision 90 already has the
+deployment state its target host and the instance it will read and write. No instance carries a field
+saying it is controlling.
+
+**Two grounds.** Principle 11 refuses state that needs a process to stay true: a mark on an instance would
+need something to clear it when the deployment that set it is decommissioned, and nothing would — a
+destroyed deployment writes nothing, so the stale mark outlives it and reads as authoritative. Read from
+the deployment, the same question is answered by a record that exists only as long as the deployment does.
+And decision 90 already made both the target host and the instance parameters of the deployment for the
+same reason it gives there: the target is a parameter of the deployment, never a property of the software.
+Which of several instances is controlling is the same kind of statement, and putting it anywhere else would
+split one act's parameters across two homes.
+
+**The consequence, stated plainly: "is this instance controlling" is answerable only relative to a
+deployment.** Two deployments may name the same instance and disagree — one treating it as controlling, the
+other as a secondary it reads. **Nothing refuses that, and nothing should.** Three reasons. It is what
+rule 2 means rather than a defect in it: a property of the deployment is relative to the deployment by
+construction, and a rule making it globally consistent would be a property of the record wearing a
+deployment's name. Refusing it needs a check no deployment can run — a deployment would have to enumerate
+every other deployment naming its instances, which is a set no instance holds and no principal can
+enumerate, and a check that cannot be run is the state principle 11 refuses in another form. And the
+disagreement is harmless where it is not intended: governance writes from two deployments to one instance
+are writes by the [engine](vocabulary.md#engine) under each deployment's own `action_policy`, which is the
+same posture as two deployments writing tasks to one instance, already permitted. Where it is not harmless
+it is not a naming conflict but the ordinary hazard of two swarms sharing a record, which decision 76's
+separation and the record's own admission check (decision 97) already govern.
+
+#### 3. Several instances and no controlling one: fail closed
+
+A deployment naming several instances of the record and naming none of them controlling does not deploy.
+The operator is asked which instance is controlling, and the deployment proceeds once named.
+
+**This is the case between two ruled decisions, and the ruling resolves it in favour of the first.**
+Decision 76 rules that the instance binding is explicit and that "where the binding is absent or ambiguous,
+the resolution **fails closed** — the work is put to the operator, and never resolved to whichever instance
+is configured first" (`authority_model.md`). Decision 90's rule 2 says a deployment "deploys a companion
+instance where it names none". The case here has named instances, so 90's *names none* does not describe
+it; and it has no controlling one, so the binding for governance writes is ambiguous, which is exactly what
+76 refuses.
+
+**Decision 90's companion rule is scoped to a deployment naming no instance at all, and stating that scope
+is what keeps this a clarification rather than a contradiction.** Rule 2 answers the from-zero case: a
+swarm with nowhere to write has nowhere to put a verdict, a gate decision, or a task, and every rule in
+this directory is silent for it, so deploying the companion is what makes that a deployment rather than a
+half of one. There is nothing to be ambiguous about when nothing is named — the deployment is not choosing
+badly among candidates, it has none. A deployment that names several has candidates and has not chosen,
+which is a different failure with a different remedy: 90's answer would have the deployment stand up a
+*ninth* instance nobody asked for and write governance to it, which is the worst available reading of the
+operator's intent.
+
+**A default rule is the answer decision 76 refused by name.** Taking the first-named instance, or the one
+on the deployment's own host, is "resolving to whichever instance is configured first" — the phrase 76
+uses for what it forbids. The convenience is real and so is the failure it buys: a governance write is a
+write to what the swarm may do, what a principal is, or how work reaches the swarm, and a silently-defaulted
+one lands somewhere the operator never chose and is discovered when something the swarm may not do happens.
+
+**Cost accepted.** A deployment that would have run does not, until the operator names an instance. That
+cost is one line of configuration, surfaced at deploy time, when the operator is already deciding what the
+deployment names — against a governance write landing in an instance nobody chose, discovered later and
+from its effects. The design takes the first.
+
+**What this states, and what it does not mint.** No term is added to `vocabulary.md`: *controlling* is used
+as an adjective on the deployment's own naming, in the sentence that names it, and nothing turns on it that
+the three rules above do not say. No type is registered — the controlling instance is a field's worth of
+obligation on the deployment, alongside the target host and the instance binding decision 90 already puts
+there. And *the record* keeps `vocabulary.md#record`'s singular definition: several instances are several
+records under decision 76, and this ruling picks which of them takes one class of write, not which of them
+is real.
+
+**What this leaves open, and what it does not reach.** Decision 98 — whether an instance's planning records
+are per instance, and whether a swarm holding several has planning of its own — depends on this ruling for
+the narrow part of its own question and is not ruled here. What this supplies is that the controlling
+instance exists and is well-defined, so swarm-level planning has a *candidate* home rather than none;
+whether planning belonging to the swarm itself is a thing the design has at all, and whether a declared read
+may relate one instance's planning to a task bound to another, are 98's and are untouched. This ruling also
+does not say how a deployment states which instance is controlling, or what the field is called — that is a
+mechanism, and it belongs with the `deployment_configuration` entity decision 90 already sends the
+per-instance bindings to.
+
+**What would reopen it.** A use for the wide reading: swarm-level state that must live in one instance and
+that is not a governance write. That is the widening rule 1 is written to accept, and finding one amends
+the scope stated above. The other reopening condition is decision 90's own — a deployment model in which
+the record is not per-deployment — since a single instance serving many deployments would make the
+relative-to-a-deployment answer in rule 2 the common case rather than the corner one.
+
+**Matrix.** The host adapter's admission rows are unchanged: nothing here adds an action class. A
+deployment naming several instances and no controlling one is a fail-closed resolution of the same shape
+decision 76's binding already carries, read where that binding is read.
 
 ### Whether the instance of the record serving a swarm is an external system when the swarm operates it
 
