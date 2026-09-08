@@ -451,9 +451,9 @@ symmetric adds nothing to the model and ruling them asymmetric would require inv
 does not carry.
 
 **What the rule does not reach.** It admits a type, not a row: which rows of an admitted type a principal
-sees is the tenancy and ownership question decisions 81 and 83 open — with decision 82 asking the adjacent
-fork question, whether a forker gets its own instance or shares a hosted one — and this ruling neither
-answers those nor depends on them. And a step's declared reads (`reads_to_enter[]`, `reads_to_close[]`) stay what they are —
+sees is the tenancy and ownership question decisions 81 and 83 open — with decision 82 having retired the
+adjacent fork question rather than answering it, since multi-operator is a property every instance has
+whoever hosts it — and this ruling neither answers those nor depends on them. And a step's declared reads (`reads_to_enter[]`, `reads_to_close[]`) stay what they are —
 they narrow what an admitted principal reads for that step, and they never widen a grant, which the
 retrieval contract already states. **What would reopen it:** an enforcement point where the existence
 disclosure is not a schema fact — a per-row read refusal that leaks whether a named person is in the
