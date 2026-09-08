@@ -363,7 +363,7 @@ is `status.md`.
 script or a `.claude/hooks/` registration living in this tree, not from a service outside it — so a
 long-lived branch forked before the commit that added or wired one of these checks carries neither the
 file nor the registration, and the guarantee it names is silently absent there until the branch merges
-`main` back in. `status.md`'s revision recording the `git_stash_guard.py` hook (merged in `main` PR #753,
+`main` back in. `status.md`'s revision recording the `git_stash_guard.py` hook (carried on `main`,
 absent from `feat/foundation-p1-docs` until this branch's own merge of `main`) states the general form of
 this and the daemon-checkout instance `CLAUDE.md` already names; the remedy is the same for both — merge
 `main` on a cadence and re-verify the check fires through its real invocation path, not by confirming the
@@ -608,7 +608,7 @@ open rather than ruled deliberately, on two grounds. First, both are the operato
 memo, 72 carries his proposed rename with a counter-proposal recorded beside it, and neither turns on a
 principle the documents already settle — the standing instruction is to rule what the design's own logic
 decides and to leave him what turns on his judgement. Second, both would execute as a corpus-wide rename of
-the exact files three open PRs (#766, #767, #770) are amending, so ruling either now would conflict with all
+the exact files other work in flight is amending, so ruling either now would conflict with all
 three; they are to be ruled and executed as one pass after those merge, which is also why they are recorded
 now, while the evidence is gathered, rather than left to be re-derived later. **The open rows: 72 and 73.**
 
@@ -622,7 +622,7 @@ lines it concerns are written; the register rows above point at them.
 foundation document. They are the gaps left by several documents opening decisions concurrently on this
 branch and renumbering around each other, and they are recorded as gaps rather than closed up: renumbering
 would break every cross-reference the documents already carry, and silence would invite the next author to
-reuse the number for something unrelated. **Do not assign 19 or 22 to a new decision.** The next free number is **79**, and it is free across every branch, not only this one. The sweep is what establishes the number; this line never does, and an author who reads it instead of repeating the sweep will collide the way its own history predicts. It has now been stale on six consecutive passes — it read 63 with 64 on the table, then 66 with 69, then 74 while this branch's own decision 74 was already written on it, then 75 while 76 and 77 were already assigned on another branch. The sweep is over the remotes, not the file: the maximum decision row on any branch's copy of this table. As of 2026-09-07 it covers every open pull-request branch and gives 69 on `feat/foundation-p1-docs` and `fix/vocabulary-undefined-terms`, 70 on the `declaration_scope` ruling, 71 on the `underdetermined_inputs` reason class, 73 on the naming-decisions pair, 75 on the identity-model branch, 77 on the multi-instance pair (PR #784), and 78 here — so 79.
+reuse the number for something unrelated. **Do not assign 19 or 22 to a new decision.** The next free number is **79**, and it is free across every branch, not only this one. The sweep is what establishes the number; this line never does, and an author who reads it instead of repeating the sweep will collide the way its own history predicts. It has now been stale on six consecutive passes — it read 63 with 64 on the table, then 66 with 69, then 74 while this branch's own decision 74 was already written on it, then 75 while 76 and 77 were already assigned on another branch. The sweep is over the remotes, not the file: the maximum decision row on any branch's copy of this table. As of 2026-09-07 it covers every open pull-request branch and gives 69 on `feat/foundation-p1-docs` and `fix/vocabulary-undefined-terms`, 70 on the `declaration_scope` ruling, 71 on the `underdetermined_inputs` reason class, 73 on the naming-decisions pair, 75 on the identity-model branch, 77 on the multi-instance pair, and 78 here — so 79.
 
 **20 and 21 were assigned, then renumbered, and two pointers were left behind.** Both were opened in
 `payments.md` and renumbered to 27 and 28 before that document was committed, to avoid colliding with 23

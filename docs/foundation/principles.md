@@ -264,7 +264,7 @@ is not this decision's work; it is noted so that the count above is read correct
 multi-word ones.
 
 **What ruling this costs, and why it is registered rather than applied.** Any collapse is a rename across
-these documents and their generated projection, and three open PRs (#766, #767, #770) amend the same files.
+these documents and their generated projection, and other work in flight amends the same files.
 The single-word preference is the same standard decision 72 turned on. Decision 72 has since been ruled and
 executed on its own (2026-09-07, `conformance.md#the-register-of-open-design-decisions`) — the record renamed to `verdict` and
 its field to `conclusion` — which shows the shape a collapse takes here but settles nothing about this one.
