@@ -4155,6 +4155,32 @@ than carries.
 **One decision opened and ruled (69).** No figure above is carried from an earlier revision; each was
 measured by the instrument in its row on this branch on 2026-09-06.
 
+## Revision 70 (2026-09-08): decisions 94 and 95 ruled — read admission, and the proxy as the interposition point
+
+**What was ruled.** Two halves of one hole, raised by the operator on 2026-09-08. Decision **94** states
+read admission per entity type: default-deny, the grant as the allowlist, checked at the read, symmetric
+with the write side decision 41 ruled — argued at `authority_model.md#grants`. Decision **95** states that
+a harness reaches the record through the swarm's own MCP proxy and holds no direct instance credential,
+because the proxy is the only interposition point where admission can be refused — argued at
+`authority_model.md#the-swarm-reaches-the-record-through-a-proxy-that-admits-never-through-per-harness-credentials`.
+Decision **96** is opened and left open: how the proxy authenticates to the instance on an agent's behalf.
+
+**What is built, against what is now ruled.** Nothing in this revision was built by it; these rows record
+the gap the rulings create, on the same footing as every earlier revision's.
+
+| Design term / rule (revision 70) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| read admission per entity type, default-deny, grant as allowlist, read at the read (decision 94) | the record-usage contract's "Must not read" column, which described a boundary and admitted nothing | unchanged from the revision 8 row: no mechanism reads or enforces the contract, and `context_entity_types[]` bounds no runtime read — the rule now exists where before there was not one to be unenforced | the Neotoma client; the tool proxy, which is where decision 95 puts the check |
+| the harness reaches the record through the proxy, never a direct instance credential (decision 95) | nothing stated; the question was open | not assessed as a topology on this branch; what is recorded is that the proxy exists and is the nearest thing to a real enforcement point, and that its empty-identity branch admits | `mcp_tool_grant_proxy/proxy.py`; per-harness MCP configuration |
+| an unresolved caller identity is refused at the proxy (decision 95's first consequence) | nothing stated; principle 5's general rule reached the stub loader and not this branch | `enforce()` returns `(True, "")` on an empty `agent_sub` — the fail-open branch already enumerated below, now contradicting a stated rule rather than only a principle | `mcp_tool_grant_proxy/proxy.py` |
+| multi-instance routing resolves at the proxy from the deployment's binding (decision 95's third consequence) | nothing stated; decision 91 left the several-instance case open | not built; no deployment names several instances today | the proxy; decision 91, still open on which instance takes governance writes |
+
+**The five fail-open paths are unchanged by this revision and are not fixed by it.** They are daemon code
+with their own issues, and the rulings above give three of them a stated rule to be measured against rather
+than only a principle. Fixing them needs a containment test that fails when containment is absent — an
+external review's warning that the acceptance criterion as written "merely enumerates failures" is the
+reason a fix that only closes the enumerated branches would not settle it.
+
 ## Revision 69 (2026-09-07): decision 72 ruled — the record that closes a step is the `verdict`, its field the `conclusion`
 
 **Ruled and executed as one pass.** The record a step owner writes to close a step is renamed from
