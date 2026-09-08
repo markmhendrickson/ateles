@@ -711,48 +711,75 @@ are this row's to answer.
 
 ### Where a harness reaches the record, and what admits the request
 
-**Reopened as decision 97 (2026-09-08). Decision 95 ruled on 2026-09-08 that a harness reaches the record
-only through the swarm's own MCP proxy, on the ground that a proxy is the only place in the path where a
-request can be refused. That ground is false, and it contradicts decision 56, ruled two days earlier.**
-Registered in `conformance.md#the-register-of-open-design-decisions`. What follows states the contradiction,
-what survives it, and what is now open.
+**Ruled (decision 97, 2026-09-08): the enforcement point for an agent's read and write to the record is
+the record's own admission check against the requesting principal's grant. A proxy in front of the record
+is permitted and is never the enforcement point.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. Decision 95 had ruled the same day that a harness
+reaches the record only through the swarm's own proxy, on the ground that a proxy is the only place in the
+path where a request can be refused; that ground is false, and it contradicts decision 56, ruled two days
+earlier. What follows states the ruling's grounds, then the contradiction it resolves and what survives it.
 
-**Decision 56 already answered where the enforcement point sits, and rejected a proxy by name.** Its
-question was where the enforcement point sits that ties an admitted governance write to a permitted action,
-and it named three candidates: the record's admission check reading the action, *a proxy in front of the
-record*, or a sole-writer grant. It ruled the third and located the refusal **at the record** — "every
-other principal's write to a governance type is refused at the record's admission under decision 41"
-(`gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits`). Its reasoning rejected
-the proxy on principle 6: a proxy in front of the record is a second gate on the write path to the swarm's
-own record, where the grant is already read at the write by the record itself. Decision 95 placed the
-enforcement point at a proxy without citing 56, and so restated a rejected candidate as the only one.
+**Why the record.** Three grounds, in the order they bind.
+
+*Decision 56 already ruled this.* Its question was where the enforcement point sits that ties an admitted
+governance write to a permitted action, and it named the same three candidates this row names: the record's
+admission check reading the action, a proxy in front of the record, or a sole-writer grant. It ruled the
+third and located every other write's refusal at the record — "every other principal's write to a
+governance type is refused at the record's admission under decision 41". Its reasoning rejected the proxy
+by name and on principle 6: a proxy in front of the record is a second gate on the write path to the
+swarm's own record, where the grant is already read at the write by the record itself
+(`gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits`). Decision 95 placed the
+enforcement point at a proxy without citing 56, and so restated a rejected candidate as the only one; a
+ruling that did the same here would leave two rulings two days apart disagreeing about the same point in
+the same path.
+
+*The record-side check needs no component alive for a refusal.* A check in a proxy is a check that is
+absent whenever the proxy is — down, restarting, or bypassed by a harness that connects to the instance
+directly — and a request that reaches the instance around it meets nothing. The record's check holds
+however a harness connects, which is what principle 1 asks of a mechanism before it counts as a control:
+a refusal that depends on a component's liveness is a refusal that a failure removes. This is also the
+weaker property the design already relies on everywhere else, since decision 41's allowlist is "read at
+every enforcement point" and decision 94 puts the read check at the read.
+
+*A proxy is a single point of compromise for every operator's data.* Every request and every credential
+passes one hop, so its compromise reaches everything the swarm can read and write, and its credential is
+the one whose theft is not scoped to a principal. That is the hazard decision 96 names, and it is a reason
+not to make the proxy the thing the boundary rests on, whatever else the proxy is for.
 
 **The "no enforcement point" premise does not hold.** Decision 95 argued that under per-harness credentials
 decisions 41 and 94 are "unenforceable by construction… because the request reaches the record without
 passing anything that reads a grant". A record that reads the requesting principal's grant at the write
 passes exactly that, which is the topology decision 56 ruled and decision 41 assumes when it says the
-allowlist is "read at every enforcement point". A bearer credential held by a harness is a real hazard —
-its blast radius is the whole grant, and a stolen one is a principal — but that is an argument about
-custody, not about the existence of a check, and 95 spent the second argument to reach a conclusion only
-the first supports. What the substrate does today is recorded in `status.md`, and is evidence about what is
-built, never a ground for the design.
+allowlist is "read at every enforcement point". The hazard 95 reached for besides — a bearer credential
+whose blast radius is the whole grant — is real and is answered under *Cost accepted* below, but it is an
+argument about custody, not about the existence of a check, and 95 spent it to reach a conclusion only the
+first argument supports. What the substrate does today is recorded in `status.md`, and is evidence about
+what is built, never a ground for the design.
 
-**What survives.** Nothing in decision 94 depends on this: read admission per entity type is default-deny
-against the reading principal's grant wherever the check runs, and the ruling above is unaffected. Decision
-95's three consequences survive only as conditionals — if a proxy is in the path, then an unresolved caller
-identity is refused there rather than passed through (principle 5), the read boundary is checked there, and
-multi-instance routing resolves there from the deployment's binding. Each is a correct statement about a
-proxy and none is an argument for having one.
+**What a proxy is still for.** Permitting a proxy is not damning it with the word convenience: it holds
+real value, and the value is real precisely because none of it is enforcement. It is one place to rotate a
+credential rather than one per harness. It is one place to resolve which instance of the record a request
+reaches, which is the routing need decision 91 leaves open. And it is one place from which requests are
+observable. A deployment that wants any of these puts a proxy in the path and loses nothing, because the
+record refuses what it would have refused anyway; a deployment that does not is no less bound.
 
-**What is open (decision 97).** Whether a harness holds its own credential to the instance and the record
-admits, or reaches the record through the swarm's proxy, or both — and if both, which is the enforcement
-point and which is the convenience. The fork the design must weigh: a record-side check is the mechanism
-the design already has (principle 6) and is where decision 56 put it, and it needs no component to be alive
-for a read to be refused; a proxy is one place to rotate a credential and one place to resolve which
-instance a request reaches, and it holds the request and the credential together, but it is a second gate
-on the swarm's own record and a component whose compromise or absence reaches everything. Decision 96 —
-how a proxy authenticates on an agent's behalf — stays open beneath this one and is answered only if 97
-puts a proxy in the path.
+**What survives of decision 95.** Nothing in decision 94 depended on it: read admission per entity type is
+default-deny against the reading principal's grant wherever the check runs. Its three consequences survive
+as conditionals on a proxy existing — if a proxy is in the path, then an unresolved caller identity is
+refused there rather than passed through (principle 5), the read boundary is checked there, and
+multi-instance routing resolves there from the deployment's binding. Each is a correct statement *about* a
+proxy and none is an argument *for* having one, which is the distinction 95 did not draw.
+
+**Cost accepted.** A bearer credential held by a harness is a real hazard: its blast radius is the whole
+grant, and a stolen one is a principal. This ruling does not reduce that; it declines to answer it with a
+second gate, and answers it where the design already answers custody — grants kept narrow and revocable
+under `#grants`, and attribution on every write. A deployment that wants the credential held in one place
+may put a proxy there, and decision 96 is what that deployment then answers.
+
+**What would reopen it.** A record whose admission check cannot read the requesting principal's grant —
+which would first be a gap in the record, not a reason for a proxy — or a deployment in which a harness
+cannot hold a credential at all. Decision 96, how a proxy authenticates on an agent's behalf, stays open
+beneath this one and is answered by any deployment that puts a proxy in the path.
 
 ## Attribution
 
