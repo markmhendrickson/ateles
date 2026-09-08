@@ -623,12 +623,12 @@ governance write reserved under decision 18 — writing an intake rule is reserv
 gated at the same class as a `workflow` declaration — so declaring a default ancestor there inherits that
 authority without inventing a new gate for it. The class-default write `classify` makes when it finds one is
 the identical `PART_OF` write it makes today when a task names its own parent by identifier
-(`#where-the-volume-goes-a-default-ancestor-per-intake-class-not-a-finding-on-every-orphan`); naming the
+(`#whether-an-orphan-is-a-defect-at-all`); naming the
 default on the rule that already produces the task keeps that write and its authorization in one place.
 Revision 45's refusal survives unchanged: the swarm still may not author a missing ancestor
 (`#the-swarm-may-not-author-a-missing-ancestor`); an `intake_rule`'s default is a record the operator
 pre-authored once, for the class, before any orphan of that class existed, exactly as
-`#where-the-volume-goes-a-default-ancestor-per-intake-class-not-a-finding-on-every-orphan` already states —
+`#whether-an-orphan-is-a-defect-at-all` already states —
 this ruling only fixes where that pre-authored value is written down, not who may write it.
 
 **Confirmed: the `intake_rule` declaration shape carries it.** The shape `work_model.md` states — "It names

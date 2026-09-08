@@ -1017,10 +1017,10 @@ live, which fail-closed does not allow for a governance type.
 **What surfaces it, and why neither existing shape fits without stretching.** An inert governance write
 nobody sees is exactly the reporting-without-binding shape principle 1 refuses, so it cannot be left as a
 silent observation — but neither of the two mechanisms this design already has for surfacing a condition
-takes it cleanly. A `#checkpoint`'s subject is exactly one, an action or a task
+takes it cleanly. A `vocabulary.md#checkpoint`'s subject is exactly one, an action or a task
 (`#the-checkpoint`), and a synced observation resting unread under a governance type's current value is
 neither: no batch is holding on it, no step needs it resolved to close, and there is no task to name as the
-subject. A `#finding` is "one defect or objection a step owner records when judging a batch" — tied to a
+subject. A `vocabulary.md#finding` is "one defect or objection a step owner records when judging a batch" — tied to a
 sign-off and a batch's review moment — and this condition exists whether or not any batch happens to be
 judged that day; a peer could replicate a stale `agent_policy` on a Tuesday and the next review of anything
 might be weeks off. Forcing either shape onto this condition would be inventing a new use for a mechanism
