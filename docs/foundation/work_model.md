@@ -216,6 +216,43 @@ closed without completion, the reason for the second being the closing verdict's
 outside the set being refused at the write as any undeclared value is; the reader maps every spelling the
 record already carries onto `open` or terminal, permanently. Live status distribution: `status.md`.
 
+### A task is live when some principal could claim it now
+
+**The ruling.** A task is **live** when it is [claimable](vocabulary.md#claimable) by some principal: not
+terminal, no lease held on it, and no open checkpoint holding it from claim. "Live" names no new property.
+It is the claimable predicate above read over the whole backlog rather than from one principal's seat —
+existentially, over every principal, instead of the 1:1 "is this mine" a claim asks. A backlog partitions
+into exactly two parts on it: the live tasks, which some principal could take now, and the rest, each of
+which is terminal or held by an open checkpoint that says by what. Nothing else is a third case, and there
+is no state a task can occupy that this read cannot classify.
+
+**Why claimability and not the alternatives.** *Has an open checkpoint* is exact and matches the record,
+but it says nothing about a task that is merely unclaimed: an unheld, uncheckpointed task and a task
+nobody will ever take are one value under it, so it does not partition the backlog at all. *Recently
+touched* is a time read, and staleness is the field principle 11 refuses for the same reason it refuses a
+stored liveness flag — it is state that needs a process to keep it true, and the process that would clear
+it is the one that died. Claimability is what "live" already means to a queue, and it is derived at read
+time from what the record carries, so nothing maintains it (principle 11). The word follows the corpus's
+existing use of *live* for the one batch of a chain and the one instance of a recurring task
+(`#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next`): in each case the live one
+is the one that is not terminal and not held, read and never stored.
+
+**No term is minted for it** (principle 12). `claimable` is the term, defined once in
+`vocabulary.md#claimable` and argued once above; *live* is that predicate's reading over a pool, the way
+*the claimable pool* is already written in the section below without a term of its own. A vocabulary entry
+for a second word meaning what `claimable` means is the overlap invariant 12 forbids, and a `live` status
+field would be the stored held-state principle 11 and the `blocked` retirement above already refuse.
+
+**What this settles about a retired status.** A task carrying `blocked` is neither live nor legibly held:
+the status is retired (`vocabulary.md#retired-names`), so no claim predicate reads it, and it raises no
+checkpoint, so nothing holds it either — it reaches no queue and no decision queue, which is the shape
+principle 1 calls a report rather than a control. Under this predicate such a row is not an ambiguous
+third case: it is claimable if nothing else holds it, and every one of them resolves one of exactly two
+ways — it is genuinely unadvanceable, and an open checkpoint is raised on it naming the reason class that
+says by what (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`), or it is not, and it
+loses the retired status and returns to the claimable pool. Which rows a given checkout holds, and how
+many, is a measurement and belongs to `status.md`, never here.
+
 ### Priority orders the claimable pool; it does not enter it
 
 **Pull answers "is this mine"; nothing above answers "which of my several"** (`#pull-is-the-only-delivery-assignment-constrains-eligibility`:
