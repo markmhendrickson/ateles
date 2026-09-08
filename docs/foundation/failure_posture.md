@@ -367,7 +367,7 @@ closed (`gates_and_workflows.md#the-checkpoint`). `unclaimed_step` is the except
 it reorders, and the step it names stays claimable by its role, since a step owner arriving late is the
 resolution. `unreadable_workflow` and `unspawnable_assignee` hold too, though nothing could claim under
 them anyway. A checkpoint whose subject is an action holds the action and not the task, whose lease holder
-carries the resolution. This is the whole of what a `blocked` status meant, read from the edge instead
+carries the resolution. This is the whole of what the retired `blocked` status meant, read from the edge instead
 (`work_model.md#what-a-claim-predicate-treats-as-claimable`); a status beside the checkpoint was a second
 held state that needed a process to clear, and `blocked` is retired as one (`vocabulary.md#retired-names`).
 

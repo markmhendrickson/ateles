@@ -229,7 +229,9 @@ held, which no open [checkpoint](#checkpoint) holds from claim (every task-subje
 `unclaimed_step` — `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`), and whose
 `assigned_to` is unset or names the [principal](#principal) about to [claim](#claim).
 **See:** [`work_model.md#what-a-claim-predicate-treats-as-claimable`](work_model.md#what-a-claim-predicate-treats-as-claimable).
-**Never:** —
+**Never:** `blocked` as a stored [task](#task) status (retired: see [Retired names](#retired-names)). The
+ordinary verb and adjective are untouched — a [step](#step) blocked on its owner, a blocked claim, a change
+blocked on a section — since none of those is a status value.
 **Not for:** "available" for claimable; open for claimable, whether as an open task, an open pool, or a
 task said to be open — `open` is a status value and means something else.
 
@@ -471,7 +473,8 @@ apart from `release` because released and landed are different claims (`principl
 a [batch](#batch) that closed on the release [action](#action)'s success would record the first as the
 second.
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
-**Never:** "gate owner".
+**Never:** "gate owner"; "operator_preview" (retired as a step name: see
+[Retired names](#retired-names)).
 **Not for:** gate, phase, or check for a step — neither after a step name (a qa gate, an impl phase) nor
 in front of a step's own attributes (a gate owner, a gate sequence); `gate` is the action gate. Also not
 checkpoint for a step, in either order.
@@ -884,7 +887,8 @@ another is load-bearing — the same calendar write being `external_api_write` o
 [adapter](#adapter)'s own document argues it, at the row where the operation appears.
 **See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers),
 [`adapters.md#what-an-adapters-document-must-contain`](adapters.md#what-an-adapters-document-must-contain).
-**Never:** —
+**Never:** `merge` as the name of an action class (retired for `merge_pr`: see
+[Retired names](#retired-names)) — the [step](#step) named `merge` and the ordinary verb are unaffected.
 **Not for:** "category" or "kind" for the class; inferring it from the handling agent.
 
 ### blast radius
@@ -907,7 +911,10 @@ another is load-bearing — the same calendar write being `external_api_write` o
 count, graduates that class from [checkpointing](#checkpoint) to being taken without one.
 Named for what the series is made of: the members are actions, and the class they share is what graduates.
 **See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers).
-**Never:** "streak".
+**Never:** "streak"; recurring series for this series — the phrase tied to the members, the count, or
+graduating (retired: see [Retired names](#retired-names)). The swarm's sense only: an
+[external system](#external-system)'s own recurring event series is that system's concept, which
+[`calendar.md`](calendar.md) and [`adapters.md`](adapters.md) name correctly and decision 24 rules on.
 **Not for:** history for a series, unqualified.
 
 ### operator_only
@@ -1040,7 +1047,8 @@ An adapter is a [daemon](#daemon) in the work model's sense: it self-triggers on
 [task](#task); the [engine](#engine) reads only what the adapter wrote.
 **See:** [`adapters.md#the-two-invariants`](adapters.md#the-two-invariants),
 [`adapters.md#what-the-adapter-does-with-every-event`](adapters.md#what-the-adapter-does-with-every-event).
-**Never:** "connector", "plugin".
+**Never:** "connector", "plugin"; "calendar_routing_config" (retired as a binding type for
+`channel_config`: see [Retired names](#retired-names)).
 **Not for:** the engine for the adapter (the engine reads the record; the adapter reads the system);
 "gateway" for an adapter, unqualified.
 

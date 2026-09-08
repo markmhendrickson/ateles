@@ -45,6 +45,8 @@ decision-86 ruling having taken 92 while this pass was being written — so the 
 ruling takes 93, one number across both documents it amends.
 A sweep over every remote branch's copy of every document here on 2026-09-08 gives 96, so the decision-91
 ruling takes 97, one number across both documents it amends.
+A sweep over every remote branch's copy of every document here on 2026-09-08 gives 98, so the
+retired-name binding pass takes 99, one number across all four documents it amends.
 
 ## `authority_model.md`
 
@@ -97,7 +99,7 @@ ruling takes 97, one number across both documents it amends.
 
 | Revision | Pass | What changed |
 |---|---|---|
-| 29 | the simplification pass of 2026-09-05 | `calendar_routing_config` replaced by `channel_config`, the binding type `adapters.md` names |
+| 29 | the simplification pass of 2026-09-05 | `calendar_routing_config` retired for `channel_config`, the binding type `adapters.md` names |
 | 37 | the testability pass of 2026-09-06 | refusal 1's mechanical half, the field allowlist on the grant |
 | 38 | the event/signal/delivery pass of 2026-09-06 | "Every inbound signal, and what it becomes" and its table headers, Linkage, Identity, and the disposition sentence renamed to `event`, matching `github.md`'s and `gmail.md`'s precedent; `signal` kept only in its ordinary-English sense |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
@@ -186,6 +188,7 @@ ruling takes 97, one number across both documents it amends.
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
 | 58 | — | Revised by the schema-drift pass (revision 58, 2026-09-06, **derived from** the operator's 2026-09-06 12:56 memo, via `conformance.md`'s decision 67): DM-10b added — the substrate refuses a write naming an undeclared field, expected-failing until Neotoma satisfies it, distinct from DM-10's client-side read-back check. |
 | 66 | — | Revised by the agent-identity pass of 2026-09-06 (revision 66, **derived from** the operator's 2026-09-06 14:44 memo): AD-39, AD-40, and AD-41 added — decision 69's per-agent-credential obligation and the shared-credential conclusion's disposition, the outbound mark and its refusal, and the credential's home on the `vendor_binding`. |
+| 99 | the retired-name binding pass of 2026-09-08 | WM-15's failure condition names the retired `blocked` status as retired, so the row states the retirement it tests for |
 
 ## `data_model.md`
 
@@ -207,6 +210,7 @@ ruling takes 97, one number across both documents it amends.
 | 58 | the decision-70 ruling of 2026-09-06 | the `project` field on the `workflow` and `batch` rows renamed `declaration_scope`, the scoping key distinguished from decision 57's planning level of the same name — `vocabulary.md#declaration-scope` |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
 | 37 | the testability pass of 2026-09-06 | the conformance suite's findings carried back into their homes: the `finding` row; `verdict` carrying its findings by edge, `tasks_attached[]`, and the per-kind pinned state, `SIGNED_BY` → principal; `DUPLICATE_OF`; `acceptance_criteria[]` on the task; `recoveries` and `lapse_cap` on `action_policy`; `rounds_cap` and `none_permitted` on the declaration; the daemon's window observation; `blocked` retired as a status |
+| 99 | the retired-name binding pass of 2026-09-08 | the task row names the retired `blocked` status as retired |
 
 ## `failure_posture.md`
 
@@ -222,6 +226,7 @@ ruling takes 97, one number across both documents it amends.
 | 45 | the underdetermined-inputs pass of 2026-09-06 | decision 71 ruled — a required read that resolved to no instance raises `underdetermined_inputs` at hydration, before the step opens, and an input found but too thin to act on stays the step owner's judgement under decision 13 |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
 | 86 | the reason-class enumeration repair of 2026-09-08 | `capability_unavailable`, ruled a reason class of its own by decision 60, added to the canonical enumeration in *Checkpoints on tasks: one queue, one protocol* and to the recital of which checkpoints hold a task from claim, both of which had omitted it; no decision opened or ruled, and what the class means is unchanged |
+| 99 | the retired-name binding pass of 2026-09-08 | the checkpoint section names the retired `blocked` status as retired where it states what the status meant |
 
 ## `gates_and_workflows.md`
 
@@ -383,6 +388,7 @@ ruling takes 97, one number across both documents it amends.
 | 88 | the verdict-rename pass of 2026-09-08 | decision 72 ruled — the record that closes a step is the [verdict](vocabulary.md#verdict) and the field it carries is the [conclusion](vocabulary.md#conclusion); `sign-off` and `sign_off` retired as names of the record, kept under [Retired names](vocabulary.md#retired-names); the ruling argued in a section of its own beside the [Owner](vocabulary.md#owner-five-meanings-one-word-forbidden-alone) section |
 | 90 | the register-gap rollup of 2026-09-08 | the [session_digest](vocabulary.md#session_digest) entry added; the scoping key renamed [declaration scope](vocabulary.md#declaration-scope) per decision 70; `verify_deployed` named on the step-names entry; decision 72's section given the rules index decision 74 requires |
 | 98 | the `forker` retirement of 2026-09-08 | `forker` added to [operator](vocabulary.md#operator)'s Never list and to the Retired names table, replaced by [operator](vocabulary.md#operator), so decision 82's retirement binds mechanically rather than resting on prose |
+| 99 | the retired-name binding pass of 2026-09-08 | five retirements bound that prose alone had left unenforced — `blocked` as a task status, the graduation sense of `recurring series`, `operator_preview`, `calendar_routing_config`, and `merge` as an action class — each added to the Never list of the term that replaced it |
 
 ## `work_model.md`
 
@@ -410,7 +416,7 @@ ruling takes 97, one number across both documents it amends.
 
 | Revision | Pass | What changed |
 |---|---|---|
-| 29 | the simplification pass of 2026-09-05 | `operator_preview` renamed `consent`; open decision 33 |
+| 29 | the simplification pass of 2026-09-05 | `operator_preview` retired for `consent`; open decision 33 |
 | 31 | the memo-gap pass of 2026-09-06 | decision 39 ruled here — what intake's `link` attaches and what hydration resolves; the payment `consent` row aligned with decision 27 |
 | 34 | the workflow-format pass of 2026-09-06 | the two declared intervals and the planned wait, cited in *How to read a workflow section*, `outreach`, and `operator-only`; a standing constraint on an entity a task names, read at intake |
 | 35 | the consistency pass of 2026-09-06 | the three `consent`-carrying workflows cite when their checkpoint is written and what the take re-evaluates |
