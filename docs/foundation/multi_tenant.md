@@ -260,11 +260,14 @@ with either: `match_tenant` holds whatever value 79 settles on. Nor does it forb
 continuing to carry a tenant-shaped realm literal; it rules that nothing reads the tenant out of it for an
 admission decision.
 
-**Sequencing: ruled now, buildable after decision 86.** The tool half this ruling turns on cannot be
-written at all until the grammar by which a capability names a tool exists, which is decision 86 and is
-open. `match_tenant` on the record-shaped half is implementable immediately; the tenant scoping of a
-shell or filesystem capability waits on 86, because there is no capability there to scope yet. The
-decision is settled; its full effect is not yet expressible.
+**Sequencing: ruled, and now expressible in full.** The tool half this ruling turns on could not be
+written at all until the grammar by which a capability names a tool existed. Decision 86 ruled that grammar
+on 2026-09-08 (`authority_model.md#a-capability-names-a-tool-as-toolsurfaceoperation-and-that-is-what-a-harness-allowlist-is-compared-against`):
+a tool capability is an ordinary entry of `capabilities[]`, so `match_tenant` scopes it exactly as it
+scopes a record capability, and a shell or filesystem capability is now a capability there is something to
+scope — `tool:shell:<command>` and `tool:harness:<Tool>`, on the two reserved surfaces. Nothing in this
+ruling changes: the tenant was always a term of the grant rather than of any one capability, which is why
+86 could settle the half this ruling could not yet reach without reopening it.
 
 **The migration is a backfill, not a reshape.** No minted key is invalidated: the subject form is
 unchanged, and this ruling adds a field to grants rather than changing what a credential looks like. Every

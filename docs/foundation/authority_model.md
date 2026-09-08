@@ -527,50 +527,128 @@ answering confidently from stale data. Grants are read at every check, or from a
 bound is declared and whose expiry resolves to `Indeterminate` — which denies — rather than to the last
 value it held.
 
-### How a capability names a tool, and what a harness allowlist is compared against
+### A capability names a tool as `tool:<surface>:<operation>`, and that is what a harness allowlist is compared against
 
-**Open.** Decision 42 made the tools a principal may invoke a dimension of its `agent_grant`, and made a
-harness's own list a copy "derived from the grant at load, or held equal to it by a parity test, and never
-a second home". Neither obtains until one question is answered: **by what grammar a capability names a
-tool**, and therefore what the two sides of that parity test compare. The measurement that found no agent
-holding parity named this as its blocker rather than a finding — a copy cannot be held equal to an original
-that has no way to state what it holds.
+**Ruled (2026-09-08, decision 86).** A capability names a tool the way it names everything else: as one
+entry in `capabilities[]`, of the operation form `tool:<surface>:<operation>`, with `param_constraints`
+carrying whatever bound the operation's arguments take. **One grammar, not five.** The five things the word
+"tool" spans — a record operation, an MCP tool, a shell command, filesystem reach, and a harness's own
+built-in — differ in **what mediates them and how tightly a bound on them can be enforced**, and they do not
+differ in **how a grant states that a principal holds them**. Only the second is this decision's question,
+and there is one answer to it.
 
-The candidate grammar for how a grant names a tool is proposed in
-[`docs/tool_grant_grammar.md`](../tool_grant_grammar.md) (decision 86, status: open — not yet
-ratified).
+**What the grammar is.** The `<surface>` is the domain half of the tuple — what the principal may act on —
+and the `<operation>` is the permission-scope half — what it may do there. Both halves match
+`[A-Za-z0-9_.-]+` or the single character `*`. The mapping to a harness's own four recognized allowlist
+forms is total and lives in one normalizer that both sides of the parity test import, never a
+reimplementation on each side (invariant 9): `mcp__<server>__<tool>` ⇄ `tool:<server>:<tool>`; a bare
+harness tool name ⇄ `tool:harness:<name>`; `Bash(<command>)` and `Bash(<command>:*)` ⇄
+`tool:shell:<command>`; bare `Bash` ⇄ `tool:shell:*`. The mapping is stated once, in full, in
+[`docs/tool_grant_grammar.md`](../tool_grant_grammar.md), which this ruling ratifies as the mapping's home;
+what follows is the rule, and that document is its mechanics.
 
-**What is already fixed, and is not the question.** The capability op form `tool:<surface>:<operation>` with
-`param_constraints` is what the grant checker parses and what the tool proxy enforces, and the harness's own
-four recognized entry forms — a wildcard, a bare tool name, an `mcp__<server>__<tool>` reference, and a
-scoped shell grant — are already validated in the lint that guards the allowlist. Both grammars exist. What
-does not exist is the declared mapping between them, and it is the mapping, not either grammar, that the
-parity test needs.
+**Why one grammar and not several.** Three arguments, each from a rule already standing.
 
-**Four questions the mapping has to settle, each with a cost.** *The bijection*: whether the grant's
-`<surface>` half is the MCP server alone, which leaves the harness's non-MCP entries unnameable, or a
-capability surface that also admits reserved names for the harness's own tools and for the shell — the cost
-of the first is that shell and filesystem reach stays outside the record, which is the reach that most needs
-bounding; the cost of the second is two surface names whose membership the design must then say how to
-enumerate. *Wildcards*: whether a wildcard is expressible at all, and if so at which tier — a wildcard over
-every surface is the fail-open shape this section already names, and the same shape decision 41 rejects for
-entity types; a wildcard over one surface is a domain with an enumerable membership, and the harder question
-is the shell, whose reachable commands are not a list anyone can read back. *A non-enumerable harness*: a
-provider that receives no allowlist at all has a reach that is the ambient configuration, and where the
-provider is chosen at run time by capacity, the same grant yields different reach on different days — which
-makes the divergence a question about what a grant *means*, not only about what a test can see; principle 7
-keeps that third value distinct from a verdict and principle 5 keeps it out of the permissive branch.
-*Direction of derivation*: whether the allowlist is eventually derived from the grant at load, which removes
-the drift class, or held equal by a test, which is cheaper and leaves the copy in place — decision 42 permits
-either and the sequencing between them is unruled.
+*A second grammar would be a second home for one bound.* Decision 42 ruled that the tools a principal may
+invoke are a dimension of its grant's `capabilities[]`. A separate field, or a separate entry form, for the
+tools with no server behind them would put one question — what reach does this principal hold — in two
+places, which invariant 9 forbids and which would need its own parity test, its own validator, and its own
+migration. Invariant 6 says the same thing from the other side: `capabilities[]` already generalizes over
+domain and scope, and a shell command is a domain and a scope.
 
-**What decides it.** Whether the record is meant to answer "under what reach did this principal execute" for
-every principal and every harness, or only for the harnesses that can enforce a bound. The first requires a
-grammar that can express reach a harness cannot enforce, and accepts that some capabilities are recorded and
-reporting-only; the second lets the grammar stop where enforcement stops, and accepts that a verdict against
-a non-enforcing harness attests a prompt and not a reach. Decision 42 leaned toward the first in its cost
-clause — naming the reporting-only case rather than hiding it — without ruling the grammar that would make it
-writable.
+*The differences that are real are differences of enforcement, and enforcement is not the grammar.* An MCP
+call can be refused with its arguments read; a shell command cannot, because nothing mediates it; a
+filesystem read is bounded by where a process runs and not by a name it is called by. Each of those is a
+fact about the enforcement point, and the design already carries the term for it: a capability whose bound
+no enforcement point can read is **recorded and reporting-only**, which is the state decision 42's cost
+clause chose to name rather than conceal, and which principle 1 requires be named rather than counted as a
+control.
+Splitting the grammar to track that difference would encode an implementation fact — which mediator exists
+today — into the design's vocabulary, which is the direction the corpus forbids.
+
+*And a record operation is already named, so it is not renamed here.* `store`, `retrieve`, and `correct`
+over entity types and repositories stay exactly the capabilities decision 41 made them. They are **not**
+re-expressed as `tool:` operations, and a grant naming both forms for the same reach would be the overlap
+invariant 12 forbids — two terms the design does not distinguish. The `tool:` prefix names reach the record
+does not mediate; what the record mediates, the record's own operation names. The swap test settles the
+pair: substituting `tool:mcpsrv_neotoma:store` for the `store` capability changes what is enforced — the
+first bounds which tool appears in a child's menu, the second bounds which type is admitted at the write —
+so the two are distinct and both earn their place.
+
+**Filesystem reach is not a sixth thing; it is `tool:harness:<Tool>` and `tool:shell:<command>` seen from
+the other end.** A process reaches a path because a tool it was given reads or writes one — `Read`,
+`Write`, `Edit`, a shell command. The path space is what those capabilities *do*, not a domain a grant names
+beside them. Naming paths in the grant would be a second bound on the same reach, and the argument bound
+belongs where every other argument bound belongs, in `param_constraints` — enforceable through the proxy
+where a proxy mediates the call, and recorded and unenforced where none does.
+
+**Two reserved surfaces, and what makes them domains.** `harness` names the tools the harness itself
+provides, whose membership is the harness's own tool list; `shell` names one command reachable through a
+shell. Both are surfaces in the ordinary sense — a domain with an operation in it — and neither is a new
+kind of entry. Reserving the two names is the whole cost of admitting the reach that most needs bounding
+into the record, and the alternative — a grammar whose `<surface>` is an MCP server and nothing else —
+leaves shell and filesystem reach permanently unnameable, which is the status quo and which decision 42
+ruled against without saying how.
+
+**A wildcard is a domain's shorthand, never a grammar's escape hatch.** `tool:*` — every operation on every
+surface — is **expressible and refused**: the parser accepts it, because a grammar that cannot write down
+the fail-open shape cannot describe the state a migration is migrating away from or report a wildcard as a
+wildcard rather than as a parse error; and a validator refuses it **at the write**, so it never appears in a
+stored grant. The ground is decision 41 in terms — a capability naming every type "is not an allowlist but
+the default-allow this rule rejects" — and the tool dimension is a capability of the same array.
+`tool:<surface>:*` is admissible, on three bounds: the surface's membership must be **enumerable at check
+time**, and where the tool list cannot be read the capability resolves `Indeterminate`, which denies
+(principle 7); it never spans surfaces, which is the domain term doing its work; and it is widened by a
+governance write like any other. This is the same tiering decision 41 draws for entity types — a named type
+is an allowlist entry, every type is not — applied one level down.
+
+**`tool:shell:*` is the one surface wildcard whose enumerability bound cannot be met, and it is admitted
+anyway, deliberately.** The commands reachable through a shell are not a list anyone can read back. The
+design nonetheless admits it, because a build agent genuinely needs a shell and refusing to let a grant say
+so leaves that reach outside the record entirely, where no reviewer sees it and no verdict attests it — the
+worse of the two failures. It carries the standing consequence that it is the capability a reviewer should
+always find someone's argument behind, and its `param_constraints` are recorded and unenforced until
+something mediates the shell.
+
+**What the parity test compares, now that it has two sides.** Both sides normalize to the same set of
+`tool:<surface>:<operation>` strings, and the comparison is set equality over the normalized forms. The
+grant side reads the parsed tool capabilities directly and treats **an empty set as a failure, never as
+permission** — a checker that fails open when no grant declares a tool would score every unmigrated
+principal as conforming, which is invariant 4's decoration. The harness side reads **the arguments actually
+built for the child process**, not the field a definition declares, because the two disagree structurally:
+a declared wildcard passes no flag at all, and an unconditionally appended server surface is in the
+arguments and never in the field. A divergence in **either** direction is a failure — wider than the grant
+is unauthorized reach, and narrower is a grant that does not describe what ran. A definition that failed to
+load is `unknown` with its error, never a wildcard grant, because a failed read never synthesizes a value
+more permissive than success would have returned (invariant 5); and a harness that passes no allowlist at
+all is `unknown` and reporting-only, with a run in which every principal is `unknown` failing rather than
+passing empty.
+
+**An unnamed tool is denied.** A capability the grant does not name is not held — the same default-deny
+decision 41 ruled for entity types, and the same rule read at every enforcement point rather than from a
+cache. This does not narrow what an operator may grant. **Breadth is written by enumeration, not by
+absence**: a principal intended to hold everything its tooling can do holds a surface wildcard for each
+surface it reaches, `tool:shell:*` included, and the grant then says so — dated, attributed, and readable
+by the reviewer and by the parity test. What default-deny removes is not the wide grant but the *unwritten*
+one: reach a principal has because nothing bounded it, which no governance write authorized and which no
+verdict can attest. The operator's stated intent to grant any possible access is expressible in this
+grammar in full; what is not expressible is holding that access without having granted it.
+
+**What this leaves to decision 87.** This grammar makes the harness's reach nameable; it does not rule that
+the harness may not exceed what is named. Decision 87 now has something to decide over: whether a harness
+configuration is closed by default and opened only by a grant; whether a harness that cannot bound its
+non-enumerable reach may carry granted work at all, or whether its use is itself a capability a grant must
+name; and whether routing a principal to a provider that enforces nothing is a capability escalation the
+router performs, which this grammar can now describe and which no rule yet forbids. It also leaves
+open, as decision 42 permitted and this ruling does not close, whether the harness's list is eventually
+**derived** from the grant at load — which removes the drift class — or only **held equal** by the parity
+test, which is cheaper and leaves the copy in place. And it settles nothing about *which* tools any
+principal should hold: the grammar states how a reach is written down, never which reach is appropriate,
+and the authoring pass is separate work.
+
+**What would reopen it.** A tool whose reach is neither a domain with an operation in it nor an argument
+bound on one — a capability that a surface and an operation genuinely cannot name — would be evidence the
+single grammar is too narrow, and would be argued here.
 
 ### Whether a harness may provide a capability the grant does not name
 
@@ -618,10 +696,18 @@ a report accepts that some reach is recorded and unenforced, which is what decis
 already contemplated for a non-enforcing harness. The operator's stated intent — to grant any possible
 access, not only tool-mediated access — is on the record as framing for this row and is not a ruling.
 
-**Sequencing.** Not implementable before decision 86. A rule that a harness may not exceed the grant is
-unenforceable while the grant grammar cannot name what the harness provides: today it cannot express the
-shell or the harness's own tools at all, so the reach that most needs bounding is the reach the rule could
-not reach.
+**Sequencing: unblocked by decision 86, and still open.** This row was not implementable while the grant
+grammar could not name what the harness provides. Decision 86 has since ruled that grammar
+(`#a-capability-names-a-tool-as-toolsurfaceoperation-and-that-is-what-a-harness-allowlist-is-compared-against`):
+the shell and the harness's own tools are nameable now, as the reserved surfaces `shell` and `harness`, and
+a grant can therefore state the reach a rule here would bound. What 86 supplies is the vocabulary, not the
+rule — it makes the reach writable and leaves untouched whether a harness may hold reach no grant wrote
+down. The dispositions above are unchanged by it, with two sharpened: *extend default-deny to the whole
+capability surface* now has a surface it can be stated over, and *refuse the non-enumerable harness* now
+has the case 86 deliberately admitted — `tool:shell:*`, a surface wildcard whose membership cannot be
+enumerated and which 86 admits into the record rather than leave the reach outside it. Whether a principal
+may **hold** that capability, and whether a provider that enforces nothing may carry work granted under it,
+are this row's to answer.
 
 ### Where a harness reaches the record, and what admits the request
 
