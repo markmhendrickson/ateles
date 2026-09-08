@@ -774,6 +774,45 @@ hardest to review afterwards.
 
 **What would reopen it.** Decision 43 or 56 reopening; nothing about planning records in particular.
 
+### Whether an instance's planning records are per instance, and how a swarm reading several relates them
+
+**Open (decision 98, opened 2026-09-08 by the decisions 81 to 83 pass).** Registered in
+`conformance.md#the-register-of-open-design-decisions`. The operator raised the question in the memo that
+retired decision 82's framing, and it is registered here rather than absorbed into that ruling because the
+subject is this document's and not the tenancy axis's (invariant 12).
+
+**The question.** Where a swarm is configured with several instances of the record, does each instance carry
+its own planning records — its own missions, strategies, projects, and plans, representative of that
+instance — or does the swarm hold one hierarchy that spans them? The operator's framing: his personal
+instance would carry his own planning, and an instance shared with a client engagement would carry that
+engagement's, so the set of instances represents not only his own world but the collaborative worlds he
+works within.
+
+**What is already settled and constrains any answer.** Decision 76 rules that one operator's several
+instances are **several records** that must not merge, with an explicit binding that fails closed when
+ambiguous. `#the-mechanism-against-cross-record-collision-is-the-subject` already makes a planning write
+land only on the record the writing batch's task is `PART_OF`, refused at the write by the engine where the
+referred record is not the first on the producing task's ascent. Both point toward per-instance planning
+being what the design already implies rather than a new mechanism — a hierarchy spanning instances would
+need an ascent that crosses a boundary decision 76 says nothing may cross.
+
+**What is genuinely open, and why the row is not ruled by derivation.** Two things the settled rules do not
+reach. First, whether a swarm reading several instances may **relate** their planning records at all — read
+one instance's strategy as context for a task bound to another — or whether the ascent is closed at the
+instance boundary in both directions. Decision 76 forbids a *write* that merges and an orchestrator that
+reads across to write one brief; whether a declared, attributed read across instances is the same thing is
+not stated, and the operator's "the swarm needs to navigate and leverage them" suggests he wants something
+across them. Second, whether a swarm holding several instances has any planning of **its own** — records
+about its operation that belong to no one instance — or whether every planning record is some instance's.
+An answer to the second interacts with decision 91: if a controlling instance is where a deployment's
+governance writes go, it is the candidate home for swarm-level planning, and if there is no such thing then
+the swarm's own planning has nowhere to live.
+
+**What would decide it.** Whether any rule in this document reads a planning record from outside the
+record its task ascends to. None does today, which is why the row is open rather than ruled: the design is
+currently indifferent, and the operator's own use — several engagements, each with its own planning, acted
+within rather than merged — is the fact that settles it, as it settled decision 76.
+
 ## What this document does not decide
 
 How a `cadence` is spelled, and how the level mark is written in the registry — the schema's
