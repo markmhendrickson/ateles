@@ -424,7 +424,15 @@ stale into a confident-looking value at exactly the moment the adapter stops rea
 reader who is not a step may conclude from finding an artifact in the record. The operator asks whether the
 record should hold a stronger position for external state — whether state read from the record can be
 relied on to have incorporated everything the external system holds, so that no reader needs a
-supplementary read of its own. Three candidates, none ruled.
+supplementary read of its own. Four candidates, none ruled.
+
+The first three answer by settling what the record **claims** about what it holds. The fourth answers by
+changing what is **there to read** — leaving the claim exactly as it is and obliging that adapter-sourced
+material be incorporated into the graph as typed entities and edges, so that a reader who would not know to
+go looking finds the thing anyway. They are not alternatives in the same register, and an answer may well
+take one of the first three together with the fourth; the row states them side by side because each is a
+distinct answer to what a reader may rely on, and the fourth is the one that does not depend on the reader
+knowing the question arises.
 
 **1. The scoped claim, made explicit.** What the design does today: the record states what was read and
 when, coverage bounds it, and a step declares the freshness it requires with hydration enforcing that
@@ -455,6 +463,55 @@ irrecoverable coverage gap, making it legible rather than pretending it is absen
 states its requirements on writes, and this one binds read surfaces, so it must say what fails when a
 surface omits it (principle 1) and where that requirement lives.
 
+**4. Incorporation: adapter-sourced material becomes typed entities and edges, not only artifacts.** The
+record's claim is left as candidate 1 leaves it, and the obligation moves to what an adapter's material
+becomes once it is in the record. Capture without incorporation, on this reading, does not deliver what
+capture is for: a message held as an artifact with a body is captured, and the company and the people that
+message names are not queryable until something extracts them into typed entities with edges.
+
+The case that shows it is an archive of correspondence digested in full. It produces the message
+artifacts, and it also produces the `contact` and `company` entities the correspondence refers to — and those surface in
+contexts where correspondence is not the question at all: a step drafting a proposal, one checking who a
+payment is for, one judging whether a task concerns a party who has objected to being processed. None of
+those would think to read a mailbox, because none of them is doing mail work. That is the difference this
+candidate turns on. The first three all assume a reader who would go and read, reading more or well or
+badly; this one names work that is **structurally unavailable on demand**, because what is needed cannot be
+asked for by a reader who does not know it exists. The need is invisible from where the reader stands, so
+no occasion to read ever arises.
+
+The supporting argument is invariant 1's. A retrieval that depends on someone remembering to make it
+mostly will not be made, and when it is, the result lands in that step's own context rather than in the
+record — so it serves one step and leaves nothing behind, and the next reader pays the same cost again.
+That is the reasoning by which the corpus already prefers declared reads over the judgement of whoever is
+at the call site, and it applies to a retrieval no one is prompted to make with more force, not less.
+
+**What it composes with.** `data_model.md#record-conventions` already rules capture generous by design,
+on the stated purpose under which a piece of context with no use today is the input to work not yet
+conceived. This candidate extends that from capture to incorporation, and it does so with **no completeness
+claim at all** — nothing is asserted about whether the archive was read in full, only about what the
+material read becomes — so principle 5 and the coverage rule are untouched by it. It is a claim about form
+rather than about extent, and it is independently testable in the way the other three are not: whether a
+digested archive produced typed entities with edges is a question a reader can ask of the record itself.
+The provenance machinery it would need is also already there, since `#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`
+binds an observation to the **interpretation** that produced it wherever a value was extracted rather than
+transcribed, which is exactly the chain an extracted entity would ride on.
+
+**What it costs, and what it owes.** Extraction is a judgement, judgements are wrong, and a wrongly
+extracted entity is a durable false fact that later work reads as true — where a missing entity is only
+absent. So the obligation cannot be "extract everything", and naming its bound is part of what this
+candidate would have to settle rather than something to work out afterwards. Three things in the corpus
+already bound it and each is an objection this candidate must answer rather than a detail it inherits.
+`data_model.md#record-conventions` states that the generous purpose does **not** reach Art. 9 for a third
+party, and correspondence is precisely where third-party material arrives. `calendar.md#what-this-adapter-refuses`
+refuses the nearby shape outright for its own adapter, which records an attendee as a reference where the
+record already holds a `contact` and as an address otherwise, and creates a `contact` for nobody it merely
+observes — so this candidate either scopes its obligation to a step rather than to the adapter, as
+`workflows.md#meeting-processing` already does for a transcript, or it overrules that refusal and says so.
+And decision 39 ruled that `link` attaches what a task **names** and nothing on relevance alone
+(`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`), on the ground that a relevance-judged
+pull has no stopping rule and is purpose-blind; an incorporation obligation bounded by what the material
+names is consistent with that ruling, and one bounded by what might later matter reopens it.
+
 **A statement already made in passing, and its home.** The posture candidate 1 describes is asserted once
 in the corpus, as an aside answering a different objection:
 `calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of` states that the record
@@ -471,7 +528,9 @@ record holds what the swarm decided and on what evidence, and is deliberately no
 does not own — the source it keeps is not a second copy of what the external system currently holds, but
 the record of one read, at one time, with the coverage that read had (*What the record supplies*, below).
 Candidate 2 makes it the second thing, which is a different object with different obligations, and an
-argument for it has to take that on rather than treat it as a stronger version of what exists. What this
+argument for it has to take that on rather than treat it as a stronger version of what exists. Candidate 4
+does not touch that crux at all — it leaves the record the first thing and asks what the material read
+becomes once it is there — which is why it can be ruled alongside any of the first three. What this
 question is **not** is the cadence question
 (`#continual-inbound-is-the-inbound-side-and-an-intake-rule-evaluates-downstream-of-it`), which asks how
 external state reaches the record and is answered; nor the step's question, which
