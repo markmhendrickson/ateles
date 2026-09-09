@@ -527,6 +527,105 @@ answering confidently from stale data. Grants are read at every check, or from a
 bound is declared and whose expiry resolves to `Indeterminate` — which denies — rather than to the last
 value it held.
 
+### What the credential binding carries, and what a check reads to resolve a credential to a principal
+
+**Open.** Registered in `conformance.md#the-register-of-open-design-decisions`. `#principals` states that a
+credential binds to a principal **many-to-one**, and names `principal_binding` as what joins the two
+credential systems — the store's `user_id` and a host login to the `operator`, an AAuth `sub` to the
+`agent`, reaching the human principal through that agent's binding. What neither that section nor
+`data_model.md#relationships` states is what the binding **is**: the relationships table carries
+`principal_binding` as an edge from agent to principal with no fields at all, and the credential-to-principal
+side of the many-to-one has no edge type of its own. `migration.md`'s G17 is the same finding taken from the
+other direction — the instance holds the bindings as a scalar field on the `agent` and on the
+`agent_grant`, which it calls a credential binding living on the wrong entity.
+
+**Why the question cannot wait for the type to be registered.** `principal_binding` is one of the thirteen
+relationship types stage 1 registers
+(`migration.md#ordering-dependencies-and-what-each-stage-depends-on`), and G26 states that registration
+is one-way: a schema loses fields and gains them, and a registered type is not retired. So the shape
+registered in stage 1 is the shape the design lives with, and registering before this is answered is a
+decision taken by the write rather than by the design — the failure decision 80 names, an implementation
+choosing the design because the existing keys already have its shape. The count is part of the question and
+not incidental to it: a credential-to-principal edge distinct from `principal_binding` is a **fourteenth**
+type stage 1 must register, so an answer that adds one changes what stage 1 writes, and an answer that
+loads the existing type changes what that type carries. Either way the stage is not writable as currently
+enumerated, and both are irreversible once written.
+
+**What the answer has to carry, and what makes each of these binding rather than a preference.**
+
+The **many-to-one is a requirement and not an observation**. A principal holds several credentials at
+once — a store identity, a host login, an address on an external system, a chat identity — each of which
+binds to exactly one principal, and `adapters.md#per-agent-credentials-where-the-system-issues-them-a-shared-credential-where-it-does-not`
+already states that the cardinality of an agent's identity per external system is a property of the
+binding. A scalar field on the agent expresses one of those and drops the rest, which is what makes the
+present state a defect and not merely an unfinished field: the record cannot hold what the design says the
+principal has.
+
+**Rotation makes the many-to-one simultaneous rather than merely plural.** `#grants` rules that rotation
+is staged and never a flag day: the new credential is admitted alongside the old one, the grant matching it
+is written and read back before the agent presents it, and the old credential is retired only after
+read-back shows admissions arriving on the new one. The dual-admit window is exactly a moment at which two
+credentials bind to one principal, both live, and the design already states that at no moment is the set of
+matching grants empty. An edge that cannot express two simultaneous bindings does not merely lose a
+credential — it makes the rotation rule unimplementable, so this is the sharpest of the constraints and any
+candidate that fails it is refused on that ground alone.
+
+**What a check reads is a separate half of the question from what the edge carries.** Decision 96 rules
+credential **pass-through**: a proxy presents the agent's own credential and holds none of its own, so the
+instance matches grants on the `sub` actually presented. Decision 97 puts the enforcement point at the
+record's own admission check against the requesting principal's grant, and decision 41 states that the
+grant's allowlist is read at every enforcement point. Grants are matched on `(sub, iss)` — the credential —
+and not on the principal, so the enforcement point reaches the principal only where something resolves the
+presented credential to one. Today that resolution is the capped table scan G17 names. Whether it stays a
+read over the edge, or whether the grant match makes it unnecessary at admission and needed only at
+attribution, is what this decision has to say rather than leave to whichever caller first needs it.
+
+**The candidates.**
+
+1. **A credential entity with an edge to the principal.** The credential becomes a record of its own —
+   kind, issuer, expiry, whatever identifies it — and the binding is an edge from it to the principal, one
+   edge per credential, many edges per principal. The many-to-one and the dual-admit window are both direct
+   consequences of the cardinality rather than conditions on a field. What it costs is a second entity type
+   in a design that already resolves credentials at the grant, and it has to say what the credential entity
+   holds that the grant's `sub` and `iss` do not.
+
+2. **Properties on the binding edge itself, one edge per credential.** `principal_binding` stays the edge
+   type and carries the credential's identifying values — its kind, its issuer, and an expiry where the
+   issuer states one — so a principal has as many edges as it has credentials and rotation writes a second
+   edge before ending the first. This is the shape
+   `conformance_suite.md#what-the-documents-leave-unspecified-here-and-how-each-is-recorded` already
+   derives — an edge type carrying the credential kind and value, the principal, and an expiry — and that
+   derivation is recorded there as proposed rather than assumed, which is the vacancy this row registers.
+   What it has to answer is whether the edge's source is then the credential rather than the agent, which
+   the relationships table's current `agent → principal` does not admit, and whether an edge carrying an
+   expiry is the maintained state invariant 11 forbids or the ended edge the design writes everywhere else.
+
+3. **The grant is the binding, and no separate edge exists.** A grant already carries `sub`, `iss`, and
+   `expires_at`, and is already matched on the credential; adding the principal to it would make the grant
+   the one place a credential and a principal meet. The objection is that a grant is an authorization
+   statement and a binding is an identity fact, so the two would share a lifetime that decision 41's
+   default-deny does not intend — revoking a capability would retract an identity — and a credential
+   presented under no grant would resolve to no principal rather than to an unattributed write, which
+   `#principals` states as the state a reader can see. It also inverts a property of the grant row the
+   design states deliberately: the grant carries no edges at all in `data_model.md#concepts`, which is
+   what keeps an authorization statement out of the graph the authority chain is read along.
+
+**What any answer has to survive.** Invariant 11 is the argument **for** the edge and also the test of its
+fields: state that would need a watchdog, a sweeper, or a reconciler to stay correct belongs in a
+relationship and not in a field, which is why the scalar the instance holds is wrong; but an edge carrying
+an expiry the design does not end by writing is the same maintained state one level out, so the row has to
+say which of the edge's values are written once and which are derived at a read. Invariant 9 asks the
+answer to leave one home for which principal a credential belongs to, which candidate 3 satisfies by
+construction and candidates 1 and 2 satisfy only if the resolution is read from the edge and nowhere else.
+And principle 5 governs the resolution's failure: a credential that resolves to no principal is a write
+recorded as unattributed and never one defaulted to the operator, which `#principals` already rules and
+which any answer here inherits rather than restates.
+
+**What this does not reach.** The tenant a grant is scoped to is not a term of this question: decision 80
+rules it matched on the grant as `match_tenant`, and nothing is derived from a credential's subject to
+reach a tenant. And the identifier's form on the `operator` entity is decision 79, ruled to a human slug
+with an immutable UUID behind it; a binding names whatever that identifier is, and does not restate it.
+
 ### A capability names a tool as `tool:<surface>:<operation>`, and that is what a harness allowlist is compared against
 
 **Ruled (2026-09-08, decision 86).** A capability names a tool the way it names everything else: as one
