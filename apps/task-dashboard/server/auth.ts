@@ -196,6 +196,91 @@ export function buildAuthorizeUrl(redirectUri: string, state: string): string {
   return url.toString();
 }
 
+// ── Carrying the hash across the OIDC round trip ────────────────────────────
+//
+// The route is client-side hash routing (`#/entities/<id>`), and a browser
+// fragment is NEVER sent to any server — not on the first request, not across
+// any redirect leg. `next` above (captured server-side from `req.url`) is
+// therefore blind to it by construction: a cold-session open of
+// `#/entities/<id>` degrades to `next=/` and the deep link is lost the moment
+// the gate 302s to Google, with no server-side fix possible.
+//
+// The gate also serves NOTHING but a 302 to unauthenticated visitors below
+// `/auth/*` (see serve.ts's "the gate covers everything below it" contract),
+// so the app bundle never loads for a cold hit — there is no in-page JS
+// running yet at the point the redirect would normally fire. The fix is to
+// make `/auth/login` itself a tiny same-origin HTML document instead of a
+// bare redirect: the browser is still sitting on the ORIGINAL URL when that
+// document runs (no navigation has happened yet), so `location.hash` is
+// still live. That inline script persists it to sessionStorage and only THEN
+// navigates on to Google. `/auth/callback` mirrors it in reverse: it reads
+// the saved hash back out of sessionStorage and appends it to `next` before
+// the final in-app navigation.
+//
+// sessionStorage, not a query param or the `state` nonce: the hash can
+// contain characters that are awkward to round-trip through a URL used for
+// CSRF binding, and sessionStorage already lives on the right origin and tab
+// for exactly the lifetime this needs (cleared on tab close, invisible to
+// Google in between).
+
+export const HASH_STORAGE_KEY = "ateles_dash_resume_hash";
+
+/**
+ * The `/auth/login` document: capture `location.hash` (if any) into
+ * sessionStorage, then hand off to Google. Escaped as a JSON string literal
+ * so a hash containing `<`, `&`, quotes, or backslashes can never break out
+ * of the inline script.
+ */
+export function loginCaptureHtml(authorizeUrl: string): string {
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>Signing in…</title></head>
+<body>
+<script>
+(function () {
+  try {
+    var hash = window.location.hash || "";
+    if (hash && hash !== "#") {
+      window.sessionStorage.setItem(${JSON.stringify(HASH_STORAGE_KEY)}, hash);
+    } else {
+      window.sessionStorage.removeItem(${JSON.stringify(HASH_STORAGE_KEY)});
+    }
+  } catch (e) {
+    // Storage can throw in a locked-down browser context; sign-in must not
+    // hang on that — it just means the destination hash won't survive.
+  }
+  window.location.replace(${JSON.stringify(authorizeUrl)});
+})();
+</script>
+</body></html>`;
+}
+
+/**
+ * The `/auth/callback` document: restore the hash saved by the login page (if
+ * any) and complete the navigation to `next` client-side, so the fragment
+ * rides the LAST hop too. `next` is always same-origin (see the `raw.startsWith("/")`
+ * guard in serve.ts), so this never constructs an off-origin destination.
+ */
+export function callbackResumeHtml(next: string): string {
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>Signed in</title></head>
+<body>
+<script>
+(function () {
+  var next = ${JSON.stringify(next)};
+  try {
+    var key = ${JSON.stringify(HASH_STORAGE_KEY)};
+    var hash = window.sessionStorage.getItem(key) || "";
+    window.sessionStorage.removeItem(key);
+    if (hash && hash !== "#") next += hash;
+  } catch (e) {
+    // No stored hash to restore; land on next as-is.
+  }
+  window.location.replace(next);
+})();
+</script>
+</body></html>`;
+}
+
 /**
  * Exchange the authorization code for an id_token, verify it against Google's
  * live JWKS, and return the verified email — but only if it is verified AND

@@ -30,9 +30,11 @@ import {
   SESSION_COOKIE,
   authConfigured,
   buildAuthorizeUrl,
+  callbackResumeHtml,
   consumeState,
   createState,
   issueSession,
+  loginCaptureHtml,
   parseCookies,
   readSession,
   verifyGoogleCode,
@@ -123,9 +125,17 @@ app.use("/auth/login", (req, res) => {
   const raw = new URL(req.url || "/", "http://x").searchParams.get("next") || "/";
   const next = raw.startsWith("/") && !raw.startsWith("//") ? raw : "/";
   const state = createState(next);
-  res.statusCode = 302;
-  res.setHeader("Location", buildAuthorizeUrl(redirectUriFor(req), state));
-  res.end();
+  // NOT a redirect: a bare 302 here would leave the browser on a URL with no
+  // JS ever having run, so a hash present on the ORIGINAL address (e.g.
+  // `#/entities/<id>`) has no chance to be captured before it's gone — that
+  // fragment is never sent to any server, on this hop or any later one. This
+  // document runs while the browser is still on the original URL, captures
+  // `location.hash` into sessionStorage, and only then hands off to Google.
+  // See auth.ts's "Carrying the hash across the OIDC round trip".
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("Cache-Control", "no-store");
+  res.end(loginCaptureHtml(buildAuthorizeUrl(redirectUriFor(req), state)));
 });
 
 app.use("/auth/callback", async (req, res) => {
@@ -147,9 +157,15 @@ app.use("/auth/callback", async (req, res) => {
     res.setHeader("Set-Cookie", [
       `${SESSION_COOKIE}=${issueSession(email)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}`,
     ]);
-    res.statusCode = 302;
-    res.setHeader("Location", resumed.next);
-    res.end();
+    // NOT a redirect, for the same reason /auth/login isn't one: `resumed.next`
+    // is a path-and-query only (the server never saw the fragment), so a bare
+    // 302 here would land on the right PAGE but the wrong deep link every
+    // time. This document restores the hash the login page stashed in
+    // sessionStorage and completes the navigation to `next` client-side.
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store");
+    res.end(callbackResumeHtml(resumed.next));
   } catch {
     // Deliberately does not distinguish "not on the allowlist" from a bad
     // token: a precise message would let a stranger enumerate who has access.
