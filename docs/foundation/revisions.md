@@ -53,6 +53,11 @@ A sweep over every remote branch's copy of every document here on 2026-09-08 giv
 and 79 pass takes 101, one number across all three documents it amends. A later sweep the same day gives
 101 — the decision-73 pass having taken it while this one was being written — so the decisions 96 and 79
 pass takes 102, one number across all three documents it amends.
+A sweep over `origin/main`, every origin branch, and every `refs/pull/*/head` ref on 2026-09-09 gives 105,
+so the decision-100 ruling takes 106, one number across all three documents it amends. The sweep is run
+twice — once before writing and once immediately before committing — because a sweep of open pull-request
+branches alone proved insufficient: two passes collided on one number this week, both having swept the
+branches and neither the pull-request head refs.
 
 ## `authority_model.md`
 
@@ -191,6 +196,7 @@ pass takes 102, one number across all three documents it amends.
 | 103 | the workflow-proving pass of 2026-09-09 | decision 100 registered as **open** — whether a newly declared workflow is proven before it binds production work, and against what. The row names the four mechanisms that bear on it and the two rules any answer is bounded by, and rules nothing; the question is the operator's |
 | 104 | the credential-binding pass of 2026-09-09 | decision 101 registered as **open** — what fields the credential-binding edge carries, and what resolving a credential to a principal reads. The row names the three constraints any answer is bounded by, the field set `conformance_suite.md` already proposes and marks as proposed rather than assumed, and the two ways stage 1 is unwritable as enumerated under either candidate |
 | 105 | the acyclicity pass of 2026-09-09 | decision 102 registered as **open** — whether acyclicity is a property of a relationship type or of the graph, and what the check does when a type is registered. The row names the two documents that assert the per-type reading, the contradiction that closed the seam on a different question, and the two of the design's own edges a type-blind check would reach |
+| 106 | the decision-100 ruling of 2026-09-09 | row 100 moved from **open** to **ruled** — proving conditioned on the blast tier the declaration write already resolves to, a declaration above some tier proven before it binds production work and one below not. The status cell states the three grounds (invariant 6's extend-the-mechanism test, what proving establishes that signing does not, and proportionality on the tier as the design's expression of blast radius), the proxy the ruling accepts, what would reopen it, and the three things it leaves open deliberately. The row's blocking cell reworded: the `migration.md` claim it put in doubt is corrected by this pass rather than made true |
 
 ## `conformance_suite.md`
 
@@ -307,6 +313,7 @@ pass takes 102, one number across all three documents it amends.
 | 60 | the undefined-term pass of 2026-09-06 | a new section, *Substrate field names the design reads and never adopts as terms*, records `user_id`, `sub`, `iss`, `conversation`, `raw_fragments`, and `reducer_config` — six names cited across five or more foundation documents whose concepts the design already names, kept out of `vocabulary.md` so the design outlives the substrate's field names; no gap number added, since none of the six is a place the foundation fails to say what the migration needs |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
 | 58 | — | Revised by the schema-drift pass (revision 58, 2026-09-06, **derived from** the operator's 2026-09-06 12:56 memo, via `conformance.md`'s decision 67): G25 cross-referenced as the design-side symptom of the same missing registry read neotoma#1972's diverging `relationship_type` copies show; no gap number added, no figure restated. |
+| 106 | the decision-100 ruling of 2026-09-09 | one sentence corrected in the skills cutover: the cutover batch is the parity test applied to a procedure, and what the dual-run supplies is a fallback a brand-new declaration lacks. The clause claiming it is the same test the conformance suite runs for any declaration is deleted as false — the suite runs from zero against named fixtures and tests whether the engine enforces the design's rules, never whether a particular declaration does useful work. The stage's sequence, its dependencies, and its reversibility are unchanged |
 
 ## `multi_tenant.md`
 
@@ -434,6 +441,7 @@ pass takes 102, one number across all three documents it amends.
 | 89 | the liveness-partition amendment of 2026-09-08 | decision 92's partition corrected from two parts to three — a nonterminal task under a held lease is claimable by nobody and is neither terminal nor checkpointed, so the two-part statement accounted for no actively executing task; the middle part described in the existing `lease`/`held` terms and given no name, and no term minted |
 | 103 | the workflow-proving pass of 2026-09-09 | decision 100 opened and argued here, beside `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`, whose declaration-as-governance-write ruling defines the gap: the gate judges a declaration as written and the first batch routed through it is the first execution of any step of it. The section states the question, the four mechanisms that bear on it and what each is scoped to — the migration's dual-run cutover, the recovery-path cadence rule, the conformance suite's disposable instance, and the review step — the three candidates, and the two rules any answer must survive; it argues no side. `replay` is named as unavailable to any candidate, per `vocabulary.md#replay` |
 | 105 | the acyclicity pass of 2026-09-09 | a forward pointer added where the per-type cycle check is asserted: whether that reading is the design's requirement or its assumption about the record it was written against is decision 102, argued in `data_model.md`. The two checks the section states are unchanged, and no candidate there changes the writer's walk |
+| 106 | the decision-100 ruling of 2026-09-09 | decision 100 ruled here, the section rewritten from the open question revision 103 argued into the ruling: proving conditioned on the blast tier, with the three grounds, the cost accepted — the tier is assigned to the write and not to the declaration's future behavior, and is accepted as a proxy — what would reopen it, and the three things it leaves open, which are the threshold value, the ground a proving run runs against, and whether the unproven state is an edge or the absence of a proving record. Principle 3's planted positive and the advisory path's parity shape are carried through from the open section; the refusal of `replay` is unchanged |
 
 ## `workflows.md`
 

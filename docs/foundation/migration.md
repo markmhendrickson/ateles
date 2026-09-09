@@ -530,8 +530,9 @@ reduced to a rendered pointer at the one root whose harness hard-requires the pa
 corrected to name the `workflow` that superseded it, the correction read back. A retirement before the
 cutover batch has closed is the flag day this document forbids: the swarm would hold neither the old path
 nor a proven new one. The cutover batch is the parity test `gates_and_workflows.md#one-step-set-defined-once-tested-for-parity`
-asks for, applied to a procedure instead of a step set, and it is the same test the conformance suite runs
-for any declaration.
+asks for, applied to a procedure instead of a step set, and what the dual-run supplies is a **fallback** — the
+skill still invocable while the workflow is exercised — which a declaration with no predecessor does not
+have.
 
 **Stage 11 — the skills (workflow; declarations, then retirements).** For each procedure row: declare,
 dual-run, cut over on one closed batch, retire the skill. For each role: the runner reads
