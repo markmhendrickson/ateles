@@ -497,7 +497,7 @@ record the design refuses to keep.
 **`unknown` is a rendered value, not a blank.** A CI state the adapter could not read is `unknown` on the
 artifact and holds the step; the console shows `unknown`, distinct from failing and from passing. That
 domain value is still shown when the observation read *succeeded*; a failed observation read is screen
-unknown per §3, not a blank health panel and not a coerced empty adapter list.
+unknown per §3, not a blank health summary and not a coerced empty adapter list.
 
 **Silence is a derived read**, and it is the one that matters most here: a daemon is **silent** when no
 window observation exists past its declared window *while the record is reachable*. The screen must not
