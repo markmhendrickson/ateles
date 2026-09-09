@@ -282,7 +282,7 @@ value across all the stores — one tenant cannot separate stores it does not di
 a disposition, and it was the right offer while the several-instance case was anticipated rather than
 actual. It is actual: the operator answered that he already runs two instances separated by high
 sensitivity and expects more as further engagements arrive. A non-goal would rest the design on a premise
-his own setup contradicts, and the cutover would be planned against a fiction. That the question turned
+his own setup contradicts, and laying the foundation would be planned against a fiction. That the question turned
 on a fact rather than on a preference is why it was his to answer and not a reviewer's to derive.
 
 **One identity per instance.** A principal holds a distinct identity in each instance, with the reads and
