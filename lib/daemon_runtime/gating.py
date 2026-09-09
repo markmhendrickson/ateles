@@ -261,6 +261,11 @@ class GateDecision:
     threshold: float
     policy_id: str
     reason: str
+    # True when `confidence` is the fail-closed default because no producer
+    # ever scored this task (ateles#902), as opposed to a real score that
+    # happens to be low. Callers must not let the two read the same: an
+    # unscored task says so; a scored-low task keeps saying "low confidence".
+    confidence_unscored: bool = False
 
     @property
     def may_auto_execute(self) -> bool:
@@ -449,6 +454,7 @@ def evaluate_gate(
     action_type: str | None,
     policy: ExecutionPolicy,
     successful_recurrences: int = 0,
+    confidence_unscored: bool = False,
 ) -> GateDecision:
     """
     Apply the gate matrix. Returns a GateDecision.
@@ -464,6 +470,14 @@ def evaluate_gate(
     does not mean "risky", it means an agent cannot do this — and a hundred
     prior successes do not hand the swarm a credential it was designed not to
     hold.
+
+    ``confidence_unscored`` (ateles#902): True when `confidence` is only the
+    fail-closed default (0.0) because no producer ever scored this task, not
+    because an agent judged it low. This changes NOTHING about the decision —
+    the fail-closed behavior is unchanged, an unscored task still checkpoints
+    exactly as before — it only changes the REASON text and stamps
+    `GateDecision.confidence_unscored` so "never scored" and "scored low"
+    never again read identically to the operator.
     """
     blast = policy.blast_radius_for(action_type)
     threshold = policy.confidence_threshold
@@ -482,6 +496,7 @@ def evaluate_gate(
                 "operator-only action — never auto-executable at any "
                 "confidence or recurrence count"
             ),
+            confidence_unscored=confidence_unscored,
         )
 
     # Recurrence graduation: a proven recurring series may auto-execute below
@@ -508,24 +523,35 @@ def evaluate_gate(
             threshold=threshold,
             policy_id=policy.entity_id,
             reason=reason,
+            confidence_unscored=confidence_unscored,
         )
 
     # Otherwise: checkpoint. Low-confidence + high-blast also proposes alternatives.
+    # An unscored task gets a distinct reason (ateles#902): "never scored" is not
+    # a judgment "low confidence" claims to be, and the two must not read alike.
     if not high_conf and blast == BlastRadius.HIGH:
+        reason = (
+            "never scored (no confidence recorded) and high blast radius — "
+            "propose alternatives"
+            if confidence_unscored
+            else "low confidence and high blast radius — propose alternatives"
+        )
         return GateDecision(
             action=GateAction.CHECKPOINT_WITH_ALTERNATIVES,
             blast_radius=blast,
             confidence=confidence,
             threshold=threshold,
             policy_id=policy.entity_id,
-            reason="low confidence and high blast radius — propose alternatives",
+            reason=reason,
+            confidence_unscored=confidence_unscored,
         )
 
-    reason = (
-        "high blast radius — operator approval required"
-        if blast == BlastRadius.HIGH
-        else "below confidence threshold"
-    )
+    if blast == BlastRadius.HIGH:
+        reason = "high blast radius — operator approval required"
+    elif confidence_unscored:
+        reason = "never scored — no confidence recorded"
+    else:
+        reason = "below confidence threshold"
     return GateDecision(
         action=GateAction.CHECKPOINT,
         blast_radius=blast,
@@ -533,6 +559,7 @@ def evaluate_gate(
         threshold=threshold,
         policy_id=policy.entity_id,
         reason=reason,
+        confidence_unscored=confidence_unscored,
     )
 
 
@@ -566,6 +593,7 @@ def write_checkpoint_brief(
                 "plan_summary": plan_summary,
                 "confidence": decision.confidence,
                 "confidence_threshold": decision.threshold,
+                "confidence_unscored": decision.confidence_unscored,
                 "blast_radius": decision.blast_radius.value,
                 "gate_action": decision.action.value,
                 "reason": decision.reason,
