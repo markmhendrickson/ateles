@@ -46,6 +46,8 @@ resolves to a genuinely different bot token than `TELEGRAM_BOT_TOKEN` — so it
 is not the source of a live 409. If Monedula's log shows repeated 409s,
 confirm what else on the host is polling `getUpdates` for the same token
 before assuming it is Cyphorhinus; the two were never designed to share one.
+Host-side identification and elimination of the second consumer is tracked in
+ateles#890 (not closed by dead-gate alarming alone).
 
 ## Logs
 
