@@ -56,6 +56,7 @@ below; steps and gates are `gates_and_workflows.md`; core workflows (including i
 - [Operator-only tasks are claimed by the operator-facing agent](#operator-only-tasks-are-claimed-by-the-operator-facing-agent).
 - [A task is executed only through a workflow](#a-task-is-executed-only-through-a-workflow).
 - [Changing the swarm is work, and it goes through a workflow like any other](#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other).
+- [Whether a newly declared workflow is proven before it binds production work](#whether-a-newly-declared-workflow-is-proven-before-it-binds-production-work).
 - [What goes through a workflow is a batch of tasks](#what-goes-through-a-workflow-is-a-batch-of-tasks).
 - [How a batch is formed, and what chooses its workflow](#how-a-batch-is-formed-and-what-chooses-its-workflow).
 - [A batch may hold on a condition discovered mid-flight](#a-batch-may-hold-on-a-condition-discovered-mid-flight).
@@ -591,6 +592,107 @@ simultaneously unreadable could not recover on its own — that is a real limita
 writing. And the failure is at least **loud**: an unreadable workflow halts rather than degrades, so the
 condition presents as a checkpoint and an announcement rather than as work quietly not happening
 (`failure_posture.md` rule 2), which is what makes an operator-only recovery viable at all.
+
+### Whether a newly declared workflow is proven before it binds production work
+
+**Open.** Registered in `conformance.md#the-register-of-open-design-decisions`. The section above settles
+that declaring a workflow is work, that the declaration is a governance write, and that the write is an
+action at the gate under its class. What it does not settle is what happens *after* the write lands. A
+declaration that clears the gate is live, and the first batch routed through it is the first time any step
+of it has ever been executed. Nothing here, and nothing in
+`gates_and_workflows.md#declaration-batch-projection`, describes a rehearsal, a run on fixtures, or any
+state in which a declaration exists and does not yet route real work. **Replay** is not among the
+candidates and cannot be: it is refused outright in this design (`vocabulary.md#replay`), so a proving run
+is a first doing on a written-for-the-purpose population and never a second doing of a stored one.
+
+**Why the question is not answered by the gate that already governs the write.** The gate judges the
+declaration at the moment it would be taken — its class, its blast tier, the proposer's confidence — and
+that judgement is made by reading the declaration. A declaration is a *future execution path*, and it is
+one whose steps are executed by principals reasoning under a model rather than by code a reviewer can
+evaluate by reading. Two declarations that read identically can behave differently, and a declaration that
+reads well can produce a step that concludes wrongly on the first real batch. So the question is not
+whether declaring is governed — it is, and thoroughly — but whether governing the declaration is the same
+thing as knowing what the declaration will do. The blast radius makes the gap worth naming rather than
+tolerating: a declaration is a change to how *every* future batch of its type is executed, which the
+section above already calls a larger radius than most outward work carries.
+
+**What the design already has, and what it is scoped to.** Four mechanisms bear on this and none of them
+covers it. One of them comes closest and is worth stating first, because it already asserts more than it
+carries.
+
+`migration.md#ordering-and-the-cutover-for-the-skills` states the only proving-before-binding sequence in
+the corpus: a procedure's workflow is declared, the skill it replaces stays invocable, the workflow is then
+executed **end to end through one real batch**, and only when that batch has closed is the skill retired.
+It is a genuine control, and it is not the answer to this question in two ways. Its subject is the
+*retirement of the old path* rather than the protection of production from an unproven declaration, so a
+declaration with no predecessor skill passes through nothing. And what it proves on is a **real batch** with
+binding verdicts — the dual-run makes the old path the fallback, which is what a brand-new declaration does
+not have. That section also carries a claim this question puts in doubt: that the cutover batch "is the same
+test the conformance suite runs for any declaration." The suite's rows test whether the engine enforces the
+design's rules, on fixtures, from zero; they do not judge whether any particular declaration does useful
+work. Whichever way this decision goes, that sentence is either made true by the answer or corrected.
+
+`failure_posture.md#the-rules` states the closest rule the corpus holds — a recovery path is **exercised on
+a declared cadence**, because a restore that has never been run cannot fail and until it is run it is
+decoration. That is the same argument this question asks about a different object, and it is scoped to
+`recovery_paths[]` on a binding entity, not to workflow declarations.
+
+`conformance_suite.md#from-zero-the-disposable-instance-and-why-it-cannot-be-the-production-one` already
+establishes a place a thing may be exercised without touching anyone's data: a record instance created
+empty per run and destroyed after it, isolated by four layers that each fail closed. Its subject is the
+acceptance suite judging the design against itself from zero, and its fixtures
+(`conformance_suite.md#named-fixtures`) are written for that; it is not a facility a swarm in operation
+reaches for when it declares something. Decision 76 is what makes such a facility coherent rather than a fork of
+production — several instances of one operator's record are several records, with one identity per instance
+and an explicit binding that fails closed when ambiguous — so the substrate for a proving run exists in the
+design even though nothing points a declaration at it.
+
+The review step is the fourth, and it is the reason the status quo is a real candidate and not merely the
+absence of one. Every step has an owner who signs it, a standing finding obliges a change to what produced
+it (`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`),
+and a declaration that performs badly is corrected through that loop without any new mechanism.
+
+**The candidates.**
+
+1. **Implicit proving, which is what the design does now.** No new obligation. A declaration binds when the
+   gate passes it, and the correction loop above is what catches a bad one. The cost is that the first
+   production batch is the experiment, and the batch that pays for the defect is a real one.
+
+2. **Explicit proving before binding.** A declaration does not route production work until it has been
+   exercised — on fixtures, or on an instance that is not the production one — and the proving result is
+   itself a record, judged by a principal. What it needs: somewhere to run, which decision 76 and the
+   disposable instance make expressible; and a state a declaration can be in
+   between written and binding, which the design does not currently have and cannot get cheaply — a
+   `workflow` is a governance type whose write is a permitted action with one writer
+   (`gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits`), and an `enabled`
+   field on it is the maintained state principle 11 forbids. So candidate 2 has to say what the unproven
+   state *is* without adding a flag, the candidate being an edge or the absence of a proving record rather
+   than a value on the declaration. The cost is an obligation on every declaration, including one an
+   operator wrote and is confident in.
+
+3. **Proving conditioned on blast tier.** The declaration write already resolves to a tier under the
+   instance's `action_policy` (`gates_and_workflows.md#confidence-and-three-blast-tiers`); a declaration
+   above some tier must be proven and one below need not. This composes with machinery that exists rather
+   than standing a second one beside it, which is what invariant 6 asks of any answer here.
+
+The design's own precedent for evaluating something non-bindingly beside the thing that binds is the
+advisory path: `route_task` resolves as the enforcing gate does, and a parity test holds the two equal
+(`gates_and_workflows.md#confidence-and-three-blast-tiers`). That is a shape candidates 2 and 3 could take
+without inventing one. The epistemic rule behind any of them is principle 3
+(`principles.md#3-validate-the-instrument-before-believing-the-measurement`): a proving run that has never
+gone red proves nothing, so whatever proving is, it needs its own planted positive.
+
+**What any answer has to survive.** Invariant 6 is the sharp edge: a proving step that re-does what the
+review step already does is a second gate, and the design would then have two places to read before knowing
+whether a declaration may bind. An answer that adds proving has to say what proving establishes that
+signing does not — the candidate being that a signature judges a declaration as written and a proving run
+judges it as executed, which are different claims about an LLM-executed step and the same claim about a
+deterministic one. An answer that declines to add it has to say why the recovery-path rule's reasoning does
+not reach a declaration, given that both are paths whose first real use is their first use.
+
+`ownership_grant`'s domain already covers a workflow (`authority_model.md#the-tuple`), so a workflow has
+an owner who could be the principal that judges a proving result. Candidate 2 therefore needs no new role,
+which removes one objection to it and does not settle the question.
 
 ### What goes through a workflow is a batch of tasks
 
