@@ -923,6 +923,11 @@ if the task ended without doing what the batch needed.
 `DEPENDS_ON` write that would close a cycle among its own edges — its hierarchical relationship types,
 `PART_OF` and `DEPENDS_ON`, are cycle-checked at write, which is a property of the record the design relies
 on rather than rebuilds (`adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`).
+Whether that per-type reading is the design's requirement or its assumption about the record it was written
+against is decision 102, argued at
+`data_model.md#whether-acyclicity-is-a-property-of-a-relationship-type-or-of-the-graph` and registered in
+`conformance.md#the-register-of-open-design-decisions`; the two checks below are what the design states
+today, and no candidate there changes the writer's walk.
 A loop that runs through `ADDRESSED_BY` is invisible to that per-type check, so the second check is the
 writer's: before it writes, the step owner walks from the target task to its live batch along
 `ADDRESSED_BY`, from that batch along its `DEPENDS_ON` edges, and on — the bounded retrieval the record

@@ -110,6 +110,96 @@ with them.
 
 <!-- /rendered -->
 
+## Whether acyclicity is a property of a relationship type or of the graph
+
+**Open.** Registered in `conformance.md#the-register-of-open-design-decisions`. The design reads acyclicity
+as a **per-type** property and says so twice.
+`work_model.md#a-batch-may-depend-on-a-task-it-created` states that the record refuses a `DEPENDS_ON` write
+that would close a cycle among its own edges, that `PART_OF` and `DEPENDS_ON` are "its hierarchical
+relationship types", and that a loop through `ADDRESSED_BY` "is invisible to that per-type check" — which is
+why the writer's own walk is the second check rather than a redundancy.
+`planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward` relies on the same reading to
+bound the ascent, so that the walk upward from any task is a path that ends. Both cite the check as a
+property of the record the design relies on rather than rebuilds. **What neither states, and what this
+decision registers, is whether that per-type reading is the design's requirement or the design's assumption
+about the record it happened to be written against** — and therefore what the check does when a new
+relationship type is registered.
+
+**The seam has been noticed once and closed on a different question.** Contradiction X-15
+(`conformance_suite.md#contradictions-a-state-one-test-requires-and-another-forbids`) put the record's
+per-type refusal against the same section's writer walk, and closed it by dividing the enforcement: the
+record refuses the cycles its per-type check can see, and the writer is the enforcement point for the loop
+through `ADDRESSED_BY`, which is the shape decision 56 ruled for governance writes. That closure is correct
+about the division of labour and takes the per-type reading as its premise rather than as its subject. So
+the seam is not unnoticed — it is settled on the question of *who refuses* and unasked on the question of
+*what the check is a property of*, which is why this row is opened rather than folded into X-15.
+
+**Why the question binds stage 1 and is not deferred behind G25.** Every edge the design introduces is
+registered in stage 1 (`migration.md#ordering-dependencies-and-what-each-stage-depends-on`), and G25 already
+holds that stage on the record admitting new relationship types at all. The check is separate from that
+dependency and reaches further: whatever the relationship-type vocabulary comes to permit, a check applied
+without regard to type governs every type in it. Two of the design's own edges are the direct case.
+`FOLLOWS` is a chain read from a live batch back to its intake batch, and a recurring task's history read
+from its live instance back — the design reads it precisely as a sequence, so a check that refuses to close
+a loop in it refuses something the design does not intend to write, but a check that treats it as
+constrained the way `PART_OF` is has a claim about `FOLLOWS` that the design has not made.
+`ownership_grant` runs object → principal, and an object may be a principal, so a principal owning a type
+that owns a principal is a shape the design permits and a type-blind check would not distinguish from a
+defect. Neither is a hypothetical about a future type: both are among the thirteen.
+
+**Why it is Neotoma's code and an Ateles design question.** `conformance.md#what-the-design-requires-of-the-substrate-regardless-of-who-builds-it`
+already states the form: this corpus states what it requires of the record, and the record's own repository
+builds it; a gap between the two is located and fixed where it lives and is never a fact either side may
+reason from. The relationship-type vocabulary is exactly that shape already — G25 assigns the registry read
+to the substrate, and decision 67 names it the same missing mechanism as the substrate's several
+hand-kept copies of the same closed set. What this row owes is the requirement, in the form
+`conformance.md#what-the-design-requires-of-the-substrate-regardless-of-who-builds-it` states requirements: what the
+design needs a check to do, and what a conformance row would hold red until it does. The specification that
+implements it belongs to the record's own repository, alongside G25's.
+
+**The candidates.**
+
+1. **Per-type, declared at registration.** A registered relationship type declares whether it is acyclic,
+   and the check runs for the types that declare it. This is what the corpus already reads the record as
+   doing, so it makes an assumption into a requirement rather than changing a rule; it keeps the guard where
+   `PART_OF` and `DEPENDS_ON` genuinely need it, which is where the two sections above rely on it; and it
+   extends type registration rather than standing a second mechanism beside it, which is what invariant 6
+   asks. What it has to say is where the declaration lives — a property of the registered type, which is
+   what `data_model.md#concepts` would then carry a column for — and what a type that declares nothing
+   defaults to, which principle 5 makes the load-bearing half of the answer rather than a detail.
+
+2. **No check; acyclicity is the caller's concern.** The cheapest, and the design does not need it to be
+   wrong to reject it: the writer's walk that `work_model.md` already requires for the cross-type case
+   would become the whole mechanism, which is a coherent position and is the one the design already takes
+   for every loop the per-type check cannot see. What it drops is a guard two sections currently lean on to
+   bound a walk, so an answer here has to say what bounds the ascent instead.
+
+3. **Universal, and the design's edges conform.** Rejected on its face if `FOLLOWS` is genuinely a chain,
+   but the row states it rather than assuming it, because the assumption is the thing being tested: the
+   design reads `FOLLOWS` as a sequence and has never had to write one that closes, so "conform" may cost
+   nothing on the edges the design has and cost on an edge it has not yet named. What this candidate has to
+   say is which of the thirteen it constrains and whether any of those constraints is one the design would
+   have chosen on its own.
+
+**What any answer has to survive.** Principle 1 is the sharpest, and it bears on the answer twice. A check
+that runs on some write paths and not others is not a control in this design's sense — it reports on the
+paths it covers — so an answer that keeps the check has to say whether making it bind is part of the answer
+or a separate defect, and an answer that removes it has to name what fails when a cycle is written. The
+design's own precedent is that the writer is the enforcement point where the record's per-type check cannot
+see the loop, which is `work_model.md`'s cross-type walk and is the shape decision 56 ruled for governance
+writes: the one writer that holds the grant checks before it writes. Principle 5 governs the default: a
+type whose acyclicity is unstated resolves to the restrictive branch or to the permissive one, and this is
+the field carrying the safety meaning, so the answer states which. And an unbounded walk over a deep graph
+is a cost paid at every write, which makes a declared depth bound a candidate term of any answer rather
+than an implementation detail — with the design's own rule that a bound reached resolves to a refusal and
+never to a permissive default, as `#record-conventions` already requires of a degraded read.
+
+**What this does not reach.** Which relationship types the vocabulary holds is G25 and belongs to the
+record's repository; this question is what a check does with the types the vocabulary comes to hold,
+whichever they are. And the cross-type walk `work_model.md` requires of a step owner before it writes a
+`DEPENDS_ON` is unchanged by any candidate here: it exists because no per-type check can see a loop that
+runs through a second type, which stays true whether the per-type check is declared, universal, or absent.
+
 ## Record conventions
 
 - **Observations are the history.** Every write is an append-only observation with a timestamp and
