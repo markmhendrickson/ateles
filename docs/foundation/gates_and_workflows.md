@@ -156,6 +156,76 @@ is, so the mark sits on the registered type and the mechanisms that read it are 
 (`data_model.md#record-conventions`). A marker on the read would be a second place to say the same thing, and
 one that a declaration could omit.
 
+**Whether a step's declaration is a floor or a ceiling, and whether it covers writes.** *Open, registered
+in `conformance.md#the-register-of-open-design-decisions` (decision 103).* What the rule above states is a
+floor, and it is enforced on one side only. A step that cannot read a type it declared does not proceed —
+that binds at runtime, on the step. A step that reads a type it did **not** declare is a declaration error
+caught in the pull request that introduced it — that binds at review, on the author. So the two halves of
+"declared" are held by two different mechanisms at two different moments, and only the first refuses
+anything while a batch is moving. The asymmetry is deliberate and argued above: an undeclared dependency is
+visibly missing where an unstated one is invisible until a read fails silently and something proceeds on
+the gap. What is registered here is whether that is the design's answer or its starting position.
+
+**The write side has no declaration at all.** `reads_to_enter` and `reads_to_close` have no counterpart:
+nothing in a step's declaration names the entity types it writes. What governs a write is the executing
+principal's `agent_grant`, default-deny per entity type (decision 41), which is a property of the
+**principal** and not of the step — so a principal granted a type may write it from any step it claims, and
+the declaration answers "what must this step be able to read" while nothing answers "what does this step
+change". Whether that gap is closed is part of this question and is also a defect on its own terms,
+registered separately as an issue, since it stands however the floor-or-ceiling half rules.
+
+**What this does not reopen.** External systems are already settled and are not the subject: the adapter
+runs before and after a step and never during it
+(`adapters.md#the-adapter-runs-before-and-after-a-step-never-during-it`), so during a step the step works on
+what hydration resolved and reaches no external system itself. That is topology — there is no live path out
+of a step to constrain — where this question is about admission to the record. And the freshness rule
+already qualifies a declared read rather than bounding an undeclared one: a read whose coverage falls short
+of what the step declared is `unknown` for that step, never a smaller success, and holds the step as an
+unreadable one does.
+
+**The candidates.**
+
+1. **Requirements only — the floor, made explicit.** The declaration states what a step must be able to
+   read, and anything else it reads within its principal's grant is permitted; an undeclared read stays what
+   it is today, a defect caught at review. This is the corpus as written, stated as an answer rather than
+   left as a silence. For it: the grant already carries the ceiling, matched on the credential at the read
+   (decision 94), so a per-step ceiling would be a second place stating what a principal may touch, which
+   invariant 9 forbids and invariant 6 asks to avoid by extending the mechanism that generalizes. Against
+   it: nothing ever checks that a step touched only what it declared, so the ceiling half is reporting and
+   not a control, which is invariant 1's defect in its plainest form — and this candidate has to own that
+   rather than describe review as enforcement, since the review catches what a reader notices in a diff and
+   not what a step does at runtime.
+
+2. **Exhaustive and enforced at runtime.** Reads and writes are both declared, and anything outside the
+   declaration is refused when attempted. For it: it makes a step's reach **attestable** — what a verdict
+   could have rested on is readable from the declaration rather than taken on trust, which matters most
+   where a step is executed by a principal reasoning under a model and no one can read the code to know what
+   it looked at. That is the argument decision 100 accepted for proving, that a declaration as written and a
+   declaration as executed are different claims for a step no code determines. Against it: the design's
+   enforcement point for admission is the record (decision 97), and the record sees the requesting principal
+   and its grant, not the step that principal executes — so a step-scoped refusal needs the enforcement
+   point to become step-aware, which is an architectural cost and which this candidate must argue is
+   extending the record's admission check rather than standing a second gate beside it (invariant 6, and the
+   second gate decision 97 already rejected). It also has to say what a genuinely unanticipated read raises,
+   given that hydration runs before the step and a late read has nowhere to go: `underdetermined_inputs` and
+   `undeclared_dependency` are distinct classes that must not be collapsed
+   (`failure_posture.md#a-task-whose-inputs-cannot-be-resolved-is-put-to-the-operator-not-executed-on-a-guess`), and a read the step never declared is not a dependency it could not
+   reach.
+
+3. **Symmetry without a ceiling.** Writes get the declaration reads already have — declared, the floor
+   enforced at runtime, the undeclared caught at review — and neither side gains a runtime ceiling. For it:
+   it closes the read/write asymmetry, which is a defect whichever way the ceiling question rules, and it
+   needs nothing of the enforcement point, so it is available whether or not candidate 2 is ever reachable.
+   Against it: it inherits candidate 1's answer to invariant 1 on both sides rather than one, so it doubles
+   what is stated and not what binds.
+
+**What any answer owes.** Decision 41 and decision 94 rule admission per entity type, per principal,
+default-deny, checked at the write and at the read. Those are the **outer** bound and this question is
+about an **inner** one, the same relation `data_model.md#concepts` already states when it says a step's
+declared reads narrow what the grant admits and that neither may widen the other. An answer must say why
+both exist and what each answers, or it reads as reopening 41 and 94 rather than as bounding a step within
+them.
+
 **A hydration failure is the step's failure, and it takes the path a failed read already takes.** An
 adapter that cannot fulfil a read it was asked for does not return an empty result: the read is `unknown`,
 and the phase does not proceed to the step. That is the rule below, not a second one — the hold is bounded,
