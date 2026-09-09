@@ -771,7 +771,7 @@ pressure for a record the design refuses to keep.
 channel carries a declared subset. Completed work is deliberately not carried.
 
 **A second decision queue.** Not a "needs attention" list beside the checkpoint queue, not a separate
-approvals inbox, not an alerts panel. One decision queue, one resolution protocol — the design says "do
+approvals inbox, not an alerts surface. One decision queue, one resolution protocol — the design says "do
 not build a second gate, a second queue, or a second notification path" by name.
 
 **Editing foundation documents, or the register, through the console.** The register is a document. The
