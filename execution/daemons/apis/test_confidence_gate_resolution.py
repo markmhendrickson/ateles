@@ -141,3 +141,37 @@ def test_unscored_task_with_no_owner_hits_required_inputs_floor():
     )
     assert unscored is True
     assert confidence <= 0.4
+
+
+def test_unscored_well_specified_low_blast_task_auto_executes():
+    """Part 2 intentionally lets the drain path move: a well-specified,
+    NEVER-scored task assigned a low-blast action_type mechanically scores
+    high enough to clear the fallback threshold and AUTO_EXECUTEs — same as
+    if an agent had scored it itself. `confidence_unscored` only rewrites the
+    CHECKPOINT* reason text (see Part 1); it does not gate the action axis,
+    so it cannot turn this task's mechanical score into a checkpoint.
+
+    This is the positive case existing fail-closed tests never covered —
+    those all use confidence <= 0.2 or a high-blast action_type, so they
+    stay green even if the #902 low-blast drain path regresses. Without this
+    test, a change that accidentally checkpoints every unscored task (or one
+    that lets mechanical scoring auto-execute a high-blast task) would both
+    pass CI.
+    """
+    snapshot = {
+        "title": "Well-specified task",
+        "body": "b" * 60,
+    }  # no confidence/confidence_score field at all
+    confidence, unscored = apis._resolve_confidence(
+        snapshot, has_owner=True, action_type_recognized=True, relationship_count=3,
+    )
+    decision = evaluate_gate(
+        confidence=confidence,
+        action_type="local_edit",  # low-blast under the fallback policy
+        policy=_fallback_policy(),
+        confidence_unscored=unscored,
+    )
+    assert unscored is True
+    assert confidence >= 0.85  # >= _FALLBACK_THRESHOLD
+    assert decision.action == GateAction.AUTO_EXECUTE
+    assert decision.may_auto_execute is True

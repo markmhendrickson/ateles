@@ -270,11 +270,13 @@ def _read_confidence(snapshot: dict) -> float:
     explicit score, return 0.0 so the gate fails CLOSED (checkpoint) for any
     non-low-blast action — the operator is asked rather than the swarm guessing.
 
-    Kept exactly as before (ateles#902 changes nothing about this fallback or
-    its callers): `dispatch_task` now scores an unscored task with
-    `score_confidence` *before* this is called, so in practice the snapshot it
-    sees carries a mechanical score rather than nothing. This function itself
-    still fails to 0.0 on a truly absent/unparseable value, unchanged.
+    Kept exactly as before (ateles#902 changes nothing about this function or
+    its behavior): still fails to 0.0 on a truly absent/unparseable value.
+    `dispatch_task` calls this only indirectly, through `_resolve_confidence`,
+    and only on the branch where the snapshot ALREADY carries an explicit
+    score (`_confidence_is_explicit` is True) — an unscored snapshot never
+    reaches this function at all; `_resolve_confidence` routes it to
+    `score_confidence` instead and returns that value directly.
     """
     raw = snapshot.get("confidence", snapshot.get("confidence_score"))
     try:
@@ -310,8 +312,14 @@ def _resolve_confidence(
     its own rubric for the sibling pre-execution gate.
 
     `unscored=True` is what lets the gate's reason text say "never scored"
-    instead of "low confidence" — the fail-closed FLOOR the mechanical score
-    can produce is unchanged; only the label attached to it changes.
+    instead of "low confidence" when the decision is a CHECKPOINT* — it does
+    NOT force a checkpoint by itself. The mechanical score returned here is a
+    real value the gate's confidence axis consults like any other: a
+    well-specified, unscored, LOW-blast task can score high enough to clear
+    `confidence_threshold` and AUTO_EXECUTE, same as a task an agent scored
+    itself. That is intentional (ateles#902) — it is what lets the swarm's
+    low-blast drain path move again for tasks nobody explicitly scored,
+    instead of every one of them stalling at a checkpoint nobody can clear.
     """
     if _confidence_is_explicit(snapshot):
         return _read_confidence(snapshot), False

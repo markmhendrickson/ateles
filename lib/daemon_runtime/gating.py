@@ -471,13 +471,20 @@ def evaluate_gate(
     prior successes do not hand the swarm a credential it was designed not to
     hold.
 
-    ``confidence_unscored`` (ateles#902): True when `confidence` is only the
-    fail-closed default (0.0) because no producer ever scored this task, not
-    because an agent judged it low. This changes NOTHING about the decision —
-    the fail-closed behavior is unchanged, an unscored task still checkpoints
-    exactly as before — it only changes the REASON text and stamps
+    ``confidence_unscored`` (ateles#902): True when no producer ever scored
+    this task, so `confidence` is either the fail-closed default (0.0) or a
+    mechanical approximation (`confidence_scoring.score_confidence`) filled
+    in ahead of this call — never an agent's own judgment. It changes ONLY
+    the REASON text on a CHECKPOINT*/AUTO_EXECUTE decision, stamping
     `GateDecision.confidence_unscored` so "never scored" and "scored low"
-    never again read identically to the operator.
+    never again read identically to the operator. It does NOT gate the
+    action axis: a well-specified, unscored, LOW-blast task can still clear
+    `confidence_threshold` on its mechanical score and AUTO_EXECUTE exactly
+    as it would if an agent had scored it — this flag does not force a
+    checkpoint. Fail-closed is preserved by the blast-radius axis alone:
+    ``NEVER`` never auto-executes regardless of this flag (see above), and a
+    HIGH-blast unscored task still checkpoints because the fallback
+    mechanical score does not clear HIGH's bar, not because of this flag.
     """
     blast = policy.blast_radius_for(action_type)
     threshold = policy.confidence_threshold
