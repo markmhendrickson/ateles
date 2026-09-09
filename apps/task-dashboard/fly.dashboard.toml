@@ -1,0 +1,51 @@
+# Fly configuration for the Ateles task dashboard.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# THIS REPO IS PUBLIC. No app name, hostname or client-identifying value may
+# appear in this file.
+# ─────────────────────────────────────────────────────────────────────────────
+# The app name and region are passed as flags by the deploy workflow, read from
+# repository secrets; the canonical binding lives in the `deployment_configuration`
+# entity in Neotoma. This mirrors neotoma's own fly configs, which likewise name
+# no app — neotoma PR #2001 was closed for committing client-identifying deploy
+# config to a public repo.
+#
+# WHY A PER-INSTANCE CONFIG FILE AT ALL: `flyctl deploy` REAPPLIES the selected
+# config's [[vm]] block over the running machine. It does not merge, and it
+# prints no warning when it SHRINKS one. Deploying without `-c` falls back to a
+# `fly.toml` that is not describing this app. That is not hypothetical — it is
+# neotoma#2289, where a missing `-c` would have downgraded an instance 8x on
+# memory and from `performance` to `shared`.
+
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+
+  # This dashboard is a read-only view that is cheap to start and idle most of
+  # the time. Unlike the Neotoma instance — which must stay always-on because
+  # MCP-over-HTTP sessions live in process memory — nothing here is held in
+  # memory across requests except a 10-minute sign-in nonce, whose loss costs
+  # one retry of a redirect. So it may scale to zero and cost nothing idle.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    # /healthz is deliberately the ONLY unauthenticated route: Fly's checker
+    # has no Google account. It reports liveness and the build's commit, and
+    # no graph data.
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  cpus = 1
