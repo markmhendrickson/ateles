@@ -128,8 +128,9 @@ ALLOWLIST_WORDS = frozenset(
     """.split()
 )
 # `fields` tipped the advisory bound on ateles#899 (decision-93 ruling prose merged with main);
-# `side` tipped it on ateles#914 after the same merge; the rest are ordinary English that had
-# crossed threshold without being load-bearing terms.
+# `side` tipped it on ateles#914 after the same merge; `surface` tipped it again on ateles#916
+# (decision-101 deny-table prose); the rest are ordinary English that had crossed threshold
+# without being load-bearing terms.
 
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z']*")
 _TESTID_ABBREVIATIONS = frozenset(
