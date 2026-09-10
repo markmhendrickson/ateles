@@ -511,6 +511,31 @@ secret for anything below it. And a credential is resolved once per invocation a
 retry of that invocation, because idempotency is scoped per principal: re-resolving mid-retry can present
 a different credential and make the retry a second first attempt.
 
+### Where a credential comes from, and what happens when that source cannot be read
+
+**Open.** Registered in `conformance.md#the-register-of-open-design-decisions` as decision 105. The rules
+above govern a credential the swarm already holds: how it is kept out of a resident process, how it is
+returned as a value rather than written into an environment, how it is resolved once per invocation, and
+which grant it matches. None of them says where it came from.
+
+That silence is total rather than partial. A secret source is named four times across the whole directory,
+and three of those are this section's own use of *materialize*. The design has no term for the store, no
+statement of who may write one, no rule for how a credential reaches the process that holds it, and no
+posture for the interval when the source is unreachable.
+
+Four things bound an answer, and each is already stated elsewhere. Principle 5 makes an unreadable store
+the safety field's own case — a credential that cannot be fetched is `unknown`, and a principal that
+proceeds without one has failed open. Custody by revocability already divides credentials in two, and the
+credential that is never materialized cannot share a lifecycle with the one that may be. Invariant 9
+refuses a second home, so a credential whose origin could be read from a deployment *and* from a
+`vendor_binding` has two answers and no authority. And the dual-admit window binds the source as much as
+the grant: a store that cannot hold two live values for one principal makes the staged rotation above
+unimplementable.
+
+What this does not reopen: G17 and decision 101 ask what the credential-to-principal binding carries, and
+decisions 96 and 97 rule what a check reads at the moment of the action. This asks what exists before any
+of those apply.
+
 **Rotation is staged, never a flag day.** Because a grant is matched on the credential (`sub`, `iss`), a
 credential replaced in one step is a principal whose grants stop matching. So the new credential is
 admitted alongside the old one — the grant matching it is written and read back — *before* the agent
