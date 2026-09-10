@@ -261,5 +261,51 @@ class TestBranchSweepIsMachineIndependent(unittest.TestCase):
         )
 
 
+class TestSupersessionIsJudgedOnContent(unittest.TestCase):
+    """Staleness is a question about the row, not about commit history.
+
+    The first implementation gated a branch's ruling on whether the branch
+    descended from `git rev-list -1 origin/main -- conformance.md`. That command
+    returns a different commit depending on how a checkout built its history, so
+    CI marked 66 refs stale where a developer's clone marked 2, and the same
+    source rendered two different documents — decision 93 ruled on one machine
+    and unruled on the other. A projection whose output depends on the machine
+    cannot be a `--check` gate.
+
+    Decision 95 is the case the gate exists for: ruled and reopened the same day,
+    with branches still carrying the superseded ruling. Reading one of those as a
+    ruling main is missing would report a reopened question as answered.
+    """
+
+    RULED = {"status": "ruled", "status_cell": "**ruled**"}
+
+    def test_a_reopened_row_supersedes_a_branchs_ruling(self):
+        main_row = {"status": "reopened", "status_cell": "**reopened**"}
+        self.assertTrue(ds.is_superseded(main_row, self.RULED))
+
+    def test_an_open_row_does_not_supersede(self):
+        """The ordinary ruled-but-not-merged case must survive."""
+        main_row = {"status": "open", "status_cell": "**open**"}
+        self.assertFalse(ds.is_superseded(main_row, self.RULED))
+
+    def test_a_row_main_has_never_seen_is_not_superseded(self):
+        self.assertFalse(ds.is_superseded(None, self.RULED))
+
+    def test_supersession_does_not_consult_git(self):
+        """The test must be answerable from two dicts and nothing else.
+
+        If it ever needs a repository to answer, the machine-dependence is back.
+        """
+        import inspect
+
+        src = inspect.getsource(ds.is_superseded)
+        for forbidden in ("run(", "git", "merge-base", "rev-list"):
+            self.assertNotIn(
+                forbidden,
+                src.split('"""')[-1],
+                f"is_superseded must not shell out ({forbidden!r} in its body)",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

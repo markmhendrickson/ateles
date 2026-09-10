@@ -49,15 +49,23 @@ ruled — the register's own status vocabulary carries ``reopened`` distinctly f
 ``ruled``, and collapsing the two would erase the fact that a settled question
 was unsettled again.
 
-**A branch's ruling counts only when the branch is newer than main's own last
-word on that row.** Decision 95 is why: it was ruled and reopened the same day,
-and six branches forked before the reopening still carry the *superseded*
-ruling. Reading those as rulings main is missing would report a reopened question
-as answered — inverting the very fact the reopening recorded. So a branch's
-``ruled`` is admitted only if the branch's copy of ``conformance.md`` descends
-from main's most recent commit touching it; a branch that has not caught up is
-carrying history, not an answer, and is reported as stale rather than silently
-dropped.
+**A branch's ruling counts unless main has since unsettled that row.** Decision
+95 is why: it was ruled and reopened the same day, and branches forked in between
+still carry the *superseded* ruling. Reading those as rulings main is missing
+would report a reopened question as answered — inverting the very fact the
+reopening recorded. So a branch's ``ruled`` is refused for any row main now reads
+``reopened``, and the refusal is reported rather than silently dropped.
+
+That test is on the row's content, deliberately. It was first written as commit
+ancestry — admit a branch only if it descends from main's last commit touching
+the register — and that was wrong in a way that took four disproved theories to
+find. ``git rev-list -1 origin/main -- conformance.md`` returns a different commit
+depending on how a checkout built its history, so CI marked 66 refs stale where a
+developer's clone marked 2, and the same source rendered two different documents:
+decision 93 ruled on one machine, unruled on the other. A projection whose output
+depends on the machine that rendered it cannot be a ``--check`` gate. Staleness
+was never a history question — a branch is carrying history when *that row's*
+status has moved on, which the two copies of the row state directly.
 
 *implemented* is checked only where a row's own ruling names a concrete artefact
 this repository can be asked about, through the checkers registered in
@@ -232,31 +240,6 @@ def register_at(ref: str) -> dict[str, dict[str, str]] | None:
     return rows or None
 
 
-def main_register_tip() -> str | None:
-    """The most recent commit on main that touched the register document."""
-    code, out = run(
-        [
-            "git",
-            "rev-list",
-            "-1",
-            MAIN_REF,
-            "--",
-            f"{FOUNDATION_DIR}/{REGISTER_DOC}",
-        ]
-    )
-    return out.strip() or None if code == 0 else None
-
-
-def descends_from(ref: str, commit: str) -> bool:
-    """True when `ref` already contains `commit`.
-
-    A branch that does not is carrying a copy of the register from before main's
-    last word on it. Its rows are history, not answers -- see decision 95.
-    """
-    code, _ = run(["git", "merge-base", "--is-ancestor", commit, ref])
-    return code == 0
-
-
 def remote_branches(exclude: str = MAIN_REF) -> list[str]:
     code, out = run(list(BRANCH_LIST_ARGS))
     if code != 0:
@@ -311,6 +294,33 @@ class Row:
         return "—"
 
 
+def is_superseded(
+    main_row: dict[str, str] | None, branch_row: dict[str, str]
+) -> bool:
+    """True when main has moved this row's status past what the branch carries.
+
+    The question a branch's ruling has to answer is whether main has *since*
+    unsettled that row -- decision 95 was ruled and reopened the same day, and a
+    branch forked in between carries a ruling the reopening superseded. Reading
+    it as a ruling main is missing would invert the fact the reopening recorded.
+
+    This is judged on the row's own content, not on commit ancestry. Ancestry was
+    the first implementation and it was wrong in a way that took four disproved
+    theories to find: `git rev-list -1 origin/main -- <register>` returns a
+    different commit depending on how a checkout built its history, so CI and a
+    developer's clone disagreed about which branches were stale (66 versus 2) and
+    the same source rendered two different documents. A projection whose output
+    depends on the machine cannot be a `--check` gate, and staleness was never
+    really a history question: a branch is carrying history when *this row's*
+    status has moved on, which the two copies of the row say directly.
+    """
+    if main_row is None:
+        return False
+    # `reopened` is the status the supersession produces, and the register's
+    # vocabulary carries it distinctly from `open` for exactly this reason.
+    return main_row["status"] == "reopened"
+
+
 def collect(refs_scanned: list[str]) -> tuple[list[Row], list[str], list[str]]:
     """Build every row's three axes.
 
@@ -334,18 +344,11 @@ def collect(refs_scanned: list[str]) -> tuple[list[Row], list[str], list[str]]:
         for num, data in main_rows.items()
     }
 
-    tip = main_register_tip()
     read: list[str] = []
     stale: list[str] = []
     for ref in refs_scanned:
         branch_rows = register_at(ref)
         if branch_rows is None:
-            continue
-        if tip is not None and not descends_from(ref, tip):
-            # Forked before main's last word on the register. Its rows are
-            # history; admitting them would report decision 95's superseded
-            # ruling as a ruling main is missing.
-            stale.append(ref)
             continue
         read.append(ref)
         for num, data in branch_rows.items():
@@ -359,6 +362,14 @@ def collect(refs_scanned: list[str]) -> tuple[list[Row], list[str], list[str]]:
             if existing.main_status in RULED_STATUSES:
                 continue  # already merged; a branch copy adds nothing
             if existing.main_status in NON_QUESTION_STATUSES:
+                continue
+            if is_superseded(main_rows.get(num), data):
+                # Decision 95's case: main has moved this row's own status on
+                # since the branch's copy was written, so the branch carries a
+                # ruling main deliberately unsettled. Admitting it would report
+                # a reopened question as answered. Judged per row, on the row's
+                # own content, because that is what the claim is about.
+                stale.append(f"{ref} (row {num})")
                 continue
             existing.ruled_on_branches.append(ref)
 

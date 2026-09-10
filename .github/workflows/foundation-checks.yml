@@ -150,20 +150,7 @@ jobs:
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           git rev-parse --verify --quiet origin/main >/dev/null || {
             echo "::notice::origin/main not fetchable — decision state skipped"; exit 0; }
-          python3 "$f" --check || {
-            echo "::group::fresh render vs committed"
-            python3 "$f" --out /tmp/fresh.md >/dev/null
-            diff -u docs/foundation/decision_state.md /tmp/fresh.md | head -60 || true
-            echo "--- refs the sweep read ---"
-            python3 "$f" --json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print('refs_read:', d.get('refs_read')); print('refs_stale count:', len(d.get('refs_stale',[])))"
-            echo "--- ancestry inputs ---"
-            echo "main head:    $(git rev-parse --short origin/main)"
-            echo "register tip: $(git rev-list -1 origin/main -- docs/foundation/conformance.md | cut -c1-8)"
-            echo "93 branch:    $(git rev-parse --short origin/claude/foundation-decision-93-heading 2>&1)"
-            echo "::endgroup::"
-            exit 1
-          }
-
+          python3 "$f" --check
       # Register narrative: the decision register's prose held to its own table.
       # The rule-coverage contract binds a decision opened in a DOCUMENT to a
       # register row; nothing read the narrative around the table, so the prose
