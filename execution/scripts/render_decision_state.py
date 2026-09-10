@@ -112,9 +112,28 @@ RULED_STATUSES = frozenset({"ruled", "ruled in part"})
 # Statuses that carry no question, so no axis applies.
 NON_QUESTION_STATUSES = frozenset({"withdrawn", "not a decision"})
 
-# A branch whose register copy is worth diffing. Everything under refs/remotes,
-# minus the symbolic HEAD.
-BRANCH_LIST_ARGS = ("git", "for-each-ref", "--format=%(refname)", "refs/remotes/")
+# A branch whose register copy is worth diffing. Only `refs/remotes/origin/*`,
+# the namespace the standard clone refspec (`+refs/heads/*:refs/remotes/origin/*`)
+# fills on every machine.
+#
+# Deliberately NOT everything under `refs/remotes/`. A clone configured with an
+# extra refspec for pull-request heads — `+refs/pull/*/head:refs/remotes/origin-pr/*`
+# — carries refs a default CI checkout has never heard of, so a sweep over the
+# whole namespace renders a different document per machine and `--check` goes red
+# for a reason that has nothing to do with any decision. That is the failure this
+# document exists to prevent, and it reached the generator: the committed file was
+# rendered on a clone holding nine `origin-pr/*` refs and CI, holding none, read a
+# different register set.
+#
+# Nothing is lost by the narrowing. A pull request's ruling lives on the branch
+# the pull request is opened from, which is an `origin/*` ref like any other; the
+# `origin-pr/*` copy of it is the same commit reached by a second name.
+BRANCH_LIST_ARGS = (
+    "git",
+    "for-each-ref",
+    "--format=%(refname)",
+    "refs/remotes/origin/",
+)
 
 # Rows whose ruling names an artefact this repository can be asked about, mapped
 # to the check that asks. Each entry is (script, what a pass establishes).

@@ -228,5 +228,38 @@ class TestPlanCitations(unittest.TestCase):
         self.assertIn("snapshot.snapshot.todos.t1.notes", problems[0])
 
 
+class TestBranchSweepIsMachineIndependent(unittest.TestCase):
+    """The ref set must be the one every clone has, not the one this clone has.
+
+    The committed document was rendered on a clone carrying a non-default
+    refspec for pull-request heads (`+refs/pull/*/head:refs/remotes/origin-pr/*`),
+    nine of them. CI, with a default checkout, had none, read a different set of
+    registers, and `--check` went red against a file nobody had edited.
+
+    That is the failure the document exists to prevent, arriving in the document's
+    own generator: a projection whose output depends on which machine rendered it
+    reports a decision's state as a function of local git configuration.
+    """
+
+    def test_sweep_is_scoped_to_the_origin_namespace(self):
+        args = ds.BRANCH_LIST_ARGS
+        self.assertEqual(
+            args[-1],
+            "refs/remotes/origin/",
+            "the sweep must name refs/remotes/origin/ explicitly: a bare "
+            "refs/remotes/ picks up any namespace a local refspec happens to "
+            "fill, and the render stops being reproducible off this machine",
+        )
+
+    def test_a_pull_request_ref_namespace_is_not_swept(self):
+        """A ref only some clones have must not reach the render."""
+        self.assertNotIn(
+            "refs/remotes/",
+            [a for a in ds.BRANCH_LIST_ARGS if a == "refs/remotes/"],
+            "refs/remotes/ as the whole namespace admits origin-pr/* and any "
+            "other locally-configured mirror",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

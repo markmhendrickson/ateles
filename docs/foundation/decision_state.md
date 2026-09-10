@@ -32,8 +32,8 @@ Each of these reads **open** to anything reading the corpus. The ruling is on th
 
 | # | Subject | Ruling lives on | Blocks |
 |---|---|---|---|
-| 93 | whether principle 11's heading states the invariant it is cited for — … | `origin-pr/899`, `origin/claude/foundation-decision-93-heading` | the conditional already in the principle's own second sentence and restated at `data_model.md#concepts`, which … |
-| 101 | what fields the credential-binding edge carries, and what resolving a credential to … | `origin-pr/916`, `origin/claude/foundation-decision-101-credential-binding` | stage 1 of the migration, which registers `principal_binding` among thirteen relationship types and cannot … |
+| 93 | whether principle 11's heading states the invariant it is cited for — … | `origin/claude/foundation-decision-93-heading` | the conditional already in the principle's own second sentence and restated at `data_model.md#concepts`, which … |
+| 101 | what fields the credential-binding edge carries, and what resolving a credential to … | `origin/claude/foundation-decision-101-credential-binding` | stage 1 of the migration, which registers `principal_binding` among thirteen relationship types and cannot … |
 
 ## The register on three axes
 
@@ -120,7 +120,7 @@ Each of these reads **open** to anything reading the corpus. The ruling is on th
 | 90 | where a swarm is deployed, and what a deployment must name: whether … | yes | yes | unknown | — | decision 45, whose host-as-external-system ruling and action classes this extends to a teardown rather … |
 | 91 | whether a deployment that names several instances of the record names one … | yes | yes | unknown | — | decision 90, which leaves it open rather than settling it by omission; the explicit … |
 | 92 | what makes a task **live** — the predicate a queue reads to … | yes | yes | unknown | — | decision 37's `blocked` retirement, which is what leaves a task carrying that status in … |
-| 93 | whether principle 11's heading states the invariant it is cited for — … | yes | no | unknown | `origin-pr/899`, `origin/claude/foundation-decision-93-heading` | the conditional already in the principle's own second sentence and restated at `data_model.md#concepts`, which … |
+| 93 | whether principle 11's heading states the invariant it is cited for — … | yes | no | unknown | `origin/claude/foundation-decision-93-heading` | the conditional already in the principle's own second sentence and restated at `data_model.md#concepts`, which … |
 | 94 | whether the design states read admission per entity type, as decision 41 … | yes | yes | unknown | — | decision 41, which ruled the write side and deferred the read side to a … |
 | 95 | whether each harness the swarm runs configures its own credential to the … | no | no | unknown | — | decisions 41 and 94, whose default-deny admission the ruling claimed had no enforcement point … |
 | 96 | how the proxy authenticates to the instance on an agent's behalf — … | yes | yes | unknown | — | decision 97, which ruled that a proxy is permitted and never the enforcement point, … |
@@ -128,7 +128,7 @@ Each of these reads **open** to anything reading the corpus. The ruling is on th
 | 98 | whether an instance's planning records are per instance — each instance of … | yes | yes | unknown | — | decision 91, whose controlling instance is the candidate home for any swarm-level planning; decision … |
 | 99 | whether a swarm configured with several instances of the record has planning … | no | no | unknown | — | decision 91, which supplies a controlling instance as a candidate home without supplying a … |
 | 100 | whether a newly declared workflow is proven before it binds production work, … | yes | yes | unknown | — | nothing in the design; and `migration.md#ordering-and-the-cutover-for-the-skills`, whose claim that its cutover batch is the … |
-| 101 | what fields the credential-binding edge carries, and what resolving a credential to … | yes | no | unknown | `origin-pr/916`, `origin/claude/foundation-decision-101-credential-binding` | stage 1 of the migration, which registers `principal_binding` among thirteen relationship types and cannot … |
+| 101 | what fields the credential-binding edge carries, and what resolving a credential to … | yes | no | unknown | `origin/claude/foundation-decision-101-credential-binding` | stage 1 of the migration, which registers `principal_binding` among thirteen relationship types and cannot … |
 | 102 | whether acyclicity is a property of a relationship type or of the … | no | no | unknown | — | stage 1 of the migration, since a check applied without regard to type governs … |
 | 103 | whether a step's declaration is a floor or a ceiling, and whether … | no | no | unknown | — | decision 41 and decision 94, which rule admission per entity type per principal, default-deny, … |
 | 104 | what a reader of adapter-sourced state in the record may rely on … | no | no | unknown | — | nothing in the design; and the placement of a claim `calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of` already makes in … |
