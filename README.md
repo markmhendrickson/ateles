@@ -11,9 +11,11 @@ life end to end, with the governance substrate (identity, capability, gating, au
 against the vision.
 
 Ateles is a design and a working example of it. The design is
-[`docs/foundation/`](docs/foundation/): twenty-three documents — twenty-two stating how work is created,
+[`docs/foundation/`](docs/foundation/): twenty-four documents — twenty-two stating how work is created,
 taken, executed, and approved, and what the swarm does when it cannot reach its own record, plus
-[Revisions](docs/foundation/revisions.md), which states no rule and holds their amendment history. The example is what
+[Revisions](docs/foundation/revisions.md) and [Decision state](docs/foundation/decision_state.md),
+which state no rule and hold amendment history and the register projected onto ruled/merged/implemented.
+The example is what
 runs against that design — background daemons and skills that already automate code review, releases,
 issue triage, email, calendar, recurring payments (fiat + Bitcoin), meeting capture and recap, health
 tracking, customer development, content and social, multi-jurisdiction tax prep, and CRM.
@@ -707,6 +709,7 @@ Full documentation lives in `docs/` — index at [docs/README.md](docs/README.md
 [Scenarios](docs/foundation/scenarios.md) · [Workflows](docs/foundation/workflows.md) ·
 [Migration](docs/foundation/migration.md) · [Multi-tenant](docs/foundation/multi_tenant.md) ·
 [Revisions](docs/foundation/revisions.md) ·
+[Decision state](docs/foundation/decision_state.md) ·
 [Status](docs/foundation/status.md)
 
 **Orientation:** [Who it's for (ICP)](docs/icp.md) · [Architecture](docs/architecture.md) ·
