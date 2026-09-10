@@ -362,7 +362,7 @@ a script a person runs rather than a lane a merge waits on — so a reader audit
 principle-1 compliance saw a populated `Runs` cell and moved on, while one of those checks ran on no pull
 request at all (ateles#929). A **no script** verdict is a third state the column also has to carry: the
 workflow invokes it, a `[ -f ]` guard skips it, and the row is a contract for a checker not yet written,
-which `status.md` records. Read the column as the answer to *what fails when this is violated*: **yes**
+which `status.md` records. Read the column as the answer to *what happens when this is violated*: **yes**
 means a pull request goes red, **advisory** means it prints and never fails, and **no script** means
 nothing runs yet.
 
