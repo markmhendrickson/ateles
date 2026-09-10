@@ -766,9 +766,20 @@ def _gate_dispatcher(monkeypatch, *, ci_state, checkpoints, routed):
     async def fake_route_ci(self, trigger, parent):
         routed.append(trigger.number)
 
+    # ateles#682: the gate now also asks whether the panel verdict was ever
+    # recorded as a GitHub review. That read fails closed, so without a stub
+    # these fixtures would reach the network and hold on the resulting error.
+    # Default to "recorded" — the unrecorded case has its own tests in
+    # test_binding_verdicts.py.
+    async def fake_recording_blocked(self, trigger):
+        return False
+
     monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
     monkeypatch.setattr(SwarmDispatcher, "_store_merge_checkpoint", fake_checkpoint)
     monkeypatch.setattr(SwarmDispatcher, "_route_ci_failure", fake_route_ci)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_verdict_recording_blocked", fake_recording_blocked
+    )
     return SwarmDispatcher(_StubNotifier(), _config())
 
 
