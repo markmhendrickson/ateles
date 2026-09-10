@@ -228,6 +228,41 @@ class TestPlanCitations(unittest.TestCase):
         self.assertIn("snapshot.snapshot.todos.t1.notes", problems[0])
 
 
+class TestPathFilterCoversThisFile(unittest.TestCase):
+    """This file must be in foundation-checks.yml's `paths:` filter.
+
+    It was not, until #930. The lane invoked these tests and the trigger never
+    fired for a change that touched only them, so the suite could go red on a
+    branch and the merge gate would report nothing — the check present, the lane
+    absent from the change (`principles.md` §1).
+
+    Asserting it here rather than trusting the YAML means a future edit that
+    drops the entry fails in the suite the entry exists to run.
+    """
+
+    def test_this_file_is_named_in_the_foundation_lane_filter(self):
+        workflow = (
+            Path(__file__).resolve().parents[2]
+            / ".github"
+            / "workflows"
+            / "foundation-checks.yml"
+        )
+        if not workflow.is_file():
+            self.skipTest(f"{workflow} absent on this branch")
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn(
+            "execution/scripts/test_decision_state.py",
+            text,
+            "this test file is not in the foundation lane's paths: filter, so a "
+            "change touching only it would skip the lane that runs it",
+        )
+        self.assertIn(
+            "execution/scripts/check_plan_decision_citations.py",
+            text,
+            "check_plan_decision_citations.py is not in the paths: filter",
+        )
+
+
 class TestBranchSweepIsMachineIndependent(unittest.TestCase):
     """The ref set must be the one every clone has, not the one this clone has.
 
