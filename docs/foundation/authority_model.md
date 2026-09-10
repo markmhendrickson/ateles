@@ -567,7 +567,15 @@ match what was presented, and takes the principal at the other end. Where severa
 rotation rule requires during the dual-admit window — every one of them resolves to the same principal,
 because the many-to-one is a property of the shape rather than of the read.
 
-**Why this and not the alternatives.** The dual-admit window decides it: `#grants` requires two credentials
+**Why this and not the alternatives, and why the choice is structural rather than a preference.** The two
+candidates differ in what a wrong answer costs, and the design's own rule on that is what selects this one.
+`principal_binding` is a type stage 1 registers regardless, and G26 makes registration one-way: a schema
+loses fields and gains them, but a registered type is not retired. So a credential entity with its own edge
+is a fourteenth type that stands forever if it proves unnecessary, where properties on the existing edge can
+be superseded by adding that entity later and migrating the edges. Narrowing later is a breaking change and
+widening later is not — decision 91's reasoning, applied to a type rather than to a scope.
+
+The dual-admit window rules out the third candidate: `#grants` requires two credentials
 to bind to one principal at once with the set of matching grants never empty, so a shape holding one
 binding per principal is refused on that ground alone. The grant cannot be the binding, because a grant
 holding a second credential becomes two grants and reopens the question one level out. And a credential
