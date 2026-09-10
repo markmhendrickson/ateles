@@ -509,7 +509,7 @@ def render(rows: list[Row], refs_read: list[str], refs_stale: list[str]) -> str:
     add("")
     add(
         "**No count of branches is written here.** A number would change every "
-        "time anyone pushed anything, failing `--check` for a reason unrelated to "
+        "time anyone updated a branch, failing `--check` for a reason unrelated to "
         "any decision — and a check that goes red for reasons the reader learns to "
         "dismiss has stopped being a control (`principles.md`). The branch sweep's "
         "own figures are in the `--json` output, where a consumer that wants them "

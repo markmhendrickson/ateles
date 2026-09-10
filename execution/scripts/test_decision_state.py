@@ -107,7 +107,7 @@ class TestThreeAxes(unittest.TestCase):
         """The document changes when a decision's state changes, not otherwise.
 
         Writing a branch count into the output made `--check` fail whenever
-        anyone pushed anything — red for a reason unrelated to any decision. A
+        anyone updated a branch — red for a reason unrelated to any decision. A
         check the reader learns to dismiss has stopped being a control.
         """
         rows = [
