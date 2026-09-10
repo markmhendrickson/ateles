@@ -150,7 +150,13 @@ jobs:
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           git rev-parse --verify --quiet origin/main >/dev/null || {
             echo "::notice::origin/main not fetchable — decision state skipped"; exit 0; }
-          python3 "$f" --check
+          python3 "$f" --check || {
+            echo "::group::fresh render vs committed"
+            python3 "$f" --out /tmp/fresh.md >/dev/null
+            diff -u docs/foundation/decision_state.md /tmp/fresh.md | head -60 || true
+            echo "::endgroup::"
+            exit 1
+          }
 
       # Register narrative: the decision register's prose held to its own table.
       # The rule-coverage contract binds a decision opened in a DOCUMENT to a
