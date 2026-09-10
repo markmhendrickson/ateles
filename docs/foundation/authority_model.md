@@ -558,7 +558,32 @@ value it held.
 
 ### What the credential binding carries, and what a check reads to resolve a credential to a principal
 
-**Open.** Registered in `conformance.md#the-register-of-open-design-decisions`. `#principals` states that a
+**Ruled** (decision 101, 2026-09-10): **`principal_binding` carries the credential kind, the credential
+value, and an expiry, and a principal holding several credentials holds several edges.** One edge per
+credential, properties on the edge, and no separate credential entity.
+
+A check resolving a credential to a principal reads the `principal_binding` edges whose kind and value
+match what was presented, and takes the principal at the other end. Where several match — which the
+rotation rule requires during the dual-admit window — every one of them resolves to the same principal,
+because the many-to-one is a property of the shape rather than of the read.
+
+**Why this and not the alternatives.** The dual-admit window decides it: `#grants` requires two credentials
+to bind to one principal at once with the set of matching grants never empty, so a shape holding one
+binding per principal is refused on that ground alone. The grant cannot be the binding, because a grant
+holding a second credential becomes two grants and reopens the question one level out. And a credential
+entity of its own would give the value a second home during rotation, with nothing saying which the check
+reads — invariant 9's objection — where properties on the edge extend the type that already joins the two
+credential systems, which is what invariant 6 asks.
+
+**What travels with this.** The value sits on an edge, so it is read wherever the edge is read, and custody
+by revocability binds that reader exactly as it binds any other holder: a credential that is the asset is
+not materialized by reading its edge. That obligation now travels with the edge rather than with a separate
+entity that might have carried its own access rule.
+
+**What this does not settle.** Where the value comes from before any of these rules reach it is decision
+105, and nothing here answers it: an edge carrying a value says nothing about the store that produced it.
+
+The paragraphs below state the question as it stood before the ruling, and the constraints that bound it. `#principals` states that a
 credential binds to a principal **many-to-one**, and names `principal_binding` as what joins the two
 credential systems — the store's `user_id` and a host login to the `operator`, an AAuth `sub` to the
 `agent`, reaching the human principal through that agent's binding. What neither that section nor
