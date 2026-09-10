@@ -39,7 +39,7 @@ source by ``--check``, the same discipline
 **How each axis is decided.**
 
 *ruled* and *merged* come from the register table itself, read on ``origin/main``
-and on every remote branch that carries a copy of ``conformance.md``. A row whose
+and on every ``origin/*`` branch that carries a copy of ``conformance.md``. A row whose
 status on ``origin/main`` is open, and which some branch has moved to ruled, is
 **ruled but not merged**, and the branch is named. Only forward movement counts:
 a branch forked before a ruling landed carries a stale copy that reads *ruled* on
@@ -406,7 +406,7 @@ def render(rows: list[Row], refs_read: list[str], refs_stale: list[str]) -> str:
     )
     add(
         "<!-- Source: conformance.md#the-register-of-open-design-decisions, read "
-        f"on {MAIN_REF} and every remote branch. -->"
+        f"on {MAIN_REF} and every `origin/*` branch. -->"
     )
     add("")
     add("# Decision state: ruled, merged, implemented")
@@ -416,7 +416,7 @@ def render(rows: list[Row], refs_read: list[str], refs_stale: list[str]) -> str:
         "`execution/scripts/render_decision_state.py`, held equal to its source by "
         "`--check` in `scripts/lint.sh`. **Source:** the register table at "
         "`conformance.md#the-register-of-open-design-decisions`, read on "
-        f"`{MAIN_REF}` and on every remote branch carrying a copy of it."
+        f"`{MAIN_REF}` and on every `origin/*` branch carrying a copy of it."
     )
     add("")
     add(
@@ -434,7 +434,8 @@ def render(rows: list[Row], refs_read: list[str], refs_stale: list[str]) -> str:
     add("")
     add(
         "- **ruled?** — the question has an answer, wherever that answer currently "
-        "lives. Read from the register's status on any ref that carries one."
+        "lives. Read from the register's status on any `origin/*` ref that\n"
+        "carries one."
     )
     add(
         "- **merged?** — the ruling is on "
@@ -519,22 +520,28 @@ def render(rows: list[Row], refs_read: list[str], refs_stale: list[str]) -> str:
     add("## What was read")
     add("")
     add(
-        f"The register on `{MAIN_REF}`, and the copy carried by every remote "
-        "branch current with it. Only forward movement is counted: a branch "
-        "forked before a ruling landed carries a stale copy reading **open** "
-        f"where `{MAIN_REF}` reads **ruled**, and treating that as a retraction "
-        "would invent a reopening no one performed. A row a branch opens and "
-        f"`{MAIN_REF}` has never seen is not a ruling `{MAIN_REF}` is missing, and "
-        "is not carried here."
+        f"The register on `{MAIN_REF}`, and the copy carried by every "
+        "`refs/remotes/origin/*` branch. That namespace and not every remote "
+        "ref: a clone configured with an extra refspec (pull-request heads, a "
+        "second mirror) carries refs another machine has never fetched, and a "
+        "sweep over those renders a different document per machine. Only "
+        "forward movement is counted: a branch whose copy predates a ruling "
+        f"reads **open** where `{MAIN_REF}` reads **ruled**, and treating that "
+        "as a retraction would invent a reopening no one performed. A row a "
+        f"branch opens and `{MAIN_REF}` has never seen is not a ruling "
+        f"`{MAIN_REF}` is missing, and is not carried here."
     )
     add("")
     add(
-        "Branches carrying a copy of the register that predates "
-        f"`{MAIN_REF}`'s most recent change to it are **not read**. This is not "
-        "fastidiousness: decision 95 was ruled and reopened the same day, and "
-        "branches forked in between still carry the superseded ruling. Admitting "
-        "those would report a reopened question as answered — inverting the fact "
-        "the reopening recorded."
+        "A branch's ruling is **refused for any row** "
+        f"`{MAIN_REF}` now reads **reopened**. This is not fastidiousness: "
+        "decision 95 was ruled and reopened the same day, and branches forked "
+        "in between still carry the superseded ruling. Admitting those would "
+        "report a reopened question as answered — inverting the fact the "
+        "reopening recorded. The test is on that row's own status, never on "
+        "commit ancestry, because ancestry answers differently depending on how "
+        "a checkout built its history and the projection would stop being "
+        "reproducible off one machine."
     )
     add("")
     add(
