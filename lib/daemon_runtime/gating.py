@@ -534,12 +534,15 @@ def evaluate_gate(
         )
 
     # Otherwise: checkpoint. Low-confidence + high-blast also proposes alternatives.
-    # An unscored task gets a distinct reason (ateles#902): "never scored" is not
-    # a judgment "low confidence" claims to be, and the two must not read alike.
+    # An unscored task gets a distinct reason (ateles#902): a producer never
+    # judged it, and that must not read as the judgment "low confidence" claims
+    # to be. The wording says what is true after Part 2 — a score is present and
+    # it is mechanical — rather than claiming no confidence was recorded, which
+    # the mechanical score contradicts.
     if not high_conf and blast == BlastRadius.HIGH:
         reason = (
-            "never scored (no confidence recorded) and high blast radius — "
-            "propose alternatives"
+            "not scored by a producer (score is a mechanical estimate) and "
+            "high blast radius — propose alternatives"
             if confidence_unscored
             else "low confidence and high blast radius — propose alternatives"
         )
@@ -556,7 +559,7 @@ def evaluate_gate(
     if blast == BlastRadius.HIGH:
         reason = "high blast radius — operator approval required"
     elif confidence_unscored:
-        reason = "never scored — no confidence recorded"
+        reason = "not scored by a producer — score is a mechanical estimate"
     else:
         reason = "below confidence threshold"
     return GateDecision(

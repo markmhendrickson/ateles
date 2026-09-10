@@ -71,7 +71,7 @@ def test_unparseable_confidence_is_also_treated_as_unscored():
 
 
 def test_end_to_end_unscored_task_reason_says_never_scored():
-    """Full path: an unscored task's gate decision must say "never scored",
+    """Full path: an unscored task's gate decision must say it was not scored by a producer,
     not "low confidence" — the exact operator-facing symptom in ateles#902.
     """
     snapshot = {"title": "Publish the release notes", "body": "b" * 10}
@@ -85,7 +85,7 @@ def test_end_to_end_unscored_task_reason_says_never_scored():
         confidence_unscored=unscored,
     )
     assert decision.action != GateAction.AUTO_EXECUTE
-    assert "never scored" in decision.reason.lower()
+    assert "not scored by a producer" in decision.reason.lower()
     assert "low confidence" not in decision.reason.lower()
 
 
@@ -105,7 +105,7 @@ def test_end_to_end_scored_low_task_reason_still_says_low_confidence():
     )
     assert decision.action != GateAction.AUTO_EXECUTE
     assert "low confidence" in decision.reason.lower()
-    assert "never scored" not in decision.reason.lower()
+    assert "not scored by a producer" not in decision.reason.lower()
 
 
 def test_unscored_high_blast_task_still_checkpoints_end_to_end():

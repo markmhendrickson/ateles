@@ -511,7 +511,7 @@ def test_any_action_type_vocabulary_must_contain_the_never_set():
 # (0.0) was stamped into a reason string ("low confidence and high blast
 # radius") that reads as a judgment nobody made. These tests pin the fix:
 # the reason text (and `GateDecision.confidence_unscored`) must distinguish
-# "never scored" from "scored low", and fail-closed behavior must be
+# not-scored-by-a-producer from scored-low, and fail-closed behavior must be
 # unchanged in both cases — an unscored task still checkpoints.
 
 
@@ -542,10 +542,10 @@ def test_unscored_and_scored_low_high_blast_produce_different_reasons():
     # Same action, same confidence value — but the reason must differ, and
     # each must say what actually happened rather than sharing one string.
     assert unscored.reason != scored_low.reason
-    assert "never scored" in unscored.reason.lower()
+    assert "not scored by a producer" in unscored.reason.lower()
     assert "low confidence" not in unscored.reason.lower()
     assert "low confidence" in scored_low.reason.lower()
-    assert "never scored" not in scored_low.reason.lower()
+    assert "not scored by a producer" not in scored_low.reason.lower()
 
     assert unscored.confidence_unscored is True
     assert scored_low.confidence_unscored is False
@@ -567,14 +567,14 @@ def test_unscored_and_scored_low_below_threshold_produce_different_reasons():
     assert unscored.action == GateAction.CHECKPOINT
     assert scored_low.action == GateAction.CHECKPOINT
     assert unscored.reason != scored_low.reason
-    assert "never scored" in unscored.reason.lower()
+    assert "not scored by a producer" in unscored.reason.lower()
     assert unscored.reason != "below confidence threshold"
     assert scored_low.reason == "below confidence threshold"
 
 
 def test_confidence_unscored_defaults_false_for_existing_callers():
     """Every pre-existing call site omits `confidence_unscored` — it must
-    default to False so none of them silently start reporting "never scored"
+    default to False so none of them silently start reporting an unscored estimate
     for a value they explicitly passed in.
     """
     d = evaluate_gate(confidence=0.3, action_type="local_edit", policy=_default())
@@ -607,3 +607,29 @@ def test_unscored_low_blast_task_still_checkpoints_below_threshold():
     )
     assert d.action == GateAction.CHECKPOINT
     assert not d.may_auto_execute
+
+
+def test_unscored_reason_never_claims_no_confidence_was_recorded():
+    """The reason text must not contradict the confidence it carries (ateles#905, ux).
+
+    After Part 2 an unscored task is stamped with a mechanical score, so a
+    reason saying "no confidence recorded" is false on its face — the decision
+    carries a real float. The reason must say the score is mechanical, not that
+    none exists. Principle 3: the instrument's report must match what it read.
+    """
+    policy = _default()
+    # Both reason branches must be covered: a HIGH-blast action takes the
+    # propose-alternatives branch, a LOW-blast one below threshold takes the
+    # plain checkpoint branch. Each wrote its own "no confidence recorded"
+    # string, so a test hitting only one of them cannot fail on the other.
+    for blast_action in ("open_pr", "merge_pr", "draft", "local_edit"):
+        d = evaluate_gate(
+            confidence=0.55,
+            action_type=blast_action,
+            policy=policy,
+            confidence_unscored=True,
+        )
+        low = d.reason.lower()
+        assert "no confidence recorded" not in low, f"{blast_action}: {d.reason}"
+        assert "never scored" not in low, f"{blast_action}: {d.reason}"
+        assert d.confidence == 0.55
