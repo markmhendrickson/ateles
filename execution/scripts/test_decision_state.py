@@ -342,5 +342,69 @@ class TestSupersessionIsJudgedOnContent(unittest.TestCase):
             )
 
 
+class TestMechanicalChecksTableIsWellFormed(unittest.TestCase):
+    """Every row in conformance.md's mechanical-checks table has four cells.
+
+    The `Merge gate` column was added so the table can say which checks block a
+    pull request; before it, three rows named `scripts/lint.sh` as their
+    invocation path and one of those ran on no pull request at all (ateles#929).
+
+    A column added by hand is a column a later row forgets. `Plan decision
+    citations` was appended after the column landed and carried three cells
+    under a four-column header — malformed, and invisible to every checker,
+    because none of them read this table. This asserts the shape so the next
+    appended row fails here instead of rendering as a broken table.
+
+    Escaped pipes inside a cell (`\\| 78 \\|`) are content, not delimiters, and
+    are masked before counting.
+    """
+
+    @staticmethod
+    def _rows() -> list[tuple[int, list[str]]]:
+        path = Path(__file__).resolve().parents[2] / "docs" / "foundation" / "conformance.md"
+        if not path.is_file():
+            return []
+        out: list[tuple[int, list[str]]] = []
+        inside = False
+        for n, line in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
+            if line.startswith("| Check | Merge gate |"):
+                inside = True
+                continue
+            if inside:
+                if not line.startswith("|"):
+                    break
+                if line.startswith("|---"):
+                    continue
+                masked = line.replace("\\|", "\x00")
+                out.append((n, masked.split("|")[1:-1]))
+        return out
+
+    def test_the_table_is_present_and_has_rows(self):
+        rows = self._rows()
+        if not rows:
+            self.skipTest("conformance.md absent on this branch")
+        self.assertGreater(len(rows), 10, "the mechanical-checks table lost rows")
+
+    def test_every_row_has_four_cells(self):
+        for line_no, cells in self._rows():
+            self.assertEqual(
+                len(cells),
+                4,
+                f"conformance.md:{line_no}: mechanical-checks row has "
+                f"{len(cells)} cells under a four-column header "
+                f"(Check | Merge gate | Runs | What fails): {cells[0].strip()!r}",
+            )
+
+    def test_every_merge_gate_cell_states_a_verdict(self):
+        """An empty verdict is the ambiguity the column exists to remove."""
+        for line_no, cells in self._rows():
+            verdict = cells[1].strip().lower()
+            self.assertTrue(
+                verdict.startswith(("**yes**", "no", "**no")),
+                f"conformance.md:{line_no}: Merge gate cell must state yes, no, "
+                f"or no-script; got {cells[1].strip()!r}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

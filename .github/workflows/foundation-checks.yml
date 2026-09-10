@@ -154,6 +154,18 @@ jobs:
           git rev-parse --verify --quiet origin/main >/dev/null || {
             echo "::notice::origin/main not fetchable — decision state skipped"; exit 0; }
           python3 "$f" --check
+      # Decision 78: the register's row and the ruling's own section held to
+      # each other. Registered in conformance.md as a mechanical check and,
+      # until #929, wired only into scripts/lint.sh — which is not a merge gate,
+      # so the one check binding a decision's ruled status to the document
+      # stating it never ran on a pull request (`principles.md` §1).
+      - name: Decision 78 — the register row and the ruling agree
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_decision_78.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
       # Register narrative: the decision register's prose held to its own table.
       # The rule-coverage contract binds a decision opened in a DOCUMENT to a
       # register row; nothing read the narrative around the table, so the prose
