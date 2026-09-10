@@ -135,7 +135,9 @@ Each of these reads **open** to anything reading the corpus. The ruling is on th
 
 ## What was read
 
-The register on `origin/main`, and the copy carried by **16** remote branch(es) current with it. Only forward movement is counted: a branch forked before a ruling landed carries a stale copy reading **open** where `origin/main` reads **ruled**, and treating that as a retraction would invent a reopening no one performed. A row a branch opens and `origin/main` has never seen is not a ruling `origin/main` is missing, and is not carried here.
+The register on `origin/main`, and the copy carried by every remote branch current with it. Only forward movement is counted: a branch forked before a ruling landed carries a stale copy reading **open** where `origin/main` reads **ruled**, and treating that as a retraction would invent a reopening no one performed. A row a branch opens and `origin/main` has never seen is not a ruling `origin/main` is missing, and is not carried here.
 
-A further **177** branch(es) carry a copy of the register that predates `origin/main`'s most recent change to it, and their rows are not read. This is not fastidiousness: decision 95 was ruled and reopened the same day, and branches forked in between still carry the superseded ruling. Admitting those would report a reopened question as answered — inverting the fact the reopening recorded.
+Branches carrying a copy of the register that predates `origin/main`'s most recent change to it are **not read**. This is not fastidiousness: decision 95 was ruled and reopened the same day, and branches forked in between still carry the superseded ruling. Admitting those would report a reopened question as answered — inverting the fact the reopening recorded.
+
+**No count of branches is written here.** A number would change every time anyone pushed anything, failing `--check` for a reason unrelated to any decision — and a check that goes red for reasons the reader learns to dismiss has stopped being a control (`principles.md`). The branch sweep's own figures are in the `--json` output, where a consumer that wants them reads them fresh rather than from a stored copy that ages. This document changes when a decision's state changes, and not otherwise.
 

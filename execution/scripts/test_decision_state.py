@@ -103,6 +103,51 @@ class TestThreeAxes(unittest.TestCase):
         )
         self.assertEqual(row.ruling_lives, "—")
 
+    def test_output_does_not_change_when_only_the_branch_count_changes(self):
+        """The document changes when a decision's state changes, not otherwise.
+
+        Writing a branch count into the output made `--check` fail whenever
+        anyone pushed anything — red for a reason unrelated to any decision. A
+        check the reader learns to dismiss has stopped being a control.
+        """
+        rows = [
+            ds.Row(
+                number="101",
+                question="what the credential binding carries",
+                argued_in="`authority_model.md#x`",
+                blocks="stage 1",
+                main_status="open",
+                ruled_on_branches=["origin/claude/decision-101"],
+            )
+        ]
+        few = ds.render(rows, ["origin/a"], ["origin/x"])
+        many = ds.render(
+            rows, ["origin/a", "origin/b", "origin/c"], ["origin/x", "origin/y"]
+        )
+        self.assertEqual(few, many)
+
+    def test_a_changed_ruling_does_change_the_output(self):
+        """The other half: the check must still go red on what it watches."""
+        base = ds.Row(
+            number="101", question="q", argued_in="", blocks="", main_status="open"
+        )
+        ruled = ds.Row(
+            number="101",
+            question="q",
+            argued_in="",
+            blocks="",
+            main_status="open",
+            ruled_on_branches=["origin/claude/decision-101"],
+        )
+        self.assertNotEqual(ds.render([base], [], []), ds.render([ruled], [], []))
+
+    def test_bare_anchor_citations_are_requalified_to_the_register(self):
+        """In a register cell `#x` means conformance.md; copied here it would not."""
+        self.assertEqual(
+            ds.requalify("see `#scope` and `other.md#y`"),
+            "see `conformance.md#scope` and `other.md#y`",
+        )
+
     def test_subject_is_truncated_and_says_so(self):
         long = " ".join(f"w{i}" for i in range(40))
         self.assertTrue(ds.subject(long).endswith("…"))

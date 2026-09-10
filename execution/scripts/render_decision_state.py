@@ -489,23 +489,32 @@ def render(rows: list[Row], refs_read: list[str], refs_stale: list[str]) -> str:
     add("## What was read")
     add("")
     add(
-        f"The register on `{MAIN_REF}`, and the copy carried by "
-        f"**{len(refs_read)}** remote branch(es) current with it. Only forward "
-        "movement is counted: a branch forked before a ruling landed carries a "
-        "stale copy reading **open** where "
-        f"`{MAIN_REF}` reads **ruled**, and treating that as a retraction would "
-        "invent a reopening no one performed. A row a branch opens and "
+        f"The register on `{MAIN_REF}`, and the copy carried by every remote "
+        "branch current with it. Only forward movement is counted: a branch "
+        "forked before a ruling landed carries a stale copy reading **open** "
+        f"where `{MAIN_REF}` reads **ruled**, and treating that as a retraction "
+        "would invent a reopening no one performed. A row a branch opens and "
         f"`{MAIN_REF}` has never seen is not a ruling `{MAIN_REF}` is missing, and "
         "is not carried here."
     )
     add("")
     add(
-        f"A further **{len(refs_stale)}** branch(es) carry a copy of the register "
-        f"that predates `{MAIN_REF}`'s most recent change to it, and their rows are "
-        "not read. This is not fastidiousness: decision 95 was ruled and reopened "
-        "the same day, and branches forked in between still carry the superseded "
-        "ruling. Admitting those would report a reopened question as answered — "
-        "inverting the fact the reopening recorded."
+        "Branches carrying a copy of the register that predates "
+        f"`{MAIN_REF}`'s most recent change to it are **not read**. This is not "
+        "fastidiousness: decision 95 was ruled and reopened the same day, and "
+        "branches forked in between still carry the superseded ruling. Admitting "
+        "those would report a reopened question as answered — inverting the fact "
+        "the reopening recorded."
+    )
+    add("")
+    add(
+        "**No count of branches is written here.** A number would change every "
+        "time anyone pushed anything, failing `--check` for a reason unrelated to "
+        "any decision — and a check that goes red for reasons the reader learns to "
+        "dismiss has stopped being a control (`principles.md`). The branch sweep's "
+        "own figures are in the `--json` output, where a consumer that wants them "
+        "reads them fresh rather than from a stored copy that ages. This document "
+        "changes when a decision's state changes, and not otherwise."
     )
     add("")
     return "\n".join(out) + "\n"
