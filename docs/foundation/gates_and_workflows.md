@@ -1576,6 +1576,28 @@ flowchart TD
 The halt is not on this diagram and is not a checkpoint: a checkpoint is written to the record, and the
 halt is the state in which nothing can be (`failure_posture.md#what-a-checkpoint-does-not-absorb`).
 
+## What a gate sign-off is pinned to
+
+**Open.** Registered in `conformance.md#the-register-of-open-design-decisions` as decision 106.
+
+`data_model.md#record-conventions` rules that a verdict is pinned to the artifact state it judged, so a
+conclusion against a superseded state is readable as one rather than being indistinguishable from a live
+conclusion. That list of pinned-state kinds is closed, and an issue body is not among them.
+
+A gate sign-off has no equivalent. It records that a lens signed, and never what it read. So a sign-off and
+a later rewrite of the thing it judged are two facts in the record with no relation between them, and no
+reader can tell whether the second invalidates the first.
+
+The two directions of this failure are not symmetric, which is why it is a design question rather than a
+defect to repair once. A **stale block** is recoverable: the work is stuck, someone notices, and a person
+clears it. A **stale sign-off** is not, because nothing is stuck — the work proceeds on a scope nobody
+approved, with the gate reading `signed_off` and nothing prompting anyone to look.
+
+Bounded by invariant 1, since a pin nothing reads is not a control, so a candidate must say what refuses
+when the states diverge; by principle 2, whose read-back makes a pinned state evidence rather than a claim;
+and by invariant 9, since a derived staleness read must not become a second home for what the artifact's
+own observations already carry.
+
 ## Contradictions this document settles
 
 **C3.** Four copies of the step set → one home, parity where a copy is unavoidable. **C5.** The gate-state
