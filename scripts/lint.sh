@@ -114,6 +114,23 @@ python execution/scripts/check_foundation_front_matter.py || ERRORS=$((ERRORS + 
 echo "  - Checking reading projection is in sync with the conformance matrix..."
 python execution/scripts/render_reading_projection.py --check || ERRORS=$((ERRORS + 1))
 
+# Decision state: docs/foundation/decision_state.md projects the register onto
+# ruled / merged / implemented, which the register's single status field cannot
+# express. Regenerate with the same script and no flag.
+#
+# The check reads every remote branch, so it needs a fetched remote to be
+# meaningful and is SKIPPED rather than failed where origin/main is absent — a
+# shallow CI clone or an offline machine would otherwise report drift it cannot
+# see. Skipping is the honest verdict there: unknown is not a failure
+# (principles.md), and failing on an unfetchable remote would train the reader
+# to ignore this row.
+if git rev-parse --verify --quiet origin/main >/dev/null; then
+  echo "  - Checking decision state is in sync with the register..."
+  python execution/scripts/render_decision_state.py --check || ERRORS=$((ERRORS + 1))
+else
+  echo "  - Skipping decision state (no origin/main to read the register from)"
+fi
+
 # tool_allowlist grant grammar (ateles#255 — bash: prefix is silently dropped
 # by the CLI's --allowedTools parser; only Bash(<command>:*) is honored).
 # Requires live Neotoma; skipped (not failed) when NEOTOMA_BASE_URL is unset

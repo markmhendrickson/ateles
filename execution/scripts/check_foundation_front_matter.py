@@ -42,7 +42,9 @@ continues the argument above it (``**So …**``, ``**And …**``).
 never inlined, its revisions are its own sections rather than a front-matter
 chain, and it is deliberately outside the reading list
 (``conformance.md#read-when-these-paths-changed``). ``revisions.md`` is exempt
-because it *is* the companion.
+because it *is* the companion. ``decision_state.md`` is exempt because it is a
+render target: regenerated rather than amended, so a revisions row per run would
+record the generator's runs and not a change to any claim.
 
 Stdlib only; registered in ``conformance.md#mechanical-checks-on-this-directory``.
 """
@@ -60,6 +62,12 @@ FOUNDATION_DIR = Path("docs/foundation")
 EXEMPT = {
     "status.md",  # a dated report; outside the reading list, revisions are sections
     "revisions.md",  # the companion the history moves into
+    # A render target has no amendment history of its own: it is regenerated,
+    # never amended, and a revisions row per regeneration would record the
+    # generator's runs rather than a change to a claim. Its history is the
+    # generator's, in git. Same ground as status.md -- generated, never keyed,
+    # never inlined -- and it carries a GENERATED banner naming the script.
+    "decision_state.md",
 }
 
 INDEX_LEAD = "**The rules in this section.**"

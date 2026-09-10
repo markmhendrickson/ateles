@@ -37,6 +37,8 @@ on:
       - "execution/scripts/check_foundation_*.py"
       - "execution/scripts/link_vocabulary_terms.py"
       - "execution/scripts/render_reading_projection.py"
+      - "execution/scripts/render_decision_state.py"
+      - "docs/foundation/decision_state.md"
       - "execution/daemons/apis/test_foundation*.py"
       - ".github/workflows/foundation-checks.yml"
     # Synchronize only re-runs when a matching path is in the push delta;
@@ -51,7 +53,16 @@ jobs:
     name: foundation corpus checkers
     runs-on: ubuntu-latest
     steps:
+      # Full history, and origin/main fetched as a ref. The decision-state
+      # projection reads the register at origin/main and compares the rulings
+      # on the current remote branches against it, so a shallow single-branch
+      # checkout leaves it nothing to project and the step skips — a check that
+      # never runs is the defect it was written to catch (`principles.md` §1).
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch origin/main as a ref
+        run: git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main
 
       # The checkers are stdlib-only by design (each says so in its docstring),
       # so they need an interpreter and nothing else. setup-python provides
@@ -126,6 +137,20 @@ jobs:
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           python3 "$f" --check
 
+      # Decision state: the register projected onto ruled/merged/implemented,
+      # held equal to a fresh render. The projection reads origin/main plus the
+      # current remote branches, so a ruling that lives only on a branch is
+      # reported rather than read as open. Skipped when origin/main is not
+      # fetchable — the renderer exits nonzero with that diagnostic, and a lane
+      # that cannot read the register must not report the projection as correct.
+      - name: Decision state — matches the register it projects
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/render_decision_state.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          git rev-parse --verify --quiet origin/main >/dev/null || {
+            echo "::notice::origin/main not fetchable — decision state skipped"; exit 0; }
+          python3 "$f" --check
       # Register narrative: the decision register's prose held to its own table.
       # The rule-coverage contract binds a decision opened in a DOCUMENT to a
       # register row; nothing read the narrative around the table, so the prose
