@@ -558,14 +558,53 @@ value it held.
 
 ### What the credential binding carries, and what a check reads to resolve a credential to a principal
 
-**Ruled** (decision 101, 2026-09-10): **`principal_binding` carries the credential kind, the credential
-value, and an expiry, and a principal holding several credentials holds several edges.** One edge per
-credential, properties on the edge, and no separate credential entity.
+**Ruled** (decision 101, 2026-09-10): **`principal_binding` carries `credential_kind`, `credential_value`,
+`credential_issuer`, and `expires_at`, and a principal holding several credentials holds several edges.**
+One edge per credential, properties on the edge, and no separate credential entity. Field vocabulary:
 
-A check resolving a credential to a principal reads the `principal_binding` edges whose kind and value
-match what was presented, and takes the principal at the other end. Where several match — which the
-rotation rule requires during the dual-admit window — every one of them resolves to the same principal,
-because the many-to-one is a property of the shape rather than of the read.
+| Field | Holds | AAuth map | Host / operator map |
+|---|---|---|---|
+| `credential_kind` | credential family / system class | e.g. `aauth_sub` | e.g. `github_login`, `store_user_id`, `email_address`, `chat_id` |
+| `credential_value` | the presented subject value | `sub` | the login, user id, address, or chat id |
+| `credential_issuer` | the issuer or namespace that makes the value unique | `iss` | the external system or host namespace; absent only when the kind's namespace is already unique without one |
+| `expires_at` | optional expiry bound read at check time | as the issuer states | as the issuer states |
+
+**Endpoint / source.** No credential entity is introduced; the relationship's endpoint is the principal
+reached by the presented credential, with the credential identity carried in those edge fields. For an
+AAuth credential, the binding resolves `credential_value` + `credential_issuer` (`sub` + `iss`) to the
+`agent`; the human operator is then reached through that agent's own `principal_binding`. For an operator
+credential, the binding resolves the credential directly to the `operator`.
+
+**Expiry / end.** `expires_at` is a read-time liveness bound, not maintained state. A binding is live when
+the edge is unended and `now < expires_at` when present; retiring a credential writes or ends the edge,
+exactly like other ended relationships. No sweeper is required to flip a status when the clock passes
+(invariant 11).
+
+A check resolving a credential to a principal reads the unended, unexpired `principal_binding` edges whose
+`credential_kind`, `credential_value`, and `credential_issuer` (when the kind requires one) match what was
+presented, and takes the principal at the other end. Where several match — which the rotation rule requires
+during the dual-admit window — every one of them resolves to the same principal, because the many-to-one is
+a property of the shape rather than of the read. Grant match and binding resolution use the same comparison:
+AAuth `(sub, iss)` is `credential_value` + `credential_issuer` under `credential_kind` `aauth_sub`.
+
+**Resolver outcomes.** The check returns one of the three values the grant checker already uses
+(`Permit` / `Deny` / `Indeterminate`). Enforcement maps `Indeterminate` to deny; the recorded decision keeps
+the third value so unknown stays distinct from a conclusion (principles 5 and 7). Diagnostics may name the
+principal id and `credential_kind`; they never echo raw `credential_value`.
+
+| Resolver outcome | Because | What the enforcement point does |
+|---|---|---|
+| `Permit` (resolved) | ≥1 live (unended, unexpired) `principal_binding` matches the presented `credential_kind` + `credential_value` (+ `credential_issuer` when required), and every match targets the **same** principal | Continue to grant match / attribution on that principal. Diagnostic may name principal id + credential kind; never echo `credential_value`. |
+| `Deny` (no binding) | No matching edge for the presented key | Refuse the write / admission. Record as **unattributed** (`#principals`) — never default to the operator. Surface: `[COPY: no principal_binding for this credential kind — create or restore the binding]`. |
+| `Deny` (expired-only) | Matching edges exist but all are ended or `now ≥ expires_at` | Distinct from no-binding. Surface expiry/retirement, not "unknown credential". Hint: `[COPY: binding expired or ended — rotate / dual-admit a live edge before presenting]`. |
+| `Indeterminate` (binding source unreadable / partial) | Relationship store unreachable, timed out, or read incomplete | Treat as Deny at the enforcement point (same posture as grant-load `Indeterminate` above). Keep the third value in logs/diagnostics — do not coerce to a plain `Deny` in the recorded decision. Hint: `[COPY: binding source unavailable — retry after record health; do not guess a principal]`. |
+| `Deny` (ambiguous / conflicting) | ≥2 live matching edges target **different** principals | Fail closed; do not pick first edge. Surface conflict with redacted fingerprints / principal ids only. Hint: `[COPY: conflicting principal_binding edges — operator must end the wrong edge(s)]`. |
+| `Deny` (malformed presentation) | Presented credential missing required key parts (`credential_kind` / `credential_value` / issuer when the kind requires it), or kind unrecognized | Restrictive default (principle 5). Hint: `[COPY: credential presentation malformed or kind unrecognized — fix caller shape]`. |
+
+**Examples.**
+
+- `[COPY: dual-admit success — two live principal_binding edges with different credential_value under the same credential_kind and credential_issuer both target principal P; resolution returns Permit on P and grant match continues.]`
+- `[COPY: conflict failure — two live matching edges target different principals; resolution returns Deny (ambiguous), records both principal ids with redacted fingerprints, and refuses first-edge-wins.]`
 
 **Why this and not the alternatives, and why the choice is structural rather than a preference.** The two
 candidates differ in what a wrong answer costs, and the design's own rule on that is what selects this one.
@@ -651,16 +690,17 @@ attribution, is what this decision has to say rather than leave to whichever cal
    in a design that already resolves credentials at the grant, and it has to say what the credential entity
    holds that the grant's `sub` and `iss` do not.
 
-2. **Properties on the binding edge itself, one edge per credential.** `principal_binding` stays the edge
-   type and carries the credential's identifying values — its kind, its issuer, and an expiry where the
-   issuer states one — so a principal has as many edges as it has credentials and rotation writes a second
-   edge before ending the first. This is the shape
+2. **Properties on the binding edge itself, one edge per credential.** *(Historical candidate — chosen.)*
+   `principal_binding` stays the edge type and carries the credential's identifying values — its kind, its
+   issuer, and an expiry where the issuer states one — so a principal has as many edges as it has
+   credentials and rotation writes a second edge before ending the first. This is the shape
    `conformance_suite.md#what-the-documents-leave-unspecified-here-and-how-each-is-recorded` already
    derives — an edge type carrying the credential kind and value, the principal, and an expiry — and that
    derivation is recorded there as proposed rather than assumed, which is the vacancy this row registers.
-   What it has to answer is whether the edge's source is then the credential rather than the agent, which
-   the relationships table's current `agent → principal` does not admit, and whether an edge carrying an
-   expiry is the maintained state invariant 11 forbids or the ended edge the design writes everywhere else.
+   Candidate 2 owed two answers the ruling above closes: the edge's source is not a credential entity —
+   credential identity lives in edge fields (`credential_kind`, `credential_value`, `credential_issuer`)
+   and the endpoint is the principal reached — and `expires_at` is a read-time liveness bound ended by
+   writing the edge, not maintained state invariant 11 forbids.
 
 3. **The grant is the binding, and no separate edge exists.** A grant already carries `sub`, `iss`, and
    `expires_at`, and is already matched on the credential; adding the principal to it would make the grant
