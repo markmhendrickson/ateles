@@ -261,6 +261,11 @@ class GateDecision:
     threshold: float
     policy_id: str
     reason: str
+    # True when `confidence` is the fail-closed default because no producer
+    # ever scored this task (ateles#902), as opposed to a real score that
+    # happens to be low. Callers must not let the two read the same: an
+    # unscored task says so; a scored-low task keeps saying "low confidence".
+    confidence_unscored: bool = False
 
     @property
     def may_auto_execute(self) -> bool:
@@ -449,6 +454,7 @@ def evaluate_gate(
     action_type: str | None,
     policy: ExecutionPolicy,
     successful_recurrences: int = 0,
+    confidence_unscored: bool = False,
 ) -> GateDecision:
     """
     Apply the gate matrix. Returns a GateDecision.
@@ -464,6 +470,21 @@ def evaluate_gate(
     does not mean "risky", it means an agent cannot do this — and a hundred
     prior successes do not hand the swarm a credential it was designed not to
     hold.
+
+    ``confidence_unscored`` (ateles#902): True when no producer ever scored
+    this task, so `confidence` is either the fail-closed default (0.0) or a
+    mechanical approximation (`confidence_scoring.score_confidence`) filled
+    in ahead of this call — never an agent's own judgment. It changes ONLY
+    the REASON text on a CHECKPOINT*/AUTO_EXECUTE decision, stamping
+    `GateDecision.confidence_unscored` so "never scored" and "scored low"
+    never again read identically to the operator. It does NOT gate the
+    action axis: a well-specified, unscored, LOW-blast task can still clear
+    `confidence_threshold` on its mechanical score and AUTO_EXECUTE exactly
+    as it would if an agent had scored it — this flag does not force a
+    checkpoint. Fail-closed is preserved by the blast-radius axis alone:
+    ``NEVER`` never auto-executes regardless of this flag (see above), and a
+    HIGH-blast unscored task still checkpoints because the fallback
+    mechanical score does not clear HIGH's bar, not because of this flag.
     """
     blast = policy.blast_radius_for(action_type)
     threshold = policy.confidence_threshold
@@ -482,6 +503,7 @@ def evaluate_gate(
                 "operator-only action — never auto-executable at any "
                 "confidence or recurrence count"
             ),
+            confidence_unscored=confidence_unscored,
         )
 
     # Recurrence graduation: a proven recurring series may auto-execute below
@@ -508,24 +530,38 @@ def evaluate_gate(
             threshold=threshold,
             policy_id=policy.entity_id,
             reason=reason,
+            confidence_unscored=confidence_unscored,
         )
 
     # Otherwise: checkpoint. Low-confidence + high-blast also proposes alternatives.
+    # An unscored task gets a distinct reason (ateles#902): a producer never
+    # judged it, and that must not read as the judgment "low confidence" claims
+    # to be. The wording says what is true after Part 2 — a score is present and
+    # it is mechanical — rather than claiming no confidence was recorded, which
+    # the mechanical score contradicts.
     if not high_conf and blast == BlastRadius.HIGH:
+        reason = (
+            "not scored by a producer (score is a mechanical estimate) and "
+            "high blast radius — propose alternatives"
+            if confidence_unscored
+            else "low confidence and high blast radius — propose alternatives"
+        )
         return GateDecision(
             action=GateAction.CHECKPOINT_WITH_ALTERNATIVES,
             blast_radius=blast,
             confidence=confidence,
             threshold=threshold,
             policy_id=policy.entity_id,
-            reason="low confidence and high blast radius — propose alternatives",
+            reason=reason,
+            confidence_unscored=confidence_unscored,
         )
 
-    reason = (
-        "high blast radius — operator approval required"
-        if blast == BlastRadius.HIGH
-        else "below confidence threshold"
-    )
+    if blast == BlastRadius.HIGH:
+        reason = "high blast radius — operator approval required"
+    elif confidence_unscored:
+        reason = "not scored by a producer — score is a mechanical estimate"
+    else:
+        reason = "below confidence threshold"
     return GateDecision(
         action=GateAction.CHECKPOINT,
         blast_radius=blast,
@@ -533,6 +569,7 @@ def evaluate_gate(
         threshold=threshold,
         policy_id=policy.entity_id,
         reason=reason,
+        confidence_unscored=confidence_unscored,
     )
 
 
@@ -566,6 +603,7 @@ def write_checkpoint_brief(
                 "plan_summary": plan_summary,
                 "confidence": decision.confidence,
                 "confidence_threshold": decision.threshold,
+                "confidence_unscored": decision.confidence_unscored,
                 "blast_radius": decision.blast_radius.value,
                 "gate_action": decision.action.value,
                 "reason": decision.reason,

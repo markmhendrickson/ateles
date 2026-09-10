@@ -170,6 +170,7 @@ from lib.daemon_runtime import (  # noqa: E402
     assess_readiness,
     create_run_conversation,
     missing_request,
+    score_confidence,
     send_run_email,
     write_assessment,
     GateAction,
@@ -249,11 +250,33 @@ def _infer_action_type(skill: str | None, snapshot: dict) -> str | None:
     return None
 
 
+def _confidence_is_explicit(snapshot: dict) -> bool:
+    """True when the snapshot carries a `confidence`/`confidence_score` value
+    that actually parses as a number — i.e. some producer scored this task.
+    """
+    raw = snapshot.get("confidence", snapshot.get("confidence_score"))
+    if raw is None:
+        return False
+    try:
+        float(raw)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def _read_confidence(snapshot: dict) -> float:
     """
     Read the agent-supplied confidence (0..1) from the task snapshot. Absent an
     explicit score, return 0.0 so the gate fails CLOSED (checkpoint) for any
     non-low-blast action — the operator is asked rather than the swarm guessing.
+
+    Kept exactly as before (ateles#902 changes nothing about this function or
+    its behavior): still fails to 0.0 on a truly absent/unparseable value.
+    `dispatch_task` calls this only indirectly, through `_resolve_confidence`,
+    and only on the branch where the snapshot ALREADY carries an explicit
+    score (`_confidence_is_explicit` is True) — an unscored snapshot never
+    reaches this function at all; `_resolve_confidence` routes it to
+    `score_confidence` instead and returns that value directly.
     """
     raw = snapshot.get("confidence", snapshot.get("confidence_score"))
     try:
@@ -267,6 +290,52 @@ def _successful_recurrences(snapshot: dict) -> int:
         return max(0, int(snapshot.get("successful_recurrences", 0)))
     except (TypeError, ValueError):
         return 0
+
+
+def _resolve_confidence(
+    snapshot: dict,
+    *,
+    has_owner: bool,
+    action_type_recognized: bool,
+    relationship_count: int = 0,
+) -> tuple[float, bool]:
+    """
+    Confidence for the gate, populated ahead of the read (ateles#902 Part 2).
+
+    Returns (confidence, unscored). When the snapshot already carries an
+    explicit score, that score is used verbatim and `unscored` is False — a
+    producer's own judgment (e.g. Cicada's full-rubric self-score) always
+    wins over the mechanical approximation here. Only when NO producer ever
+    scored the task does this fall through to `score_confidence` — a
+    deterministic, fields-based approximation of the same confidence_rubric
+    (ent_22fd6f25159f1f2689726780), mirroring how `readiness.py` approximates
+    its own rubric for the sibling pre-execution gate.
+
+    `unscored=True` is what lets the gate's reason text say "never scored"
+    instead of "low confidence" when the decision is a CHECKPOINT* — it does
+    NOT force a checkpoint by itself. The mechanical score returned here is a
+    real value the gate's confidence axis consults like any other: a
+    well-specified, unscored, LOW-blast task can score high enough to clear
+    `confidence_threshold` and AUTO_EXECUTE, same as a task an agent scored
+    itself. That is intentional (ateles#902) — it is what lets the swarm's
+    low-blast drain path move again for tasks nobody explicitly scored,
+    instead of every one of them stalling at a checkpoint nobody can clear.
+    """
+    if _confidence_is_explicit(snapshot):
+        return _read_confidence(snapshot), False
+
+    result = score_confidence(
+        snapshot,
+        has_owner=has_owner,
+        action_type_recognized=action_type_recognized,
+        relationship_count=relationship_count,
+        successful_recurrences=_successful_recurrences(snapshot),
+    )
+    log.info(
+        f"[{DAEMON_NAME}] confidence: unscored task — mechanical score "
+        f"{result.value:.2f} ({result.rationale})"
+    )
+    return result.value, True
 
 ATELES_REPO = Path(
     os.environ.get("ATELES_REPO_PATH", str(Path.home() / "repos" / "ateles"))
@@ -653,17 +722,33 @@ async def dispatch_task(
     if not gate_override:
         policy = resolve_policy_for_agent(skill)
         action_type = _infer_action_type(skill, snapshot)
-        confidence = _read_confidence(snapshot)
+        # ateles#902: populate confidence ahead of the read. When no producer
+        # scored this task, this mechanically scores it (per confidence_rubric
+        # ent_22fd6f25159f1f2689726780) instead of the gate reading an absent
+        # field as a silent 0.0 — and marks it unscored so the checkpoint
+        # reason says "never scored", not "low confidence".
+        action_type_recognized = bool(action_type) and (
+            action_type.strip().lower()
+            in (policy.low_blast_action_types | policy.high_blast_action_types)
+        )
+        confidence, confidence_unscored = _resolve_confidence(
+            snapshot,
+            has_owner=bool(assigned_to) or skill is not None,
+            action_type_recognized=action_type_recognized,
+            relationship_count=int(snapshot.get("relationship_count", 0) or 0),
+        )
         decision = evaluate_gate(
             confidence=confidence,
             action_type=action_type,
             policy=policy,
             successful_recurrences=_successful_recurrences(snapshot),
+            confidence_unscored=confidence_unscored,
         )
         log.info(
             f"[{DAEMON_NAME}] gate: task={entity_id} → {skill} "
             f"action={action_type} blast={decision.blast_radius.value} "
-            f"conf={confidence:.2f}/{decision.threshold:.2f} "
+            f"conf={confidence:.2f}/{decision.threshold:.2f}"
+            f"{' (unscored)' if confidence_unscored else ''} "
             f"→ {decision.action.value} ({decision.reason})"
         )
         if decision.action != GateAction.AUTO_EXECUTE:

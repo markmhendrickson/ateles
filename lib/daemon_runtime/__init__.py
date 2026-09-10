@@ -90,6 +90,7 @@ from .grant_checker import (
     revoke_grant,
     suspend_grant,
 )
+from .confidence_scoring import ConfidenceScore, score_confidence
 from .readiness import (
     ReadinessAssessment,
     assess_readiness,
@@ -193,4 +194,7 @@ __all__ = [
     "missing_request",
     "build_assessment_entity",
     "write_assessment",
+    # confidence scoring (ateles#902) — populates confidence ahead of the gate
+    "ConfidenceScore",
+    "score_confidence",
 ]
