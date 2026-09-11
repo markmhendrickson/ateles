@@ -41,6 +41,7 @@ on:
       - "execution/scripts/check_plan_decision_citations.py"
       - "execution/scripts/test_decision_state.py"
       - "execution/scripts/test_check_foundation_*.py"
+      - "execution/scripts/test_foundation_mechanical_checks_ci.py"
       - "docs/foundation/decision_state.md"
       - "execution/daemons/apis/test_foundation*.py"
       - ".github/workflows/foundation-checks.yml"
@@ -229,3 +230,19 @@ jobs:
           uv run --extra dev python -m pytest \
             execution/daemons/apis/test_foundation.py \
             execution/daemons/apis/test_foundation_binding.py -q
+
+      # ateles#944 (qa lens on #929's own fix): this guard proves the
+      # conformance.md `Merge gate` column is true rather than decorative —
+      # exactly the class of "reports without binding" defect the foundation
+      # lane exists to catch, so it must run from this lane itself and not
+      # only from the generic execution/scripts/** sweep in ateles-tests.yml.
+      # Own step for the same attributability reason as the checkers above.
+      - name: Merge gate column — table claims resolve to real CI steps
+        run: |
+          f=execution/scripts/test_foundation_mechanical_checks_ci.py
+          if [ ! -f "$f" ]; then
+            echo "::notice::$f absent on this branch — skipped"
+            exit 0
+          fi
+          uv run --extra dev python -m pytest \
+            execution/scripts/test_foundation_mechanical_checks_ci.py -q
