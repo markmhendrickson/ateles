@@ -60,7 +60,56 @@ AUTHORITY_RULED = f"""\
 
 **Ruled** (decision 101, 2026-09-10): **`principal_binding` carries `credential_kind`,
 `credential_value`, `credential_issuer`, and `expires_at`.**
+
+**Endpoint / source.** For an AAuth credential the binding resolves `credential_value` +
+`credential_issuer` to the `agent`; the human operator is then reached through that agent's
+**separate acts-as** `principal_binding`, a second edge of this type whose endpoint is the
+`operator`. A resolver takes the endpoint of the edge whose kind matches what was presented,
+so the AAuth kind yields the agent (attribution, A-for-B) and the acts-as kind yields the
+operator (decision 48's counting rule).
 """
+
+# Both endpoints inverted. Every field, cardinality, and resolution token is
+# still present and correct -- only the two endpoints are the wrong way round,
+# which is the defect the endpoint assertion exists for.
+AUTHORITY_ENDPOINTS_SWAPPED = AUTHORITY_RULED.replace(
+    "to the `agent`", "to the `operator`", 1
+).replace(
+    "whose endpoint is the\n`operator`", "whose endpoint is the\n`agent`", 1
+).replace(
+    "the AAuth kind yields the agent", "the AAuth kind yields the operator", 1
+).replace(
+    "the acts-as kind yields the\noperator", "the acts-as kind yields the\nagent", 1
+)
+
+AUTHORITY_AAUTH_SWAPPED_ONLY = AUTHORITY_RULED.replace(
+    "to the `agent`", "to the `operator`", 1
+).replace(
+    "the AAuth kind yields the agent", "the AAuth kind yields the operator", 1
+)
+
+AUTHORITY_ACTS_AS_SWAPPED_ONLY = AUTHORITY_RULED.replace(
+    "whose endpoint is the\n`operator`", "whose endpoint is the\n`agent`", 1
+).replace(
+    "the acts-as kind yields the\noperator", "the acts-as kind yields the\nagent", 1
+)
+
+# The endpoint paragraph removed altogether: nothing states either endpoint.
+AUTHORITY_NO_ENDPOINTS = AUTHORITY_RULED[
+    : AUTHORITY_RULED.index("**Endpoint / source.**")
+]
+
+# A correct endpoint sentence in a LATER section must not vouch for a ruling
+# section that states the inverse -- the assertion reads the ruling section
+# only, so the swap is still caught.
+AUTHORITY_SWAPPED_WITH_CORRECT_ELSEWHERE = (
+    AUTHORITY_ENDPOINTS_SWAPPED
+    + """
+### The counting rule: an agent counts as its bound principal
+
+Its AAuth edge ends at the **agent**, and its acts-as edge ends at the **operator**.
+"""
+)
 
 AUTHORITY_OPEN = f"""\
 # Authority model
@@ -164,10 +213,14 @@ def test_fails_when_ruling_section_still_open(tmp_path: Path) -> None:
 
     problems = decision_101.check(tmp_path)
 
-    assert len(problems) == 1
-    assert "decision-101-authority" in problems[0]
-    assert "must open with" in problems[0]
-    assert "**Open.**" in problems[0]
+    opener_problems = [p for p in problems if "must open with" in p]
+    assert len(opener_problems) == 1
+    assert "decision-101-authority" in opener_problems[0]
+    assert "**Open.**" in opener_problems[0]
+    # A reverted section states no endpoints either, so those assertions fire
+    # alongside — the ruling being open is exactly when both are true.
+    assert len(problems) == 3
+    assert sum("decision-101-endpoints" in p for p in problems) == 2
 
 
 def test_fails_when_authority_model_file_is_absent(tmp_path: Path) -> None:
@@ -200,3 +253,114 @@ def test_authority_section_unchecked_when_register_not_ruled(
     )
 
     assert decision_101.check(tmp_path) == []
+
+
+# --- The endpoint assignment (decision 101 with decision 48) -----------------
+#
+# Swapping the two endpoints leaves every field, cardinality, and resolution
+# token intact, so every other assertion in this file stays green on a corpus
+# that says the opposite of the ruling. Registration is one-way under G26, so
+# a swap that reaches stage 1 is not correctable afterwards.
+
+
+def test_fails_when_both_endpoints_are_swapped(tmp_path: Path) -> None:
+    write_corpus(tmp_path, authority_model=AUTHORITY_ENDPOINTS_SWAPPED)
+
+    problems = decision_101.check(tmp_path)
+
+    assert len(problems) == 2
+    assert all("decision-101-endpoints" in p for p in problems)
+    assert any(
+        "AAuth credential is stated to resolve to the operator" in p
+        for p in problems
+    )
+    assert any(
+        "acts-as binding is stated to end at the agent" in p for p in problems
+    )
+
+
+def test_fails_when_only_the_aauth_endpoint_is_swapped(tmp_path: Path) -> None:
+    write_corpus(tmp_path, authority_model=AUTHORITY_AAUTH_SWAPPED_ONLY)
+
+    problems = decision_101.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "decision-101-endpoints" in problems[0]
+    assert "AAuth credential is stated to resolve to the operator" in problems[0]
+    assert "ends that edge at the **agent**" in problems[0]
+
+
+def test_fails_when_only_the_acts_as_endpoint_is_swapped(tmp_path: Path) -> None:
+    write_corpus(tmp_path, authority_model=AUTHORITY_ACTS_AS_SWAPPED_ONLY)
+
+    problems = decision_101.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "decision-101-endpoints" in problems[0]
+    assert "acts-as binding is stated to end at the agent" in problems[0]
+    assert "ends that edge at the **operator**" in problems[0]
+
+
+def test_fails_when_the_ruling_states_neither_endpoint(tmp_path: Path) -> None:
+    write_corpus(tmp_path, authority_model=AUTHORITY_NO_ENDPOINTS)
+
+    problems = decision_101.check(tmp_path)
+
+    assert len(problems) == 2
+    assert any(
+        "does not state that the AAuth credential resolves to the **agent**" in p
+        for p in problems
+    )
+    assert any(
+        "does not state that the acts-as binding's endpoint is the **operator**"
+        in p
+        for p in problems
+    )
+
+
+def test_correct_endpoints_in_a_later_section_do_not_excuse_a_swap(
+    tmp_path: Path,
+) -> None:
+    """The assertion reads the ruling section, not the whole document."""
+    write_corpus(
+        tmp_path, authority_model=AUTHORITY_SWAPPED_WITH_CORRECT_ELSEWHERE
+    )
+
+    problems = decision_101.check(tmp_path)
+
+    assert len(problems) == 2
+    assert all("decision-101-endpoints" in p for p in problems)
+
+
+def test_endpoints_unchecked_when_register_not_ruled(tmp_path: Path) -> None:
+    write_corpus(
+        tmp_path,
+        conformance=CONFORMANCE.replace("**ruled**", "**open**"),
+        authority_model=AUTHORITY_ENDPOINTS_SWAPPED,
+    )
+
+    assert decision_101.check(tmp_path) == []
+
+
+# --- The resolution regex ---------------------------------------------------
+
+
+def test_resolution_language_is_not_satisfied_by_the_word_attribution(
+    tmp_path: Path,
+) -> None:
+    """An earlier RESOLUTION_RE matched any `principal` within 80 chars of a
+    loose alternation, so the word "attribution" elsewhere in the row kept the
+    check green after the resolution language was deleted."""
+    row_without_resolution = DATA_MODEL_OK.replace(
+        "credential-to-principal resolution "
+        "(match live edges on kind+value[+issuer] → principal endpoint)",
+        "attribution (the AAuth edge, resolving to the agent, "
+        "records a write as A-for-B on that principal)",
+    )
+    assert "credential-to-principal resolution" not in row_without_resolution
+    write_corpus(tmp_path, data_model=row_without_resolution)
+
+    problems = decision_101.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "missing kind+value → principal resolution language" in problems[0]

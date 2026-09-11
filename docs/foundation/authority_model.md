@@ -572,6 +572,17 @@ One edge per credential, properties on the edge, and no separate credential enti
 | `credential_issuer` | the issuer or namespace that makes the value unique | `iss` | the external system or host namespace; absent only when the kind's namespace is already unique without one |
 | `expires_at` | optional expiry bound read at check time | as the issuer states | as the issuer states |
 
+**What the acts-as edge carries is open (decision 107).** The table above maps the AAuth and the host /
+operator credential. It does not map the **acts-as** edge, and no kind is named for it anywhere: the two
+edges are told apart by `credential_kind`, and only one of the two kinds has a value. Two readings of that
+edge sit unreconciled in this document — the resolver sentence below treats it as matched from a
+presentation ("the acts-as kind yields the operator"), while `data_model.md#relationships` lists the
+agent's acts-as principal as a read *from* the edge, which is a traversal from the agent and no
+presentation at all. The difference is not cosmetic: `Deny (malformed presentation)` below fires on a
+missing `credential_value`, so under the first reading an acts-as edge needs a value and under the second
+it must not be judged by that rule at all. Registered as decision 107 rather than settled here; stage 1
+registers the type and not the kind vocabulary, so the question survives registration.
+
 **Endpoint / source.** No credential entity is introduced; the relationship's endpoint is the principal
 reached by the presented credential, with the credential identity carried in those edge fields. For an
 AAuth credential, the binding resolves `credential_value` + `credential_issuer` (`sub` + `iss`) to the
@@ -581,6 +592,17 @@ therefore holds two edges of this type, told apart by `credential_kind`; a resol
 of the edge whose kind matches what was presented, so the AAuth kind yields the agent (attribution,
 A-for-B) and the acts-as kind yields the operator (decision 48's counting rule). For an operator
 credential, the binding resolves the credential directly to the `operator`.
+
+**Which endpoints an acts-as edge may take is open (decisions 108 and 109).** Every statement above
+describes the case this design was drawn for — an agent acting in a *human's* interest — and the endpoint
+declared in `data_model.md#relationships` is the generic `principal`, which admits an `agent` as readily as
+an `operator`. Nothing written rejects an agent's acts-as edge to **another agent** (decision 108), and
+decision 48's counting rule reasons about interests without stating a depth, so permitting one turns
+interest resolution into a chain walk with no bound; and nothing written rejects an **operator** holding one
+(decision 109) — "operator credentials resolve directly to the `operator`" says what a presented operator
+credential resolves to, not what edges an `operator` may hold. Both are stated as open rather than ruled
+because the corpus implies no answer to either, and registering the type does not close them: what stage 1
+registers is the edge, not a constraint on its endpoints.
 
 **Expiry / end.** `expires_at` is a read-time liveness bound, not maintained state. A binding is live when
 the edge is unended and `now < expires_at` when present; retiring a credential writes or ends the edge,
@@ -1285,10 +1307,17 @@ principals, and the threshold's home (Safe's shape: on the governed object). 48,
 ### The counting rule: an agent counts as its bound principal
 
 **Ruled (decision 48, the brief's Q1, 2026-09-06): for a structural check, an agent counts as the principal
-its `principal_binding` names — one interest; for attribution, it is recorded as itself, A-for-B.**
-Registered as ruled in `conformance.md#the-register-of-open-design-decisions`. Two agents bound to one
-operator are one interest on a quorum and one party to a separation-of-duties check, and each is still the
-agent that acted on the record.
+its **acts-as** `principal_binding` names — one interest; for attribution, it is recorded as itself,
+A-for-B.** Registered as ruled in `conformance.md#the-register-of-open-design-decisions`. Two agents bound
+to one operator are one interest on a quorum and one party to a separation-of-duties check, and each is
+still the agent that acted on the record.
+
+**Which binding this names.** An agent acting in a human's interest holds two `principal_binding` edges of
+the one type, told apart by `credential_kind` (decision 101,
+`#what-the-credential-binding-carries-and-what-a-check-reads-to-resolve-a-credential-to-a-principal`): its
+AAuth edge ends at the **agent**, and its acts-as edge ends at the **operator**. This rule reads the
+acts-as edge and so counts the operator. Reading the AAuth edge instead would count the agent, which is the
+attack this section exists to prevent — two agents under one operator would then be two interests.
 
 **Why.** Principle 5 chooses the restrictive branch: counting an agent as its principal yields fewer
 distinct interests, so a quorum is harder to reach and a separation stricter to satisfy, and the failure of

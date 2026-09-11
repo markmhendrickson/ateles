@@ -36,9 +36,16 @@ CARDINALITY_RE = re.compile(
     r"one edge per credential|several edges|many edges", re.I
 )
 # Resolution: match kind+value → principal.
+#
+# Every alternative must carry a RESOLUTION verb or the explicit
+# credential-to-principal phrase. An earlier revision allowed a bare
+# `.{0,80}principal` tail, which the word "attribution" elsewhere in the same
+# row satisfied -- so deleting the resolution language left the check green.
 RESOLUTION_RE = re.compile(
-    r"(kind\+value|match.*kind|resolv).{0,80}principal"
-    r"|credential-to-principal resolution",
+    r"kind\+value(?:\[\+issuer\])?\s*(?:→|->)\s*principal"
+    r"|match(?:es|ing)?\s+live\s+edges\s+on\s+kind"
+    r"|resolv\w*\s+(?:a\s+)?credential\w*\s+to\s+(?:a\s+|the\s+)?principal"
+    r"|credential-to-principal\s+resolution",
     re.I,
 )
 LEGACY_ENDPOINTS_RE = re.compile(r"agent\s*→\s*principal", re.I)
@@ -127,6 +134,99 @@ AUTHORITY_HEADING = (
 )
 
 
+# The endpoint assignment decision 101 settles, and the defect class that makes
+# it worth a mechanical assertion: swapping the two endpoints (AAuth → operator,
+# acts-as → agent) leaves every field, cardinality, and resolution token intact,
+# so every other assertion here stays green on a corpus that says the opposite
+# of the ruling. Registration is one-way under G26 (`migration.md`), so a swap
+# that reaches stage 1 is not correctable afterwards. Attribution requires the
+# AAuth edge to end at the agent (or a write attributes to the operator and
+# A-for-B is unrecordable); decision 48's counting rule requires the acts-as
+# edge to end at the operator (or two agents under one operator count as two
+# interests). One edge cannot end at both, which is why there are two.
+AAUTH_ENDPOINT_RE = re.compile(
+    r"AAuth\s+kind\s+yields\s+the\s+\*{0,2}agent"
+    r"|AAuth\s+edge[^.;]{0,80}?ends\s+at\s+the\s+\*{0,2}agent"
+    r"|resolves[^.;]{0,120}?\(`sub`\s*\+\s*`iss`\)\s*to\s+the\s*\n?\s*`agent`",
+    re.I,
+)
+ACTS_AS_ENDPOINT_RE = re.compile(
+    r"acts-as\s+kind\s+yields\s+the\s+\*{0,2}operator"
+    r"|acts-as[^.;]{0,120}?whose\s+endpoint\s+is\s+the\s+\*{0,2}`?operator"
+    r"|acts-as\s+edge[^.;]{0,80}?ends\s+at\s+the\s+\*{0,2}`?operator",
+    re.I,
+)
+# A swap states the inverse. Detecting it explicitly lets the diagnostic name
+# what is wrong rather than only that something is missing.
+AAUTH_SWAPPED_RE = re.compile(
+    r"AAuth\s+kind\s+yields\s+the\s+\*{0,2}operator"
+    r"|AAuth\s+edge[^.;]{0,80}?ends\s+at\s+the\s+\*{0,2}`?operator",
+    re.I,
+)
+ACTS_AS_SWAPPED_RE = re.compile(
+    r"acts-as\s+kind\s+yields\s+the\s+\*{0,2}agent"
+    r"|acts-as[^.;]{0,120}?whose\s+endpoint\s+is\s+the\s+\*{0,2}`?agent"
+    r"|acts-as\s+edge[^.;]{0,80}?ends\s+at\s+the\s+\*{0,2}`?agent",
+    re.I,
+)
+
+
+def authority_ruling_body(text: str) -> str | None:
+    """The body of the decision-101 ruling section, heading to next heading.
+
+    The endpoint assignment is stated inside this section, so the assertion
+    reads the section rather than the whole document — a correct sentence
+    elsewhere must not vouch for a swapped one here.
+    """
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if line.strip() != AUTHORITY_HEADING:
+            continue
+        body: list[str] = []
+        for follow in lines[i + 1 :]:
+            if follow.startswith("## ") or follow.startswith("### "):
+                break
+            body.append(follow)
+        return "\n".join(body)
+    return None
+
+
+def check_authority_endpoints(path: Path, heading_no: int, body: str) -> list[str]:
+    """Assert which principal each of the two binding kinds resolves to."""
+    problems: list[str] = []
+
+    if AAUTH_SWAPPED_RE.search(body):
+        problems.append(
+            f"{path}:{heading_no}: decision-101-endpoints — the AAuth "
+            "credential is stated to resolve to the operator; decision 101 "
+            "ends that edge at the **agent** (attribution records a write as "
+            "A-for-B, which an operator endpoint makes unrecordable)"
+        )
+    elif not AAUTH_ENDPOINT_RE.search(body):
+        problems.append(
+            f"{path}:{heading_no}: decision-101-endpoints — the ruling "
+            "section does not state that the AAuth credential resolves to the "
+            "**agent**"
+        )
+
+    if ACTS_AS_SWAPPED_RE.search(body):
+        problems.append(
+            f"{path}:{heading_no}: decision-101-endpoints — the acts-as "
+            "binding is stated to end at the agent; decision 101 ends that "
+            "edge at the **operator** (decision 48's counting rule reads it, "
+            "and an agent endpoint would make two agents under one operator "
+            "two interests)"
+        )
+    elif not ACTS_AS_ENDPOINT_RE.search(body):
+        problems.append(
+            f"{path}:{heading_no}: decision-101-endpoints — the ruling "
+            "section does not state that the acts-as binding's endpoint is "
+            "the **operator**"
+        )
+
+    return problems
+
+
 def authority_ruling_section(text: str) -> tuple[int, str] | None:
     """The decision-101 ruling section in ``authority_model.md``, with its opener.
 
@@ -196,9 +296,8 @@ def check(root: Path) -> list[str]:
                 "register row 101 is **ruled**"
             )
         else:
-            section = authority_ruling_section(
-                authority_path.read_text(encoding="utf-8")
-            )
+            authority_text = authority_path.read_text(encoding="utf-8")
+            section = authority_ruling_section(authority_text)
             if section is None:
                 problems.append(
                     f"{authority_path}:1: decision-101-authority — no section "
@@ -213,6 +312,13 @@ def check(root: Path) -> list[str]:
                         "— the ruling section must open with \"**Ruled\" while "
                         "register row 101 is **ruled**; it opens "
                         f"{opener.strip()[:40]!r}"
+                    )
+                body = authority_ruling_body(authority_text)
+                if body is not None:
+                    problems.extend(
+                        check_authority_endpoints(
+                            authority_path, heading_no, body
+                        )
                     )
 
     return problems
