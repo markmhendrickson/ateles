@@ -39,6 +39,11 @@ from enum import Enum
 
 import httpx
 
+try:  # package import (production) and bare import (in-dir pytest) both work
+    from .neotoma_timeout import neotoma_timeout
+except ImportError:  # pragma: no cover
+    from neotoma_timeout import neotoma_timeout  # type: ignore
+
 log = logging.getLogger(__name__)
 
 NEOTOMA_BASE_URL = os.environ.get(
@@ -200,7 +205,7 @@ def _correct(entity_id: str, field: str, value, idempotency_key: str) -> bool:
             f"{NEOTOMA_BASE_URL}/correct",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             json=body,
-            timeout=15,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         return True
