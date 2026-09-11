@@ -103,7 +103,9 @@ entity in the record, so an ownership or delegation edge has somewhere to point 
 model, not Zanzibar as a system). A credential (the store's `user_id`, an AAuth `sub`, a GitHub login, an
 email address, a chat id) is a binding to a principal, many-to-one, never the principal itself; a login
 string, an address, or a magic value compared as `"operator"` is a credential standing in for a principal.
-An agent carries a `principal_binding`: the principal it acts as; it is recorded as itself for attribution. That binding is **one instance of the credential binding and not a second edge type**: its credential is the agent's own AAuth credential, so the edge carries `credential_kind: aauth_sub` with the agent's `sub` and `iss`, and its principal endpoint is the principal the agent acts as. So the acts-as reading and the credential-to-principal reading are the same edge read for two purposes, and decision 48's counting rule — an agent counts as the principal its `principal_binding` names — resolves unambiguously to that endpoint.
+An agent carries a `principal_binding`: the principal it acts as; it is recorded as itself for attribution. That binding is **one instance of the credential-binding edge type and not a second type** — but it is a distinct *edge* from the one that binds the agent's own AAuth credential, and an agent acting in a human's interest holds both. They are told apart by `credential_kind`. The agent's AAuth edge carries `credential_kind: aauth_sub` with the agent's `sub` and `iss` and ends at the **agent**, because that is the principal the credential identifies; the acts-as edge ends at the **operator**, the principal whose interest is acted in.
+
+**Attribution is what forces two edges rather than one.** A write by the agent is recorded as itself, A-for-B — so the credential it presents must resolve to the agent, or the write would attribute to the operator and A-for-B would be unrecordable. Decision 48's counting rule needs the opposite endpoint: it makes two agents under one operator **one interest**, which holds only if the edge it reads names the operator. One edge cannot end at both. The counting rule therefore reads the acts-as edge, and credential resolution reads the AAuth edge; each is unambiguous because `credential_kind` selects which.
 
 **The human principal is an `operator` entity (C9, settled).** The type whose only job is to be a
 principal is the human principal: an `operator` entity, carrying identity and nothing descriptive, and
@@ -123,7 +125,8 @@ instance — so on such an instance `user_id` identifies the instance's account 
 write whose only identity is that value **resolves to no principal and is recorded as unattributed**,
 which is a state a reader can see rather than a silent default to the operator. The AAuth `sub` is an
 agent's credential: it binds to the `agent` that presented it, and reaches the human principal only
-through that agent's `principal_binding` — which is what joins the two credential systems, and what was
+through that agent's separate acts-as `principal_binding` — a second edge of the same type, ending at
+the `operator`. That pair is what joins the two credential systems, and what was
 missing while no type sat above them.
 
 **What stays open, and it is not this document's to close.** The shape of the identifier on the `operator`
@@ -572,7 +575,11 @@ One edge per credential, properties on the edge, and no separate credential enti
 **Endpoint / source.** No credential entity is introduced; the relationship's endpoint is the principal
 reached by the presented credential, with the credential identity carried in those edge fields. For an
 AAuth credential, the binding resolves `credential_value` + `credential_issuer` (`sub` + `iss`) to the
-`agent`; the human operator is then reached through that agent's own `principal_binding`. For an operator
+`agent`; the human operator is then reached through that agent's **separate acts-as** `principal_binding`,
+a second edge of this type whose endpoint is the `operator`. An agent acting in a human's interest
+therefore holds two edges of this type, told apart by `credential_kind`; a resolver takes the endpoint
+of the edge whose kind matches what was presented, so the AAuth kind yields the agent (attribution,
+A-for-B) and the acts-as kind yields the operator (decision 48's counting rule). For an operator
 credential, the binding resolves the credential directly to the `operator`.
 
 **Expiry / end.** `expires_at` is a read-time liveness bound, not maintained state. A binding is live when

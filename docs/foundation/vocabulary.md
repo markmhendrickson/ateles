@@ -1414,14 +1414,17 @@ principal itself.
 [credential](#credential) to the [principal](#principal) it identifies — one edge per credential, carrying
 `credential_kind`, `credential_value`, `credential_issuer`, and `expires_at` (decision 101).
 An [agent](#agent)'s binding to the principal whose interest it acts in is **one instance of this edge and
-not a second kind**: its credential is the agent's own AAuth credential, so the edge carries
-`credential_kind: aauth_sub` with that agent's `sub` and `iss`. This is what joins the two credential
-systems — an AAuth `sub` binds to the agent that presented it and reaches the human principal only through
-that agent's own binding.
+not a second kind** — but it is a distinct *edge* from the one binding the agent's own AAuth credential,
+and an agent acting in a human's interest holds both, told apart by `credential_kind`. The AAuth edge
+carries `credential_kind: aauth_sub` with that agent's `sub` and `iss` and ends at the **agent**, the
+principal that credential identifies; the acts-as edge ends at the **[operator](#operator)**. This pair is
+what joins the two credential systems — an AAuth `sub` binds to the agent that presented it and reaches the
+human principal only through that agent's separate acts-as binding.
 It carries one rule the design turns on: **for a [quorum](#quorum) or a
-[separation-of-duties](#separation-of-duties) check, an agent counts as the principal its binding names**
-— one interest, so two agents bound to one [operator](#operator) cannot satisfy a check meant to require
-two. Attribution is unaffected: the agent is recorded as itself, A-for-B.
+[separation-of-duties](#separation-of-duties) check, an agent counts as the principal its acts-as binding
+names** — one interest, so two agents bound to one [operator](#operator) cannot satisfy a check meant to
+require two. Attribution is unaffected, and is why the two edges are distinct: the agent is recorded as
+itself, A-for-B, which its AAuth edge is what makes resolvable.
 **See:** [`authority_model.md#principals`](authority_model.md#principals),
 [`authority_model.md#the-counting-rule-an-agent-counts-as-its-bound-principal`](authority_model.md#the-counting-rule-an-agent-counts-as-its-bound-principal).
 **Never:** —
