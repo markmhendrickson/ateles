@@ -7,6 +7,13 @@ Strix genus: wood owls. T3 daemon in the Ateles swarm.
 Single click on the icon toggles recording on/off. No dropdown menu.
 Hover tooltip shows current state.
 
+Recording is driven through audio_hijack_control.sh (start/stop/status/toggle
+via AppleScript against the Audio Hijack session named $AUDIO_HIJACK_SESSION,
+default "Tyto"). Audio Hijack writes paired *remote*/*mic* files that the Tyto
+daemon transcribes + analyzes. This replaces the retired BlackHole capture path
+(record_meeting_audio.py). The /record_meeting skill drives the same script, so
+the menu-bar toggle and the chat command share one mechanism.
+
 Icon:
   🔴  recording active (mic live)
   ⚫  recording off (mic muted)
@@ -22,7 +29,7 @@ import rumps
 from AppKit import NSObject
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent  # ateles repo root
-CONTROL_SCRIPT = ROOT / "execution" / "scripts" / "meeting-recording-control.sh"
+CONTROL_SCRIPT = ROOT / "execution" / "scripts" / "audio_hijack_control.sh"
 
 ICON_RECORDING = "🔴"
 ICON_IDLE = "⚫"
