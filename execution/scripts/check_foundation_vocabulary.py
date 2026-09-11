@@ -122,13 +122,14 @@ ALLOWLIST_WORDS = frozenset(
     each whose under work them none have exactly having whom itself under below over than upon
     close closed closes closing opens opened opening ruled ruling revised revision retired retiring
     resolves resolved resolving pass passes passed declares declared declaring taken taking bound
-    definition question shape list default exists existing cannot
+    definition question shape list default exists existing cannot side
     fields surface their then half thing later different stays reaches refused refuses stored
     request answer defect
     """.split()
 )
 # `fields` tipped the advisory bound on ateles#899 (decision-93 ruling prose merged with main);
-# the rest are ordinary English that had crossed threshold without being load-bearing terms.
+# `side` tipped it on ateles#914 after the same merge; the rest are ordinary English that had
+# crossed threshold without being load-bearing terms.
 
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z']*")
 _TESTID_ABBREVIATIONS = frozenset(

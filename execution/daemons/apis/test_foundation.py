@@ -711,6 +711,7 @@ class TestVocabularyLint:
             "their",
             "later",
             "defect",
+            "side",
         ):
             assert word not in candidates, word
 
