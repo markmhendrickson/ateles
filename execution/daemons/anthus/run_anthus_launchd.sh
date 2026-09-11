@@ -1,42 +1,26 @@
 #!/usr/bin/env bash
 # Launcher for the Anthus daemon under launchd.
 #
-# Sources the operator's materialized secret env (SOPS -> ~/.config/neotoma/.env,
-# produced by execution/scripts/secrets_materialize.py) so daemon-spawned
-# `claude --print` agents inherit CLAUDE_CODE_OAUTH_TOKEN and authenticate on
-# the operator's Claude subscription instead of failing with 401 / "credit
-# balance too low". No secret is committed: the plist points here, and this
-# script reads the gitignored materialized env at launch.
+# Historically this script parsed the operator's materialized secret env
+# (SOPS -> ~/.config/neotoma/.env) and `export`ed every key into its own
+# process environment before `exec`ing python, so that daemon-spawned
+# `claude --print` agents would inherit CLAUDE_CODE_OAUTH_TOKEN. That export
+# loop is what let `ps eww <anthus-pid>` read every materialized secret
+# (including a GitHub PAT and a Telegram bot token unrelated to OAuth) from
+# any local process running as the operator (ateles#657).
 #
-# Safe when the env file is absent (fresh checkout / CI): the daemon still runs,
-# just without the OAuth token (spawned agents fall back to ambient creds).
+# It was also unnecessary: `lib/daemon_runtime/__init__.py` already loads
+# the same materialized dotenv IN-PROCESS at import time, for every daemon
+# that imports lib.daemon_runtime — anthus.py does. That in-process load
+# populates anthus's own os.environ (visible only via that process's own
+# memory, not via `ps eww`), and `_spawn_agent`'s create_subprocess_exec
+# call passes no explicit `env=`, so the child `claude --print` process
+# inherits CLAUDE_CODE_OAUTH_TOKEN from the parent the same way every other
+# environment variable does. No bash-level export was ever required for
+# that to work — this now matches every sibling daemon (apis, aquila,
+# cotinga, ...), which invoke the venv interpreter directly with no dotenv
+# wrapper.
 set -euo pipefail
-
-ENV_FILE="${NEOTOMA_MATERIALIZED_ENV:-$HOME/.config/neotoma/.env}"
-if [ -f "$ENV_FILE" ]; then
-  # Parse line-by-line rather than `source`: the materialized env legitimately
-  # contains values with spaces (e.g. ATELES_GMAIL_SEND_CMD="gws gmail ...")
-  # that a bare `. env` would try to execute. Export only well-formed
-  # KEY=VALUE lines, taking the value verbatim (everything after the first =),
-  # and skip comments / blanks / malformed keys.
-  while IFS= read -r _line || [ -n "$_line" ]; do
-    case "$_line" in
-      ''|'#'*) continue ;;
-    esac
-    _key="${_line%%=*}"
-    # A valid env key is letters/digits/underscore and contains no space.
-    case "$_key" in
-      *[!A-Za-z0-9_]*|'') continue ;;
-    esac
-    _val="${_line#*=}"
-    # Strip one layer of surrounding quotes if present.
-    case "$_val" in
-      \"*\") _val="${_val#\"}"; _val="${_val%\"}" ;;
-      \'*\') _val="${_val#\'}"; _val="${_val%\'}" ;;
-    esac
-    export "$_key=$_val"
-  done < "$ENV_FILE"
-fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PY="${ANTHUS_PYTHON:-$REPO_ROOT/.venv/bin/python3}"
