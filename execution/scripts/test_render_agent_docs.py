@@ -102,3 +102,94 @@ class TestMirrorsMatchFreshRender:
         assert not stale_corrected, (
             f"corrected-agent mirrors are stale relative to Neotoma: {stale_corrected}"
         )
+
+
+class TestSkipWithoutTokenExitMatrix:
+    """Exit-code matrix for ``--skip-without-token`` (ateles#717 QA).
+
+    Mirrors the credential/unreachable SKIP contract in
+    ``scripts/linters/test_validate_tool_allowlist.py``, but against
+    ``render_agent_docs.main()`` in-process so unreachable cases do not burn
+    the live ``_request`` retry sleep.
+    """
+
+    def _sandbox_home(self, monkeypatch, tmp_path) -> None:
+        # _load_env() falls back to ~/.config/neotoma/.env — sandbox HOME so a
+        # developer's live token cannot leak into these unconfigured cases.
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+    def test_skip_without_token_exits_0_when_env_missing(
+        self, monkeypatch, tmp_path, capsys
+    ) -> None:
+        self._sandbox_home(monkeypatch, tmp_path)
+        monkeypatch.delenv("NEOTOMA_BASE_URL", raising=False)
+        monkeypatch.delenv("NEOTOMA_BEARER_TOKEN", raising=False)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["render_agent_docs.py", "--check", "--skip-without-token"],
+        )
+
+        assert render_agent_docs.main() == 0
+        out = capsys.readouterr().out
+        assert "SKIP" in out
+        assert "not configured" in out
+
+    def test_skip_without_token_exits_0_when_neotoma_unreachable(
+        self, monkeypatch, tmp_path, capsys
+    ) -> None:
+        self._sandbox_home(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.invalid")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "dummy-token-for-skip-test")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["render_agent_docs.py", "--check", "--skip-without-token"],
+        )
+
+        def _unreachable(*_a, **_k):
+            raise SystemExit(
+                "Neotoma unreachable after 5 tries: <urlopen error timed out>"
+            )
+
+        monkeypatch.setattr(render_agent_docs, "fetch_agents", _unreachable)
+
+        assert render_agent_docs.main() == 0
+        out = capsys.readouterr().out
+        assert "SKIP" in out
+        assert "unreachable" in out
+
+    def test_skip_without_token_still_fails_on_real_drift(
+        self, monkeypatch, tmp_path, capsys
+    ) -> None:
+        self._sandbox_home(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.invalid")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "dummy-token-for-skip-test")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["render_agent_docs.py", "--check", "--skip-without-token"],
+        )
+        monkeypatch.setattr(
+            render_agent_docs, "fetch_agents", lambda *_a, **_k: []
+        )
+        # Gate honesty: once Neotoma is reachable, SKIP must not swallow drift.
+        monkeypatch.setattr(render_agent_docs, "check", lambda _agents: 1)
+
+        assert render_agent_docs.main() == 1
+        out = capsys.readouterr().out
+        assert "not configured" not in out
+        assert "unreachable" not in out
+
+    def test_check_without_skip_flag_still_hard_fails_unconfigured(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        self._sandbox_home(monkeypatch, tmp_path)
+        monkeypatch.delenv("NEOTOMA_BASE_URL", raising=False)
+        monkeypatch.delenv("NEOTOMA_BEARER_TOKEN", raising=False)
+        monkeypatch.setattr(sys, "argv", ["render_agent_docs.py", "--check"])
+
+        with pytest.raises(SystemExit) as excinfo:
+            render_agent_docs.main()
+        # sys.exit(str) → SystemExit with a non-zero / non-None code message.
+        assert excinfo.value.code not in (0, None)

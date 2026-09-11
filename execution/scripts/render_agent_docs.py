@@ -40,6 +40,11 @@ running prompt yet).
 Usage:
     render_agent_docs.py            # Neotoma → disk
     render_agent_docs.py --check    # exit 1 if disk differs from Neotoma
+    render_agent_docs.py --check --skip-without-token
+                                    # same, but exit 0 with a SKIP notice when
+                                    # Neotoma is unconfigured/unreachable (the
+                                    # CI gate uses this, so the lane goes red
+                                    # for drift and nothing else)
 
 Env: NEOTOMA_BASE_URL, NEOTOMA_BEARER_TOKEN (falls back to
 ~/.config/neotoma/.env).
@@ -425,9 +430,38 @@ def check(agents: list[dict]) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="verify disk matches Neotoma")
+    parser.add_argument(
+        "--skip-without-token",
+        action="store_true",
+        help=(
+            "exit 0 with a SKIP notice when Neotoma is unconfigured or unreachable, "
+            "instead of failing. For the blocking CI gate: a missing token or a "
+            "Neotoma outage is an infrastructure gap, not mirror drift, and a gate "
+            "that cannot tell them apart gets disabled the first time it goes red "
+            "for the wrong reason."
+        ),
+    )
     args = parser.parse_args()
-    base_url, token = _load_env()
-    agents = fetch_agents(base_url, token)
+
+    if args.skip_without_token:
+        # Any failure resolving config or reaching Neotoma means "cannot
+        # determine freshness" — which must never read as drift.
+        try:
+            base_url, token = _load_env()
+        except SystemExit:
+            base_url, token = "", ""
+        if not base_url or not token:
+            print("SKIP — NEOTOMA_BASE_URL/NEOTOMA_BEARER_TOKEN not configured; mirror freshness not checked")
+            return 0
+        try:
+            agents = fetch_agents(base_url, token)
+        except SystemExit as exc:
+            print(f"SKIP — Neotoma unreachable ({exc}); mirror freshness not checked")
+            return 0
+    else:
+        base_url, token = _load_env()
+        agents = fetch_agents(base_url, token)
+
     return check(agents) if args.check else render(agents)
 
 

@@ -11,10 +11,18 @@ name: Agent config validation
 #      hand-edited or left stale, per the swarm's
 #      regenerate_generated_files_before_opening_pr policy.
 #
-# Both checks read live Neotoma state, so this lane needs NEOTOMA_BEARER_TOKEN.
-# validate_tool_allowlist.py itself treats a missing token or unreachable
-# Neotoma as a clean SKIP (exit 0) rather than a crash — see the step-level
-# NOTE below for the informational/continue-on-error rollout plan.
+# Both checks read live Neotoma state, so this lane needs NEOTOMA_BEARER_TOKEN
+# (provisioned as a repo secret 2026-09-01). Both treat a missing token or an
+# unreachable Neotoma as a clean SKIP (exit 0) rather than a failure, so the
+# lane goes red only for a real defect.
+#
+# TRIGGERS — why there is a schedule as well as a PR lane (ateles#682):
+# mirror drift ORIGINATES OUTSIDE THIS REPO. A session corrects an
+# agent_definition in Neotoma and the checked-in mirror goes stale without a
+# single file changing, so no pull_request ever fires and the path filter
+# below never matches. That is exactly how ~24 agents drifted unnoticed. The
+# PR lane catches a PR that edits mirrors by hand; only the schedule catches
+# the far more common case of Neotoma moving on its own.
 
 on:
   pull_request:
@@ -24,6 +32,10 @@ on:
       - "execution/scripts/render_agent_docs.py"
       - "scripts/linters/validate_tool_allowlist.py"
       - ".github/workflows/agent-config-validation.yml"
+  schedule:
+    # 07:15 UTC daily — surfaces drift introduced by Neotoma-side corrections,
+    # which touch no files and therefore trigger no PR.
+    - cron: "15 7 * * *"
   workflow_dispatch:
 
 permissions:
@@ -56,13 +68,27 @@ jobs:
         continue-on-error: true
         run: python3 scripts/linters/validate_tool_allowlist.py
 
-      # NOTE: non-blocking for now. As of ateles#255 the checked-in mirrors
-      # under docs/agents/ and .claude/skills/ carry pre-existing drift from
-      # Neotoma unrelated to this lane (renamed-agent references, agents added
-      # to Neotoma with no corresponding regen commit). Making this blocking
-      # today would fail on that pre-existing gap, not on new PRs. Flip to a
-      # hard failure (remove `continue-on-error`) once a full mirror regen
-      # lands and the two trees are back in sync.
-      - name: Validate agent-doc mirrors are in sync with Neotoma (informational)
-        continue-on-error: true
-        run: python3 execution/scripts/render_agent_docs.py --check
+      # BLOCKING as of ateles#682. The two preconditions the ateles#255
+      # rollout named are now met: NEOTOMA_BEARER_TOKEN was provisioned as a
+      # repo secret on 2026-09-01, and the full mirror regen in this PR put
+      # docs/agents/ and .claude/skills/ back in sync with Neotoma (81 files,
+      # 40 agents, `--check` clean).
+      #
+      # Why this had to become blocking rather than stay informational: the
+      # mirrors are RENDER TARGETS of agent_definition.prompt_markdown, so any
+      # session correcting an entity leaves the repo stale until someone
+      # re-renders — and nothing enforced that. The drift this PR clears had
+      # accumulated across 24 agents precisely because the only check was
+      # advisory. An informational check reports the symptom forever; a gate
+      # keeps the two trees in sync.
+      #
+      # `--skip-without-token` keeps the gate honest: a missing token or a
+      # Neotoma outage exits 0 with a SKIP notice rather than failing, so the
+      # lane goes red for actual mirror drift and nothing else. A gate that
+      # cannot tell drift from an outage is one that gets disabled.
+      #
+      # When this fails: correct the agent_definition entity in Neotoma (never
+      # edit the generated file), then run
+      # `python3 execution/scripts/render_agent_docs.py` and commit the output.
+      - name: Validate agent-doc mirrors are in sync with Neotoma
+        run: python3 execution/scripts/render_agent_docs.py --check --skip-without-token
