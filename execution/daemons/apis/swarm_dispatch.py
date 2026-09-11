@@ -93,6 +93,7 @@ from review_panel import (
     select_panel,
 )
 from skill_runner import (
+    REVIEW_VERDICT_TOKENS,
     SkillResult,
     run_skill,
     usable_providers,
@@ -504,8 +505,24 @@ def parse_pending_gates(stdout: str) -> set[str]:
 
 # Vanellus / panelist verdict token (SWARM_GITHUB_CONTRACT, skill_runner.py):
 # a review comment carries exactly one of these bold verdict tokens.
+#
+# ateles#938: this regex is built from `skill_runner.REVIEW_VERDICT_TOKENS` —
+# the SAME tuple that renders the "Verdict vocabulary" section of
+# SWARM_GITHUB_CONTRACT (the text a dispatched agent actually reads) — rather
+# than a second, hand-typed alternation. The bug this closes: the contract
+# instructed `SIGNED_OFF` (skill_runner.SWARM_GITHUB_CONTRACT, and every
+# Neotoma-mirrored SKILL.md that cites it) while this regex, maintained
+# separately, stopped at four tokens. An agent that did exactly what the
+# gate-writeback instruction requires — confirm its own `gate_status` write via
+# read-back, then emit `**SIGNED_OFF**` — produced a token this regex could not
+# see, so the verdict came back `None`, routed as "unparseable", and escalated
+# to the operator. Deriving both sides from one tuple makes that drift
+# structurally impossible: extend `REVIEW_VERDICT_TOKENS` and this regex gains
+# the token for free. `test_instructed_review_verdict_tokens_subseteq_parser`
+# plants the regression — remove a token from the tuple only and CI fails.
 _REVIEW_VERDICT = re.compile(
-    r"\*\*(APPROVE|REQUEST_CHANGES|COMMENT|BLOCKED)\*\*", re.I
+    r"\*\*(" + "|".join(re.escape(tok) for tok in REVIEW_VERDICT_TOKENS) + r")\*\*",
+    re.I,
 )
 
 
@@ -723,7 +740,15 @@ def parse_review_verdict(stdout: str) -> str | None:
 
 
 def review_verdict_is_clear(verdict: str | None) -> bool:
-    """True only for an unambiguous non-blocking verdict (APPROVE or COMMENT).
+    """True only for an unambiguous non-blocking verdict.
+
+    APPROVE, COMMENT, and (ateles#938) SIGNED_OFF are all clear: none of them
+    carries a blocker, so none should route findings back for a fix. SIGNED_OFF
+    is included here WITHOUT being conflated with APPROVE — this predicate only
+    answers "does this verdict block the merge PATH" (fix-routing vs
+    readiness-gating), which is a coarser question than "is this a merge
+    authorisation". See `verdict_to_review_event` for the axis that keeps
+    SIGNED_OFF from ever being read as an approval on GitHub itself.
 
     REQUEST_CHANGES / BLOCKED / None (unparseable) are all NOT clear — the PR is
     not merge-ready and blocking findings should route back for a fix.
@@ -731,7 +756,7 @@ def review_verdict_is_clear(verdict: str | None) -> bool:
     Reads the TOKEN ONLY. Callers deciding the merge path must use
     `review_blocks_merge`, which also consults the body — see its docstring.
     """
-    return verdict in ("approve", "comment")
+    return verdict in ("approve", "comment", "signed_off")
 
 
 def review_blocks_merge(verdict: str | None, body: str | None = None) -> bool:
@@ -839,12 +864,24 @@ def verdict_to_review_event(verdict: str | None, body: str | None = None) -> str
       comment         -> COMMENT
       blocked         -> COMMENT   (blocking is expressed by routing findings
                                     back for a fix, not by hard-blocking merge)
+      signed_off      -> COMMENT   (ateles#938 — see below; NEVER APPROVE)
       None            -> COMMENT   (unparseable: never escalate on a guess)
 
     REQUEST_CHANGES is returned for EXACTLY ONE input. That asymmetry is the
     point: escalating on a mis-parse would block a good PR under branch
     protection, and de-escalating a real REQUEST_CHANGES would defeat the
     feature. Everything ambiguous lands on the inert COMMENT.
+
+    ateles#938 — `signed_off` is deliberately excluded from the APPROVE branch,
+    on purpose, forever. SIGNED_OFF certifies that a gate-owning lens's
+    `gate_status` write landed and was read back — a claim about a durable
+    write, not a judgement about the PR. APPROVE certifies the judgement.
+    Mapping `signed_off` to GitHub's `APPROVE` review event would misrepresent
+    a write-confirmation as a human/code-owner-equivalent merge authorisation
+    on a public PR — exactly the alias Security/Arch rejected for this issue
+    (see option C in the issue's swarm spec). `signed_off` is still
+    `review_verdict_is_clear` (it does not block the merge path), it is simply
+    never the input that produces GitHub's strongest review state.
 
     ateles#595 — body cross-check. When `body` is supplied and contains at least
     one `[BLOCKING]` marker, the body WINS and REQUEST_CHANGES is returned
@@ -870,7 +907,67 @@ def verdict_to_review_event(verdict: str | None, body: str | None = None) -> str
         return _REVIEW_EVENT_APPROVE
     if verdict == "request_changes":
         return _REVIEW_EVENT_REQUEST_CHANGES
+    # `signed_off` (ateles#938) falls through here deliberately, alongside
+    # `comment`/`blocked`/None — it is a write-confirmation, not a merge
+    # judgement, and must never reach _REVIEW_EVENT_APPROVE. Do not add a
+    # `verdict == "signed_off"` branch above that returns APPROVE.
     return _REVIEW_EVENT_COMMENT
+
+
+# ── SIGNED_OFF backlog guard: head-pinning (ateles#938 ruling 2) ─────────────
+# Teaching the parser SIGNED_OFF makes every historical `**SIGNED_OFF**`
+# comment written before this fix retroactively parseable — including ones
+# written against a PR head that has since moved. ateles#938 forbids treating
+# that backlog as a blanket merge authorisation ("Do not let a parser fix
+# silently convert 93 stale sign-offs into merge authorisations"). The chosen
+# control (docs/foundation/data_model.md#record-conventions: "a verdict is
+# pinned to the artifact state it judged") is HEAD-PINNING: a SIGNED_OFF only
+# counts against the PR head it was actually written against.
+#
+# Vanellus is already instructed (skill_runner.SWARM_GITHUB_CONTRACT via
+# docs/agents/vanellus.md) to include a `Reviewed commit: <full head SHA>`
+# line in its aggregation for exactly this reason. This is that instruction's
+# read side: parse the line, and let the caller compare it against the PR's
+# CURRENT head (`_pr_head_sha`) before trusting a SIGNED_OFF that predates it.
+_REVIEWED_COMMIT_RE = re.compile(
+    r"Reviewed commit:\s*`?([0-9a-f]{7,40})`?", re.IGNORECASE
+)
+
+
+def parse_reviewed_commit(body: str | None) -> str | None:
+    """The head SHA a review body claims to have judged, or None if absent.
+
+    Bare hex, optionally backtick-wrapped, 7-40 characters (GitHub accepts
+    abbreviated SHAs down to 7 hex digits). Absence is common on reviews
+    written before this convention existed — callers must treat None as
+    "cannot verify pinning", not as "pinned to nothing in particular".
+    """
+    if not body:
+        return None
+    m = _REVIEWED_COMMIT_RE.search(body)
+    return m.group(1).lower() if m else None
+
+
+def signed_off_is_head_pinned(body: str | None, current_head_sha: str | None) -> bool:
+    """True only when a SIGNED_OFF verdict is pinned to the PR's CURRENT head.
+
+    ateles#938 backlog guard. A SIGNED_OFF whose `Reviewed commit:` line is
+    missing, or names a SHA that is not a prefix-match of (nor matched by)
+    the current head, does NOT count — the caller must treat it the way a
+    stale REQUEST_CHANGES is already treated: not clear, re-review required.
+    Fails CLOSED in every ambiguous case (missing commit line, missing current
+    head, mismatch) — the default for a newly-parseable historical token must
+    be "not yet re-verified", never "clear by omission".
+
+    Matching allows either side to be an abbreviated prefix of the other,
+    since `Reviewed commit:` lines written by different agents/rounds are not
+    guaranteed to carry the full 40-character SHA.
+    """
+    reviewed = parse_reviewed_commit(body)
+    if not reviewed or not current_head_sha:
+        return False
+    current = current_head_sha.lower()
+    return reviewed == current or current.startswith(reviewed) or reviewed.startswith(current)
 
 
 def merge_authorization_clause(
@@ -4292,24 +4389,13 @@ class SwarmDispatcher:
             return self.config.max_fix_rounds
 
     async def _pr_head_sha(self, trigger: SwarmTrigger) -> str | None:
-        """Current head SHA of the PR, or None if it cannot be read."""
-        url = (
-            f"https://api.github.com/repos/{trigger.repository}/pulls/"
-            f"{trigger.number}"
-        )
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(
-                    url, headers=self._github_headers(trigger.repository)
-                )
-                resp.raise_for_status()
-                return (resp.json().get("head") or {}).get("sha")
-        except Exception as exc:  # noqa: BLE001 — advisory only
-            log.warning(
-                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
-                f"could not read head SHA ({exc})"
-            )
-            return None
+        """Current head SHA of the PR, or None if it cannot be read.
+
+        Thin wrapper over `_pr_head_sha_for` — kept as its own method because
+        every existing call site already has a `SwarmTrigger` in hand rather
+        than the bare (repository, number) pair.
+        """
+        return await self._pr_head_sha_for(trigger.repository, trigger.number)
 
     async def _escalate_noop_fix_round(
         self, trigger: SwarmTrigger, kind: str, n: int, before: str | None
@@ -5469,6 +5555,18 @@ class SwarmDispatcher:
         findings: a `**COMMENT**` aggregation listing a `[BLOCKING]` item read as
         clear here, and since this is the CI-green path, a PR could reach
         merge-ready on an aggregation that named its own blocker.
+
+        ateles#938 backlog guard — SIGNED_OFF is head-pinned. Teaching the
+        parser SIGNED_OFF makes every historical `**SIGNED_OFF**` aggregation
+        retroactively parseable, including ones written against a PR head that
+        has since moved. Per the issue's ruling, such a verdict counts as
+        clear ONLY when its `Reviewed commit:` line matches the PR's CURRENT
+        head SHA (`signed_off_is_head_pinned`); a `signed_off` that fails that
+        check is treated as NOT clear here — same as a stale REQUEST_CHANGES —
+        so a merge-ready signal is never raised off a sign-off that judged an
+        earlier revision of the diff. This does not touch REQUEST_CHANGES,
+        BLOCKED, or unparseable handling, which were already correct; it is
+        additive only for the newly-accepted token.
         """
         try:
             async with httpx.AsyncClient(timeout=30) as client:
@@ -5479,13 +5577,47 @@ class SwarmDispatcher:
                 if comment is None:
                     return False
                 body = comment.get("body") or ""
-                return not review_blocks_merge(parse_review_verdict(body), body)
+                verdict = parse_review_verdict(body)
+                if review_blocks_merge(verdict, body):
+                    return False
+                if verdict == "signed_off":
+                    current_head = await self._pr_head_sha_for(repository, pr_number)
+                    if not signed_off_is_head_pinned(body, current_head):
+                        log.info(
+                            f"[{DAEMON_NAME}] {repository}#{pr_number}: SIGNED_OFF "
+                            "aggregation is not pinned to the current head "
+                            f"({current_head!r}) — treating as not-clear pending "
+                            "re-review (ateles#938 backlog guard)"
+                        )
+                        return False
+                return True
         except Exception as exc:
             log.warning(
                 f"[{DAEMON_NAME}] {repository}#{pr_number}: review-verdict read "
                 f"failed ({exc}) — treating as not-clear"
             )
             return False
+
+    async def _pr_head_sha_for(self, repository: str, pr_number: int) -> str | None:
+        """Current head SHA for an arbitrary (repository, pr_number) pair.
+
+        `_pr_head_sha` takes a `SwarmTrigger`; this is the same read for call
+        sites (like the ateles#938 backlog guard above) that only have the
+        bare identifiers and should not construct a synthetic trigger just to
+        reuse it.
+        """
+        url = f"https://api.github.com/repos/{repository}/pulls/{pr_number}"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(url, headers=self._github_headers(repository))
+                resp.raise_for_status()
+                return (resp.json().get("head") or {}).get("sha")
+        except Exception as exc:  # noqa: BLE001 — advisory only
+            log.warning(
+                f"[{DAEMON_NAME}] {repository}#{pr_number}: could not read head "
+                f"SHA for SIGNED_OFF head-pinning check ({exc})"
+            )
+            return None
 
     async def check_workflow_owner_drift(self) -> list[tuple[str, str, str]]:
         """Warn if any workflow names a gate owner the swarm cannot dispatch.

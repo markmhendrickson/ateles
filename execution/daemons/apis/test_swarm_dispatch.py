@@ -51,6 +51,7 @@ from swarm_dispatch import (
     parse_pending_gates,
     parse_review_verdict,
     prepare_pr_worktree,
+    review_blocks_merge,
     review_verdict_is_clear,
     verdict_to_review_event,
     vanellus_comment_missing,
@@ -169,9 +170,12 @@ def test_parse_review_verdict_none_when_absent():
     assert parse_review_verdict(None) is None
 
 
-def test_review_verdict_is_clear_only_for_approve_or_comment():
+def test_review_verdict_is_clear_only_for_approve_comment_or_signed_off():
     assert review_verdict_is_clear("approve") is True
     assert review_verdict_is_clear("comment") is True
+    # ateles#938: SIGNED_OFF does not block the merge PATH (it carries no
+    # blocker) even though it is never an approval — see verdict_to_review_event.
+    assert review_verdict_is_clear("signed_off") is True
     assert review_verdict_is_clear("request_changes") is False
     assert review_verdict_is_clear("blocked") is False
     # Unparseable verdict is NOT clear — never silently proceed to merge-ready.
@@ -207,10 +211,202 @@ def test_request_changes_is_the_only_escalating_mapping():
     one that de-escalates defeats the feature."""
     escalating = [
         v
-        for v in ("approve", "request_changes", "comment", "blocked", None, "", "wat")
+        for v in (
+            "approve",
+            "request_changes",
+            "comment",
+            "blocked",
+            "signed_off",
+            None,
+            "",
+            "wat",
+        )
         if verdict_to_review_event(v) == "REQUEST_CHANGES"
     ]
     assert escalating == ["request_changes"], escalating
+
+
+# ── ateles#938: SIGNED_OFF is an accepted, distinct verdict token ────────────
+#
+# The dispatcher instructs review agents to emit `**SIGNED_OFF**` (see
+# skill_runner.SWARM_GITHUB_CONTRACT and docs/agents/vanellus.md's "Verdict
+# mapping" note) after a gate-owning lens confirms, via read-back, that its
+# own `gate_status` write landed. The parser's regex never learned that fifth
+# token, so a correctly-formed sign-off came back as an unparseable verdict
+# and escalated to the operator — the dominant stall cause cited in the issue
+# (93 open PRs). These tests are the P0 regressions from the issue's QA plan.
+
+
+def test_parse_review_verdict_accepts_signed_off():
+    """The literal bug: a well-formed SIGNED_OFF must parse, not return None."""
+    assert parse_review_verdict("## Verdict\n**SIGNED_OFF**\nlgtm") == "signed_off"
+    # Case-insensitive, matching every other token in this parser.
+    assert parse_review_verdict("**signed_off**") == "signed_off"
+    assert parse_review_verdict("**Signed_Off**") == "signed_off"
+
+
+def test_signed_off_does_not_claim_unparseable_verdict_escalation():
+    """Effect-level: a SIGNED_OFF verdict with no [BLOCKING] findings must not
+    take the `unparseable-verdict` escalation path.
+
+    Planted negative: on the pre-fix parser (four tokens, no SIGNED_OFF),
+    `parse_review_verdict` returns None for this exact body, `review_blocks_merge`
+    is therefore True, and `_route_blocking_findings` — finding no parseable
+    `[BLOCKING]` markers either — escalates `unparseable-verdict`
+    (swarm_dispatch.py's `_route_blocking_findings`, the `if not by_lens:` arm).
+    This test is the regression lock for that stall.
+    """
+    body = (
+        "**🤖 Waxwing — Ateles swarm, arch reviewer**\n"
+        "**SIGNED_OFF**\n\n"
+        "- [x] gate_status.arch confirmed via read-back\n\n"
+        "Arch gate signed off. No blocking findings."
+    )
+    verdict = parse_review_verdict(body)
+    assert verdict == "signed_off"
+    # The exact predicate _handle_pr branches on before routing to
+    # _route_blocking_findings vs _gate_merge_readiness.
+    assert review_blocks_merge(verdict, body) is False
+
+
+def test_signed_off_still_escalates_when_body_has_blocking_findings():
+    """The body cross-check (ateles#595) still wins: a SIGNED_OFF token above a
+    `[BLOCKING]` finding must not be trusted over the finding itself."""
+    body = "**SIGNED_OFF**\n\n[BLOCKING] arch: contradicts docs/foundation/data_model.md"
+    assert review_blocks_merge(parse_review_verdict(body), body) is True
+
+
+def test_signed_off_maps_to_comment_not_approve():
+    """ateles#938 semantics: SIGNED_OFF certifies a confirmed gate WRITE, not a
+    merge judgement. Collapsing it into APPROVE would let a durable-write
+    confirmation stand in as a merge authorisation it never made — the exact
+    alias Security/Arch rejected (option C in the issue's swarm spec)."""
+    assert verdict_to_review_event("signed_off") == "COMMENT"
+    assert verdict_to_review_event("signed_off") != "APPROVE"
+
+
+def test_signed_off_is_clear_for_routing_but_not_an_approval():
+    """SIGNED_OFF is `review_verdict_is_clear` (does not route findings back for
+    a fix) while still never producing GitHub's APPROVE review event — the two
+    predicates answer different questions and must not collapse into one."""
+    assert review_verdict_is_clear("signed_off") is True
+    assert review_blocks_merge("signed_off", body=None) is False
+    assert verdict_to_review_event("signed_off") == "COMMENT"
+
+
+def test_unrecognized_verdict_token_still_unparseable():
+    """A typo'd or invented token (not in REVIEW_VERDICT_TOKENS) must still
+    read as unparseable — widening the accepted set to include SIGNED_OFF must
+    not loosen the regex into accepting arbitrary bold text as a verdict."""
+    assert parse_review_verdict("**SIGNED-OFF**") is None  # hyphenated, not '_'
+    assert parse_review_verdict("**APPROVED**") is None  # not the real token
+    assert parse_review_verdict("**SIGNEDOFF**") is None
+
+
+# ── ateles#938: one source — instructed tokens ⊆ parser-accepted tokens ─────
+
+
+def test_instructed_review_verdict_tokens_subseteq_parser():
+    """The durable fix (issue acceptance criterion #4): every token the
+    dispatcher's contract instructs an agent to emit must be a token the
+    parser accepts — asserted here as an executable invariant, not left to a
+    human diffing two lists.
+
+    PLANTED-NEGATIVE PROOF (see PR description for the actual red run): remove
+    a single token from `skill_runner.REVIEW_VERDICT_TOKENS` — e.g. drop
+    `SIGNED_OFF` — and this test fails immediately, because `_REVIEW_VERDICT`
+    is built from that exact tuple (see swarm_dispatch.py) and stops matching
+    the dropped token while the instructed-set check below still requires it.
+    This is the antidote to ateles#938 recurring: the parser and the
+    instruction text can no longer drift silently, because they are the same
+    tuple, and this test asserts every one of its members round-trips through
+    the parser.
+    """
+    from skill_runner import REVIEW_VERDICT_TOKENS
+
+    assert len(REVIEW_VERDICT_TOKENS) >= 1, "instructed-token source is empty"
+    for token in REVIEW_VERDICT_TOKENS:
+        body = f"**{token}**"
+        parsed = parse_review_verdict(body)
+        assert parsed == token.lower(), (
+            f"instructed token {token!r} (from skill_runner.REVIEW_VERDICT_TOKENS, "
+            "the same vocabulary rendered into SWARM_GITHUB_CONTRACT and every "
+            "Neotoma-mirrored SKILL.md 'Verdict' line) did not round-trip through "
+            "swarm_dispatch.parse_review_verdict — the instruction and the parser "
+            "have drifted again."
+        )
+
+
+def test_swarm_github_contract_vocabulary_matches_review_verdict_tokens():
+    """The contract TEXT an agent actually reads must enumerate exactly the
+    tokens the parser accepts — not a hand-typed list that happens to agree
+    today. Extracts the bold tokens named in the rendered contract's "Verdict
+    vocabulary" section and compares the set against REVIEW_VERDICT_TOKENS."""
+    import re
+
+    from skill_runner import REVIEW_VERDICT_TOKENS, SWARM_GITHUB_CONTRACT
+
+    section = SWARM_GITHUB_CONTRACT.split("### Verdict vocabulary")[1].split(
+        "### Worked example"
+    )[0]
+    named = set(re.findall(r"\*\*([A-Z_]+)\*\*", section))
+    assert named == set(REVIEW_VERDICT_TOKENS), (
+        named,
+        set(REVIEW_VERDICT_TOKENS),
+    )
+
+
+# ── ateles#938 ruling 2: SIGNED_OFF backlog is head-pinned ──────────────────
+
+
+def test_parse_reviewed_commit_extracts_sha():
+    from swarm_dispatch import parse_reviewed_commit
+
+    assert (
+        parse_reviewed_commit("Reviewed commit: abc1234def5678900000000000000000000000")
+        == "abc1234def5678900000000000000000000000"
+    )
+    assert parse_reviewed_commit("Reviewed commit: `abc1234`") == "abc1234"
+    assert parse_reviewed_commit("REVIEWED COMMIT: ABC1234") == "abc1234"
+    assert parse_reviewed_commit("no such line here") is None
+    assert parse_reviewed_commit(None) is None
+    assert parse_reviewed_commit("") is None
+
+
+def test_signed_off_head_pinning_matches_current_head():
+    from swarm_dispatch import signed_off_is_head_pinned
+
+    body = "**SIGNED_OFF**\nReviewed commit: abc1234def5678900000000000000000000000"
+    assert (
+        signed_off_is_head_pinned(body, "abc1234def5678900000000000000000000000")
+        is True
+    )
+    # Abbreviated SHA either direction still matches.
+    assert signed_off_is_head_pinned(body, "abc1234def56789") is True
+    assert (
+        signed_off_is_head_pinned(
+            "Reviewed commit: abc1234", "abc1234def5678900000000000000000000000"
+        )
+        is True
+    )
+
+
+def test_signed_off_head_pinning_fails_closed_on_stale_or_missing_commit():
+    """The backlog guard (issue ruling 2): a SIGNED_OFF whose Reviewed-commit
+    line names a SHA the PR head has since moved past does NOT count as
+    pinned — it must not silently become a merge-clear signal on deploy.
+    Equally, a pre-convention SIGNED_OFF with no Reviewed-commit line at all
+    fails closed rather than being treated as pinned by omission."""
+    from swarm_dispatch import signed_off_is_head_pinned
+
+    stale_body = "**SIGNED_OFF**\nReviewed commit: 0000000000000000000000000000000000dead"
+    assert signed_off_is_head_pinned(stale_body, "abc1234def5678900000000000000000000000") is False
+
+    no_commit_line_body = "**SIGNED_OFF**\nlgtm, no commit line here"
+    assert signed_off_is_head_pinned(no_commit_line_body, "abc1234def5678900000000000000000000000") is False
+
+    assert signed_off_is_head_pinned("**SIGNED_OFF**\nReviewed commit: abc1234", None) is False
+    assert signed_off_is_head_pinned(None, "abc1234") is False
 
 
 # ── _handle_pr verdict branching ─────────────────────────────────────────────

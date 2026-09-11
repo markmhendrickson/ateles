@@ -214,6 +214,42 @@ def _load_agent_def(role: str) -> AgentDefinition:
     return _agent_def_cache[role]
 
 
+# ── Review-verdict vocabulary (ateles#938 — one source, defined once) ─────────
+# THE single authoritative list of bold verdict tokens a swarm agent may emit as
+# its one-line GitHub verdict. Every other place that needs this vocabulary —
+# the contract text below, the regression test, and
+# `swarm_dispatch._REVIEW_VERDICT` (the parser that reads the token back off
+# Vanellus's aggregation) — imports THIS tuple rather than hand-typing its own
+# copy. That is the fix for ateles#938: the dispatcher instructed `SIGNED_OFF`
+# in this very contract (see the "Verdict vocabulary" section immediately
+# below) while its parser's regex, maintained separately, never learned the
+# fifth token — a correctly-formed sign-off therefore parsed as unparseable and
+# escalated to the operator instead of clearing the panel.
+#
+# `SIGNED_OFF` is NOT a synonym for `APPROVE`. It certifies a narrower, prior
+# claim: that a gate-owning lens's `correct()` write to `gate_status` landed,
+# confirmed by an immediate read-back (see the GATE WRITEBACK instruction in
+# swarm_dispatch._panelist_prompt). `APPROVE` certifies a judgement about the
+# PR as a whole. Collapsing the two would let a durable-write confirmation
+# stand in for a merge authorisation it never made — so `SIGNED_OFF` maps to
+# the inert GitHub `COMMENT` event, never `APPROVE` (see
+# `swarm_dispatch.verdict_to_review_event`), and a `SIGNED_OFF` verdict is
+# still `review_verdict_is_clear` (it does not block the merge path or route
+# findings back) without being treated as approval.
+#
+# Extend this tuple — never a second regex or a second hand-typed list — when
+# the swarm needs a new verdict token. Both call sites below are keyed off it,
+# and `test_swarm_dispatch.py::test_instructed_review_verdict_tokens_subseteq_parser`
+# fails CI the moment a token here and the parser regex disagree.
+REVIEW_VERDICT_TOKENS: tuple[str, ...] = (
+    "APPROVE",
+    "REQUEST_CHANGES",
+    "COMMENT",
+    "BLOCKED",
+    "SIGNED_OFF",
+)
+
+
 # ── Shared GitHub-interaction convention (Phase 1 / Layer A) ──────────────────
 # Injected into every GitHub-dispatched agent's system prompt by build_system_prompt
 # when include_github_contract=True.  Lives in ONE place — not duplicated across
@@ -221,6 +257,23 @@ def _load_agent_def(role: str) -> AgentDefinition:
 # already present in swarm_dispatch.py prompts.
 #
 # See docs/swarm_github_interaction_design.md — Layer A.
+
+_VERDICT_VOCABULARY_LINES = {
+    "APPROVE": "all checks pass, no blockers.",
+    "REQUEST_CHANGES": "one or more [BLOCKING] findings; the author must "
+    "address them.",
+    "COMMENT": "observations only; nothing blocks merge.",
+    "BLOCKED": "cannot proceed (missing information, open pre-impl gate, etc.).",
+    "SIGNED_OFF": "your gate/phase is signed off.",
+}
+
+# Rendered from REVIEW_VERDICT_TOKENS so the contract text an agent reads can
+# never enumerate a token the parser (built from the same tuple, see
+# swarm_dispatch._REVIEW_VERDICT) does not accept.
+_VERDICT_VOCABULARY_BLOCK = "\n".join(
+    f"- `**{token}**` — {_VERDICT_VOCABULARY_LINES[token]}"
+    for token in REVIEW_VERDICT_TOKENS
+)
 
 SWARM_GITHUB_CONTRACT = """\
 ## Swarm GitHub interaction contract (Layer A)
@@ -265,11 +318,7 @@ Immediately after the attribution header, on its own line:
 
 Use exactly ONE of these tokens as the bold status line — one per comment, always present:
 
-- `**APPROVE**` — all checks pass, no blockers.
-- `**REQUEST_CHANGES**` — one or more [BLOCKING] findings; the author must address them.
-- `**COMMENT**` — observations only; nothing blocks merge.
-- `**BLOCKED**` — cannot proceed (missing information, open pre-impl gate, etc.).
-- `**SIGNED_OFF**` — your gate/phase is signed off.
+{verdict_vocabulary_block}
 
 ### Worked example — reproduce this pattern exactly
 
@@ -341,6 +390,15 @@ Keep comments checklist/structured. Avoid essay-style prose. The implementer and
 aggregator (Vanellus) parse these; treat them as structured data with a human-readable \
 summary, not a narrative.\
 """
+
+# Splice the rendered vocabulary block in via plain string replacement rather
+# than `.format()` — the contract text above is full of literal `{`/`}`-free
+# but backtick- and code-fence-heavy examples, and a stray brace anywhere in a
+# future edit would make `.format()` raise. `.replace()` on a placeholder that
+# cannot occur elsewhere in the text has no such failure mode.
+SWARM_GITHUB_CONTRACT = SWARM_GITHUB_CONTRACT.replace(
+    "{verdict_vocabulary_block}", _VERDICT_VOCABULARY_BLOCK
+)
 
 # ── Prior-art contract (check existing context before building) ───────────────
 # Injected into every dispatched agent's system prompt by build_system_prompt,
