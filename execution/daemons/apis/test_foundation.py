@@ -698,7 +698,20 @@ class TestVocabularyLint:
         """A high-frequency function word never appears, however often it is used."""
         mod = self._lint()
         candidates = {w for w, _ in mod.undefined_word_candidates(_REPO_ROOT)}
-        for word in ("that", "with", "never", "which", "before", "written", "already"):
+        for word in (
+            "that",
+            "with",
+            "never",
+            "which",
+            "before",
+            "written",
+            "already",
+            "fields",
+            "surface",
+            "their",
+            "later",
+            "defect",
+        ):
             assert word not in candidates, word
 
     def test_undefined_word_candidates_never_affects_the_exit_code(self, capsys) -> None:
