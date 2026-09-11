@@ -61,6 +61,9 @@ class _Handler:
 def _isolate_state(tmp_path, monkeypatch):
     """Point the run-state file at a temp dir so tests never touch real state."""
     monkeypatch.setattr(monedula, "STATE_FILE", tmp_path / ".monedula_last_run")
+    monkeypatch.setattr(
+        monedula, "GATE_HEALTH_FILE", tmp_path / ".monedula_gate_health"
+    )
     # Neutralise outbound effects.
     monkeypatch.setattr(monedula, "_notify", lambda *a, **k: None, raising=False)
     monkeypatch.setattr(monedula, "_fetch_due_tasks", lambda *a, **k: [], raising=False)
@@ -69,10 +72,16 @@ def _isolate_state(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(monedula, "telegram_send", lambda *a, **k: None, raising=False)
     # A matched payment reaches the operator-approval gate, which long-polls
-    # Telegram for 120s. Stub it to decline: these tests assert that a one-off
-    # is EVALUATED, never that it is paid — approval stays the operator's.
+    # Telegram for 120s via the structured `telegram_poll_approval` (#554).
+    # Stub it to an explicit DECLINE reply — not a bare `None`/timeout, which
+    # after #554 is a channel failure that escalates and fails the run. These
+    # tests assert that a one-off is EVALUATED, never that it is paid —
+    # approval stays the operator's, and a decline keeps the run clean.
     monkeypatch.setattr(
-        monedula, "telegram_long_poll_once", lambda *a, **k: None, raising=False
+        monedula,
+        "telegram_poll_approval",
+        lambda *a, **k: monedula.TelegramPollResult(kind="reply", text="no"),
+        raising=False,
     )
     yield
 
