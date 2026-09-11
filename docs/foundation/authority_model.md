@@ -103,7 +103,7 @@ entity in the record, so an ownership or delegation edge has somewhere to point 
 model, not Zanzibar as a system). A credential (the store's `user_id`, an AAuth `sub`, a GitHub login, an
 email address, a chat id) is a binding to a principal, many-to-one, never the principal itself; a login
 string, an address, or a magic value compared as `"operator"` is a credential standing in for a principal.
-An agent carries a `principal_binding`: the principal it acts as; it is recorded as itself for attribution.
+An agent carries a `principal_binding`: the principal it acts as; it is recorded as itself for attribution. That binding is **one instance of the credential binding and not a second edge type**: its credential is the agent's own AAuth credential, so the edge carries `credential_kind: aauth_sub` with the agent's `sub` and `iss`, and its principal endpoint is the principal the agent acts as. So the acts-as reading and the credential-to-principal reading are the same edge read for two purposes, and decision 48's counting rule — an agent counts as the principal its `principal_binding` names — resolves unambiguously to that endpoint.
 
 **The human principal is an `operator` entity (C9, settled).** The type whose only job is to be a
 principal is the human principal: an `operator` entity, carrying identity and nothing descriptive, and

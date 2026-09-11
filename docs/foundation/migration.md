@@ -956,7 +956,7 @@ numbers are separate and only two of these are opened as decisions below.
   merges name pull requests the record holds as typed rows but not as `artifact`; deriving their
   checkpoints needs an artifact that no adapter read produced. Either the derivation is allowed to mint
   from the record's own reference, or those held decisions cannot be carried.
-- **G17 — the credential binding has no edge type.** `data_model.md#concepts` says credentials bind to a
+- **G17 — the credential binding has no edge type. RULED by decision 101 (2026-09-10): the edge is `principal_binding`, one per credential, carrying `credential_kind`, `credential_value`, `credential_issuer`, and `expires_at`; what remains is registering it, which is stage 1's work.** `data_model.md#concepts` says credentials bind to a
   principal many-to-one; the relationships table names no edge for it, and the instance holds the
   bindings as fields on the agent and on the grant.
 - **G18 — `agent_grant.expires_at`, `sub`, `iss` versus the source's field names.** A tolerant-reader

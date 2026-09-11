@@ -121,10 +121,33 @@ def check_data_model_row(path: Path, row_no: int, row_body: str) -> list[str]:
     return problems
 
 
+AUTHORITY_HEADING = (
+    "### What the credential binding carries, and what a check reads "
+    "to resolve a credential to a principal"
+)
+
+
+def authority_ruling_section(text: str) -> tuple[int, str] | None:
+    """The decision-101 ruling section in ``authority_model.md``, with its opener.
+
+    Returns (line number of the heading, the first non-blank line beneath it),
+    or None when the heading is absent.
+    """
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if line.strip() == AUTHORITY_HEADING:
+            for follow in lines[i + 1 :]:
+                if follow.strip():
+                    return i + 1, follow
+            return i + 1, ""
+    return None
+
+
 def check(root: Path) -> list[str]:
     fdir = root / FOUNDATION_DIR
     conformance_path = fdir / "conformance.md"
     data_model_path = fdir / "data_model.md"
+    authority_path = fdir / "authority_model.md"
     if not conformance_path.is_file() or not data_model_path.is_file():
         raise CorpusProblem(
             f"expected {conformance_path} and {data_model_path} under --root {root}"
@@ -160,6 +183,37 @@ def check(root: Path) -> list[str]:
         problems.extend(
             check_data_model_row(data_model_path, binding_no, binding_body)
         )
+
+    # The document that STATES the ruling. Without this the whole of
+    # authority_model.md's field table, endpoint rule, and resolver outcomes
+    # could be deleted or reverted to `**Open.**` and this check would stay
+    # green on the data_model row alone -- the ruled-but-not-implemented
+    # divergence, on the document that is the implementation of the ruling.
+    if ruled:
+        if not authority_path.is_file():
+            problems.append(
+                f"{authority_path}:1: decision-101-authority — missing while "
+                "register row 101 is **ruled**"
+            )
+        else:
+            section = authority_ruling_section(
+                authority_path.read_text(encoding="utf-8")
+            )
+            if section is None:
+                problems.append(
+                    f"{authority_path}:1: decision-101-authority — no section "
+                    f'"{AUTHORITY_HEADING.lstrip("# ")}" while register row 101 '
+                    "is **ruled**"
+                )
+            else:
+                heading_no, opener = section
+                if not opener.lstrip().startswith("**Ruled"):
+                    problems.append(
+                        f"{authority_path}:{heading_no}: decision-101-authority "
+                        "— the ruling section must open with \"**Ruled\" while "
+                        "register row 101 is **ruled**; it opens "
+                        f"{opener.strip()[:40]!r}"
+                    )
 
     return problems
 

@@ -92,7 +92,8 @@ python execution/scripts/check_foundation_anchors.py || ERRORS=$((ERRORS + 1))
 
 echo "  - Checking foundation decision 78 is ruled in the corpus..."
 python execution/scripts/check_foundation_decision_78.py || ERRORS=$((ERRORS + 1))
-python execution/scripts/check_foundation_decision_101.py || ERRORS=$((ERRORS + 1))
+echo "  - Checking decision 101 ruling is bound to the corpus..."
+python3 execution/scripts/check_foundation_decision_101.py || ERRORS=$((ERRORS + 1))
 
 echo "  - Checking foundation vocabulary (no Never word in the prose)..."
 python execution/scripts/check_foundation_vocabulary.py || ERRORS=$((ERRORS + 1))
