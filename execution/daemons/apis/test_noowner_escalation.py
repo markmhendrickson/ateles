@@ -26,7 +26,22 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import apis  # noqa: E402
+from fake_neotoma import FakeNeotoma  # noqa: E402
 from unroutable_ledger import UnroutableLedger  # noqa: E402
+from unroutable_store import NeotomaLedgerStore  # noqa: E402
+
+
+def _ledger_against(fake_unused=None) -> UnroutableLedger:
+    """A ledger wired to the test's fake Neotoma.
+
+    Caching is off so every assertion reflects what STORAGE holds — the blind
+    spot that let PR #666's unit tests pass while the bug was live in prod.
+    """
+    return UnroutableLedger(
+        store=NeotomaLedgerStore(
+            base_url="http://fake", token="t", ledger_key="test", cache_seconds=0
+        )
+    )
 
 
 class _Notifier:
@@ -40,10 +55,21 @@ class _Notifier:
 
 
 @pytest.fixture(autouse=True)
-def _isolated_ledger(monkeypatch, tmp_path):
-    """Every test gets its own on-disk ledger — never the operator's real one."""
-    monkeypatch.setattr(apis, "_unroutable", UnroutableLedger(path=tmp_path / "l.json"))
+def neotoma(monkeypatch, tmp_path):
+    """A fake Neotoma backing the ledger — never the operator's real instance.
+
+    Also neutralizes the legacy-disk migration, so the suite cannot inherit live
+    production dedup state from the developer's machine.
+    """
+    fake = FakeNeotoma()
+    import unroutable_store as us
+
+    monkeypatch.setattr(us.httpx, "post", fake.post)
+    monkeypatch.setattr(us.httpx, "get", fake.get)
+    monkeypatch.setenv("APIS_UNROUTABLE_LEDGER", str(tmp_path / "absent.json"))
+    monkeypatch.setattr(apis, "_unroutable", _ledger_against())
     monkeypatch.setattr(apis, "_created_seen", {})
+    return fake
 
 
 @pytest.fixture(autouse=True)
@@ -155,22 +181,76 @@ def test_a_new_unroutable_task_is_still_reported():
     assert "ent_brand_new" in combined, "a new unroutable task went unreported"
 
 
-def test_escalation_dedup_survives_a_restart(tmp_path, monkeypatch):
+def test_escalation_dedup_survives_a_restart(monkeypatch):
     """A restart must not re-page the operator about the standing backlog."""
-    path = tmp_path / "ledger.json"
     snapshot = {"title": "No owner", "tags": []}
 
-    monkeypatch.setattr(apis, "_unroutable", UnroutableLedger(path=path))
     n1 = _Notifier()
     _dispatch("ent_a", snapshot, n1)
     assert len(n1.sent) == 1
 
-    # Restart: fresh ledger object, fresh created-seen set, same file.
-    monkeypatch.setattr(apis, "_unroutable", UnroutableLedger(path=path))
+    # Restart: fresh ledger AND fresh store, same backing Neotoma.
+    monkeypatch.setattr(apis, "_unroutable", _ledger_against())
     monkeypatch.setattr(apis, "_created_seen", {})
     n2 = _Notifier()
     _dispatch("ent_a", snapshot, n2)
     assert n2.sent == [], "re-paged the whole backlog after a restart"
+
+
+# ── an unreachable Neotoma must not rebuild the flood ────────────────────────
+#
+# THE crux of moving this ledger off disk. Reads fail CLOSED: if the dedup state
+# cannot be read, whether a task was already paged is UNKNOWN, and guessing "not
+# yet" re-escalates the whole standing backlog at once. Driven through the real
+# dispatch_task, because the hold lives in its except-clause, not in the ledger.
+
+
+def test_unreadable_ledger_holds_the_page_instead_of_flooding(neotoma, monkeypatch):
+    """35 known tasks + a Neotoma outage must yield ZERO pages, not 35."""
+    snapshots = {f"ent_{i}": {"title": f"task {i}", "tags": []} for i in range(35)}
+    warm = _Notifier()
+    for eid, snap in snapshots.items():
+        _dispatch(eid, snap, warm)
+    assert warm.sent, "sanity: the backlog should page once while Neotoma is up"
+
+    neotoma.fail_reads = True
+    monkeypatch.setattr(apis, "_unroutable", _ledger_against())
+    monkeypatch.setattr(apis, "_created_seen", {})
+    outage = _Notifier()
+    for eid, snap in snapshots.items():
+        _dispatch(eid, snap, outage)
+    assert outage.sent == [], (
+        f"an unreadable ledger re-paged the backlog: {len(outage.sent)} page(s)"
+    )
+
+
+def test_a_held_page_does_not_crash_the_dispatcher(neotoma):
+    """Holding is a log line, not an exception escaping into the SSE loop."""
+    neotoma.fail_reads = True
+    _dispatch("ent_a", {"title": "No owner", "tags": []}, _Notifier())
+
+
+def test_the_task_is_still_marked_blocked_when_the_page_is_held(neotoma, monkeypatch):
+    """Held page, but the task stays visible in the backlog — not on the floor."""
+    marked = []
+    monkeypatch.setattr(
+        apis, "set_task_status", lambda eid, status, **k: marked.append((eid, status))
+    )
+    neotoma.fail_reads = True
+    _dispatch("ent_a", {"title": "No owner", "tags": []}, _Notifier())
+    assert marked, "the task was neither paged nor marked — it fell on the floor"
+
+
+def test_pages_resume_once_neotoma_recovers(neotoma, monkeypatch):
+    """The hold is for the duration of the outage, not permanent."""
+    neotoma.fail_reads = True
+    _dispatch("ent_new", {"title": "No owner", "tags": []}, _Notifier())
+
+    neotoma.fail_reads = False
+    monkeypatch.setattr(apis, "_created_seen", {})
+    recovered = _Notifier()
+    _dispatch("ent_new", {"title": "No owner", "tags": []}, recovered)
+    assert recovered.sent, "the page was held permanently, not just during the outage"
 
 
 # ── unreadable tasks must not silently vanish ────────────────────────────────

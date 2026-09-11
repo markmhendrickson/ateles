@@ -18,7 +18,15 @@ from .config import AtelesConfig, load
 # Context-entity schemas a fresh operator needs registered + seeded. The swarm
 # resolves operator/locale/channel/roster specifics from these at runtime, which
 # is why an empty Neotoma is dead on arrival (see docs/installability.md).
-CONTEXT_SCHEMAS = ("operator_profile", "locale_profile", "channel_config", "swarm_roster")
+CONTEXT_SCHEMAS = (
+    "operator_profile",
+    "locale_profile",
+    "channel_config",
+    "swarm_roster",
+    # Apis unroutable-escalation ledger (ateles#697). Identity is ledger_key —
+    # see execution/daemons/apis/unroutable_store.SCHEMA_DEFINITION.
+    "apis_unroutable_ledger",
+)
 
 
 @dataclass
