@@ -1,0 +1,94 @@
+name: Plan page refresh
+
+# Renders the shared plan rendered_page FROM its plan entity.
+#
+#     plan.next_steps / decisions / goals  →  rendered_page.html_body
+#
+# The plan entity is canonical. No copy of its content lives in this repo, so
+# there is no repo file whose edit should trigger a republish — the PLAN
+# CHANGING is the event, and a plan correction happens in Neotoma, not here.
+#
+# GitHub cannot observe a Neotoma write. The repo's real-trigger mechanism is
+# the daemons' SSE subscription (apis.py SUBSCRIBE_ENTITY_TYPES), which is
+# push-based and fires at the moment of the change. That is the right long-term
+# home for this refresh and is filed as a follow-up task; it needs a `plan`
+# subscription plus a page-refresh handler, which is a daemon change rather
+# than a workflow change.
+#
+# Until then this workflow is the fallback, and it is deliberately shaped to
+# admit that:
+#
+#   schedule           — a sweep, because polling is the only thing CI can do
+#                        about an event it cannot observe. Cheap: one GET of the
+#                        plan and one of the served page when nothing changed.
+#   workflow_dispatch  — republish on demand after a known plan edit, which is
+#                        the fast path a session should use instead of waiting.
+#   pull_request       — --check only, and only when the RENDERER changes, since
+#                        that is the only thing in this repo that can alter the
+#                        output.
+#
+# Why verification is not optional: `publish_rendered_page` on an existing
+# entity returns success with `created: false` and a fresh token while
+# continuing to serve the OLD bytes. Content updates go through /correct
+# instead. Because that difference is invisible in a success code, the script
+# always re-reads the served page and exits non-zero if the content did not
+# change — a refresher that silently no-ops is worse than none, since nobody
+# looks at the page again to notice.
+
+on:
+  schedule:
+    # Hourly. The plan is edited in bursts during working sessions; an hour of
+    # staleness on a shared read-only page is acceptable, a day is not.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "execution/scripts/render_plan_page.py"
+      - "execution/scripts/test_render_plan_page.py"
+      - ".github/workflows/plan-page-refresh.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never let two publishes race onto the same entity.
+  group: plan-page-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: render the plan page and verify it
+    runs-on: ubuntu-latest
+    env:
+      NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}
+      NEOTOMA_BASE_URL: ${{ vars.NEOTOMA_BASE_URL || 'https://neotoma.markmhendrickson.com' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Runs without any Neotoma access, so it is blocking even while the
+      # secret gap below stands — the renderer's grammar and its fail-loud
+      # behaviour are covered here rather than in a job that cannot run.
+      - name: Test the renderer
+        run: python3 execution/scripts/test_render_plan_page.py
+
+      # NOTE: the steps below are non-blocking until NEOTOMA_BEARER_TOKEN is
+      # provisioned as a repo secret — the same pre-existing gap that
+      # agent-config-validation.yml, loxia-pr-review.yml and
+      # lanius-stale-issues.yml already carry. Without the secret they cannot
+      # reach Neotoma at all, so today they do not effectively run in CI.
+      # Flip to blocking (remove `continue-on-error`) once the secret exists
+      # and one green run confirms it.
+      - name: Check the live page matches the plan
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: python3 execution/scripts/render_plan_page.py --check
+
+      - name: Render from the plan and verify it actually changed
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        run: python3 execution/scripts/render_plan_page.py

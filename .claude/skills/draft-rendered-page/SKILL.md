@@ -130,8 +130,6 @@ Meaning: **inline `<script>` blocks DO execute**; only inline event-handler ATTR
 
 So: interactive widgets ARE possible. Use a `<button id="…">` + a separate `<script>` that does `getElementById(...).addEventListener('click', …)`. Never use `onclick=` attributes (those are the thing actually blocked). A real working Copy button (navigator.clipboard.writeText with a select-text fallback for unfocused/denied cases) is the canonical example — match neotoma.io's evaluate-page Copy.
 
-The pure-CSS theme toggle is still FINE (no reason to rewrite it), but it was not strictly necessary on no-JS grounds. When choosing CSS-only vs. JS, decide on robustness/simplicity, not on a false "JS is forbidden" premise. Always verify the actual CSP header on the serve route before assuming a capability is unavailable.
-
 
 
 ## Verify HTML structure + self-consistency (REQUIRED)
@@ -164,11 +162,15 @@ When a human reviews a draft and requests changes, treat each revision as a reus
 The test: the next person who runs this skill cold should benefit from every generalizable revision the last human asked for, without re-discovering it.
 
 
+## A page derived from an entity renders FROM that entity
+
+When a page's content is wholly derived from another entity (a plan, a project, a report), the ENTITY is canonical and the page is a projection of it. Do not keep a hand-maintained copy of that content in a repo file and push it outward — that is a second copy which diverges silently (2026-09-02: a repo-canonical plan page said '22 decisions' while the plan held 26). Generate the HTML from the entity's fields, and make the generator FAIL LOUDLY if the entity's shape stops matching its grammar, rather than emitting a page with content quietly missing. Nobody reloads a page they have already read, so a silent degradation is never noticed. See `execution/scripts/render_plan_page.py`.
+
 ## Guest-link mechanics for multi-page sets (REQUIRED)
 
 Three rules learned building a multi-page client page-set (2026-06), all verified live:
 
-1. **Mint the guest link automatically on page creation, and re-show it on every update.** Use `publish_rendered_page` (one call: creates-or-publishes + mints a submitter-scoped token + returns the absolute `/entities/<id>/html?access_token=<token>` URL, 30-day TTL). Do not treat minting as a separate operator ask -- a preview's whole value is being shareable. Editing the body via `correct` does NOT change or invalidate the token (it is page-scoped), so reuse the existing token and re-surface the link in the reply after any edit.
+1. **Mint the guest link automatically on page creation, and re-show it on every update.** Use `publish_rendered_page` (one call: creates-or-publishes + mints a submitter-scoped token + returns the absolute `/entities/<id>/html?access_token=<token>` URL, 30-day TTL). **`publish_rendered_page` CREATES and MINTS; it does NOT update the content of an existing page.** Called with an existing `entity_id` and a new `html_body` it returns success with `created: false` and a FRESH token while the page keeps serving the OLD bytes (verified live 2026-09-02). Content updates go through `correct`. Because the difference is invisible in a success payload, verify any content update by re-fetching `/entities/<id>/html` and asserting the new content is actually served — a byte-count alone is a weak signal, since an equal-length edit leaves it unchanged. Do not treat minting as a separate operator ask -- a preview's whole value is being shareable. Editing the body via `correct` does NOT change or invalidate the token (it is page-scoped), so reuse the existing token and re-surface the link in the reply after any edit.
 
 2. **Cross-links between guest pages MUST carry the TARGET page's own token -- always.** A guest token is NOT a session: opening page A under `?access_token=X` does not authorize a click to page B. A bare `/entities/<B>/html` link on a guest page -> access prompt / 401 for the recipient. In a hub + sub-page set, every inter-page `href` (hub tiles, "volver al inicio" footers, any cross-reference) must be `/entities/<targetId>/html?access_token=<targetToken>` -- each link uses the token of the page it points AT, not the page it sits on. Build a `{entityId: token}` map up front and stamp every href from it. **Mandatory before sharing:** fetch each live page and assert zero `href=".../entities/.../html"` without `access_token`.
 
@@ -182,9 +184,63 @@ Never emit unquoted numeric SVG attributes like `<circle cx=12 cy=12 r=9/>` or `
 
 When collapsing card grids on mobile, do not force every grid to one column. Stack to a single column only the cards whose content needs the horizontal room (full-sentence step cards); let short-label card grids (icon + 1-3 word name) keep their natural 2-up auto-fit wrap, and size content-driven pills/tags to their content (never `flex-basis:100%`, which stretches a `~15 min` tag to a full-width bar). Verify the actual rendered width equals the viewport (no horizontal overflow) at ~375-390px.
 
+## Deep-linkable headings — every heading gets a stable id + anchor (REQUIRED)
+
+Every heading (h1–h6) on a rendered page MUST be deep-linkable: a stable `id` (a slug of its text) plus a hover-revealed `#` permalink. Long pages (hubs, multi-section briefs, recaps) are unusable for reference without it — you cannot point someone at "the determinism section" by URL. This is Ateles taste, enforced reactively by the `RENDERED_PAGE_NO_HEADING_ANCHORS` rule on the conformance_policy (`ent_edd087ca6482f7d93162f9a2`) and satisfied proactively here.
+
+Pick one:
+- **Static (short/stable pages):** author each heading with an explicit id and a trailing anchor, e.g. `<h2 id="the-experiment">The Experiment <a class="hanchor" href="#the-experiment">#</a></h2>`.
+- **Inline script (long/iterated pages):** a small inline `<script>` that walks every `<main> h1..h6`, slugifies textContent into an id when none is set, de-dupes collisions, and appends a hover `#` permalink with class `hanchor`. Inline `<script>` executes on rendered pages (only `onclick=` attrs are blocked — see the JS-allowed correction above), so this is safe.
+
+CSS (theme-aware, both modes):
+```
+h1,h2,h3,h4,h5,h6{ scroll-margin-top:1.5rem; }
+a.hanchor{ margin-left:.4em; font-weight:400; font-size:.85em; text-decoration:none; opacity:0; transition:opacity .12s ease; color:var(--muted); }
+h1:hover>a.hanchor,h2:hover>a.hanchor,h3:hover>a.hanchor,h4:hover>a.hanchor,h5:hover>a.hanchor,h6:hover>a.hanchor{ opacity:.5; }
+a.hanchor:hover{ opacity:1; }
+```
+
+Slug: lowercase, collapse non-alphanumerics to single hyphens, strip leading/trailing hyphens; on collision append `-2`, `-3`, …. Never overwrite an author-set id.
+Verify after store: every `<main>` heading carries an `id`, the page contains the `.hanchor` affordance, and `publish_rendered_page` returns no `RENDERED_PAGE_NO_HEADING_ANCHORS` warning.
+
+## Cross-page navigation and references (REQUIRED for hub / multi-page sets)
+
+Four rules for any set of pages that hang off a hub or shared index:
+
+1. **Common nav back to the hub.** Every page that belongs to a hub MUST carry the same top navigation linking back to the hub, and to any shared index, using each target's own guest token. It is one consistent element across the whole set (for example a `<nav class="topnav">…</nav>` as the first in-flow element of `html_body`), styled from theme variables rather than inline colors, so the reader is never more than one click from the hub. The footer may repeat the links, but the top nav is the required one. Add a matching `.topnav` rule to every page's `custom_css` so the nav looks the same across the set.
+2. **Link every cross-reference inline.** Whenever the prose names another page, situation, brief, or section, make that name a link to it carrying the target's token, never bare text. "Situation 7" inside a sentence is a link, not a label. (This is the guest-token rule applied to body prose, not just hub tiles and footers.)
+3. **Cross-references are full sentences, never label fragments.** Do not write "vs Situation 7: same skeleton, different buyer." Write "Situation 6 shares its skeleton with Situation 7, but the buyer is different: …". This is the brand_voice no-sentence-fragments rule, and it applies to ALL prose on the page (ledes, subtitles, meta lines, callouts, and table cells), not only body paragraphs. Headings, chips, and footer metadata may remain terse labels. Related: do not open a section with a flat, reassuring throat-clearing sentence ("The system works.", "A team has a working AI capability.") that warms up before it warns — cut it and lead with the tension or the substance.
+4. **No bold in copy.** Do not use `<strong>` or `<b>` anywhere in the body, not in running prose and not as a bullet's leading label (no bolded "Map first." or "Who it is for:"). Emphasis comes from sentence structure, and from a CSS class only where a genuine UI chrome label needs weight (chips, table headers, nav), never from bolded words in the copy itself. A bolded "Label:" lead-in is the same anti-pattern as the fragment rule above: cut the bold and write the full sentence. Enforced by the `RENDERED_PAGE_BOLD_TAG` conformance rule.
+
+## Copy voice: no bold, no flat openers, full sentences (REQUIRED)
+
+Three voice rules for the prose you put ON a rendered page (ledes, pull-quotes, section openers, body paragraphs, callouts, table cells). They recur with human reviewers, so apply them by construction:
+
+1. **No bold in the page copy.** Never emit `<strong>` or `<b>` in a rendered page, not in prose and not as a bullet label. Emphasis comes from sentence structure and from CSS on structural elements (headings, chips, labels), never from bolded words in running copy. This is enforced reactively by the `RENDERED_PAGE_BOLD_TAG` rule on the conformance_policy (`ent_edd087ca6482f7d93162f9a2`).
+2. **No flat throat-clearing openers.** Never open a lede, a pull-quote, or a section with a short, low-information declarative the reader must get past before the point (for example "The system works.", "The product works.", "The direction is decided.", "Every engineer is faster."). Fold it into the next sentence, or lead with the tension. For example, "The product works. It cannot yet meet enterprise expectations." becomes "The blocker is not the product, which works, but the enterprise expectations it cannot yet meet." The one exception is a product's signature hero tagline: a deliberate two-beat homepage-style hook may stand.
+3. **Full sentences, not fragments.** No sentence fragments, no "Label:" lead-ins, and no "vs X:" constructions in running prose. Headings, chips, status labels, table-header cells, and footer metadata may stay terse labels; prose may not.
+
+## Equal visual weight for paired / parallel content (REQUIRED)
+
+When two or more items on a page are PEERS — the two speakers in a transcript, the two sides of a comparison, sibling task lists ("On me" / "On you"), parallel bullets — give their body text the SAME weight and color. Differentiate them by a LABEL (a colored speaker tag, a badge, a heading), never by making one side muted and the other full-strength. A muted body color reads as "secondary / less important", which is wrong for genuine peers and quietly demotes one party.
+
+The concrete bug this came from: a two-party call transcript rendered one speaker's turns in `--foreground` (near-black) and the other's in `--muted-foreground` (grey). Both passed WCAG AA, but the grey speaker read as an afterthought in light mode and receded badly in dark mode. Fix: both speakers' text at `--foreground`; the amber-vs-dark speaker LABEL is the only differentiator. Same rule for "On me" vs "On you" task lists — do not mute "On you" just because it is the other party's items; mute only the genuinely secondary layer (a description under a heading, a caption under a stat). This is easy to miss: a `.tasks--theirs` (or equivalent "other party") CSS class often carries a leftover `color: var(--muted-foreground)` — grep every list-item color rule and confirm each PEER list is `--foreground`, not just the first one you fixed.
+
+Reserve `--muted-foreground` for true hierarchy: supporting/description text under a foreground lead, metadata, captions, ledes that set up a section. Not for one half of a peer pair.
+
+## Absolutely-positioned bullets must account for the row's own padding (REQUIRED)
+
+A custom list bullet drawn with `li::before{position:absolute; top:…}` is positioned relative to the `li`'s padding box, so its `top` MUST include the `li`'s own `padding-top`, or the bullet floats above the first text line. The trap: copying a bullet rule from a list with `padding:0` into a list with `padding:0.55rem 0` leaves the bullet ~6px too high (the exact amount of the padding-top). Compute it: `top = padding-top + line-height/2 - bullet-height/2` so the bullet's center lands on the first line's optical center. Verify with `getComputedStyle(li,'::before').top` — the bullet center (`top + height/2`) should equal `paddingTop + lineHeight/2` within ~1px. This bit the .tasks--theirs list (top set as if padding were 0). Better still, avoid absolute positioning for simple bullets: a flex row (`display:flex; align-items:baseline` with the dot as a first child or a `::marker`) self-aligns without magic numbers.
+
+## Fixed-width label columns so content aligns (REQUIRED)
+
+When a list pairs a short leading label with a description on each row — status pills ("THIS WEEK" / "ONGOING" / "WHEN YOU SEND IT" / "LATER"), a date column, a speaker tag, a step number — give the label column a FIXED width so every description starts at the same x. Content-width labels produce a ragged left edge on the descriptions (each row's text begins at a different position), which reads as sloppy even when every other detail is polished.
+
+Set the label to a fixed `width` sized to the LONGEST label PLUS horizontal padding headroom (not an exact fit — an exact-width box makes the longest label's text touch the border), not `min-width` (which lets shorter ones shrink and re-ragged), and left-align the descriptions to that grid. Verify `scrollWidth <= clientWidth` on the longest label so nothing overflows. On mobile (≤420px) where a fixed column would crowd the text, stack the label above the description instead (`flex-direction:column`) and drop the fixed width. This is the same discipline as the transcript speaker column (a fixed `64px` / `52px` / `46px` grid track at each breakpoint) applied to any label-plus-content row.
+
 ## Canonical machine-readable policy — one definition, two consumers (REQUIRED)
 
-The theming, toggle, host-override, and tokenized-link rules above are ALSO expressed as machine-readable DATA on a `conformance_policy` entity (`ent_edd087ca6482f7d93162f9a2`, "Ateles rendered_page house style"). That entity is the single source of truth driving BOTH the proactive path (this skill, at authoring time) and the reactive path (Neotoma `publish_rendered_page`, at share time) — so the two cannot drift. Discipline:
+The theming, toggle, heading-anchor, no-bold, host-override, and tokenized-link rules above are ALSO expressed as machine-readable DATA on a `conformance_policy` entity (`ent_edd087ca6482f7d93162f9a2`, "Ateles rendered_page house style"). That entity is the single source of truth driving BOTH the proactive path (this skill, at authoring time) and the reactive path (Neotoma `publish_rendered_page`, at share time) — so the two cannot drift. Discipline:
 
 - **Read the policy at the start of a rendered_page task** (retrieve `ent_edd087ca6482f7d93162f9a2`) and satisfy every rule by construction; the prose here is the human-readable companion, the entity is canonical.
 - **On every `publish_rendered_page` call, inspect the returned `conformance_warnings`.** Each carries a stable `code` + `severity`. Treat a non-empty list as MUST-FIX before surfacing the page; re-author and re-publish until it is empty. The universal `RENDERED_PAGE_TOKENLESS_LINK` invariant is enforced for every tenant in core regardless of policy.
