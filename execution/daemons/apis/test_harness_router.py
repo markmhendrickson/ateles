@@ -123,3 +123,33 @@ def test_malformed_headroom_file_falls_back_to_env(monkeypatch, tmp_path) -> Non
         '{"claude": 0.1, "codex": 0.9, "cursor": 0.4}',
     )
     assert harness_router.provider_candidates(_available(), now=100.0)[0] == "codex"
+
+
+def test_routing_state_reports_every_provider_with_its_headroom(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "APIS_HARNESS_HEADROOM",
+        '{"claude": 0.15, "codex": 0.9, "cursor": 0.4}',
+    )
+    described = harness_router.describe_routing_state(now=100.0)
+    assert "claude=0.15" in described
+    assert "codex=0.9" in described
+    assert "cursor=0.4" in described
+
+
+def test_routing_state_names_a_cooling_provider(monkeypatch) -> None:
+    monkeypatch.setenv("APIS_HARNESS_COOLDOWN_SECONDS", "30")
+    harness_router.cool_down("claude", now=100.0)
+    assert "cooling: claude" in harness_router.describe_routing_state(now=110.0)
+
+
+def test_routing_state_renders_no_cooldown_explicitly() -> None:
+    assert "cooling: none" in harness_router.describe_routing_state(now=100.0)
+
+
+def test_routing_state_reflects_operator_provider_order(monkeypatch) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,claude")
+    assert "providers: cursor,claude" in harness_router.describe_routing_state(
+        now=100.0
+    )
