@@ -518,8 +518,10 @@ above govern a credential the swarm already holds: how it is kept out of a resid
 returned as a value rather than written into an environment, how it is resolved once per invocation, and
 which grant it matches. None of them says where it came from.
 
-That silence is total rather than partial. A secret source is named four times across the whole directory,
-and three of those are this section's own use of *materialize*. The design has no term for the store, no
+That silence is total rather than partial. The verb *materialize* appears six times across the whole
+directory — four here, of which two are the custody rule's own statement that a long-lived credential is
+never materialized into a resident process and a revocable one may be, and two this section's; plus one
+each in `conformance.md` and `conformance_suite.md`. Not one of the six names a source. The design has no term for the store, no
 statement of who may write one, no rule for how a credential reaches the process that holds it, and no
 posture for the interval when the source is unreachable.
 
