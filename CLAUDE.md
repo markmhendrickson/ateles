@@ -84,6 +84,20 @@ Two deliberate non-verdicts: a **failed fetch** reports `unknown`, not drift (of
 
 Motivated by three occurrences on the same checkout: ateles#339 and #361 (both recovered by hand; the PR titles read "stranded in the deploy checkout"), then 2026-08-09, when `~/ateles-rc-src` sat on a 2026-07-28 local merge commit — 3 ahead, 14 behind — so ateles#401 merged to main and never reached the running daemon while `git pull --ff-only` refused without changing HEAD.
 
+## Deployment-plist config drift (daemons)
+
+`lib/daemon_runtime/plist_drift.py` reports, at daemon startup, whether the **live launchd environment** matches the **reviewed plist** in the repo (`execution/daemons/<name>/com.ateles.<name>.plist`). Config that lives only in a deployment artifact drifts invisibly: on 2026-08-25 `ATELES_SWARM_AUTO_BUILD` was absent from the repo plist while Apis ran with `=0`, so the swarm stopped before every build for four days after the bug justifying that rollback (ateles#460) was fixed, and no reviewed file recorded the decision.
+
+**Advisory by default**: logs at ERROR and continues. A dispatch daemon that refuses to boot over a config difference would cause a larger outage than the drift it reports.
+
+| Env var | Effect |
+|---|---|
+| `ATELES_ENFORCE_PLIST_CONFIG=1` | Make drift **fatal** — the daemon raises `PlistConfigDriftError` instead of warning |
+
+Two deliberate non-verdicts: a **missing or unparseable live plist** reports `unknown`, not drift (hand-launched daemons and CI have nothing to compare against), and **`HOME`/`PATH`** are ignored as legitimately machine-specific. See `docs/runbooks/apis_autonomy_flags.md` for the autonomy-flag table and rollback rules.
+
+Motivated by ateles#506: the reviewed Apis plist declared 9 of 14 live environment keys, pointed paths at the shared session clone instead of the deployment checkout, and omitted autonomy flags whose values matched code defaults — indistinguishable from unmade decisions.
+
 ### Which checkout a daemon runs from
 
 Daemons run **dedicated checkouts**, never the shared main clone where interactive sessions work:
