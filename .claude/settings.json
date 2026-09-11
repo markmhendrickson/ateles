@@ -74,9 +74,16 @@
           {
             "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop_finalizer.py\""
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/decision_shape_gate.py\""
           }
         ]
       }
     ]
+  },
+  "env": {
+    "ATELES_DECISION_SHAPE_ENFORCE": "1"
   }
 }
