@@ -98,6 +98,18 @@ jobs:
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           python3 "$f"
 
+      # Decision 78 ruling: binds the register row's status cell to the ruling
+      # section's own opening line in adapters.md, so a prose edit that updates
+      # one but not the other is caught (ateles#929 — this check was previously
+      # wired only into scripts/lint.sh, a script a person runs, and never ran
+      # on this merge-gating path).
+      - name: Decision 78 ruling — register and adapters section agree
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_decision_78.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
       # Vocabulary: any Never item from vocabulary.md in foundation prose.
       # Not-for items print as advisory and never fail — that is the script's
       # own contract, not a softening applied here.

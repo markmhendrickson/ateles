@@ -54,52 +54,52 @@ echo "📝 Running custom linters..."
 # Parquet access linter
 echo "  - Checking parquet access patterns..."
 find . -name "*.py" -not -path "./.venv/*" -not -path "./venv*/*" -not -path "./mcp-servers/parquet/*" -not -path "./execution/scripts/*_import.py" | \
-    xargs python scripts/linters/ast_parquet_linter.py || ERRORS=$((ERRORS + 1))
+    xargs python3 scripts/linters/ast_parquet_linter.py || ERRORS=$((ERRORS + 1))
 
 # File naming
 echo "  - Checking file naming conventions..."
 find . -type f \( -name "*.py" -o -name "*.sh" -o -name "*.md" \) -not -path "./.venv/*" -not -path "./venv*/*" | \
-    xargs python scripts/linters/check_file_naming.py || ERRORS=$((ERRORS + 1))
+    xargs python3 scripts/linters/check_file_naming.py || ERRORS=$((ERRORS + 1))
 
 # Documentation
 echo "  - Checking documentation structure..."
 find . -name "*.md" -path "./docs/*" -o -name "*.md" -path "./strategy/*" | \
-    xargs python scripts/linters/check_documentation.py || ERRORS=$((ERRORS + 1))
+    xargs python3 scripts/linters/check_documentation.py || ERRORS=$((ERRORS + 1))
 
 # Workflow compliance
 echo "  - Checking workflow file compliance..."
 find ./strategy/operations -name "*.md" | \
-    xargs python scripts/linters/check_workflow_compliance.py || ERRORS=$((ERRORS + 1))
+    xargs python3 scripts/linters/check_workflow_compliance.py || ERRORS=$((ERRORS + 1))
 
 # Config sourcing (operator-specific config must be env/Neotoma-sourced)
 echo "  - Checking config sourcing (no hardcoded operator config)..."
-python scripts/linters/check_hardcoded_config.py || ERRORS=$((ERRORS + 1))
+python3 scripts/linters/check_hardcoded_config.py || ERRORS=$((ERRORS + 1))
 
 # Neotoma REST paths (ateles#606 — MCP tool names like `retrieve_entities` are
 # not routes; they 404, and the 404 is usually swallowed into an empty result
 # so the caller reports success while reading nothing).
 echo "  - Checking Neotoma REST paths (no MCP tool names used as routes)..."
-python scripts/linters/check_neotoma_rest_paths.py || ERRORS=$((ERRORS + 1))
+python3 scripts/linters/check_neotoma_rest_paths.py || ERRORS=$((ERRORS + 1))
 
 # Agent roster (no retired agent names in prompts, mirrors, or routing code)
 echo "  - Checking agent roster (no retired agent names)..."
-python scripts/linters/check_agent_roster.py || ERRORS=$((ERRORS + 1))
+python3 scripts/linters/check_agent_roster.py || ERRORS=$((ERRORS + 1))
 
 # Foundation documents (docs/foundation/). Registered in
 # conformance.md#mechanical-checks-on-this-directory. All stdlib-only, no Neotoma needed.
 echo "  - Checking foundation anchors (every intra-foundation link resolves)..."
-python execution/scripts/check_foundation_anchors.py || ERRORS=$((ERRORS + 1))
+python3 execution/scripts/check_foundation_anchors.py || ERRORS=$((ERRORS + 1))
 
 echo "  - Checking foundation decision 78 is ruled in the corpus..."
-python execution/scripts/check_foundation_decision_78.py || ERRORS=$((ERRORS + 1))
+python3 execution/scripts/check_foundation_decision_78.py || ERRORS=$((ERRORS + 1))
 echo "  - Checking decision 101 ruling is bound to the corpus..."
 python3 execution/scripts/check_foundation_decision_101.py || ERRORS=$((ERRORS + 1))
 
 echo "  - Checking foundation vocabulary (no Never word in the prose)..."
-python execution/scripts/check_foundation_vocabulary.py || ERRORS=$((ERRORS + 1))
+python3 execution/scripts/check_foundation_vocabulary.py || ERRORS=$((ERRORS + 1))
 
 echo "  - Checking vocabulary term links (first mentions link their definition)..."
-python execution/scripts/link_vocabulary_terms.py --check || ERRORS=$((ERRORS + 1))
+python3 execution/scripts/link_vocabulary_terms.py --check || ERRORS=$((ERRORS + 1))
 
 # Decision 74: a document's amendment history lives in revisions.md, and a section
 # stating three or more rules opens with the list of them. Both were fixed once by
@@ -107,14 +107,14 @@ python execution/scripts/link_vocabulary_terms.py --check || ERRORS=$((ERRORS + 
 # one clause per pass, and a section grows one rule at a time. This is what stops
 # the pattern re-accreting.
 echo "  - Checking foundation front matter (no revision chain; rule sections indexed)..."
-python execution/scripts/check_foundation_front_matter.py || ERRORS=$((ERRORS + 1))
+python3 execution/scripts/check_foundation_front_matter.py || ERRORS=$((ERRORS + 1))
 
 # Reading projection (decision 66): docs/foundation/projection/ is generated from
 # conformance_suite.md's matrix and is what a review prompt inlines. A rule edited in its
 # canonical document without regenerating is caught here and in CI, in the same run that
 # catches a broken anchor. Regenerate with the same script and no flag.
 echo "  - Checking reading projection is in sync with the conformance matrix..."
-python execution/scripts/render_reading_projection.py --check || ERRORS=$((ERRORS + 1))
+python3 execution/scripts/render_reading_projection.py --check || ERRORS=$((ERRORS + 1))
 
 # Decision state: docs/foundation/decision_state.md projects the register onto
 # ruled / merged / implemented, which the register's single status field cannot
@@ -128,7 +128,7 @@ python execution/scripts/render_reading_projection.py --check || ERRORS=$((ERROR
 # to ignore this row.
 if git rev-parse --verify --quiet origin/main >/dev/null; then
   echo "  - Checking decision state is in sync with the register..."
-  python execution/scripts/render_decision_state.py --check || ERRORS=$((ERRORS + 1))
+  python3 execution/scripts/render_decision_state.py --check || ERRORS=$((ERRORS + 1))
 else
   echo "  - Skipping decision state (no origin/main to read the register from)"
 fi
@@ -139,7 +139,7 @@ fi
 # so this stays runnable on a machine without Neotoma access.
 if [ -n "$NEOTOMA_BASE_URL" ]; then
     echo "  - Checking agent_definition tool_allowlist grant grammar..."
-    python scripts/linters/validate_tool_allowlist.py || ERRORS=$((ERRORS + 1))
+    python3 scripts/linters/validate_tool_allowlist.py || ERRORS=$((ERRORS + 1))
 
     # Generated agent-doc mirrors must be fresh (docs/agents/*.md,
     # .claude/skills/*/SKILL.md are rendered FROM Neotoma agent_definition
@@ -147,7 +147,7 @@ if [ -n "$NEOTOMA_BASE_URL" ]; then
     # drift unrelated to any one PR currently fails this check repo-wide (see
     # .github/workflows/agent-config-validation.yml for the tracking note).
     echo "  - Checking agent-doc mirrors are in sync with Neotoma (informational)..."
-    python execution/scripts/render_agent_docs.py --check || true
+    python3 execution/scripts/render_agent_docs.py --check || true
 else
     echo "  - Skipping tool_allowlist + agent-doc-mirror checks (NEOTOMA_BASE_URL unset)"
 fi
