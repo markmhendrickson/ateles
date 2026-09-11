@@ -68,7 +68,10 @@ documents it amends (`authority_model.md`, `conformance.md`, and `data_model.md`
 written against 110, which the decision-93 ruling took on `authority_model.md` when ateles#899
 merged; a number is never reused, so the rows renumber rather than the landed ruling moving. The
 same sweep gives the decision-105 opening 112 and the decision-106 opening 113.
-A sweep over `origin/main`, every origin branch, and every `refs/pull/*/head` ref on 2026-09-11 — 706 refs — gives 115, so the decision-106 revision entry, rebased onto main after being written against 113 (a number the decision-105 opening and the decision-101 ruling had since taken in the same range), renumbers to 116; the ruling it records does not change.
+A sweep over `origin/main`, every origin branch, and every `refs/pull/*/head` ref on 2026-09-11 —
+706 refs — gives 115, so the decision-106 revision entry, rebased onto main after being written
+against 113 (a number the decision-105 opening and the decision-101 ruling had since taken in the
+same range), renumbers to 116; the ruling it records does not change.
 
 ## `authority_model.md`
 

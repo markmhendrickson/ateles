@@ -5,7 +5,7 @@
 
 Every rule `github.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`github.md`](../github.md) and are not repeated here (decision 66).
 
-18 rules.
+19 rules.
 
 ## [Reviews, review comments, and threads](../github.md#reviews-review-comments-and-threads)
 
@@ -53,6 +53,10 @@ Every rule `github.md` owns, one entry each: the rule's own statement from `conf
 ## [The property that makes this a control and not a list](../github.md#the-property-that-makes-this-a-control-and-not-a-list)
 
 - **GH-16** — [`github.md#what-the-outcomes-are-and-the-rule-against-a-fifth`](../github.md#what-the-outcomes-are-and-the-rule-against-a-fifth): an event outside the tables is `dropped` with reason `unmapped` and counted; no fifth outcome; an event that invalidates a decision is an observation, and the pinned verdict reads stale *[M (AD-21 and GH-7 at this host; kept because the document states it as its own control)]*
+
+## [Releases and tags](../github.md#releases-and-tags)
+
+- **GH-17** — `release.published` confirms the `release`-class action and `verify_deployed` still reads the deployed checkout; `release.deleted` and `release.unpublished` are observations and never a recovery having happened; a tag deletion is half a `retag_release` confirmation *[M]*
 
 ## [Everything else the host can deliver](../github.md#everything-else-the-host-can-deliver)
 
