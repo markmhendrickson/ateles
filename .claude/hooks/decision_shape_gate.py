@@ -53,6 +53,21 @@ findings; the real failing list produced all three. Re-run those before widening
 any pattern here.
 
 Fail-open (stdlib only; any error exits 0), matching every hook here.
+
+OBSERVABILITY: a `harness_event` is emitted per finding, in BOTH modes, via the
+same `emit_harness_event_raw` POST helper the sibling `stop_finalizer.py` hook
+uses (in `_session_integrity.py`, imported here rather than re-implemented) —
+so both hooks in the same `Stop` array share one HTTP/timeout/error-handling
+path instead of two copies that could drift. Without an emission here, flipping
+ATELES_DECISION_SHAPE_ENFORCE back to WARN (or unsetting it) makes every
+violation this hook finds vanish with no trace: no counter, nothing for a later
+audit to check. That is invariant 1 (a mechanism that does not bind is not a
+control) one layer down, in the mechanism meant to enforce it — found by
+Waxwing on PR 951. This hook's event uses its own vocabulary (`enforced` +
+`findings`), not the session-integrity `integral|violated|exempt` enum — the
+two checks report genuinely different things and forcing one shape on both
+would misrepresent whichever didn't fit. Best-effort and fail-open: no bearer
+token or a network error is logged and swallowed, never blocks the hook.
 """
 from __future__ import annotations
 
@@ -63,6 +78,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _session_integrity import emit_harness_event_raw  # noqa: E402
 
 ENFORCE = os.environ.get("ATELES_DECISION_SHAPE_ENFORCE", "") in ("1", "true", "yes")
 
@@ -149,12 +165,7 @@ def findings(text: str) -> list[str]:
         # Bound the END at a sentence terminator too, not only a newline.
         # Honouring ". " for the start but only "\n" for the end left the very
         # false negative this scoping was added to close: a consent keyword in a
-        # LATER sentence on the same line still suppressed a real finding.
-        # Found by Loxia on PR 951 and reproduced before fixing.
-        # Bound the END at a sentence terminator, not only a newline. Honouring
-        # ". " for the start but only "\n" for the end left the very false
-        # negative this scoping was added to close: a consent keyword in a LATER
-        # sentence on the same line still suppressed a real finding. Note the
+        # LATER sentence on the same line still suppressed a real finding. The
         # terminator that matters most here is "?" — a permission question ends
         # in one by construction, so a fix that only handled "." missed it.
         # Found by Loxia on PR 951, reproduced, and fixed against the repro.
@@ -202,6 +213,21 @@ def findings(text: str) -> list[str]:
     return out
 
 
+def emit_finding_event(session_id: str, found: list[str], enforced: bool) -> None:
+    """Record this Stop-hook's finding via the shared harness_event POST
+    helper, so a violation leaves a durable trace regardless of WARN/BLOCK
+    mode. Own vocabulary (`enforced` + `findings`), not the session-integrity
+    `integral|violated|exempt` enum — see the OBSERVABILITY docstring note.
+    """
+    emit_harness_event_raw(f"decision-shape-{session_id}", {
+        "event_type": "decision_shape_check",
+        "session_id": session_id,
+        "enforced": enforced,
+        "findings_count": len(found),
+        "findings": found,
+    }, log_tag="decision-shape")
+
+
 def main() -> int:
     try:
         raw = sys.stdin.read()
@@ -223,6 +249,15 @@ def main() -> int:
         return 0
 
     detail = "Standing-rule check on this turn's closing section:\n- " + "\n- ".join(found)
+
+    # Emit a durable record in BOTH modes — see OBSERVABILITY note above. A
+    # finding that only reaches stderr (WARN) or the model's return channel
+    # (BLOCK) vanishes once ATELES_DECISION_SHAPE_ENFORCE changes or the
+    # session ends; the harness_event is what a later audit can check against.
+    try:
+        emit_finding_event(ev.get("session_id", ""), found, ENFORCE)
+    except Exception:
+        pass
 
     if not ENFORCE:
         sys.stderr.write(f"[decision-shape] WARN: {detail}\n")
