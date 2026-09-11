@@ -161,3 +161,34 @@ No 1Password in CI at all.
 - Forkability: a forker generates their own age key, stores it in their own
   vault, supplies their own `manifest.env-map.json`, and never touches your
   secrets.
+
+## Host-only keys (dual-writer contract)
+
+Some deployed configuration exists **only** in a running host's environment —
+never in 1Password, so it has no manifest entry. `secrets_extract_host.py`
+captures those into the same `secrets/<block>.sops.enc` snapshot that
+`secrets_publish.py` writes, "sight unseen" (the value never touches an
+agent's context, log, or stdout — see the script's own docstring for the
+security properties).
+
+This makes each snapshot a **dual writer**: `secrets_publish.py` owns the
+keys resolved from the manifest's `refs` (1Password-backed); a host
+extraction run owns whatever keys it was pointed at (host-only, no 1Password
+reference). Both write into the same file.
+
+**The contract that keeps them from clobbering each other:** a publish run
+only ever touches the keys it resolved from `refs` for that file block. Any
+other key already in the snapshot — including host-only keys — is decrypted,
+preserved untouched, and re-encrypted alongside the freshly-resolved ones
+(`secrets_lib.merge_preserve_unmanaged`). A publish never does a blind
+replace-encrypt from `refs` alone; if the existing snapshot can't be
+decrypted first, publish refuses rather than risk silently dropping keys it
+doesn't manage.
+
+Symmetrically, `secrets_extract_host.py --keys-from <file>` only ever writes
+the key names in that file: existing keys (manifest-managed or host-only) are
+preserved unless `--overwrite` is passed for that specific run.
+
+Net effect: republishing after a 1Password rotation does not wipe host-only
+keys, and re-running a host extraction does not wipe 1Password-managed keys.
+Regression coverage: `execution/scripts/test_secrets_extract_host.py`.
