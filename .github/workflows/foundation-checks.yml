@@ -177,6 +177,17 @@ jobs:
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           python3 "$f"
 
+      # Decision 101: when register row 101 is ruled, data_model.md#relationships
+      # must carry the writable principal_binding credential shape (kind/value/
+      # issuer/expiry + one-edge-per-credential resolution). Prevents ruled-without-
+      # registration drift (ateles#916 panel finding).
+      - name: Decision 101 — ruled principal_binding shape in data_model
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_decision_101.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
   foundation-tests:
     name: foundation binding tests
     runs-on: ubuntu-latest

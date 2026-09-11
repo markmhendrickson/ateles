@@ -103,7 +103,9 @@ entity in the record, so an ownership or delegation edge has somewhere to point 
 model, not Zanzibar as a system). A credential (the store's `user_id`, an AAuth `sub`, a GitHub login, an
 email address, a chat id) is a binding to a principal, many-to-one, never the principal itself; a login
 string, an address, or a magic value compared as `"operator"` is a credential standing in for a principal.
-An agent carries a `principal_binding`: the principal it acts as; it is recorded as itself for attribution.
+An agent carries a `principal_binding`: the principal it acts as; it is recorded as itself for attribution. That binding is **one instance of the credential-binding edge type and not a second type** — but it is a distinct *edge* from the one that binds the agent's own AAuth credential, and an agent acting in a human's interest holds both. They are told apart by `credential_kind`. The agent's AAuth edge carries `credential_kind: aauth_sub` with the agent's `sub` and `iss` and ends at the **agent**, because that is the principal the credential identifies; the acts-as edge ends at the **operator**, the principal whose interest is acted in.
+
+**Attribution is what forces two edges rather than one.** A write by the agent is recorded as itself, A-for-B — so the credential it presents must resolve to the agent, or the write would attribute to the operator and A-for-B would be unrecordable. Decision 48's counting rule needs the opposite endpoint: it makes two agents under one operator **one interest**, which holds only if the edge it reads names the operator. One edge cannot end at both. The counting rule therefore reads the acts-as edge, and credential resolution reads the AAuth edge; each is unambiguous because `credential_kind` selects which.
 
 **The human principal is an `operator` entity (C9, settled).** The type whose only job is to be a
 principal is the human principal: an `operator` entity, carrying identity and nothing descriptive, and
@@ -123,7 +125,8 @@ instance — so on such an instance `user_id` identifies the instance's account 
 write whose only identity is that value **resolves to no principal and is recorded as unattributed**,
 which is a state a reader can see rather than a silent default to the operator. The AAuth `sub` is an
 agent's credential: it binds to the `agent` that presented it, and reaches the human principal only
-through that agent's `principal_binding` — which is what joins the two credential systems, and what was
+through that agent's separate acts-as `principal_binding` — a second edge of the same type, ending at
+the `operator`. That pair is what joins the two credential systems, and what was
 missing while no type sat above them.
 
 **What stays open, and it is not this document's to close.** The shape of the identifier on the `operator`
@@ -558,7 +561,105 @@ value it held.
 
 ### What the credential binding carries, and what a check reads to resolve a credential to a principal
 
-**Open.** Registered in `conformance.md#the-register-of-open-design-decisions`. `#principals` states that a
+**Ruled** (decision 101, 2026-09-10): **`principal_binding` carries `credential_kind`, `credential_value`,
+`credential_issuer`, and `expires_at`, and a principal holding several credentials holds several edges.**
+One edge per credential, properties on the edge, and no separate credential entity. Field vocabulary:
+
+| Field | Holds | AAuth map | Host / operator map |
+|---|---|---|---|
+| `credential_kind` | credential family / system class | e.g. `aauth_sub` | e.g. `github_login`, `store_user_id`, `email_address`, `chat_id` |
+| `credential_value` | the presented subject value | `sub` | the login, user id, address, or chat id |
+| `credential_issuer` | the issuer or namespace that makes the value unique | `iss` | the external system or host namespace; absent only when the kind's namespace is already unique without one |
+| `expires_at` | optional expiry bound read at check time | as the issuer states | as the issuer states |
+
+**What the acts-as edge carries is open (decision 107).** The table above maps the AAuth and the host /
+operator credential. It does not map the **acts-as** edge, and no kind is named for it anywhere: the two
+edges are told apart by `credential_kind`, and only one of the two kinds has a value. Two readings of that
+edge sit unreconciled in this document — the resolver sentence below treats it as matched from a
+presentation ("the acts-as kind yields the operator"), while `data_model.md#relationships` lists the
+agent's acts-as principal as a read *from* the edge, which is a traversal from the agent and no
+presentation at all. The difference is not cosmetic: `Deny (malformed presentation)` below fires on a
+missing `credential_value`, so under the first reading an acts-as edge needs a value and under the second
+it must not be judged by that rule at all. Registered as decision 107 rather than settled here; stage 1
+registers the type and not the kind vocabulary, so the question survives registration.
+
+**Endpoint / source.** No credential entity is introduced; the relationship's endpoint is the principal
+reached by the presented credential, with the credential identity carried in those edge fields. For an
+AAuth credential, the binding resolves `credential_value` + `credential_issuer` (`sub` + `iss`) to the
+`agent`; the human operator is then reached through that agent's **separate acts-as** `principal_binding`,
+a second edge of this type whose endpoint is the `operator`. An agent acting in a human's interest
+therefore holds two edges of this type, told apart by `credential_kind`; a resolver takes the endpoint
+of the edge whose kind matches what was presented, so the AAuth kind yields the agent (attribution,
+A-for-B) and the acts-as kind yields the operator (decision 48's counting rule). For an operator
+credential, the binding resolves the credential directly to the `operator`.
+
+**Which endpoints an acts-as edge may take is open (decisions 108 and 109).** Every statement above
+describes the case this design was drawn for — an agent acting in a *human's* interest — and the endpoint
+declared in `data_model.md#relationships` is the generic `principal`, which admits an `agent` as readily as
+an `operator`. Nothing written rejects an agent's acts-as edge to **another agent** (decision 108), and
+decision 48's counting rule reasons about interests without stating a depth, so permitting one turns
+interest resolution into a chain walk with no bound; and nothing written rejects an **operator** holding one
+(decision 109) — "operator credentials resolve directly to the `operator`" says what a presented operator
+credential resolves to, not what edges an `operator` may hold. Both are stated as open rather than ruled
+because the corpus implies no answer to either, and registering the type does not close them: what stage 1
+registers is the edge, not a constraint on its endpoints.
+
+**Expiry / end.** `expires_at` is a read-time liveness bound, not maintained state. A binding is live when
+the edge is unended and `now < expires_at` when present; retiring a credential writes or ends the edge,
+exactly like other ended relationships. No sweeper is required to flip a status when the clock passes
+(invariant 11).
+
+A check resolving a credential to a principal reads the unended, unexpired `principal_binding` edges whose
+`credential_kind`, `credential_value`, and `credential_issuer` (when the kind requires one) match what was
+presented, and takes the principal at the other end. Where several match — which the rotation rule requires
+during the dual-admit window — every one of them resolves to the same principal, because the many-to-one is
+a property of the shape rather than of the read. Grant match and binding resolution use the same comparison:
+AAuth `(sub, iss)` is `credential_value` + `credential_issuer` under `credential_kind` `aauth_sub`.
+
+**Resolver outcomes.** The check returns one of the three values the grant checker already uses
+(`Permit` / `Deny` / `Indeterminate`). Enforcement maps `Indeterminate` to deny; the recorded decision keeps
+the third value so unknown stays distinct from a conclusion (principles 5 and 7). Diagnostics may name the
+principal id and `credential_kind`; they never echo raw `credential_value`.
+
+| Resolver outcome | Because | What the enforcement point does |
+|---|---|---|
+| `Permit` (resolved) | ≥1 live (unended, unexpired) `principal_binding` matches the presented `credential_kind` + `credential_value` (+ `credential_issuer` when required), and every match targets the **same** principal | Continue to grant match / attribution on that principal. Diagnostic may name principal id + credential kind; never echo `credential_value`. |
+| `Deny` (no binding) | No matching edge for the presented key | Refuse the write / admission. Record as **unattributed** (`#principals`) — never default to the operator. Surface: `[COPY: no principal_binding for this credential kind — create or restore the binding]`. |
+| `Deny` (expired-only) | Matching edges exist but all are ended or `now ≥ expires_at` | Distinct from no-binding. Surface expiry/retirement, not "unknown credential". Hint: `[COPY: binding expired or ended — rotate / dual-admit a live edge before presenting]`. |
+| `Indeterminate` (binding source unreadable / partial) | Relationship store unreachable, timed out, or read incomplete | Treat as Deny at the enforcement point (same posture as grant-load `Indeterminate` above). Keep the third value in logs/diagnostics — do not coerce to a plain `Deny` in the recorded decision. Hint: `[COPY: binding source unavailable — retry after record health; do not guess a principal]`. |
+| `Deny` (ambiguous / conflicting) | ≥2 live matching edges target **different** principals | Fail closed; do not pick first edge. Surface conflict with redacted fingerprints / principal ids only. Hint: `[COPY: conflicting principal_binding edges — operator must end the wrong edge(s)]`. |
+| `Deny` (malformed presentation) | Presented credential missing required key parts (`credential_kind` / `credential_value` / issuer when the kind requires it), or kind unrecognized | Restrictive default (principle 5). Hint: `[COPY: credential presentation malformed or kind unrecognized — fix caller shape]`. |
+
+**Examples.**
+
+- `[COPY: dual-admit success — two live principal_binding edges with different credential_value under the same credential_kind and credential_issuer both target principal P; resolution returns Permit on P and grant match continues.]`
+- `[COPY: conflict failure — two live matching edges target different principals; resolution returns Deny (ambiguous), records both principal ids with redacted fingerprints, and refuses first-edge-wins.]`
+
+**Why this and not the alternatives, and why the choice is structural rather than a preference.** The two
+candidates differ in what a wrong answer costs, and the design's own rule on that is what selects this one.
+`principal_binding` is a type stage 1 registers regardless, and G26 makes registration one-way: a schema
+loses fields and gains them, but a registered type is not retired. So a credential entity with its own edge
+is a fourteenth type that stands forever if it proves unnecessary, where properties on the existing edge can
+be superseded by adding that entity later and migrating the edges. Narrowing later is a breaking change and
+widening later is not — decision 91's reasoning, applied to a type rather than to a scope.
+
+The dual-admit window rules out the third candidate: `#grants` requires two credentials
+to bind to one principal at once with the set of matching grants never empty, so a shape holding one
+binding per principal is refused on that ground alone. The grant cannot be the binding, because a grant
+holding a second credential becomes two grants and reopens the question one level out. And a credential
+entity of its own would give the value a second home during rotation, with nothing saying which the check
+reads — invariant 9's objection — where properties on the edge extend the type that already joins the two
+credential systems, which is what invariant 6 asks.
+
+**What travels with this.** The value sits on an edge, so it is read wherever the edge is read, and custody
+by revocability binds that reader exactly as it binds any other holder: a credential that is the asset is
+not materialized by reading its edge. That obligation now travels with the edge rather than with a separate
+entity that might have carried its own access rule.
+
+**What this does not settle.** Where the value comes from before any of these rules reach it is decision
+105, and nothing here answers it: an edge carrying a value says nothing about the store that produced it.
+
+The paragraphs below state the question as it stood before the ruling, and the constraints that bound it. `#principals` states that a
 credential binds to a principal **many-to-one**, and names `principal_binding` as what joins the two
 credential systems — the store's `user_id` and a host login to the `operator`, an AAuth `sub` to the
 `agent`, reaching the human principal through that agent's binding. What neither that section nor
@@ -618,16 +719,17 @@ attribution, is what this decision has to say rather than leave to whichever cal
    in a design that already resolves credentials at the grant, and it has to say what the credential entity
    holds that the grant's `sub` and `iss` do not.
 
-2. **Properties on the binding edge itself, one edge per credential.** `principal_binding` stays the edge
-   type and carries the credential's identifying values — its kind, its issuer, and an expiry where the
-   issuer states one — so a principal has as many edges as it has credentials and rotation writes a second
-   edge before ending the first. This is the shape
+2. **Properties on the binding edge itself, one edge per credential.** *(Historical candidate — chosen.)*
+   `principal_binding` stays the edge type and carries the credential's identifying values — its kind, its
+   issuer, and an expiry where the issuer states one — so a principal has as many edges as it has
+   credentials and rotation writes a second edge before ending the first. This is the shape
    `conformance_suite.md#what-the-documents-leave-unspecified-here-and-how-each-is-recorded` already
    derives — an edge type carrying the credential kind and value, the principal, and an expiry — and that
    derivation is recorded there as proposed rather than assumed, which is the vacancy this row registers.
-   What it has to answer is whether the edge's source is then the credential rather than the agent, which
-   the relationships table's current `agent → principal` does not admit, and whether an edge carrying an
-   expiry is the maintained state invariant 11 forbids or the ended edge the design writes everywhere else.
+   Candidate 2 owed two answers the ruling above closes: the edge's source is not a credential entity —
+   credential identity lives in edge fields (`credential_kind`, `credential_value`, `credential_issuer`)
+   and the endpoint is the principal reached — and `expires_at` is a read-time liveness bound ended by
+   writing the edge, not maintained state invariant 11 forbids.
 
 3. **The grant is the binding, and no separate edge exists.** A grant already carries `sub`, `iss`, and
    `expires_at`, and is already matched on the credential; adding the principal to it would make the grant
@@ -1205,10 +1307,17 @@ principals, and the threshold's home (Safe's shape: on the governed object). 48,
 ### The counting rule: an agent counts as its bound principal
 
 **Ruled (decision 48, the brief's Q1, 2026-09-06): for a structural check, an agent counts as the principal
-its `principal_binding` names — one interest; for attribution, it is recorded as itself, A-for-B.**
-Registered as ruled in `conformance.md#the-register-of-open-design-decisions`. Two agents bound to one
-operator are one interest on a quorum and one party to a separation-of-duties check, and each is still the
-agent that acted on the record.
+its **acts-as** `principal_binding` names — one interest; for attribution, it is recorded as itself,
+A-for-B.** Registered as ruled in `conformance.md#the-register-of-open-design-decisions`. Two agents bound
+to one operator are one interest on a quorum and one party to a separation-of-duties check, and each is
+still the agent that acted on the record.
+
+**Which binding this names.** An agent acting in a human's interest holds two `principal_binding` edges of
+the one type, told apart by `credential_kind` (decision 101,
+`#what-the-credential-binding-carries-and-what-a-check-reads-to-resolve-a-credential-to-a-principal`): its
+AAuth edge ends at the **agent**, and its acts-as edge ends at the **operator**. This rule reads the
+acts-as edge and so counts the operator. Reading the AAuth edge instead would count the agent, which is the
+attack this section exists to prevent — two agents under one operator would then be two interests.
 
 **Why.** Principle 5 chooses the restrictive branch: counting an agent as its principal yields fewer
 distinct interests, so a quorum is harder to reach and a separation stricter to satisfy, and the failure of

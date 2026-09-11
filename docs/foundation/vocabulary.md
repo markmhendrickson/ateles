@@ -1410,20 +1410,27 @@ principal itself.
 **Not for:** identity for the principal; account for a credential.
 
 ### principal binding
-**Definition:** the [edge](#edge) from an [agent](#agent) to the [principal](#principal) whose interest it
-acts in, recorded as `principal_binding`.
-Not a [credential](#credential): a credential binds a login, key, or address **to** a principal, while
-this binds one principal to another, and it is what joins the two credential systems — an AAuth `sub`
-binds to the agent that presented it and reaches the human principal only through the agent's binding.
+**Definition:** the [edge](#edge) recorded as `principal_binding`, from a presented
+[credential](#credential) to the [principal](#principal) it identifies — one edge per credential, carrying
+`credential_kind`, `credential_value`, `credential_issuer`, and `expires_at` (decision 101).
+An [agent](#agent)'s binding to the principal whose interest it acts in is **one instance of this edge and
+not a second kind** — but it is a distinct *edge* from the one binding the agent's own AAuth credential,
+and an agent acting in a human's interest holds both, told apart by `credential_kind`. The AAuth edge
+carries `credential_kind: aauth_sub` with that agent's `sub` and `iss` and ends at the **agent**, the
+principal that credential identifies; the acts-as edge ends at the **[operator](#operator)**. This pair is
+what joins the two credential systems — an AAuth `sub` binds to the agent that presented it and reaches the
+human principal only through that agent's separate acts-as binding.
 It carries one rule the design turns on: **for a [quorum](#quorum) or a
-[separation-of-duties](#separation-of-duties) check, an agent counts as the principal its binding names**
-— one interest, so two agents bound to one [operator](#operator) cannot satisfy a check meant to require
-two. Attribution is unaffected: the agent is recorded as itself, A-for-B.
+[separation-of-duties](#separation-of-duties) check, an agent counts as the principal its acts-as binding
+names** — one interest, so two agents bound to one [operator](#operator) cannot satisfy a check meant to
+require two. Attribution is unaffected, and is why the two edges are distinct: the agent is recorded as
+itself, A-for-B, which its AAuth edge is what makes resolvable.
 **See:** [`authority_model.md#principals`](authority_model.md#principals),
 [`authority_model.md#the-counting-rule-an-agent-counts-as-its-bound-principal`](authority_model.md#the-counting-rule-an-agent-counts-as-its-bound-principal).
 **Never:** —
-**Not for:** a [credential](#credential) for the binding (the credential binds to a principal; this binds
-between two); the binding for [delegation](#delegation) (a delegation is granted and expires, a binding is
+**Not for:** a separate credential entity standing beside the binding (decision 101 rules the credential
+edge-keyed, so the edge carries the credential's fields and no entity holds it); the binding for
+[delegation](#delegation) (a delegation is granted and expires, a binding is
 what the agent is); the binding for `vendor_binding` (that binds a [role](#role) to a model and harness,
 and carries no [authority](#authority)).
 
