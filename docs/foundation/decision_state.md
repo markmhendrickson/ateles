@@ -22,9 +22,9 @@ The **Subject** column is a label of a few words, never a substitute for the row
 
 ## What this run found
 
-- **2** row(s) **ruled but not merged** — the corpus on `origin/main` reads open where a ruling exists on a branch.
+- **1** row(s) **ruled but not merged** — the corpus on `origin/main` reads open where a ruling exists on a branch.
 - **7** row(s) genuinely open — no ruling anywhere scanned.
-- **80** row(s) ruled and merged.
+- **81** row(s) ruled and merged.
 - **88** row(s) whose implemented axis is `unknown`.
 
 ### Ruled but not merged
@@ -33,7 +33,6 @@ Each of these reads **open** to anything reading the corpus. The ruling is on th
 
 | # | Subject | Ruling lives on | Blocks |
 |---|---|---|---|
-| 93 | whether principle 11's heading states the invariant it is cited for — … | `origin/claude/foundation-decision-93-heading` | the conditional already in the principle's own second sentence and restated at `data_model.md#concepts`, which … |
 | 101 | what fields the credential-binding edge carries, and what resolving a credential to … | `origin/claude/foundation-decision-101-credential-binding` | stage 1 of the migration, which registers `principal_binding` among thirteen relationship types and cannot … |
 
 ## The register on three axes
@@ -121,7 +120,7 @@ Each of these reads **open** to anything reading the corpus. The ruling is on th
 | 90 | where a swarm is deployed, and what a deployment must name: whether … | yes | yes | unknown | — | decision 45, whose host-as-external-system ruling and action classes this extends to a teardown rather … |
 | 91 | whether a deployment that names several instances of the record names one … | yes | yes | unknown | — | decision 90, which leaves it open rather than settling it by omission; the explicit … |
 | 92 | what makes a task **live** — the predicate a queue reads to … | yes | yes | unknown | — | decision 37's `blocked` retirement, which is what leaves a task carrying that status in … |
-| 93 | whether principle 11's heading states the invariant it is cited for — … | yes | no | unknown | `origin/claude/foundation-decision-93-heading` | the conditional already in the principle's own second sentence and restated at `data_model.md#concepts`, which … |
+| 93 | whether principle 11's heading states the invariant it is cited for — … | yes | yes | unknown | — | the conditional already in the principle's own second sentence and restated at `data_model.md#concepts`, which … |
 | 94 | whether the design states read admission per entity type, as decision 41 … | yes | yes | unknown | — | decision 41, which ruled the write side and deferred the read side to a … |
 | 95 | whether each harness the swarm runs configures its own credential to the … | no | no | unknown | — | decisions 41 and 94, whose default-deny admission the ruling claimed had no enforcement point … |
 | 96 | how the proxy authenticates to the instance on an agent's behalf — … | yes | yes | unknown | — | decision 97, which ruled that a proxy is permitted and never the enforcement point, … |
