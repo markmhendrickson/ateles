@@ -146,8 +146,21 @@ def findings(text: str) -> list[str]:
     sentence = ""
     if m:
         start = max(tail.rfind("\n", 0, m.start()), tail.rfind(". ", 0, m.start()))
-        end = tail.find("\n", m.end())
-        sentence = tail[(start + 1 if start >= 0 else 0):(end if end >= 0 else len(tail))]
+        # Bound the END at a sentence terminator too, not only a newline.
+        # Honouring ". " for the start but only "\n" for the end left the very
+        # false negative this scoping was added to close: a consent keyword in a
+        # LATER sentence on the same line still suppressed a real finding.
+        # Found by Loxia on PR 951 and reproduced before fixing.
+        # Bound the END at a sentence terminator, not only a newline. Honouring
+        # ". " for the start but only "\n" for the end left the very false
+        # negative this scoping was added to close: a consent keyword in a LATER
+        # sentence on the same line still suppressed a real finding. Note the
+        # terminator that matters most here is "?" — a permission question ends
+        # in one by construction, so a fix that only handled "." missed it.
+        # Found by Loxia on PR 951, reproduced, and fixed against the repro.
+        nxt = re.search(r"[.?!]\s|\n", tail[m.end():])
+        end = m.end() + nxt.end() if nxt else len(tail)
+        sentence = tail[(start + 1 if start >= 0 else 0):end]
     if m and not CONSENT_GATED_RE.search(sentence):
         out.append(
             f"the turn ends asking permission ({m.group(0)!r}) for something not "
