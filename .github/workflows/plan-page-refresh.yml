@@ -1,0 +1,75 @@
+name: Plan page refresh
+
+# Keeps the shared plan rendered_page in sync with its source file in the repo,
+# so the page is never republished by hand.
+#
+#     docs/pages/*.html  →  rendered_page.html_body  (Neotoma, guest-shared)
+#
+# Two lanes:
+#   push to main  — publish the page, then VERIFY by re-fetching the live
+#                   /html route and asserting the served content changed.
+#   pull_request  — --check only: fail if the PR would leave the live page
+#                   stale relative to the source file.
+#
+# Why verification is not optional: `publish_rendered_page` on an existing
+# entity returns success with `created: false` and a fresh token while
+# continuing to serve the OLD bytes. Content updates go through /correct
+# instead. Because that difference is invisible in a success code, the script
+# always re-reads the served page and exits non-zero if the bytes did not
+# change — a refresher that silently no-ops is worse than none, since nobody
+# looks at the page again to notice.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/pages/**"
+      - "execution/scripts/render_plan_page.py"
+      - ".github/workflows/plan-page-refresh.yml"
+  pull_request:
+    paths:
+      - "docs/pages/**"
+      - "execution/scripts/render_plan_page.py"
+      - ".github/workflows/plan-page-refresh.yml"
+  # The page also drifts when a session edits the entity out of band. Allow a
+  # manual re-publish without a commit.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never let two publishes race onto the same entity.
+  group: plan-page-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: publish and verify the plan page
+    runs-on: ubuntu-latest
+    env:
+      NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}
+      NEOTOMA_BASE_URL: ${{ vars.NEOTOMA_BASE_URL || 'https://neotoma.markmhendrickson.com' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # NOTE: non-blocking until NEOTOMA_BEARER_TOKEN is provisioned as a repo
+      # secret — the same pre-existing gap agent-config-validation.yml,
+      # loxia-pr-review.yml and lanius-stale-issues.yml already carry. Without
+      # the secret this step cannot reach Neotoma at all. Flip to blocking
+      # (remove `continue-on-error`) once the secret exists and one green run
+      # confirms it.
+      - name: Check the live page matches the source file
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: python3 execution/scripts/render_plan_page.py --check
+
+      - name: Publish the page and verify it actually changed
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        run: python3 execution/scripts/render_plan_page.py

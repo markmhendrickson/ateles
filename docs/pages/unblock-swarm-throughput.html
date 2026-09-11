@@ -1,0 +1,121 @@
+<h1>Unblock swarm PR/issue/task throughput</h1>
+<p class="sub">ateles + neotoma &middot; plan <code>ent_18b902cf72822373f9da8ced</code> &middot; 24 steps, 4 strands &middot; measured 2026-09-02 against live GitHub, Neotoma prod, and the running apis daemon</p>
+
+<h2 class="first">Problems and their fixes</h2>
+
+<div class="p">
+<div class="ph"><span class="n">1</span><h3>The operator&rsquo;s escape hatch is silent</h3></div>
+<p><code>/confirm-gates-clear</code> was posted on <strong>#711</strong>, <strong>#704</strong> and <strong>#187</strong>. All three received, all three logged at INFO, <strong>none produced any GitHub comment</strong> &mdash; verified by reading every comment after each timestamp. Every guard early-return logs at <code>log.debug</code> while <code>apis.py</code> configures INFO, so a declined command is invisible on GitHub <em>and</em> in the log.</p>
+<p class="fix"><strong>Fix &mdash; step 1.</strong> Always post a comment, including on every decline; raise those calls to INFO.</p>
+</div>
+
+<div class="p">
+<div class="ph"><span class="n">2</span><h3>56% of open PRs cannot be gate-cleared at all</h3></div>
+<p>Gate state lives on the <strong>issue</strong> entity; a PR never carries <code>gate_status</code>. <strong>46 of 82</strong> open ateles PRs have no closure-keyword parent. No gate-clearing code reaches them.</p>
+<p class="fix"><strong>Fix &mdash; step 2, operator-only.</strong> A policy choice: hard-block at PR-open, a bug fast path, or operator-gated merge.</p>
+</div>
+
+<div class="p">
+<div class="ph"><span class="n">3</span><h3>A tax task reaches the payment executor</h3></div>
+<p>An assignee outside the 5-name route table falls through to keyword inference. Reproduced: <code>resolve_skill(['finance'], assigned_to='picus')</code> &rarr; <strong><code>monedula</code></strong>. Picus is the tax role; Monedula moves money. <code>pavo</code>&rarr;<code>cicada</code> too. A second defect compounds it &mdash; tags that are <em>present but unmapped</em> suppress text inference entirely, which is why <strong>this plan&rsquo;s own step 1 is unroutable</strong>.</p>
+<p class="fix"><strong>Fix &mdash; step 16.</strong> Both defects in one change. A blast-radius bug, not a routing miss &mdash; it must land before #597 adds routes.</p>
+</div>
+
+<div class="p">
+<div class="ph"><span class="n">4</span><h3>Nothing sweeps for undispatched tasks</h3></div>
+<p><code>APIS_RECONCILE_ENABLED</code> <strong>does not exist</strong> &mdash; zero hits repo-wide. SSE <code>task.created</code> is the only trigger, and <code>TaskWatchdog</code> explicitly excludes <code>pending</code>. <strong>A task created while the daemon is down is never dispatched by anything.</strong> 21,373 task entities exist in prod.</p>
+<p class="fix"><strong>Fix &mdash; step 19.</strong> The claim+lease primitive <em>is</em> the sweep. Do not build an interim push sweeper.</p>
+</div>
+
+<div class="p">
+<div class="ph"><span class="n">5</span><h3>Corvus can already be run &mdash; nothing decides to run it</h3></div>
+<p>Three disjoint execution mechanisms exist: dedicated daemons (12 of 37 agents), the GitHub pipeline, and the task path (5 skills). <strong>Corvus is reachable by none.</strong> But <code>dispatch_role.py</code> already runs any role with a SKILL.md, and the gate is already PR-independent &mdash; <code>corvus</code> is mapped to <code>send_external_comms</code>, already HIGH blast, with the approval loop closing over Telegram with zero GitHub.</p>
+<p class="fix"><strong>Fix &mdash; steps 22&ndash;23.</strong> A claim predicate as simple as <code>assigned_to == me</code>. Do <em>not</em> build a new approval path or a daemon per agent.</p>
+</div>
+
+<div class="p">
+<div class="ph"><span class="n">6</span><h3>Standing instructions die at every compaction</h3></div>
+<p><code>settings.json</code> registers <code>session_start.py</code> against <code>startup|resume|clear</code> &mdash; <strong>excluding <code>compact</code></strong>. The hook meant to preserve instructions is silent exactly when compaction eats them. One operator instruction was restated four times in a single session.</p>
+<p class="fix"><strong>Fix &mdash; step 4 (#711).</strong> Itself blocked by problem 2 &mdash; <em>the plan&rsquo;s own reliability depends on a step inside the plan.</em></p>
+</div>
+
+<div class="callout">
+<h3>The model that survived verification</h3>
+<p>A <strong>throughput problem with a partial gate blockage</strong>, not a frozen system. 82 PRs open &mdash; but <strong>11 merged today</strong>, and <strong>36 opened against 9 merged</strong>. The swarm produces PRs ~4&times; faster than it merges them.</p>
+<p>So the measure is <strong>merged-per-day reaching opened-per-day</strong>, not &ldquo;the 82 are cleared.&rdquo; A backlog refilling at 36/day is not fixed by draining it once.</p>
+<p class="caveat">Single-day sample. &ldquo;4&times;&rdquo; is today&rsquo;s ratio, not an established rate.</p>
+</div>
+
+<h2>Strand A &mdash; unblock the path</h2>
+<table>
+<thead><tr><th>#</th><th>Who</th><th>Step</th><th>Blocked by</th></tr></thead>
+<tbody>
+<tr><td>1</td><td><span class="tag sa">SUBAGENT</span></td><td>Fix the silent decline</td><td class="free">nothing &mdash; first</td></tr>
+<tr class="opr"><td>2</td><td><span class="tag op">OPERATOR</span></td><td><strong>Unparented-PR policy</strong> &mdash; unblocks 46 of 82</td><td>step 1, for visibility</td></tr>
+<tr><td>3</td><td><span class="tag sw">SWARM</span></td><td>Merge #717 &mdash; 27 mirrors, flips render check to blocking</td><td class="free">nothing</td></tr>
+<tr><td>4</td><td><span class="tag sw">SWARM</span></td><td>Merge #711 &mdash; compact matcher. Unblocks strand B</td><td>3, 2</td></tr>
+<tr><td>5</td><td><span class="tag sw">SWARM</span></td><td>Merge #720 &mdash; 27 of 28 files duplicate #717</td><td>4</td></tr>
+<tr><td>6</td><td><span class="tag sw">SWARM</span></td><td>Merge #686 &mdash; prior-art contract, built and green</td><td>gates</td></tr>
+<tr><td>7</td><td><span class="tag sw">SWARM</span></td><td>Merge #724 &mdash; <code>operator_only</code> never auto-executable</td><td class="free">nothing</td></tr>
+<tr><td>8</td><td><span class="tag sw">SWARM</span></td><td>Rebase and land #689</td><td>7 + conflicts</td></tr>
+<tr><td>9</td><td><span class="tag sw">SWARM</span></td><td>Land #688</td><td>8 + Falco security</td></tr>
+<tr><td>10</td><td><span class="tag sa">SUBAGENT</span></td><td>Fix neotoma#2205 &mdash; relationship filters return 0</td><td class="free">nothing</td></tr>
+<tr><td>11</td><td><span class="tag sa">SUBAGENT</span></td><td>Consolidate the 4 issue-number fields</td><td class="free">nothing</td></tr>
+</tbody>
+</table>
+
+<h2>Strand B &mdash; drive it reliably from a session</h2>
+<table>
+<thead><tr><th>#</th><th>Who</th><th>Step</th></tr></thead>
+<tbody>
+<tr><td>12</td><td><span class="tag sw">SWARM</span></td><td>= step 4. #711 is the keystone</td></tr>
+<tr><td>13</td><td><span class="tag sa">SUBAGENT</span></td><td>Keep <code>next_steps</code> naming the current step and blocker</td></tr>
+<tr><td>14</td><td><span class="tag sw">SWARM</span></td><td>= step 6. #686 is the prior-art mechanism</td></tr>
+<tr class="opr"><td>15</td><td><span class="tag op">OPERATOR</span></td><td><strong>Open item</strong> &mdash; the mid-turn gap, below</td></tr>
+</tbody>
+</table>
+
+<h2>Strand C &mdash; make task execution delegable</h2>
+<p class="lead">The path, and where it breaks: <code>task created</code> &rarr; <span class="brk">non-enum statuses</span> &rarr; SSE is the only trigger &rarr; <span class="brk">nothing sweeps</span> &rarr; <code>resolve_skill</code> &rarr; <span class="brk">5 of 37 reachable; unmapped tags suppress fallback</span> or <span class="brk">unknown assignee misroutes</span> &rarr; <span class="brk"><code>operator_only</code> &rarr; LOW</span> &rarr; <code>EXECUTING</code> with no <code>finally</code> &rarr; spawn.</p>
+<table>
+<thead><tr><th>#</th><th>Who</th><th>Step</th><th>Blocked by</th></tr></thead>
+<tbody>
+<tr><td>16</td><td><span class="tag sa">SUBAGENT</span></td><td><strong>Fix <code>resolve_skill</code></strong> &mdash; misroute + suppressed fallback</td><td class="free">nothing</td></tr>
+<tr><td>17</td><td><span class="tag sw">SWARM</span></td><td>= step 7. #724 counted against both strands</td><td class="free">nothing</td></tr>
+<tr><td>18</td><td><span class="tag sw">SWARM</span></td><td>Land #597 &mdash; code-shaped roles only</td><td>16</td></tr>
+<tr><td>19</td><td><span class="tag sa">SUBAGENT</span></td><td><strong>Build claim+lease as the sweep.</strong> Query real prod statuses, not the enum</td><td>16</td></tr>
+<tr><td>20</td><td><span class="tag sa">SUBAGENT</span></td><td>Fix task creation &mdash; audit creators beyond Turdus</td><td>after 16</td></tr>
+<tr><td>21</td><td><span class="tag sa">SUBAGENT</span></td><td>Fix 143 stranded <code>participation_record</code> rows</td><td class="free">nothing</td></tr>
+</tbody>
+</table>
+
+<h2>Strand D &mdash; work that never touches GitHub</h2>
+<p class="lead"><strong>What Turdus has that Corvus lacks: Turdus never receives a task.</strong> It polls Gmail and <em>creates</em> tasks &mdash; a producer, not a consumer. So it is not the working version of the path Corvus is missing, and a bespoke daemon per agent does not scale to 25.</p>
+<table>
+<thead><tr><th>#</th><th>Who</th><th>Step</th><th>Blocked by</th></tr></thead>
+<tbody>
+<tr><td>22</td><td><span class="tag sa">SUBAGENT</span></td><td>Claim predicate honours <code>assigned_to</code>; prove on Corvus end to end</td><td>19</td></tr>
+<tr><td>23</td><td><span class="tag sa">SUBAGENT</span></td><td>Verify the approval loop closes &mdash; <em>read, not yet observed</em></td><td>22</td></tr>
+<tr class="opr"><td>24</td><td><span class="tag op">OPERATOR</span></td><td><strong>Second gate for outbound work?</strong> Recommendation: split drafting from publishing</td><td>23</td></tr>
+</tbody>
+</table>
+
+<div class="gap">
+<h3>The honest gap</h3>
+<p>Two reliability failures have <strong>no mechanism that fires when they occur</strong>: routing an agent-owned decision to the operator happens <strong>mid-turn</strong>, and reporting a snapshot as standing state is bound only inside the <code>/where</code> skill &mdash; it recurred in the brief that commissioned this plan.</p>
+<p><strong>The test is not that the machinery is written down, it is that it fires at the moment it applies.</strong> Strand B is not complete when #711 and #720 merge.</p>
+</div>
+
+<div class="gap alt">
+<h3>Decisions to abandon &mdash; do not re-raise</h3>
+<ul>
+<li><strong>#187</strong> &mdash; already closed as superseded; main owns deterministic waive.</li>
+<li><strong>&ldquo;Nobody owns merging&rdquo;</strong> &mdash; Vanellus owns it and ran twice today.</li>
+<li><strong>A third mirror-regen PR</strong> &mdash; #720 already duplicates #717.</li>
+<li><strong>Rebuilding prior art</strong> &mdash; built, 926 tests passing, open as #686. Merge it.</li>
+<li><strong>A new approval path for non-code work</strong> &mdash; the gate is already PR-independent.</li>
+</ul>
+</div>
+
+<h2>Operator-only steps</h2>
+<p><strong>2</strong> (unparented-PR policy &mdash; unblocks the largest population), <strong>15</strong> (accept or close the mid-turn gap), <strong>24</strong> (outbound consent posture). Steps 4 and 5 need the step-2 decision first. <strong>Strand C contains none</strong> &mdash; task dispatch is broken in code, not blocked on a decision.</p>
