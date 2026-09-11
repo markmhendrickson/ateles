@@ -155,7 +155,7 @@ def test_main_flush_final_remnant_writes_one_jsonl_line(tmp_path, monkeypatch):
         patch.object(lt.time, "sleep"),
         patch.object(lt.time, "time", return_value=10_000.0),
         patch.object(lt.subprocess, "run", return_value=ffmpeg_ok) as mock_run,
-        patch.object(lt, "transcribe_slice", return_value=(True, "final words")),
+        patch.object(lt, "transcribe_slice", return_value=(True, "final words", [])),
         patch.object(lt, "log") as mock_log,
     ):
         rc = lt.main(
@@ -263,7 +263,7 @@ def test_main_kill_switch_fires_on_five_consecutive_failures(tmp_path, monkeypat
         patch.object(lt, "probe_duration", side_effect=cursor_durations),
         patch.object(lt.time, "sleep"),
         patch.object(lt.subprocess, "run", return_value=ffmpeg_ok),
-        patch.object(lt, "transcribe_slice", return_value=(False, "boom")),
+        patch.object(lt, "transcribe_slice", return_value=(False, "boom", [])),
         patch.object(lt, "log") as mock_log,
     ):
         rc = lt.main(
@@ -292,11 +292,11 @@ def test_main_silence_leaves_streak_unchanged_mid_run(tmp_path, monkeypatch):
 
     ffmpeg_ok = MagicMock(returncode=0, stderr="", stdout="")
     results = [
-        (False, "e1"),
-        (False, "e2"),
-        (False, "e3"),
-        (False, "e4"),
-        (False, lt.SILENCE_SENTINEL),
+        (False, "e1", []),
+        (False, "e2", []),
+        (False, "e3", []),
+        (False, "e4", []),
+        (False, lt.SILENCE_SENTINEL, []),
     ]
     # 5 chunks then probe None to exit without a 5th real failure
     durations = [10.0 * (i + 1) for i in range(5)] + [None]
@@ -333,12 +333,12 @@ def test_success_after_failures_clears_streak_before_kill(tmp_path, monkeypatch)
 
     ffmpeg_ok = MagicMock(returncode=0, stderr="", stdout="")
     results = [
-        (False, "e1"),
-        (False, "e2"),
-        (True, "some text"),
-        (False, "e3"),
-        (False, "e4"),
-        (False, "e5"),
+        (False, "e1", []),
+        (False, "e2", []),
+        (True, "some text", []),
+        (False, "e3", []),
+        (False, "e4", []),
+        (False, "e5", []),
     ]
     durations = [10.0 * (i + 1) for i in range(6)] + [None]
 
@@ -526,7 +526,7 @@ def test_transcribe_slice_always_passes_no_store_and_no_diarize(tmp_path):
     proc = MagicMock(returncode=0, stderr="", stdout="hello world\n")
 
     with patch.object(lt.subprocess, "run", return_value=proc) as mock_run:
-        ok, payload = lt.transcribe_slice(wav, env={"PATH": "/usr/bin"})
+        ok, payload, segments = lt.transcribe_slice(wav, env={"PATH": "/usr/bin"})
 
     assert ok is True
     assert payload == "hello world"
@@ -617,3 +617,405 @@ def test_build_subprocess_env_tolerates_missing_dotenv(tmp_path):
         materialized=tmp_path / "absent", base_env={"PATH": "/usr/bin"}
     )
     assert env == {"PATH": "/usr/bin"}
+
+
+# --------------------------------------------------------------------------
+# Case 11 — confidence gate (ateles#777)
+#
+# The level gate answers "was this loud". On a noisy microphone that is not the
+# same question as "was this speech": in the fixture session below a fabricated
+# chunk measured -39.0 dB while real speech measured -36.4 dB, so no level
+# threshold separates them. The confidence gate asks Whisper's own per-segment
+# no_speech_prob / avg_logprob instead, plus how much text was claimed per
+# second of audio.
+# --------------------------------------------------------------------------
+
+
+def _seg(start, end, no_speech_prob, avg_logprob, chars):
+    """Build a segment with `chars` characters of filler text.
+
+    The gate never inspects WHAT the text says — only how much of it there is
+    per second — so filler is a faithful stand-in and keeps the operator's own
+    words out of the repo.
+    """
+    return {
+        "start": start,
+        "end": end,
+        "no_speech_prob": no_speech_prob,
+        "avg_logprob": avg_logprob,
+        "text": "x" * chars,
+    }
+
+
+# Whisper's verbose_json confidences for the #777 regression fixture
+# (~/Documents/data/recordings/20260907 1114 mic.mp4): ten chunks, each
+# transcribed FOUR times, because Whisper's decode is non-deterministic and a
+# threshold fitted to one draw overfits. Only measurements live in the JSON —
+# `chars` is the LENGTH of each segment's text, never the text, which is the
+# operator's own voice.
+_TESTDATA_777 = json.loads(
+    (_SCRIPTS_DIR / "testdata_777_confidence.json").read_text(encoding="utf-8")
+)["chunks"]
+
+# The single first-draw transcription, kept as the per-chunk readable case.
+FIXTURE_777 = {
+    int(k): (v["expect"], [
+        (s["start"], s["end"], s["no_speech_prob"], s["avg_logprob"], s["chars"])
+        for s in v["trials"][0]
+    ])
+    for k, v in _TESTDATA_777.items()
+}
+
+
+@pytest.mark.parametrize("chunk", sorted(FIXTURE_777))
+def test_confidence_gate_reproduces_fixture_verdicts(chunk):
+    """Every chunk of the #777 fixture is classified correctly at the defaults.
+
+    This is the regression case the issue asks for: the four fabricated chunks
+    must not be emitted as transcript, and the six real ones must be.
+    """
+    expected, rows = FIXTURE_777[chunk]
+    segments = [_seg(*r) for r in rows]
+    verdict, evidence = lt.classify_transcription(segments)
+    assert verdict == expected, (
+        f"chunk {chunk}: expected {expected}, got {verdict} (evidence={evidence})"
+    )
+    assert evidence["segments"] == len(segments)
+
+
+def test_confidence_gate_separates_the_two_chunks_no_level_gate_could():
+    """ch4 (real speech, -36.4 dB) and ch5 (fabricated, -39.0 dB).
+
+    2.6 dB apart, so no level threshold splits them — that is the whole finding
+    of #777. The confidence gate does split them.
+    """
+    assert lt.classify_transcription([_seg(*r) for r in FIXTURE_777[4][1]])[0] == "speech"
+    assert lt.classify_transcription([_seg(*r) for r in FIXTURE_777[5][1]])[0] == "hallucinated"
+
+
+def test_confidence_gate_returns_unknown_without_segments():
+    """No segments means no signal — never mistake that for a fabrication.
+
+    A missing measurement must fall through to emitting the chunk, exactly as a
+    failed RMS read falls through to transcription.
+    """
+    assert lt.classify_transcription([]) == ("unknown", {})
+    assert lt.classify_transcription(None) == ("unknown", {})
+
+
+def test_segment_char_rate_is_zero_for_a_nonpositive_span():
+    """A zero-length or inverted segment must not divide by zero."""
+    assert lt.segment_char_rate({"start": 5.0, "end": 5.0, "text": "hello"}) == 0.0
+    assert lt.segment_char_rate({"start": 5.0, "end": 1.0, "text": "hello"}) == 0.0
+
+
+def test_segment_char_rate_counts_characters_per_second():
+    assert lt.segment_char_rate({"start": 0.0, "end": 2.0, "text": "abcdef"}) == 3.0
+
+
+def test_confidence_gate_needs_all_three_axes():
+    """Each axis alone is insufficient — that is why all three are required.
+
+    Confirmed on the fixture: no_speech_prob alone fails (real speech reached
+    0.370, a fabrication sat at 0.297), and avg_logprob alone fails (a
+    fabrication decoded at -0.331, better than real speech at -1.050).
+    """
+    # Confident and dense, but Whisper says it is not speech.
+    assert not lt.segment_is_speech(_seg(0.0, 10.0, 0.90, -0.30, 100))
+    # Confident and speech-like, but only a few characters across ten seconds.
+    assert not lt.segment_is_speech(_seg(0.0, 10.0, 0.01, -0.30, 5))
+    # Speech-like and dense, but the decode was incoherent.
+    assert not lt.segment_is_speech(_seg(0.0, 10.0, 0.01, -3.50, 100))
+    # All three clear.
+    assert lt.segment_is_speech(_seg(0.0, 10.0, 0.01, -0.30, 100))
+
+
+def test_confidence_gate_keeps_a_chunk_when_any_single_segment_is_speech():
+    """A real sentence surrounded by padded silence must survive.
+
+    Fixture ch6 and ch8 are exactly this: one dense real segment beside a
+    stretched near-empty one. Judging the chunk on its aggregate would suppress
+    both.
+    """
+    segments = [
+        _seg(0.0, 30.0, 0.6966, -0.4437, 53),   # stretched over silence
+        _seg(30.0, 35.0, 0.3703, -0.5691, 55),  # the real sentence
+    ]
+    assert lt.classify_transcription(segments)[0] == "speech"
+
+
+def test_confidence_gate_evidence_records_the_deciding_segment():
+    """The JSONL must say WHY, so thresholds can be re-derived from the log."""
+    _, evidence = lt.classify_transcription([_seg(*r) for r in FIXTURE_777[3][1]])
+    assert set(evidence) == {"no_speech_prob", "avg_logprob", "char_rate", "segments"}
+    assert evidence["char_rate"] < lt.DEFAULT_MIN_CHAR_RATE
+
+
+def test_main_marks_a_suppressed_chunk_distinctly_from_a_level_skip(tmp_path, monkeypatch):
+    """`suppressed: low_confidence` vs `skipped: below_threshold`.
+
+    The issue requires the two mechanisms be measurable apart, and the
+    fabricated text must never appear under "text" where a consumer reads it.
+    """
+    recording = tmp_path / "meet_system.mp4"
+    recording.write_bytes(b"x")
+    out = tmp_path / "out.jsonl"
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    ffmpeg_ok = MagicMock(returncode=0, stderr="", stdout="")
+    hallucinated = [_seg(*r) for r in FIXTURE_777[3][1]]
+
+    with (
+        patch.object(lt, "probe_duration", side_effect=[10.0, None]),
+        patch.object(lt.time, "sleep"),
+        patch.object(lt.subprocess, "run", return_value=ffmpeg_ok),
+        patch.object(lt, "measure_slice_rms_db", return_value=-40.0),
+        patch.object(
+            lt, "transcribe_slice",
+            return_value=(True, "fabricated sentence", hallucinated),
+        ),
+        patch.object(lt, "log"),
+    ):
+        rc = lt.main(
+            ["--file", str(recording), "--out", str(out), "--interval", "1", "--start-at", "0"]
+        )
+
+    assert rc == 0
+    line = json.loads(out.read_text().splitlines()[0])
+    assert line["suppressed"] == "low_confidence"
+    assert "skipped" not in line, "must not be confused with a level-gate skip"
+    assert line["text"] == "", "a consumer reading 'text' must never see a fabrication"
+    assert line["suppressed_text"] == "fabricated sentence"
+    assert line["confidence"]["char_rate"] < lt.DEFAULT_MIN_CHAR_RATE
+    # The level gate's own measurement is still recorded alongside.
+    assert line["rms_db"] == -40.0
+
+
+def test_main_emits_real_speech_untouched(tmp_path, monkeypatch):
+    """The gate is additive: a real chunk keeps its text and gains evidence."""
+    recording = tmp_path / "meet_system.mp4"
+    recording.write_bytes(b"x")
+    out = tmp_path / "out.jsonl"
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    ffmpeg_ok = MagicMock(returncode=0, stderr="", stdout="")
+    real = [_seg(*r) for r in FIXTURE_777[4][1]]
+
+    with (
+        patch.object(lt, "probe_duration", side_effect=[10.0, None]),
+        patch.object(lt.time, "sleep"),
+        patch.object(lt.subprocess, "run", return_value=ffmpeg_ok),
+        patch.object(lt, "measure_slice_rms_db", return_value=-36.4),
+        patch.object(lt, "transcribe_slice", return_value=(True, "real words", real)),
+        patch.object(lt, "log"),
+    ):
+        lt.main(["--file", str(recording), "--out", str(out), "--interval", "1", "--start-at", "0"])
+
+    line = json.loads(out.read_text().splitlines()[0])
+    assert line["text"] == "real words"
+    assert "suppressed" not in line
+    assert line["confidence"]["no_speech_prob"] <= lt.DEFAULT_MAX_NO_SPEECH_PROB
+
+
+def test_main_report_only_mode_flags_without_suppressing(tmp_path, monkeypatch):
+    """--no-confidence-gate is the calibration posture: judge, log, but emit."""
+    recording = tmp_path / "meet_system.mp4"
+    recording.write_bytes(b"x")
+    out = tmp_path / "out.jsonl"
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    ffmpeg_ok = MagicMock(returncode=0, stderr="", stdout="")
+    hallucinated = [_seg(*r) for r in FIXTURE_777[3][1]]
+
+    with (
+        patch.object(lt, "probe_duration", side_effect=[10.0, None]),
+        patch.object(lt.time, "sleep"),
+        patch.object(lt.subprocess, "run", return_value=ffmpeg_ok),
+        patch.object(lt, "measure_slice_rms_db", return_value=-40.0),
+        patch.object(lt, "transcribe_slice", return_value=(True, "fabricated", hallucinated)),
+        patch.object(lt, "log"),
+    ):
+        lt.main([
+            "--file", str(recording), "--out", str(out),
+            "--interval", "1", "--start-at", "0", "--no-confidence-gate",
+        ])
+
+    line = json.loads(out.read_text().splitlines()[0])
+    assert line["suppressed"] == "low_confidence_reported_only"
+    assert line["text"] == "fabricated", "report-only mode must not suppress"
+
+
+def test_main_flags_a_chunk_whose_confidence_could_not_be_measured(tmp_path, monkeypatch):
+    """No segments came back: emit, but mark the uncertainty rather than vouch.
+
+    Surfacing an unknown beats resolving it wrongly — and it must never be
+    silently suppressed, or a transcription-path change would mute the feed.
+    """
+    recording = tmp_path / "meet_system.mp4"
+    recording.write_bytes(b"x")
+    out = tmp_path / "out.jsonl"
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    ffmpeg_ok = MagicMock(returncode=0, stderr="", stdout="")
+
+    with (
+        patch.object(lt, "probe_duration", side_effect=[10.0, None]),
+        patch.object(lt.time, "sleep"),
+        patch.object(lt.subprocess, "run", return_value=ffmpeg_ok),
+        patch.object(lt, "measure_slice_rms_db", return_value=-36.0),
+        patch.object(lt, "transcribe_slice", return_value=(True, "some words", [])),
+        patch.object(lt, "log"),
+    ):
+        lt.main(["--file", str(recording), "--out", str(out), "--interval", "1", "--start-at", "0"])
+
+    line = json.loads(out.read_text().splitlines()[0])
+    assert line["text"] == "some words"
+    assert line["confidence_unavailable"] is True
+    assert "suppressed" not in line
+
+
+def test_transcribe_slice_requests_segment_confidences(tmp_path):
+    """The gate is only as good as the fields it gets — pin the argv.
+
+    Without --segments-json the API returns no confidences and every chunk
+    classifies as "unknown", which silently disables the gate.
+    """
+    wav = tmp_path / "slice.wav"
+    wav.write_bytes(b"x")
+    proc = MagicMock(returncode=0, stderr="", stdout="hello world\n")
+
+    with patch.object(lt.subprocess, "run", return_value=proc) as mock_run:
+        lt.transcribe_slice(wav, env={"PATH": "/usr/bin"})
+
+    argv = mock_run.call_args.args[0]
+    assert "--segments-json" in argv, f"--segments-json missing from argv: {argv}"
+
+
+def test_transcribe_slice_reads_and_removes_the_segment_sidecar(tmp_path):
+    """Segments come back to the caller, and the sidecar does not accumulate."""
+    wav = tmp_path / "slice.wav"
+    wav.write_bytes(b"x")
+    seg_path = wav.with_suffix(".segments.json")
+    segments = [{"start": 0.0, "end": 2.0, "text": "hi",
+                 "no_speech_prob": 0.01, "avg_logprob": -0.3}]
+
+    def fake_run(argv, **kwargs):
+        seg_path.write_text(json.dumps({"language": "english", "segments": segments}))
+        return MagicMock(returncode=0, stderr="", stdout="hi\n")
+
+    with patch.object(lt.subprocess, "run", side_effect=fake_run):
+        ok, payload, got = lt.transcribe_slice(wav, env={"PATH": "/usr/bin"})
+
+    assert ok is True and payload == "hi"
+    assert got == segments
+    assert not seg_path.exists(), "sidecar must be cleaned up after every slice"
+
+
+def test_transcribe_slice_tolerates_a_malformed_segment_sidecar(tmp_path):
+    """A broken measurement disables the gate for that chunk — never drops audio."""
+    wav = tmp_path / "slice.wav"
+    wav.write_bytes(b"x")
+    seg_path = wav.with_suffix(".segments.json")
+
+    def fake_run(argv, **kwargs):
+        seg_path.write_text("{not json")
+        return MagicMock(returncode=0, stderr="", stdout="hi\n")
+
+    with patch.object(lt.subprocess, "run", side_effect=fake_run), patch.object(lt, "log"):
+        ok, payload, got = lt.transcribe_slice(wav, env={"PATH": "/usr/bin"})
+
+    assert ok is True and payload == "hi"
+    assert got == []
+    assert not seg_path.exists()
+
+
+def _gate_verdict_with_level_gate(chunk_data, rows):
+    """Both gates in the order the tailer runs them: level first, then confidence."""
+    if chunk_data["rms_db"] < lt.DEFAULT_SILENCE_THRESHOLD_DB:
+        return "silence"
+    return lt.classify_transcription([_as_segment(r) for r in rows])[0]
+
+
+def test_confidence_gate_holds_across_every_repeat_transcription():
+    """The whole fixture, all four transcriptions of each chunk, both gates.
+
+    Whisper's decode is non-deterministic, so this — not the single-draw case
+    above — is what says the thresholds are not overfitted. Across 40 samples
+    every real-speech transcription must be emitted and every fabricated one
+    suppressed, by one gate or the other.
+    """
+    emitted_speech = suppressed_fabrication = 0
+    failures = []
+    for chunk, data in sorted(_TESTDATA_777.items(), key=lambda kv: int(kv[0])):
+        for trial, rows in enumerate(data["trials"]):
+            verdict = _gate_verdict_with_level_gate(data, rows)
+            emitted = verdict == "speech"
+            if data["expect"] == "speech":
+                emitted_speech += emitted
+                if not emitted:
+                    failures.append(f"ch{chunk} trial{trial}: real speech {verdict}")
+            else:
+                suppressed_fabrication += not emitted
+                if emitted:
+                    failures.append(f"ch{chunk} trial{trial}: fabrication emitted")
+
+    assert not failures, "\n".join(failures)
+    assert emitted_speech == 24
+    assert suppressed_fabrication == 16
+
+
+def test_fixture_confirms_whisper_decode_is_non_deterministic():
+    """Pins the finding the thresholds are calibrated against.
+
+    If a future model made the decode deterministic this test would fail, which
+    is the signal to re-fit on fewer trials rather than keep paying for four.
+    """
+    varying = [
+        chunk for chunk, data in _TESTDATA_777.items()
+        if len({
+            tuple((s["no_speech_prob"], s["avg_logprob"], s["chars"]) for s in trial)
+            for trial in data["trials"]
+        }) > 1
+    ]
+    assert varying, "expected at least one chunk to decode differently across trials"
+
+
+def test_char_rate_is_the_binding_axis_on_the_fixture():
+    """Documents WHY min_char_rate is 3.0 — the gap it sits in.
+
+    Real speech never fell below 3.59 chars/s; no fabrication that cleared the
+    other two axes exceeded 2.87. A future change that narrows this gap should
+    fail here rather than silently start leaking fabrications.
+    """
+    speech_floor = min(
+        max(lt.segment_char_rate(_as_segment(s)) for s in trial)
+        for data in _TESTDATA_777.values() if data["expect"] == "speech"
+        for trial in data["trials"]
+    )
+    fabrication_ceiling = max(
+        max(
+            (lt.segment_char_rate(_as_segment(s)) for s in trial
+             if s["no_speech_prob"] <= lt.DEFAULT_MAX_NO_SPEECH_PROB
+             and s["avg_logprob"] >= lt.DEFAULT_MIN_AVG_LOGPROB),
+            default=0.0,
+        )
+        for data in _TESTDATA_777.values()
+        if data["expect"] == "hallucinated"
+        and data["rms_db"] >= lt.DEFAULT_SILENCE_THRESHOLD_DB
+        for trial in data["trials"]
+    )
+    assert fabrication_ceiling < lt.DEFAULT_MIN_CHAR_RATE < speech_floor, (
+        f"default {lt.DEFAULT_MIN_CHAR_RATE} must sit between "
+        f"{fabrication_ceiling:.2f} and {speech_floor:.2f}"
+    )
+
+
+def _as_segment(row):
+    """A stored measurement row as a segment dict, with filler for the text."""
+    return {
+        "start": row["start"],
+        "end": row["end"],
+        "no_speech_prob": row["no_speech_prob"],
+        "avg_logprob": row["avg_logprob"],
+        "text": "x" * row["chars"],
+    }

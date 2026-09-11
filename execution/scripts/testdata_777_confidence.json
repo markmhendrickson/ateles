@@ -1,0 +1,1531 @@
+{
+ "_comment": [
+  "Whisper verbose_json per-segment confidences for the ateles#777 regression",
+  "fixture: ~/Documents/data/recordings/20260907 1114 mic.mp4, ten chunks, each",
+  "transcribed four times (Whisper's decode is non-deterministic).",
+  "Only measurements are stored -- 'chars' is the LENGTH of the segment text,",
+  "never the text itself, which is the operator's own voice.",
+  "'expect' is the ground-truth label; 'rms_db' is the p95 level the RMS gate saw."
+ ],
+ "chunks": {
+  "0": {
+   "expect": "speech",
+   "rms_db": -27.1,
+   "trials": [
+    [
+     {
+      "start": 0.0,
+      "end": 4.56,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3484,
+      "chars": 39
+     },
+     {
+      "start": 4.56,
+      "end": 7.38,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3484,
+      "chars": 41
+     },
+     {
+      "start": 8.32,
+      "end": 12.2,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3484,
+      "chars": 32
+     },
+     {
+      "start": 12.2,
+      "end": 14.44,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3484,
+      "chars": 30
+     },
+     {
+      "start": 14.44,
+      "end": 19.44,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3484,
+      "chars": 49
+     },
+     {
+      "start": 20.52,
+      "end": 21.52,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3484,
+      "chars": 18
+     },
+     {
+      "start": 23.12,
+      "end": 24.68,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3484,
+      "chars": 41
+     },
+     {
+      "start": 24.68,
+      "end": 25.78,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3484,
+      "chars": 22
+     },
+     {
+      "start": 25.78,
+      "end": 29.78,
+      "no_speech_prob": 0.1089,
+      "avg_logprob": -0.6541,
+      "chars": 41
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 4.56,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 39
+     },
+     {
+      "start": 4.56,
+      "end": 7.38,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 41
+     },
+     {
+      "start": 8.32,
+      "end": 12.2,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 32
+     },
+     {
+      "start": 12.2,
+      "end": 13.56,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 26
+     },
+     {
+      "start": 14.44,
+      "end": 19.44,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 49
+     },
+     {
+      "start": 20.52,
+      "end": 21.52,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 18
+     },
+     {
+      "start": 23.12,
+      "end": 24.68,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 41
+     },
+     {
+      "start": 24.68,
+      "end": 25.78,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 22
+     },
+     {
+      "start": 27.64,
+      "end": 29.76,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 41
+     },
+     {
+      "start": 29.76,
+      "end": 30.74,
+      "no_speech_prob": 0.8331,
+      "avg_logprob": -0.7876,
+      "chars": 35
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 4.56,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3484,
+      "chars": 39
+     },
+     {
+      "start": 4.56,
+      "end": 7.38,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3484,
+      "chars": 41
+     },
+     {
+      "start": 8.32,
+      "end": 12.2,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3484,
+      "chars": 32
+     },
+     {
+      "start": 12.2,
+      "end": 14.44,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3484,
+      "chars": 30
+     },
+     {
+      "start": 14.44,
+      "end": 19.44,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3484,
+      "chars": 49
+     },
+     {
+      "start": 20.52,
+      "end": 21.52,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3484,
+      "chars": 18
+     },
+     {
+      "start": 23.12,
+      "end": 24.68,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3484,
+      "chars": 41
+     },
+     {
+      "start": 24.68,
+      "end": 25.78,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3484,
+      "chars": 22
+     },
+     {
+      "start": 25.78,
+      "end": 29.78,
+      "no_speech_prob": 0.1089,
+      "avg_logprob": -0.6541,
+      "chars": 41
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 4.56,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 39
+     },
+     {
+      "start": 4.56,
+      "end": 7.38,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 41
+     },
+     {
+      "start": 8.32,
+      "end": 12.2,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 32
+     },
+     {
+      "start": 12.2,
+      "end": 13.56,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 26
+     },
+     {
+      "start": 14.44,
+      "end": 19.44,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 49
+     },
+     {
+      "start": 20.52,
+      "end": 21.52,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 18
+     },
+     {
+      "start": 23.12,
+      "end": 24.68,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 41
+     },
+     {
+      "start": 24.68,
+      "end": 25.78,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 22
+     },
+     {
+      "start": 27.64,
+      "end": 29.76,
+      "no_speech_prob": 0.0011,
+      "avg_logprob": -0.3486,
+      "chars": 41
+     },
+     {
+      "start": 29.76,
+      "end": 31.04,
+      "no_speech_prob": 0.8331,
+      "avg_logprob": -0.7388,
+      "chars": 41
+     }
+    ]
+   ]
+  },
+  "1": {
+   "expect": "speech",
+   "rms_db": -35.0,
+   "trials": [
+    [
+     {
+      "start": 0.0,
+      "end": 10.52,
+      "no_speech_prob": 0.0726,
+      "avg_logprob": -0.4978,
+      "chars": 87
+     },
+     {
+      "start": 10.52,
+      "end": 17.76,
+      "no_speech_prob": 0.0019,
+      "avg_logprob": -1.5533,
+      "chars": 6
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 10.52,
+      "no_speech_prob": 0.0736,
+      "avg_logprob": -0.4978,
+      "chars": 87
+     },
+     {
+      "start": 10.52,
+      "end": 12.98,
+      "no_speech_prob": 0.0019,
+      "avg_logprob": -1.5293,
+      "chars": 6
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 10.52,
+      "no_speech_prob": 0.0736,
+      "avg_logprob": -0.4978,
+      "chars": 87
+     },
+     {
+      "start": 10.52,
+      "end": 15.6,
+      "no_speech_prob": 0.0019,
+      "avg_logprob": -1.5654,
+      "chars": 6
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 10.52,
+      "no_speech_prob": 0.0726,
+      "avg_logprob": -0.4978,
+      "chars": 87
+     },
+     {
+      "start": 10.52,
+      "end": 17.52,
+      "no_speech_prob": 0.0019,
+      "avg_logprob": -1.2677,
+      "chars": 6
+     }
+    ]
+   ]
+  },
+  "2": {
+   "expect": "hallucinated",
+   "rms_db": -44.7,
+   "trials": [
+    [
+     {
+      "start": 30.0,
+      "end": 32.0,
+      "no_speech_prob": 0.754,
+      "avg_logprob": -0.9782,
+      "chars": 5
+     }
+    ],
+    [
+     {
+      "start": 30.0,
+      "end": 32.0,
+      "no_speech_prob": 0.754,
+      "avg_logprob": -0.9782,
+      "chars": 5
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 2.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 2.0,
+      "end": 4.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 4.0,
+      "end": 6.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 6.0,
+      "end": 8.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 8.0,
+      "end": 10.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 10.0,
+      "end": 12.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 12.0,
+      "end": 14.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 14.0,
+      "end": 16.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 16.0,
+      "end": 18.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 18.0,
+      "end": 20.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 5
+     },
+     {
+      "start": 20.0,
+      "end": 22.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 5
+     },
+     {
+      "start": 22.0,
+      "end": 24.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 5
+     },
+     {
+      "start": 24.0,
+      "end": 26.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 5
+     },
+     {
+      "start": 26.0,
+      "end": 28.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 5
+     },
+     {
+      "start": 28.0,
+      "end": 30.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 30.0,
+      "end": 32.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 32.0,
+      "end": 34.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 34.0,
+      "end": 36.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 36.0,
+      "end": 38.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 38.0,
+      "end": 40.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 40.0,
+      "end": 42.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 42.0,
+      "end": 44.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 44.0,
+      "end": 46.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 46.0,
+      "end": 48.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 48.0,
+      "end": 50.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 50.0,
+      "end": 52.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 52.0,
+      "end": 54.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 54.0,
+      "end": 56.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 2.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 2.0,
+      "end": 4.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 4.0,
+      "end": 6.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 6.0,
+      "end": 8.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 8.0,
+      "end": 10.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 10.0,
+      "end": 12.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 12.0,
+      "end": 14.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 14.0,
+      "end": 16.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 16.0,
+      "end": 18.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 4
+     },
+     {
+      "start": 18.0,
+      "end": 20.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 5
+     },
+     {
+      "start": 20.0,
+      "end": 22.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 5
+     },
+     {
+      "start": 22.0,
+      "end": 24.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 5
+     },
+     {
+      "start": 24.0,
+      "end": 26.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 5
+     },
+     {
+      "start": 26.0,
+      "end": 28.0,
+      "no_speech_prob": 0.7622,
+      "avg_logprob": -0.2868,
+      "chars": 5
+     },
+     {
+      "start": 28.0,
+      "end": 30.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 30.0,
+      "end": 32.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 32.0,
+      "end": 34.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 34.0,
+      "end": 36.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 36.0,
+      "end": 38.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 38.0,
+      "end": 40.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 40.0,
+      "end": 42.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 42.0,
+      "end": 44.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 44.0,
+      "end": 46.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 46.0,
+      "end": 48.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 48.0,
+      "end": 50.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 50.0,
+      "end": 52.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 52.0,
+      "end": 54.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     },
+     {
+      "start": 54.0,
+      "end": 56.0,
+      "no_speech_prob": 0.3623,
+      "avg_logprob": -0.1123,
+      "chars": 5
+     }
+    ]
+   ]
+  },
+  "3": {
+   "expect": "hallucinated",
+   "rms_db": -56.3,
+   "trials": [
+    [
+     {
+      "start": 0.0,
+      "end": 10.0,
+      "no_speech_prob": 0.825,
+      "avg_logprob": -0.8213,
+      "chars": 22
+     },
+     {
+      "start": 10.0,
+      "end": 20.0,
+      "no_speech_prob": 0.825,
+      "avg_logprob": -0.8213,
+      "chars": 20
+     },
+     {
+      "start": 20.0,
+      "end": 30.0,
+      "no_speech_prob": 0.4059,
+      "avg_logprob": -0.1385,
+      "chars": 20
+     },
+     {
+      "start": 30.0,
+      "end": 40.0,
+      "no_speech_prob": 0.4059,
+      "avg_logprob": -0.1385,
+      "chars": 20
+     }
+    ],
+    [
+     {
+      "start": 30.0,
+      "end": 40.0,
+      "no_speech_prob": 0.5974,
+      "avg_logprob": -0.973,
+      "chars": 23
+     }
+    ],
+    [
+     {
+      "start": 30.0,
+      "end": 40.0,
+      "no_speech_prob": 0.5974,
+      "avg_logprob": -0.973,
+      "chars": 23
+     }
+    ],
+    [
+     {
+      "start": 30.0,
+      "end": 40.0,
+      "no_speech_prob": 0.5974,
+      "avg_logprob": -0.973,
+      "chars": 23
+     }
+    ]
+   ]
+  },
+  "4": {
+   "expect": "speech",
+   "rms_db": -36.4,
+   "trials": [
+    [
+     {
+      "start": 0.0,
+      "end": 17.28,
+      "no_speech_prob": 0.0151,
+      "avg_logprob": -0.4628,
+      "chars": 62
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 17.28,
+      "no_speech_prob": 0.0151,
+      "avg_logprob": -0.4628,
+      "chars": 62
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 17.28,
+      "no_speech_prob": 0.0151,
+      "avg_logprob": -0.4628,
+      "chars": 62
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 17.28,
+      "no_speech_prob": 0.0151,
+      "avg_logprob": -0.4628,
+      "chars": 62
+     }
+    ]
+   ]
+  },
+  "5": {
+   "expect": "hallucinated",
+   "rms_db": -39.0,
+   "trials": [
+    [
+     {
+      "start": 0.0,
+      "end": 10.0,
+      "no_speech_prob": 0.5961,
+      "avg_logprob": -2.7693,
+      "chars": 141
+     },
+     {
+      "start": 30.0,
+      "end": 35.0,
+      "no_speech_prob": 0.6631,
+      "avg_logprob": -0.6739,
+      "chars": 23
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 7.82,
+      "no_speech_prob": 0.5961,
+      "avg_logprob": -4.3459,
+      "chars": 11
+     },
+     {
+      "start": 7.82,
+      "end": 12.64,
+      "no_speech_prob": 0.5961,
+      "avg_logprob": -4.3459,
+      "chars": 13
+     },
+     {
+      "start": 13.08,
+      "end": 21.68,
+      "no_speech_prob": 0.5961,
+      "avg_logprob": -4.3459,
+      "chars": 13
+     },
+     {
+      "start": 21.68,
+      "end": 32.48,
+      "no_speech_prob": 0.3471,
+      "avg_logprob": -0.9866,
+      "chars": 31
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 14.88,
+      "no_speech_prob": 0.5961,
+      "avg_logprob": -3.0221,
+      "chars": 16
+     },
+     {
+      "start": 15.2,
+      "end": 22.88,
+      "no_speech_prob": 0.5961,
+      "avg_logprob": -3.0221,
+      "chars": 17
+     },
+     {
+      "start": 23.04,
+      "end": 28.88,
+      "no_speech_prob": 0.452,
+      "avg_logprob": -1.4903,
+      "chars": 18
+     },
+     {
+      "start": 30.88,
+      "end": 34.88,
+      "no_speech_prob": 0.452,
+      "avg_logprob": -1.4903,
+      "chars": 63
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 5.82,
+      "no_speech_prob": 0.5961,
+      "avg_logprob": -2.8535,
+      "chars": 9
+     },
+     {
+      "start": 30.0,
+      "end": 34.0,
+      "no_speech_prob": 0.7728,
+      "avg_logprob": -0.4664,
+      "chars": 23
+     }
+    ]
+   ]
+  },
+  "6": {
+   "expect": "speech",
+   "rms_db": -36.7,
+   "trials": [
+    [
+     {
+      "start": 0.0,
+      "end": 0.84,
+      "no_speech_prob": 0.6294,
+      "avg_logprob": -0.9147,
+      "chars": 3
+     },
+     {
+      "start": 30.0,
+      "end": 39.92,
+      "no_speech_prob": 0.119,
+      "avg_logprob": -0.5605,
+      "chars": 85
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 0.84,
+      "no_speech_prob": 0.6294,
+      "avg_logprob": -0.9147,
+      "chars": 3
+     },
+     {
+      "start": 30.0,
+      "end": 39.92,
+      "no_speech_prob": 0.119,
+      "avg_logprob": -0.5605,
+      "chars": 85
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 0.84,
+      "no_speech_prob": 0.626,
+      "avg_logprob": -0.9144,
+      "chars": 3
+     },
+     {
+      "start": 30.0,
+      "end": 39.92,
+      "no_speech_prob": 0.119,
+      "avg_logprob": -0.5618,
+      "chars": 85
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 0.84,
+      "no_speech_prob": 0.6294,
+      "avg_logprob": -0.9147,
+      "chars": 3
+     },
+     {
+      "start": 30.0,
+      "end": 39.92,
+      "no_speech_prob": 0.119,
+      "avg_logprob": -0.5605,
+      "chars": 85
+     }
+    ]
+   ]
+  },
+  "7": {
+   "expect": "speech",
+   "rms_db": -33.0,
+   "trials": [
+    [
+     {
+      "start": 0.0,
+      "end": 4.0,
+      "no_speech_prob": 0.0095,
+      "avg_logprob": -0.3999,
+      "chars": 69
+     },
+     {
+      "start": 16.8,
+      "end": 21.12,
+      "no_speech_prob": 0.0095,
+      "avg_logprob": -0.3999,
+      "chars": 96
+     },
+     {
+      "start": 30.0,
+      "end": 32.0,
+      "no_speech_prob": 0.0035,
+      "avg_logprob": -0.5784,
+      "chars": 20
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 4.0,
+      "no_speech_prob": 0.0095,
+      "avg_logprob": -0.3999,
+      "chars": 69
+     },
+     {
+      "start": 16.8,
+      "end": 21.12,
+      "no_speech_prob": 0.0095,
+      "avg_logprob": -0.3999,
+      "chars": 96
+     },
+     {
+      "start": 30.0,
+      "end": 32.0,
+      "no_speech_prob": 0.0035,
+      "avg_logprob": -0.5784,
+      "chars": 20
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 4.0,
+      "no_speech_prob": 0.0095,
+      "avg_logprob": -0.3999,
+      "chars": 69
+     },
+     {
+      "start": 16.8,
+      "end": 21.12,
+      "no_speech_prob": 0.0095,
+      "avg_logprob": -0.3999,
+      "chars": 96
+     },
+     {
+      "start": 30.0,
+      "end": 32.0,
+      "no_speech_prob": 0.0035,
+      "avg_logprob": -0.5784,
+      "chars": 20
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 4.0,
+      "no_speech_prob": 0.0095,
+      "avg_logprob": -0.3995,
+      "chars": 69
+     },
+     {
+      "start": 16.8,
+      "end": 21.12,
+      "no_speech_prob": 0.0095,
+      "avg_logprob": -0.3995,
+      "chars": 96
+     },
+     {
+      "start": 30.0,
+      "end": 32.0,
+      "no_speech_prob": 0.0035,
+      "avg_logprob": -0.5773,
+      "chars": 20
+     }
+    ]
+   ]
+  },
+  "8": {
+   "expect": "speech",
+   "rms_db": -33.9,
+   "trials": [
+    [
+     {
+      "start": 0.0,
+      "end": 29.96,
+      "no_speech_prob": 0.6999,
+      "avg_logprob": -0.4438,
+      "chars": 53
+     },
+     {
+      "start": 30.0,
+      "end": 35.0,
+      "no_speech_prob": 0.3703,
+      "avg_logprob": -0.5683,
+      "chars": 55
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 29.96,
+      "no_speech_prob": 0.6999,
+      "avg_logprob": -0.4438,
+      "chars": 53
+     },
+     {
+      "start": 30.0,
+      "end": 35.0,
+      "no_speech_prob": 0.3703,
+      "avg_logprob": -0.5683,
+      "chars": 55
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 29.96,
+      "no_speech_prob": 0.6999,
+      "avg_logprob": -0.4438,
+      "chars": 53
+     },
+     {
+      "start": 30.0,
+      "end": 35.0,
+      "no_speech_prob": 0.3703,
+      "avg_logprob": -0.5683,
+      "chars": 55
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 29.96,
+      "no_speech_prob": 0.6999,
+      "avg_logprob": -0.4438,
+      "chars": 53
+     },
+     {
+      "start": 30.0,
+      "end": 35.0,
+      "no_speech_prob": 0.3703,
+      "avg_logprob": -0.5683,
+      "chars": 55
+     }
+    ]
+   ]
+  },
+  "9": {
+   "expect": "hallucinated",
+   "rms_db": -51.3,
+   "trials": [
+    [
+     {
+      "start": 0.0,
+      "end": 14.0,
+      "no_speech_prob": 0.5789,
+      "avg_logprob": -3.054,
+      "chars": 4
+     },
+     {
+      "start": 14.0,
+      "end": 28.8,
+      "no_speech_prob": 0.5789,
+      "avg_logprob": -3.054,
+      "chars": 4
+     },
+     {
+      "start": 29.8,
+      "end": 30.8,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 7
+     },
+     {
+      "start": 30.84,
+      "end": 31.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 4
+     },
+     {
+      "start": 31.84,
+      "end": 32.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 2
+     },
+     {
+      "start": 32.84,
+      "end": 34.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 1
+     },
+     {
+      "start": 34.84,
+      "end": 35.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 2
+     },
+     {
+      "start": 36.84,
+      "end": 37.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 3
+     },
+     {
+      "start": 37.84,
+      "end": 38.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 2
+     },
+     {
+      "start": 38.84,
+      "end": 39.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 3
+     },
+     {
+      "start": 39.84,
+      "end": 40.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 2
+     },
+     {
+      "start": 40.84,
+      "end": 41.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 2
+     },
+     {
+      "start": 41.84,
+      "end": 42.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 4
+     },
+     {
+      "start": 42.84,
+      "end": 43.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 4
+     },
+     {
+      "start": 43.84,
+      "end": 44.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 4
+     },
+     {
+      "start": 44.84,
+      "end": 45.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 4
+     },
+     {
+      "start": 45.84,
+      "end": 46.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 4
+     },
+     {
+      "start": 46.84,
+      "end": 47.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 2
+     },
+     {
+      "start": 47.84,
+      "end": 48.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 3
+     },
+     {
+      "start": 48.84,
+      "end": 49.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 2
+     },
+     {
+      "start": 49.84,
+      "end": 50.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 3
+     },
+     {
+      "start": 50.84,
+      "end": 51.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 6
+     },
+     {
+      "start": 51.84,
+      "end": 52.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 3
+     },
+     {
+      "start": 52.84,
+      "end": 53.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 4
+     },
+     {
+      "start": 53.84,
+      "end": 54.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 4
+     },
+     {
+      "start": 54.84,
+      "end": 55.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 3
+     },
+     {
+      "start": 55.84,
+      "end": 56.84,
+      "no_speech_prob": 0.3943,
+      "avg_logprob": -2.0995,
+      "chars": 4
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 16.0,
+      "no_speech_prob": 0.5827,
+      "avg_logprob": -3.2091,
+      "chars": 17
+     },
+     {
+      "start": 16.0,
+      "end": 40.0,
+      "no_speech_prob": 0.346,
+      "avg_logprob": -0.4724,
+      "chars": 17
+     }
+    ],
+    [
+     {
+      "start": 0.0,
+      "end": 4.96,
+      "no_speech_prob": 0.5789,
+      "avg_logprob": -3.5054,
+      "chars": 21
+     },
+     {
+      "start": 7.52,
+      "end": 11.02,
+      "no_speech_prob": 0.5789,
+      "avg_logprob": -3.5054,
+      "chars": 28
+     },
+     {
+      "start": 12.12,
+      "end": 13.22,
+      "no_speech_prob": 0.5789,
+      "avg_logprob": -3.5054,
+      "chars": 4
+     },
+     {
+      "start": 13.78,
+      "end": 15.72,
+      "no_speech_prob": 0.5789,
+      "avg_logprob": -3.5054,
+      "chars": 32
+     },
+     {
+      "start": 15.72,
+      "end": 16.98,
+      "no_speech_prob": 0.5789,
+      "avg_logprob": -3.5054,
+      "chars": 17
+     },
+     {
+      "start": 16.98,
+      "end": 18.18,
+      "no_speech_prob": 0.5789,
+      "avg_logprob": -3.5054,
+      "chars": 11
+     },
+     {
+      "start": 18.18,
+      "end": 19.12,
+      "no_speech_prob": 0.5789,
+      "avg_logprob": -3.5054,
+      "chars": 20
+     },
+     {
+      "start": 19.12,
+      "end": 20.18,
+      "no_speech_prob": 0.5789,
+      "avg_logprob": -3.5054,
+      "chars": 17
+     },
+     {
+      "start": 20.18,
+      "end": 21.26,
+      "no_speech_prob": 0.5789,
+      "avg_logprob": -3.5054,
+      "chars": 9
+     },
+     {
+      "start": 21.26,
+      "end": 22.26,
+      "no_speech_prob": 0.5789,
+      "avg_logprob": -3.5054,
+      "chars": 9
+     },
+     {
+      "start": 22.26,
+      "end": 24.46,
+      "no_speech_prob": 0.5789,
+      "avg_logprob": -3.5054,
+      "chars": 18
+     }
+    ],
+    [
+     {
+      "start": 0.1,
+      "end": 14.1,
+      "no_speech_prob": 0.5789,
+      "avg_logprob": -3.2667,
+      "chars": 54
+     },
+     {
+      "start": 14.1,
+      "end": 40.1,
+      "no_speech_prob": 0.0026,
+      "avg_logprob": -0.8407,
+      "chars": 51
+     }
+    ]
+   ]
+  }
+ }
+}

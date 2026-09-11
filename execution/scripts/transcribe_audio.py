@@ -112,6 +112,7 @@ def transcribe_with_retry(
     model: str = "whisper-1",
     language: str | None = None,
     verbose: bool = False,
+    response_format: str | None = None,
 ):
     """
     Transcribe audio with retry logic for rate limit errors.
@@ -122,6 +123,9 @@ def transcribe_with_retry(
         model: Whisper model to use
         language: Language code (None for auto-detect)
         verbose: Print retry messages
+        response_format: Whisper response format. ``"verbose_json"`` adds the
+            per-segment ``no_speech_prob`` / ``avg_logprob`` the live tailer's
+            hallucination gate needs. ``None`` keeps the SDK default.
 
     Returns:
         Transcription result
@@ -180,9 +184,14 @@ def transcribe_with_retry(
                 file_obj = audio_file
                 _mp4_tmp = None
 
-            transcript = client.audio.transcriptions.create(
-                model=model, file=file_obj, language=language
-            )
+            create_kwargs = {
+                "model": model,
+                "file": file_obj,
+                "language": language,
+            }
+            if response_format:
+                create_kwargs["response_format"] = response_format
+            transcript = client.audio.transcriptions.create(**create_kwargs)
 
             # Close file if we opened it
             if file_opened_here and raw_fh:
@@ -1602,11 +1611,40 @@ def transcribe_two_files(
     return result
 
 
+def whisper_segments(transcript) -> list[dict]:
+    """Normalize a Whisper ``verbose_json`` response into plain segment dicts.
+
+    Keeps only the fields the live tailer's hallucination gate consumes, so the
+    caller never has to carry an SDK object across a process boundary. Returns
+    ``[]`` when the response carries no segments (e.g. a non-verbose format, or
+    a slice Whisper transcribed to nothing).
+    """
+    segments = getattr(transcript, "segments", None) or []
+    out = []
+    for seg in segments:
+        def _get(name, default=None):
+            if isinstance(seg, dict):
+                return seg.get(name, default)
+            return getattr(seg, name, default)
+
+        out.append(
+            {
+                "start": float(_get("start", 0.0) or 0.0),
+                "end": float(_get("end", 0.0) or 0.0),
+                "text": _get("text", "") or "",
+                "no_speech_prob": float(_get("no_speech_prob", 0.0) or 0.0),
+                "avg_logprob": float(_get("avg_logprob", 0.0) or 0.0),
+            }
+        )
+    return out
+
+
 def transcribe_audio_file(
     audio_path: Path,
     language: str | None = None,
     verbose: bool = False,
     use_diarization: bool | None = None,
+    want_segments: bool = False,
 ) -> dict:
     """
     Transcribe an audio file using ElevenLabs (diarization / multichannel) when
@@ -1618,6 +1656,10 @@ def transcribe_audio_file(
         use_diarization: If True, use ElevenLabs when key is set. If False, Whisper only.
             If None (default), use ElevenLabs when ELEVENLABS_API_KEY is set and
             RECORD_MEETING_DIARIZE is not ``0``.
+        want_segments: Request Whisper's ``verbose_json`` so the result carries a
+            ``segments`` list with per-segment ``no_speech_prob`` / ``avg_logprob``.
+            Only honoured on the single-file (unchunked) Whisper path — the live
+            tailer's slices are always well under the chunking limit.
 
     Returns:
         Dictionary with transcription results including text and metadata
@@ -1657,6 +1699,10 @@ def transcribe_audio_file(
     # Handle chunking for large files
     chunk_files = []
     chunk_temp_dir = None
+    # Only the single-file Whisper path fills this; every other path leaves it
+    # empty, and an empty segment list means "no confidence signal available"
+    # to the caller rather than "silence".
+    transcript_segments: list[dict] = []
 
     try:
         if use_diarization and os.environ.get("ELEVENLABS_API_KEY", "").strip():
@@ -1776,6 +1822,7 @@ def transcribe_audio_file(
                         model="whisper-1",
                         language=language,  # None for auto-detect
                         verbose=verbose,
+                        response_format="verbose_json" if want_segments else None,
                     )
                     if verbose:
                         print(
@@ -1788,6 +1835,8 @@ def transcribe_audio_file(
                         if hasattr(transcript, "language")
                         else language or "auto"
                     )
+                    if want_segments:
+                        transcript_segments = whisper_segments(transcript)
 
                 except Exception as e:
                     error_str = str(e).lower()
@@ -1838,6 +1887,7 @@ def transcribe_audio_file(
             "language": transcript_language,
             "audio_duration_seconds": audio_duration,
             "file_size_bytes": file_size,
+            "segments": transcript_segments,
         }
 
     finally:
@@ -2549,6 +2599,15 @@ def main():
         "Used by realtime chunk transcription.",
     )
     parser.add_argument(
+        "--segments-json",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Request Whisper's verbose_json and write per-segment "
+        "no_speech_prob / avg_logprob to PATH as JSON. Consumed by the live "
+        "tailer's hallucination gate; stdout still carries only the text.",
+    )
+    parser.add_argument(
         "--original-source-file",
         type=str,
         default=None,
@@ -2617,6 +2676,7 @@ def main():
                 audio_path,
                 language=args.language,
                 use_diarization=use_diarization,
+                want_segments=bool(args.segments_json),
             )
 
         # Always drop sidecars next to the audio: a .txt of the merged transcript
@@ -2624,6 +2684,20 @@ def main():
         # idempotency key) and the raw ElevenLabs JSON (so the dialogue can be
         # re-merged with different segmentation without re-billing the API).
         _write_transcript_sidecars(audio_path, transcription_result, verbose=True)
+
+        if args.segments_json:
+            # Written to a caller-named path rather than stdout: stdout carries
+            # the transcript text, and the live tailer parses that contract.
+            Path(args.segments_json).write_text(
+                json.dumps(
+                    {
+                        "language": transcription_result.get("language"),
+                        "segments": transcription_result.get("segments") or [],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
 
         if args.no_store:
             text = (transcription_result.get("transcription_text") or "").strip()
