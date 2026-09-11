@@ -5,7 +5,7 @@
 
 Which rules a lens reviewing for one kind of failure should select, by the conformance class the matrix assigns each row (`conformance_suite.md#how-the-suite-judges-and-what-a-row-is`). This is an index of row ids and the file each is projected into — the statements themselves are in those files and are not repeated here, so there is one copy of every rule in this directory.
 
-## Class M — 361 rules
+## Class M — 362 rules
 
 - [`adapters.md`](adapters.md) — AD-1, AD-2, AD-3, AD-4, AD-5, AD-6, AD-7, AD-8, AD-8a, AD-9, AD-10, AD-11, AD-12, AD-13, AD-14, AD-15, AD-16, AD-17, AD-18, AD-19, AD-20, AD-21, AD-22, AD-23, AD-24, AD-25, AD-26, AD-27, AD-28, AD-29, AD-30, AD-31, AD-32, AD-33, AD-34, AD-36, AD-37, AD-38, AD-39, AD-40, AD-41
 
@@ -21,7 +21,7 @@ Which rules a lens reviewing for one kind of failure should select, by the confo
 
 - [`gates_and_workflows.md`](gates_and_workflows.md) — GW-1, GW-2, GW-3, GW-3a, GW-4, GW-5, GW-6, GW-7, GW-8, GW-9, GW-10, GW-11, GW-12, GW-13, GW-14, GW-15, GW-16, GW-17, GW-18, GW-19, GW-20, GW-21, GW-22, GW-23, GW-24, GW-25, GW-25a, GW-26, GW-27, GW-28, GW-29, GW-29a, GW-30, GW-31, GW-32, GW-33, GW-33a, GW-34, GW-35, GW-36, GW-37, GW-38, GW-39, GW-40, GW-41, GW-42, GW-43, GW-44, GW-45, GW-46, GW-47, GW-48, GW-49, GW-52, GW-53, GW-54, DM-28
 
-- [`github.md`](github.md) — GH-1, GH-2, GH-3, GH-4, GH-5, GH-6, GH-7, GH-8, GH-9, GH-10, GH-11, GH-12, GH-13, GH-14, GH-15, GH-16, GH-17, GH-18
+- [`github.md`](github.md) — GH-1, GH-2, GH-3, GH-4, GH-5, GH-6, GH-7, GH-8, GH-9, GH-10, GH-11, GH-12, GH-13, GH-14, GH-15, GH-16, GH-16a, GH-17, GH-18
 
 - [`gmail.md`](gmail.md) — GM-1, GM-2, GM-3, GM-4, GM-5, GM-6, GM-7, GM-8, GM-9, GM-10, GM-11
 

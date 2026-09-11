@@ -1576,6 +1576,47 @@ flowchart TD
 The halt is not on this diagram and is not a checkpoint: a checkpoint is written to the record, and the
 halt is the state in which nothing can be (`failure_posture.md#what-a-checkpoint-does-not-absorb`).
 
+## What a verdict on an issue is pinned to
+
+**Open.** Registered in `conformance.md#the-register-of-open-design-decisions` as decision 106.
+
+`data_model.md#record-conventions` rules that a verdict is pinned to the artifact state it judged, so a
+conclusion against a superseded state is readable as one rather than being indistinguishable from a live
+conclusion. That list of pinned-state kinds is closed, and an issue body is not among them.
+
+So a conclusion on an issue records what a principal concluded and never what it read. A conclusion and a
+later rewrite of the body are two facts in the record with no relation between them, and no reader can tell
+whether the second invalidates the first.
+
+The two directions are not symmetric, which is why this is a design question rather than a defect to repair
+once. A conclusion that **holds** work is recoverable: the work does not proceed, and a principal
+eventually asks why. A conclusion that **permits** work is not, because nothing waits — the work proceeds
+on a body nobody judged, and nothing prompts a reader to look.
+
+Bounded by invariant 1, since a pin nothing reads is not a control, so a candidate must say what refuses
+when the states diverge; by principle 2, whose read-back makes a pinned state evidence rather than a claim;
+and by invariant 9, since a derived staleness read must not become a second home for what the artifact's
+own observations already carry.
+
+**Candidates.** *The body as read*, on the `artifact_refs[]` pattern the code artifact already uses. *A
+derived staleness read* over the artifact's own observations, carrying no pin of its own. Or *the design
+ruling an issue's conclusion unpinned*, because a body is not evidence in the way a head is. The third
+satisfies the bounds only if it also says what a reader does when the body has moved, since leaving that
+silent is the permitting case above.
+
+**The two directions, each as a case.** A conclusion that holds: a review step concludes blocking on a body stating
+one requirement; the body is rewritten to state another; the work stays stopped and the step owner is asked
+why, so the divergence surfaces through the person waiting on it. A conclusion that permits: a review step
+signs on a body stating one scope; the body is rewritten to state a wider one; the batch proceeds, the
+merge takes, and nothing in the record distinguishes that from a conclusion on the body as merged. The
+second is the case a candidate is judged on.
+
+**What a reader is told when they diverge** — placeholders, since the copy is the operator-facing agent's
+to write: `[COPY: the state this conclusion was pinned to]`, `[COPY: the state the artifact carries now]`,
+and `[COPY: the act that resolves it — re-conclude on the current state, or reopen the step]`. A bare
+staleness marker with neither state named satisfies invariant 1 and fails the reader, which is why the
+placeholders name three things rather than one.
+
 ## Contradictions this document settles
 
 **C3.** Four copies of the step set → one home, parity where a copy is unavoidable. **C5.** The gate-state

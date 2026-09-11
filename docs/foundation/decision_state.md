@@ -22,18 +22,10 @@ The **Subject** column is a label of a few words, never a substitute for the row
 
 ## What this run found
 
-- **1** row(s) **ruled but not merged** — the corpus on `origin/main` reads open where a ruling exists on a branch.
-- **8** row(s) genuinely open — no ruling anywhere scanned.
-- **81** row(s) ruled and merged.
-- **89** row(s) whose implemented axis is `unknown`.
-
-### Ruled but not merged
-
-Each of these reads **open** to anything reading the corpus. The ruling is on the branch named.
-
-| # | Subject | Ruling lives on | Blocks |
-|---|---|---|---|
-| 101 | what fields the credential-binding edge carries, and what resolving a credential to … | `origin/claude/foundation-decision-101-credential-binding` | stage 1 of the migration, which registers `principal_binding` among thirteen relationship types and cannot … |
+- **0** row(s) **ruled but not merged** — the corpus on `origin/main` reads open where a ruling exists on a branch.
+- **11** row(s) genuinely open — no ruling anywhere scanned.
+- **82** row(s) ruled and merged.
+- **92** row(s) whose implemented axis is `unknown`.
 
 ## The register on three axes
 
@@ -128,11 +120,14 @@ Each of these reads **open** to anything reading the corpus. The ruling is on th
 | 98 | whether an instance's planning records are per instance — each instance of … | yes | yes | unknown | — | decision 91, whose controlling instance is the candidate home for any swarm-level planning; decision … |
 | 99 | whether a swarm configured with several instances of the record has planning … | no | no | unknown | — | decision 91, which supplies a controlling instance as a candidate home without supplying a … |
 | 100 | whether a newly declared workflow is proven before it binds production work, … | yes | yes | unknown | — | nothing in the design; and `migration.md#ordering-and-the-cutover-for-the-skills`, whose claim that its cutover batch is the … |
-| 101 | what fields the credential-binding edge carries, and what resolving a credential to … | yes | no | unknown | `origin/claude/foundation-decision-101-credential-binding` | stage 1 of the migration, which registers `principal_binding` among thirteen relationship types and cannot … |
+| 101 | what fields the credential-binding edge carries, and what resolving a credential to … | yes | yes | unknown | — | stage 1 of the migration, which registers `principal_binding` among thirteen relationship types and cannot … |
 | 102 | whether acyclicity is a property of a relationship type or of the … | no | no | unknown | — | stage 1 of the migration, since a check applied without regard to type governs … |
 | 103 | whether a step's declaration is a floor or a ceiling, and whether … | no | no | unknown | — | decision 41 and decision 94, which rule admission per entity type per principal, default-deny, … |
 | 104 | what a reader of adapter-sourced state in the record may rely on … | no | no | unknown | — | nothing in the design; and the placement of a claim `calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of` already makes in … |
 | 105 | where a credential comes from before the custody rules reach it, and … | no | no | unknown | — | decision 90, which already makes the target host and the record instance parameters of … |
+| 107 | what a principal's **acts-as** `principal_binding` carries, and whether that edge is presented … | no | no | unknown | — | nothing blocks it: stage 1 registers the edge type and its four fields, not … |
+| 108 | whether an `agent` may hold an **acts-as** `principal_binding` to another `agent` — … | no | no | unknown | — | decision 48, whose counting rule reads this edge and reasons about interests without stating … |
+| 109 | whether an `operator` may hold an **acts-as** `principal_binding` — the corpus says … | no | no | unknown | — | decision 48's counting rule, which would read such an edge and count two operators … |
 
 ## What was read
 

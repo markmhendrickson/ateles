@@ -5,7 +5,7 @@
 
 Every rule `github.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`github.md`](../github.md) and are not repeated here (decision 66).
 
-18 rules.
+19 rules.
 
 ## [Reviews, review comments, and threads](../github.md#reviews-review-comments-and-threads)
 
@@ -20,6 +20,7 @@ Every rule `github.md` owns, one entry each: the rule's own statement from `conf
 ## [Issues](../github.md#issues)
 
 - **GH-5** — [`github.md#pull-requests`](../github.md#pull-requests): a label is never step state *[M]*
+- **GH-16a** — "What a verdict pins": a permitting conclusion on an issue, followed by `issues.edited` rewriting the body, must not be readable as a live conclusion with no stale or refuse signal — the stale-**permit** shape (decision 106), distinct from the stale-**hold** shape GH-7 covers at the pull request *[M — **red today**: decision 106 is open and `github.md#issues` states no ruled pin for kind `issue` to compare against, so no derived read exists yet; the row stays red until decision 106 is ruled and a pin (or its dissolve-and-state-under-linkage) lands, at which point this row is the effect check for whichever candidate is chosen]*
 
 ## [The transitions the mining found unhandled](../github.md#the-transitions-the-mining-found-unhandled)
 
