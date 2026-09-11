@@ -124,6 +124,36 @@ terminal status and the edge to the task it duplicates (`workflows.md#intake`). 
 as the record's conclusion would let an external actor close a task by closing an issue, which the second
 invariant forbids.
 
+**What a verdict pins.** `data_model.md#record-conventions` closes the list of pinned-state kinds without
+naming `issue`, and `gates_and_workflows.md#what-a-verdict-on-an-issue-is-pinned-to` registers that gap as
+decision 106, **open**. Until it is ruled, a conclusion on an issue records what a principal concluded and
+never what it read, so a conclusion and a later `issues.edited` rewrite of the body are two facts in the
+record with no relation between them — the row above already writes the rewrite as an observation, and
+nothing today compares it to any conclusion that preceded it. This is not silent for want of a mechanism:
+it is silent because the design has not yet named which state a verdict on an issue pins, the same way it
+names the head for a code artifact or the message for mail. Treating `signed_off` (or any conclusion) on an
+issue as live across a body rewrite is exactly the reading decision 106 exists to close, not a default this
+document endorses in its absence. Two candidates are open at decision 106: the body as read, on the
+`artifact_refs[]` pattern the code artifact below already uses; and a derived staleness read comparing the
+conclusion against this table's `issues.edited` observations, carrying no pin of its own. A third —
+declining to pin an issue's conclusion at all — is named at decision 106 and fails there on UX grounds
+unless it also says what a reader does when the body has moved, since leaving that silent is the stale
+conclusion this section describes. Decision 106 also states the two directions, each as a case — a stale
+**hold** against a stale **permit** — and the refuse-message shape a reader is shown on divergence; both
+are argued there rather than duplicated here. **Host `issues.pinned`, in the table above, is a different thing
+entirely** — it orders the host's own issue list and is dropped as `presentation_only`; it is never the
+pinned state this subsection or decision 106 means.
+
+**`pull_request` is also unstated at this exact heading, but not ungoverned.** The pull requests section
+below states the same rule inline, under *pinned-head* — `pull_request.synchronize` is an observation on
+`head`, open verdicts are unaffected, and *The transitions the mining found unhandled* states in full that a
+force-update leaves every verdict whose `artifact_refs[]` pinned the old head readable as stale by a derived
+read. That is `data_model.md`'s `head` kind applied to this system, already closed by the record's own list,
+so `pull_request` owes no new decision the way `issue` does — only a heading. Nothing below is currently
+titled **What a verdict pins** for `pull_request`; it is written as prose under *pinned-head* and *The
+transitions the mining found unhandled* instead, and a future edit collecting it under that heading would
+rename nothing it argues.
+
 ## Pull requests
 
 The `pull_request` event carries twenty-three actions. The pull request is an artifact of kind

@@ -20,6 +20,7 @@ Every rule `github.md` owns, one entry each: the rule's own statement from `conf
 ## [Issues](../github.md#issues)
 
 - **GH-5** — [`github.md#pull-requests`](../github.md#pull-requests): a label is never step state *[M]*
+- **GH-16a** — "What a verdict pins": a permitting conclusion on an issue, followed by `issues.edited` rewriting the body, must not be readable as a live conclusion with no stale or refuse signal — the stale-**permit** shape (decision 106), distinct from the stale-**hold** shape GH-7 covers at the pull request *[M — **red today**: decision 106 is open and `github.md#issues` states no ruled pin for kind `issue` to compare against, so no derived read exists yet; the row stays red until decision 106 is ruled and a pin (or its dissolve-and-state-under-linkage) lands, at which point this row is the effect check for whichever candidate is chosen]*
 
 ## [The transitions the mining found unhandled](../github.md#the-transitions-the-mining-found-unhandled)
 
@@ -52,10 +53,6 @@ Every rule `github.md` owns, one entry each: the rule's own statement from `conf
 ## [The property that makes this a control and not a list](../github.md#the-property-that-makes-this-a-control-and-not-a-list)
 
 - **GH-16** — [`github.md#what-the-outcomes-are-and-the-rule-against-a-fifth`](../github.md#what-the-outcomes-are-and-the-rule-against-a-fifth): an event outside the tables is `dropped` with reason `unmapped` and counted; no fifth outcome; an event that invalidates a decision is an observation, and the pinned verdict reads stale *[M (AD-21 and GH-7 at this host; kept because the document states it as its own control)]*
-
-## [Releases and tags](../github.md#releases-and-tags)
-
-- **GH-17** — `release.published` confirms the `release`-class action and `verify_deployed` still reads the deployed checkout; `release.deleted` and `release.unpublished` are observations and never a recovery having happened; a tag deletion is half a `retag_release` confirmation *[M]*
 
 ## [Everything else the host can deliver](../github.md#everything-else-the-host-can-deliver)
 
