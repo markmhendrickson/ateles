@@ -53,15 +53,44 @@ DATA_MODEL_NO_EXPIRY = """\
 """
 
 
+AUTHORITY_RULED = f"""\
+# Authority model
+
+{decision_101.AUTHORITY_HEADING}
+
+**Ruled** (decision 101, 2026-09-10): **`principal_binding` carries `credential_kind`,
+`credential_value`, `credential_issuer`, and `expires_at`.**
+"""
+
+AUTHORITY_OPEN = f"""\
+# Authority model
+
+{decision_101.AUTHORITY_HEADING}
+
+**Open.** What the credential binding carries is not yet settled.
+"""
+
+AUTHORITY_NO_HEADING = """\
+# Authority model
+
+### Some other section that is not the decision-101 ruling
+
+**Ruled** (decision 101, 2026-09-10): text under the wrong heading.
+"""
+
+
 def write_corpus(
     root: Path,
     conformance: str = CONFORMANCE,
     data_model: str = DATA_MODEL_OK,
+    authority_model: str | None = AUTHORITY_RULED,
 ) -> None:
     fdir = root / "docs" / "foundation"
     fdir.mkdir(parents=True)
     (fdir / "conformance.md").write_text(conformance, encoding="utf-8")
     (fdir / "data_model.md").write_text(data_model, encoding="utf-8")
+    if authority_model is not None:
+        (fdir / "authority_model.md").write_text(authority_model, encoding="utf-8")
 
 
 def test_passes_when_ruled_and_data_model_row_carries_fields(tmp_path: Path) -> None:
@@ -128,3 +157,46 @@ def test_raises_when_data_model_file_is_absent(tmp_path: Path) -> None:
 
     with pytest.raises(decision_101.CorpusProblem, match="data_model.md"):
         decision_101.check(tmp_path)
+
+
+def test_fails_when_ruling_section_still_open(tmp_path: Path) -> None:
+    write_corpus(tmp_path, authority_model=AUTHORITY_OPEN)
+
+    problems = decision_101.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "decision-101-authority" in problems[0]
+    assert "must open with" in problems[0]
+    assert "**Open.**" in problems[0]
+
+
+def test_fails_when_authority_model_file_is_absent(tmp_path: Path) -> None:
+    write_corpus(tmp_path, authority_model=None)
+
+    problems = decision_101.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "decision-101-authority" in problems[0]
+    assert "missing while register row 101 is **ruled**" in problems[0]
+
+
+def test_fails_when_ruling_heading_is_absent(tmp_path: Path) -> None:
+    write_corpus(tmp_path, authority_model=AUTHORITY_NO_HEADING)
+
+    problems = decision_101.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "decision-101-authority" in problems[0]
+    assert "no section" in problems[0]
+
+
+def test_authority_section_unchecked_when_register_not_ruled(
+    tmp_path: Path,
+) -> None:
+    write_corpus(
+        tmp_path,
+        conformance=CONFORMANCE.replace("**ruled**", "**open**"),
+        authority_model=AUTHORITY_OPEN,
+    )
+
+    assert decision_101.check(tmp_path) == []
