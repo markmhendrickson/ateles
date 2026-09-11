@@ -217,10 +217,12 @@ def test_fails_when_ruling_section_still_open(tmp_path: Path) -> None:
     assert len(opener_problems) == 1
     assert "decision-101-authority" in opener_problems[0]
     assert "**Open.**" in opener_problems[0]
-    # A reverted section states no endpoints either, so those assertions fire
-    # alongside — the ruling being open is exactly when both are true.
-    assert len(problems) == 3
-    assert sum("decision-101-endpoints" in p for p in problems) == 2
+    # A reverted section carries no `**Endpoint / source.**` paragraph either,
+    # so that assertion fires alongside, as one consolidated message — the
+    # ruling being open is exactly when both are true.
+    assert len(problems) == 2
+    assert sum("decision-101-endpoints" in p for p in problems) == 1
+    assert any("no" in p and "Endpoint / source" in p for p in problems)
 
 
 def test_fails_when_authority_model_file_is_absent(tmp_path: Path) -> None:
@@ -271,11 +273,12 @@ def test_fails_when_both_endpoints_are_swapped(tmp_path: Path) -> None:
     assert len(problems) == 2
     assert all("decision-101-endpoints" in p for p in problems)
     assert any(
-        "AAuth credential is stated to resolve to the operator" in p
+        "the AAuth credential's endpoint is stated to resolve to the operator" in p
         for p in problems
     )
     assert any(
-        "acts-as binding is stated to end at the agent" in p for p in problems
+        "the acts-as binding's endpoint is stated to resolve to the agent" in p
+        for p in problems
     )
 
 
@@ -286,7 +289,10 @@ def test_fails_when_only_the_aauth_endpoint_is_swapped(tmp_path: Path) -> None:
 
     assert len(problems) == 1
     assert "decision-101-endpoints" in problems[0]
-    assert "AAuth credential is stated to resolve to the operator" in problems[0]
+    assert (
+        "the AAuth credential's endpoint is stated to resolve to the operator"
+        in problems[0]
+    )
     assert "ends that edge at the **agent**" in problems[0]
 
 
@@ -297,7 +303,10 @@ def test_fails_when_only_the_acts_as_endpoint_is_swapped(tmp_path: Path) -> None
 
     assert len(problems) == 1
     assert "decision-101-endpoints" in problems[0]
-    assert "acts-as binding is stated to end at the agent" in problems[0]
+    assert (
+        "the acts-as binding's endpoint is stated to resolve to the agent"
+        in problems[0]
+    )
     assert "ends that edge at the **operator**" in problems[0]
 
 
@@ -306,16 +315,11 @@ def test_fails_when_the_ruling_states_neither_endpoint(tmp_path: Path) -> None:
 
     problems = decision_101.check(tmp_path)
 
-    assert len(problems) == 2
-    assert any(
-        "does not state that the AAuth credential resolves to the **agent**" in p
-        for p in problems
-    )
-    assert any(
-        "does not state that the acts-as binding's endpoint is the **operator**"
-        in p
-        for p in problems
-    )
+    # No `**Endpoint / source.**` paragraph at all is one root cause, reported
+    # as one consolidated message rather than two independent per-side ones.
+    assert len(problems) == 1
+    assert "decision-101-endpoints" in problems[0]
+    assert "no" in problems[0] and "Endpoint / source" in problems[0]
 
 
 def test_correct_endpoints_in_a_later_section_do_not_excuse_a_swap(
@@ -364,3 +368,129 @@ def test_resolution_language_is_not_satisfied_by_the_word_attribution(
 
     assert len(problems) == 1
     assert "missing kind+value → principal resolution language" in problems[0]
+
+
+# --- Adversarial review findings: contradiction by addition, and markdown --
+#
+# An adversarial review ran six attacks (covered above) that this checker
+# caught, then found two more that it did not: appending a plain-English
+# sentence asserting the opposite endpoint assignment to the same paragraph
+# ("contradiction by addition"), and bold-splitting the words in the
+# canonical sentence so no phrase regex matched it while a redundant, correct
+# mention elsewhere in the (then whole-section) scan kept the check green
+# ("regex evasion by markdown"). Both are regression-tested here against the
+# fix: scoping to the `**Endpoint / source.**` paragraph, normalizing
+# markdown emphasis before matching, and requiring every clause in that
+# paragraph naming a kind to agree on its one expected principal.
+
+AUTHORITY_CONTRADICTION_BY_ADDITION = AUTHORITY_RULED.replace(
+    "operator (decision 48's counting rule).\n",
+    "operator (decision 48's counting rule). Put another way: the credential "
+    "presented over AAuth ultimately identifies the human behind the agent, "
+    "so it is the delegated identity — the agent itself — that the acts-as "
+    "relationship exists to reach.\n",
+)
+
+# `ag**e**nt` / `op**e**rator`: a `*` marker landing inside each word. The
+# canonical sentence no longer matches any rigid whole-phrase regex once
+# split this way; a redundant, untouched, correct mention of "the acts-as
+# kind yields the operator" sits earlier in the real corpus's ruling section
+# (in the "What the acts-as edge carries" paragraph) — reproduced here too,
+# so the fixture matches the shape of the actual attack rather than a
+# simplified one.
+AUTHORITY_MARKDOWN_SPLIT = (
+    AUTHORITY_RULED[: AUTHORITY_RULED.index("**Endpoint / source.**")]
+    + '**What the acts-as edge carries is open.** The resolver sentence below '
+    'treats it as matched from a presentation ("the acts-as kind yields the '
+    "operator\").\n\n"
+    + AUTHORITY_RULED[AUTHORITY_RULED.index("**Endpoint / source.**") :]
+).replace(
+    "the AAuth kind yields the agent (attribution, A-for-B) and the acts-as kind yields the\noperator (decision 48's counting rule).",
+    "the AAuth kind yields the ag**e**nt (attribution, A-for-B) and the acts-as kind yields the\nop**e**rator (decision 48's counting rule).",
+)
+
+
+def test_fails_on_contradiction_by_addition(tmp_path: Path) -> None:
+    """Appending a contradicting sentence to the canonical paragraph must be
+    caught even though it uses no phrase either endpoint regex recognizes —
+    this is what defeated the previous generation of the check."""
+    write_corpus(tmp_path, authority_model=AUTHORITY_CONTRADICTION_BY_ADDITION)
+
+    problems = decision_101.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "decision-101-endpoints" in problems[0]
+    assert "AAuth" in problems[0]
+    assert "inconsistently" in problems[0] or "ambiguous" in problems[0].lower()
+
+
+def test_fails_on_markdown_emphasis_splitting_the_canonical_words(
+    tmp_path: Path,
+) -> None:
+    """Bold-splitting the canonical sentence's words must be caught even with
+    a redundant, correct, untouched mention of the acts-as endpoint earlier
+    in the same ruling section — this is what defeated the previous
+    generation of the check."""
+    assert "ag**e**nt" in AUTHORITY_MARKDOWN_SPLIT
+    assert "op**e**rator" in AUTHORITY_MARKDOWN_SPLIT
+    write_corpus(tmp_path, authority_model=AUTHORITY_MARKDOWN_SPLIT)
+
+    problems = decision_101.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "decision-101-markdown" in problems[0]
+    assert "g**e" in problems[0] or "p**e" in problems[0]
+
+
+# --- Two further attacks against the fixed implementation -------------------
+#
+# Invented while closing the two findings above, to probe the new
+# implementation's own assumptions rather than only the old one's.
+
+AUTHORITY_PARTIAL_SWAP_CONTRADICTS_FRAMING = AUTHORITY_RULED.replace(
+    "operator (decision 48's counting rule).",
+    "agent (decision 48's counting rule).",
+)
+
+
+def test_fails_when_canonical_sentence_contradicts_earlier_correct_framing(
+    tmp_path: Path,
+) -> None:
+    """Swapping only the acts-as clause of the canonical resolver sentence
+    while the paragraph's own earlier framing clause ("...a second edge of
+    this type whose endpoint is the `operator`") still states it correctly
+    must be caught as a contradiction between two clauses in the same
+    paragraph, not silently resolved in either direction."""
+    assert "whose endpoint is the\n`operator`" in AUTHORITY_PARTIAL_SWAP_CONTRADICTS_FRAMING
+    write_corpus(tmp_path, authority_model=AUTHORITY_PARTIAL_SWAP_CONTRADICTS_FRAMING)
+
+    problems = decision_101.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "decision-101-endpoints" in problems[0]
+    assert "acts-as" in problems[0]
+    assert "inconsistently" in problems[0]
+
+
+AUTHORITY_ENDPOINT_LEAD_DROPPED = AUTHORITY_RULED.replace(
+    "**Endpoint / source.** For an AAuth credential",
+    "For an AAuth credential",
+)
+
+
+def test_fails_when_the_endpoint_paragraphs_own_lead_phrase_is_dropped(
+    tmp_path: Path,
+) -> None:
+    """Softening or dropping the `**Endpoint / source.**` bold lead-in, while
+    leaving the paragraph's own (correct) sentences untouched, must not make
+    the check silently stop looking at the paragraph — it is the anchor the
+    whole endpoint assertion depends on, so losing it must fail closed rather
+    than pass by default."""
+    assert "**Endpoint / source.**" not in AUTHORITY_ENDPOINT_LEAD_DROPPED
+    write_corpus(tmp_path, authority_model=AUTHORITY_ENDPOINT_LEAD_DROPPED)
+
+    problems = decision_101.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "decision-101-endpoints" in problems[0]
+    assert "no" in problems[0] and "Endpoint / source" in problems[0]
