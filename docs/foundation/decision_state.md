@@ -23,9 +23,9 @@ The **Subject** column is a label of a few words, never a substitute for the row
 ## What this run found
 
 - **0** row(s) **ruled but not merged** — the corpus on `origin/main` reads open where a ruling exists on a branch.
-- **11** row(s) genuinely open — no ruling anywhere scanned.
+- **12** row(s) genuinely open — no ruling anywhere scanned.
 - **82** row(s) ruled and merged.
-- **92** row(s) whose implemented axis is `unknown`.
+- **93** row(s) whose implemented axis is `unknown`.
 
 ## The register on three axes
 
@@ -125,6 +125,7 @@ The **Subject** column is a label of a few words, never a substitute for the row
 | 103 | whether a step's declaration is a floor or a ceiling, and whether … | no | no | unknown | — | decision 41 and decision 94, which rule admission per entity type per principal, default-deny, … |
 | 104 | what a reader of adapter-sourced state in the record may rely on … | no | no | unknown | — | nothing in the design; and the placement of a claim `calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of` already makes in … |
 | 105 | where a credential comes from before the custody rules reach it, and … | no | no | unknown | — | decision 90, which already makes the target host and the record instance parameters of … |
+| 106 | whether an issue is a pinned-state kind, and what a conclusion on … | no | no | unknown | — | decision 72, which named the record and its `conclusion` field and whose pinning rule … |
 | 107 | what a principal's **acts-as** `principal_binding` carries, and whether that edge is presented … | no | no | unknown | — | nothing blocks it: stage 1 registers the edge type and its four fields, not … |
 | 108 | whether an `agent` may hold an **acts-as** `principal_binding` to another `agent` — … | no | no | unknown | — | decision 48, whose counting rule reads this edge and reasons about interests without stating … |
 | 109 | whether an `operator` may hold an **acts-as** `principal_binding` — the corpus says … | no | no | unknown | — | decision 48's counting rule, which would read such an edge and count two operators … |

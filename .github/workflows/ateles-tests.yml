@@ -25,6 +25,12 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - "scripts/linters/check_agent_roster.py"
+      # ateles#944 (qa lens): the python3 CLI regression eval
+      # (execution/scripts/test_lint_sh_python3_invocations.py) reads
+      # scripts/lint.sh's own text — without this entry, a change to
+      # lint.sh alone (not the test file) would not re-run the lane that
+      # collects that eval.
+      - "scripts/lint.sh"
       - "CLAUDE.md"
       - "scripts/linters/test_claude_verification_discipline.py"
       - "scripts/linters/test_*.py"
@@ -80,7 +86,9 @@ jobs:
         run: uv run --extra dev python -m pytest lib/test_transcript_clarity.py -q
       # ateles#524 (qa lens, PR #527 round 2): execution/scripts/ has its own
       # test_*.py files (SOPS token fallback, Loxia review, agent-doc render,
-      # transcription) but no lane ran them — this closes that gap.
+      # transcription) but no lane ran them — this closes that gap. Also
+      # collects test_lint_sh_python3_invocations.py (ateles#944), the
+      # scripts/lint.sh bare-python regression eval.
       - name: Run execution/scripts tests
         run: uv run --extra dev python -m pytest execution/scripts/ -q
       # ateles#727 / #731 (qa lens): CLAUDE.md Verification discipline effect
