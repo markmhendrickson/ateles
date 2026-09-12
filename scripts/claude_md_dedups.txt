@@ -1,0 +1,27 @@
+# Deliberate same-rule dedups in CLAUDE.md.
+#
+# Format: <dropped lead> => <surviving lead>
+#
+# Each line records a rule NAME that a union merge dropped because both sides
+# stated the same rule and one phrasing was kept. Adding a line here is a
+# claim that a human checked the surviving rule clause by clause and confirmed
+# it carries everything the dropped one did. It is not a way to quiet the
+# check: verify_claude_md_merge.py verifies both sides of the arrow against the
+# merged file, so a stale entry fails the gate rather than excusing it.
+#
+# A rule that is merely SIMILAR does not belong here. `Dispatch, don't work
+# inline` and `Dispatch, don't drift inline` are two rules with different
+# content, and both stay.
+
+# ateles#973 — reconciling the bidirectional CLAUDE.md divergence.
+# main's phrasing yielded to the worktree's stronger form, which names the
+# consent-gate carve-out explicitly and calls the violation by name. Main's
+# unique clause — re-surface an unanswered question each turn rather than
+# dropping it — is appended to the survivor.
+Proceed on your recommendation instead of stopping to ask. => Proceed with your recommendation — don't ask.
+
+# ateles#973 — main's phrasing yielded to the worktree's longer form, which
+# adds the PR_ACTIONS mechanism, the stays-the-operator's bound, and the
+# preference for a reopen over a gate waive. Main's "not mistaken for
+# flapping" clause is present in both.
+Re-request review yourself when monitoring shows it is warranted. => Re-request review yourself whenever monitoring shows it is warranted — do not wait to be asked.
