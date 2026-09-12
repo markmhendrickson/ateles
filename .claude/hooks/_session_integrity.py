@@ -51,10 +51,22 @@ def log(msg: str) -> None:
 
 
 def read_hook_input() -> dict:
-    """Claude Code passes a JSON event object on stdin. Fail-open to {}."""
+    """Claude Code passes a JSON event object on stdin. Fail-open to {}.
+
+    The harness contract is always a JSON object, but `json.loads` will
+    happily parse a top-level array/string/number/null too — every caller
+    immediately does `ev.get(...)`, so a non-dict result must be coerced to
+    `{}` here rather than left to raise `AttributeError` in six different
+    call sites. Found while adding `test_decision_shape_gate.py`: the fix
+    was first patched locally into that one hook's own stdin-parsing inline
+    copy, which is the "extend the mechanism that already generalizes, not a
+    parallel one" mistake CLAUDE.md names — moved here so every caller of
+    this shared helper gets it, not just one.
+    """
     try:
         raw = sys.stdin.read()
-        return json.loads(raw) if raw.strip() else {}
+        ev = json.loads(raw) if raw.strip() else {}
+        return ev if isinstance(ev, dict) else {}
     except Exception as exc:  # noqa: BLE001 — fail open
         log(f"could not parse hook stdin: {exc}")
         return {}

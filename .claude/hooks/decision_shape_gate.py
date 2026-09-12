@@ -78,7 +78,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _session_integrity import emit_harness_event_raw  # noqa: E402
+from _session_integrity import emit_harness_event_raw, read_hook_input  # noqa: E402
 
 ENFORCE = os.environ.get("ATELES_DECISION_SHAPE_ENFORCE", "") in ("1", "true", "yes")
 
@@ -229,11 +229,10 @@ def emit_finding_event(session_id: str, found: list[str], enforced: bool) -> Non
 
 
 def main() -> int:
-    try:
-        raw = sys.stdin.read()
-        ev = json.loads(raw) if raw.strip() else {}
-    except Exception:
-        return 0
+    # Shared stdin-parsing helper (also fail-opens to {} on non-dict JSON —
+    # see its docstring) rather than a local copy, matching every other hook
+    # in this directory.
+    ev = read_hook_input()
 
     # One nudge per stop. Never trap a turn that cannot satisfy the check.
     if ev.get("stop_hook_active"):
