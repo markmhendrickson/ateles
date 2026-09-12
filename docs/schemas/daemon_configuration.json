@@ -1,0 +1,28 @@
+{
+  "entity_type": "daemon_configuration",
+  "schema_version": "1.0.0",
+  "description": "One entity per daemon holding a config map (Phase 1 shape for ateles#642). Keys are logical names (e.g. sse_subscription_id); values are CONFIG only — secret values never stored. Register with: neotoma schemas register daemon_configuration --fields @docs/schemas/daemon_configuration.json --activate",
+  "fields": {
+    "schema_version": { "type": "string", "required": true },
+    "daemon_name": {
+      "type": "string",
+      "required": true,
+      "description": "Short daemon identity matching handler_name / SSE client name (e.g. apis, neotoma-agent). Canonical lookup key for config_resolver._fetch_from_neotoma."
+    },
+    "config": {
+      "type": "object",
+      "required": true,
+      "description": "Map of logical config keys to string values. Never holds secret values — only CONFIG-class facts."
+    },
+    "set_by": {
+      "type": "string",
+      "required": false,
+      "description": "Agent or operator identity that authored this entity."
+    },
+    "notes": {
+      "type": "string",
+      "required": false,
+      "description": "Free-text drift/history notes (same role as deployment_configuration.gotchas)."
+    }
+  }
+}
