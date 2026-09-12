@@ -1,0 +1,55 @@
+{
+  "_comment": "GENERATED — do not hand-edit. Regenerate with `python3 .claude/hooks/hook_wiring_reference.py --write` after an intentional change to .claude/settings.json. This is the canonical hook-wiring set that session_start.py compares a checkout against (ateles#973); a committed snapshot rather than a live git fetch, so the check cannot hang or fail an offline session start.",
+  "wirings": [
+    [
+      "PostToolUse",
+      "spawn_task_neotoma_pairing.py",
+      "^mcp__ccd_session__spawn_task$"
+    ],
+    [
+      "PreToolUse",
+      "git_stash_guard.py",
+      "Edit|Write|NotebookEdit|Bash"
+    ],
+    [
+      "PreToolUse",
+      "gmail_send_gate.py",
+      "Edit|Write|NotebookEdit|Bash"
+    ],
+    [
+      "PreToolUse",
+      "sibling_repo_worktree_guard.py",
+      "Edit|Write|NotebookEdit|Bash"
+    ],
+    [
+      "SessionStart",
+      "ateles-session-start.sh",
+      ""
+    ],
+    [
+      "SessionStart",
+      "reinject_working_method.py",
+      "compact"
+    ],
+    [
+      "SessionStart",
+      "session_start.py",
+      "startup|resume|clear|compact"
+    ],
+    [
+      "Stop",
+      "decision_shape_gate.py",
+      ""
+    ],
+    [
+      "Stop",
+      "stop_finalizer.py",
+      ""
+    ],
+    [
+      "UserPromptSubmit",
+      "user_prompt_submit.py",
+      ""
+    ]
+  ]
+}

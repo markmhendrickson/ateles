@@ -85,6 +85,28 @@ python3 scripts/linters/check_neotoma_rest_paths.py || ERRORS=$((ERRORS + 1))
 echo "  - Checking agent roster (no retired agent names)..."
 python3 scripts/linters/check_agent_roster.py || ERRORS=$((ERRORS + 1))
 
+# CLAUDE.md rule parity (ateles#973). A standing rule that vanishes from this
+# file stops binding, and a small diff can hide the loss — the six deletions in
+# the merge that motivated this were all same-rule replacements. Every side
+# whose rules must survive is passed as an input side: main alone cannot witness
+# the loss of a rule main never had.
+echo "  - Checking CLAUDE.md rule parity (no standing rule lost)..."
+if git rev-parse --verify --quiet origin/main >/dev/null; then
+  python3 scripts/verify_claude_md_merge.py --check \
+    --base origin/main:CLAUDE.md \
+    --other HEAD:CLAUDE.md \
+    --merged CLAUDE.md \
+    --dedups scripts/claude_md_dedups.txt || ERRORS=$((ERRORS + 1))
+else
+  echo "    (skipped — origin/main not fetched in this checkout)"
+fi
+
+# Hook-wiring reference (ateles#973). The snapshot session_start.py compares a
+# checkout against is generated from .claude/settings.json, so it must not drift
+# from it — a stale reference makes the banner lie in both directions.
+echo "  - Checking hook-wiring reference matches .claude/settings.json..."
+python3 .claude/hooks/hook_wiring_reference.py --check || ERRORS=$((ERRORS + 1))
+
 # Foundation documents (docs/foundation/). Registered in
 # conformance.md#mechanical-checks-on-this-directory. All stdlib-only, no Neotoma needed.
 echo "  - Checking foundation anchors (every intra-foundation link resolves)..."

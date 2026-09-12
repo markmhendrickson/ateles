@@ -1,5 +1,13 @@
 # Ateles — Claude Code Project Instructions
 
+> **How to read a `<!-- CONFLICT -->` marker.** A few rules below are marked as
+> deliberately unresolved: two rules that pull against each other, kept as they
+> are because deciding which framing governs is the operator's call, not a
+> merge's. Never resolve one by editing prose — reword neither bullet, delete
+> neither, and do not collapse the pair into one. Each marker states both
+> framings and what to do in the meantime, so it works without network access
+> to the issue it cites.
+
 ## Plan and task maintenance (automatic)
 
 Each session maintains the Neotoma `plan` entity that matches **its own workstream** — never a fixed, hardcoded plan. The swarm-architecture plan `ent_99ace4dd6673aa36ed08b1fe` ("Ateles Agent Swarm Architecture") is the plan for swarm-architecture work **only**. Unrelated workstreams (tax prep, Neotoma release engineering, website, cloud hosting, etc.) each have their own plan and MUST NOT write into the swarm plan. Writing one workstream's `decisions`/`todos` into another's plan is the collision that corrupted this plan in June 2026.
@@ -37,12 +45,28 @@ All hooks are **fail-open** (stdlib-only Python; any error or missing `NEOTOMA_B
 
 **Rollout posture:** defaults to **WARN** (logs the violation, exits 0). Set `ATELES_SESSION_INTEGRITY_ENFORCE=1` to switch the Stop hook to **BLOCK** (exit 2 + `{"decision":"block"}`), preventing a clean stop until the session binds a plan and stores its turns. Per-session state lives in `.claude/.session_state/` (gitignored).
 
+## Rule parity and hook-wiring parity (mechanical enforcement)
+
+Two checks exist because this file and its hook wiring both went stale silently, and a rule that lives in only one checkout does not bind (`docs/foundation/principles.md#1`).
+
+- **`scripts/verify_claude_md_merge.py`** — compares `CLAUDE.md` rule-by-rule between revisions. It keys on the **bolded lead** of each bullet plus every heading, and reports any rule name present on one side and absent from the other, in both directions. Runs in `scripts/lint.sh`. **Pass every side whose rules must survive** (`--base origin/main:CLAUDE.md --other HEAD:CLAUDE.md`): main alone cannot witness the loss of a rule main never had — deleting ``NEVER `git stash` `` passes a main-only check cleanly, since that rule reached this file from a worktree. A **deliberate** same-rule dedup is recorded in `scripts/claude_md_dedups.txt` as `<dropped lead> => <surviving lead>`; both sides of the arrow are verified against the merged file, so a stale entry fails the gate rather than excusing it. Exit 1 means a rule was lost; exit 2 means the check did not run, which is not the same as passing. Near-identical leads are reported but **never collapsed** — `Dispatch, don't work inline` and `Dispatch, don't drift inline` are two rules. Motivated by ateles#973: a hand-assembled summary of a bidirectional divergence in this file named four worktree-only rules where a mechanical per-rule search found eight, and the four missed included two safety rules. A diff-line count is not a substitute — the six deletions in that merge were all same-rule replacements, so a small diff can hide a lost rule.
+- **`.claude/hooks/hook_wiring_reference.py`** — prints a session-start banner naming, by filename, every hook wiring that `.claude/hooks/hook_wiring_reference.json` declares and this checkout's `.claude/settings.json` lacks. Compares against that **committed snapshot**, never a live `git show` or network fetch: this fires on every session start including offline and sandboxed runs, so a checker that could hang or throw would itself be the new silent failure. The snapshot is generated (`--write`) and held equal to the settings file by `--check` in `scripts/lint.sh` — never hand-edited. One-directional: a wiring the reference declares and the checkout lacks is reported, a purely local extra is not, since a false positive trains you to ignore the banner. Fail-open (stdlib-only; any error → exit 0, and a healthy checkout prints nothing). Motivated by ateles#973: a session ran for hours from a worktree missing `git_stash_guard.py` and both compaction wirings, so the never-stash rule was enforced by prose alone and the interaction rules were lost at every compaction boundary. A hook that is not wired never runs and never errors, so nothing else surfaces it.
+
 ## Session conduct — how the operator wants to be worked with
 
 These are standing operator instructions, stated repeatedly across sessions. Each was set or re-stated because it was broken. They live here because **CLAUDE.md is re-injected from disk after every compaction**, so unlike an instruction given in conversation, they do not age out of a long session.
 
 This section holds the **always-on interaction protocol** — how every turn is run. The dated subsection below holds **standing authorizations**, each granted on a specific date and each expanding or bounding what a session may do without asking. Both are operator-set and both survive compaction; the split is by kind, not by weight.
 
+<!-- CONFLICT: unresolved, see ateles#973 — do not silently pick one framing -->
+<!-- The next two bullets name nearly the same rule and say different things.
+     "Dispatch, don't work inline" governs WHAT to dispatch into: a Neotoma task
+     entity, never a harness chip. "Dispatch, don't drift inline" governs the
+     FAILURE MODE: drift, one small step at a time, until a session has done an
+     agent's whole job itself. Each was written after a distinct failure, so
+     both are kept. Whether they should become one bullet is the operator's
+     call. Until then: follow both — they do not contradict, they cover
+     different halves. Do not reword either to resolve the overlap. -->
 - **Dispatch, don't work inline.** Create a Neotoma `task` entity and let an agent claim it; use a subagent only where no swarm path exists. This binds to *all* work — research, analysis, design, payments, investigation — not only code. Work you recommend is work you file, in the same turn you recommend it, without waiting to be asked; dispatch proactively and in parallel. Reserve the session for judgement and conversation. Durable work never goes into a harness task chip (`spawn_task`) — a chip is not an entity, so it is unclaimable and invisible to the swarm.
 - **Dispatch, don't drift inline.** Work that belongs to an agent goes to an agent. The failure is drift — one small step at a time until a session has done an agent's whole job itself. A finding you can't act on gets dispatched or filed, never spawned as a task chip for Mark to click.
 - **Summarize what the operator said at the top of each reply,** cleaned up. Most operator input arrives as live voice transcription, which garbles names and can fabricate whole sentences; echoing what was heard is how the operator catches it. Do this even when the turn seems routine.
@@ -83,6 +107,20 @@ Each was set or re-stated because it was broken, and several were broken again w
 - **Merge stays gated, and two classes stay Mark's absolutely.** Do not merge where a live blocking review stands — live means its finding is unaddressed, not merely that it exists. **Credential rotation** and **deploying a hosted client instance** are Mark's regardless of how obvious the next step looks.
 - **A plain comment does NOT re-dispatch a swarm review.** `github_gateway.py` routes every `issue_comment` event to the operator-override command handler, so a comment carrying no command reaches a handler that finds nothing and stops. `PR_ACTIONS = {"opened", "reopened", "synchronize"}` are the only events that re-run a PR review. Three re-review requests posted on 2026-09-11 were mechanically no-ops for this reason. Only `/confirm-gates-clear` and `/swarm-run` (both gated to the operator login) drive the pipeline from a comment; otherwise a push or a review event is what moves it.
 - **Re-request review yourself whenever monitoring shows it is warranted — do not wait to be asked.** Standing authorization, 2026-09-11. `PR_ACTIONS = {"opened", "reopened", "synchronize"}` are the only events that re-run a PR review, so the way to request one is a push or a close-and-reopen; a comment cannot do it. Warranted means: every blocking finding is discharged in substance, checks are green, and the PR is otherwise mergeable — the lens's own objection has been answered and only a re-look is missing. NOT warranted, and these stay Mark's: a live finding nobody has answered, or an adjudication this session made that no lens has seen. Reopen is reversible and is a real pipeline entry rather than a skip, so prefer it over `/confirm-gates-clear` wherever a genuine re-review is available. Say on the PR why it was reopened, so the reopen is not mistaken for flapping.
+<!-- CONFLICT: unresolved, see ateles#973 — do not silently pick one framing -->
+<!-- The next two bullets state the same boundary from opposite directions, and
+     which framing governs is a live question about how much autonomy the rule
+     grants. The gates-clear bullet GRANTS a standing authorization to waive,
+     bounded to a mechanical pipeline failure where no lens was ever asked. The
+     "Prefer a genuine re-review" bullet WITHHOLDS, treating a waive as a last
+     resort for when no lens judgement is obtainable at all, and directing you
+     to ask the lens instead. The two bounds are arguably the same bound —
+     "no lens was ever asked" and "no lens judgement is obtainable" — but one
+     reads as permission and the other as restraint.
+     In the meantime, follow the STRICTER reading: prefer a real re-review
+     (a push, or a close-and-reopen) wherever one is available, and treat a
+     waive as available only when the pipeline itself is mechanically broken.
+     Do not reword either bullet to settle this. -->
 - **Comment `/confirm-gates-clear` yourself when a PR is blocked only by swarm MECHANICS, never when it is blocked by JUDGEMENT.** Standing authorization, 2026-09-11. The bound is the operator's own: the swarm must have reviewed and signed off, and the only thing left standing must be a mechanical failure in the pipeline. Qualifying: a verdict the parser cannot read, a gate never initialized, a trigger routed to a handler that does nothing with it, a lens that never ran. NOT qualifying, and these stay Mark's: a live blocking finding no lens has withdrawn; an adjudication made by this session rather than by a lens; a gate whose owning lens has not looked at the current head. Waiving substitutes the session's judgement for a lens's — legitimate where no lens was ever asked, illegitimate where one was asked and objected. When in doubt, prefer `/swarm-run`, which re-drives the pipeline instead of skipping it. Say in the comment which mechanical failure is being cleared and what evidence shows the work itself is sound.
 - **Prefer a genuine re-review over waiving a gate.** A gate waive is for a PR blocked by swarm *mechanics* where no lens judgement is obtainable; it substitutes session judgement for a lens's. Where a lens objected and its objection has been answered, ask the lens rather than skipping it — on 2026-09-11 a lens ruling on an adjudication this session had made proved the session's reading too narrow.
 
