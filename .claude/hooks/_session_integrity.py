@@ -51,10 +51,22 @@ def log(msg: str) -> None:
 
 
 def read_hook_input() -> dict:
-    """Claude Code passes a JSON event object on stdin. Fail-open to {}."""
+    """Claude Code passes a JSON event object on stdin. Fail-open to {}.
+
+    The harness contract is always a JSON object, but `json.loads` will
+    happily parse a top-level array/string/number/null too — every caller
+    immediately does `ev.get(...)`, so a non-dict result must be coerced to
+    `{}` here rather than left to raise `AttributeError` in six different
+    call sites. Found while adding `test_decision_shape_gate.py`: the fix
+    was first patched locally into that one hook's own stdin-parsing inline
+    copy, which is the "extend the mechanism that already generalizes, not a
+    parallel one" mistake CLAUDE.md names — moved here so every caller of
+    this shared helper gets it, not just one.
+    """
     try:
         raw = sys.stdin.read()
-        return json.loads(raw) if raw.strip() else {}
+        ev = json.loads(raw) if raw.strip() else {}
+        return ev if isinstance(ev, dict) else {}
     except Exception as exc:  # noqa: BLE001 — fail open
         log(f"could not parse hook stdin: {exc}")
         return {}
@@ -209,31 +221,37 @@ def _mentions_task_binding(payload: dict) -> bool:
 # harness_event audit emission (best-effort, fail-open)
 # ---------------------------------------------------------------------------
 
-def emit_harness_event(session_id: str, summary: dict, integrity_status: str) -> None:
-    """Write one harness_event recording the session integrity outcome.
+def emit_harness_event_raw(
+    idempotency_slug: str, entity_fields: dict, log_tag: str = "harness-event",
+) -> None:
+    """POST one `harness_event` entity to Neotoma. Shared by every Stop hook
+    in this checkout that emits an audit row — `emit_harness_event` below
+    (session-integrity) and `decision_shape_gate.py`'s decision-shape check.
+
+    `idempotency_slug` becomes `harness-event-{idempotency_slug}-{timestamp}`.
+    `entity_fields` is merged onto the required `entity_type`/`harness` keys
+    as-is, so each caller owns its own event vocabulary (e.g. `event_type`,
+    `integrity_status`) rather than this function imposing one shape on all
+    callers — the two current callers intentionally use different schemas for
+    what "the outcome" means (a tri-state enum vs. a bool + finding list).
+    `log_tag` names the caller in stderr diagnostics, so a missing-token or
+    network-failure line points at the hook that actually failed rather than
+    always reading "[session-integrity]" regardless of which hook called in.
 
     Schema 689230f4-cd83-49b6-baa7-a752cf70629d. Best-effort: no token or a
     network error is logged and swallowed — never blocks the hook.
     """
     token = os.environ.get(BEARER_ENV)
     if not token:
-        log("no bearer token — skipping harness_event emission")
+        sys.stderr.write(f"[{log_tag}] no bearer token — skipping harness_event emission\n")
         return
     body = {
-        "idempotency_key": f"harness-event-session-integrity-{session_id}-{int(time.time())}",
+        "idempotency_key": f"harness-event-{idempotency_slug}-{int(time.time())}",
         "observation_source": "workflow_state",
         "entities": [{
             "entity_type": "harness_event",
-            "event_type": "session_integrity_check",
             "harness": "claude_code",
-            "session_id": session_id,
-            "integrity_status": integrity_status,  # integral | violated | exempt
-            "turns": summary.get("turns", 0),
-            "wrote_domain": summary.get("wrote_domain", False),
-            "bound_plan": summary.get("bound_plan", False),
-            "bound_task": summary.get("bound_task", False),
-            "captured_learning": summary.get("captured_learning", False),
-            "write_types": sorted(summary.get("write_types", []) or []),
+            **entity_fields,
         }],
     }
     try:
@@ -246,4 +264,24 @@ def emit_harness_event(session_id: str, summary: dict, integrity_status: str) ->
         with urllib.request.urlopen(req, timeout=8) as resp:
             resp.read()
     except Exception as exc:  # noqa: BLE001
-        log(f"harness_event emission failed (non-fatal): {exc}")
+        sys.stderr.write(f"[{log_tag}] harness_event emission failed (non-fatal): {exc}\n")
+
+
+def emit_harness_event(session_id: str, summary: dict, integrity_status: str) -> None:
+    """Write one harness_event recording the session integrity outcome.
+
+    Schema 689230f4-cd83-49b6-baa7-a752cf70629d. Best-effort: no token or a
+    network error is logged and swallowed — never blocks the hook (enforced
+    by emit_harness_event_raw).
+    """
+    emit_harness_event_raw(f"session-integrity-{session_id}", {
+        "event_type": "session_integrity_check",
+        "session_id": session_id,
+        "integrity_status": integrity_status,  # integral | violated | exempt
+        "turns": summary.get("turns", 0),
+        "wrote_domain": summary.get("wrote_domain", False),
+        "bound_plan": summary.get("bound_plan", False),
+        "bound_task": summary.get("bound_task", False),
+        "captured_learning": summary.get("captured_learning", False),
+        "write_types": sorted(summary.get("write_types", []) or []),
+    }, log_tag="session-integrity")
