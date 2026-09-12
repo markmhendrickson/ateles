@@ -151,6 +151,55 @@ class TestSentenceScoping:
 
 
 # ---------------------------------------------------------------------------
+# The START-boundary asymmetry — the mirror image of the END-boundary fix,
+# found by the qa lens on PR #951 by direct execution.
+#
+# The end boundary recognised `[.?!]\s|\n`; the start recognised only "\n"
+# and ". ". So a PREVIOUS sentence ending in "?" or "!" was pulled into the
+# scoped sentence whole, and a consent keyword inside it suppressed a genuine
+# finding. Every case below FAILS against the pre-fix code (the two defect
+# cases assert a finding the pre-fix code suppressed) and passes after, except
+# the controls and the true negative, which pin the behaviour that must NOT
+# change. The `.`-terminated control above already passed before the fix,
+# which is exactly why it is not sufficient on its own.
+# ---------------------------------------------------------------------------
+class TestSentenceStartBoundarySymmetry:
+    def test_question_terminated_prior_sentence_does_not_suppress(self):
+        # The defect case, verbatim from the qa lens's reproduction.
+        text = "Is the deploy still scheduled for today? Should I fix the parser bug?"
+        assert len(dsg.findings(text)) == 1
+
+    def test_bang_terminated_prior_sentence_does_not_suppress(self):
+        text = "The deploy shipped without review! Should I fix the parser bug?"
+        assert len(dsg.findings(text)) == 1
+
+    def test_control_period_terminated_prior_sentence_still_fires(self):
+        text = "The deploy went out today. Should I fix the parser bug?"
+        assert len(dsg.findings(text)) == 1
+
+    def test_control_bare_question_still_fires(self):
+        text = "Should I fix the parser bug?"
+        assert len(dsg.findings(text)) == 1
+
+    def test_true_negative_genuine_consent_gate_still_suppressed(self):
+        # Widening the start boundary must not turn a real consent-gated
+        # question into a finding.
+        text = "Should I run the deploy to production?"
+        assert dsg.findings(text) == []
+
+    def test_both_ends_use_one_shared_boundary_definition(self):
+        # The defect was two copies of one concept drifting apart. Assert the
+        # scoped sentence is exactly the permission question in both
+        # directions, so a future edit to one end cannot silently widen only
+        # that end.
+        prior_q = "Is the deploy scheduled? Should I fix the parser bug? A merge landed."
+        m = dsg.PERMISSION_RE.search(prior_q)
+        assert dsg.sentence_around(prior_q, m.start(), m.end()).strip() == (
+            "Should I fix the parser bug?"
+        )
+
+
+# ---------------------------------------------------------------------------
 # closing_section() 2500-char truncation boundary.
 # ---------------------------------------------------------------------------
 class TestClosingSectionBoundary:

@@ -106,6 +106,33 @@ OPERATOR_ONLY_RE = re.compile(
 
 FENCED_SHELL_RE = re.compile(r"```(?:bash|sh|shell|console)\b")
 
+# ONE definition of "a sentence ends here", used for BOTH ends of the scoping
+# window in `findings()`. The two ends were written as two separate
+# expressions, and they drifted: the END was widened to `[.?!]\s|\n` to close
+# a false negative (a permission question ends in "?" by construction, so the
+# next sentence's consent keyword leaked in), while the START was left at only
+# `\n` and ". ". The mirror-image false negative followed — when the PREVIOUS
+# sentence ended in "?" or "!", `rfind` found no boundary there and ran back
+# further, pulling that sentence in, so a consent keyword in it suppressed a
+# genuine finding. Two copies of one concept is the defect; a shared definition
+# is what stops it recurring (principles.md, "one source, defined once").
+SENTENCE_BOUNDARY_RE = re.compile(r"[.?!]\s|\n")
+
+
+def sentence_around(text: str, start: int, end: int) -> str:
+    """The sentence containing text[start:end], both ends bounded by the SAME
+    terminator set (`.`/`?`/`!` followed by whitespace, or a newline).
+
+    Scans forward from the beginning rather than using `rfind`, because the
+    start boundary is now a pattern rather than a pair of fixed substrings.
+    """
+    left = 0
+    for mb in SENTENCE_BOUNDARY_RE.finditer(text, 0, start):
+        left = mb.end()
+    nxt = SENTENCE_BOUNDARY_RE.search(text, end)
+    right = nxt.end() if nxt else len(text)
+    return text[left:right]
+
 
 def last_assistant_text(transcript_path: str | None) -> str:
     """Return the final assistant message's text, or '' if unreadable."""
@@ -161,17 +188,15 @@ def findings(text: str) -> list[str]:
     # bullets away suppress a real finding — verified on a live example.
     sentence = ""
     if m:
-        start = max(tail.rfind("\n", 0, m.start()), tail.rfind(". ", 0, m.start()))
-        # Bound the END at a sentence terminator too, not only a newline.
-        # Honouring ". " for the start but only "\n" for the end left the very
-        # false negative this scoping was added to close: a consent keyword in a
-        # LATER sentence on the same line still suppressed a real finding. The
-        # terminator that matters most here is "?" — a permission question ends
-        # in one by construction, so a fix that only handled "." missed it.
-        # Found by Loxia on PR 951, reproduced, and fixed against the repro.
-        nxt = re.search(r"[.?!]\s|\n", tail[m.end():])
-        end = m.end() + nxt.end() if nxt else len(tail)
-        sentence = tail[(start + 1 if start >= 0 else 0):end]
+        # BOTH ends come from `sentence_around`, so they cannot drift apart
+        # again. The END was widened first (Loxia, PR 951): a consent keyword
+        # in a LATER sentence on the same line suppressed a real finding, and
+        # "?" is the terminator that matters most since a permission question
+        # ends in one by construction. The START was left narrow and carried
+        # the mirror-image defect (qa lens, PR 951, reproduced by execution):
+        # a prior sentence ending in "?" or "!" was pulled in whole, so its
+        # consent keyword suppressed a genuine finding.
+        sentence = sentence_around(tail, m.start(), m.end())
     if m and not CONSENT_GATED_RE.search(sentence):
         out.append(
             f"the turn ends asking permission ({m.group(0)!r}) for something not "
@@ -191,6 +216,13 @@ def findings(text: str) -> list[str]:
     # operator something to do now. Explanatory prose ("rotation is operator-only
     # by design, which is why the fix closes the path instead") is not an
     # instruction, and flagging it interrupts the operator for nothing.
+    #
+    # This scan is deliberately LINE-scoped, not sentence-scoped, and so does
+    # not share `sentence_around`: both of its boundaries are "\n" already, so
+    # they are symmetric and cannot drift the way the permission scan's did. An
+    # actionable instruction and the prose qualifying it ("... rather than
+    # waiting for me") routinely sit in one sentence, so narrowing this to a
+    # sentence would break the explanatory exemption above rather than fix a bug.
     op_actionable = False
     om = OPERATOR_ONLY_RE.search(tail)
     if om:
