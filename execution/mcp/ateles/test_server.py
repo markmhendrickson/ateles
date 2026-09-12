@@ -993,5 +993,159 @@ class TestSwarmObservability(unittest.TestCase):
         self.assertIn("error", out)
 
 
+class TestUnreadableGatesHoldAndRaise(unittest.TestCase):
+    """An unreadable gate record must HOLD AND RAISE, never read as 'pending'.
+
+    The failure this locks out: a gate check that cannot distinguish "not yet
+    reviewed" from "the record it reads is broken" reports both as every gate
+    blocking, so finished work stalls on a bookkeeping state and the report
+    names gate owners who were never actually asked for anything.
+    """
+
+    def test_non_issue_entity_errors_instead_of_reporting_all_gates_pending(self):
+        """Passing an agent_grant id must not fabricate an all-pending map."""
+        with patch.object(
+            srv,
+            "_get",
+            return_value={
+                "entity_id": "ent_grant",
+                "entity_type": "agent_grant",
+                "snapshot": {"status": "active"},
+            },
+        ):
+            out = srv._get_gate_status("ent_grant")
+        self.assertIn("error", out)
+        self.assertIs(out["gates_evaluated"], False)
+        self.assertEqual(out["entity_type"], "agent_grant")
+        self.assertEqual(out["reason_codes"], ["unreadable.wrong_entity_type"])
+        self.assertEqual(out["unreadable"][0]["code"], "unreadable.wrong_entity_type")
+        # The bug signature: a blocking-gate list for a non-issue record.
+        self.assertNotIn("blocking_gates", out)
+        self.assertNotIn("all_gates_cleared", out)
+
+    def test_uninitialised_gate_status_is_flagged_not_reported_as_withheld(self):
+        """No gate_status at all is 'never triaged', not 'owners withholding'."""
+        with patch.object(
+            srv,
+            "_get",
+            return_value={
+                "entity_id": "ent_issue",
+                "entity_type": "issue",
+                "snapshot": {"repo": "o/r", "github_number": 1, "current_owner": "pavo"},
+            },
+        ), patch.object(srv, "_pipeline_state_for", return_value={"stage": None}):
+            out = srv._get_gate_status("ent_issue")
+        self.assertIs(out["gates_evaluated"], True)
+        self.assertIs(out["gates_initialised"], False)
+        self.assertEqual(out["reason_codes"], ["uninitialised.never_triaged"])
+        self.assertIn("NEVER INITIALISED", out["interpretation"])
+        # Must NOT phrase an absent record as a named owner withholding sign-off.
+        self.assertNotIn("waiting on pavo", out["interpretation"])
+        # Primary fields must not look like ordinary pending.
+        self.assertNotIn("blocking_gates", out)
+        self.assertNotIn("all_gates_cleared", out)
+
+    def test_get_gate_status_malformed_gate_status_not_coerced_to_empty_blocking_as_pending(
+        self,
+    ):
+        """Present-but-malformed gate_status must hold-and-raise, not → {} pending."""
+        with patch.object(
+            srv,
+            "_get",
+            return_value={
+                "entity_id": "ent_issue",
+                "entity_type": "issue",
+                "snapshot": {
+                    "repo": "o/r",
+                    "github_number": 1,
+                    "gate_status": "[1,2]",
+                },
+            },
+        ), patch.object(srv, "_pipeline_state_for", return_value={"stage": None}):
+            out = srv._get_gate_status("ent_issue")
+        self.assertIn("error", out)
+        self.assertIs(out["gates_evaluated"], False)
+        self.assertEqual(out["reason_codes"], ["unreadable.malformed_gate_status"])
+        self.assertEqual(
+            out["unreadable"][0]["code"], "unreadable.malformed_gate_status"
+        )
+        self.assertNotIn("blocking_gates", out)
+        self.assertNotIn("all_gates_cleared", out)
+
+    def test_get_gate_status_malformed_json_string_not_coerced_to_pending(self):
+        with patch.object(
+            srv,
+            "_get",
+            return_value={
+                "entity_id": "ent_issue",
+                "entity_type": "issue",
+                "snapshot": {
+                    "repo": "o/r",
+                    "github_number": 1,
+                    "gate_status": "not json",
+                },
+            },
+        ), patch.object(srv, "_pipeline_state_for", return_value={"stage": None}):
+            out = srv._get_gate_status("ent_issue")
+        self.assertIs(out["gates_evaluated"], False)
+        self.assertEqual(out["reason_codes"], ["unreadable.malformed_gate_status"])
+        self.assertNotIn("blocking_gates", out)
+
+    def test_real_pending_gates_still_report_as_waiting(self):
+        """The genuine unsigned case is unchanged — this is not a blanket pass."""
+        with patch.object(
+            srv,
+            "_get",
+            return_value={
+                "entity_id": "ent_issue",
+                "entity_type": "issue",
+                "snapshot": {
+                    "repo": "o/r",
+                    "github_number": 1,
+                    "current_owner": "waxwing",
+                    "gate_status": {"pm": "signed_off", "arch": "pending"},
+                },
+            },
+        ), patch.object(srv, "_pipeline_state_for", return_value={"stage": None}):
+            out = srv._get_gate_status("ent_issue")
+        self.assertIs(out["gates_evaluated"], True)
+        self.assertIs(out["gates_initialised"], True)
+        self.assertIn("arch", out["blocking_gates"])
+        self.assertIs(out["all_gates_cleared"], False)
+        self.assertEqual(out["reason_codes"], [])
+        self.assertIn("waiting on waxwing", out["interpretation"])
+
+    def test_gates_evaluated_truthiness_does_not_collapse_evaluated_paths(self):
+        """Ordinary falsy checks must not treat success/never-triaged as unevaluable.
+
+        Callers write `if not out.get("gates_evaluated")`. Omitting the key on
+        evaluated paths re-collapses states into hold-and-raise — the footgun
+        Waxwing flagged on #761. Effect: evaluated answers are truthy.
+        """
+        never_triaged = {
+            "entity_id": "ent_issue",
+            "entity_type": "issue",
+            "snapshot": {"repo": "o/r", "github_number": 1},
+        }
+        unsigned = {
+            "entity_id": "ent_issue",
+            "entity_type": "issue",
+            "snapshot": {
+                "repo": "o/r",
+                "github_number": 1,
+                "gate_status": {"pm": "pending"},
+            },
+        }
+        for payload in (never_triaged, unsigned):
+            with patch.object(srv, "_get", return_value=payload), patch.object(
+                srv, "_pipeline_state_for", return_value={"stage": None}
+            ):
+                out = srv._get_gate_status("ent_issue")
+            # Key present AND true — `.get` default None / missing must not win.
+            self.assertIn("gates_evaluated", out)
+            self.assertTrue(out.get("gates_evaluated"))
+            self.assertFalse(not out.get("gates_evaluated"))
+
+
 if __name__ == "__main__":
     unittest.main()
