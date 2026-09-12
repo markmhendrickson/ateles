@@ -2,7 +2,7 @@
 """
 ateles — MCP server for Ateles swarm routing and checkpoint management.
 
-Provides seven tools that wrap multi-step Neotoma/GitHub query patterns into
+Provides eight tools that wrap multi-step Neotoma/GitHub query patterns into
 single calls, so any connected agent gets reliable swarm interaction without
 re-deriving the roster/policy/checkpoint dance — or the entity-read plus
 log-grep dance — each session.
@@ -12,13 +12,15 @@ Tools:
   route_task          — resolve owning agent + definition + execution policy
   list_checkpoints    — pending checkpoint_briefs awaiting operator
   resolve_checkpoint  — approve/reject a checkpoint with validation
-                        (the ONLY mutating tool)
+                        (the only tool that mutates Neotoma)
   get_gate_status     — an issue's gate_status, owner, blocking gates, history,
                         and pipeline state                        [read-only]
   list_pipeline_queue — who holds the issue-pipeline slot, who is queued, and
                         how long each has waited                  [read-only]
   get_dispatch_health — dispatcher liveness, recent activity, failures
                                                                   [read-only]
+  merge_pr            — evaluate the full merge gate and merge only if it
+                        passes; dry-run by default            [mutates GitHub]
 
 The observability tools never write gate state — see the SELF-CERTIFICATION
 BOUNDARY note above their implementations. Their reads fail CLOSED: a failed
@@ -90,6 +92,11 @@ threshold, and reason. Act on the operator's decision via resolve_checkpoint —
 do NOT execute the held task yourself.
 5. **Neotoma first.** Durable memory lives in Neotoma. Store, don't leave in \
 conversation.
+6. **Merge through merge_pr, never `gh pr merge`.** merge_pr is the only path \
+that checks the review verdict against the current head SHA, and the only one \
+that distinguishes an unreviewed PR from an approved one — `gh pr merge` \
+reports both as an empty reviewDecision. Reach for the shell here and you are \
+merging on an assumption you have not tested.
 """
 
 
@@ -1296,6 +1303,466 @@ def _get_dispatch_health() -> dict:
 
 
 
+# ── PR merge gate (the one mutating GitHub tool) ─────────────────────────────
+#
+# WHY THIS EXISTS. On 2026-09-01 eight PRs were merged from a session by hand
+# with `gh pr merge --squash`. Seven of the eight carried
+# reviewDecision=CHANGES_REQUESTED at the moment they were merged. Five of
+# those went through in a single shell loop that piped merge output to
+# /dev/null and then read back only `state` — so the blocking verdict was never
+# displayed, let alone weighed.
+#
+# Every one of those merges was probably DEFENSIBLE: in each case the blocking
+# review sat on an older commit than the merged head, i.e. the findings had
+# been fixed by later pushes. But nothing checked. The session inferred
+# "stale, therefore fine" and was right by luck, and `gh pr merge` offers no
+# way to tell a SUPERSEDED CHANGES_REQUESTED from a LIVE one — both print the
+# same string. That distinction is a SHA comparison, and a SHA comparison is
+# exactly the sort of thing a tool should do and a tired agent should not.
+#
+# The inverse error is worse and is the one the operator named. A PR with NO
+# review at all reports reviewDecision="" — the same empty value as a PR whose
+# checks are simply not required. Absence of a verdict reads as absence of a
+# blocker, so an unreviewed, pipeline-bypassing PR looks SAFEST to any naive
+# check. This tool refuses that reading: an unsigned gate is unsigned, never
+# cleared, mirroring _blocking_gates above.
+#
+# DESIGN. This is a gate evaluator that happens to be able to merge, not a
+# merge command that happens to check. _evaluate_merge_gate is pure and total
+# over five conditions; _merge_pr merges ONLY on an unconditional pass. It
+# defaults to dry_run=True so the default call is a question, not an act.
+#
+# FAIL CLOSED EVERYWHERE. Any signal that cannot be read blocks the merge. A
+# 403 on the reviews endpoint is not "no blocking reviews" — the whole class of
+# bug this server was written against is a check that cannot tell absence from
+# failure and reports the permissive answer.
+#
+# This does NOT breach the self-certification boundary above. It writes no gate
+# state and signs nothing off: it reads verdicts other agents wrote and either
+# performs the mechanical merge or refuses. A session still cannot approve its
+# own work — it can only act on an approval that already exists.
+
+_MERGE_METHODS = ("squash", "merge", "rebase")
+
+# Marker for a PR that reached review without a parent issue, so it skipped the
+# gated issue → pm/arch → Cicada path. swarm_dispatch posts it and calls merge
+# "operator-gated"; that phrase has no machine meaning unless something reads
+# the marker, which is what this does.
+_BYPASS_MARKER = "<!-- pipeline-bypass-notice -->"
+
+
+def _parse_pr_ref(pr_ref: str) -> tuple[str | None, int | None]:
+    """Parse 'owner/repo#123' into (repo, number). Bare numbers are rejected.
+
+    A bare '#123' is ambiguous across the swarm's repositories, and today's
+    damage included operating on the wrong target because an identifier was
+    guessed rather than given. Requiring the owner/repo form makes that
+    impossible instead of unlikely.
+    """
+    if not pr_ref:
+        return None, None
+    match = re.match(r"^([\w.\-]+/[\w.\-]+)#(\d+)$", str(pr_ref).strip())
+    if not match:
+        return None, None
+    return match.group(1), int(match.group(2))
+
+
+def _github_get(path: str, params: dict | None = None) -> tuple[Any, str | None]:
+    """GET the GitHub API. Returns (payload, error) — never raises.
+
+    Mirrors _pipeline_markers' two-value contract so callers cannot silently
+    read a failure as an empty result.
+    """
+    try:
+        resp = httpx.get(
+            f"{GITHUB_API}{path}",
+            headers=_github_headers(),
+            params=params or {},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        return resp.json(), None
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        if status in (401, 403):
+            detail = (
+                f"HTTP {status} — GitHub token missing, expired, or lacking scope; "
+                "this signal is UNKNOWN, not clear"
+            )
+        else:
+            detail = f"HTTP {status}"
+        return None, f"{path}: {detail}"
+    except Exception as exc:
+        return None, f"{path}: {type(exc).__name__}: {exc}"
+
+
+def _standing_review_verdict(reviews: Any, head_sha: str) -> dict:
+    """Reduce a review list to the standing verdict, keyed to the head SHA.
+
+    Applies GitHub's own reviewDecision semantics — latest review per reviewer
+    wins, COMMENTED/PENDING never change the standing decision — and then adds
+    the part GitHub does not give you: whether each standing verdict was cast
+    against the CURRENT head or an earlier commit.
+
+    A CHANGES_REQUESTED on an older SHA is reported as `stale`, NOT as clear.
+    Staleness is a fact for the caller to act on, not permission to proceed:
+    the fixes may well have landed, but only a human or a fresh review can say
+    the findings were actually addressed. Reporting it as clear here would
+    re-create by code the same assumption that went unchecked by hand.
+    """
+    latest: dict[str, dict] = {}
+    for review in reviews if isinstance(reviews, list) else []:
+        if not isinstance(review, dict):
+            continue
+        state = str(review.get("state") or "").upper()
+        # COMMENTED and PENDING never carry a decision, so they must not
+        # displace a standing APPROVED or CHANGES_REQUESTED from the same
+        # reviewer — this is why "latest review" alone is the wrong reduction.
+        if state not in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            continue
+        user = ((review.get("user") or {}).get("login")) or "?"
+        prev = latest.get(user)
+        if prev is None or str(review.get("submitted_at") or "") >= str(
+            prev.get("submitted_at") or ""
+        ):
+            latest[user] = review
+
+    approvals, blocking, stale_blocking = [], [], []
+    for user, review in latest.items():
+        state = str(review.get("state") or "").upper()
+        if state == "DISMISSED":
+            continue
+        sha = str(review.get("commit_id") or "")
+        entry = {
+            "reviewer": user,
+            "state": state,
+            "commit": sha[:12] or None,
+            "submitted_at": review.get("submitted_at"),
+            "on_current_head": bool(sha) and sha == head_sha,
+        }
+        if state == "APPROVED":
+            approvals.append(entry)
+        elif entry["on_current_head"]:
+            blocking.append(entry)
+        else:
+            stale_blocking.append(entry)
+
+    return {
+        "approvals": approvals,
+        "blocking": blocking,
+        "stale_blocking": stale_blocking,
+        # An approval on an older SHA does not vouch for code pushed since.
+        "approved_on_current_head": any(a["on_current_head"] for a in approvals),
+        "reviewed_at_all": bool(latest),
+    }
+
+
+def _required_checks_state(repo: str, head_sha: str) -> dict:
+    """Combined status + check-runs for one SHA, reduced to green/failing/pending.
+
+    Both surfaces are read because a repo can use either or both, and a green
+    result on one says nothing about the other.
+    """
+    status, status_err = _github_get(f"/repos/{repo}/commits/{head_sha}/status")
+    runs, runs_err = _github_get(
+        f"/repos/{repo}/commits/{head_sha}/check-runs", {"per_page": 100}
+    )
+    if status_err or runs_err:
+        return {
+            "state": "unknown",
+            "error": status_err or runs_err,
+            "detail": "check state could not be read — this is NOT 'no checks failing'",
+        }
+
+    failing, pending = [], []
+    combined = str((status or {}).get("state") or "").lower()
+    for ctx in (status or {}).get("statuses") or []:
+        state = str(ctx.get("state") or "").lower()
+        if state == "failure":
+            failing.append(ctx.get("context"))
+        elif state == "pending":
+            pending.append(ctx.get("context"))
+
+    for run in (runs or {}).get("check_runs") or []:
+        conclusion = str(run.get("conclusion") or "").lower()
+        if str(run.get("status") or "").lower() != "completed":
+            pending.append(run.get("name"))
+        elif conclusion in ("failure", "timed_out", "cancelled", "action_required"):
+            failing.append(run.get("name"))
+
+    # The legacy combined-status endpoint reports state="pending" for a commit
+    # that has NO legacy statuses at all — which is every commit in a repo that
+    # uses only check-runs (the modern Actions surface). Treating that as
+    # pending blocks every such PR forever, so the combined state counts only
+    # when there is at least one context behind it. Verified against
+    # markmhendrickson/ateles#631: five green check-runs, zero statuses,
+    # combined state "pending".
+    combined_is_real = bool((status or {}).get("statuses"))
+    if failing:
+        state = "failing"
+    elif pending or (combined == "pending" and combined_is_real):
+        state = "pending"
+    else:
+        # No checks configured at all is green: a repo without CI is not a repo
+        # with failing CI. Branch protection, read below, is what makes a check
+        # required in the first place.
+        state = "green"
+    return {"state": state, "failing": failing[:10], "pending": pending[:10]}
+
+
+def _pr_has_bypass_notice(repo: str, number: int) -> tuple[bool, str | None]:
+    """Whether the pipeline-bypass notice is present on the PR."""
+    comments, error = _github_get(
+        f"/repos/{repo}/issues/{number}/comments", {"per_page": 100}
+    )
+    if error:
+        return False, error
+    for comment in comments if isinstance(comments, list) else []:
+        if _BYPASS_MARKER in str((comment or {}).get("body") or ""):
+            return True, None
+    return False, None
+
+
+def _evaluate_merge_gate(repo: str, number: int) -> dict:
+    """Evaluate every merge condition for one PR. Pure read; never merges.
+
+    Five conditions, ALL of which must hold. They are totalled over a fixed
+    list rather than short-circuited so the caller sees every reason at once —
+    fixing one blocker only to discover the next on the following call is the
+    interaction that made the manual version expensive.
+    """
+    blockers: list[str] = []
+    warnings: list[str] = []
+
+    pr, error = _github_get(f"/repos/{repo}/pulls/{number}")
+    if error:
+        return {
+            "pr": f"{repo}#{number}",
+            "mergeable": False,
+            "blockers": [f"could not read the PR: {error}"],
+            "detail": "the PR could not be read, so nothing about it is known",
+        }
+
+    head_sha = str((pr.get("head") or {}).get("sha") or "")
+    base_ref = str((pr.get("base") or {}).get("ref") or "")
+    state = str(pr.get("state") or "")
+    merged = bool(pr.get("merged"))
+
+    if merged:
+        return {
+            "pr": f"{repo}#{number}",
+            "mergeable": False,
+            "already_merged": True,
+            "blockers": ["already merged"],
+            "head_sha": head_sha[:12],
+        }
+    if state != "open":
+        blockers.append(f"PR is {state}, not open")
+    if pr.get("draft"):
+        blockers.append("PR is a draft")
+
+    # 1. Base must be the repository default branch. A stacked PR whose base is
+    #    another open PR's head merges its parent's unreviewed commits too.
+    default_branch = None
+    repo_meta, repo_err = _github_get(f"/repos/{repo}")
+    if repo_err:
+        blockers.append(f"could not read the default branch: {repo_err}")
+    else:
+        default_branch = str((repo_meta or {}).get("default_branch") or "")
+        if base_ref != default_branch:
+            blockers.append(
+                f"base is '{base_ref}', not the default branch '{default_branch}' "
+                "— merging a stacked PR would carry its parent's commits"
+            )
+
+    # 2. GitHub's own mergeability (conflicts, and branch-protection blocks).
+    mergeable_state = str(pr.get("mergeable_state") or "unknown")
+    if pr.get("mergeable") is False:
+        blockers.append(f"GitHub reports the PR is not mergeable ({mergeable_state})")
+    elif pr.get("mergeable") is None:
+        # GitHub computes this asynchronously; null means "ask again", which is
+        # not the same as yes.
+        blockers.append(
+            "GitHub has not finished computing mergeability (mergeable=null) — retry shortly"
+        )
+    if mergeable_state == "blocked":
+        blockers.append(
+            "branch protection reports the PR as blocked (a required check or "
+            "review is missing)"
+        )
+
+    # 3. Required checks green, against THIS head SHA.
+    checks = {"state": "unknown"}
+    if head_sha:
+        checks = _required_checks_state(repo, head_sha)
+        if checks["state"] == "failing":
+            blockers.append(f"required checks are failing: {', '.join(str(c) for c in checks.get('failing') or [])}")
+        elif checks["state"] == "pending":
+            blockers.append(f"checks are still running: {', '.join(str(c) for c in checks.get('pending') or [])}")
+        elif checks["state"] == "unknown":
+            blockers.append(f"check state is unknown: {checks.get('error')}")
+    else:
+        blockers.append("could not determine the PR head SHA")
+
+    # 4. Review verdict, keyed to the head SHA. This is the condition the
+    #    2026-09-01 merges skipped.
+    reviews_payload, reviews_err = _github_get(
+        f"/repos/{repo}/pulls/{number}/reviews", {"per_page": 100}
+    )
+    review: dict[str, Any] = {}
+    if reviews_err:
+        blockers.append(f"review state could not be read: {reviews_err}")
+    else:
+        review = _standing_review_verdict(reviews_payload, head_sha)
+        if review["blocking"]:
+            who = ", ".join(f"{b['reviewer']}@{b['commit']}" for b in review["blocking"])
+            blockers.append(f"CHANGES_REQUESTED standing against the current head ({who})")
+        if review["stale_blocking"]:
+            who = ", ".join(
+                f"{b['reviewer']}@{b['commit']}" for b in review["stale_blocking"]
+            )
+            # Blocking, deliberately. The findings were probably fixed by the
+            # pushes since — but "probably" is what went unchecked by hand, and
+            # only a re-review can retire a finding.
+            blockers.append(
+                f"CHANGES_REQUESTED on an earlier commit ({who}), not re-reviewed "
+                f"against the current head {head_sha[:12]} — a stale block is not a cleared one; "
+                "request a fresh review, or waive with acknowledge_stale_review"
+            )
+        if not review["reviewed_at_all"]:
+            # The inverse error: no review reads as no blockers.
+            blockers.append(
+                "no review of any kind — an unreviewed PR is UNSIGNED, not cleared "
+                "(empty reviewDecision looks identical to a clean bill of health)"
+            )
+        elif not review["approved_on_current_head"] and not review["blocking"]:
+            blockers.append(
+                f"no APPROVE against the current head {head_sha[:12]} "
+                "(an approval of earlier code does not vouch for what was pushed since)"
+            )
+
+    # 5. Pipeline-bypass notice. swarm_dispatch calls merge "operator-gated"
+    #    when this is present; that phrase is inert unless something reads it.
+    bypassed, bypass_err = _pr_has_bypass_notice(repo, number)
+    if bypass_err:
+        blockers.append(f"could not check for the pipeline-bypass notice: {bypass_err}")
+    elif bypassed:
+        blockers.append(
+            "pipeline-bypass-notice is present — this PR skipped the gated "
+            "issue → pm/arch → implementation path and merge stays operator-gated"
+        )
+
+    return {
+        "pr": f"{repo}#{number}",
+        "title": pr.get("title"),
+        "url": pr.get("html_url"),
+        "head_sha": head_sha[:12],
+        "base_ref": base_ref,
+        "default_branch": default_branch,
+        "mergeable": not blockers,
+        "blockers": blockers,
+        "warnings": warnings,
+        "checks": checks,
+        "review": review,
+        "bypass_notice": bypassed,
+    }
+
+
+def _merge_pr(
+    pr_ref: str,
+    method: str = "squash",
+    dry_run: bool = True,
+    acknowledge_stale_review: bool = False,
+) -> dict:
+    """Evaluate the merge gate for a PR, and merge only if it passes.
+
+    dry_run defaults to True: the default call reports whether the PR MAY be
+    merged and why, without merging. Merging requires dry_run=false explicitly,
+    so a merge is always something the caller asked for in as many words.
+
+    acknowledge_stale_review retires ONLY the stale-CHANGES_REQUESTED blocker,
+    and only when that is the sole thing standing in the way. It exists because
+    the stale case is both common and usually legitimate — but it forces the
+    caller to say "I looked at that older verdict and the findings are fixed"
+    rather than never seeing the verdict at all. It cannot clear a live block,
+    a failing check, a missing approval, or a bypass notice.
+    """
+    repo, number = _parse_pr_ref(pr_ref)
+    if not repo or not number:
+        return {
+            "error": f"could not parse pr_ref {pr_ref!r}",
+            "detail": "expected the fully-qualified form 'owner/repo#123'",
+        }
+    if method not in _MERGE_METHODS:
+        return {"error": f"method must be one of {list(_MERGE_METHODS)}, got {method!r}"}
+
+    gate = _evaluate_merge_gate(repo, number)
+
+    waived: list[str] = []
+    if acknowledge_stale_review and gate.get("blockers"):
+        remaining = [b for b in gate["blockers"] if "not re-reviewed against the current head" not in b]
+        waived = [b for b in gate["blockers"] if b not in remaining]
+        if waived:
+            gate["blockers"] = remaining
+            gate["mergeable"] = not remaining
+            gate["waived_blockers"] = waived
+            gate["waiver"] = (
+                "stale CHANGES_REQUESTED waived by the caller via "
+                "acknowledge_stale_review — the caller asserts the findings were "
+                "addressed by commits pushed since that review"
+            )
+
+    gate["method"] = method
+    gate["dry_run"] = bool(dry_run)
+
+    if not gate.get("mergeable"):
+        gate["merged"] = False
+        gate["action"] = "refused"
+        return gate
+
+    if dry_run:
+        gate["merged"] = False
+        gate["action"] = "would_merge"
+        gate["detail"] = (
+            "the gate passes; nothing was merged because dry_run is true. "
+            "Call again with dry_run=false to merge."
+        )
+        return gate
+
+    try:
+        resp = httpx.put(
+            f"{GITHUB_API}/repos/{repo}/pulls/{number}/merge",
+            headers=_github_headers(),
+            json={"merge_method": method},
+            timeout=60,
+        )
+    except Exception as exc:
+        gate["merged"] = False
+        gate["action"] = "merge_request_failed"
+        gate["error"] = f"{type(exc).__name__}: {exc}"
+        return gate
+
+    body: dict = {}
+    try:
+        body = resp.json() or {}
+    except Exception:
+        body = {}
+
+    # 200 alone is not proof: GitHub returns merged=false in some paths, and a
+    # status code is not a landed state.
+    if resp.status_code == 200 and body.get("merged"):
+        gate["merged"] = True
+        gate["action"] = "merged"
+        gate["merge_sha"] = body.get("sha")
+    else:
+        gate["merged"] = False
+        gate["action"] = "merge_refused_by_github"
+        gate["error"] = (
+            f"HTTP {resp.status_code}: {body.get('message') or resp.text[:200]}"
+        )
+    return gate
+
+
 # ── MCP Server setup ─────────────────────────────────────────────────────────
 
 TOOLS = [
@@ -1425,6 +1892,56 @@ TOOLS = [
         ),
         inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
     ),
+    Tool(
+        name="merge_pr",
+        description=(
+            "Evaluate the full merge gate for a pull request and merge it ONLY if "
+            "the gate passes. Checks, in one call: the base is the repository "
+            "default branch (not a stacked PR), GitHub reports the PR mergeable, "
+            "required checks are green against the CURRENT head SHA, a standing "
+            "APPROVE exists against that same head SHA, and no pipeline-bypass "
+            "notice is present. Every unreadable signal BLOCKS — an unreviewed PR "
+            "is unsigned, not cleared, and a CHANGES_REQUESTED on an earlier commit "
+            "is stale, not retired. Defaults to dry_run=true, so the default call "
+            "reports whether the PR may be merged and why, without merging. "
+            "Use this instead of `gh pr merge`, which shows none of the above."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "pr_ref": {
+                    "type": "string",
+                    "description": (
+                        "Fully-qualified pull request, 'owner/repo#123'. A bare "
+                        "number is rejected as ambiguous across swarm repositories."
+                    ),
+                },
+                "method": {
+                    "type": "string",
+                    "enum": list(_MERGE_METHODS),
+                    "description": "Merge method. Defaults to squash.",
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": (
+                        "When true (the default), evaluate and report only. Pass "
+                        "false to actually merge a PR whose gate passes."
+                    ),
+                },
+                "acknowledge_stale_review": {
+                    "type": "boolean",
+                    "description": (
+                        "Retire ONLY a CHANGES_REQUESTED left on an earlier commit, "
+                        "asserting its findings were fixed by commits pushed since. "
+                        "Cannot clear a live block, a failing check, a missing "
+                        "approval, or a bypass notice."
+                    ),
+                },
+            },
+            "required": ["pr_ref"],
+            "additionalProperties": False,
+        },
+    ),
 ]
 
 TOOL_HANDLERS = {
@@ -1441,6 +1958,12 @@ TOOL_HANDLERS = {
     ),
     "list_pipeline_queue": lambda args: _list_pipeline_queue(),
     "get_dispatch_health": lambda args: _get_dispatch_health(),
+    "merge_pr": lambda args: _merge_pr(
+        args["pr_ref"],
+        args.get("method", "squash") or "squash",
+        bool(args.get("dry_run", True)),
+        bool(args.get("acknowledge_stale_review", False)),
+    ),
 }
 
 
