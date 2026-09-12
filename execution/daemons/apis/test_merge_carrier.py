@@ -392,7 +392,7 @@ async def test_approved_clean_pr_is_found_with_age_and_state(monkeypatch):
         reviews={452: [_review("APPROVED", NOW - timedelta(days=12))]},
         pr_detail={452: {"mergeable_state": "clean", "merged": False}},
     )
-    report = await d.report_pr_review_queue(["o/r"])
+    report = await d.report_pr_review_queue(["o/r"], now=NOW)
     assert report["approved_unmerged"] == 1
     entry = report["prs"][0]
     assert entry["approved_unmerged_age_days"] == 12
@@ -410,7 +410,7 @@ async def test_stale_approved_clean_pr_escalates_to_blocker(monkeypatch):
         reviews={452: [_review("APPROVED", NOW - timedelta(days=12))]},
         pr_detail={452: {"mergeable_state": "clean", "merged": False}},
     )
-    report = await d.report_pr_review_queue(["o/r"])
+    report = await d.report_pr_review_queue(["o/r"], now=NOW)
     assert report["escalated"] == 1
     blockers = d.notifier.at(sd.Priority.BLOCKER)
     assert len(blockers) == 1 and "o/r#452" in blockers[0]
@@ -426,7 +426,7 @@ async def test_rotted_approved_pr_reports_rebase_not_merge(monkeypatch):
         reviews={210: [_review("APPROVED", NOW - timedelta(days=53))]},
         pr_detail={210: {"mergeable_state": "dirty", "merged": False}},
     )
-    report = await d.report_pr_review_queue(["o/r"])
+    report = await d.report_pr_review_queue(["o/r"], now=NOW)
     assert report["rotted"] == 1
     assert report["prs"][0]["blocker"] == "rebase_required"
     assert "rebase" in d.notifier.at(sd.Priority.BLOCKER)[0].lower()
@@ -443,7 +443,7 @@ async def test_freshly_approved_pr_does_not_page(monkeypatch):
         reviews={600: [_review("APPROVED", NOW - timedelta(hours=6))]},
         pr_detail={600: {"mergeable_state": "clean", "merged": False}},
     )
-    report = await d.report_pr_review_queue(["o/r"])
+    report = await d.report_pr_review_queue(["o/r"], now=NOW)
     assert report["approved_unmerged"] == 1
     assert report["escalated"] == 0
     assert d.notifier.at(sd.Priority.BLOCKER) == []
@@ -464,7 +464,7 @@ async def test_standing_block_outranks_an_approval(monkeypatch):
         },
         pr_detail={226: {"mergeable_state": "clean", "merged": False}},
     )
-    report = await d.report_pr_review_queue(["o/r"])
+    report = await d.report_pr_review_queue(["o/r"], now=NOW)
     assert report["approved_unmerged"] == 0
 
 
@@ -486,12 +486,12 @@ async def test_state_transition_pages_again(monkeypatch):
 
     monkeypatch.setattr(d, "_approved_unmerged_prs", fake_candidates)
 
-    await d.report_pr_review_queue(["o/r"])
-    await d.report_pr_review_queue(["o/r"])
+    await d.report_pr_review_queue(["o/r"], now=NOW)
+    await d.report_pr_review_queue(["o/r"], now=NOW)
     assert len(d.notifier.at(sd.Priority.BLOCKER)) == 1, "escalate-once violated"
 
     state["v"] = "dirty"  # it rotted
-    await d.report_pr_review_queue(["o/r"])
+    await d.report_pr_review_queue(["o/r"], now=NOW)
     assert len(d.notifier.at(sd.Priority.BLOCKER)) == 2
 
 
@@ -516,7 +516,7 @@ async def test_report_never_merges(monkeypatch):
         reviews={452: [_review("APPROVED", NOW - timedelta(days=12))]},
         pr_detail={452: {"mergeable_state": "clean", "merged": False}},
     )
-    await d.report_pr_review_queue(["o/r"])
+    await d.report_pr_review_queue(["o/r"], now=NOW)
     assert merged == [], "the queue report must never merge a PR"
 
 
@@ -528,7 +528,7 @@ async def test_report_is_fail_open(monkeypatch):
         raise RuntimeError("github down")
 
     monkeypatch.setattr(d, "_approved_unmerged_prs", boom)
-    report = await d.report_pr_review_queue(["o/r"])  # must not raise
+    report = await d.report_pr_review_queue(["o/r"], now=NOW)  # must not raise
     assert report["approved_unmerged"] == 0
 
 
@@ -571,7 +571,7 @@ async def test_unreviewed_pr_is_reported_as_its_own_state(monkeypatch):
         reviews={599: []},
         pr_detail={599: {"mergeable_state": "clean", "merged": False}},
     )
-    report = await d.report_pr_review_queue(["o/r"])
+    report = await d.report_pr_review_queue(["o/r"], now=NOW)
     assert report["unreviewed"] == 1
     assert report["approved_unmerged"] == 0, (
         "an unreviewed PR must NEVER be counted as approved"
@@ -589,7 +589,7 @@ async def test_unreviewed_pr_pages_the_operator(monkeypatch):
         reviews={607: []},
         pr_detail={607: {"mergeable_state": "clean", "merged": False}},
     )
-    await d.report_pr_review_queue(["o/r"])
+    await d.report_pr_review_queue(["o/r"], now=NOW)
     blockers = d.notifier.at(sd.Priority.BLOCKER)
     assert len(blockers) == 1
     assert "no formal review" in blockers[0].lower()

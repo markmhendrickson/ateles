@@ -67,6 +67,9 @@ def test_email_primary_off_by_default(monkeypatch):
 
 
 def test_email_primary_delivers_via_gws(monkeypatch):
+    # Pin the global kill-switch open: this test asserts a send HAPPENS, so an
+    # ambient ATELES_NOTIFY_EMAIL_ENABLED=0 would fail it for the wrong reason.
+    monkeypatch.delenv("ATELES_NOTIFY_EMAIL_ENABLED", raising=False)
     n = Notifier(rubric=NO_SILENCE)
     n._email_primary = True
     n._operator_email = "op@test"
@@ -96,6 +99,7 @@ def test_notify_to_overrides_recipient(monkeypatch):
     monkeypatch.setenv("OPERATOR_EMAIL", "self@test")
     monkeypatch.setenv("ATELES_SWARM_EMAIL", "self+swarm@test")
     monkeypatch.setenv("ATELES_NOTIFY_TO", "alerts@test")
+    monkeypatch.delenv("ATELES_NOTIFY_EMAIL_ENABLED", raising=False)
     n = Notifier(rubric=NO_SILENCE)
     assert n._notify_to == "alerts@test"
     calls = {}
