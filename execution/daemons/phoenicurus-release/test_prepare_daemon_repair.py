@@ -93,14 +93,21 @@ class TestExistingReleaseStatusConnectionFailureDoesNotSilentlySkip:
         monkeypatch.setattr(prepare.urllib.request, "urlopen", fake_urlopen)
 
         with caplog.at_level("WARNING"):
-            # Pins CURRENT behavior (returns None on connection failure).
-            # TODO(ateles#243): this asserts the CURRENT silent-skip; whether
-            # an unreachable Neotoma should fail loud instead of proceeding
-            # is a product decision, tracked in ateles#243, not made here.
             result = prepare.existing_release_status("v0.18.9")
 
-        assert result is None
-        assert "could not check existing release_result" in caplog.text
+        # ateles#243 resolved: an unreachable Neotoma must NOT be reported as
+        # "no release in flight". The two outcomes are now distinct values —
+        # the caller (`run_prepare`) defers on the sentinel instead of
+        # spawning a second prepare agent on top of a pending release. The
+        # behavioural half of this assertion lives in
+        # test_existing_release_status.py
+        # (test_unreadable_inflight_check_does_not_spawn).
+        assert result is prepare.UNKNOWN_RELEASE_STATUS
+        assert result is not None, (
+            "collapsing an unreadable check into None is the defect itself"
+        )
+        assert "in-flight" in caplog.text.lower()
+        assert any(r.levelname == "ERROR" for r in caplog.records)
 
 
 class TestExistingReleaseStatusUsesConfiguredBaseUrl:
