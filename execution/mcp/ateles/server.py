@@ -8,6 +8,10 @@ re-deriving the roster/policy/checkpoint dance — or the entity-read plus
 log-grep dance — each session.
 
 Tools:
+  check_swarm_fact    — answer an operational question about how the swarm
+                        actually works, computed from live state (workflow
+                        triggers, DNS→Fly app, daemon liveness, code paths,
+                        checkout freshness)                       [read-only]
   get_swarm_roster    — full roster (roles → agent names)
   route_task          — resolve owning agent + definition + execution policy
   list_checkpoints    — pending checkpoint_briefs awaiting operator
@@ -56,6 +60,12 @@ from mcp.types import (
     Tool,
 )
 
+try:
+    from .swarm_facts import CHECKS as FACT_CHECKS, check_swarm_fact
+except ImportError:  # launched as a script, not a package
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from swarm_facts import CHECKS as FACT_CHECKS, check_swarm_fact
+
 log = logging.getLogger("ateles")
 
 NEOTOMA_BASE_URL = os.environ.get(
@@ -90,6 +100,14 @@ threshold, and reason. Act on the operator's decision via resolve_checkpoint —
 do NOT execute the held task yourself.
 5. **Neotoma first.** Durable memory lives in Neotoma. Store, don't leave in \
 conversation.
+6. **Check operational facts, don't infer them.** Before asserting how the \
+swarm works — what deploys or ships something, which app serves a domain, \
+whether a daemon is actually running, whether a code path exists, whether a \
+checkout is current — call check_swarm_fact. It computes the answer from live \
+state at call time. Inferring these from a doc, a filename, a memory, or a \
+single glance at a config file is the single most common source of confidently \
+wrong statements about this system. If check_swarm_fact returns \
+status "unknown", the fact is UNVERIFIED — say so; it is not an all-clear.
 """
 
 
@@ -1300,6 +1318,63 @@ def _get_dispatch_health() -> dict:
 
 TOOLS = [
     Tool(
+        name="check_swarm_fact",
+        description=(
+            "Answer an operational question about how the swarm ACTUALLY works, "
+            "computed from live state at call time rather than from docs or "
+            "memory. Call this BEFORE asserting any of the following, all of "
+            "which agents routinely get wrong by inference:\n"
+            "  • 'deploy_triggers' — every way each workflow can be started, "
+            "including workflow_dispatch. Answers 'what deploys prod?' / 'do I "
+            "need to publish a release?'\n"
+            "  • 'serving_app' (needs `domain`) — which Fly app actually serves "
+            "a domain, its deploy time, and which similarly-named apps do NOT. "
+            "Answers 'which app do I scale/restart/deploy?'\n"
+            "  • 'daemons' — which daemons exist in the repo vs are loaded in "
+            "launchd vs are actually running. Answers 'is X running?'\n"
+            "  • 'code_path' (needs `pattern`) — whether a mechanism exists in "
+            "the code and what calls it, with test and non-test callers "
+            "separated. Answers 'does this inherit a filter/guard/check?'\n"
+            "  • 'checkout_freshness' (optional `path`) — whether a checkout is "
+            "behind, ahead, or dirty. Answers 'is this code current?' before "
+            "citing line numbers from it.\n"
+            "Every result carries a `status` of ok/drifted/unknown. 'unknown' "
+            "means the fact is UNVERIFIED, never that everything is fine."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "check": {
+                    "type": "string",
+                    "enum": sorted(FACT_CHECKS),
+                    "description": "Which operational question to answer.",
+                },
+                "domain": {
+                    "type": "string",
+                    "description": "For 'serving_app': the hostname, e.g. app.example.com.",
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "For 'code_path': the symbol or string to search for.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "For 'checkout_freshness': the checkout to inspect.",
+                },
+                "workflow": {
+                    "type": "string",
+                    "description": "For 'deploy_triggers': narrow to workflows matching this name.",
+                },
+                "repo_root": {
+                    "type": "string",
+                    "description": "Repo to inspect; defaults to the Ateles repo.",
+                },
+            },
+            "required": ["check"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
         name="get_swarm_roster",
         description=(
             "Returns the full Ateles swarm roster: a map of roles to agent names, "
@@ -1428,6 +1503,14 @@ TOOLS = [
 ]
 
 TOOL_HANDLERS = {
+    "check_swarm_fact": lambda args: check_swarm_fact(
+        args["check"],
+        domain=args.get("domain"),
+        pattern=args.get("pattern"),
+        path=args.get("path"),
+        workflow=args.get("workflow"),
+        repo_root=args.get("repo_root"),
+    ),
     "get_swarm_roster": lambda args: _get_swarm_roster(),
     "route_task": lambda args: _route_task(
         args["task_description"], args.get("action_type")

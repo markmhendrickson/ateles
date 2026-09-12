@@ -788,7 +788,13 @@ class TestToolSchemas(unittest.TestCase):
     # Read-only swarm observability. resolve_checkpoint stays the ONLY mutating
     # tool: see the self-certification boundary note in server.py — a session
     # must not be able to advance its own gate.
-    OBSERVABILITY_TOOLS = {"get_gate_status", "list_pipeline_queue", "get_dispatch_health"}
+    OBSERVABILITY_TOOLS = {
+        "get_gate_status", "list_pipeline_queue", "get_dispatch_health",
+        # check_swarm_fact answers operational questions from live state. It
+        # reads workflow YAML, DNS, launchd, and git — never Neotoma — so it is
+        # covered by the read-only guard below like the rest of this set.
+        "check_swarm_fact",
+    }
 
     def test_tools_defined(self):
         self.assertEqual(len(srv.TOOLS), len(self.ACTION_TOOLS | self.OBSERVABILITY_TOOLS))

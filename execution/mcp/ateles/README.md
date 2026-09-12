@@ -17,6 +17,35 @@ Registered in `~/.claude.json` as the `ateles` server, launched via
 | `get_gate_status` | no | An issue's `gate_status`, `current_owner`, blocking gates, recent `owner_history`, and pipeline state |
 | `list_pipeline_queue` | no | What holds the issue-pipeline slot, what is queued, and how long each has waited |
 | `get_dispatch_health` | no | Dispatcher liveness, recent pipeline activity, recent dispatch failures |
+| `check_swarm_fact` | no | Answers an operational question about how the swarm actually works, computed from live state at call time |
+
+### `check_swarm_fact`
+
+Exists because agents repeatedly *infer* operational facts instead of checking
+them, and the inferences are wrong — six instances in a single session, each
+one cheap to verify. The information was never missing; what was missing was a
+prompt to look and an obvious place to look. A doc supplies neither, and rots:
+this repo's own `docs/` describes the checkout-drift guard as though daemons
+call it, when exactly 1 of 18 does.
+
+So every answer is computed from the system of record at call time.
+
+| `check` | Answers | Reads |
+|---|---|---|
+| `deploy_triggers` | "What ships this? Do I need to publish a release?" | every `on:` key in the workflow YAML |
+| `serving_app` | "Which app do I scale/restart?" | DNS CNAME chain, then the Fly app list |
+| `daemons` | "Is X actually running?" | daemon dirs vs `launchctl list` |
+| `code_path` | "Does this inherit a filter/guard?" | ripgrep over the working tree |
+| `checkout_freshness` | "Is this code current?" | `git rev-list` against the tracking ref |
+
+Every result carries `status`: `ok`, `drifted`, or `unknown`. **`unknown` means
+the fact is unverified, never that everything is fine** — a check that cannot
+reach its source says so with a reason, because "I checked and it's fine" and
+"I couldn't check" lead to opposite decisions.
+
+Two deliberate non-verdicts inherited from the daemon guard: a failed `git
+fetch` reports `unknown` rather than drift (offline must not look like unpushed
+commits), and untracked files are not drift (deploy checkouts accumulate logs).
 
 ### Read-only by construction
 
