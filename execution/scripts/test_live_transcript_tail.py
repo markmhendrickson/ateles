@@ -617,3 +617,118 @@ def test_build_subprocess_env_tolerates_missing_dotenv(tmp_path):
         materialized=tmp_path / "absent", base_env={"PATH": "/usr/bin"}
     )
     assert env == {"PATH": "/usr/bin"}
+
+
+# --------------------------------------------------------------------------
+# Case 6 — the capture gate: explicit start, bounded session
+# --------------------------------------------------------------------------
+
+
+def test_resolve_refuses_when_no_target_given(tmp_path, monkeypatch):
+    """The defect this closes: an unnamed run must NOT attach to a recording."""
+    monkeypatch.delenv(lt.ATTACH_GROWING_ENV, raising=False)
+    growing = tmp_path / "call_system.mp4"
+    growing.write_bytes(b"aa")
+
+    with patch.object(lt, "find_growing_recording") as detect:
+        path, err = lt.resolve_capture_target(None, tmp_path)
+
+    assert path is None
+    # Refusal must happen BEFORE detection — not detect-then-discard.
+    detect.assert_not_called()
+    assert "refusing to auto-attach" in err
+    assert "--attach-growing" in err
+
+
+def test_resolve_uses_explicit_file_without_detection(tmp_path):
+    f = tmp_path / "named_system.mp4"
+    f.write_bytes(b"aa")
+    with patch.object(lt, "find_growing_recording") as detect:
+        path, err = lt.resolve_capture_target(f, tmp_path)
+    assert path == f and err is None
+    detect.assert_not_called()
+
+
+def test_resolve_missing_explicit_file_errors(tmp_path):
+    path, err = lt.resolve_capture_target(tmp_path / "gone.mp4", tmp_path)
+    assert path is None and "not found" in err
+
+
+def test_resolve_attach_growing_opts_into_detection(tmp_path, monkeypatch):
+    monkeypatch.delenv(lt.ATTACH_GROWING_ENV, raising=False)
+    found = tmp_path / "call_system.mp4"
+    found.write_bytes(b"aa")
+    with patch.object(lt, "find_growing_recording", return_value=found):
+        path, err = lt.resolve_capture_target(None, tmp_path, attach_growing=True)
+    assert path == found and err is None
+
+
+def test_resolve_attach_growing_via_env(tmp_path, monkeypatch):
+    monkeypatch.setenv(lt.ATTACH_GROWING_ENV, "1")
+    found = tmp_path / "call_system.mp4"
+    found.write_bytes(b"aa")
+    with patch.object(lt, "find_growing_recording", return_value=found):
+        path, err = lt.resolve_capture_target(None, tmp_path)
+    assert path == found and err is None
+
+
+def test_resolve_attach_growing_finds_nothing(tmp_path, monkeypatch):
+    monkeypatch.delenv(lt.ATTACH_GROWING_ENV, raising=False)
+    with patch.object(lt, "find_growing_recording", return_value=None):
+        path, err = lt.resolve_capture_target(None, tmp_path, attach_growing=True)
+    assert path is None and "no active recording" in err
+
+
+def test_session_cap_flag_defaults_and_parses():
+    """The cap is on by default; 0 is the explicit opt-out."""
+    assert lt.DEFAULT_MAX_SESSION_MIN > 0
+
+
+def test_main_refuses_unnamed_run(tmp_path, monkeypatch):
+    """End to end: no --file and no opt-in → exit 1, nothing transcribed."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.delenv(lt.ATTACH_GROWING_ENV, raising=False)
+    out = tmp_path / "out.jsonl"
+
+    with (
+        patch.object(lt, "find_growing_recording") as detect,
+        patch.object(lt, "transcribe_slice") as mock_tx,
+        patch.object(lt, "log") as mock_log,
+    ):
+        rc = lt.main(["--dir", str(tmp_path), "--out", str(out)])
+
+    assert rc == 1
+    detect.assert_not_called()
+    mock_tx.assert_not_called()
+    assert not out.exists()
+    assert any("refusing to auto-attach" in str(c) for c in mock_log.call_args_list)
+
+
+def test_main_stops_at_session_cap(tmp_path, monkeypatch):
+    """The cap ends the session BEFORE slicing another chunk."""
+    recording = tmp_path / "meet_system.mp4"
+    recording.write_bytes(b"x")
+    out = tmp_path / "out.jsonl"
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    # start=1000; cap of 1 min → deadline 1060. Second call (loop check) is
+    # past it, so the loop must break without slicing.
+    times = iter([1000.0] + [2000.0] * 20)
+
+    with (
+        patch.object(lt, "probe_duration", return_value=500.0),
+        patch.object(lt.time, "sleep"),
+        patch.object(lt.time, "time", side_effect=lambda: next(times)),
+        patch.object(lt, "subprocess") as mock_sub,
+        patch.object(lt, "transcribe_slice") as mock_tx,
+    ):
+        rc = lt.main([
+            "--file", str(recording), "--out", str(out),
+            "--interval", "1", "--start-at", "0", "--max-session-min", "1",
+        ])
+
+    assert rc == 0
+    mock_sub.run.assert_not_called()
+    mock_tx.assert_not_called()
+    events = [json.loads(ln) for ln in out.read_text().splitlines() if ln.strip()]
+    assert events and events[-1]["event"] == "session_cap_reached"
