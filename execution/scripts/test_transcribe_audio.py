@@ -36,6 +36,22 @@ import transcribe_audio as ta  # noqa: E402
 _SYNTH_VOCAB = "Vexcorp=Vex Corp|Vexcorb|Vexcore, Zolium=Zolium's|Zolyum|the Zolium"
 
 
+def test_ffprobe_reads_channel_count_for_non_wav_capture(tmp_path):
+    """The audio-driven router can classify the M4A/MP4 files Tyto receives."""
+    capture = tmp_path / "synthetic.m4a"
+    capture.write_bytes(b"not-real-audio")
+    completed = types.SimpleNamespace(returncode=0, stdout="2\n", stderr="")
+
+    with patch.object(ta.shutil, "which", return_value="/usr/bin/ffprobe"), patch.object(
+        ta.subprocess, "run", return_value=completed
+    ) as run:
+        assert ta._ffprobe_channel_count(capture) == 2
+
+    command = run.call_args.args[0]
+    assert command[-1] == str(capture)
+    assert "stream=channels" in command
+
+
 @pytest.fixture(autouse=True)
 def _synthetic_vocab(monkeypatch):
     """Inject synthetic proper-noun vocabulary and never hit Neotoma in tests."""
