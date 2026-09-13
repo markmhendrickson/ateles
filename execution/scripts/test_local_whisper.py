@@ -35,6 +35,25 @@ def test_local_is_the_default_even_when_both_paid_keys_are_present():
     assert lw.resolve_backend(env=env) == lw.BACKEND_LOCAL
 
 
+def test_multichannel_audio_uses_elevenlabs_when_available():
+    assert (
+        lw.resolve_backend(
+            channel_count=2,
+            env={"ELEVENLABS_API_KEY": "configured"},
+        )
+        == lw.BACKEND_ELEVENLABS
+    )
+
+
+def test_multichannel_audio_without_elevenlabs_stays_local():
+    assert lw.resolve_backend(channel_count=2, env={}) == lw.BACKEND_LOCAL
+
+
+def test_unknown_channel_count_stays_local_even_with_paid_keys():
+    env = {"ELEVENLABS_API_KEY": "configured", "OPENAI_API_KEY": "configured"}
+    assert lw.resolve_backend(channel_count=None, env=env) == lw.BACKEND_LOCAL
+
+
 def test_explicit_argument_wins_over_everything():
     env = {"TRANSCRIBE_BACKEND": "local", "ELEVENLABS_API_KEY": "k"}
     assert lw.resolve_backend(explicit="openai", env=env) == lw.BACKEND_OPENAI

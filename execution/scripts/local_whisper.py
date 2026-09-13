@@ -112,6 +112,7 @@ def resolve_backend(
     *,
     explicit: str | None = None,
     use_diarization: bool | None = None,
+    channel_count: int | None = None,
     env: dict[str, str] | None = None,
 ) -> str:
     """Decide which speech-to-text backend to use.
@@ -126,7 +127,8 @@ def resolve_backend(
        ahead of the local default rather than behind it. Regressing
        multi-speaker meetings to a diarization-less backend would silently
        destroy the thing ``record_meeting`` and ``analyze-meeting`` exist for.
-    4. Otherwise → local.
+    4. Multi-channel audio with a key present → ElevenLabs.
+    5. Mono or unknown-channel audio → local.
 
     The metered OpenAI path is reachable ONLY through steps 1 and 2. It is never
     selected implicitly and never used as a fallback: an unavailable free
@@ -156,6 +158,8 @@ def resolve_backend(
     if use_diarization is True:
         return BACKEND_ELEVENLABS
     if use_diarization is None and has_key and env.get("RECORD_MEETING_DIARIZE") == "1":
+        return BACKEND_ELEVENLABS
+    if use_diarization is None and has_key and channel_count is not None and channel_count >= 2:
         return BACKEND_ELEVENLABS
 
     return BACKEND_LOCAL

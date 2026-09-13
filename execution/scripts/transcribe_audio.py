@@ -790,7 +790,7 @@ def _format_multichannel_transcripts_chronologically(transcripts: list) -> str |
 
 
 def get_audio_channel_count(audio_path: Path) -> int | None:
-    """Return channel count for WAV via stdlib wave; else pydub if available."""
+    """Return channel count via WAV, pydub, then ffprobe; None when unknown."""
     try:
         if audio_path.suffix.lower() == ".wav":
             import wave
@@ -805,7 +805,45 @@ def get_audio_channel_count(audio_path: Path) -> int | None:
         segment = AudioSegment.from_file(str(audio_path))
         return int(segment.channels)
     except Exception:
+        pass
+    return _ffprobe_channel_count(audio_path)
+
+
+def _ffprobe_channel_count(audio_path: Path) -> int | None:
+    """Return the first audio stream's channel count without raising."""
+    ffprobe_path = shutil.which("ffprobe")
+    if not ffprobe_path:
         return None
+    try:
+        result = subprocess.run(
+            [
+                ffprobe_path,
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=channels",
+                "-of",
+                "csv=p=0",
+                str(audio_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    first_line = (result.stdout or "").strip().splitlines()
+    if not first_line:
+        return None
+    try:
+        channels = int(first_line[0].strip().rstrip(","))
+    except ValueError:
+        return None
+    return channels if channels > 0 else None
 
 
 def _elevenlabs_request_timeout() -> tuple[float, float]:
@@ -1660,6 +1698,7 @@ def transcribe_audio_file(
     resolved_backend = resolve_backend(
         explicit=backend,
         use_diarization=use_diarization,
+        channel_count=get_audio_channel_count(audio_path),
     )
 
     if resolved_backend == BACKEND_LOCAL:

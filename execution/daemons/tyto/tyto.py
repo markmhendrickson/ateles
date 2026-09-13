@@ -64,8 +64,10 @@ Environment variables:
                             retrying (default: 300).
   TYTO_TRANSCRIBE_ENABLED   Set to 0 to disable auto-transcription (default: 1)
   TYTO_TRANSCRIBE_SCRIPT    Path to transcribe_audio.py (auto-detected from repo root)
-  ELEVENLABS_API_KEY        When set, enables diarization via ElevenLabs
-  RECORD_MEETING_DIARIZE    Set to 0 to force plain transcription (default: 1)
+  ELEVENLABS_API_KEY        Enables ElevenLabs for explicit diarization and
+                            multi-channel audio; key presence alone does not route.
+  RECORD_MEETING_DIARIZE    Set to 1 for ElevenLabs diarization, 0 for local;
+                            unset routes from the audio channel count.
   TYTO_ANALYZE_ENABLED      Set to 0 to disable post-transcription meeting analysis (default: 1)
   TYTO_ANALYZE_MEETING_SKILL  Path to analyze-meeting/SKILL.md (auto-detected from repo root)
   TYTO_ANALYZE_NEOTOMA_SKILL  Path to analyze-neotoma-feedback/SKILL.md (auto-detected)
@@ -225,12 +227,6 @@ def _find_transcribe_script() -> str:
 TRANSCRIBE_SCRIPT = Path(
     os.environ.get("TYTO_TRANSCRIBE_SCRIPT", _find_transcribe_script())
 )
-
-# Diarization: enabled by default when ELEVENLABS_API_KEY is set
-def _should_diarize() -> bool:
-    if os.environ.get("RECORD_MEETING_DIARIZE", "1") == "0":
-        return False
-    return bool(os.environ.get("ELEVENLABS_API_KEY", ""))
 
 # ── Meeting analysis config ───────────────────────────────────────────────────
 # Set TYTO_ANALYZE_ENABLED=0 to disable post-transcription analysis.
@@ -962,11 +958,14 @@ class RecordingWatcher:
         if self._capture_method == "voice_memo":
             cmd.extend(["--backend", "local"])
             log.info(f"[{DAEMON_NAME}] Voice Memo local transcription mode.")
-        elif _should_diarize():
+        elif os.environ.get("RECORD_MEETING_DIARIZE") == "1":
             cmd.append("--diarize")
-            log.info(f"[{DAEMON_NAME}] Single-file diarization mode.")
+            log.info(f"[{DAEMON_NAME}] Explicit single-file diarization mode.")
+        elif os.environ.get("RECORD_MEETING_DIARIZE") == "0":
+            cmd.append("--no-diarize")
+            log.info(f"[{DAEMON_NAME}] Explicit single-file local mode.")
         else:
-            log.info(f"[{DAEMON_NAME}] Single-file plain transcription mode.")
+            log.info(f"[{DAEMON_NAME}] Single-file audio-directed transcription mode.")
 
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
@@ -974,7 +973,7 @@ class RecordingWatcher:
                 f"[{DAEMON_NAME}] Transcription failed (rc={result.returncode}): "
                 f"{result.stderr.strip()[:300]}"
             )
-            if _should_diarize():
+            if "--diarize" in cmd:
                 log.info(f"[{DAEMON_NAME}] Retrying without diarization...")
                 cmd_fallback = [
                     python, str(TRANSCRIBE_SCRIPT), str(remote_path), "--no-diarize",

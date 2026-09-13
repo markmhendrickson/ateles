@@ -562,6 +562,27 @@ def test_voice_memo_uses_local_backend_even_when_elevenlabs_key_exists(tmp_path,
     assert "--diarize" not in command
 
 
+def test_single_file_meeting_defers_routing_to_transcribe_script(tmp_path, monkeypatch):
+    """Tyto must not reintroduce key-presence routing beside the shared selector."""
+    recording = _write(tmp_path, "20260908 101500 system.m4a", age_secs=FRESH)
+    watcher = _make_watcher(tmp_path, capture_method="audio_hijack_system")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "configured")
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    completed = MagicMock(
+        returncode=0,
+        stdout="NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_test_auto\n",
+        stderr="",
+    )
+
+    with patch.object(tyto.subprocess, "run", return_value=completed) as run:
+        assert watcher._run_transcription(recording, None) == "ent_test_auto"
+
+    command = run.call_args.args[0]
+    assert "--diarize" not in command
+    assert "--no-diarize" not in command
+    assert "--backend" not in command
+
+
 def test_zero_byte_memo_is_not_transcribed(tmp_path):
     """A memo still being written has size 0 and must wait."""
     _write(tmp_path, "20260908 101500-NEW0001.m4a", age_secs=FRESH, size=0)
