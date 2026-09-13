@@ -21,6 +21,7 @@ import logging
 import os
 import subprocess
 import tempfile
+import threading
 from datetime import datetime, time
 from enum import Enum
 from pathlib import Path
@@ -134,6 +135,10 @@ class Notifier:
             os.environ.get("ATELES_DIGEST_QUEUE_PATH", "").strip()
             or Path(tempfile.gettempdir()) / "ateles-notify-digest.json"
         )
+        # Tyto can complete independent recording watchers on worker threads.
+        # Serialize the whole notification path: the persisted digest queue is
+        # a read-modify-write transaction, and delivery clients are shared too.
+        self._notification_lock = threading.RLock()
         self._apprise: Any = None
         if HAS_APPRISE:
             self._apprise = apprise.Apprise()
@@ -183,6 +188,16 @@ class Notifier:
 
         Returns True if sent immediately, False if queued or dropped.
         """
+        with self._notification_lock:
+            return self._send_locked(message, priority, handler, bypass_silence)
+
+    def _send_locked(
+        self,
+        message: str,
+        priority: Priority | str,
+        handler: str,
+        bypass_silence: bool,
+    ) -> bool:
         prio = Priority(priority) if isinstance(priority, str) else priority
         tag = f"[{handler}] " if handler else ""
         full_message = f"{tag}{message}"
@@ -226,32 +241,36 @@ class Notifier:
     @property
     def _digest_queue(self) -> list[str]:
         """Read the persisted queue. Fail-open: unreadable state => empty."""
-        try:
-            raw = json.loads(self._digest_path.read_text())
-            return [str(x) for x in raw] if isinstance(raw, list) else []
-        except FileNotFoundError:
-            return []
-        except Exception as exc:  # noqa: BLE001 — never crash a notification
-            log.warning("[notify] digest queue unreadable (%s) — treating as empty", exc)
-            return []
+        with self._notification_lock:
+            try:
+                raw = json.loads(self._digest_path.read_text())
+                return [str(x) for x in raw] if isinstance(raw, list) else []
+            except FileNotFoundError:
+                return []
+            except Exception as exc:  # noqa: BLE001 — never crash a notification
+                log.warning(
+                    "[notify] digest queue unreadable (%s) — treating as empty", exc
+                )
+                return []
 
     def _queue_digest(self, message: str) -> None:
         """Append to the persisted queue, atomically. Never raises."""
-        try:
-            items = self._digest_queue
-            items.append(message)
-            self._digest_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._digest_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(items))
-            tmp.replace(self._digest_path)
-        except Exception as exc:  # noqa: BLE001
-            # Losing the queue write must not lose the alert: say so loudly.
-            log.error(
-                "[notify] could not persist digest item (%s) — message not "
-                "queued and will NOT be delivered: %r",
-                exc,
-                message[:200],
-            )
+        with self._notification_lock:
+            try:
+                items = self._digest_queue
+                items.append(message)
+                self._digest_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self._digest_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(items))
+                tmp.replace(self._digest_path)
+            except Exception as exc:  # noqa: BLE001
+                # Losing the queue write must not lose the alert: say so loudly.
+                log.error(
+                    "[notify] could not persist digest item (%s) — message not "
+                    "queued and will NOT be delivered: %r",
+                    exc,
+                    message[:200],
+                )
 
     def flush_digest(self) -> bool:
         """Send all queued digest messages as a single message.
@@ -260,23 +279,24 @@ class Notifier:
         failed send leaves the items for the next attempt instead of dropping
         them silently.
         """
-        items = self._digest_queue
-        if not items:
-            return False
-        body = "\n".join(f"• {m}" for m in items)
-        header = f"📋 Digest ({len(items)} items)\n\n"
-        ok = self._deliver(header + body, force=True)
-        if ok:
-            try:
-                self._digest_path.unlink(missing_ok=True)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("[notify] digest sent but queue not cleared: %s", exc)
-        else:
-            log.warning(
-                "[notify] digest delivery failed — keeping %d item(s) queued",
-                len(items),
-            )
-        return ok
+        with self._notification_lock:
+            items = self._digest_queue
+            if not items:
+                return False
+            body = "\n".join(f"• {m}" for m in items)
+            header = f"📋 Digest ({len(items)} items)\n\n"
+            ok = self._deliver(header + body, force=True)
+            if ok:
+                try:
+                    self._digest_path.unlink(missing_ok=True)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[notify] digest sent but queue not cleared: %s", exc)
+            else:
+                log.warning(
+                    "[notify] digest delivery failed — keeping %d item(s) queued",
+                    len(items),
+                )
+            return ok
 
     def _maybe_flush_digest(self) -> None:
         """Drain the queue opportunistically, on any send.
