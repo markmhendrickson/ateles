@@ -67,7 +67,8 @@ def _settled(watcher: tyto.RecordingWatcher) -> None:
     """
     for path in watcher._dir.iterdir():
         if path.is_file():
-            watcher._seen[path] = path.stat().st_mtime
+            stat = path.stat()
+            watcher._seen[path] = (stat.st_mtime_ns, stat.st_size)
 
 
 def _poll(watcher: tyto.RecordingWatcher) -> list[tuple[Path, Path | None]]:
@@ -201,6 +202,19 @@ def test_a_new_memo_after_startup_is_still_transcribed(tmp_path):
     _settled(watcher)
 
     assert [c[0] for c in _poll(watcher)] == [fresh]
+
+
+def test_multiple_new_memos_after_startup_are_all_transcribed(tmp_path):
+    """One poll processes every settled arrival, not only the newest memo."""
+    watcher = _make_watcher(
+        tmp_path, paired=False, extensions={".m4a", ".wav"},
+        max_age_secs=3600, seed_existing=True,
+    )
+    first = _write(tmp_path, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    second = _write(tmp_path, "20260908 101501-NEW0002.wav", age_secs=FRESH)
+    _settled(watcher)
+
+    assert [call[0] for call in _poll(watcher)] == [first, second]
 
 
 def test_max_age_zero_disables_the_window_only(tmp_path):
@@ -368,6 +382,16 @@ def test_missing_directory_is_tolerated(tmp_path):
     assert _poll(watcher) == []
 
 
+def test_empty_directory_is_a_quiet_success(tmp_path):
+    """An existing empty watch directory produces no work and no error."""
+    watcher = _make_watcher(
+        tmp_path, paired=False, extensions={".m4a", ".wav"},
+        max_age_secs=3600, seed_existing=True,
+    )
+
+    assert _poll(watcher) == []
+
+
 def test_a_memo_is_transcribed_only_once(tmp_path):
     memo = _write(tmp_path, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
     watcher = _make_watcher(
@@ -391,3 +415,25 @@ def test_zero_byte_memo_is_not_transcribed(tmp_path):
     _settled(watcher)
 
     assert _poll(watcher) == []
+
+
+def test_memo_must_stop_growing_before_transcription(tmp_path):
+    """Stable mtime alone cannot make a still-growing memo look settled."""
+    memo = _write(tmp_path, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    watcher = _make_watcher(
+        tmp_path, paired=False, extensions={".m4a"}, max_age_secs=3600,
+    )
+
+    # First sighting records the initial (mtime, size) signature.
+    assert _poll(watcher) == []
+    original = memo.stat()
+
+    # Simulate a writer that appends content while preserving mtime.  A
+    # timestamp-only settling check would transcribe on this poll.
+    with memo.open("ab") as handle:
+        handle.write(b"more audio")
+    os.utime(memo, ns=(original.st_atime_ns, original.st_mtime_ns))
+    assert _poll(watcher) == []
+
+    # Once the complete signature is unchanged, the memo is eligible.
+    assert [call[0] for call in _poll(watcher)] == [memo]

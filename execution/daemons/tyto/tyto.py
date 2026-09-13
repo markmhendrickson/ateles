@@ -602,7 +602,10 @@ class RecordingWatcher:
         # Only files whose mtime is within this many seconds of "now" are
         # eligible. 0 = no age limit (the meeting-recording watchers' behavior).
         self._max_age_secs = max_age_secs
-        self._seen: dict[Path, float] = {}    # path → mtime at first sight
+        # A path is settled only after both its timestamp and byte length stay
+        # unchanged across polls.  Watching mtime alone is insufficient: a
+        # writer can append more audio while preserving/restoring mtime.
+        self._seen: dict[Path, tuple[int, int]] = {}  # path → (mtime_ns, size)
         self._transcribed: set[Path] = set() # remote paths already transcribed
         # Backlog guard: record everything already on disk at construction time
         # as handled, so an existing archive is never transcribed. Belt and
@@ -703,12 +706,13 @@ class RecordingWatcher:
             return False
         if st.st_size == 0:
             return False
+        signature = (st.st_mtime_ns, st.st_size)
         prev = self._seen.get(path)
         if prev is None:
-            self._seen[path] = st.st_mtime
+            self._seen[path] = signature
             return False
-        if st.st_mtime != prev:
-            self._seen[path] = st.st_mtime
+        if signature != prev:
+            self._seen[path] = signature
             return False
         return (now - st.st_mtime) >= self.SETTLE_SECS
 
