@@ -58,10 +58,16 @@ Environment variables:
   TYTO_VOICE_MEMO_INCLUDE_QTA  Set to 1 to also watch .qta files (default: 0).
                             transcribe_audio.py converts .qta via ffmpeg, but every
                             .qta on disk is old by construction, so it is opt-in.
+  TYTO_VOICE_MEMO_RETRY_STATE  Durable pending-retry journal (default:
+                            ~/.local/state/ateles/tyto-voice-memo-retries.json).
+  TYTO_VOICE_MEMO_RETRY_SECS  Delay after a failed memo transcription before
+                            retrying (default: 300).
   TYTO_TRANSCRIBE_ENABLED   Set to 0 to disable auto-transcription (default: 1)
   TYTO_TRANSCRIBE_SCRIPT    Path to transcribe_audio.py (auto-detected from repo root)
-  ELEVENLABS_API_KEY        When set, enables diarization via ElevenLabs
-  RECORD_MEETING_DIARIZE    Set to 0 to force plain transcription (default: 1)
+  ELEVENLABS_API_KEY        Enables ElevenLabs for explicit diarization and
+                            multi-channel audio; key presence alone does not route.
+  RECORD_MEETING_DIARIZE    Set to 1 for ElevenLabs diarization, 0 for local;
+                            unset routes from the audio channel count.
   TYTO_ANALYZE_ENABLED      Set to 0 to disable post-transcription meeting analysis (default: 1)
   TYTO_ANALYZE_MEETING_SKILL  Path to analyze-meeting/SKILL.md (auto-detected from repo root)
   TYTO_ANALYZE_NEOTOMA_SKILL  Path to analyze-neotoma-feedback/SKILL.md (auto-detected)
@@ -71,6 +77,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import subprocess
@@ -78,6 +85,8 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 # ── Load .env early so env vars are available before config reads ─────────────
 def _load_env() -> None:
@@ -105,8 +114,6 @@ def _load_env() -> None:
             pass
 
 _load_env()
-
-import httpx
 
 # ── Path bootstrap ────────────────────────────────────────────────────────────
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -197,6 +204,13 @@ VOICE_MEMO_MAX_AGE_SECS = int(
 # format was retired years ago), so including it only widens the backlog the
 # guard has to hold back. Default off; set to 1 to opt in.
 VOICE_MEMO_INCLUDE_QTA = os.environ.get("TYTO_VOICE_MEMO_INCLUDE_QTA", "0") == "1"
+VOICE_MEMO_RETRY_STATE = Path(
+    os.environ.get(
+        "TYTO_VOICE_MEMO_RETRY_STATE",
+        str(Path.home() / ".local" / "state" / "ateles" / "tyto-voice-memo-retries.json"),
+    )
+)
+VOICE_MEMO_RETRY_SECS = int(os.environ.get("TYTO_VOICE_MEMO_RETRY_SECS", "300"))
 TRANSCRIBE_ENABLED = os.environ.get("TYTO_TRANSCRIBE_ENABLED", "1") != "0"
 
 # Auto-detect transcribe_audio.py — check ateles repo first, then personal repo
@@ -213,12 +227,6 @@ def _find_transcribe_script() -> str:
 TRANSCRIBE_SCRIPT = Path(
     os.environ.get("TYTO_TRANSCRIBE_SCRIPT", _find_transcribe_script())
 )
-
-# Diarization: enabled by default when ELEVENLABS_API_KEY is set
-def _should_diarize() -> bool:
-    if os.environ.get("RECORD_MEETING_DIARIZE", "1") == "0":
-        return False
-    return bool(os.environ.get("ELEVENLABS_API_KEY", ""))
 
 # ── Meeting analysis config ───────────────────────────────────────────────────
 # Set TYTO_ANALYZE_ENABLED=0 to disable post-transcription analysis.
@@ -434,7 +442,7 @@ If no calendar event matches within the ±90-minute window, note
     log.info(f"[{DAEMON_NAME}] Meeting analysis complete for {remote_path.name}.")
     # Surface a brief summary from the output (first non-empty line of stdout)
     first_line = next(
-        (l.strip() for l in result.stdout.splitlines() if l.strip()), ""
+        (line.strip() for line in result.stdout.splitlines() if line.strip()), ""
     )
     notifier.send(
         f"Meeting analysis done: {first_line[:120] or remote_path.name}",
@@ -577,6 +585,8 @@ class RecordingWatcher:
         extensions: set[str] | None = None,
         max_age_secs: int = 0,
         seed_existing: bool = False,
+        retry_state_path: Path | None = None,
+        retry_secs: int = 300,
     ) -> None:
         self._dir = watch_dir
         self._notifier = notifier
@@ -602,6 +612,12 @@ class RecordingWatcher:
         # Only files whose mtime is within this many seconds of "now" are
         # eligible. 0 = no age limit (the meeting-recording watchers' behavior).
         self._max_age_secs = max_age_secs
+        self._retry_state_path = retry_state_path
+        self._retry_secs = max(0, retry_secs)
+        self._pending_retries: dict[Path, float] = {}
+        self._retry_state_available = True
+        if self._retry_state_path is not None:
+            self._load_retry_state()
         # A path is settled only after both its timestamp and byte length stay
         # unchanged across polls.  Watching mtime alone is insufficient: a
         # writer can append more audio while preserving/restoring mtime.
@@ -615,19 +631,97 @@ class RecordingWatcher:
         if seed_existing:
             self._seed_existing()
 
+    def _load_retry_state(self) -> None:
+        """Load durable pending retries, failing closed if the journal is unreadable."""
+        assert self._retry_state_path is not None
+        if not self._retry_state_path.exists():
+            return
+        try:
+            payload = json.loads(self._retry_state_path.read_text())
+            if (
+                not isinstance(payload, dict)
+                or payload.get("version") != 1
+                or not isinstance(payload.get("pending"), list)
+            ):
+                raise ValueError("unsupported retry-state format")
+            for item in payload["pending"]:
+                if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                    raise ValueError("invalid pending retry entry")
+                self._pending_retries[Path(item["path"])] = float(
+                    item.get("retry_after", 0)
+                )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            self._retry_state_available = False
+            log.error(
+                f"[{DAEMON_NAME}] Voice Memo retry state is unreadable: "
+                f"{self._retry_state_path}: {exc}. Memo processing is disabled "
+                "until the journal is repaired; existing files will not be seeded "
+                "as handled."
+            )
+
+    def _save_retry_state(self) -> bool:
+        """Atomically persist pending retries before relying on in-memory state."""
+        if self._retry_state_path is None:
+            return True
+        payload = {
+            "version": 1,
+            "pending": [
+                {"path": str(path), "retry_after": retry_after}
+                for path, retry_after in sorted(
+                    self._pending_retries.items(), key=lambda item: str(item[0])
+                )
+            ],
+        }
+        tmp_path = self._retry_state_path.with_suffix(
+            self._retry_state_path.suffix + ".tmp"
+        )
+        try:
+            self._retry_state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path.write_text(json.dumps(payload, indent=2) + "\n")
+            os.chmod(tmp_path, 0o600)
+            tmp_path.replace(self._retry_state_path)
+            return True
+        except OSError as exc:
+            self._retry_state_available = False
+            log.error(
+                f"[{DAEMON_NAME}] Cannot persist Voice Memo retry state at "
+                f"{self._retry_state_path}: {exc}. Memo processing is disabled "
+                "rather than risking a lost retry."
+            )
+            return False
+
+    def _mark_pending(self, path: Path, retry_after: float = 0) -> bool:
+        self._pending_retries[path] = retry_after
+        return self._save_retry_state()
+
+    def _clear_pending(self, path: Path) -> bool:
+        self._pending_retries.pop(path, None)
+        return self._save_retry_state()
+
     def _seed_existing(self) -> None:
         """Mark every currently-present eligible file as already handled."""
+        if not self._retry_state_available:
+            return
         try:
             existing = [p for p in self._dir.iterdir() if self._is_eligible_file(p)]
         except OSError:
             return
         for path in existing:
-            self._transcribed.add(path)
-        if existing:
+            if path not in self._pending_retries:
+                self._transcribed.add(path)
+        seeded_count = len(existing) - sum(
+            path in self._pending_retries for path in existing
+        )
+        if seeded_count:
             log.info(
-                f"[{DAEMON_NAME}] Backlog guard: {len(existing)} pre-existing "
+                f"[{DAEMON_NAME}] Backlog guard: {seeded_count} pre-existing "
                 f"file(s) in {self._dir} marked as handled; they will not be "
                 "transcribed."
+            )
+        if self._pending_retries:
+            log.info(
+                f"[{DAEMON_NAME}] Restored {len(self._pending_retries)} pending "
+                "Voice Memo retry/retries from durable state."
             )
 
     # Audio Hijack recorder block names that represent the far-end / system audio track.
@@ -664,7 +758,7 @@ class RecordingWatcher:
 
         With _max_age_secs == 0 every file passes (meeting-recording behavior).
         """
-        if self._max_age_secs <= 0:
+        if path in self._pending_retries or self._max_age_secs <= 0:
             return True
         try:
             st = path.stat()
@@ -717,6 +811,8 @@ class RecordingWatcher:
         return (now - st.st_mtime) >= self.SETTLE_SECS
 
     async def poll_once(self) -> None:
+        if not self._retry_state_available:
+            return
         if not self._dir.exists():
             log.debug(f"[{DAEMON_NAME}] Recordings dir does not exist: {self._dir}")
             return
@@ -727,6 +823,8 @@ class RecordingWatcher:
             if not self._is_eligible_file(path):
                 continue
             if path in self._transcribed:
+                continue
+            if self._pending_retries.get(path, 0) > now:
                 continue
             # Backlog guard: an old file is never a fresh recording. Checked
             # before settling so a stale archive file is not even logged.
@@ -748,15 +846,29 @@ class RecordingWatcher:
                 log.debug(f"[{DAEMON_NAME}] Waiting for mic file to settle: {mic_path.name}")
                 continue
 
-            # Both settled (or no mic file) — transcribe
-            self._transcribed.add(path)
+            # Voice Memos record retry eligibility durably before invoking a
+            # backend, then clear it only after successful transcription.
+            durable_retry = self._retry_state_path is not None
+            if durable_retry:
+                if path not in self._pending_retries and not self._mark_pending(path):
+                    continue
+            else:
+                self._transcribed.add(path)
             log.info(
                 f"[{DAEMON_NAME}] Recording settled, transcribing: {path.name}"
                 + (f" + {mic_path.name}" if mic_path else " (remote only)")
             )
-            await self._handle_recording(path, mic_path)
+            succeeded = await self._handle_recording(path, mic_path)
+            if durable_retry:
+                if succeeded:
+                    self._transcribed.add(path)
+                    if not self._clear_pending(path):
+                        self._transcribed.discard(path)
+                else:
+                    retry_after = datetime.now(tz=UTC).timestamp() + self._retry_secs
+                    self._mark_pending(path, retry_after)
 
-    async def _handle_recording(self, remote_path: Path, mic_path: Path | None) -> None:
+    async def _handle_recording(self, remote_path: Path, mic_path: Path | None) -> bool:
         label = remote_path.name + (f" + {mic_path.name}" if mic_path else "")
         self._notifier.send(
             f"Auto-transcribing: {label}",
@@ -778,7 +890,7 @@ class RecordingWatcher:
                 priority=Priority.BLOCKER,
                 handler=DAEMON_NAME,
             )
-            return  # don't attempt analysis if transcription failed
+            return False  # don't attempt analysis if transcription failed
 
         if ANALYZE_ENABLED:
             try:
@@ -795,6 +907,7 @@ class RecordingWatcher:
                     priority=Priority.BLOCKER,
                     handler=DAEMON_NAME,
                 )
+        return True
 
     def _run_transcription(self, remote_path: Path, mic_path: Path | None) -> str | None:
         """
@@ -802,10 +915,9 @@ class RecordingWatcher:
         Raises RuntimeError on unrecoverable failure.
         """
         if not TRANSCRIBE_SCRIPT.exists():
-            log.error(
-                f"[{DAEMON_NAME}] transcribe_audio.py not found: {TRANSCRIBE_SCRIPT}"
+            raise RuntimeError(
+                f"transcribe_audio.py not found: {TRANSCRIBE_SCRIPT}"
             )
-            return None
 
         python = _find_venv_python()
         has_elevenlabs = bool(os.environ.get("ELEVENLABS_API_KEY", "").strip())
@@ -816,8 +928,33 @@ class RecordingWatcher:
                     return line.split("=", 1)[1].strip() or None
             return None
 
+        def _extract_backend(stdout: str, fallback: str) -> str:
+            backend_to_engine = {
+                "local": "local_whisper_cpp",
+                "elevenlabs": "elevenlabs_stt",
+                "openai": "openai_whisper_api",
+            }
+            for line in stdout.splitlines():
+                if line.startswith("TRANSCRIPTION_ENGINE="):
+                    return line.split("=", 1)[1].strip() or fallback
+                if line.startswith("TRANSCRIPTION_BACKEND_SELECTED="):
+                    selected = line.split("=", 1)[1].strip()
+                    return backend_to_engine.get(selected, selected) or fallback
+            return fallback
+
+        backend_override = os.environ.get("TRANSCRIBE_BACKEND", "").strip().lower()
+        diarization_override = os.environ.get("RECORD_MEETING_DIARIZE", "").strip()
+        paired_elevenlabs = backend_override == "elevenlabs" or (
+            not backend_override and diarization_override != "0"
+        )
+
         # Two-file merge path: mic + remote, requires ElevenLabs for word timestamps
-        if mic_path is not None and mic_path.exists() and has_elevenlabs:
+        if (
+            mic_path is not None
+            and mic_path.exists()
+            and has_elevenlabs
+            and paired_elevenlabs
+        ):
             log.info(f"[{DAEMON_NAME}] Two-file merge mode: [You] + diarized remote.")
             cmd = [
                 python, str(TRANSCRIBE_SCRIPT), str(remote_path),
@@ -827,12 +964,14 @@ class RecordingWatcher:
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode == 0:
                 entity_id = _extract_entity_id(result.stdout)
+                backend = _extract_backend(result.stdout, "elevenlabs_stt")
                 log.info(
                     f"[{DAEMON_NAME}] Two-file transcription complete. "
                     f"entity_id={entity_id}"
                 )
                 self._notifier.send(
-                    f"Transcription complete ([You]+diarized): {remote_path.name}",
+                    f"Transcription complete (backend={backend}, "
+                    f"[You]+diarized): {remote_path.name}",
                     priority=Priority.INFO,
                     handler=DAEMON_NAME,
                 )
@@ -842,17 +981,28 @@ class RecordingWatcher:
                 f"(rc={result.returncode}): {result.stderr.strip()[:300]}"
                 " — falling back to remote-only diarization."
             )
+        elif mic_path is not None and mic_path.exists() and not paired_elevenlabs:
+            log.info(
+                f"[{DAEMON_NAME}] Explicit backend/diarization override disables "
+                "the two-file ElevenLabs path; transcribing the system track only."
+            )
 
         # Single-file fallback: remote only, diarized or plain
         cmd = [
             python, str(TRANSCRIBE_SCRIPT), str(remote_path),
             "--capture-method", self._capture_method,
         ]
-        if _should_diarize():
+        if self._capture_method == "voice_memo":
+            cmd.extend(["--backend", "local"])
+            log.info(f"[{DAEMON_NAME}] Voice Memo local transcription mode.")
+        elif not backend_override and diarization_override == "1":
             cmd.append("--diarize")
-            log.info(f"[{DAEMON_NAME}] Single-file diarization mode.")
+            log.info(f"[{DAEMON_NAME}] Explicit single-file diarization mode.")
+        elif not backend_override and diarization_override == "0":
+            cmd.append("--no-diarize")
+            log.info(f"[{DAEMON_NAME}] Explicit single-file local mode.")
         else:
-            log.info(f"[{DAEMON_NAME}] Single-file plain transcription mode.")
+            log.info(f"[{DAEMON_NAME}] Single-file audio-directed transcription mode.")
 
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
@@ -860,7 +1010,7 @@ class RecordingWatcher:
                 f"[{DAEMON_NAME}] Transcription failed (rc={result.returncode}): "
                 f"{result.stderr.strip()[:300]}"
             )
-            if _should_diarize():
+            if "--diarize" in cmd:
                 log.info(f"[{DAEMON_NAME}] Retrying without diarization...")
                 cmd_fallback = [
                     python, str(TRANSCRIBE_SCRIPT), str(remote_path), "--no-diarize",
@@ -868,27 +1018,47 @@ class RecordingWatcher:
                 ]
                 result2 = subprocess.run(cmd_fallback, capture_output=True, text=True)
                 if result2.returncode != 0:
+                    backend = _extract_backend(
+                        result2.stdout, "local_whisper_cpp"
+                    )
                     raise RuntimeError(
-                        f"Fallback transcription also failed: {result2.stderr.strip()[:300]}"
+                        f"backend={backend}: fallback transcription also failed: "
+                        f"{result2.stderr.strip()[:300]}"
                     )
                 entity_id = _extract_entity_id(result2.stdout)
+                backend = _extract_backend(result2.stdout, "local_whisper_cpp")
                 log.info(f"[{DAEMON_NAME}] Fallback transcription succeeded. entity_id={entity_id}")
                 self._notifier.send(
-                    f"Transcription complete (no diarization): {remote_path.name}",
+                    f"Transcription complete (backend={backend}, no diarization): "
+                    f"{remote_path.name}",
                     priority=Priority.INFO,
                     handler=DAEMON_NAME,
                 )
                 return entity_id
             else:
-                raise RuntimeError(result.stderr.strip()[:300])
+                fallback = {
+                    "local": "local_whisper_cpp",
+                    "elevenlabs": "elevenlabs_stt",
+                    "openai": "openai_whisper_api",
+                }.get(backend_override, "unknown")
+                backend = _extract_backend(result.stdout, fallback)
+                raise RuntimeError(
+                    f"backend={backend}: {result.stderr.strip()[:300]}"
+                )
         else:
             entity_id = _extract_entity_id(result.stdout)
+            fallback = {
+                "local": "local_whisper_cpp",
+                "elevenlabs": "elevenlabs_stt",
+                "openai": "openai_whisper_api",
+            }.get(backend_override, "local_whisper_cpp" if self._capture_method == "voice_memo" else "unknown")
+            backend = _extract_backend(result.stdout, fallback)
             log.info(
                 f"[{DAEMON_NAME}] Transcription complete: {remote_path.name} "
                 f"entity_id={entity_id}"
             )
             self._notifier.send(
-                f"Transcription complete: {remote_path.name}",
+                f"Transcription complete (backend={backend}): {remote_path.name}",
                 priority=Priority.INFO,
                 handler=DAEMON_NAME,
             )
@@ -1000,6 +1170,8 @@ async def main() -> None:
                     extensions=memo_exts,
                     max_age_secs=VOICE_MEMO_MAX_AGE_SECS,
                     seed_existing=True,
+                    retry_state_path=VOICE_MEMO_RETRY_STATE,
+                    retry_secs=VOICE_MEMO_RETRY_SECS,
                 )
             )
     log.info(f"[{DAEMON_NAME}] Poll interval: {POLL_INTERVAL}s")

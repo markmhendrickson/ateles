@@ -21,6 +21,7 @@ Run with: pytest execution/daemons/tyto/test_tyto_voice_memos.py -v
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import time
@@ -77,6 +78,7 @@ def _poll(watcher: tyto.RecordingWatcher) -> list[tuple[Path, Path | None]]:
 
     async def _record(remote_path, mic_path):
         calls.append((remote_path, mic_path))
+        return True
 
     with patch.object(watcher, "_handle_recording", side_effect=_record):
         asyncio.run(watcher.poll_once())
@@ -404,6 +406,305 @@ def test_a_memo_is_transcribed_only_once(tmp_path):
 
     assert [c[0] for c in first] == [memo]
     assert second == []
+
+
+def test_failed_memo_is_retried_and_cleared_only_after_success(tmp_path):
+    """A backend failure stays eligible instead of becoming handled."""
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    state_path = tmp_path / "retry.json"
+    watcher = _make_watcher(
+        memo_dir,
+        capture_method="voice_memo",
+        paired=False,
+        extensions={".m4a"},
+        max_age_secs=3600,
+        seed_existing=True,
+        retry_state_path=state_path,
+        retry_secs=0,
+    )
+    memo = _write(memo_dir, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    _settled(watcher)
+    outcomes = iter((False, True))
+    calls = []
+
+    async def _record(remote_path, mic_path):
+        calls.append((remote_path, mic_path))
+        return next(outcomes)
+
+    with patch.object(watcher, "_handle_recording", side_effect=_record):
+        asyncio.run(watcher.poll_once())
+        assert memo not in watcher._transcribed
+        assert memo in watcher._pending_retries
+        assert json.loads(state_path.read_text())["pending"][0]["path"] == str(memo)
+
+        asyncio.run(watcher.poll_once())
+
+    assert calls == [(memo, None), (memo, None)]
+    assert memo in watcher._transcribed
+    assert watcher._pending_retries == {}
+    assert json.loads(state_path.read_text())["pending"] == []
+
+
+def test_startup_seeding_preserves_a_failed_new_memo_retry(tmp_path):
+    """Restarting cannot absorb a previously failed arrival into the backlog."""
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    state_path = tmp_path / "retry.json"
+    first = _make_watcher(
+        memo_dir,
+        capture_method="voice_memo",
+        paired=False,
+        extensions={".m4a"},
+        max_age_secs=3600,
+        seed_existing=True,
+        retry_state_path=state_path,
+        retry_secs=0,
+    )
+    memo = _write(memo_dir, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    _settled(first)
+
+    async def _fail(_remote_path, _mic_path):
+        return False
+
+    with patch.object(first, "_handle_recording", side_effect=_fail):
+        asyncio.run(first.poll_once())
+
+    restarted = _make_watcher(
+        memo_dir,
+        capture_method="voice_memo",
+        paired=False,
+        extensions={".m4a"},
+        max_age_secs=3600,
+        seed_existing=True,
+        retry_state_path=state_path,
+        retry_secs=0,
+    )
+    _settled(restarted)
+
+    assert memo not in restarted._transcribed
+    assert memo in restarted._pending_retries
+    assert [call[0] for call in _poll(restarted)] == [memo]
+    assert json.loads(state_path.read_text())["pending"] == []
+
+
+def test_failed_memo_obeys_retry_backoff(tmp_path):
+    """A failing backend is retried later without being hammered every poll."""
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    state_path = tmp_path / "retry.json"
+    watcher = _make_watcher(
+        memo_dir,
+        capture_method="voice_memo",
+        paired=False,
+        extensions={".m4a"},
+        max_age_secs=3600,
+        seed_existing=True,
+        retry_state_path=state_path,
+        retry_secs=300,
+    )
+    memo = _write(memo_dir, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    _settled(watcher)
+    calls = []
+
+    async def _fail(remote_path, mic_path):
+        calls.append((remote_path, mic_path))
+        return False
+
+    with patch.object(watcher, "_handle_recording", side_effect=_fail):
+        asyncio.run(watcher.poll_once())
+        asyncio.run(watcher.poll_once())
+
+    assert calls == [(memo, None)]
+    assert watcher._pending_retries[memo] > time.time()
+
+
+def test_corrupt_retry_journal_disables_memo_processing_fail_closed(tmp_path):
+    """Unreadable retry state must not let startup seeding hide failed work."""
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    memo = _write(memo_dir, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    state_path = tmp_path / "retry.json"
+    state_path.write_text("not valid JSON")
+
+    watcher = _make_watcher(
+        memo_dir,
+        capture_method="voice_memo",
+        paired=False,
+        extensions={".m4a"},
+        max_age_secs=3600,
+        seed_existing=True,
+        retry_state_path=state_path,
+    )
+    _settled(watcher)
+
+    assert watcher._retry_state_available is False
+    assert memo not in watcher._transcribed
+    assert _poll(watcher) == []
+
+
+def test_non_object_retry_journal_disables_memo_processing_fail_closed(tmp_path):
+    """Valid JSON with the wrong top-level shape must not crash Tyto startup."""
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    memo = _write(memo_dir, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    state_path = tmp_path / "retry.json"
+    state_path.write_text("[]")
+
+    watcher = _make_watcher(
+        memo_dir,
+        capture_method="voice_memo",
+        paired=False,
+        extensions={".m4a"},
+        max_age_secs=3600,
+        seed_existing=True,
+        retry_state_path=state_path,
+    )
+    _settled(watcher)
+
+    assert watcher._retry_state_available is False
+    assert memo not in watcher._transcribed
+    assert _poll(watcher) == []
+
+
+def test_failed_memo_backoff_starts_after_transcription_finishes(tmp_path):
+    """A slow failed attempt must not consume its own retry delay."""
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    state_path = tmp_path / "retry.json"
+    watcher = _make_watcher(
+        memo_dir,
+        capture_method="voice_memo",
+        paired=False,
+        extensions={".m4a"},
+        max_age_secs=3600,
+        retry_state_path=state_path,
+        retry_secs=1,
+    )
+    memo = _write(memo_dir, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    _settled(watcher)
+
+    async def _slow_failure(_remote_path, _mic_path):
+        await asyncio.sleep(1.1)
+        return False
+
+    with patch.object(watcher, "_handle_recording", side_effect=_slow_failure):
+        asyncio.run(watcher.poll_once())
+
+    assert watcher._pending_retries[memo] >= time.time() + 0.8
+
+
+def test_voice_memo_uses_local_backend_even_when_elevenlabs_key_exists(tmp_path, monkeypatch):
+    """Single-speaker memos honor the operator's local-STT selection."""
+    memo = _write(tmp_path, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    watcher = _make_watcher(tmp_path, capture_method="voice_memo", paired=False)
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "configured-but-not-used")
+    completed = MagicMock(
+        returncode=0,
+        stdout="NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_test_local\n",
+        stderr="",
+    )
+
+    with patch.object(tyto.subprocess, "run", return_value=completed) as run:
+        assert watcher._run_transcription(memo, None) == "ent_test_local"
+
+    command = run.call_args.args[0]
+    assert command[-2:] == ["--backend", "local"]
+    assert "--diarize" not in command
+
+
+def test_single_file_meeting_defers_routing_to_transcribe_script(tmp_path, monkeypatch):
+    """Tyto must not reintroduce key-presence routing beside the shared selector."""
+    recording = _write(tmp_path, "20260908 101500 system.m4a", age_secs=FRESH)
+    watcher = _make_watcher(tmp_path, capture_method="audio_hijack_system")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "configured")
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    completed = MagicMock(
+        returncode=0,
+        stdout="NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_test_auto\n",
+        stderr="",
+    )
+
+    with patch.object(tyto.subprocess, "run", return_value=completed) as run:
+        assert watcher._run_transcription(recording, None) == "ent_test_auto"
+
+    command = run.call_args.args[0]
+    assert "--diarize" not in command
+    assert "--no-diarize" not in command
+    assert "--backend" not in command
+
+
+@pytest.mark.parametrize(
+    ("env_name", "env_value", "expected_flag"),
+    [
+        ("TRANSCRIBE_BACKEND", "local", None),
+        ("RECORD_MEETING_DIARIZE", "0", "--no-diarize"),
+    ],
+)
+def test_paired_meeting_respects_local_backend_overrides(
+    tmp_path, monkeypatch, env_name, env_value, expected_flag
+):
+    """A mic pair cannot bypass an explicit instruction to keep audio local."""
+    remote = _write(tmp_path, "20260908 101500 system.m4a", age_secs=FRESH)
+    mic = _write(tmp_path, "20260908 101500 mic.m4a", age_secs=FRESH)
+    watcher = _make_watcher(tmp_path, capture_method="audio_hijack_system")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "configured")
+    monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    monkeypatch.setenv(env_name, env_value)
+    completed = MagicMock(
+        returncode=0,
+        stdout=(
+            "TRANSCRIPTION_ENGINE=local_whisper_cpp\n"
+            "NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_test_local\n"
+        ),
+        stderr="",
+    )
+
+    with patch.object(tyto.subprocess, "run", return_value=completed) as run:
+        assert watcher._run_transcription(remote, mic) == "ent_test_local"
+
+    command = run.call_args.args[0]
+    assert "--mic-file" not in command
+    if expected_flag:
+        assert expected_flag in command
+
+
+def test_completion_notification_names_actual_backend(tmp_path):
+    """The operator must be told whether audio stayed local or left-device."""
+    memo = _write(tmp_path, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    watcher = _make_watcher(tmp_path, capture_method="voice_memo", paired=False)
+    completed = MagicMock(
+        returncode=0,
+        stdout=(
+            "TRANSCRIPTION_ENGINE=local_whisper_cpp\n"
+            "NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_test_local\n"
+        ),
+        stderr="",
+    )
+
+    with patch.object(tyto.subprocess, "run", return_value=completed):
+        watcher._run_transcription(memo, None)
+
+    messages = [call.args[0] for call in watcher._notifier.send.call_args_list]
+    assert any("backend=local_whisper_cpp" in message for message in messages)
+
+
+def test_failure_notification_names_attempted_backend(tmp_path):
+    """A failed call must still disclose whether it attempted an external service."""
+    memo = _write(tmp_path, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    watcher = _make_watcher(tmp_path, capture_method="voice_memo", paired=False)
+    failed = MagicMock(
+        returncode=1,
+        stdout="TRANSCRIPTION_BACKEND_SELECTED=local\n",
+        stderr="synthetic failure",
+    )
+
+    with patch.object(tyto.subprocess, "run", return_value=failed):
+        assert asyncio.run(watcher._handle_recording(memo, None)) is False
+
+    messages = [call.args[0] for call in watcher._notifier.send.call_args_list]
+    assert any("backend=local_whisper_cpp" in message for message in messages)
 
 
 def test_zero_byte_memo_is_not_transcribed(tmp_path):

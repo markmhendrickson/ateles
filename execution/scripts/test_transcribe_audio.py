@@ -16,6 +16,7 @@ imported and exercised directly.
 
 import json
 import os
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -26,10 +27,7 @@ import pytest
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS_DIR))
 
-if "config" not in sys.modules:
-    _stub_config = types.ModuleType("config")
-    _stub_config.get_data_dir = lambda: Path(_SCRIPTS_DIR / "_test_data_dir")
-    sys.modules["config"] = _stub_config
+os.environ.setdefault("DATA_DIR", str(_SCRIPTS_DIR / "_test_data_dir"))
 
 import transcribe_audio as ta  # noqa: E402
 
@@ -37,6 +35,22 @@ import transcribe_audio as ta  # noqa: E402
 # A fictional vocabulary used by every test — no operator data. Two products
 # ("Vexcorp", "Zolium"), each with a couple of made-up mishears.
 _SYNTH_VOCAB = "Vexcorp=Vex Corp|Vexcorb|Vexcore, Zolium=Zolium's|Zolyum|the Zolium"
+
+
+def test_ffprobe_reads_channel_count_for_non_wav_capture(tmp_path):
+    """The audio-driven router can classify the M4A/MP4 files Tyto receives."""
+    capture = tmp_path / "synthetic.m4a"
+    capture.write_bytes(b"not-real-audio")
+    completed = types.SimpleNamespace(returncode=0, stdout="2\n", stderr="")
+
+    with patch.object(ta.shutil, "which", return_value="/usr/bin/ffprobe"), patch.object(
+        ta.subprocess, "run", return_value=completed
+    ) as run:
+        assert ta._ffprobe_channel_count(capture) == 2
+
+    command = run.call_args.args[0]
+    assert command[-1] == str(capture)
+    assert "stream=channels" in command
 
 
 @pytest.fixture(autouse=True)
@@ -243,6 +257,9 @@ def test_whisper_single_file_returns_corrected_text(tmp_path, monkeypatch):
     audio_path = tmp_path / "call.m4a"
     audio_path.write_bytes(b"fake-audio-bytes")
     monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    # The Whisper path is metered and now requires an explicit key before
+    # it will construct a client; OpenAI itself is mocked below.
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-a-real-credential")
 
     with patch.object(ta, "OpenAI") as mock_openai_cls, patch.object(
         ta, "transcribe_with_retry"
@@ -251,8 +268,11 @@ def test_whisper_single_file_returns_corrected_text(tmp_path, monkeypatch):
         mock_retry.return_value = _FakeTranscript(
             "We discussed Vex Corp's roadmap with Zolyum."
         )
+        # `use_diarization=False` used to imply the OpenAI path. It now means
+        # only "no ElevenLabs", and the default is the free local backend — so
+        # the metered path must be named explicitly to be exercised.
         result = ta.transcribe_audio_file(
-            audio_path, language="en", use_diarization=False
+            audio_path, language="en", backend="openai"
         )
 
     assert "Vexcorp" in result["transcription_text"]
@@ -264,6 +284,9 @@ def test_whisper_chunked_returns_corrected_text(tmp_path, monkeypatch):
     audio_path = tmp_path / "long_call.m4a"
     audio_path.write_bytes(b"fake-audio-bytes")
     monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    # The Whisper path is metered and now requires an explicit key before
+    # it will construct a client; OpenAI itself is mocked below.
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-a-real-credential")
 
     chunk_paths = [tmp_path / "chunk0.m4a", tmp_path / "chunk1.m4a"]
     for c in chunk_paths:
@@ -286,8 +309,9 @@ def test_whisper_chunked_returns_corrected_text(tmp_path, monkeypatch):
         mock_openai_cls.return_value = MagicMock()
         with patch.object(Path, "stat") as mock_stat:
             mock_stat.return_value = types.SimpleNamespace(st_size=30 * 1024 * 1024)
+            # Names the metered backend explicitly: the default is now local.
             result = ta.transcribe_audio_file(
-                audio_path, language="en", use_diarization=False
+                audio_path, language="en", backend="openai"
             )
 
     combined = result["transcription_text"]
@@ -553,3 +577,187 @@ def test_stored_entity_records_the_content_hash(tmp_path, monkeypatch):
 
     entity = captured["entities"][0]
     assert entity["audio_content_sha256"] == ta._audio_content_hash(audio)
+
+
+def test_stored_entity_records_transcription_engine_and_model(tmp_path, monkeypatch):
+    """Stored provenance must identify whether audio stayed local or left-device."""
+    audio = _write_audio(tmp_path / "rec.m4a")
+    captured = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = json.dumps(
+            {"structured": {"entities": [{"entity_id": "ent_stored", "entity_type": "transcription"}]}}
+        )
+        stderr = ""
+
+    def fake_run(cmd, *args, **kwargs):
+        for i, token in enumerate(cmd):
+            if token == "--file":
+                captured["entities"] = json.loads(Path(cmd[i + 1]).read_text())
+        return _Proc()
+
+    monkeypatch.setattr(ta.subprocess, "run", fake_run)
+    monkeypatch.setattr(ta, "_neotoma_prod_cli_argv", lambda args: ["neotoma", *args])
+    monkeypatch.setattr(ta.shutil, "which", lambda name: "/usr/bin/neotoma")
+    monkeypatch.setattr(ta, "_neotoma_auth_preflight", lambda: (True, "ok"))
+
+    ta.save_transcription(
+        audio,
+        {
+            "transcription_text": "hello",
+            "language": "en",
+            "transcription_engine": "local_whisper_cpp",
+            "transcription_model": "ggml-test.bin",
+        },
+        attach_audio_file=False,
+    )
+
+    entity = captured["entities"][0]
+    assert entity["transcription_engine"] == "local_whisper_cpp"
+    assert entity["transcription_model"] == "ggml-test.bin"
+
+
+def test_record_meeting_audio_imports_in_clean_checkout(tmp_path):
+    """The recorder must not depend on the gitignored scripts/config.py."""
+    script = Path(__file__).with_name("record_meeting_audio.py")
+    code = """
+import importlib.util, sys, types
+numpy = types.ModuleType('numpy')
+numpy.ndarray = object
+numpy.int16 = object()
+sys.modules['numpy'] = numpy
+sounddevice = types.ModuleType('sounddevice')
+sounddevice.PortAudioError = RuntimeError
+sys.modules['sounddevice'] = sounddevice
+spec = importlib.util.spec_from_file_location('record_meeting_audio_clean', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(module.DATA_DIR)
+"""
+    env = {**os.environ, "DATA_DIR": str(tmp_path / "data")}
+    env.pop("PYTHONPATH", None)
+    proc = subprocess.run(
+        [sys.executable, "-c", code, str(script)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == str(tmp_path / "data")
+
+
+# --- Backend routing: the free local path is the default ---------------------
+
+
+def test_elevenlabs_without_a_key_raises_rather_than_billing_openai(
+    tmp_path, monkeypatch
+):
+    """Diarization requested but unusable must not silently become a paid call.
+
+    Falling through here would spend money on the metered OpenAI path AND drop
+    the diarization the caller asked for — a meeting transcript with every
+    speaker merged into one voice looks fine and is wrong.
+    """
+    import transcribe_audio as ta
+
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"RIFF0000WAVE")
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-decoy-must-not-be-used")
+    monkeypatch.setattr(ta, "get_audio_duration", lambda _p: 5.0)
+
+    with pytest.raises(RuntimeError, match="ELEVENLABS_API_KEY"):
+        ta.transcribe_audio_file(audio, use_diarization=True)
+
+
+def test_default_routing_uses_the_local_backend(tmp_path, monkeypatch):
+    """With both paid keys present, an ordinary memo still goes local (free)."""
+    import transcribe_audio as ta
+
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"RIFF0000WAVE")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    monkeypatch.setattr(ta, "get_audio_duration", lambda _p: 5.0)
+
+    seen = {}
+
+    def fake_local(path, **kwargs):
+        seen["path"] = path
+        return {
+            "transcription_text": "Local text.",
+            "language": "en",
+            "backend": "local",
+            "transcription_engine": "local_whisper_cpp",
+            "transcription_model": "ggml-test.bin",
+            "rms_db": -30.0,
+            "silence": False,
+        }
+
+    monkeypatch.setattr(ta, "transcribe_local", fake_local)
+
+    result = ta.transcribe_audio_file(audio)
+
+    assert result["backend"] == "local"
+    assert result["transcription_engine"] == "local_whisper_cpp"
+    assert result["transcription_model"] == "ggml-test.bin"
+    assert result["transcription_text"] == "Local text."
+    assert seen["path"] == audio
+
+
+def test_m4a_ffprobe_channel_count_drives_public_backend_routing(tmp_path, monkeypatch):
+    """A real public-call path must use ffprobe for compressed multichannel audio."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"not-real-audio")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "configured")
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    monkeypatch.setattr(ta, "get_audio_duration", lambda _path: 5.0)
+    completed = types.SimpleNamespace(returncode=0, stdout="2\n", stderr="")
+    monkeypatch.setattr(ta.shutil, "which", lambda name: "/usr/bin/ffprobe")
+    monkeypatch.setattr(ta.subprocess, "run", lambda *args, **kwargs: completed)
+
+    def fake_elevenlabs(path, **kwargs):
+        return {
+            "transcription_text": "Two speakers.",
+            "language": "en",
+            "audio_duration_seconds": 5.0,
+            "file_size_bytes": path.stat().st_size,
+            "transcription_engine": "elevenlabs_stt",
+            "transcription_model": "scribe_v2",
+        }
+
+    monkeypatch.setattr(ta, "transcribe_with_elevenlabs_speech_to_text", fake_elevenlabs)
+
+    result = ta.transcribe_audio_file(audio)
+
+    assert result["transcription_engine"] == "elevenlabs_stt"
+
+
+def test_no_speech_marker_is_not_run_through_stutter_cleanup(tmp_path, monkeypatch):
+    """The marker is prose we wrote, not a transcript; postprocessing would maul it."""
+    import transcribe_audio as ta
+
+    audio = tmp_path / "quiet.wav"
+    audio.write_bytes(b"RIFF0000WAVE")
+    monkeypatch.setattr(ta, "get_audio_duration", lambda _p: 0.75)
+
+    marker = "[NO SPEECH DETECTED — raw output was '.'. No content.]"
+    monkeypatch.setattr(
+        ta,
+        "transcribe_local",
+        lambda path, **kw: {
+            "transcription_text": marker,
+            "language": "en",
+            "backend": "local",
+            "rms_db": -31.5,
+            "silence": True,
+        },
+    )
+
+    result = ta.transcribe_audio_file(audio)
+
+    assert result["transcription_text"] == marker
+    assert result["silence"] is True

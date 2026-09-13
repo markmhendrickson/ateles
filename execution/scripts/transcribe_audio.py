@@ -2,9 +2,11 @@
 """
 Audio Transcription Script
 
-Transcribes audio with ElevenLabs speech-to-text (diarization or multichannel)
-when ELEVENLABS_API_KEY is set and diarization is not disabled; otherwise OpenAI
-Whisper. Persists each result as a Neotoma ``transcription`` entity with the WAV
+Transcribes audio with LOCAL whisper-cli by default (free, on-device, no API
+key). ElevenLabs is used when diarization is requested — speaker separation is
+the one thing the local model cannot do — and the METERED OpenAI Whisper API
+only on an explicit opt-in (``--backend openai`` / ``TRANSCRIBE_BACKEND``); it
+is never a silent fallback. Persists each result as a Neotoma ``transcription`` entity with the WAV
 attached (``neotoma store`` combined file + entities). Optional: after store,
 creates ``REFERS_TO`` edges from the new ``transcription`` to ``contact`` and/or
 ``feedback_analysis`` entities (CLI flags, env vars, or ``<stem>_neotoma_relations.json``
@@ -12,7 +14,9 @@ next to the WAV — see ``save_transcription`` / ``record_meeting`` skill).
 
 Usage:
     python transcribe_audio.py <audio_file_path> [--language <language_code>]
-    python transcribe_audio.py file.wav --no-diarize   # force Whisper only
+    python transcribe_audio.py file.wav                # local whisper-cli (default)
+    python transcribe_audio.py file.wav --diarize      # ElevenLabs, speaker labels
+    python transcribe_audio.py file.wav --backend openai  # METERED OpenAI API
 
 Examples:
     python transcribe_audio.py data/imports/audio/recording.wav
@@ -20,7 +24,9 @@ Examples:
 """
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import math
 import os
@@ -30,7 +36,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import UTC, date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import requests
@@ -45,11 +51,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(
     0, str(PROJECT_ROOT / "execution" / "scripts")
 )  # Add scripts directory to path
-
-# Load environment variables from .env file
-# Check for parsing errors and abort if found
-import contextlib
-import io
 
 stderr_capture = io.StringIO()
 with contextlib.redirect_stderr(stderr_capture):
@@ -68,11 +69,30 @@ if "could not parse statement" in stderr_output.lower():
     print(f"{'=' * 80}\n")
     sys.exit(1)
 
-# Import config - try both paths
+from ateles.runtime_paths import get_data_dir  # noqa: E402
+
 try:
-    from scripts.config import get_data_dir
-except ImportError:
-    from config import get_data_dir
+    from scripts.local_whisper import (
+        BACKEND_ELEVENLABS,
+        BACKEND_LOCAL,
+        BACKEND_OPENAI,
+        DEFAULT_MODEL_NAME,
+        TRANSCRIPTION_ENGINE_LOCAL,
+        VALID_BACKENDS,
+        resolve_backend,
+        transcribe_local,
+    )
+except ImportError:  # pragma: no cover - path-dependent import
+    from local_whisper import (  # type: ignore[no-redef]
+        BACKEND_ELEVENLABS,
+        BACKEND_LOCAL,
+        BACKEND_OPENAI,
+        DEFAULT_MODEL_NAME,
+        TRANSCRIPTION_ENGINE_LOCAL,
+        VALID_BACKENDS,
+        resolve_backend,
+        transcribe_local,
+    )
 
 # Configuration
 DATA_DIR = get_data_dir()
@@ -158,13 +178,12 @@ def transcribe_with_retry(
                 # maps .mp4 → video/mp4 which Whisper rejects.  Open the file
                 # with a .m4a name so the SDK sends audio/mp4 (m4a alias).
                 if audio_path_obj.suffix.lower() == ".mp4":
-                    import tempfile, shutil as _shutil
                     _tmp = tempfile.NamedTemporaryFile(
                         suffix=".m4a", delete=False,
                         dir=audio_path_obj.parent,
                     )
                     _tmp.close()
-                    _shutil.copy2(str(audio_path_obj), _tmp.name)
+                    shutil.copy2(str(audio_path_obj), _tmp.name)
                     raw_fh = open(_tmp.name, "rb")
                     _mp4_tmp = _tmp.name  # track for cleanup
                 else:
@@ -190,7 +209,7 @@ def transcribe_with_retry(
                 file_opened_here = False
             if _mp4_tmp:
                 try:
-                    import os as _os; _os.unlink(_mp4_tmp)
+                    os.unlink(_mp4_tmp)
                 except Exception:
                     pass
                 _mp4_tmp = None
@@ -777,7 +796,7 @@ def _format_multichannel_transcripts_chronologically(transcripts: list) -> str |
 
 
 def get_audio_channel_count(audio_path: Path) -> int | None:
-    """Return channel count for WAV via stdlib wave; else pydub if available."""
+    """Return channel count via WAV, pydub, then ffprobe; None when unknown."""
     try:
         if audio_path.suffix.lower() == ".wav":
             import wave
@@ -792,7 +811,45 @@ def get_audio_channel_count(audio_path: Path) -> int | None:
         segment = AudioSegment.from_file(str(audio_path))
         return int(segment.channels)
     except Exception:
+        pass
+    return _ffprobe_channel_count(audio_path)
+
+
+def _ffprobe_channel_count(audio_path: Path) -> int | None:
+    """Return the first audio stream's channel count without raising."""
+    ffprobe_path = shutil.which("ffprobe")
+    if not ffprobe_path:
         return None
+    try:
+        result = subprocess.run(
+            [
+                ffprobe_path,
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=channels",
+                "-of",
+                "csv=p=0",
+                str(audio_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    first_line = (result.stdout or "").strip().splitlines()
+    if not first_line:
+        return None
+    try:
+        channels = int(first_line[0].strip().rstrip(","))
+    except ValueError:
+        return None
+    return channels if channels > 0 else None
 
 
 def _elevenlabs_request_timeout() -> tuple[float, float]:
@@ -1265,6 +1322,9 @@ def transcribe_with_elevenlabs_speech_to_text(
             "audio_duration_seconds": duration,
             "file_size_bytes": original_path.stat().st_size,
             "raw_response": {"segments": raw_segments},
+            "backend": BACKEND_ELEVENLABS,
+            "transcription_engine": "elevenlabs_stt",
+            "transcription_model": model_id,
         }
 
     upload_path, upload_temp = prepare_elevenlabs_upload_file(
@@ -1285,6 +1345,9 @@ def transcribe_with_elevenlabs_speech_to_text(
         "audio_duration_seconds": get_audio_duration(original_path),
         "file_size_bytes": original_path.stat().st_size,
         "raw_response": body,
+        "backend": BACKEND_ELEVENLABS,
+        "transcription_engine": "elevenlabs_stt",
+        "transcription_model": model_id,
     }
 
 
@@ -1607,17 +1670,31 @@ def transcribe_audio_file(
     language: str | None = None,
     verbose: bool = False,
     use_diarization: bool | None = None,
+    backend: str | None = None,
 ) -> dict:
     """
-    Transcribe an audio file using ElevenLabs (diarization / multichannel) when
-    ELEVENLABS_API_KEY is set and diarization is enabled; otherwise OpenAI Whisper.
+    Transcribe an audio file. The DEFAULT backend is local ``whisper-cli``: free,
+    already installed, and for single-speaker personal memos as effective as the
+    paid alternatives.
+
+    Backend precedence (see ``local_whisper.resolve_backend``):
+
+    1. ``backend`` argument / ``--backend`` — an explicit choice wins outright.
+    2. ``TRANSCRIBE_BACKEND`` env var — the same decision in the environment.
+    3. Diarization requested (``use_diarization=True``, or
+       ``RECORD_MEETING_DIARIZE=1`` with a key present) → ElevenLabs. Speaker
+       separation is the one thing local cannot do, and meetings need it.
+    4. Otherwise → local whisper-cli.
+
+    The metered OpenAI path is reachable only via 1 and 2. It is NEVER a silent
+    fallback: if the local backend is misconfigured, that raises rather than
+    quietly starting to bill.
 
     Args:
         audio_path: Path to audio file
         language: Optional language code (e.g., 'en', 'es'). If None, auto-detect.
-        use_diarization: If True, use ElevenLabs when key is set. If False, Whisper only.
-            If None (default), use ElevenLabs when ELEVENLABS_API_KEY is set and
-            RECORD_MEETING_DIARIZE is not ``0``.
+        use_diarization: True forces ElevenLabs; False forbids it.
+        backend: Explicit backend name ('local', 'elevenlabs', 'openai').
 
     Returns:
         Dictionary with transcription results including text and metadata
@@ -1625,11 +1702,46 @@ def transcribe_audio_file(
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    if use_diarization is None:
-        use_diarization = (
-            bool(os.environ.get("ELEVENLABS_API_KEY", "").strip())
-            and os.environ.get("RECORD_MEETING_DIARIZE", "1") != "0"
+    # RECORD_MEETING_DIARIZE historically defaulted to "1", which made ElevenLabs
+    # the implicit default for every file whenever a key was present. The default
+    # is now local, so an unset value no longer means "diarize" — only an
+    # explicit "1" does. record_meeting sets it explicitly, so meeting
+    # transcription is unaffected.
+    resolved_backend = resolve_backend(
+        explicit=backend,
+        use_diarization=use_diarization,
+        channel_count=get_audio_channel_count(audio_path),
+    )
+    if verbose:
+        print(f"TRANSCRIPTION_BACKEND_SELECTED={resolved_backend}", flush=True)
+
+    if resolved_backend == BACKEND_LOCAL:
+        if verbose:
+            print("    Transcribing locally with whisper-cli (free, on-device)...")
+        local = transcribe_local(
+            audio_path, language=language, verbose=verbose
         )
+        return {
+            "transcription_text": _postprocess_transcript(
+                local["transcription_text"]
+            )
+            if not local.get("silence")
+            else local["transcription_text"],
+            "language": local["language"],
+            "audio_duration_seconds": get_audio_duration(audio_path),
+            "file_size_bytes": audio_path.stat().st_size,
+            "backend": BACKEND_LOCAL,
+            "transcription_engine": local.get(
+                "transcription_engine", TRANSCRIPTION_ENGINE_LOCAL
+            ),
+            "transcription_model": local.get(
+                "transcription_model", DEFAULT_MODEL_NAME
+            ),
+            "rms_db": local.get("rms_db"),
+            "silence": bool(local.get("silence")),
+        }
+
+    use_diarization = resolved_backend == BACKEND_ELEVENLABS
 
     # Convert .qta files to .m4a for OpenAI compatibility
     converted_file = None
@@ -1659,6 +1771,19 @@ def transcribe_audio_file(
     chunk_temp_dir = None
 
     try:
+        if use_diarization and not os.environ.get("ELEVENLABS_API_KEY", "").strip():
+            # Chosen explicitly (or by RECORD_MEETING_DIARIZE=1) but unusable.
+            # Falling through here would silently spend money on the metered
+            # OpenAI path AND drop the diarization the caller asked for, which
+            # is the worse of the two failures — a meeting transcript with every
+            # speaker merged into one voice looks fine and is wrong.
+            raise RuntimeError(
+                "ElevenLabs was selected for diarization but ELEVENLABS_API_KEY "
+                "is not set. Set the key, or drop the diarization request to use "
+                "the free local backend (which cannot separate speakers). Not "
+                "falling back to the metered OpenAI API."
+            )
+
         if use_diarization and os.environ.get("ELEVENLABS_API_KEY", "").strip():
             if verbose:
                 print(
@@ -1676,9 +1801,37 @@ def transcribe_audio_file(
                 # Carry the raw ElevenLabs response through so the single-file
                 # path also writes the .stt_raw.json sidecar for offline re-merge.
                 "raw_response": el.get("raw_response"),
+                "backend": el.get("backend", BACKEND_ELEVENLABS),
+                "transcription_engine": el.get(
+                    "transcription_engine", "elevenlabs_stt"
+                ),
+                "transcription_model": el.get(
+                    "transcription_model", "scribe_v2"
+                ),
             }
 
-        # OpenAI Whisper path
+        # OpenAI Whisper path — METERED platform billing, not a subscription.
+        #
+        # This endpoint (/v1/audio/transcriptions) cannot be served by a ChatGPT
+        # subscription. Codex's OAuth token carries scopes
+        # ["openid","profile","email","offline_access","api.connectors.read",
+        # "api.connectors.invoke"] and routes to chatgpt.com/backend-api/codex,
+        # which exposes only codex/responses. Presenting that token to
+        # api.openai.com returns 403 "Missing scopes: api.model.read". So there
+        # is no OAuth path here to fall back to; the only options are a metered
+        # platform key, ElevenLabs, or a local model. Say which path is in use
+        # rather than letting the SDK fail opaquely on a missing key.
+        if not os.environ.get("OPENAI_API_KEY", "").strip():
+            raise RuntimeError(
+                "No transcription backend available. The OpenAI Whisper path "
+                "requires OPENAI_API_KEY (METERED platform billing) and none is "
+                "set. A ChatGPT subscription cannot serve this endpoint: its "
+                "OAuth token is scoped to the Codex backend, not the platform "
+                "audio API. Set ELEVENLABS_API_KEY to use ElevenLabs instead, "
+                "or transcribe locally with whisper-cli."
+            )
+        if verbose:
+            print("    Transcribing with OpenAI Whisper (METERED platform API key)...")
         try:
             client = OpenAI()
         except Exception as e:
@@ -1838,6 +1991,9 @@ def transcribe_audio_file(
             "language": transcript_language,
             "audio_duration_seconds": audio_duration,
             "file_size_bytes": file_size,
+            "backend": BACKEND_OPENAI,
+            "transcription_engine": "openai_whisper_api",
+            "transcription_model": "whisper-1",
         }
 
     finally:
@@ -2347,6 +2503,10 @@ def save_transcription(
         "source_directory": source_directory,
         "data_source": data_source,
     }
+    for field in ("transcription_engine", "transcription_model"):
+        value = transcription_result.get(field)
+        if value:
+            entity[field] = value
     if extra_entity_fields:
         entity.update(extra_entity_fields)
 
@@ -2419,7 +2579,8 @@ def save_transcription(
         # Extract the existing entity_id from stdout or error text and exit 0
         # so callers (Tyto) treat it as a successful duplicate detection.
         if "ERR_IDEMPOTENCY_MISMATCH" in err or "already used" in err:
-            import re as _re, sys as _sys
+            import re as _re
+            import sys as _sys
             existing_id = None
             # Check stdout first — prior run may have printed the entity line
             for line in raw.splitlines():
@@ -2503,6 +2664,16 @@ def main():
         help="Language code for transcription (e.g., en, es). If not provided, auto-detect.",
     )
     parser.add_argument(
+        "--backend",
+        type=str,
+        default=None,
+        choices=list(VALID_BACKENDS),
+        help="Transcription backend. Default: 'local' (whisper-cli, free, "
+        "on-device). 'elevenlabs' adds diarization (needs ELEVENLABS_API_KEY); "
+        "'openai' is the METERED platform Whisper API and is never selected "
+        "automatically.",
+    )
+    parser.add_argument(
         "--diarize",
         action="store_true",
         help="Use ElevenLabs speech-to-text with diarization (mono) or multichannel labels (stereo) when ELEVENLABS_API_KEY is set.",
@@ -2510,7 +2681,8 @@ def main():
     parser.add_argument(
         "--no-diarize",
         action="store_true",
-        help="Force OpenAI Whisper even if ELEVENLABS_API_KEY is set.",
+        help="Forbid ElevenLabs. Falls to the default local whisper-cli backend "
+        "(use --backend openai for the metered API).",
     )
     parser.add_argument(
         "--relate-contact-entity-id",
@@ -2616,8 +2788,13 @@ def main():
             transcription_result = transcribe_audio_file(
                 audio_path,
                 language=args.language,
+                verbose=True,
                 use_diarization=use_diarization,
+                backend=args.backend,
             )
+
+        engine = (transcription_result.get("transcription_engine") or "unknown").strip()
+        print(f"TRANSCRIPTION_ENGINE={engine}", flush=True)
 
         # Always drop sidecars next to the audio: a .txt of the merged transcript
         # (recoverable even if the Neotoma store is later rejected as a duplicate
