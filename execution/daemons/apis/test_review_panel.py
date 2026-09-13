@@ -529,3 +529,27 @@ def test_gate_owning_lenses_have_agent_grant_admission_for_issue():
                 f"{lens.agent} agent_grant must NOT admit store_structured on "
                 f"issue (gate writeback is correct-only); got {sorted(store_types)}"
             )
+
+
+def test_buteo_grant_admits_its_private_review_record():
+    """Buteo's required private review must not collapse into public prose.
+
+    The legal-role protocol says a review is complete only when its risk
+    analysis is persisted, and its gate handoff stores that record as a
+    ``plan_contribution``.  The fixture is compared with the live grant by
+    ``check_gate_lens_grants.py``, so this assertion binds protocol to both the
+    checked-in admission shape and the live drift check.
+    """
+    import json
+    from pathlib import Path
+
+    fixture_path = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "agent_grants"
+        / "gate_lens_capabilities.json"
+    )
+    fixture = json.loads(fixture_path.read_text())
+    buteo = next(entry for entry in fixture["lenses"] if entry["agent"] == "buteo")
+    caps = {c["op"]: set(c.get("entity_types") or []) for c in buteo["capabilities"]}
+    assert "plan_contribution" in caps.get("store_structured", set())

@@ -135,6 +135,20 @@ GATE_WRITEBACK_TOOLS: tuple[str, ...] = (
     "mcp__mcpsrv_neotoma__correct",
 )
 
+_CLAUDE_NEOTOMA_TOOL_PREFIX = "mcp__mcpsrv_neotoma__"
+_CODEX_NEOTOMA_MCP_SERVER = "neotoma"
+_CODEX_NEOTOMA_IDENTITY_TOOL = "get_session_identity"
+_CODEX_NEOTOMA_ENV_VARS: tuple[str, ...] = (
+    "NEOTOMA_AAUTH_PRIVATE_JWK_PATH",
+    "NEOTOMA_AAUTH_SUB",
+    "NEOTOMA_AAUTH_ISS",
+    "MCP_PROXY_DOWNSTREAM_URL",
+    "MCP_PROXY_AAUTH",
+    "MCP_PROXY_FAIL_CLOSED",
+    "MCP_PROXY_CLIENT_NAME",
+)
+_NEOTOMA_CLI_BIN = os.environ.get("NEOTOMA_CLI_BIN") or shutil.which("neotoma") or "neotoma"
+
 
 def gate_writeback_allowlist(tools: list[str]) -> list[str]:
     """Extend *tools* with the gate-writeback tools, preserving order.
@@ -148,6 +162,70 @@ def gate_writeback_allowlist(tools: list[str]) -> list[str]:
         if tool not in merged:
             merged.append(tool)
     return merged
+
+
+def codex_neotoma_auto_approval_flags(tools: list[str]) -> list[str]:
+    """Bind Codex to the signed proxy and approve explicit Neotoma tools.
+
+    ``codex exec`` inherits ``approval_policy=never`` from the operator's
+    noninteractive configuration.  Without an explicit per-tool approval,
+    an MCP call that requires approval is refused before Neotoma can evaluate
+    the dispatched agent's AAuth principal and ``agent_grant``.  Claude solves
+    the same problem with ``--allowed-tools``; Codex expresses it as
+    ``mcp_servers.<server>.tools.<tool>.approval_mode=\"approve\"``.
+
+    The ambient Codex MCP entry uses the operator bearer, which would make a
+    dispatched role's write look like the operator's own.  Override that entry
+    with Neotoma's existing fail-closed AAuth proxy.  The role signer variables
+    are injected into the child environment later in ``_run_skill_once``.
+
+    Only exact Neotoma tool names are enabled and approved.  Wildcards and
+    non-Neotoma tools never become automatic approvals, so this does not widen
+    shell, network, or unrelated MCP authority.  ``get_session_identity`` is
+    included so a dispatched role can verify the principal the record resolved.
+    """
+    tool_names: list[str] = []
+    seen: set[str] = set()
+    for granted in tools:
+        if not granted.startswith(_CLAUDE_NEOTOMA_TOOL_PREFIX):
+            continue
+        tool = granted.removeprefix(_CLAUDE_NEOTOMA_TOOL_PREFIX)
+        if not tool or tool == "*" or not re.fullmatch(r"[A-Za-z0-9_-]+", tool):
+            continue
+        if tool in seen:
+            continue
+        seen.add(tool)
+        tool_names.append(tool)
+    if _CODEX_NEOTOMA_IDENTITY_TOOL not in seen:
+        tool_names.append(_CODEX_NEOTOMA_IDENTITY_TOOL)
+
+    flags: list[str] = [
+        "-c",
+        f"mcp_servers.{_CODEX_NEOTOMA_MCP_SERVER}.command={json.dumps(_NEOTOMA_CLI_BIN)}",
+        "-c",
+        (
+            f"mcp_servers.{_CODEX_NEOTOMA_MCP_SERVER}.args="
+            + json.dumps(["mcp", "proxy", "--aauth", "--fail-closed"])
+        ),
+        "-c",
+        (
+            f"mcp_servers.{_CODEX_NEOTOMA_MCP_SERVER}.enabled_tools="
+            + json.dumps(tool_names)
+        ),
+        "-c",
+        (
+            f"mcp_servers.{_CODEX_NEOTOMA_MCP_SERVER}.env_vars="
+            + json.dumps(_CODEX_NEOTOMA_ENV_VARS)
+        ),
+    ]
+    for tool in tool_names:
+        flags.extend(
+            [
+                "-c",
+                f'mcp_servers.{_CODEX_NEOTOMA_MCP_SERVER}.tools.{tool}.approval_mode="approve"',
+            ]
+        )
+    return flags
 
 
 def _require_neotoma_base_url() -> str:
@@ -1058,6 +1136,7 @@ def _provider_command(
     *,
     cwd: str | None,
     network: bool = False,
+    auto_approve_tools: list[str] | None = None,
 ) -> tuple[list[str], bytes | None]:
     """Build one provider's noninteractive command and initial stdin payload.
 
@@ -1094,15 +1173,23 @@ def _provider_command(
         network_flags = (
             ["-c", "sandbox_workspace_write.network_access=true"] if network else []
         )
+        mcp_approval_flags = codex_neotoma_auto_approval_flags(
+            auto_approve_tools or []
+        )
         if network:
             log.info("[apis] codex sandbox: network enabled for this dispatch")
         return (
             [
                 binary,
                 "exec",
+                # Keep unrelated user MCPs and their credentials out of a
+                # governed role dispatch. Codex auth still comes from
+                # CODEX_HOME; the exact Neotoma surface is supplied below.
+                "--ignore-user-config",
                 "--sandbox",
                 "workspace-write",
                 *network_flags,
+                *mcp_approval_flags,
                 *add_dir_flags,
                 "--ephemeral",
                 "--skip-git-repo-check",
@@ -1328,6 +1415,11 @@ async def _run_skill_once(
         prompt,
         cwd=cwd,
         network=include_github_contract,
+        auto_approve_tools=(
+            gate_writeback_allowlist(agent_def.tools)
+            if provider == "codex"
+            else None
+        ),
     )
 
     # ── Stage 6: inject Neotoma MCP config so dispatched child can reach Neotoma ─
@@ -1495,6 +1587,24 @@ async def _run_skill_once(
                 subprocess_env["NEOTOMA_AAUTH_ISS"] = os.environ.get(
                     "NEOTOMA_AAUTH_ISS", "https://markmhendrickson.com"
                 )
+
+    if provider == "codex":
+        # Codex's ambient Neotoma MCP entry is operator-scoped.  A dispatched
+        # role must reach the record through the AAuth proxy configured above,
+        # with no bearer fallback that could silently turn the role's write
+        # into an operator/unverified-client write.
+        base_url = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
+        if base_url:
+            subprocess_env["MCP_PROXY_DOWNSTREAM_URL"] = f"{base_url}/mcp"
+        subprocess_env["MCP_PROXY_AAUTH"] = "1"
+        subprocess_env["MCP_PROXY_FAIL_CLOSED"] = "1"
+        subprocess_env["MCP_PROXY_CLIENT_NAME"] = f"ateles-{_role}"
+        for bearer_name in (
+            "MCP_PROXY_BEARER_TOKEN",
+            "NEOTOMA_BEARER_TOKEN",
+            "NEOTOMA_BEARER_TOKEN_PROD",
+        ):
+            subprocess_env.pop(bearer_name, None)
 
     _start_ns = time.monotonic_ns()
     try:
