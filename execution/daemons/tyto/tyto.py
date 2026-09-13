@@ -928,8 +928,33 @@ class RecordingWatcher:
                     return line.split("=", 1)[1].strip() or None
             return None
 
+        def _extract_backend(stdout: str, fallback: str) -> str:
+            backend_to_engine = {
+                "local": "local_whisper_cpp",
+                "elevenlabs": "elevenlabs_stt",
+                "openai": "openai_whisper_api",
+            }
+            for line in stdout.splitlines():
+                if line.startswith("TRANSCRIPTION_ENGINE="):
+                    return line.split("=", 1)[1].strip() or fallback
+                if line.startswith("TRANSCRIPTION_BACKEND_SELECTED="):
+                    selected = line.split("=", 1)[1].strip()
+                    return backend_to_engine.get(selected, selected) or fallback
+            return fallback
+
+        backend_override = os.environ.get("TRANSCRIBE_BACKEND", "").strip().lower()
+        diarization_override = os.environ.get("RECORD_MEETING_DIARIZE", "").strip()
+        paired_elevenlabs = backend_override == "elevenlabs" or (
+            not backend_override and diarization_override != "0"
+        )
+
         # Two-file merge path: mic + remote, requires ElevenLabs for word timestamps
-        if mic_path is not None and mic_path.exists() and has_elevenlabs:
+        if (
+            mic_path is not None
+            and mic_path.exists()
+            and has_elevenlabs
+            and paired_elevenlabs
+        ):
             log.info(f"[{DAEMON_NAME}] Two-file merge mode: [You] + diarized remote.")
             cmd = [
                 python, str(TRANSCRIBE_SCRIPT), str(remote_path),
@@ -939,12 +964,14 @@ class RecordingWatcher:
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode == 0:
                 entity_id = _extract_entity_id(result.stdout)
+                backend = _extract_backend(result.stdout, "elevenlabs_stt")
                 log.info(
                     f"[{DAEMON_NAME}] Two-file transcription complete. "
                     f"entity_id={entity_id}"
                 )
                 self._notifier.send(
-                    f"Transcription complete ([You]+diarized): {remote_path.name}",
+                    f"Transcription complete (backend={backend}, "
+                    f"[You]+diarized): {remote_path.name}",
                     priority=Priority.INFO,
                     handler=DAEMON_NAME,
                 )
@@ -953,6 +980,11 @@ class RecordingWatcher:
                 f"[{DAEMON_NAME}] Two-file transcription failed "
                 f"(rc={result.returncode}): {result.stderr.strip()[:300]}"
                 " — falling back to remote-only diarization."
+            )
+        elif mic_path is not None and mic_path.exists() and not paired_elevenlabs:
+            log.info(
+                f"[{DAEMON_NAME}] Explicit backend/diarization override disables "
+                "the two-file ElevenLabs path; transcribing the system track only."
             )
 
         # Single-file fallback: remote only, diarized or plain
@@ -963,10 +995,10 @@ class RecordingWatcher:
         if self._capture_method == "voice_memo":
             cmd.extend(["--backend", "local"])
             log.info(f"[{DAEMON_NAME}] Voice Memo local transcription mode.")
-        elif os.environ.get("RECORD_MEETING_DIARIZE") == "1":
+        elif not backend_override and diarization_override == "1":
             cmd.append("--diarize")
             log.info(f"[{DAEMON_NAME}] Explicit single-file diarization mode.")
-        elif os.environ.get("RECORD_MEETING_DIARIZE") == "0":
+        elif not backend_override and diarization_override == "0":
             cmd.append("--no-diarize")
             log.info(f"[{DAEMON_NAME}] Explicit single-file local mode.")
         else:
@@ -986,27 +1018,47 @@ class RecordingWatcher:
                 ]
                 result2 = subprocess.run(cmd_fallback, capture_output=True, text=True)
                 if result2.returncode != 0:
+                    backend = _extract_backend(
+                        result2.stdout, "local_whisper_cpp"
+                    )
                     raise RuntimeError(
-                        f"Fallback transcription also failed: {result2.stderr.strip()[:300]}"
+                        f"backend={backend}: fallback transcription also failed: "
+                        f"{result2.stderr.strip()[:300]}"
                     )
                 entity_id = _extract_entity_id(result2.stdout)
+                backend = _extract_backend(result2.stdout, "local_whisper_cpp")
                 log.info(f"[{DAEMON_NAME}] Fallback transcription succeeded. entity_id={entity_id}")
                 self._notifier.send(
-                    f"Transcription complete (no diarization): {remote_path.name}",
+                    f"Transcription complete (backend={backend}, no diarization): "
+                    f"{remote_path.name}",
                     priority=Priority.INFO,
                     handler=DAEMON_NAME,
                 )
                 return entity_id
             else:
-                raise RuntimeError(result.stderr.strip()[:300])
+                fallback = {
+                    "local": "local_whisper_cpp",
+                    "elevenlabs": "elevenlabs_stt",
+                    "openai": "openai_whisper_api",
+                }.get(backend_override, "unknown")
+                backend = _extract_backend(result.stdout, fallback)
+                raise RuntimeError(
+                    f"backend={backend}: {result.stderr.strip()[:300]}"
+                )
         else:
             entity_id = _extract_entity_id(result.stdout)
+            fallback = {
+                "local": "local_whisper_cpp",
+                "elevenlabs": "elevenlabs_stt",
+                "openai": "openai_whisper_api",
+            }.get(backend_override, "local_whisper_cpp" if self._capture_method == "voice_memo" else "unknown")
+            backend = _extract_backend(result.stdout, fallback)
             log.info(
                 f"[{DAEMON_NAME}] Transcription complete: {remote_path.name} "
                 f"entity_id={entity_id}"
             )
             self._notifier.send(
-                f"Transcription complete: {remote_path.name}",
+                f"Transcription complete (backend={backend}): {remote_path.name}",
                 priority=Priority.INFO,
                 handler=DAEMON_NAME,
             )

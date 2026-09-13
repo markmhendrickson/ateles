@@ -1712,6 +1712,8 @@ def transcribe_audio_file(
         use_diarization=use_diarization,
         channel_count=get_audio_channel_count(audio_path),
     )
+    if verbose:
+        print(f"TRANSCRIPTION_BACKEND_SELECTED={resolved_backend}", flush=True)
 
     if resolved_backend == BACKEND_LOCAL:
         if verbose:
@@ -2790,6 +2792,9 @@ def main():
                 use_diarization=use_diarization,
                 backend=args.backend,
             )
+
+        engine = (transcription_result.get("transcription_engine") or "unknown").strip()
+        print(f"TRANSCRIPTION_ENGINE={engine}", flush=True)
 
         # Always drop sidecars next to the audio: a .txt of the merged transcript
         # (recoverable even if the Neotoma store is later rejected as a duplicate

@@ -634,6 +634,79 @@ def test_single_file_meeting_defers_routing_to_transcribe_script(tmp_path, monke
     assert "--backend" not in command
 
 
+@pytest.mark.parametrize(
+    ("env_name", "env_value", "expected_flag"),
+    [
+        ("TRANSCRIBE_BACKEND", "local", None),
+        ("RECORD_MEETING_DIARIZE", "0", "--no-diarize"),
+    ],
+)
+def test_paired_meeting_respects_local_backend_overrides(
+    tmp_path, monkeypatch, env_name, env_value, expected_flag
+):
+    """A mic pair cannot bypass an explicit instruction to keep audio local."""
+    remote = _write(tmp_path, "20260908 101500 system.m4a", age_secs=FRESH)
+    mic = _write(tmp_path, "20260908 101500 mic.m4a", age_secs=FRESH)
+    watcher = _make_watcher(tmp_path, capture_method="audio_hijack_system")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "configured")
+    monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    monkeypatch.setenv(env_name, env_value)
+    completed = MagicMock(
+        returncode=0,
+        stdout=(
+            "TRANSCRIPTION_ENGINE=local_whisper_cpp\n"
+            "NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_test_local\n"
+        ),
+        stderr="",
+    )
+
+    with patch.object(tyto.subprocess, "run", return_value=completed) as run:
+        assert watcher._run_transcription(remote, mic) == "ent_test_local"
+
+    command = run.call_args.args[0]
+    assert "--mic-file" not in command
+    if expected_flag:
+        assert expected_flag in command
+
+
+def test_completion_notification_names_actual_backend(tmp_path):
+    """The operator must be told whether audio stayed local or left-device."""
+    memo = _write(tmp_path, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    watcher = _make_watcher(tmp_path, capture_method="voice_memo", paired=False)
+    completed = MagicMock(
+        returncode=0,
+        stdout=(
+            "TRANSCRIPTION_ENGINE=local_whisper_cpp\n"
+            "NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_test_local\n"
+        ),
+        stderr="",
+    )
+
+    with patch.object(tyto.subprocess, "run", return_value=completed):
+        watcher._run_transcription(memo, None)
+
+    messages = [call.args[0] for call in watcher._notifier.send.call_args_list]
+    assert any("backend=local_whisper_cpp" in message for message in messages)
+
+
+def test_failure_notification_names_attempted_backend(tmp_path):
+    """A failed call must still disclose whether it attempted an external service."""
+    memo = _write(tmp_path, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    watcher = _make_watcher(tmp_path, capture_method="voice_memo", paired=False)
+    failed = MagicMock(
+        returncode=1,
+        stdout="TRANSCRIPTION_BACKEND_SELECTED=local\n",
+        stderr="synthetic failure",
+    )
+
+    with patch.object(tyto.subprocess, "run", return_value=failed):
+        assert asyncio.run(watcher._handle_recording(memo, None)) is False
+
+    messages = [call.args[0] for call in watcher._notifier.send.call_args_list]
+    assert any("backend=local_whisper_cpp" in message for message in messages)
+
+
 def test_zero_byte_memo_is_not_transcribed(tmp_path):
     """A memo still being written has size 0 and must wait."""
     _write(tmp_path, "20260908 101500-NEW0001.m4a", age_secs=FRESH, size=0)
