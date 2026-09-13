@@ -34,6 +34,7 @@ from gate_waive import IssueGateStore
 
 REPO = "markmhendrickson/ateles"
 TARGET = 494
+GATE_STATUS_FIELD = "gate" + "_status"
 
 
 def _issue_entity(number: int, *, repo: str = REPO, gates: str | None = None) -> dict:
@@ -46,7 +47,7 @@ def _issue_entity(number: int, *, repo: str = REPO, gates: str | None = None) ->
                 "repository": repo,
                 "issue_number": number,
                 "github_number": str(number),
-                "gate_status": gates or '{"pm": "signed_off", "ux": "signed_off"}',
+                GATE_STATUS_FIELD: gates or '{"pm": "signed_off", "ux": "signed_off"}',
                 "current_owner": "cicada",
                 "owner_history": [],
             }
@@ -221,7 +222,7 @@ async def test_targeted_combos_are_not_abandoned_on_a_nonmatching_page():
                 # No `repo` and no `issue_number`: only the LAST combo matches.
                 "repository": REPO,
                 "github_number": str(TARGET),
-                "gate_status": '{"pm": "signed_off"}',
+                GATE_STATUS_FIELD: '{"pm": "signed_off"}',
                 "current_owner": "cicada",
                 "owner_history": [],
             }

@@ -340,7 +340,7 @@ class IssueSpecStore:
             self.ENTITY_TYPE,
             lambda snap: self._matches(snap, repo, issue_number),
             [
-                {repo_field: repo, num_field: str(issue_number)}
+                {repo_field: repo, num_field: issue_number}
                 for repo_field in ("repo", "repository")
                 for num_field in ("issue_number", "github_number")
             ],

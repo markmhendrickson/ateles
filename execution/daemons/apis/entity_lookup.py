@@ -90,7 +90,7 @@ async def _load_targeted(
     post: Poster,
     entity_type: str,
     matches: Matcher,
-    filter_combos: list[dict[str, str]],
+    filter_combos: list[dict[str, object]],
     ref: str,
     presence_fields: tuple[str, ...],
 ) -> tuple[dict, dict] | None:
@@ -117,7 +117,7 @@ async def _load_targeted(
                 "limit": 10,
                 "include_snapshots": True,
                 "snapshot_filters": {
-                    field: {"op": "eq", "value": str(value)}
+                    field: {"op": "eq", "value": value}
                     for field, value in combo.items()
                 },
             },
@@ -156,18 +156,22 @@ async def _load_by_scan(
     actually asks about at the front, and paging bounds the work without
     silently truncating.
     """
+    cursor = ""
     for page in range(SCAN_MAX_PAGES):
-        data = await post(
-            "entities/query",
-            {
-                "entity_type": entity_type,
-                "limit": SCAN_PAGE_SIZE,
-                "offset": page * SCAN_PAGE_SIZE,
-                "include_snapshots": True,
-                "sort_by": "last_observation_at",
-                "sort_order": "desc",
-            },
-        )
+        payload: dict[str, object] = {
+            "entity_type": entity_type,
+            "limit": SCAN_PAGE_SIZE,
+            "include_snapshots": True,
+            "sort_by": "last_observation_at",
+            "sort_order": "desc",
+        }
+        if cursor:
+            payload["cursor"] = cursor
+        else:
+            # Older record servers expose no cursor; preserve pagination there
+            # with an explicit offset rather than silently re-reading page one.
+            payload["offset"] = page * SCAN_PAGE_SIZE
+        data = await post("entities/query", payload)
         if not data:
             return None
         entities = data.get("entities") or []
@@ -175,7 +179,14 @@ async def _load_by_scan(
             snap = unwrap_snapshot(entity)
             if matches(snap):
                 return entity, snap
-        # A short (or empty) page means the listing is exhausted.
+        cursor = str(data.get("next_cursor") or "")
+        # A cursor is authoritative even when a page is short. Older record
+        # servers return short cursor pages; stopping on their length would
+        # recreate the arbitrary-window miss this helper exists to prevent.
+        if cursor:
+            continue
+        # Cursor-less servers use offset pagination, where a short (or empty)
+        # page does establish that the listing is exhausted.
         if len(entities) < SCAN_PAGE_SIZE:
             return None
     log.warning(
@@ -194,7 +205,7 @@ async def resolve_entity(
     post: Poster,
     entity_type: str,
     matches: Matcher,
-    filter_combos: list[dict[str, str]],
+    filter_combos: list[dict[str, object]],
     ref: str,
     presence_fields: tuple[str, ...],
 ) -> tuple[dict, dict] | None:
