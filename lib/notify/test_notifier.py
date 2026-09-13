@@ -6,6 +6,8 @@ those paths raised AttributeError instead of notifying.
 """
 
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -260,6 +262,24 @@ def test_failed_digest_delivery_keeps_items_queued(tmp_path):
     assert n.flush_digest() is False
     # Must NOT be dropped on a failed send.
     assert len(n._digest_queue) == 1
+
+
+def test_concurrent_digest_writes_preserve_every_notification(tmp_path, monkeypatch):
+    """Worker-thread completions must not overwrite each other's queue writes."""
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    monkeypatch.setattr(n, "_maybe_flush_digest", lambda: None)
+    messages = [f"completion-{index}" for index in range(32)]
+    start = threading.Barrier(len(messages))
+
+    def queue(message):
+        start.wait()
+        n.send(message, Priority.INFO, handler="tyto")
+
+    with ThreadPoolExecutor(max_workers=len(messages)) as pool:
+        list(pool.map(queue, messages))
+
+    assert sorted(n._digest_queue) == sorted(f"[tyto] {message}" for message in messages)
 
 
 def test_unreadable_queue_file_does_not_crash_send(tmp_path):

@@ -219,6 +219,77 @@ def test_multiple_new_memos_after_startup_are_all_transcribed(tmp_path):
     assert [call[0] for call in _poll(watcher)] == [first, second]
 
 
+def test_bounded_watcher_processes_backlog_fairly_across_polls(tmp_path):
+    """A meeting backlog may progress, but one watcher cannot monopolize a poll."""
+    backlog = [
+        _write(tmp_path, f"20260908 {index:04d} system.m4a", age_secs=FRESH)
+        for index in range(110)
+    ]
+    watcher = _make_watcher(tmp_path, max_files_per_poll=1)
+    _settled(watcher)
+
+    polls = [_poll(watcher) for _ in backlog]
+
+    assert all(len(poll) == 1 for poll in polls)
+    assert {poll[0][0] for poll in polls} == set(backlog)
+
+
+def test_failed_backlog_item_is_retried_without_blocking_later_items(tmp_path):
+    """A bounded watcher defers a failure, advances, then retries the failure."""
+    first = _write(tmp_path, "20260908 1015 system.m4a", age_secs=FRESH)
+    second = _write(tmp_path, "20260908 1016 system.m4a", age_secs=FRESH)
+    watcher = _make_watcher(tmp_path, max_files_per_poll=1, retry_secs=300)
+    _settled(watcher)
+
+    calls = []
+
+    async def fail_first(remote_path, mic_path):
+        calls.append((remote_path, mic_path))
+        return False
+
+    with patch.object(watcher, "_handle_recording", side_effect=fail_first):
+        asyncio.run(watcher.poll_once())
+
+    assert [call[0] for call in calls] == [first]
+    assert first in watcher._pending_retries
+    assert first not in watcher._transcribed
+
+    assert [call[0] for call in _poll(watcher)] == [second]
+    watcher._pending_retries[first] = 0
+    assert [call[0] for call in _poll(watcher)] == [first]
+
+
+def test_hung_meeting_watcher_does_not_starve_voice_memo_poll():
+    """Each source needs an independent loop so a provider hang stays isolated."""
+    async def scenario():
+        never = asyncio.Event()
+        meeting_started = asyncio.Event()
+        memo_polled = asyncio.Event()
+
+        async def hung_meeting():
+            meeting_started.set()
+            await never.wait()
+
+        async def poll_memos():
+            memo_polled.set()
+
+        meeting_task = asyncio.create_task(
+            tyto._poll_watcher_forever("meetings", hung_meeting, interval=0)
+        )
+        memo_task = asyncio.create_task(
+            tyto._poll_watcher_forever("voice_memos", poll_memos, interval=0.01)
+        )
+        try:
+            await asyncio.wait_for(meeting_started.wait(), timeout=0.2)
+            await asyncio.wait_for(memo_polled.wait(), timeout=0.2)
+        finally:
+            meeting_task.cancel()
+            memo_task.cancel()
+            await asyncio.gather(meeting_task, memo_task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 def test_max_age_zero_disables_the_window_only(tmp_path):
     """max_age_secs=0 means no age limit — the meeting watchers' behavior."""
     old = _write(tmp_path, "20230101 120000-OLD0001.m4a", age_secs=OLD)
@@ -705,6 +776,23 @@ def test_failure_notification_names_attempted_backend(tmp_path):
 
     messages = [call.args[0] for call in watcher._notifier.send.call_args_list]
     assert any("backend=local_whisper_cpp" in message for message in messages)
+
+
+def test_transcription_subprocess_timeout_is_bounded_and_attributed(tmp_path):
+    """A hung backend must terminate at Tyto's explicit outer deadline."""
+    memo = _write(tmp_path, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    watcher = _make_watcher(tmp_path, capture_method="voice_memo", paired=False)
+    expired = tyto.subprocess.TimeoutExpired(
+        cmd=["transcribe_audio.py"],
+        timeout=tyto.TRANSCRIBE_PROCESS_TIMEOUT_SECS,
+        output="TRANSCRIPTION_BACKEND_SELECTED=local\n",
+    )
+
+    with patch.object(tyto.subprocess, "run", side_effect=expired) as run:
+        with pytest.raises(RuntimeError, match="backend=local_whisper_cpp.*timed out"):
+            watcher._run_transcription(memo, None)
+
+    assert run.call_args.kwargs["timeout"] == tyto.TRANSCRIBE_PROCESS_TIMEOUT_SECS
 
 
 def test_zero_byte_memo_is_not_transcribed(tmp_path):
