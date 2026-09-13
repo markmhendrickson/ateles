@@ -62,6 +62,9 @@ Environment variables:
                             ~/.local/state/ateles/tyto-voice-memo-retries.json).
   TYTO_VOICE_MEMO_RETRY_SECS  Delay after a failed memo transcription before
                             retrying (default: 300).
+  TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS  Outer deadline for a transcription
+                            subprocess (default: 1800). A timed-out recording
+                            remains eligible for the next poll/retry.
   TYTO_TRANSCRIBE_ENABLED   Set to 0 to disable auto-transcription (default: 1)
   TYTO_TRANSCRIBE_SCRIPT    Path to transcribe_audio.py (auto-detected from repo root)
   ELEVENLABS_API_KEY        Enables ElevenLabs for explicit diarization and
@@ -211,6 +214,9 @@ VOICE_MEMO_RETRY_STATE = Path(
     )
 )
 VOICE_MEMO_RETRY_SECS = int(os.environ.get("TYTO_VOICE_MEMO_RETRY_SECS", "300"))
+TRANSCRIBE_PROCESS_TIMEOUT_SECS = max(
+    1, int(os.environ.get("TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS", "1800"))
+)
 TRANSCRIBE_ENABLED = os.environ.get("TYTO_TRANSCRIBE_ENABLED", "1") != "0"
 
 # Auto-detect transcribe_audio.py — check ateles repo first, then personal repo
@@ -587,6 +593,7 @@ class RecordingWatcher:
         seed_existing: bool = False,
         retry_state_path: Path | None = None,
         retry_secs: int = 300,
+        max_files_per_poll: int | None = None,
     ) -> None:
         self._dir = watch_dir
         self._notifier = notifier
@@ -614,6 +621,9 @@ class RecordingWatcher:
         self._max_age_secs = max_age_secs
         self._retry_state_path = retry_state_path
         self._retry_secs = max(0, retry_secs)
+        self._max_files_per_poll = (
+            None if max_files_per_poll is None else max(1, max_files_per_poll)
+        )
         self._pending_retries: dict[Path, float] = {}
         self._retry_state_available = True
         if self._retry_state_path is not None:
@@ -819,6 +829,7 @@ class RecordingWatcher:
 
         now = datetime.now(tz=UTC).timestamp()
 
+        processed = 0
         for path in sorted(self._dir.iterdir()):
             if not self._is_eligible_file(path):
                 continue
@@ -852,21 +863,30 @@ class RecordingWatcher:
             if durable_retry:
                 if path not in self._pending_retries and not self._mark_pending(path):
                     continue
-            else:
-                self._transcribed.add(path)
             log.info(
                 f"[{DAEMON_NAME}] Recording settled, transcribing: {path.name}"
                 + (f" + {mic_path.name}" if mic_path else " (remote only)")
             )
             succeeded = await self._handle_recording(path, mic_path)
-            if durable_retry:
-                if succeeded:
-                    self._transcribed.add(path)
+            if succeeded:
+                self._transcribed.add(path)
+                if durable_retry:
                     if not self._clear_pending(path):
                         self._transcribed.discard(path)
                 else:
-                    retry_after = datetime.now(tz=UTC).timestamp() + self._retry_secs
+                    self._pending_retries.pop(path, None)
+            else:
+                retry_after = datetime.now(tz=UTC).timestamp() + self._retry_secs
+                if durable_retry:
                     self._mark_pending(path, retry_after)
+                else:
+                    self._pending_retries[path] = retry_after
+            processed += 1
+            if (
+                self._max_files_per_poll is not None
+                and processed >= self._max_files_per_poll
+            ):
+                break
 
     async def _handle_recording(self, remote_path: Path, mic_path: Path | None) -> bool:
         label = remote_path.name + (f" + {mic_path.name}" if mic_path else "")
@@ -942,6 +962,24 @@ class RecordingWatcher:
                     return backend_to_engine.get(selected, selected) or fallback
             return fallback
 
+        def _run_command(cmd: list[str], fallback_backend: str) -> subprocess.CompletedProcess[str]:
+            try:
+                return subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=TRANSCRIBE_PROCESS_TIMEOUT_SECS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                stdout = exc.stdout or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode(errors="replace")
+                backend = _extract_backend(stdout, fallback_backend)
+                raise RuntimeError(
+                    f"backend={backend}: transcription timed out after "
+                    f"{TRANSCRIBE_PROCESS_TIMEOUT_SECS}s"
+                ) from exc
+
         backend_override = os.environ.get("TRANSCRIBE_BACKEND", "").strip().lower()
         diarization_override = os.environ.get("RECORD_MEETING_DIARIZE", "").strip()
         paired_elevenlabs = backend_override == "elevenlabs" or (
@@ -961,7 +999,7 @@ class RecordingWatcher:
                 "--mic-file", str(mic_path),
                 "--capture-method", self._capture_method,
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = _run_command(cmd, "elevenlabs_stt")
             if result.returncode == 0:
                 entity_id = _extract_entity_id(result.stdout)
                 backend = _extract_backend(result.stdout, "elevenlabs_stt")
@@ -1004,7 +1042,15 @@ class RecordingWatcher:
         else:
             log.info(f"[{DAEMON_NAME}] Single-file audio-directed transcription mode.")
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        fallback = {
+            "local": "local_whisper_cpp",
+            "elevenlabs": "elevenlabs_stt",
+            "openai": "openai_whisper_api",
+        }.get(
+            backend_override,
+            "local_whisper_cpp" if self._capture_method == "voice_memo" else "unknown",
+        )
+        result = _run_command(cmd, fallback)
         if result.returncode != 0:
             log.warning(
                 f"[{DAEMON_NAME}] Transcription failed (rc={result.returncode}): "
@@ -1016,7 +1062,7 @@ class RecordingWatcher:
                     python, str(TRANSCRIBE_SCRIPT), str(remote_path), "--no-diarize",
                     "--capture-method", self._capture_method,
                 ]
-                result2 = subprocess.run(cmd_fallback, capture_output=True, text=True)
+                result2 = _run_command(cmd_fallback, "local_whisper_cpp")
                 if result2.returncode != 0:
                     backend = _extract_backend(
                         result2.stdout, "local_whisper_cpp"
@@ -1036,22 +1082,12 @@ class RecordingWatcher:
                 )
                 return entity_id
             else:
-                fallback = {
-                    "local": "local_whisper_cpp",
-                    "elevenlabs": "elevenlabs_stt",
-                    "openai": "openai_whisper_api",
-                }.get(backend_override, "unknown")
                 backend = _extract_backend(result.stdout, fallback)
                 raise RuntimeError(
                     f"backend={backend}: {result.stderr.strip()[:300]}"
                 )
         else:
             entity_id = _extract_entity_id(result.stdout)
-            fallback = {
-                "local": "local_whisper_cpp",
-                "elevenlabs": "elevenlabs_stt",
-                "openai": "openai_whisper_api",
-            }.get(backend_override, "local_whisper_cpp" if self._capture_method == "voice_memo" else "unknown")
             backend = _extract_backend(result.stdout, fallback)
             log.info(
                 f"[{DAEMON_NAME}] Transcription complete: {remote_path.name} "
@@ -1066,6 +1102,23 @@ class RecordingWatcher:
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+
+
+async def _poll_watcher_forever(
+    name: str,
+    poll_once: Any,
+    *,
+    interval: float = POLL_INTERVAL,
+) -> None:
+    """Poll one source independently so another source cannot starve it."""
+    while True:
+        try:
+            await poll_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.error(f"[{DAEMON_NAME}] {name} poll error: {exc}", exc_info=True)
+        await asyncio.sleep(interval)
 
 
 async def main() -> None:
@@ -1151,12 +1204,20 @@ async def main() -> None:
     recording_watchers: list[RecordingWatcher] = []
     if TRANSCRIBE_ENABLED:
         recording_watchers.append(
-            RecordingWatcher(RECORDINGS_DIR, notifier, capture_method="audio_hijack_system")
+            RecordingWatcher(
+                RECORDINGS_DIR,
+                notifier,
+                capture_method="audio_hijack_system",
+                max_files_per_poll=1,
+            )
         )
         if NATIVE_RECORDINGS_DIR is not None:
             recording_watchers.append(
                 RecordingWatcher(
-                    NATIVE_RECORDINGS_DIR, notifier, capture_method="platform_native"
+                    NATIVE_RECORDINGS_DIR,
+                    notifier,
+                    capture_method="platform_native",
+                    max_files_per_poll=1,
                 )
             )
         if VOICE_MEMOS_DIR is not None:
@@ -1176,14 +1237,16 @@ async def main() -> None:
             )
     log.info(f"[{DAEMON_NAME}] Poll interval: {POLL_INTERVAL}s")
 
-    while True:
-        try:
-            await screenshot_watcher.poll_once()
-            for rw in recording_watchers:
-                await rw.poll_once()
-        except Exception as exc:
-            log.error(f"[{DAEMON_NAME}] Poll error: {exc}", exc_info=True)
-        await asyncio.sleep(POLL_INTERVAL)
+    loops = [
+        _poll_watcher_forever("screenshots", screenshot_watcher.poll_once),
+        *(
+            _poll_watcher_forever(
+                f"recordings:{watcher._capture_method}", watcher.poll_once
+            )
+            for watcher in recording_watchers
+        ),
+    ]
+    await asyncio.gather(*loops)
 
 
 if __name__ == "__main__":
