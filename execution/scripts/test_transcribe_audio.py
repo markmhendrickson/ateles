@@ -254,8 +254,11 @@ def test_whisper_single_file_returns_corrected_text(tmp_path, monkeypatch):
         mock_retry.return_value = _FakeTranscript(
             "We discussed Vex Corp's roadmap with Zolyum."
         )
+        # `use_diarization=False` used to imply the OpenAI path. It now means
+        # only "no ElevenLabs", and the default is the free local backend — so
+        # the metered path must be named explicitly to be exercised.
         result = ta.transcribe_audio_file(
-            audio_path, language="en", use_diarization=False
+            audio_path, language="en", backend="openai"
         )
 
     assert "Vexcorp" in result["transcription_text"]
@@ -292,8 +295,9 @@ def test_whisper_chunked_returns_corrected_text(tmp_path, monkeypatch):
         mock_openai_cls.return_value = MagicMock()
         with patch.object(Path, "stat") as mock_stat:
             mock_stat.return_value = types.SimpleNamespace(st_size=30 * 1024 * 1024)
+            # Names the metered backend explicitly: the default is now local.
             result = ta.transcribe_audio_file(
-                audio_path, language="en", use_diarization=False
+                audio_path, language="en", backend="openai"
             )
 
     combined = result["transcription_text"]
@@ -559,3 +563,86 @@ def test_stored_entity_records_the_content_hash(tmp_path, monkeypatch):
 
     entity = captured["entities"][0]
     assert entity["audio_content_sha256"] == ta._audio_content_hash(audio)
+
+
+# --- Backend routing: the free local path is the default ---------------------
+
+
+def test_elevenlabs_without_a_key_raises_rather_than_billing_openai(
+    tmp_path, monkeypatch
+):
+    """Diarization requested but unusable must not silently become a paid call.
+
+    Falling through here would spend money on the metered OpenAI path AND drop
+    the diarization the caller asked for — a meeting transcript with every
+    speaker merged into one voice looks fine and is wrong.
+    """
+    import transcribe_audio as ta
+
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"RIFF0000WAVE")
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-decoy-must-not-be-used")
+    monkeypatch.setattr(ta, "get_audio_duration", lambda _p: 5.0)
+
+    with pytest.raises(RuntimeError, match="ELEVENLABS_API_KEY"):
+        ta.transcribe_audio_file(audio, use_diarization=True)
+
+
+def test_default_routing_uses_the_local_backend(tmp_path, monkeypatch):
+    """With both paid keys present, an ordinary memo still goes local (free)."""
+    import transcribe_audio as ta
+
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"RIFF0000WAVE")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    monkeypatch.setattr(ta, "get_audio_duration", lambda _p: 5.0)
+
+    seen = {}
+
+    def fake_local(path, **kwargs):
+        seen["path"] = path
+        return {
+            "transcription_text": "Local text.",
+            "language": "en",
+            "backend": "local",
+            "rms_db": -30.0,
+            "silence": False,
+        }
+
+    monkeypatch.setattr(ta, "transcribe_local", fake_local)
+
+    result = ta.transcribe_audio_file(audio)
+
+    assert result["backend"] == "local"
+    assert result["transcription_text"] == "Local text."
+    assert seen["path"] == audio
+
+
+def test_no_speech_marker_is_not_run_through_stutter_cleanup(tmp_path, monkeypatch):
+    """The marker is prose we wrote, not a transcript; postprocessing would maul it."""
+    import transcribe_audio as ta
+
+    audio = tmp_path / "quiet.wav"
+    audio.write_bytes(b"RIFF0000WAVE")
+    monkeypatch.setattr(ta, "get_audio_duration", lambda _p: 0.75)
+
+    marker = "[NO SPEECH DETECTED — raw output was '.'. No content.]"
+    monkeypatch.setattr(
+        ta,
+        "transcribe_local",
+        lambda path, **kw: {
+            "transcription_text": marker,
+            "language": "en",
+            "backend": "local",
+            "rms_db": -31.5,
+            "silence": True,
+        },
+    )
+
+    result = ta.transcribe_audio_file(audio)
+
+    assert result["transcription_text"] == marker
+    assert result["silence"] is True

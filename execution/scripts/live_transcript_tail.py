@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -62,24 +61,30 @@ MIN_SLICE_SECONDS = 5.0
 STALL_EMPTY_SECONDS = 0.05
 
 # --- Silence gate -----------------------------------------------------------
-# Whisper does not return empty on silence — it HALLUCINATES subtitle boilerplate
-# ("thank you for watching", "please subscribe", full sentences in Japanese,
-# Korean, Ukrainian). Gating on measured level BEFORE transcription is the only
-# thing that actually stops it; post-hoc phrase filtering is a losing arms race
-# against an open-ended set of fabrications in arbitrary languages.
-#
-# Statistic: the 95th percentile of ffmpeg's windowed RMS, NOT the median and
-# NOT the peak. Measured on 39 labelled chunks of a real session:
-#   - median FAILS: a speaker who pauses between sentences leaves a 35s window
-#     with a median of -75 to -82 dB, indistinguishable from true silence.
-#   - peak FAILS: transient clicks push silent windows to -22 dB.
-#   - p95 separates: it asks "was there sustained energy in the loudest ~5% of
-#     this window", which is exactly what "someone spoke at some point" means.
-DEFAULT_SILENCE_THRESHOLD_DB = float(
-    os.environ.get("LIVE_TRANSCRIPT_SILENCE_THRESHOLD_DB", "-50")
-)
-RMS_PERCENTILE = 0.95
-_RMS_RE = re.compile(r"RMS_level=(-?[\d.]+)")
+# The gate itself now lives in ``silence_gate`` so the batch path
+# (``local_whisper.py``) reuses this calibration rather than inventing a second
+# threshold. See that module for the measured rationale (95th-percentile windowed
+# RMS at -50 dB, calibrated against 39 labelled chunks; median and peak both
+# failed). Re-exported here because this module's callers and tests refer to
+# these names.
+try:
+    from scripts.silence_gate import (  # noqa: F401
+        DEFAULT_SILENCE_THRESHOLD_DB,
+        RMS_PERCENTILE,
+        parse_rms_levels,
+        sustained_rms_db,
+    )
+    from scripts.silence_gate import measure_sustained_rms_db as _measure_sustained_rms_db
+except ImportError:  # pragma: no cover - path-dependent import
+    from silence_gate import (  # type: ignore[no-redef]  # noqa: F401
+        DEFAULT_SILENCE_THRESHOLD_DB,
+        RMS_PERCENTILE,
+        parse_rms_levels,
+        sustained_rms_db,
+    )
+    from silence_gate import (  # type: ignore[no-redef]
+        measure_sustained_rms_db as _measure_sustained_rms_db,
+    )
 
 # --- Follow mode ------------------------------------------------------------
 DEFAULT_FOLLOW = os.environ.get("LIVE_TRANSCRIPT_FOLLOW", "") == "1"
@@ -149,53 +154,14 @@ def probe_duration(path: Path) -> float | None:
         return None
 
 
-def parse_rms_levels(stderr: str) -> list[float]:
-    """Extract finite windowed RMS_level values (dB) from ffmpeg astats output."""
-    return [
-        float(m) for m in _RMS_RE.findall(stderr or "")
-        if "inf" not in m.lower()
-    ]
-
-
-def sustained_rms_db(values: list[float], percentile: float = RMS_PERCENTILE) -> float | None:
-    """Representative *sustained* level: the ``percentile`` of windowed RMS.
-
-    Deliberately not the mean/median (a pausing speaker drags those down to
-    silence levels) and not the max (a single click lifts silence to speech
-    levels). See DEFAULT_SILENCE_THRESHOLD_DB for the measured rationale.
-    """
-    if not values:
-        return None
-    ordered = sorted(values)
-    idx = min(len(ordered) - 1, int(percentile * len(ordered)))
-    return ordered[idx]
-
-
 def measure_slice_rms_db(wav_path: Path) -> float | None:
     """Sustained RMS (dB) of a slice, or None if the measurement failed.
 
     None is the caller's signal to transcribe anyway: a broken measurement must
-    never silently discard audio.
+    never silently discard audio. Delegates to the shared gate so the streaming
+    and batch paths measure identically.
     """
-    try:
-        proc = subprocess.run(
-            [
-                "ffmpeg", "-hide_banner", "-i", str(wav_path),
-                "-af",
-                "astats=metadata=1:reset=1:length=3,"
-                "ametadata=print:key=lavfi.astats.Overall.RMS_level",
-                "-f", "null", "/dev/null",
-            ],
-            capture_output=True, text=True, timeout=60,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        log(f"RMS measurement failed ({exc}) — transcribing anyway")
-        return None
-
-    level = sustained_rms_db(parse_rms_levels(proc.stderr))
-    if level is None:
-        log("RMS measurement returned no usable values — transcribing anyway")
-    return level
+    return _measure_sustained_rms_db(wav_path, log=log)
 
 
 def track_kind(path: Path) -> str:
