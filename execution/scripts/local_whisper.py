@@ -60,6 +60,7 @@ BACKEND_LOCAL = "local"
 BACKEND_ELEVENLABS = "elevenlabs"
 BACKEND_OPENAI = "openai"
 VALID_BACKENDS = (BACKEND_LOCAL, BACKEND_ELEVENLABS, BACKEND_OPENAI)
+TRANSCRIPTION_ENGINE_LOCAL = "local_whisper_cpp"
 
 # The env var that names a backend outright. Highest precedence, because an
 # operator who says which backend to use has settled the question.
@@ -384,6 +385,8 @@ def transcribe_local(
                 ),
                 "language": language or "en",
                 "backend": BACKEND_LOCAL,
+                "transcription_engine": TRANSCRIPTION_ENGINE_LOCAL,
+                "transcription_model": model.name,
                 "rms_db": round(rms_db, 1),
                 "silence": True,
             }
@@ -453,6 +456,8 @@ def transcribe_local(
             ),
             "language": detected or language or "en",
             "backend": BACKEND_LOCAL,
+            "transcription_engine": TRANSCRIPTION_ENGINE_LOCAL,
+            "transcription_model": model.name,
             "rms_db": None if rms_db is None else round(rms_db, 1),
             "silence": True,
             "filtered_reason": verdict.reason,
@@ -462,6 +467,8 @@ def transcribe_local(
         "transcription_text": text,
         "language": detected or language or "en",
         "backend": BACKEND_LOCAL,
+        "transcription_engine": TRANSCRIPTION_ENGINE_LOCAL,
+        "transcription_model": model.name,
         "rms_db": None if rms_db is None else round(rms_db, 1),
         "silence": False,
     }

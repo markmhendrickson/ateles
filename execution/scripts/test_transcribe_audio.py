@@ -16,6 +16,7 @@ imported and exercised directly.
 
 import json
 import os
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -578,6 +579,75 @@ def test_stored_entity_records_the_content_hash(tmp_path, monkeypatch):
     assert entity["audio_content_sha256"] == ta._audio_content_hash(audio)
 
 
+def test_stored_entity_records_transcription_engine_and_model(tmp_path, monkeypatch):
+    """Stored provenance must identify whether audio stayed local or left-device."""
+    audio = _write_audio(tmp_path / "rec.m4a")
+    captured = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = json.dumps(
+            {"structured": {"entities": [{"entity_id": "ent_stored", "entity_type": "transcription"}]}}
+        )
+        stderr = ""
+
+    def fake_run(cmd, *args, **kwargs):
+        for i, token in enumerate(cmd):
+            if token == "--file":
+                captured["entities"] = json.loads(Path(cmd[i + 1]).read_text())
+        return _Proc()
+
+    monkeypatch.setattr(ta.subprocess, "run", fake_run)
+    monkeypatch.setattr(ta, "_neotoma_prod_cli_argv", lambda args: ["neotoma", *args])
+    monkeypatch.setattr(ta.shutil, "which", lambda name: "/usr/bin/neotoma")
+    monkeypatch.setattr(ta, "_neotoma_auth_preflight", lambda: (True, "ok"))
+
+    ta.save_transcription(
+        audio,
+        {
+            "transcription_text": "hello",
+            "language": "en",
+            "transcription_engine": "local_whisper_cpp",
+            "transcription_model": "ggml-test.bin",
+        },
+        attach_audio_file=False,
+    )
+
+    entity = captured["entities"][0]
+    assert entity["transcription_engine"] == "local_whisper_cpp"
+    assert entity["transcription_model"] == "ggml-test.bin"
+
+
+def test_record_meeting_audio_imports_in_clean_checkout(tmp_path):
+    """The recorder must not depend on the gitignored scripts/config.py."""
+    script = Path(__file__).with_name("record_meeting_audio.py")
+    code = """
+import importlib.util, sys, types
+numpy = types.ModuleType('numpy')
+numpy.ndarray = object
+numpy.int16 = object()
+sys.modules['numpy'] = numpy
+sounddevice = types.ModuleType('sounddevice')
+sounddevice.PortAudioError = RuntimeError
+sys.modules['sounddevice'] = sounddevice
+spec = importlib.util.spec_from_file_location('record_meeting_audio_clean', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(module.DATA_DIR)
+"""
+    env = {**os.environ, "DATA_DIR": str(tmp_path / "data")}
+    env.pop("PYTHONPATH", None)
+    proc = subprocess.run(
+        [sys.executable, "-c", code, str(script)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == str(tmp_path / "data")
+
+
 # --- Backend routing: the free local path is the default ---------------------
 
 
@@ -621,6 +691,8 @@ def test_default_routing_uses_the_local_backend(tmp_path, monkeypatch):
             "transcription_text": "Local text.",
             "language": "en",
             "backend": "local",
+            "transcription_engine": "local_whisper_cpp",
+            "transcription_model": "ggml-test.bin",
             "rms_db": -30.0,
             "silence": False,
         }
@@ -630,8 +702,38 @@ def test_default_routing_uses_the_local_backend(tmp_path, monkeypatch):
     result = ta.transcribe_audio_file(audio)
 
     assert result["backend"] == "local"
+    assert result["transcription_engine"] == "local_whisper_cpp"
+    assert result["transcription_model"] == "ggml-test.bin"
     assert result["transcription_text"] == "Local text."
     assert seen["path"] == audio
+
+
+def test_m4a_ffprobe_channel_count_drives_public_backend_routing(tmp_path, monkeypatch):
+    """A real public-call path must use ffprobe for compressed multichannel audio."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"not-real-audio")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "configured")
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    monkeypatch.setattr(ta, "get_audio_duration", lambda _path: 5.0)
+    completed = types.SimpleNamespace(returncode=0, stdout="2\n", stderr="")
+    monkeypatch.setattr(ta.shutil, "which", lambda name: "/usr/bin/ffprobe")
+    monkeypatch.setattr(ta.subprocess, "run", lambda *args, **kwargs: completed)
+
+    def fake_elevenlabs(path, **kwargs):
+        return {
+            "transcription_text": "Two speakers.",
+            "language": "en",
+            "audio_duration_seconds": 5.0,
+            "file_size_bytes": path.stat().st_size,
+            "transcription_engine": "elevenlabs_stt",
+            "transcription_model": "scribe_v2",
+        }
+
+    monkeypatch.setattr(ta, "transcribe_with_elevenlabs_speech_to_text", fake_elevenlabs)
+
+    result = ta.transcribe_audio_file(audio)
+
+    assert result["transcription_engine"] == "elevenlabs_stt"
 
 
 def test_no_speech_marker_is_not_run_through_stutter_cleanup(tmp_path, monkeypatch):

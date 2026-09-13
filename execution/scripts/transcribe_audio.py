@@ -75,6 +75,9 @@ try:
     from scripts.local_whisper import (
         BACKEND_ELEVENLABS,
         BACKEND_LOCAL,
+        BACKEND_OPENAI,
+        DEFAULT_MODEL_NAME,
+        TRANSCRIPTION_ENGINE_LOCAL,
         VALID_BACKENDS,
         resolve_backend,
         transcribe_local,
@@ -83,6 +86,9 @@ except ImportError:  # pragma: no cover - path-dependent import
     from local_whisper import (  # type: ignore[no-redef]
         BACKEND_ELEVENLABS,
         BACKEND_LOCAL,
+        BACKEND_OPENAI,
+        DEFAULT_MODEL_NAME,
+        TRANSCRIPTION_ENGINE_LOCAL,
         VALID_BACKENDS,
         resolve_backend,
         transcribe_local,
@@ -1316,6 +1322,9 @@ def transcribe_with_elevenlabs_speech_to_text(
             "audio_duration_seconds": duration,
             "file_size_bytes": original_path.stat().st_size,
             "raw_response": {"segments": raw_segments},
+            "backend": BACKEND_ELEVENLABS,
+            "transcription_engine": "elevenlabs_stt",
+            "transcription_model": model_id,
         }
 
     upload_path, upload_temp = prepare_elevenlabs_upload_file(
@@ -1336,6 +1345,9 @@ def transcribe_with_elevenlabs_speech_to_text(
         "audio_duration_seconds": get_audio_duration(original_path),
         "file_size_bytes": original_path.stat().st_size,
         "raw_response": body,
+        "backend": BACKEND_ELEVENLABS,
+        "transcription_engine": "elevenlabs_stt",
+        "transcription_model": model_id,
     }
 
 
@@ -1717,6 +1729,12 @@ def transcribe_audio_file(
             "audio_duration_seconds": get_audio_duration(audio_path),
             "file_size_bytes": audio_path.stat().st_size,
             "backend": BACKEND_LOCAL,
+            "transcription_engine": local.get(
+                "transcription_engine", TRANSCRIPTION_ENGINE_LOCAL
+            ),
+            "transcription_model": local.get(
+                "transcription_model", DEFAULT_MODEL_NAME
+            ),
             "rms_db": local.get("rms_db"),
             "silence": bool(local.get("silence")),
         }
@@ -1781,6 +1799,13 @@ def transcribe_audio_file(
                 # Carry the raw ElevenLabs response through so the single-file
                 # path also writes the .stt_raw.json sidecar for offline re-merge.
                 "raw_response": el.get("raw_response"),
+                "backend": el.get("backend", BACKEND_ELEVENLABS),
+                "transcription_engine": el.get(
+                    "transcription_engine", "elevenlabs_stt"
+                ),
+                "transcription_model": el.get(
+                    "transcription_model", "scribe_v2"
+                ),
             }
 
         # OpenAI Whisper path — METERED platform billing, not a subscription.
@@ -1964,6 +1989,9 @@ def transcribe_audio_file(
             "language": transcript_language,
             "audio_duration_seconds": audio_duration,
             "file_size_bytes": file_size,
+            "backend": BACKEND_OPENAI,
+            "transcription_engine": "openai_whisper_api",
+            "transcription_model": "whisper-1",
         }
 
     finally:
@@ -2473,6 +2501,10 @@ def save_transcription(
         "source_directory": source_directory,
         "data_source": data_source,
     }
+    for field in ("transcription_engine", "transcription_model"):
+        value = transcription_result.get(field)
+        if value:
+            entity[field] = value
     if extra_entity_fields:
         entity.update(extra_entity_fields)
 

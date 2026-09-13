@@ -313,6 +313,8 @@ def test_real_speech_above_the_gate_is_returned_verbatim(monkeypatch, tmp_path):
     assert result["silence"] is False
     assert result["transcription_text"] == "The circuit breaker broke again."
     assert result["backend"] == lw.BACKEND_LOCAL
+    assert result["transcription_engine"] == lw.TRANSCRIPTION_ENGINE_LOCAL
+    assert result["transcription_model"] == lw.DEFAULT_MODEL_NAME
     assert result["rms_db"] == -30.0
 
 

@@ -19,7 +19,6 @@ Usage:
 
 import argparse
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -33,15 +32,11 @@ from queue import Empty, Queue
 import numpy as np
 import sounddevice as sd
 
-# Add project root for config
+# Add project root for the tracked, portable runtime-path helper.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "execution" / "scripts"))
 
-try:
-    from scripts.config import get_data_dir
-except ImportError:
-    from config import get_data_dir
+from ateles.runtime_paths import get_data_dir  # noqa: E402
 
 DATA_DIR = get_data_dir()
 DEFAULT_OUTPUT_DIR = DATA_DIR / "imports" / "audio"

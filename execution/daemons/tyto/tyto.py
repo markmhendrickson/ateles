@@ -638,7 +638,11 @@ class RecordingWatcher:
             return
         try:
             payload = json.loads(self._retry_state_path.read_text())
-            if payload.get("version") != 1 or not isinstance(payload.get("pending"), list):
+            if (
+                not isinstance(payload, dict)
+                or payload.get("version") != 1
+                or not isinstance(payload.get("pending"), list)
+            ):
                 raise ValueError("unsupported retry-state format")
             for item in payload["pending"]:
                 if not isinstance(item, dict) or not isinstance(item.get("path"), str):
@@ -861,7 +865,8 @@ class RecordingWatcher:
                     if not self._clear_pending(path):
                         self._transcribed.discard(path)
                 else:
-                    self._mark_pending(path, now + self._retry_secs)
+                    retry_after = datetime.now(tz=UTC).timestamp() + self._retry_secs
+                    self._mark_pending(path, retry_after)
 
     async def _handle_recording(self, remote_path: Path, mic_path: Path | None) -> bool:
         label = remote_path.name + (f" + {mic_path.name}" if mic_path else "")

@@ -543,6 +543,57 @@ def test_corrupt_retry_journal_disables_memo_processing_fail_closed(tmp_path):
     assert _poll(watcher) == []
 
 
+def test_non_object_retry_journal_disables_memo_processing_fail_closed(tmp_path):
+    """Valid JSON with the wrong top-level shape must not crash Tyto startup."""
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    memo = _write(memo_dir, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    state_path = tmp_path / "retry.json"
+    state_path.write_text("[]")
+
+    watcher = _make_watcher(
+        memo_dir,
+        capture_method="voice_memo",
+        paired=False,
+        extensions={".m4a"},
+        max_age_secs=3600,
+        seed_existing=True,
+        retry_state_path=state_path,
+    )
+    _settled(watcher)
+
+    assert watcher._retry_state_available is False
+    assert memo not in watcher._transcribed
+    assert _poll(watcher) == []
+
+
+def test_failed_memo_backoff_starts_after_transcription_finishes(tmp_path):
+    """A slow failed attempt must not consume its own retry delay."""
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    state_path = tmp_path / "retry.json"
+    watcher = _make_watcher(
+        memo_dir,
+        capture_method="voice_memo",
+        paired=False,
+        extensions={".m4a"},
+        max_age_secs=3600,
+        retry_state_path=state_path,
+        retry_secs=1,
+    )
+    memo = _write(memo_dir, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    _settled(watcher)
+
+    async def _slow_failure(_remote_path, _mic_path):
+        await asyncio.sleep(1.1)
+        return False
+
+    with patch.object(watcher, "_handle_recording", side_effect=_slow_failure):
+        asyncio.run(watcher.poll_once())
+
+    assert watcher._pending_retries[memo] >= time.time() + 0.8
+
+
 def test_voice_memo_uses_local_backend_even_when_elevenlabs_key_exists(tmp_path, monkeypatch):
     """Single-speaker memos honor the operator's local-STT selection."""
     memo = _write(tmp_path, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
