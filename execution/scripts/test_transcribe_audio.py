@@ -243,6 +243,9 @@ def test_whisper_single_file_returns_corrected_text(tmp_path, monkeypatch):
     audio_path = tmp_path / "call.m4a"
     audio_path.write_bytes(b"fake-audio-bytes")
     monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    # The Whisper path is metered and now requires an explicit key before
+    # it will construct a client; OpenAI itself is mocked below.
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-a-real-credential")
 
     with patch.object(ta, "OpenAI") as mock_openai_cls, patch.object(
         ta, "transcribe_with_retry"
@@ -264,6 +267,9 @@ def test_whisper_chunked_returns_corrected_text(tmp_path, monkeypatch):
     audio_path = tmp_path / "long_call.m4a"
     audio_path.write_bytes(b"fake-audio-bytes")
     monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    # The Whisper path is metered and now requires an explicit key before
+    # it will construct a client; OpenAI itself is mocked below.
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-a-real-credential")
 
     chunk_paths = [tmp_path / "chunk0.m4a", tmp_path / "chunk1.m4a"]
     for c in chunk_paths:

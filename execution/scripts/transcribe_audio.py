@@ -1678,7 +1678,28 @@ def transcribe_audio_file(
                 "raw_response": el.get("raw_response"),
             }
 
-        # OpenAI Whisper path
+        # OpenAI Whisper path — METERED platform billing, not a subscription.
+        #
+        # This endpoint (/v1/audio/transcriptions) cannot be served by a ChatGPT
+        # subscription. Codex's OAuth token carries scopes
+        # ["openid","profile","email","offline_access","api.connectors.read",
+        # "api.connectors.invoke"] and routes to chatgpt.com/backend-api/codex,
+        # which exposes only codex/responses. Presenting that token to
+        # api.openai.com returns 403 "Missing scopes: api.model.read". So there
+        # is no OAuth path here to fall back to; the only options are a metered
+        # platform key, ElevenLabs, or a local model. Say which path is in use
+        # rather than letting the SDK fail opaquely on a missing key.
+        if not os.environ.get("OPENAI_API_KEY", "").strip():
+            raise RuntimeError(
+                "No transcription backend available. The OpenAI Whisper path "
+                "requires OPENAI_API_KEY (METERED platform billing) and none is "
+                "set. A ChatGPT subscription cannot serve this endpoint: its "
+                "OAuth token is scoped to the Codex backend, not the platform "
+                "audio API. Set ELEVENLABS_API_KEY to use ElevenLabs instead, "
+                "or transcribe locally with whisper-cli."
+            )
+        if verbose:
+            print("    Transcribing with OpenAI Whisper (METERED platform API key)...")
         try:
             client = OpenAI()
         except Exception as e:
