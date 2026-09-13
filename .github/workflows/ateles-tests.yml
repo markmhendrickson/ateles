@@ -16,6 +16,7 @@ on:
       - "execution/daemons/phoenicurus-release/**"
       - "execution/daemons/monedula/**"
       - "execution/daemons/anthus/**"
+      - "execution/daemons/tyto/**"
       - "execution/mcp/**"
       - "lib/daemon_runtime/**"
       - "lib/approval/**"
@@ -80,6 +81,12 @@ jobs:
       # ship a same-named top-level module today.
       - name: Run anthus daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/anthus/ -q
+      # Tyto's RecordingWatcher tests (Voice Memos support). Its own step for
+      # the same attributability reason as the apis and anthus steps above, and
+      # added with the suite itself so this does not become another
+      # committed-but-uncollected lane gap (#584, #524, #727).
+      - name: Run tyto daemon tests
+        run: uv run --extra dev python -m pytest execution/daemons/tyto/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
       - name: Run transcript clarity lib tests
