@@ -264,6 +264,12 @@ def test_whisper_chunked_returns_corrected_text(tmp_path, monkeypatch):
     audio_path = tmp_path / "long_call.m4a"
     audio_path.write_bytes(b"fake-audio-bytes")
     monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    # This test exercises the OpenAI Whisper chunked path + corrector. Pin
+    # local whisper unavailable so engine selection does not call real
+    # Path.is_file() on the ggml model under the size-threshold Path.stat
+    # patch below (that global mock previously lacked st_mode and crashed
+    # _whisper_cpp_model() during select_transcription_engine).
+    _fake_local_whisper_available(monkeypatch, False)
 
     chunk_paths = [tmp_path / "chunk0.m4a", tmp_path / "chunk1.m4a"]
     for c in chunk_paths:
@@ -273,6 +279,18 @@ def test_whisper_chunked_returns_corrected_text(tmp_path, monkeypatch):
         "First half discusses the Zolium integration.",
         "Second half mentions Vex Corp's API and Vexcorb's release.",
     ]
+
+    real_stat = Path.stat
+
+    def _stat_force_chunk_threshold(self, *args, **kwargs):
+        # Only fake the source file's size so OpenAI chunking triggers.
+        # Other paths (model probes, exists checks) keep real filesystem stats.
+        if Path(self) == audio_path:
+            return types.SimpleNamespace(
+                st_size=30 * 1024 * 1024,
+                st_mode=0o100644,  # S_IFREG — required by Path.is_file()
+            )
+        return real_stat(self, *args, **kwargs)
 
     with patch.object(ta, "OpenAI") as mock_openai_cls, patch.object(
         ta, "get_audio_duration", return_value=1200.0
@@ -284,8 +302,7 @@ def test_whisper_chunked_returns_corrected_text(tmp_path, monkeypatch):
         side_effect=[_FakeTranscript(t) for t in chunk_texts],
     ):
         mock_openai_cls.return_value = MagicMock()
-        with patch.object(Path, "stat") as mock_stat:
-            mock_stat.return_value = types.SimpleNamespace(st_size=30 * 1024 * 1024)
+        with patch.object(Path, "stat", _stat_force_chunk_threshold):
             result = ta.transcribe_audio_file(
                 audio_path, language="en", use_diarization=False
             )
@@ -553,3 +570,290 @@ def test_stored_entity_records_the_content_hash(tmp_path, monkeypatch):
 
     entity = captured["entities"][0]
     assert entity["audio_content_sha256"] == ta._audio_content_hash(audio)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Engine routing: the engine follows the AUDIO, not the presence of an API key.
+#
+# Fixtures are SYNTHETIC — generated silence/tones via ffmpeg at test time. No
+# operator recording is ever read here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+import shutil as _shutil  # noqa: E402
+import subprocess as _subprocess  # noqa: E402
+
+
+def _make_synthetic_audio(path: Path, channels: int, seconds: float = 1.0) -> bool:
+    """Generate a synthetic tone with `channels` channels. False if no ffmpeg."""
+    ffmpeg = _shutil.which("ffmpeg")
+    if not ffmpeg:
+        return False
+    layout = "mono" if channels == 1 else "stereo"
+    cmd = [
+        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi",
+        "-i", f"sine=frequency=440:duration={seconds}:sample_rate=16000",
+        "-ac", str(channels), "-channel_layout", layout,
+        str(path),
+    ]
+    return _subprocess.run(cmd, capture_output=True).returncode == 0 and path.is_file()
+
+
+@pytest.fixture
+def _routing_env(monkeypatch):
+    """Neutral routing environment; each test sets only what it exercises."""
+    for var in (
+        "ELEVENLABS_API_KEY",
+        "RECORD_MEETING_DIARIZE",
+        "TRANSCRIBE_ENGINE_LEGACY_ROUTING",
+        "WHISPER_CPP_BIN",
+        "WHISPER_CPP_MODEL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    return monkeypatch
+
+
+def _fake_local_whisper_available(monkeypatch, available: bool = True):
+    """Fake local-whisper availability independent of the real machine's
+    install state. Patches local_whisper_available() AND the two resolvers
+    it wraps, since select_transcription_engine() also calls
+    _whisper_cpp_binary()/_whisper_cpp_model() directly to build the
+    unavailable-reason message — leaving those real would make tests pass
+    or fail based on whether whisper.cpp happens to be installed on the
+    machine running them, rather than on the code under test."""
+    monkeypatch.setattr(ta, "local_whisper_available", lambda: available)
+    monkeypatch.setattr(ta, "_whisper_cpp_binary", lambda: (None if not available else "whisper-cli"))
+    monkeypatch.setattr(ta, "_whisper_cpp_model", lambda: (None if not available else Path("/fake/ggml-model.bin")))
+
+
+def test_mono_audio_routes_to_local_whisper(tmp_path, _routing_env):
+    """A mono voice memo stays on the machine even when the EL key is set."""
+    audio = tmp_path / "mono.wav"
+    if not _make_synthetic_audio(audio, channels=1):
+        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
+    _fake_local_whisper_available(_routing_env, True)
+
+    assert ta.select_transcription_engine(audio) == ta.ENGINE_LOCAL_WHISPER
+
+
+def test_stereo_audio_routes_to_elevenlabs_diarization(tmp_path, _routing_env):
+    """A multi-channel capture keeps the diarization path."""
+    audio = tmp_path / "stereo.wav"
+    if not _make_synthetic_audio(audio, channels=2):
+        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
+    _fake_local_whisper_available(_routing_env, True)
+
+    assert ta.select_transcription_engine(audio) == ta.ENGINE_ELEVENLABS
+
+
+def test_channel_count_detection_mono_and_stereo(tmp_path):
+    """ffprobe channel detection — the signal the whole rule rests on."""
+    mono, stereo = tmp_path / "m.wav", tmp_path / "s.wav"
+    if not _make_synthetic_audio(mono, 1) or not _make_synthetic_audio(stereo, 2):
+        pytest.skip("ffmpeg not available to generate synthetic fixtures")
+    assert ta.get_audio_channel_count(mono) == 1
+    assert ta.get_audio_channel_count(stereo) == 2
+
+
+def test_explicit_engine_flag_overrides_audio_routing(tmp_path, _routing_env):
+    """--engine elevenlabs wins over a mono file; --engine local over stereo."""
+    mono, stereo = tmp_path / "m.wav", tmp_path / "s.wav"
+    if not _make_synthetic_audio(mono, 1) or not _make_synthetic_audio(stereo, 2):
+        pytest.skip("ffmpeg not available to generate synthetic fixtures")
+    _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
+    _fake_local_whisper_available(_routing_env, True)
+
+    assert (
+        ta.select_transcription_engine(mono, engine="elevenlabs")
+        == ta.ENGINE_ELEVENLABS
+    )
+    assert (
+        ta.select_transcription_engine(stereo, engine="local")
+        == ta.ENGINE_LOCAL_WHISPER
+    )
+    assert (
+        ta.select_transcription_engine(mono, engine="openai")
+        == ta.ENGINE_OPENAI_WHISPER
+    )
+
+
+def test_no_diarize_flag_prefers_local_not_openai(tmp_path, _routing_env):
+    """--no-diarize used to mean 'the other paid API'; now it means local."""
+    stereo = tmp_path / "s.wav"
+    if not _make_synthetic_audio(stereo, 2):
+        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
+    _fake_local_whisper_available(_routing_env, True)
+
+    assert (
+        ta.select_transcription_engine(stereo, use_diarization=False)
+        == ta.ENGINE_LOCAL_WHISPER
+    )
+
+
+def test_diarize_flag_forces_elevenlabs_on_mono(tmp_path, _routing_env):
+    """--diarize on a mono file still gets acoustic diarization."""
+    mono = tmp_path / "m.wav"
+    if not _make_synthetic_audio(mono, 1):
+        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
+    _fake_local_whisper_available(_routing_env, True)
+
+    assert (
+        ta.select_transcription_engine(mono, use_diarization=True)
+        == ta.ENGINE_ELEVENLABS
+    )
+
+
+def test_missing_local_whisper_falls_back_to_api(tmp_path, _routing_env, capsys):
+    """No binary/model installed → degrade to an API engine, never crash — and
+    never silently: a stderr line names the reason and the fallback engine."""
+    mono = tmp_path / "m.wav"
+    if not _make_synthetic_audio(mono, 1):
+        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    _fake_local_whisper_available(_routing_env, False)
+
+    _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
+    assert ta.select_transcription_engine(mono) == ta.ENGINE_ELEVENLABS
+    stderr = capsys.readouterr().err
+    assert "Local Whisper unavailable" in stderr
+    assert ta.ENGINE_ELEVENLABS in stderr
+
+    _routing_env.delenv("ELEVENLABS_API_KEY", raising=False)
+    assert ta.select_transcription_engine(mono) == ta.ENGINE_OPENAI_WHISPER
+    stderr = capsys.readouterr().err
+    assert "Local Whisper unavailable" in stderr
+    assert ta.ENGINE_OPENAI_WHISPER in stderr
+
+
+def test_engine_local_raises_when_local_whisper_unavailable(tmp_path, _routing_env):
+    """--engine local fails closed: no silent downgrade to a paid API."""
+    mono = tmp_path / "m.wav"
+    if not _make_synthetic_audio(mono, 1):
+        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    _fake_local_whisper_available(_routing_env, False)
+    _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
+
+    with pytest.raises(RuntimeError, match="whisper.cpp not found"):
+        ta.select_transcription_engine(mono, engine="local")
+
+
+def test_engine_local_degrade_escape_hatch_still_warns(
+    tmp_path, _routing_env, capsys
+):
+    """TRANSCRIBE_ENGINE_ALLOW_LOCAL_DEGRADE=1 restores the degrade — loudly."""
+    mono = tmp_path / "m.wav"
+    if not _make_synthetic_audio(mono, 1):
+        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    _fake_local_whisper_available(_routing_env, False)
+    _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
+    _routing_env.setenv("TRANSCRIBE_ENGINE_ALLOW_LOCAL_DEGRADE", "1")
+
+    assert (
+        ta.select_transcription_engine(mono, engine="local") == ta.ENGINE_ELEVENLABS
+    )
+    assert "Local Whisper unavailable" in capsys.readouterr().err
+
+
+def test_missing_binary_and_model_report_unavailable(_routing_env, tmp_path):
+    """local_whisper_available() is honest about a missing binary or model."""
+    _routing_env.setenv("WHISPER_CPP_BIN", str(tmp_path / "definitely-not-here"))
+    assert ta.local_whisper_available() is False
+
+    real_bin = tmp_path / "fake-whisper-cli"
+    real_bin.write_text("#!/bin/sh\nexit 0\n")
+    real_bin.chmod(0o755)
+    _routing_env.setenv("WHISPER_CPP_BIN", str(real_bin))
+    _routing_env.setenv("WHISPER_CPP_MODEL", str(tmp_path / "no-such-model.bin"))
+    assert ta.local_whisper_available() is False
+
+    model = tmp_path / "ggml-test.bin"
+    model.write_bytes(b"not-a-real-model")
+    _routing_env.setenv("WHISPER_CPP_MODEL", str(model))
+    assert ta.local_whisper_available() is True
+
+
+def test_local_whisper_raises_when_binary_missing(tmp_path, _routing_env):
+    """The engine raises (so the caller can fall back) rather than hanging."""
+    audio = tmp_path / "m.wav"
+    audio.write_bytes(b"\x00")
+    _routing_env.setenv("WHISPER_CPP_BIN", str(tmp_path / "nope"))
+    with pytest.raises(RuntimeError, match="whisper.cpp CLI not found"):
+        ta.transcribe_with_local_whisper(audio)
+
+
+def test_legacy_routing_escape_hatch_restores_key_presence_rule(
+    tmp_path, _routing_env
+):
+    """The old behaviour is recoverable without a code change."""
+    mono = tmp_path / "m.wav"
+    if not _make_synthetic_audio(mono, 1):
+        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
+    _routing_env.setenv("TRANSCRIBE_ENGINE_LEGACY_ROUTING", "1")
+    _fake_local_whisper_available(_routing_env, True)
+
+    assert ta.select_transcription_engine(mono) == ta.ENGINE_ELEVENLABS
+
+
+def test_unknown_channel_count_treated_as_single_source(tmp_path, _routing_env):
+    """When ffprobe cannot answer, do not spend money on diarization."""
+    audio = tmp_path / "unprobeable.wav"
+    audio.write_bytes(b"not really audio")
+    _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
+    _fake_local_whisper_available(_routing_env, True)
+    _routing_env.setattr(ta, "get_audio_channel_count", lambda _p: None)
+
+    assert ta.select_transcription_engine(audio) == ta.ENGINE_LOCAL_WHISPER
+
+
+def test_engine_recorded_on_transcription_result(tmp_path, _routing_env):
+    """transcribe_audio_file names the engine that ran, for the stored entity."""
+    mono = tmp_path / "m.wav"
+    if not _make_synthetic_audio(mono, 1, seconds=1.0):
+        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    _fake_local_whisper_available(_routing_env, True)
+    _routing_env.setattr(
+        ta,
+        "transcribe_with_local_whisper",
+        lambda p, language=None, verbose=False: {
+            "transcription_text": "synthetic",
+            "language": "en",
+            "transcription_engine": ta.ENGINE_LOCAL_WHISPER,
+            "transcription_model": "ggml-test.bin",
+        },
+    )
+    result = ta.transcribe_audio_file(mono)
+    assert result["transcription_engine"] == ta.ENGINE_LOCAL_WHISPER
+    assert result["transcription_model"] == "ggml-test.bin"
+    assert result["transcription_text"] == "synthetic"
+
+
+def test_transcribe_audio_file_falls_back_when_local_engine_fails(
+    tmp_path, _routing_env
+):
+    """A local failure mid-run degrades to the API path instead of crashing."""
+    mono = tmp_path / "m.wav"
+    if not _make_synthetic_audio(mono, 1):
+        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    _fake_local_whisper_available(_routing_env, True)
+    _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
+
+    def _boom(p, language=None, verbose=False):
+        raise RuntimeError("whisper.cpp model not found")
+
+    _routing_env.setattr(ta, "transcribe_with_local_whisper", _boom)
+    _routing_env.setattr(
+        ta,
+        "transcribe_with_elevenlabs_speech_to_text",
+        lambda p, language=None, verbose=False: {
+            "transcription_text": "from the api",
+            "language": "en",
+            "raw_response": {},
+        },
+    )
+    result = ta.transcribe_audio_file(mono)
+    assert result["transcription_engine"] == ta.ENGINE_ELEVENLABS
+    assert result["transcription_text"] == "from the api"
