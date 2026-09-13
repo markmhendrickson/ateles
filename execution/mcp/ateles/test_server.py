@@ -16,8 +16,6 @@ Run: python execution/mcp/ateles/test_server.py
 
 from __future__ import annotations
 
-import json
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -26,9 +24,9 @@ from unittest.mock import patch
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
-import httpx
+import httpx  # noqa: E402
 
-import server as srv
+import server as srv  # noqa: E402
 
 
 def _set_token(module, value: str) -> None:
@@ -579,6 +577,32 @@ class TestBootstrapSession(unittest.TestCase):
         self.assertFalse(result["execution"]["available"])
         self.assertEqual(result["execution"]["next_action"], "submit_or_inspect_only")
 
+    @patch("server._retrieve_entities")
+    def test_ambiguous_workstream_title_is_not_guessed(self, mock_retrieve):
+        mock_retrieve.side_effect = lambda entity_type, **kwargs: (
+            [
+                {
+                    "entity_id": "ent_task_one",
+                    "entity_type": "task",
+                    "snapshot": {"title": "Shared title"},
+                },
+                {
+                    "entity_id": "ent_task_two",
+                    "entity_type": "task",
+                    "snapshot": {"title": "Shared title"},
+                },
+            ]
+            if entity_type == "task"
+            else []
+        )
+
+        workstream, error = srv._resolve_workstream("Shared title")
+
+        self.assertIsNone(workstream)
+        self.assertIn("ambiguous workstream_ref", error)
+        self.assertIn("ent_task_one", error)
+        self.assertIn("ent_task_two", error)
+
 
 class TestGracefulDegradation(unittest.TestCase):
 
@@ -976,6 +1000,13 @@ class TestToolSchemas(unittest.TestCase):
         import inspect
 
         self.assertNotIn("_correct(", inspect.getsource(srv._bootstrap_session))
+
+    def test_bootstrap_cannot_accept_a_caller_supplied_principal(self):
+        bootstrap = next(tool for tool in srv.TOOLS if tool.name == "bootstrap_session")
+        properties = bootstrap.inputSchema["properties"]
+        self.assertTrue(
+            {"principal", "principal_id", "user_id", "aauth_sub"}.isdisjoint(properties)
+        )
 
     def test_every_tool_schema_rejects_unknown_properties(self):
         """Every inputSchema must set additionalProperties: false.
