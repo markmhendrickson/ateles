@@ -24,7 +24,9 @@ Examples:
 """
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import math
 import os
@@ -34,7 +36,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import UTC, date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import requests
@@ -49,11 +51,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(
     0, str(PROJECT_ROOT / "execution" / "scripts")
 )  # Add scripts directory to path
-
-# Load environment variables from .env file
-# Check for parsing errors and abort if found
-import contextlib
-import io
 
 stderr_capture = io.StringIO()
 with contextlib.redirect_stderr(stderr_capture):
@@ -72,11 +69,7 @@ if "could not parse statement" in stderr_output.lower():
     print(f"{'=' * 80}\n")
     sys.exit(1)
 
-# Import config - try both paths
-try:
-    from scripts.config import get_data_dir
-except ImportError:
-    from config import get_data_dir
+from ateles.runtime_paths import get_data_dir  # noqa: E402
 
 try:
     from scripts.local_whisper import (
@@ -179,13 +172,12 @@ def transcribe_with_retry(
                 # maps .mp4 → video/mp4 which Whisper rejects.  Open the file
                 # with a .m4a name so the SDK sends audio/mp4 (m4a alias).
                 if audio_path_obj.suffix.lower() == ".mp4":
-                    import tempfile, shutil as _shutil
                     _tmp = tempfile.NamedTemporaryFile(
                         suffix=".m4a", delete=False,
                         dir=audio_path_obj.parent,
                     )
                     _tmp.close()
-                    _shutil.copy2(str(audio_path_obj), _tmp.name)
+                    shutil.copy2(str(audio_path_obj), _tmp.name)
                     raw_fh = open(_tmp.name, "rb")
                     _mp4_tmp = _tmp.name  # track for cleanup
                 else:
@@ -211,7 +203,7 @@ def transcribe_with_retry(
                 file_opened_here = False
             if _mp4_tmp:
                 try:
-                    import os as _os; _os.unlink(_mp4_tmp)
+                    os.unlink(_mp4_tmp)
                 except Exception:
                     pass
                 _mp4_tmp = None
@@ -2514,7 +2506,8 @@ def save_transcription(
         # Extract the existing entity_id from stdout or error text and exit 0
         # so callers (Tyto) treat it as a successful duplicate detection.
         if "ERR_IDEMPOTENCY_MISMATCH" in err or "already used" in err:
-            import re as _re, sys as _sys
+            import re as _re
+            import sys as _sys
             existing_id = None
             # Check stdout first — prior run may have printed the entity line
             for line in raw.splitlines():

@@ -26,10 +26,7 @@ import pytest
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS_DIR))
 
-if "config" not in sys.modules:
-    _stub_config = types.ModuleType("config")
-    _stub_config.get_data_dir = lambda: Path(_SCRIPTS_DIR / "_test_data_dir")
-    sys.modules["config"] = _stub_config
+os.environ.setdefault("DATA_DIR", str(_SCRIPTS_DIR / "_test_data_dir"))
 
 import transcribe_audio as ta  # noqa: E402
 

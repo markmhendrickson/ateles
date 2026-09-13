@@ -17,7 +17,7 @@ contract is asserted without touching the filesystem, the network, or Neotoma.
 """
 
 import sys
-import types
+import os
 from pathlib import Path
 
 import pytest
@@ -25,10 +25,7 @@ import pytest
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS_DIR))
 
-if "config" not in sys.modules:
-    _stub_config = types.ModuleType("config")
-    _stub_config.get_data_dir = lambda: Path(_SCRIPTS_DIR / "_test_data_dir")
-    sys.modules["config"] = _stub_config
+os.environ.setdefault("DATA_DIR", str(_SCRIPTS_DIR / "_test_data_dir"))
 
 import import_audio_from_desktop as iad  # noqa: E402
 

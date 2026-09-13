@@ -43,7 +43,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "execution" / "scripts"))
 load_dotenv(PROJECT_ROOT / ".env")
 
 # Configuration
-from config import get_data_dir
+from ateles.runtime_paths import get_data_dir  # noqa: E402
 
 DATA_DIR = get_data_dir()
 IMPORTS_DIR = DATA_DIR / "imports"
