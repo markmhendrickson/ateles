@@ -17,10 +17,11 @@ Registered in `~/.claude.json` as the `ateles` server, launched via
 | `get_gate_status` | no | An issue's `gate_status`, `current_owner`, blocking gates, recent `owner_history`, and pipeline state |
 | `list_pipeline_queue` | no | What holds the issue-pipeline slot, what is queued, and how long each has waited |
 | `get_dispatch_health` | no | Dispatcher liveness, recent pipeline activity, recent dispatch failures |
+| `get_session_workboard` | no | Fresh compact projection of one session digest's paramount plan and managed work; `include_history` returns its cumulative ledger |
 
 ### Read-only by construction
 
-The three observability tools never write gate state. A session advancing its own
+The four observability tools never write gate state or a second status record. A session advancing its own
 gate is the self-certification boundary the dispatcher already maintains
 (ateles#230 arch §4, and the `SELF-CERTIFICATION BOUNDARY` comment in
 `execution/daemons/apis/swarm_dispatch.py`, where even an auto-re-review never
@@ -31,6 +32,15 @@ observability handler can reach `_correct`. **Treat any diff that weakens or
 removes that test as a blocking architectural concern, not a QA nit.** A future
 mutating tool belongs behind the same operator-approval path as
 `resolve_checkpoint`, never as a free-form gate setter.
+
+`get_session_workboard` reads the existing `session_digest`, explicit paramount
+plan, and task snapshots. It has no harness argument or harness-specific
+configuration: a connected Claude, Codex, or Cursor session uses the same MCP
+read. Its table is ordered paramount plan, active, queued, blocked, then
+operator-needed. The optional history is deliberately unfiltered; the compact
+view can retire a completed item only after its verified discharge and one
+surface, or after a fully recorded swarm handoff. Email work stays live until
+incorporation review and Gmail send verification are recorded.
 
 ### Reads fail closed
 

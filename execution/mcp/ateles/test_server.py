@@ -788,7 +788,9 @@ class TestToolSchemas(unittest.TestCase):
     # Read-only swarm observability. resolve_checkpoint stays the ONLY mutating
     # tool: see the self-certification boundary note in server.py — a session
     # must not be able to advance its own gate.
-    OBSERVABILITY_TOOLS = {"get_gate_status", "list_pipeline_queue", "get_dispatch_health"}
+    OBSERVABILITY_TOOLS = {
+        "get_gate_status", "list_pipeline_queue", "get_dispatch_health", "get_session_workboard",
+    }
 
     def test_tools_defined(self):
         self.assertEqual(len(srv.TOOLS), len(self.ACTION_TOOLS | self.OBSERVABILITY_TOOLS))
@@ -807,7 +809,7 @@ class TestToolSchemas(unittest.TestCase):
         for name in self.OBSERVABILITY_TOOLS:
             fn = srv.TOOL_HANDLERS[name]
             chain = inspect.getsource(fn)
-            for impl in ("_get_gate_status", "_list_pipeline_queue", "_get_dispatch_health"):
+            for impl in ("_get_gate_status", "_list_pipeline_queue", "_get_dispatch_health", "_get_session_workboard"):
                 if impl in chain:
                     chain += inspect.getsource(getattr(srv, impl))
             self.assertNotIn("_correct(", chain, f"{name} must not write to Neotoma")
@@ -991,6 +993,141 @@ class TestSwarmObservability(unittest.TestCase):
     def test_get_gate_status_rejects_unparseable_ref(self):
         out = srv._get_gate_status("garbage")
         self.assertIn("error", out)
+
+
+class TestSessionWorkboard(unittest.TestCase):
+    """The shared MCP projection must not become a second status store."""
+
+    PLAN_ID = "ent_plan_1"
+
+    def _digest(self, claims, harness="codex"):
+        return [{
+            "entity_id": "ent_digest_1",
+            "entity_type": "session_digest",
+            "snapshot": {"session_key": f"{harness}:root", "harness": harness, "tasks_claimed": claims,
+                         "artifacts": [{"kind": "entity", "ref": "ent_artifact", "description": "history"}]},
+        }]
+
+    def _plan(self):
+        return {"entity_id": self.PLAN_ID, "entity_type": "plan", "snapshot": {
+            "title": "Paramount plan", "status": "active", "next_steps": "Advance the plan",
+        }}
+
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    def test_plan_is_first_then_live_buckets_in_contract_order(self, retrieve, get):
+        claims = [
+            {"claim": "queued work", "status_claimed": "todo", "evidence_pointers": ["ent_queue"]},
+            {"claim": "blocked work", "status_claimed": "blocked", "evidence_pointers": ["ent_blocked"]},
+            {"claim": "active work", "status_claimed": "outstanding", "evidence_pointers": ["ent_active"]},
+            {"claim": "operator work", "status_claimed": "outstanding", "evidence_pointers": ["ent_operator"]},
+        ]
+        retrieve.return_value = self._digest(claims)
+        get.side_effect = lambda path: {
+            f"/entities/{self.PLAN_ID}": self._plan(),
+            "/entities/ent_active": {"entity_type": "task", "snapshot": {"status": "executing", "assigned_to": "cicada"}},
+            "/entities/ent_queue": {"entity_type": "task", "snapshot": {"status": "todo", "assigned_to": "cicada"}},
+            "/entities/ent_blocked": {"entity_type": "task", "snapshot": {"status": "blocked", "assigned_to": "cicada"}},
+            "/entities/ent_operator": {"entity_type": "task", "snapshot": {"status": "awaiting_approval", "assigned_to": "operator"}},
+        }.get(path)
+
+        out = srv._get_session_workboard("codex:root", self.PLAN_ID)
+        self.assertEqual([row["priority"] for row in out["rows"]],
+                         ["paramount", "active", "queued", "blocked", "operator-needed"])
+        self.assertIn("| Priority | Work | State | Executor | Next action |", out["table"])
+
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    def test_live_task_replaces_a_stale_completed_digest_claim(self, retrieve, get):
+        retrieve.return_value = self._digest([{
+            "claim": "old completion", "status_claimed": "complete", "verification_state": "confirmed",
+            "evidence_pointers": ["ent_task"],
+        }])
+        get.side_effect = lambda path: {
+            f"/entities/{self.PLAN_ID}": self._plan(),
+            "/entities/ent_task": {"entity_type": "task", "snapshot": {"status": "blocked", "assigned_to": "cicada"}},
+        }.get(path)
+
+        row = srv._get_session_workboard("codex:root", self.PLAN_ID)["rows"][1]
+        self.assertEqual(row["state"], "blocked")
+        self.assertEqual(row["priority"], "blocked")
+        self.assertEqual(row["state_source"], "task")
+
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    def test_subordinate_plan_is_read_live_not_duplicated_as_session_status(self, retrieve, get):
+        retrieve.return_value = self._digest([{
+            "claim": "Advance the subordinate workstream", "status_claimed": "todo",
+            "evidence_pointers": ["ent_subordinate_plan"],
+        }])
+        get.side_effect = lambda path: {
+            f"/entities/{self.PLAN_ID}": self._plan(),
+            "/entities/ent_subordinate_plan": {
+                "entity_type": "plan", "snapshot": {"title": "Subordinate plan", "status": "active", "executor": "cicada"},
+            },
+        }.get(path)
+
+        row = srv._get_session_workboard("codex:root", self.PLAN_ID)["rows"][1]
+        self.assertEqual((row["kind"], row["state"], row["state_source"]), ("plan", "active", "plan"))
+
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    def test_any_harness_uses_the_same_mcp_read_and_full_history_is_cumulative(self, retrieve, get):
+        retrieve.return_value = self._digest([], harness="cursor")
+        get.return_value = self._plan()
+
+        out = srv._get_session_workboard("cursor:root", self.PLAN_ID, include_history=True)
+        self.assertEqual(out["harness"], "cursor")
+        self.assertEqual(out["history"]["artifacts"][0]["ref"], "ent_artifact")
+        tool = next(tool for tool in srv.TOOLS if tool.name == "get_session_workboard")
+        self.assertEqual(set(tool.inputSchema["required"]), {"session_key", "paramount_plan_id"})
+        self.assertNotIn("harness", tool.inputSchema["properties"])
+
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    def test_email_work_stays_live_until_review_and_gmail_send_are_discharged(self, retrieve, get):
+        claim = {
+            "claim": "Review intake, follow up, and send draft", "status_claimed": "complete",
+            "verification_state": "confirmed", "evidence_pointers": ["ent_email_task"],
+            "workboard": {
+                "completion_surfaced_at": "2026-09-14T08:00:00Z",
+                "active_dependents": [],
+                "operator_obligations": [
+                    {"kind": "incorporation_review", "status": "reviewed"},
+                    {"kind": "gmail_send", "status": "open"},
+                ],
+            },
+        }
+        retrieve.return_value = self._digest([claim])
+        get.side_effect = lambda path: {
+            f"/entities/{self.PLAN_ID}": self._plan(),
+            "/entities/ent_email_task": {"entity_type": "task", "snapshot": {"status": "done", "assigned_to": "turdus"}},
+        }.get(path)
+        self.assertEqual(len(srv._get_session_workboard("codex:root", self.PLAN_ID)["rows"]), 2)
+
+        claim["workboard"]["operator_obligations"][1]["status"] = "sent"
+        self.assertEqual(len(srv._get_session_workboard("codex:root", self.PLAN_ID)["rows"]), 1)
+
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    def test_durable_surfaced_handoff_retires_leaf_but_preserves_history(self, retrieve, get):
+        claim = {
+            "claim": "Prepare handoff material", "status_claimed": "outstanding", "evidence_pointers": ["ent_receiver"],
+            "workboard": {"swarm_handoff": {
+                "handoff_surfaced_at": "2026-09-14T08:00:00Z", "executor": "cicada",
+                "dependencies": [], "next_action": "Run the receiving task",
+                "session_context_ref": "ent_digest_1", "operator_checkpoint_status": "none",
+            }},
+        }
+        retrieve.return_value = self._digest([claim])
+        get.side_effect = lambda path: {
+            f"/entities/{self.PLAN_ID}": self._plan(),
+            "/entities/ent_receiver": {"entity_type": "task", "snapshot": {"status": "executing", "assigned_to": "cicada", "next_action": "Run the receiving task"}},
+        }.get(path)
+
+        out = srv._get_session_workboard("codex:root", self.PLAN_ID, include_history=True)
+        self.assertEqual(len(out["rows"]), 1)  # paramount plan stays as the aggregate
+        self.assertEqual(out["history"]["tasks_claimed"][0]["claim"], "Prepare handoff material")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 """
 ateles — MCP server for Ateles swarm routing and checkpoint management.
 
-Provides seven tools that wrap multi-step Neotoma/GitHub query patterns into
+Provides eight tools that wrap multi-step Neotoma/GitHub query patterns into
 single calls, so any connected agent gets reliable swarm interaction without
 re-deriving the roster/policy/checkpoint dance — or the entity-read plus
 log-grep dance — each session.
@@ -18,6 +18,8 @@ Tools:
   list_pipeline_queue — who holds the issue-pipeline slot, who is queued, and
                         how long each has waited                  [read-only]
   get_dispatch_health — dispatcher liveness, recent activity, failures
+                                                                  [read-only]
+  get_session_workboard — one session_digest's current plan/task projection
                                                                   [read-only]
 
 The observability tools never write gate state — see the SELF-CERTIFICATION
@@ -90,6 +92,23 @@ threshold, and reason. Act on the operator's decision via resolve_checkpoint —
 do NOT execute the held task yourself.
 5. **Neotoma first.** Durable memory lives in Neotoma. Store, don't leave in \
 conversation.
+6. **Maintain the session workboard.** For every Ateles-led session with
+managed work, keep one `session_digest` as the durable ledger. Refresh its
+live summary after a material task, agent, or decision change and before
+substantial new intake. Retrieve `get_session_workboard` with the session key
+and the session's paramount plan id; it is the shared MCP read, so do not make
+a harness-local status copy. The compact table is paramount plan first, then
+active, queued, blocked, and operator-needed work, with executor and next
+action. Keep `tasks_claimed` and `artifacts` cumulative for a full `/digest`.
+A completed item leaves routine summaries only after terminal evidence is
+verified, each review/send/follow-up obligation is discharged or separately
+tracked, no active dependent needs it, and its completion was surfaced once.
+Leaf work may also leave after a surfaced durable swarm handoff: the receiving
+task or plan must record an executor, dependencies, next action, live execution
+or blocker state, stored session context, and no remaining operator checkpoint.
+Its effect still belongs in the paramount plan row.
+For email this keeps ingestion review, follow-up work, and drafts live until
+incorporation is reviewed and Gmail verifies the send.
 """
 
 
@@ -211,6 +230,300 @@ def _correct(entity_id: str, entity_type: str, field: str, value: Any, idem_key:
     }
     result = _post("/correct", body)
     return result is not None
+
+
+# ── Session workboard ───────────────────────────────────────────────────────
+
+# This is a projection, deliberately not another record.  A session_digest is
+# the session's durable ledger; plan/task snapshots replace its self-reported
+# state at read time.  A cached or separately-written board would go stale in
+# exactly the direction an operator needs it to be current.
+_TERMINAL_TASK_STATES = {
+    "done", "completed", "verified", "closed", "failed", "declined",
+    "superseded", "cancelled", "canceled",
+}
+_ACTIVE_TASK_STATES = {"in_progress", "executing", "active", "routed"}
+_QUEUED_TASK_STATES = {"pending", "todo", "open", "queued"}
+_OPERATOR_TASK_STATES = {
+    "awaiting_approval", "awaiting_input", "awaiting_operator",
+    "awaiting_release_confirmation",
+}
+_WORKBOARD_ORDER = {
+    "paramount": 0,
+    "active": 1,
+    "queued": 2,
+    "blocked": 3,
+    "operator-needed": 4,
+}
+
+
+def _text(value: Any) -> str | None:
+    """Return a non-blank string, never coercing a structured value to prose."""
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _as_snapshot(entity: dict | None) -> dict:
+    """Tolerate both `/entities/:id` and `/entities/query` response shapes."""
+    if not isinstance(entity, dict):
+        return {}
+    snap = entity.get("snapshot")
+    if isinstance(snap, dict):
+        nested = snap.get("snapshot")
+        return nested if isinstance(nested, dict) else snap
+    return entity
+
+
+def _entity_type(entity: dict | None) -> str | None:
+    return _text(entity.get("entity_type")) if isinstance(entity, dict) else None
+
+
+def _evidence_entity_ids(claim: dict) -> list[str]:
+    """Resolve only explicit entity locators; prose is not a live-state source."""
+    raw = claim.get("evidence_pointers")
+    if not isinstance(raw, list):
+        return []
+    return [pointer for pointer in raw if isinstance(pointer, str) and pointer.startswith("ent_")]
+
+
+def _find_session_digest(session_key: str) -> dict | None:
+    """Find by stored session_key, not by the current harness or worktree."""
+    rows = _retrieve_entities("session_digest", search=session_key, limit=100)
+    for row in rows:
+        if _as_snapshot(row).get("session_key") == session_key:
+            return row
+    return None
+
+
+def _claim_workboard(claim: dict) -> dict:
+    """Read optional workboard metadata without requiring a schema expansion."""
+    board = claim.get("workboard")
+    return board if isinstance(board, dict) else {}
+
+
+def _operator_obligations_are_accounted_for(board: dict) -> bool:
+    """Unknown obligations fail open into the live view rather than disappearing."""
+    obligations = board.get("operator_obligations")
+    if not isinstance(obligations, list):
+        return False
+    for obligation in obligations:
+        if not isinstance(obligation, dict):
+            return False
+        state = (_text(obligation.get("status")) or "").lower()
+        separately_tracked = bool(_text(obligation.get("tracking_ref")))
+        if state not in {"discharged", "verified", "sent", "reviewed"} and not separately_tracked:
+            return False
+    return True
+
+
+def _has_active_dependents(board: dict) -> bool:
+    """An absent dependency declaration is unknown, so retain the completed row."""
+    dependents = board.get("active_dependents")
+    if not isinstance(dependents, list):
+        return True
+    for dependent in dependents:
+        if isinstance(dependent, str) and dependent.strip():
+            return True
+        if isinstance(dependent, dict):
+            state = (_text(dependent.get("status")) or "active").lower()
+            if state not in _TERMINAL_TASK_STATES:
+                return True
+    return False
+
+
+def _completion_can_age_out(claim: dict, live_status: str | None) -> bool:
+    """Apply every discharge condition before hiding a terminal historical row."""
+    board = _claim_workboard(claim)
+    verified = (_text(claim.get("verification_state")) or "").lower() == "confirmed"
+    has_evidence = bool(_evidence_entity_ids(claim))
+    terminal = (live_status or _text(claim.get("status_claimed")) or "").lower()
+    return (
+        terminal in _TERMINAL_TASK_STATES
+        and verified
+        and has_evidence
+        and bool(_text(board.get("completion_surfaced_at")))
+        and _operator_obligations_are_accounted_for(board)
+        and not _has_active_dependents(board)
+    )
+
+
+def _handoff_can_age_out(
+    claim: dict, receiver_snapshot: dict, receiver_kind: str | None, live_status: str | None,
+) -> bool:
+    """Retire a leaf only when a task or plan holds the complete handoff."""
+    board = _claim_workboard(claim)
+    handoff = board.get("swarm_handoff")
+    if not isinstance(handoff, dict):
+        return False
+    # The task or plan evidence is the receiving durable record.  An assertion that a
+    # handoff happened is not enough: the projection must have just read it.
+    if (
+        receiver_kind not in {"task", "plan"}
+        or not receiver_snapshot
+        or (live_status or "").lower() not in (_ACTIVE_TASK_STATES | {"blocked"})
+    ):
+        return False
+    executor = (
+        _text(receiver_snapshot.get("executor"))
+        or _text(receiver_snapshot.get("assigned_to"))
+        or _text(receiver_snapshot.get("owner"))
+        or _text(handoff.get("executor"))
+    )
+    next_action = _text(receiver_snapshot.get("next_action")) or _text(handoff.get("next_action"))
+    # A declared empty dependency list is useful evidence; a missing list is
+    # unknown and must retain the leaf in the live view.
+    dependencies = handoff.get("dependencies")
+    checkpoint = (_text(handoff.get("operator_checkpoint_status")) or "").lower()
+    return (
+        bool(executor)
+        and bool(next_action)
+        and isinstance(dependencies, list)
+        and bool(_text(handoff.get("session_context_ref")))
+        and checkpoint in {"none", "resolved", "not_required"}
+        and bool(_text(handoff.get("handoff_surfaced_at")))
+    )
+
+
+def _bucket_for(status: str, executor: str | None) -> str:
+    status = status.lower()
+    if status in _OPERATOR_TASK_STATES or (executor or "").lower() == "operator":
+        return "operator-needed"
+    if status == "blocked":
+        return "blocked"
+    if status in _ACTIVE_TASK_STATES:
+        return "active"
+    return "queued"
+
+
+def _next_action(snapshot: dict, claim: dict, bucket: str) -> str:
+    board = _claim_workboard(claim)
+    for candidate in (
+        board.get("next_action"), snapshot.get("next_action"), snapshot.get("next_steps"),
+        snapshot.get("blocked_reason"),
+    ):
+        value = _text(candidate)
+        if value:
+            return value
+    if bucket == "operator-needed":
+        return "Operator decision or review required"
+    if bucket == "blocked":
+        return "Resolve the recorded blocker"
+    if bucket == "active":
+        return "Continue the assigned execution"
+    return "Claim or dispatch the recorded task"
+
+
+def _claim_row(claim: dict) -> dict | None:
+    """Build one live row, replacing stale digest state from a task snapshot."""
+    title = _text(claim.get("claim"))
+    if not title:
+        return None
+    board = _claim_workboard(claim)
+    live_record: dict | None = None
+    for entity_id in _evidence_entity_ids(claim):
+        candidate = _get(f"/entities/{entity_id}")
+        if _entity_type(candidate) in {"task", "plan"}:
+            live_record = candidate
+            break
+    record_kind = _entity_type(live_record)
+    snapshot = _as_snapshot(live_record)
+    live_status = _text(snapshot.get("status"))
+    status = live_status or _text(claim.get("status_claimed")) or "unknown"
+    if _completion_can_age_out(claim, live_status) or _handoff_can_age_out(
+        claim, snapshot, record_kind, live_status,
+    ):
+        return None
+    executor = (
+        _text(snapshot.get("executor"))
+        or _text(snapshot.get("assigned_to"))
+        or _text(snapshot.get("owner"))
+        or _text(board.get("executor"))
+        or "unassigned"
+    )
+    bucket = _bucket_for(status, executor)
+    return {
+        "kind": record_kind or "task",
+        "priority": bucket,
+        "work": _text(snapshot.get("title")) or title,
+        "state": status,
+        "executor": executor,
+        "next_action": _next_action(snapshot, claim, bucket),
+        "evidence": _evidence_entity_ids(claim),
+        "state_source": record_kind if live_status else "session_digest",
+    }
+
+
+def _format_workboard(rows: list[dict]) -> str:
+    """One compact, copyable table for every MCP-connected harness."""
+    table = ["| Priority | Work | State | Executor | Next action |", "|---|---|---|---|---|"]
+    for row in rows:
+        cells = [
+            str(row["priority"]), str(row["work"]), str(row["state"]),
+            str(row["executor"]), str(row["next_action"]),
+        ]
+        table.append("| " + " | ".join(cell.replace("|", "\\|").replace("\n", " ") for cell in cells) + " |")
+    return "\n".join(table)
+
+
+def _get_session_workboard(session_key: str, paramount_plan_id: str, include_history: bool = False) -> dict:
+    """Read a session's one digest as a fresh plan/task projection.
+
+    `session_key` is deliberately harness-agnostic: a Codex session can inspect
+    a Claude or Cursor digest through the same MCP server.  The plan id is
+    explicit so no hidden default plan can turn an unrelated session into a
+    swarm-architecture workstream.
+    """
+    digest_entity = _find_session_digest(session_key)
+    if digest_entity is None:
+        detail = _describe_transport_error()
+        return {"error": detail or "session_digest not found", "session_key": session_key}
+    plan_entity = _get(f"/entities/{paramount_plan_id}")
+    if plan_entity is None:
+        detail = _describe_transport_error()
+        return {
+            "error": detail or "paramount plan not found",
+            "session_key": session_key,
+            "paramount_plan_id": paramount_plan_id,
+        }
+    if _entity_type(plan_entity) != "plan":
+        return {
+            "error": "paramount_plan_id does not identify a plan",
+            "session_key": session_key,
+            "paramount_plan_id": paramount_plan_id,
+        }
+
+    digest = _as_snapshot(digest_entity)
+    plan = _as_snapshot(plan_entity)
+    rows: list[dict] = [{
+        "kind": "plan",
+        "priority": "paramount",
+        "work": _text(plan.get("title")) or paramount_plan_id,
+        "state": _text(plan.get("status")) or "unknown",
+        "executor": _text(plan.get("executor")) or "plan owner",
+        "next_action": _text(plan.get("next_steps")) or "Read the current plan next steps",
+        "evidence": [paramount_plan_id],
+        "state_source": "plan",
+    }]
+    claims = digest.get("tasks_claimed")
+    if isinstance(claims, list):
+        rows.extend(row for claim in claims if isinstance(claim, dict) if (row := _claim_row(claim)) is not None)
+    rows.sort(key=lambda row: _WORKBOARD_ORDER.get(str(row["priority"]), len(_WORKBOARD_ORDER)))
+    result: dict[str, Any] = {
+        "session_key": session_key,
+        "harness": _text(digest.get("harness")),
+        "digest_id": digest_entity.get("entity_id"),
+        "paramount_plan_id": paramount_plan_id,
+        "rows": rows,
+        "table": _format_workboard(rows),
+        "refresh_rule": "Refresh after a material task, agent, or decision change and before substantial new intake.",
+    }
+    if include_history:
+        # History remains unfiltered; this is the regular full-session digest,
+        # while `rows` is intentionally the routine live view.
+        result["history"] = {
+            "tasks_claimed": claims if isinstance(claims, list) else [],
+            "artifacts": digest.get("artifacts") if isinstance(digest.get("artifacts"), list) else [],
+        }
+    return result
 
 
 # Tie-break order for equal-length keyword matches, most specific first.
@@ -1425,6 +1738,39 @@ TOOLS = [
         ),
         inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
     ),
+    Tool(
+        name="get_session_workboard",
+        description=(
+            "Read-only. Render one stable session_digest as the current Ateles workboard. "
+            "It reads the named paramount plan and replaces each digest claim's stale "
+            "state with its live task snapshot. The compact table always orders the "
+            "paramount plan first, then active, queued, blocked, and operator-needed "
+            "work. Pass include_history=true for the cumulative tasks_claimed and "
+            "artifacts ledger used by a full /digest. session_key is harness-agnostic, "
+            "so any MCP-connected harness can retrieve another supported harness's "
+            "session without local configuration."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_key": {
+                    "type": "string",
+                    "description": "Stable session_digest session_key, e.g. codex:<root-session-id>.",
+                },
+                "paramount_plan_id": {
+                    "type": "string",
+                    "description": "The session's explicitly bound paramount plan entity id.",
+                },
+                "include_history": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include the unfiltered cumulative tasks_claimed and artifacts ledger.",
+                },
+            },
+            "required": ["session_key", "paramount_plan_id"],
+            "additionalProperties": False,
+        },
+    ),
 ]
 
 TOOL_HANDLERS = {
@@ -1441,6 +1787,9 @@ TOOL_HANDLERS = {
     ),
     "list_pipeline_queue": lambda args: _list_pipeline_queue(),
     "get_dispatch_health": lambda args: _get_dispatch_health(),
+    "get_session_workboard": lambda args: _get_session_workboard(
+        args["session_key"], args["paramount_plan_id"], bool(args.get("include_history", False))
+    ),
 }
 
 
