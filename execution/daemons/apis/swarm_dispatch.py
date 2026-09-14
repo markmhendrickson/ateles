@@ -5932,7 +5932,7 @@ class SwarmDispatcher:
                         continue
                     review_id = review.get("id")
                     try:
-                        resp = await client.post(
+                        resp = await client.put(
                             f"https://api.github.com/repos/{repository}/pulls/"
                             f"{pr_number}/reviews/{review_id}/dismissals",
                             json={

@@ -284,7 +284,7 @@ async def test_supersession_patches_only_bot_verdicts_and_dismisses_stale_block(
             patched_bodies[int(url.rsplit("/", 1)[-1])] = json["body"]
             return _Response({})
 
-        async def post(self, url, json=None, headers=None):
+        async def put(self, url, json=None, headers=None):
             if url.endswith("/reviews/10/dismissals"):
                 dismissed.append((url, json["message"]))
                 return _Response({"state": "DISMISSED"})
@@ -341,9 +341,12 @@ async def test_supersession_continues_after_patch_and_dismiss_failures(monkeypat
                 patched_bodies[int(url.rsplit("/", 1)[-1])] = json["body"]
             return _Response({}, 404 if url.endswith("/1") else 200)
 
-        async def post(self, url, json=None, headers=None):
+        async def put(self, url, json=None, headers=None):
             if url.endswith("/dismissals"):
                 return _Response({}, 422)
+            raise AssertionError(url)
+
+        async def post(self, url, json=None, headers=None):
             return _Response({})  # first-failure durability marker
 
     d = sd.SwarmDispatcher(notifier=type("N", (), {"send": lambda *a, **k: None})())
