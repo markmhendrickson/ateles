@@ -6377,6 +6377,130 @@ def test_handle_panel_session_limit_attributes_to_apis_dispatcher(monkeypatch):
     assert attribution_header("vanellus", "PR steward") not in comment_bodies[0]
 
 
+def test_non_capacity_review_failure_requires_action(monkeypatch):
+    """Execution failures must not borrow self-clearing quota promises."""
+    comment_bodies: list[str] = []
+
+    class _CapturingClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url, **kwargs):
+            return _FakeListResp([])
+        async def post(self, url, **kwargs):
+            comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+            return _FakeResp(201)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="x"))
+    asyncio.run(
+        d._handle_panel_session_limit(
+            _trigger(number=264, repository="owner/repo"),
+            None,
+            "vanellus",
+            "",
+            "",
+            reason="PR head changed during review or could not be verified",
+        )
+    )
+
+    assert notifier.priorities == [swarm_dispatch.Priority.BLOCKER]
+    assert len(comment_bodies) == 1
+    assert "no operator action is required" not in comment_bodies[0].lower()
+    assert "automatically after the limit resets" not in comment_bodies[0].lower()
+    assert d._REVIEW_DEFERRED_RE.search(comment_bodies[0]) is None
+    assert "operator attention is required" in comment_bodies[0].lower()
+
+
+def test_provider_capacity_failure_auto_resumes_with_partial_panel_detail(monkeypatch):
+    """Capacity exhaustion keeps the retry marker and names saved/missing lenses."""
+    comment_bodies: list[str] = []
+
+    class _CapturingClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url, **kwargs):
+            return _FakeListResp([])
+        async def post(self, url, **kwargs):
+            comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+            return _FakeResp(201)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="x"))
+    asyncio.run(
+        d._handle_panel_session_limit(
+            _trigger(number=264, repository="owner/repo"),
+            None,
+            "security",
+            "",
+            "",
+            reason="provider capacity exhausted",
+            completed_lenses=("pm",),
+            failed_lenses=(("security", "provider exhaustion"),),
+        )
+    )
+
+    assert notifier.priorities == [swarm_dispatch.Priority.INFO]
+    assert len(comment_bodies) == 1
+    body = comment_bodies[0]
+    assert d._REVIEW_DEFERRED_RE.search(body) is not None
+    assert "resume automatically" in body.lower()
+    assert "completed lens results preserved: pm" in body.lower()
+    assert "missing lens results: security (provider exhaustion)" in body.lower()
+
+
+def test_handle_pr_reports_successful_and_failed_lenses(monkeypatch):
+    """One failed lens leaves the successful results visible and names the gap."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**", calls=calls
+    )
+    monkeypatch.setattr(
+        swarm_dispatch,
+        "select_panel",
+        lambda **kwargs: [
+            Lens(agent="pavo", lens="pm", gate="pm", checks="scope"),
+            Lens(agent="falco", lens="security", gate=None, checks="security"),
+        ],
+    )
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "pavo":
+            return SkillResult(skill, True, 0, "**APPROVE**", "")
+        if skill == "falco":
+            return SkillResult(skill, False, 1, "", "process failed")
+        raise AssertionError(f"unexpected skill: {skill}")
+
+    persisted = []
+    deferred = {}
+
+    async def fake_persist(self, trigger, reviews, agents):
+        persisted.extend(reviews)
+
+    async def fake_deferral(self, *args, **kwargs):
+        deferred.update(kwargs)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_persist)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_panel_session_limit", fake_deferral)
+
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+    assert persisted == [("pm", "**APPROVE**")]
+    assert deferred["completed_lenses"] == ("pm",)
+    assert deferred["failed_lenses"] == (("security", "execution failure"),)
+    assert deferred["reason"] == "incomplete review panel"
+
+
 def test_parse_limit_reset_delay_reads_the_clock():
     from datetime import datetime
     now = datetime(2026, 7, 23, 16, 45, 0)  # 4:45pm

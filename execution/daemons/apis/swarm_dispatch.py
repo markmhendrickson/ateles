@@ -1702,6 +1702,17 @@ def detect_auth_failure(*texts: str) -> bool:
     return any(sig in blob for sig in _AUTH_FAILURE_SIGNATURES)
 
 
+def review_failure_class(result: SkillResult) -> str:
+    """Return a public-safe reason for one incomplete review invocation."""
+    if detect_session_limit(result.stdout, result.stderr, result.error):
+        return "usage limit"
+    if "no subscription-backed harness provider" in (result.error or ""):
+        return "provider exhaustion"
+    if detect_auth_failure(result.stdout, result.stderr, result.error):
+        return "credential failure"
+    return "execution failure"
+
+
 def compose_auth_failure_comment(agent: str) -> str:
     """Body for the comment posted when a panel agent's Claude call fails auth.
 
@@ -4248,7 +4259,7 @@ class SwarmDispatcher:
         )
 
         reviews: list[tuple[str, str]] = []
-        failed_lenses: list[str] = []
+        failed_lenses: list[tuple[str, str]] = []
         # (lens, agent) for each gate owner that reported its writeback refused.
         denied_gate_writebacks: list[tuple[str, str]] = []
         for lens in panel:
@@ -4287,7 +4298,7 @@ class SwarmDispatcher:
             if result.ok:
                 reviews.append((lens.lens, result.stdout))
             else:
-                failed_lenses.append(lens.lens)
+                failed_lenses.append((lens.lens, review_failure_class(result)))
             # ateles#795: a lens that owns a gate and reports its own writeback
             # was refused must not leave the gate merely `pending`. Recorded per
             # lens here, surfaced on the PR below, so "silenced" is legible as
@@ -4315,9 +4326,23 @@ class SwarmDispatcher:
             )
 
         if failed_lenses:
+            auto_resume = all(
+                failure in {"usage limit", "provider exhaustion"}
+                for _, failure in failed_lenses
+            )
             await self._handle_panel_session_limit(
-                trigger, parent, ", ".join(failed_lenses), "", "",
-                reason="incomplete review panel",
+                trigger,
+                parent,
+                ", ".join(lens for lens, _ in failed_lenses),
+                "",
+                "",
+                reason=(
+                    "provider capacity exhausted"
+                    if auto_resume
+                    else "incomplete review panel"
+                ),
+                completed_lenses=tuple(lens for lens, _ in reviews),
+                failed_lenses=tuple(failed_lenses),
             )
             return
 
@@ -4397,9 +4422,15 @@ class SwarmDispatcher:
         if not vanellus_result.ok:
             # No current invocation verdict exists. Historical issue comments
             # cannot turn provider exhaustion or process failure into a review.
+            reason = (
+                "provider capacity exhausted"
+                if review_failure_class(vanellus_result)
+                in {"usage limit", "provider exhaustion"}
+                else "review execution failure"
+            )
             await self._handle_panel_session_limit(
                 trigger, parent, "vanellus", "", vanellus_result.error,
-                reason="provider capacity or execution failure",
+                reason=reason,
             )
             return
 
@@ -8440,8 +8471,9 @@ class SwarmDispatcher:
                 f"{t.repository}#{t.number}: {exc}"
             )
 
-    # Durable marker: a PR whose review was deferred by a usage limit. Carries
-    # the ISO resume time so the sweep can re-dispatch it once the limit clears.
+    # Durable marker: a PR whose review was deferred by a self-clearing usage
+    # limit or provider-capacity exhaustion. Carries the ISO resume time so the
+    # sweep can re-dispatch it once capacity is expected to return.
     # Head-SHA-agnostic and restart-surviving, same substrate as the fix-round
     # counter. Distinct from _VANELLUS_COMMENT_MARKER so a deferral is NEVER
     # mistaken for an aggregation that ran.
@@ -8455,48 +8487,95 @@ class SwarmDispatcher:
         agent: str,
         stdout: str,
         stderr: str,
-        *, reason: str = "usage limit",
+        *,
+        reason: str = "usage limit",
+        completed_lenses: tuple[str, ...] = (),
+        failed_lenses: tuple[tuple[str, str], ...] = (),
     ) -> None:
-        """A panel/aggregation call was throttled by a self-clearing usage limit.
+        """Surface an incomplete review without fabricating a verdict.
 
-        Unlike an auth failure (page + wait for a human), a usage limit resets on
-        its own — so this posts a TRUTHFUL "review incomplete, will resume" marker
-        (never a stub that reads like a verdict) with the resume time, and lets
-        the resume sweep re-dispatch after the reset. Best-effort; never raises.
+        Usage limits and provider exhaustion get a durable retry marker because
+        capacity can recover. Stale-head, execution, and unverified-verdict
+        failures require attention and must not borrow that self-clearing copy.
+        Successful and failed lens names remain visible on partial panels.
+        Best-effort; never raises.
         """
-        delay = parse_limit_reset_delay(stdout, stderr)
-        resume_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
-        iso = resume_at.strftime("%Y-%m-%dT%H:%M:%SZ")
-        log.warning(
-            f"[{DAEMON_NAME}] {agent} panel on {t.repository}#{t.number} hit a "
-            f"{reason}; deferring review resume until {iso} (~{delay}s)"
+        auto_resume = reason in {"usage limit", "provider capacity exhausted"}
+        iso = ""
+        if auto_resume:
+            delay = parse_limit_reset_delay(stdout, stderr)
+            resume_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+            iso = resume_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+            log.warning(
+                f"[{DAEMON_NAME}] {agent} panel on {t.repository}#{t.number} "
+                f"hit {reason}; deferring review resume until {iso} (~{delay}s)"
+            )
+        else:
+            log.error(
+                f"[{DAEMON_NAME}] {agent} panel on {t.repository}#{t.number} "
+                f"stopped: {reason}; operator attention required"
+            )
+
+        completed_note = (
+            " Completed lens results preserved: " + ", ".join(completed_lenses) + "."
+            if completed_lenses
+            else ""
         )
-        # Notify at INFO (always-digest), not BLOCKER: nothing for the operator
-        # to fix — it self-resolves. (An operator who wants it sooner can top
-        # up / wait.)
+        failed_note = (
+            " Missing lens results: "
+            + ", ".join(f"{lens} ({failure})" for lens, failure in failed_lenses)
+            + "."
+            if failed_lenses
+            else ""
+        )
         try:
+            if auto_resume:
+                message = (
+                    f"⏳ Swarm review on {t.repository}#{t.number} paused: "
+                    f"{reason}; auto-resumes at {iso}. No action needed."
+                )
+                priority = Priority.INFO
+            else:
+                message = (
+                    f"⚠️ Swarm review on {t.repository}#{t.number} stopped: "
+                    f"{reason}. Operator attention is required."
+                )
+                priority = Priority.BLOCKER
             self.notifier.send(
-                f"⏳ Swarm review on {t.repository}#{t.number} paused: {reason}; "
-                f"auto-resumes at {iso}. No action needed.",
-                priority=Priority.INFO,
+                message + completed_note + failed_note,
+                priority=priority,
                 handler=DAEMON_NAME,
             )
         except Exception as exc:
-            log.error(f"[{DAEMON_NAME}] session-limit notice failed: {exc}", exc_info=True)
+            log.error(f"[{DAEMON_NAME}] review-incomplete notice failed: {exc}", exc_info=True)
 
         repo_token = _token_for_repo(t.repository)
         if not repo_token:
             return
+        detail = completed_note + failed_note
+        if auto_resume:
+            status_copy = (
+                "The review will resume automatically when capacity is expected "
+                f"to return (scheduled ~`{iso}`); no operator action is required."
+            )
+            marker = self._REVIEW_DEFERRED_MARKER.format(iso=iso) + "\n"
+        else:
+            status_copy = (
+                "Operator attention is required before a current-head review is "
+                "run again."
+            )
+            marker = ""
         body = (
-            f"{self._REVIEW_DEFERRED_MARKER.format(iso=iso)}\n"
-            f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
-            f"⏳ **Review incomplete — {reason}.** The "
-            f"`{agent}` aggregation did not complete. This is **not** a verdict — the PR has not been "
-            f"assessed. The review will resume automatically after the limit "
-            f"resets (scheduled ~`{iso}`); no operator action is required.\n\n"
-            "_Posted by the Apis dispatcher — distinct from a `vanellus-"
-            "aggregation` verdict on purpose, so a throttled review is never "
-            "mistaken for a completed one._"
+            marker
+            + f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+            + f"⚠️ **Review incomplete — {reason}.** The `{agent}` review did "
+            + "not complete. This is **not** a verdict."
+            + detail
+            + " "
+            + status_copy
+            + "\n\n_Posted by the Apis dispatcher — distinct from a `vanellus-"
+            + "aggregation` verdict on purpose, so an incomplete review is never "
+            + "mistaken for a completed one._"
         )
         url = f"https://api.github.com/repos/{t.repository}/issues/{t.number}/comments"
         try:
@@ -8535,8 +8614,9 @@ class SwarmDispatcher:
                 )
                 post.raise_for_status()
                 log.info(
-                    f"[{DAEMON_NAME}] posted review-deferred marker on "
-                    f"{t.repository}#{t.number} (resume {iso})"
+                    f"[{DAEMON_NAME}] posted review-incomplete notice on "
+                    f"{t.repository}#{t.number}"
+                    + (f" (resume {iso})" if auto_resume else "")
                 )
         except Exception as exc:
             log.error(
