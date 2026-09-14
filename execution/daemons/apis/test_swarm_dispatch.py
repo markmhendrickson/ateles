@@ -69,6 +69,7 @@ def _trigger(**overrides):
         html_url="https://github.com/owner/repo/pull/87",
         delivery_id="manual-test",
         action="opened",
+        head_sha="a" * 40,
     )
     base.update(overrides)
     return SwarmTrigger(**base)
@@ -918,13 +919,13 @@ def test_route_findings_no_parseable_blocking_escalates(monkeypatch):
     monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
     notifier = _StubNotifier()
     d = SwarmDispatcher(notifier, _config())
-    # BLOCKED verdict with no [BLOCKING] blocks → escalate, don't guess.
+    # BLOCKED with no content findings is a process hold, not a parse failure.
     asyncio.run(
         d._route_blocking_findings(_trigger(), parent=80,
                                    reviews=[("pm", "cannot proceed")],
                                    verdict="blocked")
     )
-    assert any("no blocking findings could be parsed" in m for m in notifier.sent)
+    assert any("process, not content" in m for m in notifier.sent)
 
 
 def test_route_findings_unparseable_dedup_suppresses_renotify(monkeypatch):
@@ -1202,7 +1203,7 @@ def _wire_ci_status(monkeypatch, *, ci_state, review_clear, pr_head="abc123",
     async def fake_ci(self, trigger):
         return ci_state
 
-    async def fake_clear(self, repo, num):
+    async def fake_clear(self, repo, num, head_sha=""):
         return review_clear
 
     async def fake_route(self, trigger, parent):
@@ -1290,7 +1291,7 @@ def test_ci_status_fetch_pr_failure_notifies_operator(monkeypatch):
     async def fake_ci(self, trigger):
         return "green"
 
-    async def fake_clear(self, repo, num):
+    async def fake_clear(self, repo, num, head_sha=""):
         return True
 
     async def fake_route(self, trigger, parent):
@@ -1335,7 +1336,7 @@ def test_ci_status_green_threads_ci_state_into_gate(monkeypatch):
     async def fake_ci(self, trigger):
         return "green"
 
-    async def fake_clear(self, repo, num):
+    async def fake_clear(self, repo, num, head_sha=""):
         return True
 
     async def fake_gate(self, trigger, parent, panel, ci_state=None):
@@ -4591,8 +4592,8 @@ def test_vanellus_prompt_instructs_post_via_gh_cli():
     """_vanellus_prompt must tell Vanellus to post via the gh CLI."""
     t = _trigger()
     prompt = SwarmDispatcher._vanellus_prompt(t, parent=80, lenses=["pm", "qa"])
-    # The exact marker must appear so Vanellus uses it in its comment.
-    assert _VANELLUS_COMMENT_MARKER in prompt
+    # The exact head-scoped marker must appear so the verdict is current-head bound.
+    assert f"<!-- vanellus-aggregation commit={'a' * 40} -->" in prompt
 
 
 def test_vanellus_prompt_instructs_repeat_for_fallback():
@@ -4681,7 +4682,7 @@ def test_vanellus_fallback_posts_when_comment_missing(monkeypatch):
         f"Expected 1 fallback POST; got {len(client.post_calls)}"
     )
     posted_body = client.post_calls[0]["json"].get("body", "")
-    assert _VANELLUS_COMMENT_MARKER in posted_body, (
+    assert f"<!-- vanellus-aggregation commit={'a' * 40} -->" in posted_body, (
         "Fallback comment must contain the Vanellus marker for future dedup"
     )
     assert verdict_text in posted_body, (
@@ -4691,7 +4692,9 @@ def test_vanellus_fallback_posts_when_comment_missing(monkeypatch):
 
 def test_vanellus_fallback_skips_when_comment_already_present(monkeypatch):
     """When Vanellus's comment IS present, no duplicate is posted."""
-    existing_body = f"{_VANELLUS_COMMENT_MARKER}\nVanellus already posted this."
+    existing_body = compose_vanellus_fallback_comment(
+        "Vanellus already posted this.", "a" * 40
+    )
     client = _FakeHttpxClientForVanellus(existing_bodies=[existing_body])
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
     monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
@@ -6743,7 +6746,7 @@ def test_resolve_verdict_falls_back_to_aggregation_comment(monkeypatch, caplog):
     """T2 — stdout empty, marked comment has the token: fallback recovers it."""
     _comments_client(
         monkeypatch,
-        [f"{_VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**\n1 blocking"],
+        [compose_vanellus_fallback_comment("**REQUEST_CHANGES**\n1 blocking", "a" * 40)],
     )
     d = _resolver(monkeypatch)
     with caplog.at_level(logging.INFO):
@@ -6783,7 +6786,7 @@ def test_resolve_verdict_scans_past_unmarked_comments(monkeypatch):
         monkeypatch,
         [
             "a human chimed in first",
-            f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nlgtm",
+            compose_vanellus_fallback_comment("**APPROVE**\nlgtm", "a" * 40),
         ],
     )
     d = _resolver(monkeypatch)
@@ -6813,8 +6816,8 @@ def test_resolve_verdict_reads_comments_newest_first(monkeypatch):
     _comments_client(
         monkeypatch,
         [
-            f"{_VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**\nstale",
-            f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nnewest",
+            compose_vanellus_fallback_comment("**REQUEST_CHANGES**\nstale", "a" * 40),
+            compose_vanellus_fallback_comment("**APPROVE**\nnewest", "a" * 40),
         ],
         calls=calls,
     )
@@ -6833,7 +6836,7 @@ def test_handle_pr_recovers_blocking_verdict_from_comment(monkeypatch):
     )
     _comments_client(
         monkeypatch,
-        [f"{_VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**\n1 blocking"],
+        [compose_vanellus_fallback_comment("**REQUEST_CHANGES**\n1 blocking", "a" * 40)],
     )
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert ("route", "request_changes") in calls, calls
@@ -6849,7 +6852,10 @@ def test_handle_pr_recovered_approve_gates_readiness(monkeypatch):
     d = _pr_dispatcher_with_stubs(
         monkeypatch, vanellus_stdout="the panel had thoughts", calls=calls
     )
-    _comments_client(monkeypatch, [f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nlgtm"])
+    _comments_client(
+        monkeypatch,
+        [compose_vanellus_fallback_comment("**APPROVE**\nlgtm", "a" * 40)],
+    )
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert ("gate", None) in calls, calls
     assert not any(c[0] == "route" for c in calls), calls

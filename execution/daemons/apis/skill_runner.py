@@ -365,6 +365,22 @@ Update your prior comment in place rather than posting a new one when you are re
 the same issue or PR. Use `gh api -X PATCH repos/<owner>/<repo>/issues/comments/<id> \
 -f body='...'` to edit.
 
+### PR review head and supersession
+
+Every PR verdict is scoped to the exact artifact it reviewed. Put the full current
+40-hex head SHA in an HTML marker at the start of the comment:
+
+```
+<!-- review:<lens> commit=<full40hex> -->
+<!-- vanellus-aggregation commit=<full40hex> -->
+```
+
+The marker is authoritative. A prose `Reviewed commit:` line is only for readers and
+is ignored by the dispatcher. A missing, malformed, or different SHA never stands for
+the current head. When a new head supersedes a bot verdict, the dispatcher may PATCH
+that prior comment in place with a visible superseded banner; preserve that history and
+write the new verdict against the new full SHA.
+
 ### Neotoma backlinks
 
 Every comment that references or is sourced by canonical Neotoma data MUST link the \
