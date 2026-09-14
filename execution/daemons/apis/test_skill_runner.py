@@ -594,6 +594,58 @@ class TestRoleSigningEnvInjection:
     def _run(self, coro):
         return asyncio.run(coro)
 
+    @pytest.mark.parametrize("provider", ["claude", "cursor", "codex"])
+    @pytest.mark.parametrize("missing", ["key", "definition", "subject", "keys_dir"])
+    @pytest.mark.parametrize("source", ["ambient", "env_extra"])
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner._load_agent_def")
+    def test_unavailable_role_signer_cannot_inherit_another_principal(
+        self, load_def, write_event, monkeypatch, provider, missing, source
+    ) -> None:
+        """Missing role identity must never reuse the dispatcher's signer."""
+        load_def.return_value = (
+            _stub_def() if missing == "definition"
+            else _make_def(aauth_sub="" if missing == "subject" else "gryllus@ateles-swarm")
+        )
+        inherited = {
+            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH": "/secrets/keys/other.jwk.json",
+            "NEOTOMA_AAUTH_SUB": "other@ateles-swarm",
+            "NEOTOMA_AAUTH_ISS": "https://issuer.example",
+            "NEOTOMA_AAUTH_ROLE": "other",
+        }
+        for name, value in inherited.items():
+            monkeypatch.delenv(name, raising=False)
+            if source == "ambient":
+                monkeypatch.setenv(name, value)
+        monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", "" if missing == "keys_dir" else "/secrets/keys")
+        proc = MagicMock(returncode=0)
+
+        async def communicate(input=None):
+            return b"output", b""
+
+        proc.communicate = communicate
+        with (
+            patch("skill_runner._provider_binaries", return_value={provider: f"/bin/{provider}"}),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", return_value=proc) as launch,
+            patch("os.path.exists", return_value=missing != "key"),
+            patch("unroutable_ledger.shared_ledger"),
+        ):
+            result = self._run(skill_runner._run_skill_once(
+                "gryllus", "work prompt", provider=provider, role="gryllus",
+                env_extra=inherited if source == "env_extra" else None,
+            ))
+
+        if provider == "codex":
+            assert not result.ok, "Codex must refuse dispatch without its intended role signer"
+            assert "role signer unavailable" in result.error
+            launch.assert_not_called()
+        else:
+            assert result.ok
+            child = launch.call_args.kwargs["env"]
+            assert all(name not in child for name in inherited)
+
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
     def test_real_def_with_jwk_injects_signer_vars(
@@ -801,6 +853,9 @@ class TestRoleSigningEnvInjection:
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "operator-token")
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN_PROD", "operator-prod-token")
         monkeypatch.setenv("MCP_PROXY_BEARER_TOKEN", "operator-proxy-token")
+        monkeypatch.setenv("NEOTOMA_AAUTH_PRIVATE_JWK_PATH", "/secrets/keys/other.jwk.json")
+        monkeypatch.setenv("NEOTOMA_AAUTH_SUB", "other@ateles-swarm")
+        monkeypatch.setenv("NEOTOMA_AAUTH_ROLE", "other")
 
         with (
             patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
@@ -816,11 +871,14 @@ class TestRoleSigningEnvInjection:
                     provider="codex",
                     role="buteo",
                     task_entity_id="ent_abc",
+                    env_extra={"NEOTOMA_AAUTH_SUB": "extra@ateles-swarm"},
                 )
             )
 
         assert any("mcp_servers.neotoma.command=" in arg for arg in captured_cmd)
         assert captured_env["NEOTOMA_AAUTH_SUB"] == "buteo@ateles-swarm"
+        assert captured_env["NEOTOMA_AAUTH_PRIVATE_JWK_PATH"] == "/secrets/keys/buteo.jwk.json"
+        assert captured_env.get("NEOTOMA_AAUTH_ROLE") is None
         assert captured_env["MCP_PROXY_AAUTH"] == "1"
         assert captured_env["MCP_PROXY_FAIL_CLOSED"] == "1"
         assert captured_env["MCP_PROXY_DOWNSTREAM_URL"] == "https://record.example/mcp"

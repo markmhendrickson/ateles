@@ -1287,7 +1287,8 @@ async def _run_skill_once(
 
     Stage 5: when agent_definition carries empty prompt_markdown, logs a WARN,
     sends a notifier alert (when a notifier is supplied), and records a
-    degraded_generic_subagent harness_event. Dispatch still proceeds.
+    degraded_generic_subagent harness_event. Legacy adapters still proceed;
+    Codex refuses to launch without a complete role definition and signer.
 
     ``github_token`` (#109 — per-agent GitHub identity): when supplied, the token
     is injected into subprocess_env as both ``GITHUB_TOKEN`` and ``GH_TOKEN`` so
@@ -1302,9 +1303,9 @@ async def _run_skill_once(
     False (the default) for all SSE/non-GitHub task dispatches so the contract never
     appears in payment, health, finance, or other non-GitHub work.
 
-    Claude's `--allowed-tools` and injected Neotoma MCP config remain specific
-    to the Claude adapter. Codex and Cursor receive the same system + skill
-    instructions as a composite prompt and use their ambient configured tools.
+    Claude uses `--allowed-tools` and an injected Neotoma MCP config. Codex
+    receives an isolated signed Neotoma proxy and exact per-tool approvals.
+    Codex and Cursor receive system + skill instructions as a composite prompt.
 
     ``cwd`` (QE3 — eval-authoring affordance): when supplied, the dispatched
     child subprocess runs with this working directory instead of inheriting the
@@ -1537,21 +1538,6 @@ async def _run_skill_once(
             f"timeout={timeout}s"
         )
 
-    # ── Stage 2: harness_event at dispatch start ───────────────────────────────
-    try:
-        await asyncio.to_thread(
-            _write_harness_event,
-            task_entity_id=task_entity_id,
-            role=_role,
-            agent_sub=agent_def.aauth_sub,
-            event_type="subprocess",
-            tool_name=f"{provider}:{skill}",
-            success="partial",  # "partial" = in-flight / started
-            input_summary=prompt[:200],
-        )
-    except Exception as exc:
-        log.debug(f"[apis] start harness_event write failed (non-fatal): {exc}")
-
     # Hard boundary from the approved plan: all three adapters use bundled
     # subscription auth by default. API-key credentials are removed so a capped
     # plan queues/fails over instead of silently spending metered tokens.
@@ -1568,6 +1554,18 @@ async def _run_skill_once(
         subprocess_env["GITHUB_TOKEN"] = github_token
         subprocess_env["GH_TOKEN"] = github_token
 
+    # A role dispatch must never inherit another principal's signer, including
+    # caller-supplied env_extra. Clear the whole identity before role injection;
+    # otherwise a missing key or degraded definition preserves the parent key.
+    for signer_name in (
+        "NEOTOMA_AAUTH_PRIVATE_JWK_PATH",
+        "NEOTOMA_AAUTH_SUB",
+        "NEOTOMA_AAUTH_ISS",
+        "NEOTOMA_AAUTH_ROLE",  # retired signer selector
+    ):
+        subprocess_env.pop(signer_name, None)
+    role_signer_available = False
+
     # Stage 3 (ateles#94): inject the Neotoma AAuth client signer env vars so
     # the dispatched child can sign its own Neotoma writes as <role>@ateles-swarm.
     # The Neotoma client signer (aauth_client_signer.ts) reads three vars:
@@ -1575,8 +1573,8 @@ async def _run_skill_once(
     #   NEOTOMA_AAUTH_SUB              — the signing subject (e.g. cicada@ateles-swarm)
     #   NEOTOMA_AAUTH_ISS              — the issuer (https://markmhendrickson.com)
     # We only inject when the role JWK file actually exists at the expected path;
-    # if it is absent the child proceeds unsigned (graceful degradation, as today).
-    # When degraded (empty prompt_markdown) we inject nothing — child runs unsigned.
+    # if absent or degraded, legacy adapters receive no signer. Codex requires
+    # the intended signer and refuses to launch without it.
     if not degraded and agent_def.aauth_sub:
         keys_dir = os.environ.get("ATELES_PRIVATE_KEYS_DIR", "")
         if keys_dir:
@@ -1587,8 +1585,13 @@ async def _run_skill_once(
                 subprocess_env["NEOTOMA_AAUTH_ISS"] = os.environ.get(
                     "NEOTOMA_AAUTH_ISS", "https://markmhendrickson.com"
                 )
+                role_signer_available = True
 
     if provider == "codex":
+        if not role_signer_available:
+            msg = f"Neotoma role signer unavailable for {_role}; Codex dispatch refused"
+            log.error("[apis] %s", msg)
+            return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
         # Codex's ambient Neotoma MCP entry is operator-scoped.  A dispatched
         # role must reach the record through the AAuth proxy configured above,
         # with no bearer fallback that could silently turn the role's write
@@ -1605,6 +1608,21 @@ async def _run_skill_once(
             "NEOTOMA_BEARER_TOKEN_PROD",
         ):
             subprocess_env.pop(bearer_name, None)
+
+    # ── Stage 2: harness_event at dispatch start ───────────────────────────────
+    try:
+        await asyncio.to_thread(
+            _write_harness_event,
+            task_entity_id=task_entity_id,
+            role=_role,
+            agent_sub=agent_def.aauth_sub,
+            event_type="subprocess",
+            tool_name=f"{provider}:{skill}",
+            success="partial",  # "partial" = in-flight / started
+            input_summary=prompt[:200],
+        )
+    except Exception as exc:
+        log.debug(f"[apis] start harness_event write failed (non-fatal): {exc}")
 
     _start_ns = time.monotonic_ns()
     try:
