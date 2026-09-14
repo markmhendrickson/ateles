@@ -20,6 +20,8 @@ Registered in `~/.claude.json` as the `ateles` server, launched via
 | `get_task_timeline` | no | One task's history, merged and time-ordered from every record the swarm writes, with each entry's source, plus what could not be joined |
 | `watch_swarm` | no | Bounded long-poll (≤45 s): what changed since a cursor for given tasks and checkpoints, and a new cursor |
 
+| `get_session_workboard` | no | Derived session-digest workboard and cumulative history |
+
 ### Read-only by construction
 
 The observability tools, `get_task_timeline` and `watch_swarm` included, never write gate state. A session advancing its own
@@ -33,6 +35,15 @@ observability handler can reach `_correct`. **Treat any diff that weakens or
 removes that test as a blocking architectural concern, not a QA nit.** A future
 mutating tool belongs behind the same operator-approval path as
 `resolve_checkpoint`, never as a free-form gate setter.
+
+`get_session_workboard` reads the existing `session_digest`, explicit paramount
+plan, and task snapshots. It has no harness argument or harness-specific
+configuration: a connected Claude, Codex, or Cursor session uses the same MCP
+read. Its table is ordered paramount plan, active, queued, blocked, then
+operator-needed. The optional history is deliberately unfiltered; the compact
+view can retire a completed item only after its verified discharge and one
+surface, or after a fully recorded swarm handoff. Email work stays live until
+incorporation review and Gmail send verification are recorded.
 
 ### Reads fail closed
 
