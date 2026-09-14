@@ -77,9 +77,13 @@ class TestRender(unittest.TestCase):
                 "NEVER `git stash`",
                 "One worktree, one agent",
                 "Verify before asserting",
-                "Merge stays gated",
+                "Merge stays gated; credentials and material deployments stay operator-gated",
                 "Proceed with your recommendation",
                 "End every turn with the decisions",
+                "Capture reusable operator feedback as a standing rule",
+                "Advance fully verified mechanical gates automatically",
+                "Escalate choices by material operator outcome",
+                "Maintain a live session workboard",
             ):
                 self.assertIn(rule, text, f"missing standing rule: {rule}")
 

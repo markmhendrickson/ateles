@@ -45,6 +45,30 @@ CORRECTED_AGENTS = [
     "regulus",
 ]
 
+TOP_LEVEL_RULES = (
+    "Capture reusable operator feedback as a standing rule",
+    "Advance fully verified mechanical gates automatically",
+    "Escalate choices by material operator outcome",
+    "Maintain a live session workboard",
+)
+
+
+class TestTopLevelRuleDelivery:
+    @pytest.mark.parametrize(
+        "path",
+        [
+            _REPO_ROOT / "docs" / "agents" / "ateles.md",
+            _REPO_ROOT / ".claude" / "skills" / "ateles" / "SKILL.md",
+        ],
+    )
+    def test_canonical_ateles_rules_reach_both_generated_surfaces(
+        self, path: Path
+    ) -> None:
+        """The live top-level definition must bind in both generated homes."""
+        content = path.read_text()
+        for rule in TOP_LEVEL_RULES:
+            assert rule in content, f"{path} does not carry canonical rule: {rule}"
+
 
 class TestNoBashPrefixInMirrors:
     @pytest.mark.parametrize("agent", CORRECTED_AGENTS)
