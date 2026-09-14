@@ -202,6 +202,46 @@ async def test_formal_review_fetches_head_when_trigger_omits_it(monkeypatch):
     assert payloads[0]["commit_id"] == HEAD_A
 
 
+@pytest.mark.asyncio
+async def test_head_lookup_failure_posts_no_unpinned_fallback_verdict(monkeypatch):
+    posts = []
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, params=None, headers=None):
+            return _Response([])
+
+        async def post(self, url, json=None, headers=None):
+            posts.append((url, json))
+            return _Response({})
+
+    async def missing_head(trigger):
+        return None
+
+    d = sd.SwarmDispatcher(notifier=type("N", (), {"send": lambda *a, **k: None})())
+    monkeypatch.setattr(sd, "_token_for_repo", lambda repo: "token")
+    monkeypatch.setattr(sd.httpx, "AsyncClient", lambda **kw: Client())
+    monkeypatch.setattr(d, "_pr_head_sha", missing_head)
+    trigger = _trigger(head_sha="")
+
+    await d._post_missing_panel_comments(
+        trigger,
+        [("arch", "**APPROVE**")],
+        {"arch": "reviewer"},
+    )
+    await d._post_missing_vanellus_comment(
+        trigger,
+        sd.SkillResult("vanellus", True, 0, "**APPROVE**", ""),
+    )
+
+    assert posts == []
+
+
 class _Response:
     def __init__(self, payload=None, status=200):
         self.payload = payload

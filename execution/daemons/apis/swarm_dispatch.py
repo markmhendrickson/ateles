@@ -8093,6 +8093,13 @@ class SwarmDispatcher:
                 head_sha = _normalise_full_sha(t.head_sha)
                 if not head_sha:
                     head_sha = _normalise_full_sha((await self._pr_head_sha(t)) or "")
+                if not head_sha:
+                    log.warning(
+                        f"[{DAEMON_NAME}] current head unavailable — fallback "
+                        f"review comments skipped for {t.repository}#{t.number} "
+                        "rather than posting unpinned verdicts"
+                    )
+                    return
                 for lens in lenses_missing_comments(bodies, list(captured)):
                     body = compose_fallback_comment(
                         lens, agents.get(lens, "unknown panelist"), captured[lens],
@@ -8420,6 +8427,13 @@ class SwarmDispatcher:
                 head_sha = _normalise_full_sha(t.head_sha)
                 if not head_sha:
                     head_sha = _normalise_full_sha((await self._pr_head_sha(t)) or "")
+                if not head_sha:
+                    log.warning(
+                        f"[{DAEMON_NAME}] current head unavailable — Vanellus "
+                        f"fallback skipped for {t.repository}#{t.number} rather "
+                        "than posting an unpinned aggregation"
+                    )
+                    return
                 if not vanellus_comment_missing(bodies, head_sha=head_sha):
                     log.debug(
                         f"[{DAEMON_NAME}] Vanellus aggregation comment already "
