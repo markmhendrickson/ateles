@@ -5937,9 +5937,11 @@ class SwarmDispatcher:
                             f"{pr_number}/reviews/{review_id}/dismissals",
                             json={
                                 "message": (
-                                    f"Superseded by {head[:7]}: swarm re-review "
-                                    "found 0 blocking findings at the new head. "
-                                    "See PR comment thread for details."
+                                    f"Superseded by {head[:7]}: this review was "
+                                    "made against an earlier head and no longer "
+                                    "applies. A fresh panel review will run "
+                                    "against the current head; see the PR comment "
+                                    "thread for details."
                                 )
                             },
                             headers=headers,

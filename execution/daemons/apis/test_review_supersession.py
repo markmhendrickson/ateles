@@ -296,6 +296,8 @@ async def test_supersession_patches_only_bot_verdicts_and_dismisses_stale_block(
     assert result == {"comments": 2, "reviews": 1, "failures": 0}
     assert {url.rsplit("/", 1)[-1] for url, _ in patched} == {"1", "4"}
     assert len(dismissed) == 1 and "Superseded by bbbbbbb" in dismissed[0][1]
+    assert "earlier head and no longer applies" in dismissed[0][1]
+    assert "fresh panel review will run" in dismissed[0][1]
 
 
 @pytest.mark.asyncio
@@ -401,6 +403,38 @@ async def test_merge_gate_ignores_stale_block_and_requires_current_clear(monkeyp
     monkeypatch.setattr(sd.httpx, "AsyncClient", lambda **kw: Client())
     assert await d._pr_review_is_clear("o/r", 7, HEAD_B) is True
     assert await d._pr_review_is_clear("o/r", 7, "c" * 40) is False
+
+
+@pytest.mark.asyncio
+async def test_495_dismissal_does_not_open_merge_window_before_current_clear(
+    monkeypatch,
+):
+    """Retiring A cannot clear B until B has its own head-pinned approval."""
+    comments = [
+        _comment(
+            sd.compose_vanellus_fallback_comment("**REQUEST_CHANGES**", HEAD_A),
+            cid=1,
+        )
+    ]
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, params=None, headers=None):
+            return _Response(comments)
+
+    d = sd.SwarmDispatcher(notifier=type("N", (), {"send": lambda *a, **k: None})())
+    monkeypatch.setattr(sd.httpx, "AsyncClient", lambda **kw: Client())
+
+    assert await d._pr_review_is_clear("o/r", 7, HEAD_B) is False
+    comments.append(
+        _comment(sd.compose_vanellus_fallback_comment("**APPROVE**", HEAD_B), cid=2)
+    )
+    assert await d._pr_review_is_clear("o/r", 7, HEAD_B) is True
 
 
 @pytest.mark.asyncio
