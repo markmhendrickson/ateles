@@ -1010,7 +1010,7 @@ class TestSessionWorkboard(unittest.TestCase):
 
     def _plan(self):
         return {"entity_id": self.PLAN_ID, "entity_type": "plan", "snapshot": {
-            "title": "Paramount plan", "status": "active", "next_steps": "Advance the plan",
+            "title": "Display plan", "status": "active", "next_steps": "Advance the plan",
         }}
 
     @patch("server._get")
@@ -1019,22 +1019,28 @@ class TestSessionWorkboard(unittest.TestCase):
         claims = [
             {"claim": "queued work", "status_claimed": "todo", "evidence_pointers": ["ent_queue"]},
             {"claim": "blocked work", "status_claimed": "blocked", "evidence_pointers": ["ent_blocked"]},
-            {"claim": "active work", "status_claimed": "outstanding", "evidence_pointers": ["ent_active"]},
-            {"claim": "operator work", "status_claimed": "outstanding", "evidence_pointers": ["ent_operator"]},
+            {"claim": "active work", "status_claimed": "outstanding", "evidence_pointers": ["ent_active"],
+             "workboard": {"live_execution_evidence": {"lease_ref": "ent_lease", "activity_ref": "ent_activity"}}},
+            {"claim": "operator work", "status_claimed": "outstanding", "evidence_pointers": ["ent_operator"],
+             "workboard": {"operator_checkpoint_ref": "ent_checkpoint"}},
         ]
         retrieve.return_value = self._digest(claims)
         get.side_effect = lambda path: {
             f"/entities/{self.PLAN_ID}": self._plan(),
             "/entities/ent_active": {"entity_type": "task", "snapshot": {"status": "executing", "assigned_to": "cicada"}},
-            "/entities/ent_queue": {"entity_type": "task", "snapshot": {"status": "todo", "assigned_to": "cicada"}},
+            "/entities/ent_lease": {"entity_type": "lease", "snapshot": {"holder": "cicada", "runner_id": "runner-1", "expires_at": "2999-01-01T00:00:00Z"}},
+            "/entities/ent_activity": {"entity_type": "harness_event", "snapshot": {"runner_id": "runner-1", "observed_at": "2020-01-01T00:00:00Z"}},
+            "/entities/ent_queue": {"entity_type": "task", "snapshot": {"status": "todo", "assigned_to": "cicada", "claimable": True}},
             "/entities/ent_blocked": {"entity_type": "task", "snapshot": {"status": "blocked", "assigned_to": "cicada"}},
-            "/entities/ent_operator": {"entity_type": "task", "snapshot": {"status": "awaiting_approval", "assigned_to": "operator"}},
+            "/entities/ent_operator": {"entity_type": "task", "snapshot": {"status": "todo", "assigned_to": "operator"}},
+            "/entities/ent_checkpoint": {"entity_type": "checkpoint_brief", "snapshot": {"status": "awaiting_operator"}},
         }.get(path)
 
         out = srv._get_session_workboard("codex:root", self.PLAN_ID)
         self.assertEqual([row["priority"] for row in out["rows"]],
-                         ["paramount", "active", "queued", "blocked", "operator-needed"])
-        self.assertIn("| Priority | Work | State | Executor | Next action |", out["table"])
+                         ["display-plan", "active", "queued", "blocked", "operator-needed"])
+        self.assertIn("| Priority | Work | State | Assigned principal | Lease holder | Runner | Declared step owner | Next action |", out["table"])
+        self.assertEqual(out["rows"][1]["state"], "Working now")
 
     @patch("server._get")
     @patch("server._retrieve_entities")
@@ -1049,9 +1055,9 @@ class TestSessionWorkboard(unittest.TestCase):
         }.get(path)
 
         row = srv._get_session_workboard("codex:root", self.PLAN_ID)["rows"][1]
-        self.assertEqual(row["state"], "blocked")
+        self.assertEqual(row["state"], "Recorded state: blocked")
         self.assertEqual(row["priority"], "blocked")
-        self.assertEqual(row["state_source"], "task")
+        self.assertEqual(row["state_source"], "recorded_task")
 
     @patch("server._get")
     @patch("server._retrieve_entities")
@@ -1063,12 +1069,12 @@ class TestSessionWorkboard(unittest.TestCase):
         get.side_effect = lambda path: {
             f"/entities/{self.PLAN_ID}": self._plan(),
             "/entities/ent_subordinate_plan": {
-                "entity_type": "plan", "snapshot": {"title": "Subordinate plan", "status": "active", "executor": "cicada"},
+                "entity_type": "plan", "snapshot": {"title": "Subordinate plan", "status": "active", "assigned_to": "cicada"},
             },
         }.get(path)
 
         row = srv._get_session_workboard("codex:root", self.PLAN_ID)["rows"][1]
-        self.assertEqual((row["kind"], row["state"], row["state_source"]), ("plan", "active", "plan"))
+        self.assertEqual((row["kind"], row["state"], row["state_source"]), ("plan", "Recorded state: active", "recorded_plan"))
 
     @patch("server._get")
     @patch("server._retrieve_entities")
@@ -1080,7 +1086,7 @@ class TestSessionWorkboard(unittest.TestCase):
         self.assertEqual(out["harness"], "cursor")
         self.assertEqual(out["history"]["artifacts"][0]["ref"], "ent_artifact")
         tool = next(tool for tool in srv.TOOLS if tool.name == "get_session_workboard")
-        self.assertEqual(set(tool.inputSchema["required"]), {"session_key", "paramount_plan_id"})
+        self.assertEqual(set(tool.inputSchema["required"]), {"session_key", "display_plan_id"})
         self.assertNotIn("harness", tool.inputSchema["properties"])
 
     @patch("server._get")
@@ -1110,11 +1116,11 @@ class TestSessionWorkboard(unittest.TestCase):
 
     @patch("server._get")
     @patch("server._retrieve_entities")
-    def test_durable_surfaced_handoff_retires_leaf_but_preserves_history(self, retrieve, get):
+    def test_durable_tracking_locally_omits_leaf_but_preserves_history(self, retrieve, get):
         claim = {
-            "claim": "Prepare handoff material", "status_claimed": "outstanding", "evidence_pointers": ["ent_receiver"],
-            "workboard": {"swarm_handoff": {
-                "handoff_surfaced_at": "2026-09-14T08:00:00Z", "executor": "cicada",
+            "claim": "Prepare tracked material", "status_claimed": "outstanding", "evidence_pointers": ["ent_receiver"],
+            "workboard": {"durable_tracking": {
+                "visibility_surfaced_at": "2026-09-14T08:00:00Z",
                 "dependencies": [], "next_action": "Run the receiving task",
                 "session_context_ref": "ent_digest_1", "operator_checkpoint_status": "none",
             }},
@@ -1122,12 +1128,65 @@ class TestSessionWorkboard(unittest.TestCase):
         retrieve.return_value = self._digest([claim])
         get.side_effect = lambda path: {
             f"/entities/{self.PLAN_ID}": self._plan(),
-            "/entities/ent_receiver": {"entity_type": "task", "snapshot": {"status": "executing", "assigned_to": "cicada", "next_action": "Run the receiving task"}},
+            "/entities/ent_receiver": {"entity_type": "task", "snapshot": {"status": "todo", "assigned_to": "cicada", "next_action": "Run the receiving task"}},
         }.get(path)
 
         out = srv._get_session_workboard("codex:root", self.PLAN_ID, include_history=True)
-        self.assertEqual(len(out["rows"]), 1)  # paramount plan stays as the aggregate
-        self.assertEqual(out["history"]["tasks_claimed"][0]["claim"], "Prepare handoff material")
+        self.assertEqual(len(out["rows"]), 1)  # selected display plan remains visible
+        self.assertEqual(out["history"]["tasks_claimed"][0]["claim"], "Prepare tracked material")
+
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    def test_recorded_execution_is_not_active_and_roles_are_not_conflated(self, retrieve, get):
+        retrieve.return_value = self._digest([{
+            "claim": "Recorded execution", "status_claimed": "outstanding", "evidence_pointers": ["ent_task"],
+        }])
+        get.side_effect = lambda path: {
+            f"/entities/{self.PLAN_ID}": self._plan(),
+            "/entities/ent_task": {"entity_type": "task", "snapshot": {
+                "status": "executing", "assigned_to": "assigned-principal", "owner": "record-owner",
+                "executor": "ambiguous-executor", "next_action": "Live record action",
+            }},
+        }.get(path)
+
+        row = srv._get_session_workboard("codex:root", self.PLAN_ID)["rows"][1]
+        self.assertEqual((row["priority"], row["state"]), ("recorded", "Recorded state: executing"))
+        self.assertEqual(row["assigned_principal"], "assigned-principal")
+        self.assertEqual(row["record_owner"], "record-owner")
+        self.assertEqual((row["lease_holder"], row["runner"], row["declared_step_owner"]), ("unknown", "unknown", "unknown"))
+        self.assertEqual(row["next_action"], "Live record action")
+
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    def test_operator_attention_requires_open_checkpoint_and_queue_requires_claimability(self, retrieve, get):
+        claim = {"claim": "Need a person", "status_claimed": "todo", "evidence_pointers": ["ent_task"]}
+        retrieve.return_value = self._digest([claim])
+        get.side_effect = lambda path: {
+            f"/entities/{self.PLAN_ID}": self._plan(),
+            "/entities/ent_task": {"entity_type": "task", "snapshot": {"status": "todo", "assigned_to": "operator"}},
+        }.get(path)
+        self.assertEqual(srv._get_session_workboard("codex:root", self.PLAN_ID)["rows"][1]["priority"], "recorded")
+
+        claim["workboard"] = {"operator_checkpoint_ref": "ent_checkpoint"}
+        get.side_effect = lambda path: {
+            f"/entities/{self.PLAN_ID}": self._plan(),
+            "/entities/ent_task": {"entity_type": "task", "snapshot": {"status": "todo", "assigned_to": "operator"}},
+            "/entities/ent_checkpoint": {"entity_type": "checkpoint_brief", "snapshot": {"status": "awaiting_operator"}},
+        }.get(path)
+        self.assertEqual(srv._get_session_workboard("codex:root", self.PLAN_ID)["rows"][1]["priority"], "operator-needed")
+
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    def test_live_next_action_beats_stale_digest_next_action(self, retrieve, get):
+        retrieve.return_value = self._digest([{
+            "claim": "Fresh action", "status_claimed": "todo", "evidence_pointers": ["ent_task"],
+            "workboard": {"next_action": "Stale digest action"},
+        }])
+        get.side_effect = lambda path: {
+            f"/entities/{self.PLAN_ID}": self._plan(),
+            "/entities/ent_task": {"entity_type": "task", "snapshot": {"status": "todo", "next_action": "Live task action"}},
+        }.get(path)
+        self.assertEqual(srv._get_session_workboard("codex:root", self.PLAN_ID)["rows"][1]["next_action"], "Live task action")
 
 
 if __name__ == "__main__":

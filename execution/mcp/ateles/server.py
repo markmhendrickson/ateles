@@ -94,19 +94,21 @@ do NOT execute the held task yourself.
 conversation.
 6. **Maintain the session workboard.** For every Ateles-led session with
 managed work, keep one `session_digest` as the durable ledger. Refresh its
-live summary after a material task, agent, or decision change and before
-substantial new intake. Retrieve `get_session_workboard` with the session key
-and the session's paramount plan id; it is the shared MCP read, so do not make
-a harness-local status copy. The compact table is paramount plan first, then
-active, queued, blocked, and operator-needed work, with executor and next
-action. Keep `tasks_claimed` and `artifacts` cumulative for a full `/digest`.
+summary after a material task, agent, or decision change and before substantial
+new intake. Retrieve `get_session_workboard` with the session key and an
+explicit display-plan id; it is an on-demand derived read, so do not make a
+harness-local status copy or treat it as canonical live truth. The compact
+table puts the selected display plan first, then derived active, queued,
+blocked, operator-needed, and recorded-state rows. Active requires separately
+read live lease and observed-activity evidence; `tasks_claimed` and `artifacts`
+remain cumulative for a full `/digest`.
 A completed item leaves routine summaries only after terminal evidence is
 verified, each review/send/follow-up obligation is discharged or separately
 tracked, no active dependent needs it, and its completion was surfaced once.
-Leaf work may also leave after a surfaced durable swarm handoff: the receiving
-task or plan must record an executor, dependencies, next action, live execution
-or blocker state, stored session context, and no remaining operator checkpoint.
-Its effect still belongs in the paramount plan row.
+Leaf work may also be locally omitted after surfaced durable tracking: the
+referenced task or plan must record assignment or step ownership, dependencies,
+next action, session context, and no remaining operator checkpoint. This is a
+visibility choice, never a claim transfer or completion assertion.
 For email this keeps ingestion review, follow-up work, and drafts live until
 incorporation is reviewed and Gmail verifies the send.
 """
@@ -234,26 +236,23 @@ def _correct(entity_id: str, entity_type: str, field: str, value: Any, idem_key:
 
 # ── Session workboard ───────────────────────────────────────────────────────
 
-# This is a projection, deliberately not another record.  A session_digest is
-# the session's durable ledger; plan/task snapshots replace its self-reported
-# state at read time.  A cached or separately-written board would go stale in
-# exactly the direction an operator needs it to be current.
+# This is an on-demand derived read, deliberately not another record.  A
+# session_digest is summarized history, never canonical live truth.  The
+# workboard labels ordinary task/plan fields as recorded state; only separate
+# live lease and activity evidence can support an ``active`` label.  A cached
+# or separately-written board would go stale in exactly the direction an
+# operator needs it to be current.
 _TERMINAL_TASK_STATES = {
     "done", "completed", "verified", "closed", "failed", "declined",
     "superseded", "cancelled", "canceled",
 }
-_ACTIVE_TASK_STATES = {"in_progress", "executing", "active", "routed"}
-_QUEUED_TASK_STATES = {"pending", "todo", "open", "queued"}
-_OPERATOR_TASK_STATES = {
-    "awaiting_approval", "awaiting_input", "awaiting_operator",
-    "awaiting_release_confirmation",
-}
 _WORKBOARD_ORDER = {
-    "paramount": 0,
+    "display-plan": 0,
     "active": 1,
     "queued": 2,
     "blocked": 3,
     "operator-needed": 4,
+    "recorded": 5,
 }
 
 
@@ -298,6 +297,78 @@ def _claim_workboard(claim: dict) -> dict:
     """Read optional workboard metadata without requiring a schema expansion."""
     board = claim.get("workboard")
     return board if isinstance(board, dict) else {}
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    text = _text(value)
+    if text is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _live_execution_evidence(board: dict) -> dict:
+    """Return a live lease/activity reading, never infer it from task status.
+
+    The digest may point at a reconciler-produced lease and activity record,
+    but the records themselves are re-read here.  A task's stored
+    ``in_progress``/``executing`` value is intentionally insufficient: task
+    status has no lease semantics and can outlive a killed runner.
+    """
+    refs = board.get("live_execution_evidence")
+    if not isinstance(refs, dict):
+        return {}
+    lease_ref = _text(refs.get("lease_ref"))
+    activity_ref = _text(refs.get("activity_ref"))
+    if not (lease_ref and activity_ref and lease_ref.startswith("ent_") and activity_ref.startswith("ent_")):
+        return {}
+    lease = _as_snapshot(_get(f"/entities/{lease_ref}"))
+    activity = _as_snapshot(_get(f"/entities/{activity_ref}"))
+    holder = _text(lease.get("holder")) or _text(lease.get("lease_holder"))
+    runner = _text(lease.get("runner_id"))
+    expires_at = _parse_timestamp(lease.get("expires_at"))
+    observed_at = _parse_timestamp(activity.get("observed_at") or activity.get("activity_at"))
+    now = datetime.now(timezone.utc)
+    if not (holder and runner and expires_at and expires_at > now and observed_at and observed_at <= now):
+        return {}
+    # Activity must identify the same runner when it names one.  If it does
+    # not, it is not evidence that this held lease is doing work.
+    observed_runner = _text(activity.get("runner_id"))
+    if observed_runner and observed_runner != runner:
+        return {}
+    return {
+        "lease_holder": holder,
+        "runner": runner,
+        "lease_ref": lease_ref,
+        "activity_ref": activity_ref,
+    }
+
+
+def _open_operator_checkpoint(snapshot: dict, board: dict) -> bool:
+    """Operator attention is derived from a currently open checkpoint/gate."""
+    refs = (
+        _text(snapshot.get("operator_checkpoint_ref")),
+        _text(snapshot.get("checkpoint_ref")),
+        _text(snapshot.get("gate_ref")),
+        _text(board.get("operator_checkpoint_ref")),
+    )
+    for reference in refs:
+        if not reference or not reference.startswith("ent_"):
+            continue
+        checkpoint = _get(f"/entities/{reference}")
+        kind = _entity_type(checkpoint)
+        status = (_text(_as_snapshot(checkpoint).get("status")) or "").lower()
+        if kind in {"checkpoint_brief", "gate"} and status in {"awaiting_operator", "pending", "open"}:
+            return True
+    return False
+
+
+def _is_explicitly_claimable(snapshot: dict) -> bool:
+    """Queue is a presentation of a live claimability result, never a status synonym."""
+    return snapshot.get("claimable") is True or (_text(snapshot.get("claimability")) or "").lower() == "claimable"
 
 
 def _operator_obligations_are_accounted_for(board: dict) -> bool:
@@ -346,60 +417,57 @@ def _completion_can_age_out(claim: dict, live_status: str | None) -> bool:
     )
 
 
-def _handoff_can_age_out(
-    claim: dict, receiver_snapshot: dict, receiver_kind: str | None, live_status: str | None,
+def _durable_tracking_can_omit_locally(
+    claim: dict, receiver_snapshot: dict, receiver_kind: str | None, snapshot: dict,
 ) -> bool:
-    """Retire a leaf only when a task or plan holds the complete handoff."""
+    """Omit a local leaf only after another durable record tracks the work.
+
+    This affects the summary's visibility only.  It neither transfers a claim
+    nor says the work completed; the referenced task or plan remains the
+    source to inspect for its own recorded state.
+    """
     board = _claim_workboard(claim)
-    handoff = board.get("swarm_handoff")
-    if not isinstance(handoff, dict):
+    tracking = board.get("durable_tracking")
+    if not isinstance(tracking, dict):
         return False
-    # The task or plan evidence is the receiving durable record.  An assertion that a
-    # handoff happened is not enough: the projection must have just read it.
-    if (
-        receiver_kind not in {"task", "plan"}
-        or not receiver_snapshot
-        or (live_status or "").lower() not in (_ACTIVE_TASK_STATES | {"blocked"})
-    ):
+    if receiver_kind not in {"task", "plan"} or not receiver_snapshot:
         return False
-    executor = (
-        _text(receiver_snapshot.get("executor"))
-        or _text(receiver_snapshot.get("assigned_to"))
-        or _text(receiver_snapshot.get("owner"))
-        or _text(handoff.get("executor"))
-    )
-    next_action = _text(receiver_snapshot.get("next_action")) or _text(handoff.get("next_action"))
+    assigned_principal = _text(receiver_snapshot.get("assigned_to"))
+    declared_step_owner = _text(receiver_snapshot.get("step_owner"))
+    next_action = _text(receiver_snapshot.get("next_action")) or _text(receiver_snapshot.get("next_steps"))
     # A declared empty dependency list is useful evidence; a missing list is
     # unknown and must retain the leaf in the live view.
-    dependencies = handoff.get("dependencies")
-    checkpoint = (_text(handoff.get("operator_checkpoint_status")) or "").lower()
+    dependencies = tracking.get("dependencies")
+    checkpoint = (_text(tracking.get("operator_checkpoint_status")) or "").lower()
     return (
-        bool(executor)
+        bool(assigned_principal or declared_step_owner)
         and bool(next_action)
         and isinstance(dependencies, list)
-        and bool(_text(handoff.get("session_context_ref")))
+        and bool(_text(tracking.get("session_context_ref")))
         and checkpoint in {"none", "resolved", "not_required"}
-        and bool(_text(handoff.get("handoff_surfaced_at")))
+        and bool(_text(tracking.get("visibility_surfaced_at")))
+        and not _open_operator_checkpoint(snapshot, board)
     )
 
 
-def _bucket_for(status: str, executor: str | None) -> str:
-    status = status.lower()
-    if status in _OPERATOR_TASK_STATES or (executor or "").lower() == "operator":
+def _bucket_for(snapshot: dict, board: dict, status: str, live_execution: dict) -> str:
+    if _open_operator_checkpoint(snapshot, board):
         return "operator-needed"
     if status == "blocked":
         return "blocked"
-    if status in _ACTIVE_TASK_STATES:
+    if live_execution:
         return "active"
-    return "queued"
+    if _is_explicitly_claimable(snapshot):
+        return "queued"
+    return "recorded"
 
 
-def _next_action(snapshot: dict, claim: dict, bucket: str) -> str:
+def _next_action(snapshot: dict, claim: dict, bucket: str, has_live_record: bool) -> str:
     board = _claim_workboard(claim)
-    for candidate in (
-        board.get("next_action"), snapshot.get("next_action"), snapshot.get("next_steps"),
-        snapshot.get("blocked_reason"),
-    ):
+    candidates = (snapshot.get("next_action"), snapshot.get("next_steps"), snapshot.get("blocked_reason"))
+    if not has_live_record:
+        candidates += (board.get("next_action"),)
+    for candidate in candidates:
         value = _text(candidate)
         if value:
             return value
@@ -408,12 +476,14 @@ def _next_action(snapshot: dict, claim: dict, bucket: str) -> str:
     if bucket == "blocked":
         return "Resolve the recorded blocker"
     if bucket == "active":
-        return "Continue the assigned execution"
-    return "Claim or dispatch the recorded task"
+        return "Continue the live lease"
+    if bucket == "queued":
+        return "Claim the explicitly claimable work"
+    return "Recorded next action unavailable"
 
 
 def _claim_row(claim: dict) -> dict | None:
-    """Build one live row, replacing stale digest state from a task snapshot."""
+    """Build one derived row without promoting digest history to live truth."""
     title = _text(claim.get("claim"))
     if not title:
         return None
@@ -428,80 +498,88 @@ def _claim_row(claim: dict) -> dict | None:
     snapshot = _as_snapshot(live_record)
     live_status = _text(snapshot.get("status"))
     status = live_status or _text(claim.get("status_claimed")) or "unknown"
-    if _completion_can_age_out(claim, live_status) or _handoff_can_age_out(
-        claim, snapshot, record_kind, live_status,
+    if _completion_can_age_out(claim, live_status) or _durable_tracking_can_omit_locally(
+        claim, snapshot, record_kind, snapshot,
     ):
         return None
-    executor = (
-        _text(snapshot.get("executor"))
-        or _text(snapshot.get("assigned_to"))
-        or _text(snapshot.get("owner"))
-        or _text(board.get("executor"))
-        or "unassigned"
-    )
-    bucket = _bucket_for(status, executor)
+    live_execution = _live_execution_evidence(board)
+    bucket = _bucket_for(snapshot, board, status.lower(), live_execution)
+    state = "Working now" if live_execution else f"Recorded state: {status}"
     return {
         "kind": record_kind or "task",
         "priority": bucket,
         "work": _text(snapshot.get("title")) or title,
-        "state": status,
-        "executor": executor,
-        "next_action": _next_action(snapshot, claim, bucket),
+        "state": state,
+        "assigned_principal": _text(snapshot.get("assigned_to")) or "unknown",
+        "lease_holder": live_execution.get("lease_holder") or "unknown",
+        "runner": live_execution.get("runner") or "unknown",
+        "declared_step_owner": _text(snapshot.get("step_owner")) or "unknown",
+        "record_owner": _text(snapshot.get("owner")) or "unknown",
+        "next_action": _next_action(snapshot, claim, bucket, live_record is not None),
         "evidence": _evidence_entity_ids(claim),
-        "state_source": record_kind if live_status else "session_digest",
+        "state_source": "live_lease_and_activity" if live_execution else (f"recorded_{record_kind}" if live_record else "session_digest_history"),
     }
 
 
 def _format_workboard(rows: list[dict]) -> str:
     """One compact, copyable table for every MCP-connected harness."""
-    table = ["| Priority | Work | State | Executor | Next action |", "|---|---|---|---|---|"]
+    table = [
+        "| Priority | Work | State | Assigned principal | Lease holder | Runner | Declared step owner | Next action |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
     for row in rows:
         cells = [
             str(row["priority"]), str(row["work"]), str(row["state"]),
-            str(row["executor"]), str(row["next_action"]),
+            str(row.get("assigned_principal", "unknown")), str(row.get("lease_holder", "unknown")),
+            str(row.get("runner", "unknown")), str(row.get("declared_step_owner", "unknown")),
+            str(row["next_action"]),
         ]
         table.append("| " + " | ".join(cell.replace("|", "\\|").replace("\n", " ") for cell in cells) + " |")
     return "\n".join(table)
 
 
-def _get_session_workboard(session_key: str, paramount_plan_id: str, include_history: bool = False) -> dict:
-    """Read a session's one digest as a fresh plan/task projection.
+def _get_session_workboard(session_key: str, display_plan_id: str, include_history: bool = False) -> dict:
+    """Derive an on-demand session summary with one explicitly selected plan.
 
     `session_key` is deliberately harness-agnostic: a Codex session can inspect
-    a Claude or Cursor digest through the same MCP server.  The plan id is
-    explicit so no hidden default plan can turn an unrelated session into a
-    swarm-architecture workstream.
+    a Claude or Cursor digest through the same MCP server.  The display plan is
+    explicit and affects table order only; it creates no authority or session
+    binding and no hidden default plan is inferred.
     """
     digest_entity = _find_session_digest(session_key)
     if digest_entity is None:
         detail = _describe_transport_error()
         return {"error": detail or "session_digest not found", "session_key": session_key}
-    plan_entity = _get(f"/entities/{paramount_plan_id}")
+    plan_entity = _get(f"/entities/{display_plan_id}")
     if plan_entity is None:
         detail = _describe_transport_error()
         return {
-            "error": detail or "paramount plan not found",
+            "error": detail or "display plan not found",
             "session_key": session_key,
-            "paramount_plan_id": paramount_plan_id,
+            "display_plan_id": display_plan_id,
         }
     if _entity_type(plan_entity) != "plan":
         return {
-            "error": "paramount_plan_id does not identify a plan",
+            "error": "display_plan_id does not identify a plan",
             "session_key": session_key,
-            "paramount_plan_id": paramount_plan_id,
+            "display_plan_id": display_plan_id,
         }
 
     digest = _as_snapshot(digest_entity)
     plan = _as_snapshot(plan_entity)
     rows: list[dict] = [{
         "kind": "plan",
-        "priority": "paramount",
-        "work": _text(plan.get("title")) or paramount_plan_id,
-        "state": _text(plan.get("status")) or "unknown",
-        "executor": _text(plan.get("executor")) or "plan owner",
+        "priority": "display-plan",
+        "work": _text(plan.get("title")) or display_plan_id,
+        "state": f"Recorded state: {_text(plan.get('status')) or 'unknown'}",
+        "assigned_principal": _text(plan.get("assigned_to")) or "unknown",
+        "lease_holder": "unknown",
+        "runner": "unknown",
+        "declared_step_owner": _text(plan.get("step_owner")) or "unknown",
+        "record_owner": _text(plan.get("owner")) or "unknown",
         "next_action": _text(plan.get("next_steps")) or "Read the current plan next steps",
-        "evidence": [paramount_plan_id],
-        "state_source": "plan",
+        "evidence": [display_plan_id],
+        "state_source": "recorded_plan",
     }]
     claims = digest.get("tasks_claimed")
     if isinstance(claims, list):
@@ -511,10 +589,10 @@ def _get_session_workboard(session_key: str, paramount_plan_id: str, include_his
         "session_key": session_key,
         "harness": _text(digest.get("harness")),
         "digest_id": digest_entity.get("entity_id"),
-        "paramount_plan_id": paramount_plan_id,
+        "display_plan_id": display_plan_id,
         "rows": rows,
         "table": _format_workboard(rows),
-        "refresh_rule": "Refresh after a material task, agent, or decision change and before substantial new intake.",
+        "refresh_rule": "Refresh after a material task, agent, or decision change and before substantial new intake. This is an on-demand derived read, not a canonical projection.",
     }
     if include_history:
         # History remains unfiltered; this is the regular full-session digest,
@@ -1741,11 +1819,11 @@ TOOLS = [
     Tool(
         name="get_session_workboard",
         description=(
-            "Read-only. Render one stable session_digest as the current Ateles workboard. "
-            "It reads the named paramount plan and replaces each digest claim's stale "
-            "state with its live task snapshot. The compact table always orders the "
-            "paramount plan first, then active, queued, blocked, and operator-needed "
-            "work. Pass include_history=true for the cumulative tasks_claimed and "
+            "Read-only. Derive an on-demand workboard from one stable session_digest. "
+            "It labels task and plan fields as recorded state unless separately read "
+            "live lease and activity evidence supports active execution. The compact "
+            "table puts the selected display plan first, then active, queued, blocked, "
+            "operator-needed, and recorded-state work. Pass include_history=true for the cumulative tasks_claimed and "
             "artifacts ledger used by a full /digest. session_key is harness-agnostic, "
             "so any MCP-connected harness can retrieve another supported harness's "
             "session without local configuration."
@@ -1757,9 +1835,9 @@ TOOLS = [
                     "type": "string",
                     "description": "Stable session_digest session_key, e.g. codex:<root-session-id>.",
                 },
-                "paramount_plan_id": {
+                "display_plan_id": {
                     "type": "string",
-                    "description": "The session's explicitly bound paramount plan entity id.",
+                    "description": "Plan entity id to display first for this call; it does not bind the session or grant authority.",
                 },
                 "include_history": {
                     "type": "boolean",
@@ -1767,7 +1845,7 @@ TOOLS = [
                     "description": "Include the unfiltered cumulative tasks_claimed and artifacts ledger.",
                 },
             },
-            "required": ["session_key", "paramount_plan_id"],
+            "required": ["session_key", "display_plan_id"],
             "additionalProperties": False,
         },
     ),
@@ -1788,7 +1866,7 @@ TOOL_HANDLERS = {
     "list_pipeline_queue": lambda args: _list_pipeline_queue(),
     "get_dispatch_health": lambda args: _get_dispatch_health(),
     "get_session_workboard": lambda args: _get_session_workboard(
-        args["session_key"], args["paramount_plan_id"], bool(args.get("include_history", False))
+        args["session_key"], args["display_plan_id"], bool(args.get("include_history", False))
     ),
 }
 
