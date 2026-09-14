@@ -40,6 +40,49 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 # at module load, so a plain import is safe.
 import tyto  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def _isolated_signing_identity(monkeypatch):
+    """Never read the operator's signing key during watcher tests."""
+    monkeypatch.setattr(
+        tyto, "agent_identity",
+        lambda _name: {"key": "/fixture/tyto.jwk.json", "sub": "tyto@ateles-swarm", "kid": "fixture"},
+        raising=False,
+    )
+
+
+def test_transcription_uses_daemon_identity_instead_of_shared_cli_default(tmp_path):
+    watcher = _make_watcher(tmp_path, capture_method="voice_memo", paired=False)
+    memo = _write(tmp_path, "memo.m4a")
+    completed = MagicMock(returncode=0, stdout="NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_test\n", stderr="")
+    with patch.object(tyto.subprocess, "run", return_value=completed) as run:
+        watcher._run_transcription(memo, None)
+    env = run.call_args.kwargs["env"]
+    assert env["NEOTOMA_AAUTH_SUB"] == "tyto@ateles-swarm"
+    assert env["NEOTOMA_AAUTH_PRIVATE_JWK_PATH"] == "/fixture/tyto.jwk.json"
+    assert env["NEOTOMA_AAUTH_KID"] == "fixture"
+
+
+@pytest.mark.parametrize("identity", [None, {"key": "/fixture/other.jwk.json", "sub": "other@ateles-swarm", "kid": "other"}])
+def test_missing_or_mismatched_identity_does_not_run_transcription(tmp_path, monkeypatch, identity):
+    monkeypatch.setattr(tyto, "agent_identity", lambda _name: identity)
+    watcher = _make_watcher(tmp_path, capture_method="voice_memo", paired=False)
+    with patch.object(tyto.subprocess, "run") as run:
+        with pytest.raises(RuntimeError, match="Tyto transcription requires"):
+            watcher._run_transcription(_write(tmp_path, "memo.m4a"), None)
+    run.assert_not_called()
+
+
+def test_qta_default_processes_fresh_arrival_but_preserves_archive_guard(tmp_path):
+    assert tyto.VOICE_MEMO_INCLUDE_QTA is True
+    extensions = {".m4a", ".wav"} | ({".qta"} if tyto.VOICE_MEMO_INCLUDE_QTA else set())
+    old = _write(tmp_path, "archive.qta", age_secs=OLD)
+    watcher = _make_watcher(tmp_path, paired=False, extensions=extensions, seed_existing=True, max_age_secs=3600)
+    fresh = _write(tmp_path, "arrival.qta", age_secs=FRESH)
+    _settled(watcher)
+    assert [p for p, _ in _poll(watcher)] == [fresh]
+    assert old in watcher._transcribed
+
 # Ages, in seconds, used to place fixture files either side of the age window.
 OLD = 400 * 24 * 3600  # ~13 months — squarely "archive"
 FRESH = 30
