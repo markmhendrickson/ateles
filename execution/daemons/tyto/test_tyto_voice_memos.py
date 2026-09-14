@@ -40,6 +40,8 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 # at module load, so a plain import is safe.
 import tyto  # noqa: E402
 
+_verify_runtime = tyto._verify_transcription_cli_runtime
+
 
 @pytest.fixture(autouse=True)
 def _isolated_signing_identity(monkeypatch):
@@ -49,6 +51,46 @@ def _isolated_signing_identity(monkeypatch):
         lambda _name: {"key": "/fixture/tyto.jwk.json", "sub": "tyto@ateles-swarm", "kid": "fixture"},
         raising=False,
     )
+    monkeypatch.setattr(tyto, "_verify_transcription_cli_runtime", lambda _env: None)
+
+
+def test_unsupported_signer_stops_before_transcription(tmp_path, monkeypatch):
+    runtime = tmp_path / "dist" / "cli"
+    runtime.mkdir(parents=True)
+    (runtime / "bootstrap.js").write_text("// synthetic CLI")
+    (runtime / "aauth_signer.js").write_text("export const oldSigner = true;")
+    monkeypatch.setattr(tyto, "NEOTOMA_RC_DIR", str(tmp_path))
+    monkeypatch.setattr(tyto, "_verify_transcription_cli_runtime", _verify_runtime)
+    watcher = _make_watcher(tmp_path, capture_method="voice_memo", paired=False)
+    with pytest.raises(RuntimeError, match="supporting per-agent key paths"):
+        watcher._run_transcription(_write(tmp_path, "memo.m4a"), None)
+
+
+def test_deployed_signer_selects_synthetic_daemon_key(tmp_path):
+    """Exercise the installed signer selected by Tyto, with no real credentials."""
+    signer = Path(tyto.NEOTOMA_RC_DIR) / "dist" / "cli" / "aauth_signer.js"
+    if not signer.is_file():
+        pytest.skip("deployed Neotoma runtime not installed")
+    shared = tmp_path / ".neotoma" / "aauth"
+    shared.mkdir(parents=True)
+    (shared / "private.jwk").write_text(json.dumps({"fixture": "shared"}))
+    daemon = tmp_path / "daemon.jwk.json"
+    daemon.write_text(json.dumps({"fixture": "daemon"}))
+    env = dict(os.environ, NEOTOMA_AAUTH_PRIVATE_JWK_PATH=str(daemon))
+    _verify_runtime(dict(env, NEOTOMA_CLI_SCRIPT=str(signer.with_name("bootstrap.js"))))
+    check = """
+        const os = await import('node:os');
+        os.default.homedir = () => process.argv[2];
+        const { pathToFileURL } = await import('node:url');
+        const signer = await import(pathToFileURL(process.argv[1]).href);
+        const config = await signer.loadCliSignerConfig();
+        process.exit(config.privateJwk.fixture === 'daemon' ? 0 : 1);
+    """
+    completed = tyto.subprocess.run(
+        [env.get("NODE_BIN", "node"), "--input-type=module", "-e", check, str(signer), str(tmp_path)],
+        env=env, capture_output=True, text=True, timeout=20,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_transcription_uses_daemon_identity_instead_of_shared_cli_default(tmp_path):
@@ -61,6 +103,7 @@ def test_transcription_uses_daemon_identity_instead_of_shared_cli_default(tmp_pa
     assert env["NEOTOMA_AAUTH_SUB"] == "tyto@ateles-swarm"
     assert env["NEOTOMA_AAUTH_PRIVATE_JWK_PATH"] == "/fixture/tyto.jwk.json"
     assert env["NEOTOMA_AAUTH_KID"] == "fixture"
+    assert env["NEOTOMA_CLI_SCRIPT"] == str(Path(tyto.NEOTOMA_RC_DIR) / "dist" / "cli" / "bootstrap.js")
 
 
 @pytest.mark.parametrize("identity", [None, {"key": "/fixture/other.jwk.json", "sub": "other@ateles-swarm", "kid": "other"}])

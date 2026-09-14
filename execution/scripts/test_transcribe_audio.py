@@ -32,6 +32,26 @@ os.environ.setdefault("DATA_DIR", str(_SCRIPTS_DIR / "_test_data_dir"))
 import transcribe_audio as ta  # noqa: E402
 
 
+def test_neotoma_store_uses_explicit_cli_runtime(tmp_path, monkeypatch):
+    script = tmp_path / "bootstrap.js"
+    script.write_text("// synthetic runtime")
+    monkeypatch.setenv("NEOTOMA_CLI_SCRIPT", str(script))
+    monkeypatch.setenv("NODE_BIN", "/fixture/node")
+    monkeypatch.setattr(ta.shutil, "which", lambda value: value if value == "/fixture/node" else None)
+    assert ta._neotoma_cli_available()
+    argv = ta._neotoma_prod_cli_argv(["store"])
+    assert argv[:2] == ["/fixture/node", str(script)]
+    assert argv[-1] == "store"
+
+
+def test_missing_explicit_cli_does_not_fall_back_to_global(monkeypatch):
+    monkeypatch.setenv("NEOTOMA_CLI_SCRIPT", "/missing/bootstrap.js")
+    monkeypatch.setattr(ta.shutil, "which", lambda value: "/fixture/" + value)
+    with patch.object(ta.subprocess, "run") as run:
+        assert ta._neotoma_cli_json(["entities", "list"]) is None
+    run.assert_not_called()
+
+
 # A fictional vocabulary used by every test — no operator data. Two products
 # ("Vexcorp", "Zolium"), each with a couple of made-up mishears.
 _SYNTH_VOCAB = "Vexcorp=Vex Corp|Vexcorb|Vexcore, Zolium=Zolium's|Zolyum|the Zolium"

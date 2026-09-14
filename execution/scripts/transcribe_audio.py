@@ -414,16 +414,16 @@ def _proper_nouns_from_neotoma() -> list[tuple[str, str]]:
         "yes",
     ):
         return []
-    if not shutil.which("neotoma"):
+    if not _neotoma_cli_available():
         return []
     entity_id = os.environ.get("TRANSCRIBE_VOCABULARY_ENTITY_ID", "").strip()
     base = _neotoma_prod_base_url()
     # `entities get <id>` when we have an id; otherwise `entities search <name>`.
     if entity_id:
-        cmd = ["neotoma", "--base-url", base, "--api-only", "--json",
+        cmd = [*_neotoma_cli_prefix(), "--base-url", base, "--api-only", "--json",
                "entities", "get", entity_id]
     else:
-        cmd = ["neotoma", "--base-url", base, "--api-only", "--json",
+        cmd = [*_neotoma_cli_prefix(), "--base-url", base, "--api-only", "--json",
                "entities", "search", "operator transcription proper-noun corrections",
                "--type", "transcription_vocabulary"]
     try:
@@ -2066,10 +2066,25 @@ def _neotoma_auth_preflight() -> tuple[bool, str]:
     return True, "ok"
 
 
+def _neotoma_cli_prefix() -> list[str]:
+    """Use a daemon's deployed runtime when configured, otherwise the CLI on PATH."""
+    script = os.environ.get("NEOTOMA_CLI_SCRIPT", "").strip()
+    if script:
+        return [os.environ.get("NODE_BIN", "node"), script]
+    return ["neotoma"]
+
+
+def _neotoma_cli_available() -> bool:
+    prefix = _neotoma_cli_prefix()
+    return bool(shutil.which(prefix[0])) and (
+        len(prefix) == 1 or Path(prefix[1]).is_file()
+    )
+
+
 def _neotoma_prod_cli_argv(extra: list[str]) -> list[str]:
     """Build a CLI argv that forces the prod HTTP API and fails loudly if unreachable."""
     return [
-        "neotoma",
+        *_neotoma_cli_prefix(),
         "--json",
         "--api-only",
         "--base-url",
@@ -2085,7 +2100,7 @@ def _neotoma_cli_json(cli_args: list[str]) -> dict | None:
     Auth/network failures from prod surface in the parsed payload's ``error_code``;
     callers that need strict failure semantics should use ``_neotoma_cli_or_raise``.
     """
-    if not shutil.which("neotoma"):
+    if not _neotoma_cli_available():
         return None
     cmd = _neotoma_prod_cli_argv(cli_args)
     try:
@@ -2265,8 +2280,8 @@ def _neotoma_cli_relationship_create(
     source_entity_id: str, target_entity_id: str, relationship_type: str = "REFERS_TO"
 ) -> tuple[bool, str]:
     """Create one relationship on prod API via CLI; returns (ok, message)."""
-    if not shutil.which("neotoma"):
-        return False, "neotoma CLI not on PATH"
+    if not _neotoma_cli_available():
+        return False, "configured Neotoma CLI runtime unavailable"
     auth_ok, auth_reason = _neotoma_auth_preflight()
     if not auth_ok:
         return False, auth_reason
@@ -2443,10 +2458,10 @@ def save_transcription(
     Returns:
         Dictionary with saved transcription metadata including ``entity_id``
     """
-    if not shutil.which("neotoma"):
+    if not _neotoma_cli_available():
         raise RuntimeError(
-            "neotoma CLI not found on PATH; install Neotoma CLI or add it to PATH "
-            "to store transcriptions."
+            "Configured Neotoma CLI runtime unavailable; check NEOTOMA_CLI_SCRIPT "
+            "and NODE_BIN, or install the Neotoma CLI on PATH."
         )
 
     auth_ok, auth_reason = _neotoma_auth_preflight()
