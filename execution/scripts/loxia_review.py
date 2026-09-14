@@ -19,6 +19,11 @@ Review checklist:
 Environment variables (set by GHA workflow):
   ANTHROPIC_API_KEY     Claude API key
   GITHUB_TOKEN          GHA token for posting PR comments
+  LOXIA_REVIEW_TOKEN    Distinct reviewer token for native GitHub reviews
+  LOXIA_EXPECTED_REVIEWER_LOGIN  Required login for the reviewer token
+  LOXIA_NATIVE_FOUNDATION_REVIEW "true" to enable the bounded mechanism
+  LOXIA_NATIVE_REVIEW_ONLY       "true" to skip non-foundation pull requests
+  LOXIA_USE_GITHUB_PR_API        "true" to read PR files/diff from GitHub
   LOXIA_PR_NUMBER       PR number to review
   LOXIA_REPO            GitHub repo slug (owner/repo)
   LOXIA_DRY_RUN         "true" to print without posting
@@ -32,6 +37,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -51,6 +57,18 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 # path below now makes VISIBLE (red check) rather than a silent false-green.
 CLAUDE_OAUTH_TOKEN = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+NATIVE_REVIEW_TOKEN = os.environ.get("LOXIA_REVIEW_TOKEN", "")
+EXPECTED_REVIEWER_LOGIN = os.environ.get("LOXIA_EXPECTED_REVIEWER_LOGIN", "").strip()
+NATIVE_FOUNDATION_REVIEW = (
+    os.environ.get("LOXIA_NATIVE_FOUNDATION_REVIEW", "false").lower() == "true"
+)
+USE_GITHUB_PR_API = os.environ.get("LOXIA_USE_GITHUB_PR_API", "false").lower() == "true"
+NATIVE_REVIEW_ONLY = (
+    os.environ.get("LOXIA_NATIVE_REVIEW_ONLY", "false").lower() == "true"
+)
+POST_REVIEW_COMMENT = (
+    os.environ.get("LOXIA_POST_REVIEW_COMMENT", "true").lower() == "true"
+)
 PR_NUMBER = os.environ.get("LOXIA_PR_NUMBER", "")
 REPO = os.environ.get("LOXIA_REPO", "")
 DRY_RUN = os.environ.get("LOXIA_DRY_RUN", "false").lower() == "true"
@@ -66,6 +84,124 @@ CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
 GITHUB_API_URL = "https://api.github.com"
 
 MAX_DIFF_CHARS = 40_000  # truncate large diffs to stay within context
+
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+_VERDICT_RE = re.compile(
+    r"^\s*\*{0,2}Verdict\*{0,2}\s*:\s*"
+    r"(APPROVE|REQUEST_CHANGES|COMMENT)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+_FOUNDATION_EXACT_PATHS = {
+    ".github/workflows/foundation-checks.yml",
+    "execution/scripts/link_vocabulary_terms.py",
+    "execution/scripts/render_reading_projection.py",
+}
+
+NATIVE_REASON_MESSAGES = {
+    "review_credential_missing": (
+        "Loxia refused to review because its distinct reviewer credential is "
+        "not configured."
+    ),
+    "expected_reviewer_missing": (
+        "Loxia refused to review because the expected reviewer login is not configured."
+    ),
+    "head_unresolved": (
+        "Loxia refused to review because the pull request head could not be "
+        "bound to a full commit SHA."
+    ),
+    "reviewer_identity_unreadable": (
+        "Loxia could not verify which GitHub account owns the review credential."
+    ),
+    "wrong_reviewer_identity": (
+        "Loxia refused to approve because the review credential belongs to an "
+        "unexpected GitHub account."
+    ),
+    "pr_head_unreadable": (
+        "Loxia could not verify the pull request's current head commit."
+    ),
+    "head_changed": (
+        "Loxia refused to approve because the pull request head changed during "
+        "the review."
+    ),
+    "self_approval_rejected": (
+        "GitHub rejected this approval because the reviewer and author are the "
+        "same account."
+    ),
+    "review_post_failed": (
+        "Loxia produced a verdict but could not post it as a GitHub review."
+    ),
+    "review_readback_failed": (
+        "Loxia posted a review but could not verify its identity, state, and "
+        "commit through GitHub."
+    ),
+    "review_decision_readback_failed": (
+        "Loxia could not verify GitHub's aggregate review decision."
+    ),
+    "review_decision_not_approved": (
+        "Loxia posted an approval, but GitHub still reports the pull request as "
+        "not approved without another current-head blocking review."
+    ),
+}
+
+
+class NativeReviewError(RuntimeError):
+    """A native GitHub review did not bind to the intended identity/head.
+
+    ``reason_class`` is safe to show in a public failure comment. Detailed
+    transport errors stay in the workflow log, where they cannot be mistaken
+    for a review verdict or copied into durable public artifacts.
+    """
+
+    def __init__(self, reason_class: str, detail: str = "") -> None:
+        self.reason_class = reason_class
+        self.detail = detail
+        super().__init__(f"{reason_class}: {detail}" if detail else reason_class)
+
+
+def is_foundation_pr(changed_files: list[str]) -> bool:
+    """Whether every changed path belongs to the bounded foundation surface."""
+    if not changed_files:
+        return False
+    for path in changed_files:
+        if path.startswith("docs/foundation/"):
+            continue
+        if path in _FOUNDATION_EXACT_PATHS:
+            continue
+        if path.startswith("execution/scripts/check_foundation_") and path.endswith(
+            ".py"
+        ):
+            continue
+        if path.startswith("execution/daemons/apis/test_foundation") and path.endswith(
+            ".py"
+        ):
+            continue
+        return False
+    return True
+
+
+def parse_review_verdict(review: str) -> str:
+    """Map Loxia's structured verdict to a conservative native review event."""
+    match = _VERDICT_RE.search(review or "")
+    return match.group(1).upper() if match else "COMMENT"
+
+
+def format_native_review_failure(reason_class: str, *, head_sha: str) -> str:
+    """Format the stable three-part failure contract for PR comments."""
+    happened = NATIVE_REASON_MESSAGES.get(
+        reason_class,
+        "Loxia could not complete the native GitHub review.",
+    )
+    commit = head_sha[:12] if _FULL_SHA_RE.fullmatch(head_sha or "") else "unknown"
+    return (
+        f"**What happened:** {happened} "
+        f"Reason class: `{reason_class}`.\n\n"
+        f"**Mergeability:** This pull request is NOT approved for commit "
+        f"`{commit}`.\n\n"
+        "**Next action:** Check the failed workflow run, correct the named "
+        "identity, head, or GitHub API condition, and rerun Loxia against the "
+        "current head."
+    )
 
 
 # ── Domain routing ─────────────────────────────────────────────────────────────
@@ -104,6 +240,26 @@ def get_pr_diff() -> str:
     Get the diff for the current PR by comparing HEAD to merge-base with main.
     Falls back to `git diff HEAD~1` if merge-base fails.
     """
+    if USE_GITHUB_PR_API:
+        request = urllib.request.Request(
+            f"{GITHUB_API_URL}/repos/{REPO}/pulls/{PR_NUMBER}",
+            headers={
+                **_github_headers(),
+                "Accept": "application/vnd.github.v3.diff",
+            },
+            method="GET",
+        )
+        request.add_header("User-Agent", "ateles-neotoma-sync/1.0")
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return response.read().decode("utf-8", "replace")[:MAX_DIFF_CHARS]
+        except urllib.error.HTTPError as exc:
+            raise NativeReviewError(
+                "pr_diff_unreadable", f"GitHub HTTP {exc.code}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise NativeReviewError("pr_diff_unreadable", type(exc).__name__) from exc
+
     try:
         base = subprocess.check_output(
             ["git", "merge-base", "origin/main", "HEAD"],
@@ -126,6 +282,29 @@ def get_pr_diff() -> str:
 
 def get_changed_files() -> list[str]:
     """Return list of files changed in this PR."""
+    if USE_GITHUB_PR_API:
+        names: list[str] = []
+        page = 1
+        while True:
+            suffix = "" if page == 1 else f"&page={page}"
+            files = _github_json(
+                "GET",
+                f"{GITHUB_API_URL}/repos/{REPO}/pulls/{PR_NUMBER}"
+                f"/files?per_page=100{suffix}",
+                reason_class="pr_files_unreadable",
+            )
+            if not isinstance(files, list):
+                raise NativeReviewError("pr_files_unreadable")
+            names.extend(
+                item.get("filename", "")
+                for item in files
+                if isinstance(item, dict) and item.get("filename")
+            )
+            if len(files) < 100:
+                break
+            page += 1
+        return names
+
     try:
         base = subprocess.check_output(
             ["git", "merge-base", "origin/main", "HEAD"],
@@ -197,9 +376,7 @@ def _call_claude_cli(prompt: str) -> str:
         raise ClaudeReviewError("claude --print timed out") from exc
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()
-        raise ClaudeReviewError(
-            f"claude --print exited {proc.returncode}: {err[:400]}"
-        )
+        raise ClaudeReviewError(f"claude --print exited {proc.returncode}: {err[:400]}")
     text = (proc.stdout or "").strip()
     if not text:
         raise ClaudeReviewError("claude --print returned an empty review")
@@ -266,11 +443,200 @@ def review_comment_marker(reviewer: "Reviewer") -> str:
     return f"## {reviewer.display} Review {reviewer.emoji}"
 
 
-def _github_headers() -> dict:
+def _github_headers(token: str | None = None) -> dict:
     return {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Authorization": f"Bearer {GITHUB_TOKEN if token is None else token}",
         "Accept": "application/vnd.github+json",
         "Content-Type": "application/json",
+    }
+
+
+def _github_json(
+    method: str,
+    url: str,
+    payload: dict | None = None,
+    *,
+    reason_class: str,
+    token: str | None = None,
+) -> dict | list:
+    """Call GitHub and return decoded JSON or a classified binding error."""
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers=_github_headers(token),
+        method=method,
+    )
+    request.add_header("User-Agent", "ateles-neotoma-sync/1.0")
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        raise NativeReviewError(reason_class, f"GitHub HTTP {exc.code}") from exc
+    except (urllib.error.URLError, json.JSONDecodeError) as exc:
+        raise NativeReviewError(reason_class, type(exc).__name__) from exc
+
+
+def _repo_parts() -> tuple[str, str]:
+    try:
+        owner, name = REPO.split("/", 1)
+    except ValueError as exc:
+        raise NativeReviewError("invalid_repository") from exc
+    if not owner or not name:
+        raise NativeReviewError("invalid_repository")
+    return owner, name
+
+
+def _review_state_for_event(event: str) -> str:
+    return {
+        "APPROVE": "APPROVED",
+        "REQUEST_CHANGES": "CHANGES_REQUESTED",
+        "COMMENT": "COMMENTED",
+    }[event]
+
+
+def preflight_native_review(expected_head: str) -> None:
+    """Prove reviewer identity, current head, and non-self authorship."""
+
+    if not NATIVE_REVIEW_TOKEN:
+        raise NativeReviewError("review_credential_missing")
+    if not EXPECTED_REVIEWER_LOGIN:
+        raise NativeReviewError("expected_reviewer_missing")
+    if not _FULL_SHA_RE.fullmatch(expected_head or ""):
+        raise NativeReviewError("head_unresolved")
+
+    actor = _github_json(
+        "GET",
+        f"{GITHUB_API_URL}/user",
+        reason_class="reviewer_identity_unreadable",
+        token=NATIVE_REVIEW_TOKEN,
+    )
+    if not isinstance(actor, dict) or actor.get("login") != EXPECTED_REVIEWER_LOGIN:
+        raise NativeReviewError("wrong_reviewer_identity")
+
+    pr_url = f"{GITHUB_API_URL}/repos/{REPO}/pulls/{PR_NUMBER}"
+    pr = _github_json(
+        "GET",
+        pr_url,
+        reason_class="pr_head_unreadable",
+        token=NATIVE_REVIEW_TOKEN,
+    )
+    current_head = (pr.get("head") or {}).get("sha") if isinstance(pr, dict) else None
+    if current_head != expected_head:
+        raise NativeReviewError("head_changed")
+    author = (pr.get("user") or {}).get("login") if isinstance(pr, dict) else None
+    if author == EXPECTED_REVIEWER_LOGIN:
+        raise NativeReviewError("self_approval_rejected")
+
+
+def post_native_review(review: str, *, expected_head: str) -> dict:
+    """Post and read back a second-principal review bound to one full head SHA.
+
+    This is intentionally a callable mechanism, not activation policy. The
+    workflow must opt in with an expected reviewer login and its authorized
+    token after the foundation governance exception is approved. Preflight is
+    repeated immediately before the write to fence model-runtime head changes.
+    """
+    preflight_native_review(expected_head)
+    pr_url = f"{GITHUB_API_URL}/repos/{REPO}/pulls/{PR_NUMBER}"
+
+    event = parse_review_verdict(review)
+    posted = _github_json(
+        "POST",
+        f"{pr_url}/reviews",
+        {"body": review, "event": event, "commit_id": expected_head},
+        reason_class="review_post_failed",
+        token=NATIVE_REVIEW_TOKEN,
+    )
+    review_id = posted.get("id") if isinstance(posted, dict) else None
+    if not isinstance(review_id, int):
+        raise NativeReviewError("review_post_failed")
+
+    readback = _github_json(
+        "GET",
+        f"{pr_url}/reviews/{review_id}",
+        reason_class="review_readback_failed",
+        token=NATIVE_REVIEW_TOKEN,
+    )
+    expected_state = _review_state_for_event(event)
+    if not (
+        isinstance(readback, dict)
+        and readback.get("id") == review_id
+        and (readback.get("user") or {}).get("login") == EXPECTED_REVIEWER_LOGIN
+        and readback.get("commit_id") == expected_head
+        and readback.get("state") == expected_state
+    ):
+        raise NativeReviewError("review_readback_failed")
+
+    owner, name = _repo_parts()
+    graph = _github_json(
+        "POST",
+        f"{GITHUB_API_URL}/graphql",
+        {
+            "query": (
+                "query($owner:String!,$name:String!,$number:Int!){"
+                "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+                "headRefOid reviewDecision reviews(last:100){nodes{"
+                "author{login} state commit{oid} submittedAt}}}}}"
+            ),
+            "variables": {
+                "owner": owner,
+                "name": name,
+                "number": int(PR_NUMBER),
+            },
+        },
+        reason_class="review_decision_readback_failed",
+        token=NATIVE_REVIEW_TOKEN,
+    )
+    try:
+        state = graph["data"]["repository"]["pullRequest"]
+    except (KeyError, TypeError) as exc:
+        raise NativeReviewError("review_decision_readback_failed") from exc
+    if state.get("headRefOid") != expected_head:
+        raise NativeReviewError("head_changed")
+    if event == "APPROVE" and state.get("reviewDecision") != "APPROVED":
+        nodes = (state.get("reviews") or {}).get("nodes") or []
+        latest_by_actor: dict[str, dict] = {}
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            login = ((node.get("author") or {}).get("login") or "").strip()
+            submitted_at = str(node.get("submittedAt") or "")
+            previous = latest_by_actor.get(login)
+            if login and (
+                previous is None
+                or submitted_at >= str(previous.get("submittedAt") or "")
+            ):
+                latest_by_actor[login] = node
+        other_current_head_blocker = any(
+            login != EXPECTED_REVIEWER_LOGIN
+            and node.get("state") == "CHANGES_REQUESTED"
+            and ((node.get("commit") or {}).get("oid")) == expected_head
+            for login, node in latest_by_actor.items()
+        )
+        if not other_current_head_blocker:
+            raise NativeReviewError("review_decision_not_approved")
+
+    # The REST read-back above proves the review itself. This final fetch makes
+    # the race fence explicit even when GraphQL data was served concurrently.
+    final_pr = _github_json(
+        "GET",
+        pr_url,
+        reason_class="pr_head_unreadable",
+        token=NATIVE_REVIEW_TOKEN,
+    )
+    final_head = (
+        ((final_pr.get("head") or {}).get("sha"))
+        if isinstance(final_pr, dict)
+        else None
+    )
+    if final_head != expected_head:
+        raise NativeReviewError("head_changed")
+    return {
+        "review_id": review_id,
+        "reviewer": EXPECTED_REVIEWER_LOGIN,
+        "state": expected_state,
+        "commit_id": expected_head,
+        "review_decision": state.get("reviewDecision"),
     }
 
 
@@ -281,18 +647,16 @@ def find_existing_review_comment(marker: str) -> int | None:
     Matched by marker rather than author so it works whether the comment was
     posted by github-actions[bot] or a machine account, and so each reviewer
     only ever matches its own comment."""
-    url = (
-        f"{GITHUB_API_URL}/repos/{REPO}/issues/{PR_NUMBER}/comments"
-        "?per_page=100"
-    )
+    url = f"{GITHUB_API_URL}/repos/{REPO}/issues/{PR_NUMBER}/comments?per_page=100"
     req = urllib.request.Request(url, headers=_github_headers(), method="GET")
     req.add_header("User-Agent", "ateles-neotoma-sync/1.0")
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             comments = json.loads(resp.read())
     except (urllib.error.URLError, json.JSONDecodeError) as exc:
-        print(f"[loxia] Could not list comments (will POST fresh): {exc}",
-              file=sys.stderr)
+        print(
+            f"[loxia] Could not list comments (will POST fresh): {exc}", file=sys.stderr
+        )
         return None
     matches = [c for c in comments if marker in (c.get("body") or "")]
     return matches[-1]["id"] if matches else None
@@ -538,6 +902,15 @@ def select_reviewers(changed_files: list[str]) -> list[Reviewer]:
     return reviewers
 
 
+def should_post_native_review(reviewer: Reviewer, changed_files: list[str]) -> bool:
+    """Whether the opt-in foundation approval mechanism applies to this run."""
+    return (
+        NATIVE_FOUNDATION_REVIEW
+        and reviewer.skill == LOXIA.skill
+        and is_foundation_pr(changed_files)
+    )
+
+
 def build_prompt(reviewer: Reviewer, diff: str, changed_files: list[str]) -> str:
     return PROMPT_SCAFFOLD.format(
         persona=reviewer.persona,
@@ -557,7 +930,27 @@ def build_prompt(reviewer: Reviewer, diff: str, changed_files: list[str]) -> str
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
-def run_reviewer(reviewer: Reviewer, diff: str, changed_files: list[str]) -> bool:
+def _report_native_review_failure(reviewer: Reviewer, exc: NativeReviewError) -> None:
+    """Publish only the stable reason class for a failed native review."""
+    print(
+        f"[{reviewer.skill}] NATIVE REVIEW FAILED: {exc.reason_class}",
+        file=sys.stderr,
+    )
+    failure_body = (
+        f"{review_comment_marker(reviewer)}\n\n"
+        "⚠️ **Native review did not land.**\n\n"
+        f"{format_native_review_failure(exc.reason_class, head_sha=HEAD_SHA)}"
+    )
+    post_github_comment(failure_body, marker=review_comment_marker(reviewer))
+
+
+def run_reviewer(
+    reviewer: Reviewer,
+    diff: str,
+    changed_files: list[str],
+    *,
+    native_review: bool = False,
+) -> bool:
     """Build the prompt, call Claude, and (unless dry-run) post the comment and
     file a Neotoma issue on REQUEST_CHANGES — all attributed to this reviewer.
 
@@ -565,6 +958,13 @@ def run_reviewer(reviewer: Reviewer, diff: str, changed_files: list[str]) -> boo
     posts a clearly-marked "review could not run" comment (so the PR shows the
     reviewer is broken, not silently absent) and the caller exits non-zero.
     """
+    if native_review and not DRY_RUN:
+        try:
+            preflight_native_review(HEAD_SHA)
+        except NativeReviewError as exc:
+            _report_native_review_failure(reviewer, exc)
+            return False
+
     prompt = build_prompt(reviewer, diff, changed_files)
     print(f"[{reviewer.skill}] Calling Claude ({CLAUDE_MODEL})...")
     try:
@@ -591,9 +991,21 @@ def run_reviewer(reviewer: Reviewer, diff: str, changed_files: list[str]) -> boo
         print(f"[{reviewer.skill}] DRY RUN — not posting comment or filing issue")
         return True
 
-    post_github_comment(review, marker=review_comment_marker(reviewer))
+    if POST_REVIEW_COMMENT:
+        post_github_comment(review, marker=review_comment_marker(reviewer))
 
-    if "REQUEST_CHANGES" in review:
+    if native_review:
+        try:
+            result = post_native_review(review, expected_head=HEAD_SHA)
+        except NativeReviewError as exc:
+            _report_native_review_failure(reviewer, exc)
+            return False
+        print(
+            f"[{reviewer.skill}] Native review {result['review_id']} read back "
+            f"as {result['state']} on {result['commit_id'][:12]}"
+        )
+
+    if parse_review_verdict(review) == "REQUEST_CHANGES":
         file_neotoma_issue(
             title=f"{reviewer.display}: PR #{PR_NUMBER} requests changes",
             body=(
@@ -610,6 +1022,13 @@ def main() -> None:
     if not PR_NUMBER:
         print("[loxia] LOXIA_PR_NUMBER not set — nothing to review", file=sys.stderr)
         sys.exit(1)
+
+    changed_files: list[str] | None = None
+    if NATIVE_REVIEW_ONLY:
+        changed_files = get_changed_files()
+        if not is_foundation_pr(changed_files):
+            print("[loxia] PR is outside the bounded foundation surface — skipping")
+            return
 
     # Fail loud, not silent: a review job that can't actually call Claude must
     # not exit green — that gives a false "reviewed" signal on the PR. Accept
@@ -632,7 +1051,8 @@ def main() -> None:
     print(f"[loxia] Reviewing PR #{PR_NUMBER} in {REPO} (dry_run={DRY_RUN})")
 
     diff = get_pr_diff()
-    changed_files = get_changed_files()
+    if changed_files is None:
+        changed_files = get_changed_files()
 
     reviewers = select_reviewers(changed_files)
     print(
@@ -647,7 +1067,12 @@ def main() -> None:
     failed = [
         reviewer.display
         for reviewer in reviewers
-        if not run_reviewer(reviewer, diff, changed_files)
+        if not run_reviewer(
+            reviewer,
+            diff,
+            changed_files,
+            native_review=should_post_native_review(reviewer, changed_files),
+        )
     ]
 
     if failed:
