@@ -2421,6 +2421,36 @@ def _write_transcript_sidecars(
             print(f"    (sidecar write skipped: {e})", file=sys.stderr)
 
 
+_TRANSCRIPTION_REQUIRED_FIELDS = (
+    "audio_content_sha256", "original_source_file", "capture_method",
+    "transcription_engine", "consent_basis", "transcription_text", "file_size_bytes",
+)
+
+
+def _verify_transcription_storage(entity_id, expected, source_id=None):
+    """Verify the stored record and provenance before reporting completion."""
+    result = _neotoma_cli_json(["entities", "get", entity_id]) or {}
+    record = result.get("entity", result)
+    snapshot = record.get("snapshot") or {}
+    missing = [field for field in _TRANSCRIPTION_REQUIRED_FIELDS
+               if field not in snapshot or snapshot[field] != expected[field]]
+    if missing:
+        raise RuntimeError("Transcription ingestion incomplete: read-back mismatch for "
+                           + ", ".join(missing))
+    if source_id:
+        result = _neotoma_cli_json([
+            "observations", "list", "--entity-id", entity_id,
+            "--source-id", source_id, "--limit", "1",
+        ]) or {}
+        if not any(row.get("source_id") == source_id and row.get("entity_id") == entity_id
+                   for row in result.get("observations", [])):
+            raise RuntimeError("Transcription ingestion incomplete: missing audio source linkage")
+        result = _neotoma_cli_json(["sources", "get", source_id]) or {}
+        source = result.get("source", result)
+        if source.get("content_hash") != expected["audio_content_sha256"]:
+            raise RuntimeError("Transcription ingestion incomplete: audio source hash mismatch")
+
+
 def save_transcription(
     audio_path: Path,
     transcription_result: dict,
@@ -2495,7 +2525,8 @@ def save_transcription(
     data_source = f"transcribe_audio.py store {now_utc} path={resolved_audio}"
 
     duration = _json_safe_float(transcription_result.get("audio_duration_seconds"))
-    size_i = _json_safe_nonnegative_int(transcription_result.get("file_size_bytes", 0))
+    size_i = audio_path.stat().st_size
+    content_hash = _audio_content_hash(audio_path)
 
     entity = {
         "entity_type": "transcription",
@@ -2512,7 +2543,7 @@ def save_transcription(
         # Path-independent identity. The path fields above stay for provenance,
         # but this is what dedupe matches on, so a recording that moves to object
         # storage is still recognised as already transcribed (ateles#625).
-        "audio_content_sha256": _audio_content_hash(audio_path),
+        "audio_content_sha256": content_hash,
         "audio_file_name": audio_path.name,
         "original_source_file": original_source_file or audio_path.name,
         "source_directory": source_directory,
@@ -2524,8 +2555,20 @@ def save_transcription(
             entity[field] = value
     if extra_entity_fields:
         entity.update(extra_entity_fields)
+    # Capture method never implies consent; unknown is an explicit absence of attestation.
+    entity["transcription_engine"] = transcription_result.get("transcription_engine") or "unknown"
+    for field in ("capture_method", "consent_basis", "transcription_engine"):
+        entity[field] = str(entity.get(field) or "unknown").strip() or "unknown"
+    entity["audio_content_sha256"] = content_hash
+    entity["file_size_bytes"] = size_i
+    entity["original_source_file"] = original_source_file or audio_path.name
+    entity["transcription_text"] = transcription_result["transcription_text"]
+    if not entity["audio_content_sha256"]:
+        raise RuntimeError("Transcription ingestion incomplete: audio hash unavailable")
+    attachment_requested = attach_audio_file
 
-    # Neotoma rejects source uploads over ~2 GiB; store structured transcription only.
+    # Refuse a requested attachment above the caller limit before writing metadata.
+    # The remote service independently enforces its configured upload limit.
     max_wav_attach = int(
         os.getenv(
             "NEOTOMA_MAX_TRANSCRIPTION_WAV_BYTES", str(2 * 1024 * 1024 * 1024 - 1024)
@@ -2540,11 +2583,9 @@ def save_transcription(
             wav_bytes = 0
         else:
             if wav_bytes > max_wav_attach:
-                entity["wav_attachment_omitted_bytes"] = wav_bytes
-                entity[
-                    "wav_attachment_omit_reason"
-                ] = "exceeds_neotoma_source_size_limit"
-                attach_wav = False
+                raise RuntimeError(
+                    "Transcription ingestion incomplete: requested audio exceeds attachment limit"
+                )
 
     idem = idempotency_key or _transcription_idempotency_key(audio_path)
     file_idem = file_idempotency_key or _transcription_file_idempotency_key(audio_path)
@@ -2571,6 +2612,8 @@ def save_transcription(
             cmd += [
                 "--file-path",
                 str(resolved_audio),
+                "--interpretation-source-ref",
+                "unstructured",
                 "--file-idempotency-key",
                 file_idem,
             ]
@@ -2590,34 +2633,6 @@ def save_transcription(
     raw = (proc.stdout or "").strip()
     if proc.returncode != 0 or not raw:
         err = (proc.stderr or "").strip() or raw or f"exit {proc.returncode}"
-        # Idempotency mismatch means this recording was already stored.
-        # Extract the existing entity_id from stdout or error text and exit 0
-        # so callers (Tyto) treat it as a successful duplicate detection.
-        if "ERR_IDEMPOTENCY_MISMATCH" in err or "already used" in err:
-            import re as _re
-            import sys as _sys
-            existing_id = None
-            # Check stdout first — prior run may have printed the entity line
-            for line in raw.splitlines():
-                if line.startswith("NEOTOMA_TRANSCRIPTION_ENTITY_ID="):
-                    existing_id = line.split("=", 1)[1].strip()
-                    break
-            # Also scan the error text for an entity ID pattern
-            if not existing_id:
-                m = _re.search(r"ent_[0-9a-f]{24}", err)
-                if m:
-                    existing_id = m.group(0)
-            if existing_id:
-                print(f"NEOTOMA_TRANSCRIPTION_ENTITY_ID={existing_id}", flush=True)
-                print(f"\nSaved to Neotoma (transcription + WAV): entity {existing_id}", flush=True)
-                _sys.exit(0)
-            # Can't recover entity_id — exit 0 silently (already stored)
-            print(
-                f"[transcribe_audio] Idempotency mismatch for {audio_path.name} — "
-                f"already stored. Entity ID unknown.",
-                file=_sys.stderr,
-            )
-            _sys.exit(0)
         raise RuntimeError(f"Neotoma store failed: {err}")
 
     try:
@@ -2634,6 +2649,10 @@ def save_transcription(
     if not entity_id:
         raise RuntimeError(f"Neotoma store missing entity_id: {raw[:800]}")
 
+    source_id = (payload.get("unstructured") or {}).get("source_id")
+    if attachment_requested and (not attach_wav or not source_id):
+        raise RuntimeError("Transcription ingestion incomplete: audio attachment missing")
+    _verify_transcription_storage(entity_id, entity, source_id if attach_audio_file else None)
     print(f"NEOTOMA_TRANSCRIPTION_ENTITY_ID={entity_id}", flush=True)
 
     contacts = [c for c in (relate_contact_entity_ids or []) if c.startswith("ent_")]
@@ -2744,6 +2763,11 @@ def main():
         "Stored as original_source_file in the Neotoma transcription entity for dedup.",
     )
     parser.add_argument(
+        "--consent-basis",
+        default=os.environ.get("TRANSCRIPTION_CONSENT_BASIS", "unknown"),
+        help="Explicit capture consent attestation or unknown; never inferred from capture method.",
+    )
+    parser.add_argument(
         "--capture-method",
         type=str,
         default=None,
@@ -2828,11 +2852,10 @@ def main():
             args.relate_contact_entity_id or None,
             args.relate_feedback_analysis_entity_id,
         )
-        extra_fields = (
-            {"capture_method": args.capture_method.strip()}
-            if args.capture_method and args.capture_method.strip()
-            else None
-        )
+        extra_fields = {
+            "capture_method": (args.capture_method or "unknown").strip(),
+            "consent_basis": (args.consent_basis or "unknown").strip(),
+        }
         transcription_record = save_transcription(
             audio_path,
             transcription_result,

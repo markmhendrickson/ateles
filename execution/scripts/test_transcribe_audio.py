@@ -582,6 +582,7 @@ def test_stored_entity_records_the_content_hash(tmp_path, monkeypatch):
     monkeypatch.setattr(ta, "_neotoma_prod_cli_argv", lambda args: ["neotoma", *args])
     monkeypatch.setattr(ta.shutil, "which", lambda name: "/usr/bin/neotoma")
     monkeypatch.setattr(ta, "_neotoma_auth_preflight", lambda: (True, "ok"))
+    monkeypatch.setattr(ta, "_neotoma_cli_json", lambda args: {"snapshot": captured["entities"][0]})
     monkeypatch.setattr(ta, "_write_transcript_sidecars", lambda *a, **k: None)
 
     ta.save_transcription(
@@ -621,6 +622,7 @@ def test_stored_entity_records_transcription_engine_and_model(tmp_path, monkeypa
     monkeypatch.setattr(ta, "_neotoma_prod_cli_argv", lambda args: ["neotoma", *args])
     monkeypatch.setattr(ta.shutil, "which", lambda name: "/usr/bin/neotoma")
     monkeypatch.setattr(ta, "_neotoma_auth_preflight", lambda: (True, "ok"))
+    monkeypatch.setattr(ta, "_neotoma_cli_json", lambda args: {"snapshot": captured["entities"][0]})
 
     ta.save_transcription(
         audio,
