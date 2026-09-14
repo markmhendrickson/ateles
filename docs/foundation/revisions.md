@@ -488,7 +488,7 @@ same range), renumbers to 116; the ruling it records does not change.
 | 50 | the minimization-recalibration pass of 2026-09-06 | a `disclosure_lint` step added to `outreach`, the mechanical half of what `review` judged alone |
 | 55 | the self-awareness pass of 2026-09-06 | `postmortem`'s entry condition extended to a `capability_denied` or `capability_unavailable` checkpoint resolved without clearing the gap; a proposed architecture change routed at `merge` like any other finding, `planning`'s `amend` step named as the closest shape, applied reflexively and not reused as a class; the bootstrapping limitation extended to a gap that prevents the proposal itself |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
-
+| 117 | the postmortem carrier reconciliation of 2026-09-14 | `workflows.md#postmortem` applies decision 36 to all four entry classifications: an ordinary allowed-type entity carries the step-written, read-back classification and its source/writer provenance; the session, checkpoint, or task is evidence, never the intake rule's subject. The seven excluded work-model types remain excluded; the misleading halt sentence naming `agent_session` as the carrier is removed |
 
 ## Documents not yet migrated
 

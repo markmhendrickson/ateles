@@ -868,8 +868,9 @@ should have prevented it."
 
 **Entry condition:** an `intake_rule` matching one of four classifications recorded on an existing entity,
 never a work-model record type itself (decision 36): the operator-invoked halt's read-back confirming it
-stopped (`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`), written
-as an observation on the `agent_session` or artifact the halt concerned; a checkpoint whose reason is
+stopped (`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`), carried
+as a classification on an ordinary entity of an allowed type, with the halt's read-back as its evidence;
+a checkpoint whose reason is
 `repeated_lapse`, `rounds_exhausted`, or `dependency_cycle` reaching a terminal resolution
 (`failure_posture.md#the-rules`); a checkpoint whose reason is `capability_denied` or `capability_unavailable`
 reaching a terminal resolution where the resolution does not clear the underlying gap — the operator declines
@@ -877,7 +878,11 @@ to grant the capability, or declines to make it available — so the checkpoint 
 unable to do what it was trying to do (`authority_model.md#grants`,
 `failure_posture.md#a-runners-model-or-harness-going-unavailable-mid-step`); or a standing
 [finding](vocabulary.md#finding) whose institutionalization task (decision 17) has landed and closed. Each of
-the four is a change to a field already written by another step, never a new listener on the work model. A
+the four reaches the rule through a classification field another step writes and reads back on an ordinary
+entity of an allowed type, with provenance naming the source event and the writing principal. A session,
+checkpoint, or task may be evidence for that classification, never the rule's subject: decision 36's seven
+excluded types still apply (`work_model.md#whether-an-intake-rule-may-key-on-the-work-models-own-records`).
+The handling or closing step carries the classification; there is no new listener on the work model. A
 task this rule creates enters intake and is classified like any other; `classify` names which of the four
 fired and the entity it fired on.
 
