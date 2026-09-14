@@ -61,6 +61,47 @@ def test_provider_at_or_below_minimum_is_held_out(monkeypatch) -> None:
     assert harness_router.provider_candidates(_available(), now=100.0) == ["codex"]
 
 
+def test_usable_names_and_candidates_share_eligibility(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "APIS_HARNESS_HEADROOM",
+        '{"claude": 0.05, "codex": 0.8, "cursor": 0.0}',
+    )
+
+    assert harness_router.usable_provider_names(_available(), now=100.0) == {
+        "codex"
+    }
+    assert harness_router.provider_candidates(_available(), now=100.0) == ["codex"]
+
+
+def test_provider_exclusion_reason_names_headroom_floor(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "APIS_HARNESS_HEADROOM",
+        '{"claude": 1.0, "codex": 0.0, "cursor": 1.0}',
+    )
+
+    assert harness_router.provider_exclusion_reason(
+        "codex", _available(), now=100.0
+    ) == "headroom=0.000 is at or below minimum=0.050"
+
+
+def test_provider_exclusion_reason_names_missing_binary() -> None:
+    available = _available()
+    available["codex"] = None
+
+    assert harness_router.provider_exclusion_reason(
+        "codex", available, now=100.0
+    ) == "binary unavailable"
+
+
+def test_provider_exclusion_reason_names_cooldown(monkeypatch) -> None:
+    monkeypatch.setenv("APIS_HARNESS_COOLDOWN_SECONDS", "30")
+    harness_router.cool_down("codex", now=100.0)
+
+    assert harness_router.provider_exclusion_reason(
+        "codex", _available(), now=101.0
+    ) == "cooling down"
+
+
 def test_capacity_cooldown_removes_provider_until_expiry(monkeypatch) -> None:
     monkeypatch.setenv("APIS_HARNESS_COOLDOWN_SECONDS", "30")
     harness_router.cool_down("claude", now=100.0)

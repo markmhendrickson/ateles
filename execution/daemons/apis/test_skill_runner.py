@@ -3155,6 +3155,53 @@ def test_role_provider_preference_does_not_disable_capacity_failover(monkeypatch
     assert attempts == [("codex", "falco", "exact input"), ("claude", "falco", "exact input")]
 
 
+def test_usable_providers_excludes_zero_headroom_preference(monkeypatch, tmp_path):
+    """The lens availability view must match the router's eligibility view."""
+    harness_router.reset_state()
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
+    monkeypatch.setenv(
+        "APIS_HARNESS_HEADROOM",
+        '{"claude": 1.0, "codex": 0.0}',
+    )
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+    monkeypatch.setattr(
+        skill_runner,
+        "_provider_binaries",
+        lambda: {"claude": "claude", "codex": "codex"},
+    )
+
+    assert skill_runner.usable_providers() == {"claude"}
+
+
+def test_zero_headroom_hard_pin_reports_provider_exclusion(monkeypatch, tmp_path):
+    """A hard pin must name why that provider is ineligible."""
+    harness_router.reset_state()
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
+    monkeypatch.setenv(
+        "APIS_HARNESS_HEADROOM",
+        '{"claude": 1.0, "codex": 0.0}',
+    )
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+
+    async def should_not_run(provider):
+        raise AssertionError(f"ineligible provider was attempted: {provider}")
+
+    result = asyncio.run(
+        skill_runner._run_provider_attempts(
+            "falco",
+            should_not_run,
+            binaries={"claude": "claude", "codex": "codex"},
+            provider="codex",
+        )
+    )
+
+    assert not result.ok
+    assert result.attempted_providers == ()
+    assert "provider 'codex' is ineligible" in result.error
+    assert "headroom=0.000" in result.error
+    assert "minimum=0.050" in result.error
+
+
 @pytest.mark.parametrize("models", ["", "[]", "broken", '{"claude":null}', '{"cursor":"qualified"}'])
 def test_prompt_review_requires_qualified_supported_adapter(monkeypatch, models):
     monkeypatch.setenv("APIS_REVIEW_MODELS", models)

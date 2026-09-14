@@ -63,10 +63,11 @@ from foundation import (  # noqa: E402
     foundation_contract,
 )
 from harness_router import (  # noqa: E402
-    configured_providers,
     cool_down,
     cooling_providers,
     provider_candidates,
+    provider_exclusion_reason,
+    usable_provider_names,
 )
 
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
@@ -1775,13 +1776,7 @@ def usable_providers() -> set[str]:
     honored, so that pinning never turns into "the lens silently did not run"
     (review_panel.resolve_lens_provider).
     """
-    binaries = _provider_binaries()
-    cooling = cooling_providers()
-    return {
-        provider
-        for provider in configured_providers()
-        if binaries.get(provider) and provider not in cooling
-    }
+    return usable_provider_names(_provider_binaries())
 
 
 async def run_skill(
@@ -1838,6 +1833,13 @@ async def _run_provider_attempts(
     if preferred_provider in candidates and provider is None:
         candidates = [preferred_provider, *[p for p in candidates if p != preferred_provider]]
     if not candidates:
+        if provider is not None:
+            reason = provider_exclusion_reason(provider, binaries)
+            msg = (
+                f"subscription-backed harness provider '{provider}' is "
+                f"ineligible: {reason or 'not selected'}"
+            )
+            return SkillResult(skill, False, None, "", "", error=msg)
         configured = os.environ.get(
             "APIS_HARNESS_PROVIDERS", "claude,codex,cursor"
         )

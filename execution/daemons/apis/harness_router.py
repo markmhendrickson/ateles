@@ -94,6 +94,78 @@ def configured_headroom() -> dict[str, float]:
     return result
 
 
+def minimum_headroom() -> float:
+    """Return the configured eligibility floor, normalized to ``0.0..1.0``."""
+    try:
+        return min(
+            1.0,
+            max(0.0, float(os.environ.get("APIS_HARNESS_MIN_HEADROOM", "0.05"))),
+        )
+    except ValueError:
+        return 0.05
+
+
+def _provider_exclusion_reason(
+    provider: str,
+    available: Mapping[str, str | None],
+    *,
+    headroom: Mapping[str, float],
+    minimum: float,
+    moment: float,
+) -> str | None:
+    """Return why one supported provider is ineligible, or ``None``."""
+    if not available.get(provider):
+        return "binary unavailable"
+    if headroom[provider] <= minimum:
+        return (
+            f"headroom={headroom[provider]:.3f} is at or below "
+            f"minimum={minimum:.3f}"
+        )
+    if _cooldown_until.get(provider, 0.0) > moment:
+        return "cooling down"
+    return None
+
+
+def provider_exclusion_reason(
+    provider: str,
+    available: Mapping[str, str | None],
+    *,
+    now: float | None = None,
+) -> str | None:
+    """Explain why a hard-pinned provider cannot run right now."""
+    normalized = provider.strip().lower()
+    if normalized not in PROVIDERS:
+        return "unsupported provider"
+    return _provider_exclusion_reason(
+        normalized,
+        available,
+        headroom=configured_headroom(),
+        minimum=minimum_headroom(),
+        moment=time.monotonic() if now is None else now,
+    )
+
+
+def usable_provider_names(
+    available: Mapping[str, str | None], *, now: float | None = None
+) -> set[str]:
+    """Return configured providers passing the router's eligibility predicate."""
+    moment = time.monotonic() if now is None else now
+    headroom = configured_headroom()
+    minimum = minimum_headroom()
+    return {
+        provider
+        for provider in configured_providers()
+        if _provider_exclusion_reason(
+            provider,
+            available,
+            headroom=headroom,
+            minimum=minimum,
+            moment=moment,
+        )
+        is None
+    }
+
+
 def cool_down(provider: str, *, now: float | None = None) -> None:
     """Temporarily remove a provider after a cap/auth/launch failure."""
     try:
@@ -126,20 +198,19 @@ def provider_candidates(
         order = [normalized] if normalized in PROVIDERS else []
 
     headroom = configured_headroom()
-    try:
-        minimum = min(
-            1.0,
-            max(0.0, float(os.environ.get("APIS_HARNESS_MIN_HEADROOM", "0.05"))),
-        )
-    except ValueError:
-        minimum = 0.05
+    minimum = minimum_headroom()
 
     eligible = [
         provider
         for provider in order
-        if available.get(provider)
-        and headroom[provider] > minimum
-        and _cooldown_until.get(provider, 0.0) <= moment
+        if _provider_exclusion_reason(
+            provider,
+            available,
+            headroom=headroom,
+            minimum=minimum,
+            moment=moment,
+        )
+        is None
     ]
     if not eligible:
         return []

@@ -2980,7 +2980,7 @@ class SwarmDispatcher:
                 include_github_contract=True,
                 notifier=self.notifier,
                 cwd=worktree,
-                provider=resolve_lens_provider(
+                preferred_provider=resolve_lens_provider(
                     lens, available_providers=usable_providers()
                 ),
             )
