@@ -204,12 +204,19 @@ async def test_merge_gate_fails_closed_with_no_aggregation(monkeypatch):
 @pytest.mark.asyncio
 async def test_fallback_recovers_the_newest_verdict(monkeypatch):
     """The exact neotoma#2153 shape."""
+    head = "a" * 40
     pages = [[
         _c(1, "2026-08-10T11:54:23Z", "REQUEST_CHANGES"),
         _c(2, "2026-08-19T10:08:46Z", "COMMENT"),
     ]]
+    pages[0][1]["body"] += f"\nReviewed commit: {head}\n"
     d, _ = _dispatcher(monkeypatch, pages)
     trigger = type("T", (), {"repository": "o/r", "number": 2153})()
+
+    async def fake_head(_trigger):  # noqa: ANN001
+        return head
+
+    monkeypatch.setattr(d, "_pr_head_sha", fake_head)
 
     verdict, fired = await d._resolve_review_verdict(trigger, "no token here")
 

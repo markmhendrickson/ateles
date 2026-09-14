@@ -218,8 +218,11 @@ def _stalled_recovery_dispatcher(monkeypatch, *, vanellus_stdout):
     async def fake_changed_files(self, trigger):  # noqa: ANN001
         return ["src/x.ts"]
 
-    async def fake_emit_review(self, trigger, verdict, body):  # noqa: ANN001
+    async def fake_emit_review(
+        self, trigger, verdict, body, *, reviewed_head=None  # noqa: ANN001
+    ):
         # The GitHub-facing boundary this test exists to prove gets reached.
+        assert reviewed_head == "a" * 40
         posted_reviews.append((f"{trigger.repository}#{trigger.number}", verdict))
         return "rev-1"
 
@@ -234,6 +237,9 @@ def _stalled_recovery_dispatcher(monkeypatch, *, vanellus_stdout):
 
     async def fake_post_missing_vanellus(self, trigger, result):  # noqa: ANN001
         return None
+
+    async def fake_head(self, trigger):  # noqa: ANN001
+        return "a" * 40
 
     monkeypatch.setattr(sd, "run_skill", fake_run_skill)
     monkeypatch.setattr(sd.SwarmDispatcher, "_changed_files", fake_changed_files)
@@ -251,6 +257,7 @@ def _stalled_recovery_dispatcher(monkeypatch, *, vanellus_stdout):
         "_post_missing_vanellus_comment",
         fake_post_missing_vanellus,
     )
+    monkeypatch.setattr(sd.SwarmDispatcher, "_pr_head_sha", fake_head)
     monkeypatch.setattr(
         sd.SwarmDispatcher,
         "_preregistered_expectations",
