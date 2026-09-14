@@ -52,6 +52,12 @@ TOP_LEVEL_RULES = (
     "Maintain a live session workboard",
 )
 
+DEPLOYMENT_POLICY_PHRASES = (
+    "Routine deployments",
+    "deployment revision",
+    "product release decision",
+)
+
 
 class TestTopLevelRuleDelivery:
     @pytest.mark.parametrize(
@@ -68,6 +74,9 @@ class TestTopLevelRuleDelivery:
         content = path.read_text()
         for rule in TOP_LEVEL_RULES:
             assert rule in content, f"{path} does not carry canonical rule: {rule}"
+        for phrase in DEPLOYMENT_POLICY_PHRASES:
+            assert phrase in content, f"{path} does not carry deployment policy: {phrase}"
+        assert "Production or client-instance deployment remains operator-gated" not in content
 
 
 class TestNoBashPrefixInMirrors:
