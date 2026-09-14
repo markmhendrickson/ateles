@@ -5,7 +5,6 @@ urlopen so no network or env config is required."""
 import io
 import json
 import sys
-import urllib.error
 from pathlib import Path
 
 import pytest
@@ -121,40 +120,6 @@ def test_post_without_marker_always_creates(monkeypatch):
 # ── Review-failure handling (no false-green) ────────────────────────────────
 
 
-def test_api_fallback_raises_on_http_error(monkeypatch):
-    # Metered-key fallback path: a credit-exhausted / auth 400 must raise
-    # ClaudeReviewError, NOT return the error text as a review (#174 false-green).
-    monkeypatch.setattr(lx, "CLAUDE_OAUTH_TOKEN", "")
-    monkeypatch.setattr(lx, "ANTHROPIC_API_KEY", "k")
-
-    def raise_http(*a, **k):
-        raise urllib.error.HTTPError(
-            "u", 400, "Bad Request", {}, io.BytesIO(b'{"error":"credit too low"}')
-        )
-
-    monkeypatch.setattr(lx.urllib.request, "urlopen", raise_http)
-    with pytest.raises(lx.ClaudeReviewError):
-        lx.call_claude("prompt")
-
-
-def test_api_fallback_raises_on_empty_response(monkeypatch):
-    monkeypatch.setattr(lx, "CLAUDE_OAUTH_TOKEN", "")
-    monkeypatch.setattr(lx, "ANTHROPIC_API_KEY", "k")
-    monkeypatch.setattr(
-        lx.urllib.request, "urlopen",
-        lambda *a, **k: _resp({"content": [{"text": "   "}]}),
-    )
-    with pytest.raises(lx.ClaudeReviewError):
-        lx.call_claude("prompt")
-
-
-def test_no_credential_raises(monkeypatch):
-    monkeypatch.setattr(lx, "CLAUDE_OAUTH_TOKEN", "")
-    monkeypatch.setattr(lx, "ANTHROPIC_API_KEY", "")
-    with pytest.raises(lx.ClaudeReviewError):
-        lx.call_claude("prompt")
-
-
 def test_run_reviewer_returns_false_and_posts_failure_on_error(monkeypatch):
     # On a failed review: returns False (so main() exits non-zero) AND posts a
     # clearly-marked failure comment (so the PR shows the reviewer is broken).
@@ -162,10 +127,10 @@ def test_run_reviewer_returns_false_and_posts_failure_on_error(monkeypatch):
     monkeypatch.setattr(lx, "DRY_RUN", False)
     monkeypatch.setattr(lx, "HEAD_SHA", "abcdef123456")
 
-    def boom(_prompt):
-        raise lx.ClaudeReviewError("Claude API HTTP 400 — credit too low")
+    def boom(_prompt, **kwargs):
+        raise lx.ReviewError("Claude API HTTP 400 — credit too low")
 
-    monkeypatch.setattr(lx, "call_claude", boom)
+    monkeypatch.setattr(lx, "call_review", boom)
     monkeypatch.setattr(
         lx, "post_github_comment",
         lambda body, marker=None: posted.update(body=body, marker=marker),
@@ -179,55 +144,25 @@ def test_run_reviewer_returns_false_and_posts_failure_on_error(monkeypatch):
 
 def test_run_reviewer_returns_true_on_success(monkeypatch):
     monkeypatch.setattr(lx, "DRY_RUN", True)  # skip posting
-    monkeypatch.setattr(lx, "call_claude", lambda _p: "## Loxia Review 🪶\nVerdict: APPROVE")
+    monkeypatch.setattr(lx, "call_review", lambda _p, **kw: "## Loxia Review 🪶\nVerdict: APPROVE")
     assert lx.run_reviewer(lx.LOXIA, "diff", ["f.py"]) is True
 
 
-def test_oauth_token_routes_to_claude_cli(monkeypatch):
-    # When the subscription OAuth token is present, review goes via
-    # `claude --print` (subscription-native), NOT the raw metered API.
-    monkeypatch.setattr(lx, "CLAUDE_OAUTH_TOKEN", "oauth-tok")
-    monkeypatch.setattr(lx, "ANTHROPIC_API_KEY", "metered-key")
-    monkeypatch.setattr(lx.shutil, "which", lambda _bin: "/usr/bin/claude")
-
-    called = {}
-
-    class _Proc:
-        returncode = 0
-        stdout = "## Loxia Review 🪶\nVerdict: APPROVE"
-        stderr = ""
-
-    def fake_run(cmd, **kw):
-        called["cmd"] = cmd
-        called["input"] = kw.get("input")
-        return _Proc()
-
-    monkeypatch.setattr(lx.subprocess, "run", fake_run)
-    out = lx.call_claude("the prompt")
-    assert "claude" in called["cmd"][0]
-    assert "--print" in called["cmd"]
-    assert called["input"] == "the prompt"
-    assert "APPROVE" in out
+def test_call_review_preserves_requested_role(monkeypatch):
+    import types
+    calls = []
+    async def run(**kwargs):
+        calls.append(kwargs)
+        return types.SimpleNamespace(ok=True, stdout="Verdict: APPROVE", provider="codex", attempted_providers=("claude", "codex"))
+    monkeypatch.setitem(sys.modules, "skill_runner", types.SimpleNamespace(run_review_prompt=run))
+    assert lx.call_review("role-specific input", role="monedula") == "Verdict: APPROVE"
+    assert calls == [{"role":"monedula", "prompt":"role-specific input"}]
 
 
-def test_claude_cli_missing_raises(monkeypatch):
-    # Told to use the subscription but the CLI isn't installed → fail visibly,
-    # do NOT silently fall back to the metered key the operator opted out of.
-    monkeypatch.setattr(lx, "CLAUDE_OAUTH_TOKEN", "oauth-tok")
-    monkeypatch.setattr(lx.shutil, "which", lambda _bin: None)
-    with pytest.raises(lx.ClaudeReviewError):
-        lx.call_claude("prompt")
-
-
-def test_claude_cli_nonzero_exit_raises(monkeypatch):
-    monkeypatch.setattr(lx, "CLAUDE_OAUTH_TOKEN", "oauth-tok")
-    monkeypatch.setattr(lx.shutil, "which", lambda _bin: "/usr/bin/claude")
-
-    class _Proc:
-        returncode = 1
-        stdout = ""
-        stderr = "auth expired"
-
-    monkeypatch.setattr(lx.subprocess, "run", lambda *a, **k: _Proc())
-    with pytest.raises(lx.ClaudeReviewError):
-        lx.call_claude("prompt")
+def test_capacity_failure_does_not_publish_review(monkeypatch):
+    import types
+    async def run(**kwargs):
+        return types.SimpleNamespace(ok=False, stdout="", error="no qualified capacity", provider="", attempted_providers=())
+    monkeypatch.setitem(sys.modules, "skill_runner", types.SimpleNamespace(run_review_prompt=run))
+    with pytest.raises(lx.ReviewError, match="no qualified capacity"):
+        lx.call_review("input", role="loxia")

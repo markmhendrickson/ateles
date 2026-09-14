@@ -4230,6 +4230,8 @@ class SwarmDispatcher:
                 "merge stays gated)"
             )
 
+        review_head = await self._pr_head_sha(trigger)
+
         # 2. Assemble the review panel (neotoma#1640): pre-registered agents
         #    from the parent issue ∪ diff-surface matches ∪ downstream lenses.
         changed_files = await self._changed_files(trigger)
@@ -4246,6 +4248,7 @@ class SwarmDispatcher:
         )
 
         reviews: list[tuple[str, str]] = []
+        failed_lenses: list[str] = []
         # (lens, agent) for each gate owner that reported its writeback refused.
         denied_gate_writebacks: list[tuple[str, str]] = []
         for lens in panel:
@@ -4275,7 +4278,7 @@ class SwarmDispatcher:
                     include_github_contract=True,
                     notifier=self.notifier,
                     cwd=qa_worktree,
-                    provider=resolve_lens_provider(
+                    preferred_provider=resolve_lens_provider(
                         lens, available_providers=usable_providers()
                     ),
                 )
@@ -4283,6 +4286,8 @@ class SwarmDispatcher:
                 await cleanup_pr_worktree(qa_worktree)
             if result.ok:
                 reviews.append((lens.lens, result.stdout))
+            else:
+                failed_lenses.append(lens.lens)
             # ateles#795: a lens that owns a gate and reports its own writeback
             # was refused must not leave the gate merely `pending`. Recorded per
             # lens here, surfaced on the PR below, so "silenced" is legible as
@@ -4308,6 +4313,13 @@ class SwarmDispatcher:
             await self._post_missing_panel_comments(
                 trigger, reviews, agents_by_lens
             )
+
+        if failed_lenses:
+            await self._handle_panel_session_limit(
+                trigger, parent, ", ".join(failed_lenses), "", "",
+                reason="incomplete review panel",
+            )
+            return
 
         # 3. Learning pass (ateles#82): systemic findings → operator-gated
         #    proposed_skill_update entities.
@@ -4336,6 +4348,14 @@ class SwarmDispatcher:
 
         # 4. Vanellus aggregates panel verdicts. Merge is operator-gated
         #    unless APIS_AUTONOMY_AUTO_MERGE=1 (ateles#80 guardrail).
+        aggregation_started_at = datetime.now(timezone.utc)
+        aggregation_head = await self._pr_head_sha(trigger)
+        if not review_head or aggregation_head != review_head:
+            await self._handle_panel_session_limit(
+                trigger, parent, "panel", "", "",
+                reason="PR head changed during review or could not be verified",
+            )
+            return
         vanellus_result = await run_skill(
             "vanellus",
             self._vanellus_prompt(
@@ -4374,6 +4394,15 @@ class SwarmDispatcher:
         if detect_auth_failure(vanellus_result.stdout, vanellus_result.stderr):
             await self._handle_panel_auth_failure(trigger, "vanellus")
             return
+        if not vanellus_result.ok:
+            # No current invocation verdict exists. Historical issue comments
+            # cannot turn provider exhaustion or process failure into a review.
+            await self._handle_panel_session_limit(
+                trigger, parent, "vanellus", "", vanellus_result.error,
+                reason="provider capacity or execution failure",
+            )
+            return
+
         # 4b. Dispatcher fallback: if Vanellus's own gh comment did not land
         #     on the PR, post the captured stdout ourselves (mirrors
         #     _post_missing_panel_comments for the aggregation step).
@@ -4393,8 +4422,15 @@ class SwarmDispatcher:
         #    the time, and a missed token silently downgrades a REQUEST_CHANGES
         #    to an inert COMMENT on GitHub.
         verdict, used_comment_fallback = await self._resolve_review_verdict(
-            trigger, vanellus_result.stdout
+            trigger, vanellus_result.stdout,
+            expected_head=aggregation_head, started_at=aggregation_started_at,
         )
+        if verdict is None:
+            await self._handle_panel_session_limit(
+                trigger, parent, "vanellus", "", "",
+                reason="no verified current-head verdict",
+            )
+            return
         if used_comment_fallback:
             log.info(
                 f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: verdict "
@@ -4407,7 +4443,9 @@ class SwarmDispatcher:
         #     review state as an APPROVE that proceeds. Best-effort: a failure
         #     here must not change the routing decision below, which remains
         #     driven by the parsed verdict.
-        await self._emit_formal_review(trigger, verdict, vanellus_result.stdout)
+        await self._emit_formal_review(
+            trigger, verdict, vanellus_result.stdout, reviewed_head=aggregation_head
+        )
 
         # 5b. ateles#565: a merge the steward was AUTHORIZED to perform and
         #     could not. On PR #452 that refusal (a local permission classifier
@@ -4437,7 +4475,8 @@ class SwarmDispatcher:
         await self._gate_merge_readiness(trigger, parent, panel)
 
     async def _emit_formal_review(
-        self, t: SwarmTrigger, verdict: str | None, body: str
+        self, t: SwarmTrigger, verdict: str | None, body: str,
+        *, reviewed_head: str | None = None,
     ) -> str | None:
         """Post the aggregated panel verdict as a native GitHub Review.
 
@@ -4478,7 +4517,12 @@ class SwarmDispatcher:
         text = (body or "").strip() or (
             f"Aggregated swarm panel verdict: {verdict or 'unparseable'}."
         )
-        head_sha = _normalise_full_sha(t.head_sha)
+        # Prefer the head the panel actually judged (#993 reviewed_head), then
+        # the trigger SHA, then a live PR lookup. Always require a normalised
+        # commit_id (#764) — never post an unpinned formal review.
+        head_sha = _normalise_full_sha(reviewed_head or "")
+        if not head_sha:
+            head_sha = _normalise_full_sha(t.head_sha)
         if not head_sha:
             head_sha = _normalise_full_sha((await self._pr_head_sha(t)) or "")
         if not head_sha:
@@ -5683,7 +5727,8 @@ class SwarmDispatcher:
         await self._gate_merge_readiness(pr_trigger, parent, panel=[], ci_state=ci)
 
     async def _resolve_review_verdict(
-        self, t: SwarmTrigger, stdout: str
+        self, t: SwarmTrigger, stdout: str, *,
+        expected_head: str | None = None, started_at: datetime | None = None,
     ) -> tuple[str | None, bool]:
         """Resolve the panel verdict: stdout first, the PR comment as fallback.
 
@@ -5709,6 +5754,9 @@ class SwarmDispatcher:
         comment section has already settled — this is not a race against
         comment-posting latency.
         """
+        current_head = await self._pr_head_sha(t)
+        if not current_head or (expected_head is not None and current_head != expected_head):
+            return None, False
         verdict = parse_review_verdict(stdout)
         if verdict is not None:
             return verdict, False
@@ -5728,6 +5776,19 @@ class SwarmDispatcher:
                 comment = latest_aggregation_comment(comments, head_sha=head_sha)
                 if comment is not None:
                     body = comment.get("body") or ""
+                    # A fallback is an artifact of THIS review at THIS head,
+                    # not an arbitrary historical aggregation. Existing commit
+                    # parser is shared with the sign-off gate; missing is closed.
+                    if not signed_off_is_head_pinned(body, current_head):
+                        return None, False
+                    if started_at is not None:
+                        stamp = comment.get("updated_at") or comment.get("created_at")
+                        try:
+                            updated = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+                            if updated.tzinfo is None or updated < started_at:
+                                return None, False
+                        except (TypeError, ValueError):
+                            return None, False
                     fallback_verdict = parse_review_verdict(body)
                     if fallback_verdict is None:
                         # Marker present but no token — a prose-only aggregation.
@@ -8394,6 +8455,7 @@ class SwarmDispatcher:
         agent: str,
         stdout: str,
         stderr: str,
+        *, reason: str = "usage limit",
     ) -> None:
         """A panel/aggregation call was throttled by a self-clearing usage limit.
 
@@ -8407,15 +8469,15 @@ class SwarmDispatcher:
         iso = resume_at.strftime("%Y-%m-%dT%H:%M:%SZ")
         log.warning(
             f"[{DAEMON_NAME}] {agent} panel on {t.repository}#{t.number} hit a "
-            f"usage limit; deferring review resume until {iso} (~{delay}s)"
+            f"{reason}; deferring review resume until {iso} (~{delay}s)"
         )
         # Notify at INFO (always-digest), not BLOCKER: nothing for the operator
         # to fix — it self-resolves. (An operator who wants it sooner can top
         # up / wait.)
         try:
             self.notifier.send(
-                f"⏳ Swarm review on {t.repository}#{t.number} paused on a usage "
-                f"limit; auto-resumes at {iso}. No action needed.",
+                f"⏳ Swarm review on {t.repository}#{t.number} paused: {reason}; "
+                f"auto-resumes at {iso}. No action needed.",
                 priority=Priority.INFO,
                 handler=DAEMON_NAME,
             )
@@ -8428,9 +8490,8 @@ class SwarmDispatcher:
         body = (
             f"{self._REVIEW_DEFERRED_MARKER.format(iso=iso)}\n"
             f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
-            "⏳ **Review incomplete — panel throttled by a usage limit.** The "
-            f"`{agent}` aggregation could not run because the model call hit a "
-            "session/usage limit. This is **not** a verdict — the PR has not been "
+            f"⏳ **Review incomplete — {reason}.** The "
+            f"`{agent}` aggregation did not complete. This is **not** a verdict — the PR has not been "
             f"assessed. The review will resume automatically after the limit "
             f"resets (scheduled ~`{iso}`); no operator action is required.\n\n"
             "_Posted by the Apis dispatcher — distinct from a `vanellus-"

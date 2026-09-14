@@ -96,3 +96,47 @@ inline checklist.
   (Per-agent is simpler to attribute; consolidated is quieter.)
 - Do we want domain `REQUEST_CHANGES` to ever block merge, or stay advisory and
   rely on the operator? (Default: advisory.)
+
+## Subscription provider routing for prompt-only CI reviews
+
+Loxia and its registered domain reviewers call `skill_runner.run_review_prompt`.
+That entrypoint shares the provider selection, headroom, cooldown, and failover
+loop used by `run_skill`. The role prompt and the GitHub publishing identity stay
+with the caller. A review lens's provider preference orders eligible attempts;
+it does not pin the lens to an exhausted provider.
+
+CI must set repository variable `APIS_REVIEW_MODELS` to a JSON object mapping
+qualified providers to explicitly selected model identifiers. Missing or malformed
+qualification fails the review job. `APIS_HARNESS_PROVIDERS` controls the eligible
+subscription pool using the existing router policy. This implementation provides
+restricted Claude and Codex prompt adapters. Cursor remains ineligible for this
+prompt-only surface until an equivalent tool restriction is verified; ordinary
+skill dispatch still uses its existing Cursor adapter.
+
+The CI workflow accepts existing Claude subscription authentication through
+`CLAUDE_CODE_OAUTH_TOKEN`, and optional Codex ChatGPT subscription authentication
+through `CODEX_AUTH_JSON`. The latter restores a private `auth.json` on the
+runner, rejects API-key credentials, and never logs its contents. Provisioning
+these secrets and model qualifications is separate from deploying the code.
+The workflow provides no metered-key fallback. Model/credential availability must
+be verified on the runner before claiming live multi-provider operation.
+
+The restricted adapter sends identical role/task input on every attempt and
+keeps publisher credentials out of the child environment. Claude runs without
+built-in tools, ambient settings, or MCP servers. Codex ignores user configuration,
+disables shell/exec and web search, requires ChatGPT login, and uses a read-only
+sandbox in an empty temporary directory. Because these attempts cannot perform
+publisher writes, timeout and outage retries are safe here. Ordinary skill work
+continues to avoid replaying an arbitrary side-effecting task after timeout.
+
+A failed or incomplete panel has no verdict. Apis records an incomplete-review
+retry instead of converting its failure into a native GitHub review. A recovered
+aggregation comment must match the current head and have been updated during the
+current invocation. A historical comment, even at the same head, cannot replace a
+failed current review. Unavailable capacity remains an explicit retry state.
+
+Verification: the quota regression fails when the shared loop is mutated to stop
+after its first provider. The fallback regressions fail when an old-head verdict
+or a verdict after failed aggregation is allowed through. Focused tests also cover
+same-head historical comments, preserved role input, publisher credential
+separation, explicit model qualification, and ordinary skill dispatch compatibility.
