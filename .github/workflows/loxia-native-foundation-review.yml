@@ -1,0 +1,86 @@
+name: Loxia — Native Foundation Review
+
+# Privileged second-principal review for the bounded foundation surface.
+# `pull_request_target` loads this workflow from the trusted base branch. The
+# job checks out only the base commit and reads the proposed diff/files through
+# GitHub's API, so the reviewer credential never reaches PR-head code.
+#
+# Activation remains explicit: the repository variable
+# LOXIA_NATIVE_FOUNDATION_REVIEW must be "true" and the named secret/expected
+# login must be configured. Until then the existing comment-only Loxia workflow
+# remains the sole active Loxia job.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to review
+        required: true
+
+jobs:
+  review:
+    name: Loxia native foundation review
+    if: >
+      vars.LOXIA_NATIVE_FOUNDATION_REVIEW == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.pull_request.base.ref == 'main')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Determine PR state
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          INPUT_PR_NUMBER: ${{ github.event.inputs.pr_number }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            number="$INPUT_PR_NUMBER"
+          else
+            number="$EVENT_PR_NUMBER"
+          fi
+          head_sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$number" --jq .head.sha)
+          base_sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$number" --jq .base.sha)
+          {
+            echo "number=$number"
+            echo "head_sha=$head_sha"
+            echo "base_sha=$base_sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.pr.outputs.base_sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run trusted native review
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN == '' && secrets.ANTHROPIC_API_KEY || '' }}
+          GITHUB_TOKEN: ${{ github.token }}
+          LOXIA_REVIEW_TOKEN: ${{ secrets.ATELES_AGENT_PAT }}
+          LOXIA_EXPECTED_REVIEWER_LOGIN: ${{ vars.LOXIA_EXPECTED_REVIEWER_LOGIN }}
+          LOXIA_NATIVE_FOUNDATION_REVIEW: "true"
+          LOXIA_NATIVE_REVIEW_ONLY: "true"
+          LOXIA_POST_REVIEW_COMMENT: "false"
+          LOXIA_USE_GITHUB_PR_API: "true"
+          LOXIA_PR_NUMBER: ${{ steps.pr.outputs.number }}
+          LOXIA_REPO: ${{ github.repository }}
+          LOXIA_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: python execution/scripts/loxia_review.py
