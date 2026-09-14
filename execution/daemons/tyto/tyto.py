@@ -55,9 +55,9 @@ Environment variables:
                             this is the backlog guard that stops an existing memo
                             archive from being transcribed en masse on first poll.
                             0 disables the age window (seeding still applies).
-  TYTO_VOICE_MEMO_INCLUDE_QTA  Set to 1 to also watch .qta files (default: 0).
-                            transcribe_audio.py converts .qta via ffmpeg, but every
-                            .qta on disk is old by construction, so it is opt-in.
+  TYTO_VOICE_MEMO_INCLUDE_QTA  Set to 0 to exclude .qta files (default: 1).
+                            Current Voice Memos can arrive as .qta; the same
+                            startup, age, and stable-file guards apply.
   TYTO_VOICE_MEMO_RETRY_STATE  Durable pending-retry journal (default:
                             ~/.local/state/ateles/tyto-voice-memo-retries.json).
   TYTO_VOICE_MEMO_RETRY_SECS  Delay after a failed memo transcription before
@@ -66,6 +66,8 @@ Environment variables:
                             subprocess (default: 1800). A timed-out recording
                             remains eligible for the next poll/retry.
   TYTO_TRANSCRIBE_ENABLED   Set to 0 to disable auto-transcription (default: 1)
+  NEOTOMA_RC_DIR            Deployed Neotoma runtime for transcription CLI calls.
+                           Must support per-agent key paths; checked before STT.
   TYTO_TRANSCRIBE_SCRIPT    Path to transcribe_audio.py (auto-detected from repo root)
   ELEVENLABS_API_KEY        Enables ElevenLabs for explicit diarization and
                             multi-channel audio; key presence alone does not route.
@@ -128,6 +130,7 @@ from lib.daemon_runtime import (  # noqa: E402
     AgentLoader,
     enforce_status_or_exit,
 )
+from lib.daemon_runtime.neotoma_signed import NEOTOMA_RC_DIR, agent_identity  # noqa: E402
 from lib.notify import Notifier, Priority  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -201,12 +204,9 @@ VOICE_MEMO_MAX_AGE_SECS = int(
     os.environ.get("TYTO_VOICE_MEMO_MAX_AGE_SECS", "3600")
 )
 
-# Whether to treat .qta (QuickTime Audio, older Voice Memos format) as eligible.
-# transcribe_audio.py converts .qta → .m4a via ffmpeg, so it is genuinely
-# transcribable — but every .qta in the archive is old by construction (the
-# format was retired years ago), so including it only widens the backlog the
-# guard has to hold back. Default off; set to 1 to opt in.
-VOICE_MEMO_INCLUDE_QTA = os.environ.get("TYTO_VOICE_MEMO_INCLUDE_QTA", "0") == "1"
+# Current Voice Memos may arrive as QTA. The existing startup and age guards
+# distinguish the archive from new arrivals regardless of container format.
+VOICE_MEMO_INCLUDE_QTA = os.environ.get("TYTO_VOICE_MEMO_INCLUDE_QTA", "1") == "1"
 VOICE_MEMO_RETRY_STATE = Path(
     os.environ.get(
         "TYTO_VOICE_MEMO_RETRY_STATE",
@@ -940,6 +940,22 @@ class RecordingWatcher:
             )
 
         python = _find_venv_python()
+        identity = agent_identity(DAEMON_NAME)
+        if identity is None or identity["sub"] != f"{DAEMON_NAME}@ateles-swarm":
+            raise RuntimeError(
+                "Tyto transcription requires its own AAuth identity; configure "
+                "ATELES_AAUTH_KEYS_DIR and remove a conflicting NEOTOMA_AAUTH_SUB."
+            )
+        # The CLI's shared default identity may belong to an interactive agent.
+        # Pin all nested transcription queries and stores to this daemon's grant.
+        transcription_env = dict(
+            os.environ,
+            NEOTOMA_AAUTH_PRIVATE_JWK_PATH=identity["key"],
+            NEOTOMA_AAUTH_SUB=identity["sub"],
+            NEOTOMA_AAUTH_KID=identity["kid"],
+            NEOTOMA_CLI_SCRIPT=str(Path(NEOTOMA_RC_DIR) / "dist" / "cli" / "bootstrap.js"),
+        )
+        _verify_transcription_cli_runtime(transcription_env)
         has_elevenlabs = bool(os.environ.get("ELEVENLABS_API_KEY", "").strip())
 
         def _extract_entity_id(stdout: str) -> str | None:
@@ -969,6 +985,7 @@ class RecordingWatcher:
                     capture_output=True,
                     text=True,
                     timeout=TRANSCRIBE_PROCESS_TIMEOUT_SECS,
+                    env=transcription_env,
                 )
             except subprocess.TimeoutExpired as exc:
                 stdout = exc.stdout or ""
@@ -1102,6 +1119,31 @@ class RecordingWatcher:
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+
+
+def _verify_transcription_cli_runtime(env: dict[str, str]) -> None:
+    """Fail before STT if the selected CLI cannot honor a per-agent key path."""
+    script = Path(env["NEOTOMA_CLI_SCRIPT"])
+    if not script.is_file():
+        raise RuntimeError("Tyto transcription requires a deployed Neotoma CLI bootstrap.")
+    signer = script.with_name("aauth_signer.js")
+    check = """
+        const { pathToFileURL } = await import('node:url');
+        const { resolve } = await import('node:path');
+        const signer = await import(pathToFileURL(process.argv[1]).href);
+        if (typeof signer.resolveCliPrivateJwkPath !== 'function' ||
+            resolve(signer.resolveCliPrivateJwkPath()) !==
+            resolve(process.env.NEOTOMA_AAUTH_PRIVATE_JWK_PATH)) process.exit(1);
+    """
+    result = subprocess.run(
+        [env.get("NODE_BIN", "node"), "--input-type=module", "-e", check, str(signer)],
+        env=env, capture_output=True, text=True, timeout=20,
+    )
+    if result.returncode:
+        raise RuntimeError(
+            "Tyto transcription requires a deployed Neotoma CLI supporting "
+            "per-agent key paths; update NEOTOMA_RC_DIR before retrying."
+        )
 
 
 async def _poll_watcher_forever(
