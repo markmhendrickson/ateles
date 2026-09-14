@@ -297,7 +297,7 @@ async def test_supersession_patches_only_bot_verdicts_and_dismisses_stale_block(
     assert {url.rsplit("/", 1)[-1] for url, _ in patched} == {"1", "4"}
     assert len(dismissed) == 1 and "Superseded by bbbbbbb" in dismissed[0][1]
     assert "earlier head and no longer applies" in dismissed[0][1]
-    assert "fresh panel review will run" in dismissed[0][1]
+    assert "fresh panel review is required" in dismissed[0][1]
 
 
 @pytest.mark.asyncio

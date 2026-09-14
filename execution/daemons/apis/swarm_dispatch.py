@@ -5939,7 +5939,7 @@ class SwarmDispatcher:
                                 "message": (
                                     f"Superseded by {head[:7]}: this review was "
                                     "made against an earlier head and no longer "
-                                    "applies. A fresh panel review will run "
+                                    "applies. A fresh panel review is required "
                                     "against the current head; see the PR comment "
                                     "thread for details."
                                 )
