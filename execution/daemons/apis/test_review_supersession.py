@@ -424,6 +424,131 @@ async def test_periodic_sweep_uses_each_open_pr_current_head(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_periodic_sweep_paginates_and_supersedes_page_two_stale_verdict(
+    monkeypatch,
+):
+    """Page-two stale verdicts must be bannered and dismissed exactly once.
+
+    Red before pagination: a single ``per_page=100`` list left PR 101's stale
+    bot verdict standing. Green after: page two is visited, the comment is
+    bannered, the native review reads back DISMISSED, and a second sweep
+    mutates nothing again.
+    """
+    page_one = [
+        {"number": n, "head": {"sha": HEAD_B}} for n in range(1, 101)
+    ]
+    page_two_pr = {"number": 101, "head": {"sha": HEAD_B}}
+    stale_body = sd.compose_vanellus_fallback_comment(
+        "**REQUEST_CHANGES**", HEAD_A
+    )
+    comments_by_pr = {
+        101: [_comment(stale_body, cid=55)],
+    }
+    reviews_by_pr = {
+        101: [
+            {
+                "id": 77,
+                "state": "CHANGES_REQUESTED",
+                "commit_id": HEAD_A,
+                "user": {"login": "github-actions[bot]"},
+            }
+        ],
+    }
+    list_pages: list[int] = []
+    patched_bodies: dict[int, str] = {}
+    dismissed: list[str] = []
+    patch_calls: list[str] = []
+    put_calls: list[str] = []
+    review_dismissed = False
+
+    def _pr_number(url: str) -> int:
+        # .../repos/o/r/issues/101/comments or .../pulls/101/reviews
+        parts = url.rstrip("/").split("/")
+        if "comments" in parts:
+            return int(parts[parts.index("comments") - 1])
+        if "reviews" in parts:
+            return int(parts[parts.index("reviews") - 1])
+        raise AssertionError(url)
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, params=None, headers=None):
+            params = params or {}
+            # Open-PR listing only: .../repos/{owner}/{repo}/pulls
+            if url.rstrip("/").endswith("/pulls"):
+                page = int(params.get("page") or 1)
+                list_pages.append(page)
+                if page == 1:
+                    return _Response(page_one)
+                if page == 2:
+                    return _Response([page_two_pr])
+                return _Response([])
+            if "/issues/" in url and url.rstrip("/").endswith("/comments"):
+                number = _pr_number(url)
+                raw = comments_by_pr.get(number, [])
+                bodies = [
+                    {**c, "body": patched_bodies.get(c["id"], c["body"])}
+                    for c in raw
+                ]
+                return _Response(bodies)
+            if "/pulls/" in url and url.rstrip("/").endswith("/reviews"):
+                number = _pr_number(url)
+                raw = reviews_by_pr.get(number, [])
+                if number == 101 and review_dismissed and raw:
+                    return _Response([{**raw[0], "state": "DISMISSED"}])
+                return _Response(raw)
+            if url.endswith("/reviews/77"):
+                return _Response({"state": "DISMISSED"})
+            if "/issues/comments/" in url:
+                cid = int(url.rsplit("/", 1)[-1])
+                return _Response({"body": patched_bodies[cid]})
+            raise AssertionError(url)
+
+        async def patch(self, url, json=None, headers=None):
+            cid = int(url.rsplit("/", 1)[-1])
+            patch_calls.append(url)
+            patched_bodies[cid] = json["body"]
+            return _Response({})
+
+        async def put(self, url, json=None, headers=None):
+            nonlocal review_dismissed
+            put_calls.append(url)
+            dismissed.append(json["message"])
+            review_dismissed = True
+            return _Response({"state": "DISMISSED"})
+
+    d = sd.SwarmDispatcher(notifier=type("N", (), {"send": lambda *a, **k: None})())
+    monkeypatch.setattr(sd.httpx, "AsyncClient", lambda **kw: Client())
+
+    first = await d.supersede_stale_review_verdicts(["o/r"])
+    assert 1 in list_pages and 2 in list_pages
+    assert first["prs"] == 101
+    assert first["comments"] == 1
+    assert first["reviews"] == 1
+    assert first["failures"] == 0
+    assert len(patch_calls) == 1
+    assert len(put_calls) == 1
+    assert "Superseded by" in patched_bodies[55]
+    assert sd.parse_aggregation_marker(patched_bodies[55])["superseded_by"] == HEAD_B
+    assert "bbbbbbb" in dismissed[0]
+
+    list_pages.clear()
+    second = await d.supersede_stale_review_verdicts(["o/r"])
+    assert 2 in list_pages
+    assert second["prs"] == 101
+    assert second["comments"] == 0
+    assert second["reviews"] == 0
+    assert second["failures"] == 0
+    assert len(patch_calls) == 1
+    assert len(put_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_merge_gate_ignores_stale_block_and_requires_current_clear(monkeypatch):
     comments = [
         _comment(

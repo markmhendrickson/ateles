@@ -1695,20 +1695,66 @@ def compose_auth_failure_comment(agent: str) -> str:
     )
 
 
+def _legacy_lens_prefix_present(body: str, lens: str) -> bool:
+    """True when a body still uses the unstamped ``review:<lens>`` prefix line."""
+    stripped = (body or "").lstrip()
+    prefix = f"review:{lens}"
+    if not stripped.startswith(prefix):
+        return False
+    rest = stripped[len(prefix) :]
+    return (not rest) or rest[0] in "\r\n\t "
+
+
+def lens_comment_satisfies_presence(
+    body: str, lens: str, head_sha: str = ""
+) -> bool:
+    """True when ``body`` is a non-superseded comment for ``lens`` at ``head_sha``.
+
+    Marker-first producer output (``<!-- review:<lens> commit=<sha> -->``) is the
+    authoritative presence signal. Legacy unstamped ``review:<lens>`` prefixes
+    still count only when no expected head is supplied — an unstamped line cannot
+    prove the current head. Superseded and wrong-head stamps never suppress
+    fallback.
+    """
+    text = body or ""
+    lens_l = (lens or "").lower()
+    if not lens_l:
+        return False
+    for stale in _LENS_SUPERSEDED_RE.finditer(text):
+        if stale.group("lens").lower() == lens_l:
+            return False
+    expected = _normalise_full_sha(head_sha)
+    for match in _LENS_MARKER_RE.finditer(text):
+        if match.group("lens").lower() != lens_l:
+            continue
+        commit = match.group("sha").lower()
+        if expected:
+            return commit == expected
+        return True
+    if expected:
+        return False
+    return _legacy_lens_prefix_present(text, lens)
+
+
 def lenses_missing_comments(
-    comment_bodies: list[str], lenses: list[str]
+    comment_bodies: list[str],
+    lenses: list[str],
+    head_sha: str = "",
 ) -> list[str]:
-    """Lenses whose `review:<lens>` comment never landed on the PR.
+    """Lenses whose current-head review comment never landed on the PR.
 
     Headless panelists post their own comment when they can; this identifies
     the ones that could not so the dispatcher can post the captured review
     itself (PR-87 self-dogfood finding: 3 of 4 panel reviews existed only on
-    stdout)."""
+    stdout). Presence uses the shared lens marker parser — the same contract
+    ``_panelist_prompt`` / ``compose_fallback_comment`` produce — with
+    current-head matching and supersession exclusion.
+    """
     posted = {
         lens
         for lens in lenses
         for body in comment_bodies
-        if body.lstrip().startswith(f"review:{lens}")
+        if lens_comment_satisfies_presence(body, lens, head_sha=head_sha)
     }
     return [lens for lens in lenses if lens not in posted]
 
@@ -6021,35 +6067,59 @@ class SwarmDispatcher:
     async def supersede_stale_review_verdicts(
         self, repositories: list[str]
     ) -> dict[str, int]:
-        """Periodic backup for synchronize/reopen supersession (lag <= sweep)."""
+        """Periodic backup for synchronize/reopen supersession (lag <= sweep).
+
+        Pages the full open-PR set. A single ``per_page=100`` request would leave
+        later-page PRs outside bounded-lag recovery after a missed webhook.
+        Each page is superseded as it arrives so a later-page list failure cannot
+        discard already-fetched earlier pages.
+        """
         totals = {"prs": 0, "comments": 0, "reviews": 0, "failures": 0}
         for repository in repositories:
             try:
                 async with httpx.AsyncClient(timeout=30) as client:
-                    resp = await client.get(
-                        f"https://api.github.com/repos/{repository}/pulls",
-                        params={"state": "open", "per_page": 100},
-                        headers=self._github_headers(repository),
-                    )
-                    resp.raise_for_status()
-                    prs = resp.json()
+                    for page in range(1, _MAX_COMMENT_PAGES + 1):
+                        try:
+                            resp = await client.get(
+                                f"https://api.github.com/repos/{repository}/pulls",
+                                params={
+                                    "state": "open",
+                                    "per_page": 100,
+                                    "page": page,
+                                },
+                                headers=self._github_headers(repository),
+                            )
+                            resp.raise_for_status()
+                            batch = resp.json()
+                        except Exception as exc:
+                            totals["failures"] += 1
+                            log.warning(
+                                f"[{DAEMON_NAME}] supersession sweep could not "
+                                f"list {repository} page {page}: "
+                                f"{str(exc)[:240]}"
+                            )
+                            break
+                        if not batch:
+                            break
+                        for pr in batch:
+                            head = ((pr.get("head") or {}).get("sha") or "")
+                            if not _normalise_full_sha(head):
+                                continue
+                            result = await self._supersede_stale_verdicts(
+                                repository, int(pr.get("number") or 0), head
+                            )
+                            totals["prs"] += 1
+                            for key in ("comments", "reviews", "failures"):
+                                totals[key] += result[key]
+                        if len(batch) < 100:
+                            break
             except Exception as exc:
                 totals["failures"] += 1
                 log.warning(
-                    f"[{DAEMON_NAME}] supersession sweep could not list "
+                    f"[{DAEMON_NAME}] supersession sweep failed for "
                     f"{repository}: {str(exc)[:240]}"
                 )
                 continue
-            for pr in prs:
-                head = ((pr.get("head") or {}).get("sha") or "")
-                if not _normalise_full_sha(head):
-                    continue
-                result = await self._supersede_stale_verdicts(
-                    repository, int(pr.get("number") or 0), head
-                )
-                totals["prs"] += 1
-                for key in ("comments", "reviews", "failures"):
-                    totals[key] += result[key]
         return totals
 
     async def _all_issue_comments(
@@ -8100,7 +8170,9 @@ class SwarmDispatcher:
                         "rather than posting unpinned verdicts"
                     )
                     return
-                for lens in lenses_missing_comments(bodies, list(captured)):
+                for lens in lenses_missing_comments(
+                    bodies, list(captured), head_sha=head_sha
+                ):
                     body = compose_fallback_comment(
                         lens, agents.get(lens, "unknown panelist"), captured[lens],
                         head_sha,

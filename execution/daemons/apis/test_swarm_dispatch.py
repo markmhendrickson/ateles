@@ -42,6 +42,7 @@ from swarm_dispatch import (
     agent_github_login,
     attribution_header,
     compose_fallback_comment,
+    compose_superseded_verdict,
     compose_vanellus_fallback_comment,
     content_digest,
     cleanup_pr_worktree,
@@ -1451,6 +1452,32 @@ def test_lenses_missing_comments_tolerates_leading_whitespace():
 
 def test_lenses_missing_comments_all_missing_when_no_comments():
     assert lenses_missing_comments([], ["pm", "qa"]) == ["pm", "qa"]
+
+
+def test_lenses_missing_comments_marker_first_current_head_suppresses_fallback():
+    """Producer/detector contract: stamped current-head comments are present.
+
+    Red before the marker-first presence fix: a conforming
+    ``<!-- review:qa commit=<head> -->`` body failed ``startswith("review:qa")``
+    and stayed in the missing set, so the dispatcher posted a duplicate fallback.
+    """
+    head = "a" * 40
+    old = "b" * 40
+    current = compose_fallback_comment("qa", "phoenicurus", "ok", head)
+    assert current.lstrip().startswith("<!-- review:qa commit=")
+    assert lenses_missing_comments([current], ["qa"], head_sha=head) == []
+
+    stale_stamp = compose_fallback_comment("qa", "phoenicurus", "old", old)
+    assert lenses_missing_comments([stale_stamp], ["qa"], head_sha=head) == ["qa"]
+
+    superseded = compose_superseded_verdict(stale_stamp, head)
+    assert "review:qa-superseded" in superseded
+    assert lenses_missing_comments([superseded], ["qa"], head_sha=head) == ["qa"]
+
+    # Legacy unstamped lines cannot prove the current head.
+    assert lenses_missing_comments(["review:qa\nlegacy"], ["qa"], head_sha=head) == [
+        "qa"
+    ]
 
 
 # ── comment attribution ─────────────────────────────────────────────────────
