@@ -36,7 +36,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import UTC, date, datetime
+from datetime import date
 from pathlib import Path
 
 import requests
@@ -2520,13 +2520,44 @@ def save_transcription(
     except ValueError:
         audio_file_path_rel = str(audio_path)
 
-    now_utc = datetime.now(UTC).isoformat()
     title = f"Transcription — {audio_path.name}"
-    data_source = f"transcribe_audio.py store {now_utc} path={resolved_audio}"
-
     duration = _json_safe_float(transcription_result.get("audio_duration_seconds"))
-    size_i = audio_path.stat().st_size
-    content_hash = _audio_content_hash(audio_path)
+    file_present = resolved_audio.is_file()
+    extras = dict(extra_entity_fields or {})
+
+    # File-backed stores fail closed when the audio is missing. Metadata-only
+    # imports (attach_audio_file=False) may supply size/hash from the result.
+    if attach_audio_file and not file_present:
+        raise RuntimeError("Transcription ingestion incomplete: audio file missing")
+
+    content_hash = _audio_content_hash(audio_path) if file_present else None
+    if not content_hash:
+        content_hash = (
+            transcription_result.get("audio_content_sha256")
+            or extras.get("audio_content_sha256")
+        )
+    if file_present:
+        try:
+            size_i = int(audio_path.stat().st_size)
+        except OSError as exc:
+            if attach_audio_file:
+                raise RuntimeError(
+                    "Transcription ingestion incomplete: audio file unreadable"
+                ) from exc
+            size_i = transcription_result.get("file_size_bytes", extras.get("file_size_bytes"))
+    else:
+        size_i = transcription_result.get("file_size_bytes", extras.get("file_size_bytes"))
+    if size_i is None:
+        raise RuntimeError("Transcription ingestion incomplete: file size unavailable")
+    size_i = int(size_i)
+
+    # Stable under the content-keyed idempotency key: a changing timestamp would
+    # turn a post-write read-back retry into ERR_IDEMPOTENCY_MISMATCH forever.
+    data_source = (
+        f"transcribe_audio.py store audio_sha256={content_hash}"
+        if content_hash
+        else f"transcribe_audio.py store path={resolved_audio}"
+    )
 
     entity = {
         "entity_type": "transcription",
@@ -2553,16 +2584,17 @@ def save_transcription(
         value = transcription_result.get(field)
         if value:
             entity[field] = value
-    if extra_entity_fields:
-        entity.update(extra_entity_fields)
+    if extras:
+        entity.update(extras)
     # Capture method never implies consent; unknown is an explicit absence of attestation.
-    entity["transcription_engine"] = transcription_result.get("transcription_engine") or "unknown"
+    entity["transcription_engine"] = transcription_result.get("transcription_engine") or entity.get("transcription_engine") or "unknown"
     for field in ("capture_method", "consent_basis", "transcription_engine"):
         entity[field] = str(entity.get(field) or "unknown").strip() or "unknown"
     entity["audio_content_sha256"] = content_hash
     entity["file_size_bytes"] = size_i
     entity["original_source_file"] = original_source_file or audio_path.name
     entity["transcription_text"] = transcription_result["transcription_text"]
+    entity["data_source"] = data_source
     if not entity["audio_content_sha256"]:
         raise RuntimeError("Transcription ingestion incomplete: audio hash unavailable")
     attachment_requested = attach_audio_file
@@ -2574,13 +2606,14 @@ def save_transcription(
             "NEOTOMA_MAX_TRANSCRIPTION_WAV_BYTES", str(2 * 1024 * 1024 * 1024 - 1024)
         )
     )
-    attach_wav = bool(attach_audio_file and resolved_audio.is_file())
+    attach_wav = bool(attach_audio_file and file_present)
     if attach_wav:
         try:
             wav_bytes = resolved_audio.stat().st_size
         except OSError:
-            attach_wav = False
-            wav_bytes = 0
+            raise RuntimeError(
+                "Transcription ingestion incomplete: audio file unreadable"
+            )
         else:
             if wav_bytes > max_wav_attach:
                 raise RuntimeError(

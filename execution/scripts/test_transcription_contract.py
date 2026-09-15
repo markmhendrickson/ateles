@@ -74,6 +74,21 @@ def test_repeat_verified_store_remains_success(storage):
     assert save()["entity_id"] == save()["entity_id"]
 
 
+def test_retry_payload_is_byte_stable_under_fixed_idempotency_key(storage):
+    """Changing data_source under a content-keyed idempotency key makes retries reject."""
+    state, save = storage
+    save()
+    first = dict(state["entity"])
+    first_cmd = list(state["cmd"])
+    save()
+    assert state["cmd"][state["cmd"].index("--idempotency-key") + 1] == (
+        first_cmd[first_cmd.index("--idempotency-key") + 1]
+    )
+    assert state["entity"] == first
+    assert state["entity"]["data_source"] == first["data_source"]
+    assert "transcribe_audio.py store" in state["entity"]["data_source"]
+
+
 def test_metadata_only_is_explicit_and_still_verified(storage):
     state, save = storage
     assert save(attach_audio_file=False)["entity_id"] == "ent_fixture"
@@ -81,6 +96,73 @@ def test_metadata_only_is_explicit_and_still_verified(storage):
     state["drop"] = "transcription_text"
     with pytest.raises(RuntimeError, match="incomplete"):
         save(attach_audio_file=False)
+
+
+def test_metadata_only_missing_file_still_stores(tmp_path, monkeypatch):
+    """Explicit metadata-only imports must not require the audio bytes on disk."""
+    missing = tmp_path / "absent.wav"
+    state = {}
+    monkeypatch.setattr(ta, "_neotoma_cli_available", lambda: True)
+    monkeypatch.setattr(ta, "_neotoma_auth_preflight", lambda: (True, "ok"))
+    monkeypatch.setattr(ta, "_neotoma_prod_cli_argv", lambda args: ["neotoma", *args])
+
+    def run(cmd, **kwargs):
+        entity = json.loads(Path(cmd[cmd.index("--file") + 1]).read_text())[0]
+        state["entity"] = entity
+        state["cmd"] = cmd
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {"structured": {"entities": [{"entity_id": "ent_meta"}]}}
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(ta.subprocess, "run", run)
+    monkeypatch.setattr(
+        ta,
+        "_neotoma_cli_json",
+        lambda args: {
+            "entity": {"id": "ent_meta", "snapshot": state["entity"]}
+        },
+    )
+    result = ta.save_transcription(
+        missing,
+        {
+            "transcription_text": "Recovered transcript.",
+            "transcription_engine": "local_whisper_cpp",
+            "file_size_bytes": 2048,
+            "audio_content_sha256": "a" * 64,
+        },
+        attach_audio_file=False,
+        extra_entity_fields={"capture_method": "voice_memo", "consent_basis": "unknown"},
+    )
+    assert result["entity_id"] == "ent_meta"
+    assert "--file-path" not in state["cmd"]
+    assert state["entity"]["file_size_bytes"] == 2048
+    assert state["entity"]["audio_content_sha256"] == "a" * 64
+
+
+def test_file_backed_missing_audio_fails_closed(tmp_path, monkeypatch):
+    missing = tmp_path / "absent.wav"
+    monkeypatch.setattr(ta, "_neotoma_cli_available", lambda: True)
+    monkeypatch.setattr(ta, "_neotoma_auth_preflight", lambda: (True, "ok"))
+    monkeypatch.setattr(ta, "_neotoma_prod_cli_argv", lambda args: ["neotoma", *args])
+    monkeypatch.setattr(
+        ta.subprocess,
+        "run",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("store must not run")),
+    )
+    with pytest.raises(RuntimeError, match="incomplete"):
+        ta.save_transcription(
+            missing,
+            {
+                "transcription_text": "Should not store.",
+                "transcription_engine": "local_whisper_cpp",
+            },
+            attach_audio_file=True,
+            extra_entity_fields={"capture_method": "voice_memo", "consent_basis": "unknown"},
+        )
 
 
 def test_attachment_limit_cannot_report_complete(storage, monkeypatch):
