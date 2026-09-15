@@ -351,10 +351,11 @@ def test_blocker_still_delivers_when_digest_disabled(tmp_path, monkeypatch):
         returncode = 0
         stderr = ""
 
-    monkeypatch.setattr(
-        "lib.notify.notifier.subprocess.run",
-        lambda cmd, **k: calls.setdefault("cmd", cmd) or _P(),
-    )
+    def _run(cmd, **kwargs):
+        calls["cmd"] = cmd
+        return _P()
+
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", _run)
     assert n.send("daemon hard failure", Priority.BLOCKER, handler="apis") is True
     subject = calls["cmd"][calls["cmd"].index("--subject") + 1]
     assert subject.startswith("[Ateles]")
@@ -373,10 +374,11 @@ def test_operator_decision_still_delivers_outside_silence(tmp_path, monkeypatch)
         returncode = 0
         stderr = ""
 
-    monkeypatch.setattr(
-        "lib.notify.notifier.subprocess.run",
-        lambda cmd, **k: calls.setdefault("cmd", cmd) or _P(),
-    )
+    def _run(cmd, **kwargs):
+        calls["cmd"] = cmd
+        return _P()
+
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", _run)
     assert n.send("approve merge bypass?", Priority.OPERATOR_DECISION, handler="apis")
     body = calls["cmd"][calls["cmd"].index("--body") + 1]
     assert "approve merge bypass?" in body
