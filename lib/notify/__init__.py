@@ -8,14 +8,15 @@ Usage:
     notifier.send("API error: 503", priority="blocker", handler="monedula")
 
 Priority levels (maps to priority_rubric fields):
-    critical        — immediate, bypasses silence window
-    blocker         — send now, retry after 30min
-    operator_decision — hold for digest unless urgent
-    info            — hold for digest
+    critical          — immediate, bypasses silence window
+    blocker           — send now
+    operator_decision — send now; held across silence for individual delivery
+    warn              — send now outside silence; held across silence
+    info              — logged only (no digest email, no queue)
 
-See lib/notify/notifier.py for implementation.
+Routine digests are disabled. See lib/notify/notifier.py.
 """
 
-from .notifier import Notifier, Priority
+from .notifier import Notifier, Priority, is_actionable_held_notice
 
-__all__ = ["Notifier", "Priority"]
+__all__ = ["Notifier", "Priority", "is_actionable_held_notice"]

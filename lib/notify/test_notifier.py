@@ -43,10 +43,12 @@ def test_warn_accepts_string_priority():
 
 
 def test_warn_queues_for_digest_in_silence_window():
+    # WARN inside silence is still held (actionable) — but never as a digest email.
     n = Notifier(rubric=ALWAYS_SILENT)
     sent = n.send("dispatch failed", priority=Priority.WARN, handler="formica")
     assert sent is False
     assert any("dispatch failed" in m for m in n._digest_queue)
+    assert all(m.lstrip().startswith("⚠") for m in n._digest_queue)
 
 
 def test_all_daemon_used_priorities_route():
@@ -123,9 +125,13 @@ def test_notify_to_defaults_to_operator_email(monkeypatch):
 
 
 def test_email_failure_falls_back_to_telegram(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     n = Notifier(rubric=NO_SILENCE)  # apprise unconfigured → Telegram returns False
+    n._apprise = None  # hermetic: ignore process-env tokens from other modules
     n._email_primary = True
     n._operator_email = "op@test"
+    n._notify_to = "op@test"
 
     class _P:
         returncode = 1
@@ -217,14 +223,11 @@ def test_from_neotoma_unset_topic_env_falls_back_to_default(monkeypatch):
     assert n._topic_id == "999"
 
 
-# ── digest queue is persistent and self-draining ────────────────────────────
+# ── held-notice queue is persistent; routine digests are disabled ───────────
 #
-# Before this, `_digest_queue` was an in-memory list whose only drain,
-# `flush_digest()`, had zero non-test callers in the tree. Daemons are
-# long-lived, so an OPERATOR_DECISION raised inside the silence window was
-# appended and never delivered. Measured on apis.log 2026-09-01: 45 "queuing
-# for digest" lines, 0 digests ever sent — the mechanism behind "the escalation
-# was written somewhere nobody reads" (ateles#565, #583).
+# Escalations held across silence must survive restart and drain as individual
+# deliveries. Routine INFO must never grow the queue or produce a bulk
+# "📋 Digest" email (standing_rule: do not send routine Ateles digest emails).
 
 
 def _notifier(tmp_path, rubric, sent):
@@ -246,9 +249,11 @@ def test_queued_escalation_survives_restart_and_is_delivered(tmp_path):
     n2 = _notifier(tmp_path, NO_SILENCE, sent)
     assert len(n2._digest_queue) == 1
 
-    # Outside the silence window, the next send drains it.
+    # Outside the silence window, the next send drains it individually —
+    # never as a bulk "📋 Digest" message.
     n2.send("a later alert", Priority.OPERATOR_DECISION, handler="apis")
-    assert any("570" in m and "Digest" in m for m in sent), sent
+    assert any("570" in m for m in sent), sent
+    assert all("📋 Digest" not in m for m in sent), sent
     assert n2._digest_queue == []
 
 
@@ -264,22 +269,25 @@ def test_failed_digest_delivery_keeps_items_queued(tmp_path):
     assert len(n._digest_queue) == 1
 
 
-def test_concurrent_digest_writes_preserve_every_notification(tmp_path, monkeypatch):
-    """Worker-thread completions must not overwrite each other's queue writes."""
+def test_concurrent_held_writes_preserve_every_notification(tmp_path, monkeypatch):
+    """Worker-thread completions must not overwrite each other's held-queue writes."""
     sent = []
-    n = _notifier(tmp_path, NO_SILENCE, sent)
+    # Silence window so WARN holds rather than delivering immediately.
+    n = _notifier(tmp_path, ALWAYS_SILENT, sent)
     monkeypatch.setattr(n, "_maybe_flush_digest", lambda: None)
     messages = [f"completion-{index}" for index in range(32)]
     start = threading.Barrier(len(messages))
 
     def queue(message):
         start.wait()
-        n.send(message, Priority.INFO, handler="tyto")
+        n.send(message, Priority.WARN, handler="tyto")
 
     with ThreadPoolExecutor(max_workers=len(messages)) as pool:
         list(pool.map(queue, messages))
 
-    assert sorted(n._digest_queue) == sorted(f"[tyto] {message}" for message in messages)
+    assert sorted(n._digest_queue) == sorted(
+        f"⚠ [tyto] {message}" for message in messages
+    )
 
 
 def test_unreadable_queue_file_does_not_crash_send(tmp_path):
@@ -289,3 +297,149 @@ def test_unreadable_queue_file_does_not_crash_send(tmp_path):
     assert n._digest_queue == []
     n.send("still works", Priority.BLOCKER, handler="apis")
     assert any("still works" in m for m in sent)
+
+
+# ── standing_rule: no routine digest email; actionable delivery intact ──────
+
+
+def test_info_does_not_grow_queue_or_emit_digest(tmp_path):
+    """Routine INFO must not pile up for a later flush or mint a Digest email."""
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    for i in range(5):
+        assert n.send(f"monedula started #{i}", Priority.INFO, handler="monedula") is False
+    assert n._digest_queue == []
+    assert sent == []
+    assert not n._digest_path.exists()
+
+
+def test_info_does_not_self_flush_as_digest_email(tmp_path, monkeypatch):
+    """Even with email primary, INFO must never produce a Digest-shaped send."""
+    sent_cmds = []
+    n = Notifier(rubric=NO_SILENCE)
+    n._digest_path = tmp_path / "digest.json"
+    n._email_primary = True
+    n._notify_to = "alerts@test"
+    n._swarm_email = "swarm@test"
+    n._apprise = None
+
+    class _P:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(cmd, **k):
+        sent_cmds.append(cmd)
+        return _P()
+
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", fake_run)
+    n.send("tyto auto-transcribing", Priority.INFO, handler="tyto")
+    n.send("another info", Priority.INFO, handler="apis")
+    assert sent_cmds == []
+    assert n._digest_queue == []
+
+
+def test_blocker_still_delivers_when_digest_disabled(tmp_path, monkeypatch):
+    """Actionable failure notifications remain intact on the email channel."""
+    calls = {}
+    n = Notifier(rubric=NO_SILENCE)
+    n._digest_path = tmp_path / "digest.json"
+    n._email_primary = True
+    n._notify_to = "alerts@test"
+    n._swarm_email = "swarm@test"
+
+    class _P:
+        returncode = 0
+        stderr = ""
+
+    monkeypatch.setattr(
+        "lib.notify.notifier.subprocess.run",
+        lambda cmd, **k: calls.setdefault("cmd", cmd) or _P(),
+    )
+    assert n.send("daemon hard failure", Priority.BLOCKER, handler="apis") is True
+    subject = calls["cmd"][calls["cmd"].index("--subject") + 1]
+    assert subject.startswith("[Ateles]")
+    assert "Digest" not in subject
+    assert "daemon hard failure" in subject
+
+
+def test_operator_decision_still_delivers_outside_silence(tmp_path, monkeypatch):
+    calls = {}
+    n = Notifier(rubric=NO_SILENCE)
+    n._digest_path = tmp_path / "digest.json"
+    n._email_primary = True
+    n._notify_to = "alerts@test"
+
+    class _P:
+        returncode = 0
+        stderr = ""
+
+    monkeypatch.setattr(
+        "lib.notify.notifier.subprocess.run",
+        lambda cmd, **k: calls.setdefault("cmd", cmd) or _P(),
+    )
+    assert n.send("approve merge bypass?", Priority.OPERATOR_DECISION, handler="apis")
+    body = calls["cmd"][calls["cmd"].index("--body") + 1]
+    assert "approve merge bypass?" in body
+    assert "📋 Digest" not in body
+
+
+def test_classify_then_clear_preserves_actionable_drops_routine(tmp_path):
+    """Legacy mixed queues: drop INFO residue; deliver actionable individually."""
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    # Simulate a pre-existing digest file accumulated under the old policy.
+    n._digest_path.write_text(
+        __import__("json").dumps(
+            [
+                "[monedula] monedula started",
+                "[tyto] Auto-transcribing: clip.mp4",
+                "⚠️ [apis] PR #570: auto-fix exhausted — needs operator",
+                "[apis] Task created: something routine",
+                "⚠ [formica] dispatch failed for issue #12",
+            ]
+        )
+    )
+    actionable, routine = n.classify_queue()
+    assert len(actionable) == 2
+    assert len(routine) == 3
+
+    assert n.flush_digest() is True
+    assert n._digest_queue == []
+    assert any("570" in m for m in sent)
+    assert any("dispatch failed" in m for m in sent)
+    assert all("📋 Digest" not in m for m in sent)
+    assert all("monedula started" not in m for m in sent)
+    assert all("Auto-transcribing" not in m for m in sent)
+    assert all("Task created" not in m for m in sent)
+
+
+def test_flush_never_emits_bulk_digest_payload(tmp_path):
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    n._digest_path.write_text(
+        __import__("json").dumps(["⚠️ held decision", "[info] noise"])
+    )
+    n.flush_digest()
+    assert sent == ["⚠️ held decision"]
+    # Belt-and-suspenders: the real _deliver refuses digest-shaped payloads
+    # (do not use the _notifier mock — it always returns True).
+    real = Notifier(rubric=NO_SILENCE)
+    real._digest_path = tmp_path / "digest-refuse.json"
+    real._email_primary = False
+    real._apprise = None
+    assert (
+        Notifier._deliver(real, "📋 Digest (99 items)\n\n• noise", force=True) is False
+    )
+
+
+def test_hidden_queue_does_not_grow_from_info_then_self_flush(tmp_path):
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    n.send("noise a", Priority.INFO, handler="monedula")
+    n.send("noise b", Priority.INFO, handler="tyto")
+    # A later actionable send must not flush a pile of INFO as a digest.
+    n.send("real blocker", Priority.BLOCKER, handler="apis")
+    assert n._digest_queue == []
+    assert any("real blocker" in m for m in sent)
+    assert all("noise" not in m for m in sent)
+    assert all("📋 Digest" not in m for m in sent)
