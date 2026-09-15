@@ -817,10 +817,89 @@ def spawn_prepare_agent(
 # ---------------------------------------------------------------------------
 
 
+def check_release_checkout_freshness(dry_run: bool) -> None:
+    """
+    Report drift in the checkout the RELEASE is cut from, and page the operator
+    when that drift will block publishing.
+
+    This is a different checkout from the one `main()` already checks. That one
+    is the daemon's own code (`Path(__file__).parent`); this one is
+    ``NEOTOMA_REPO_ROOT``, the Neotoma tree whose contents `publish.py` tags and
+    ships. Nothing checked the second one, which is how it sat 61 commits behind
+    for six weeks while releases were cut from it (ateles#1014).
+
+    A dirty release checkout is escalated, not merely logged. `publish.preflight`
+    refuses to tag atop a dirty tree — correctly, since publishing ships whatever
+    is in the working tree — so an uncommitted file here is not a warning about a
+    possible future problem: it is a release path that is already blocked, and it
+    stays blocked until a person clears it. That is the exact shape that went
+    unnoticed from 2026-08-05: the tree was dirty, the update silently could not
+    happen, and no one was told for six weeks.
+
+    Being BEHIND is logged but not escalated. It degrades the release (a stale
+    tree ships) without stopping it, and the next successful publish moves the
+    checkout anyway, so paging on it would fire on every routine lag and train
+    the operator to ignore the alert that matters.
+
+    Never raises. A freshness report must not be the reason a release fails to
+    prepare — and note that `ATELES_ENFORCE_CHECKOUT_FRESHNESS` deliberately does
+    NOT apply here: that switch governs whether a daemon refuses to run its own
+    stale code, which is a different question from whether the tree being shipped
+    is clean.
+    """
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT / "lib" / "daemon_runtime"))
+        from checkout_drift import check_checkout_drift  # noqa: PLC0415
+
+        report = check_checkout_drift(NEOTOMA_REPO_ROOT)
+    except Exception as exc:  # noqa: BLE001
+        # Absent, but visible — the same posture as the daemon's own check.
+        log.warning(f"release checkout freshness check unavailable: {exc}")
+        return
+
+    if not report.is_drifted:
+        log.info(f"release checkout ({NEOTOMA_REPO_ROOT}): {report.summary()}")
+        return
+
+    log.error(
+        f"RELEASE CHECKOUT DRIFT at {NEOTOMA_REPO_ROOT} — {report.summary()}. "
+        f"HEAD={report.head} upstream={report.upstream}. "
+        "This is the tree the release is cut from."
+    )
+
+    if report.state != "dirty":
+        return
+
+    # Dirty: the release path is blocked right now. Say so where a person looks.
+    if dry_run:
+        log.info("dry run — not notifying the operator about the dirty release checkout.")
+        return
+
+    notify_operator(
+        f"🔴 Phoenicurus: the release checkout is DIRTY and publishing is blocked.\n\n"
+        f"`{NEOTOMA_REPO_ROOT}` has uncommitted changes to tracked files. "
+        f"`publish.py` refuses to tag atop a dirty tree, so no release can be cut "
+        f"from it until the tree is clean — and it will stay that way silently.\n\n"
+        f"Check whether those edits are real work before discarding them:\n"
+        f"  git -C {NEOTOMA_REPO_ROOT} status\n"
+        f"  git -C {NEOTOMA_REPO_ROOT} diff\n\n"
+        f"Land them on a branch if they matter, then bring the checkout current:\n"
+        f"  git -C {NEOTOMA_REPO_ROOT} fetch && "
+        f"git -C {NEOTOMA_REPO_ROOT} merge --ff-only origin/main",
+        subject="Phoenicurus: release checkout dirty — publishing blocked",
+    )
+
+
 def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
     if not (NEOTOMA_REPO_ROOT / "package.json").exists():
         log.error(f"NEOTOMA_REPO_ROOT has no package.json: {NEOTOMA_REPO_ROOT}")
         return 1
+
+    # Before deciding whether to prepare anything, establish whether the tree a
+    # release would be cut from is even publishable. Runs on every invocation,
+    # including the early-exit paths below, because a checkout that has been
+    # blocked for weeks is exactly the case where nothing else runs.
+    check_release_checkout_freshness(dry_run)
 
     # The scheduled path is rate-limited to one run per calendar day. On-merge
     # runs are rate-limited per main commit instead (checked after the fetch
