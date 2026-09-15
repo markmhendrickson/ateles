@@ -53,7 +53,7 @@ change, the outbound operation per step, the identity question the mailbox raise
 not, and the refusals. Out of scope: the general adapter rules (`adapters.md`), the workflows whose steps
 take these operations (`workflows.md`), the gate's decision function (`gates_and_workflows.md`), what the
 adapter is granted (`authority_model.md#grants`), and the per-instance binding of a mailbox to an operator,
-which is a `channel_config` context entity resolved at runtime and never named here.
+which is a `vendor_binding` context entity resolved at runtime and never named here.
 
 ## What artifacts this system holds
 
@@ -145,7 +145,7 @@ and not a silent omission here.
 | a message added, in the sent folder, matching an action's `dedup_key` | handled | an action confirmation on the `send_external_comms` action, `taken_at` and `result_ref` naming the message id |
 | a message added, in the sent folder, matching no action | handled | an observation, **and a defect to surface**: the mailbox sent something the record did not intend. It is the mail system's exact analogue of `github.md`'s merge-with-no-action row, and it is the signal that a send escaped the gate |
 | a message added, that the system classified as spam or as a promotion | handled | an observation on the thread; **it yields no task for intake**. The exclusion is stated as a rule under *What this adapter refuses* rather than as a silent filter, because a filter nobody declared is the silent branch the disposition rule exists to close |
-| a message added, to a mailbox the `channel_config` does not name | handled | `dropped`, reason `untracked_mailbox` |
+| a message added, to a mailbox the `vendor_binding` does not name | handled | `dropped`, reason `untracked_mailbox` |
 | a message deleted (the history entry) | handled | an observation on the artifact (`state: deleted`). The record keeps the artifact and its observations; a message removed at the system is not a message the record never held |
 | a message trashed or untrashed | handled | an observation on `labels[]`, trash being a label. It is not deletion and is reversible |
 | a draft's message added or removed | deliberately ignored | `dropped`, reason `draft_not_used`: a mail-system draft is not a record the design tracks, and its message-level churn says nothing about any artifact. See *The draft hazard* |

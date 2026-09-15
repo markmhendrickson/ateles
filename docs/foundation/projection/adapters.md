@@ -5,7 +5,7 @@
 
 Every rule `adapters.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`adapters.md`](../adapters.md) and are not repeated here (decision 66).
 
-42 rules.
+43 rules.
 
 ## [The workflow engine never reads an external system; it reads the record](../adapters.md#the-workflow-engine-never-reads-an-external-system-it-reads-the-record)
 
@@ -117,3 +117,7 @@ Every rule `adapters.md` owns, one entry each: the rule's own statement from `co
 ## [Where the binding is declared: no new home is needed](../adapters.md#where-the-binding-is-declared-no-new-home-is-needed)
 
 - **AD-41** — the credential a role presents to a system's instance is a `vendor_binding` capability slot naming a secret, never carrying it; the grant stays matched on the credential *[M]*
+
+## [What separates a binding from a deployment's configuration](../adapters.md#what-separates-a-binding-from-a-deployments-configuration)
+
+- **AD-42** — (decision 35's distinguishing rule, the vocabulary pass of 2026-09-15): a `vendor_binding` addresses an external system the swarm does not own; a `deployment_configuration` carries out and verifies a procedure on the swarm's own software; a verification target is the mark of the second and no binding carries one *[M for the type separation and the census; R for whether a newly proposed type is one of these two under a second name, which is a reading of the rule]*

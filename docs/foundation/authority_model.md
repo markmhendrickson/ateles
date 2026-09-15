@@ -1270,13 +1270,13 @@ seat rather than per operator, and would first have to say why `AWAITS` named no
 **Matrix.** AU-17 is mechanical; decision 43's governance cell reads the mark (`conformance_suite.md`).
 
 **C13, settled by rulings made since it was opened.** The question was which entities carry the routing
-table: `swarm_roster` with `channel_config` (`multi_tenant.md`), or `operator` with `team` (the swarm-spec
+table: `swarm_roster` with `vendor_binding` (`multi_tenant.md`), or `operator` with `team` (the swarm-spec
 proposal the header cites). Two
 rulings answer it without naming it. C9, above, makes the `operator` entity one "carrying identity and
 nothing descriptive", which leaves it nothing to carry a routing table on. Decision 37 (2026-09-06,
 `gates_and_workflows.md#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait`)
 rules that "which reason classes and which deliveries a given operator wants carried, and to which chat,
-is data on the binding that names the channel" — the `channel_config` binding — while the roster is the
+is data on the binding that names the channel" — the `vendor_binding` binding — while the roster is the
 governance type that resolves a role to a principal: "`swarm_roster` (which principal fills a role)"
 (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`). So the
 table is carried by the roster and the channel binding, as the paragraph above already says, and no

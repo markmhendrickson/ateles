@@ -244,9 +244,20 @@ retroactively reshape or minimize what these rows already hold; it declares the 
 
 ### Context entities the design retrieves and never migrates
 
-`payment_profile`, `vendor_binding`, `channel_config`, `deployment_configuration`, `locale_profile`,
+`payment_profile`, `vendor_binding`, `deployment_configuration`, `locale_profile`,
 `brand_voice`, `constitution`, `priority_rubric`, `confidence_rubric`, `tax_profile`, and the rest of the
 per-operator context are **keep**: the design reads them by type at runtime and gives them no new shape.
+
+**One name in this list changed, and the record carries both.** Decision 35 rules one binding type per
+external system and the vocabulary pass of 2026-09-15 names it `vendor_binding`
+(`adapters.md#whether-one-binding-type-or-two-names-an-external-systems-instance`); the instance holds rows
+of both `vendor_binding` and the retired `channel_config`, which the design now reads as one type under the
+surviving name. This is the design taking the design's name while the record still carries the
+implementation's — the mapping is the retired `channel_config` → `vendor_binding`, and it is a rename of a **keep**
+type, not a migration of its shape: no field moves, no row is rewritten by the design's account, and a
+reader resolving either name resolves the same binding. `deployment_configuration` is unaffected and stays a
+distinct type, on the rule at
+`adapters.md#what-separates-a-binding-from-a-deployments-configuration`.
 The artifact types the built adapters already write — issues, pull requests, reviews, mail
 messages and threads, calendar events, posts, transactions, payment events — are **keep** with a tolerant
 reader keyed on the external system and identifier: the design's `artifact` is introduced and minted by
@@ -420,7 +431,7 @@ plan, then correct its `todos`" is a `reads_to_enter` and a closing condition; t
 **Which external system, and what operation, goes to the adapter document.** A skill's mail-client syntax
 or code-host command is the per-step operation the adapter document declares for that system
 (`gmail.md`, `github.md`, `calendar.md`); the per-instance binding of the system to this operator is the
-`channel_config` or `vendor_binding` entity, which binds and never redefines the mapping
+`vendor_binding` entity, which binds and never redefines the mapping
 (`conformance.md#direction-of-truth-per-class-of-record`). A skill that says which client to use for mail is
 stating a vendor binding's capability slot, not an instruction.
 

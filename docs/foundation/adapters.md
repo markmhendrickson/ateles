@@ -35,10 +35,11 @@ gate's decision function (`gates_and_workflows.md`), what an adapter is granted
 (`authority_model.md#grants`), the per-system mapping in full for the five systems that have their own
 documents (`github.md`, `gmail.md`, `calendar.md`, `telegram.md`, `payments.md`, each applying these
 rules to its system's whole surface), and the per-instance binding
-of a system to an operator, which is one binding context entity per instance — carried in these documents
-under two names, `channel_config` and `vendor_binding`, that decision 35 rules one type
+of a system to an operator, which is one binding context entity per instance — the `vendor_binding`
+decision 35 rules the single type, `channel_config` having been the second name it retired
 (`#whether-one-binding-type-or-two-names-an-external-systems-instance`) — resolved at runtime and never
-named here.
+named here. The binding for a system is not the configuration of a *deployment*, which is a separate type
+on the rule at `#what-separates-a-binding-from-a-deployments-configuration`.
 
 ## The two invariants
 
@@ -381,7 +382,7 @@ reason that decided it. An outbound operation the adapter cannot take for want o
 drop: nothing was delivered, a denial precedes the effect, and the action stays untaken while the principal
 raises `capability_denied` on the task (`authority_model.md#grants`) — `dropped` is a delivery's disposition
 (`vocabulary.md#dropped`), and an outbound action is not a delivery. Drops are counted per window — the
-window declared on the binding that names the announcement path (`channel_config`), never a default the
+window declared on the binding that names the announcement path (`vendor_binding`), never a default the
 adapter supplies — and surfaced on the same off-record announcement path as a halt, aggregated rather than
 one message per drop. **The count does not live only in the announcement.** While the record is reachable,
 the adapter writes one observation per window on its own `agent_session` (`data_model.md#concepts`),
@@ -763,7 +764,7 @@ closed to an observation (principle 5).
 
 The chat channel holds artifacts of kind `message`, identified by the chat's identifier together with the
 message's identifier within it. It is the channel the operator-facing agent carries checkpoints and
-operator-only tasks through, where the `channel_config` entity names it.
+operator-only tasks through, where the `vendor_binding` entity names it.
 
 **The Telegram adapter is `telegram.md`, in full.** That document enumerates every kind of update the
 channel can deliver — with each row marked handled, deliberately ignored, or unhandled — and it tables the
@@ -999,8 +1000,8 @@ and `operator_only` is reserved by default for a governance class with no policy
 fail-closed rule (invariant 5), and one that wants the swarm sending through such a surface at all sets the
 class's tier explicitly, informed by the read-back's limits stated above — this document does not set that
 tier itself, because the tier is `action_policy` data belonging to the instance, never a constant of the
-design (`#continual-inbound-is-the-inbound-side-and-an-intake-rule-evaluates-downstream-of-it`). A read-only binding — a `channel_config` or
-equivalent that grants the adapter no send capability — is the narrower and simpler case, and needs nothing
+design (`#continual-inbound-is-the-inbound-side-and-an-intake-rule-evaluates-downstream-of-it`). A read-only binding — a `vendor_binding`
+that grants the adapter no send capability — is the narrower and simpler case, and needs nothing
 beyond an ordinary grant that confers no outbound capability (`#degrees-of-trust-the-design-distinguishes-and-grants-already-express-it`).
 
 ### The admission contract
@@ -1417,7 +1418,7 @@ consumers — and those conventions cannot be designed for a consumer that does 
 carries the adapters whether it uses them or not: an operator who forks this repository to run the engine
 against their own systems ships the mail, chat, calendar, code-host, and payment adapters in their
 checkout, and the adapters' daemons, tests, and documents are in their tree even where their
-`channel_config` and `vendor_binding` entities bind none of them. That is dead weight and not a hazard —
+`vendor_binding` entities bind none of them. That is dead weight and not a hazard —
 an adapter with no binding receives nothing and writes nothing, and the action gate stands in front of
 anything it could take — but it is weight, and it is the price of the review staying in one place until
 a second consumer makes the separation pay for itself. The design is otherwise unaffected either way: every
@@ -1427,16 +1428,42 @@ rule in this document is about what an adapter does and none about where its cod
 
 **Ruled (decision 35, 2026-09-06): one binding type per external system, with routing as a field of it —
 closed as settled by revision 33, the conformance suite.** Registered as ruled in
-`conformance.md#the-register-of-open-design-decisions`. The name the one type takes, and the substitution of
-it for the two names across the documents and the schema, are a vocabulary pass's under invariant 12; until that pass lands
-the two names stand in the text as two names for one type.
+`conformance.md#the-register-of-open-design-decisions`. **The name is `vendor_binding`** (the vocabulary
+pass of 2026-09-15, under invariant 12), and `channel_config` is retired into it
+(`vocabulary.md#retired-names`). The two names stood in the text as two names for one type until that pass;
+below, they appear only where this section states the question it was opened with and the evidence that
+settled it, which are a record of what was asked and cannot be rewritten without falsifying it.
+
+**Why `vendor_binding` is the surviving name, `channel_config` the retired one, and neither a third
+coinage.** Invariant 6 takes the mechanism that generalizes, and only one of the two names does. Decision 35 rules one binding type *per external
+system*, and the systems the corpus binds are the mail system, the chat channel, the calendar, the code
+host, the rails, and — since decision 45 — the host a daemon runs on. `vendor_binding` already spans the
+code host, the rails, and the harness-and-model-tier slot decision 42 put on it; the now-retired name
+`channel_config` spanned only the three that happen to be conversational (a retired scope), and a code host
+is not a channel.
+That name had also already failed this test once in the other direction: `calendar_routing_config` was retired *into* it
+(`vocabulary.md#retired-names`) because a third name for one binding was a second home, and a name that must
+keep absorbing non-channels is a name narrower than its role. The head noun decides the rest — this corpus
+says *binding* and not *config* wherever it states the rule (`#scope`, decision 90's "per-host binding",
+`failure_posture.md`'s "the binding type decision 35 settles"), because *binding* names the relation the
+type carries and *config* names only its shape. A novel coinage is refused on the ground decision 90 already
+stated when it declined "a third name for it": a new word here would be the second home principle 9 forbids,
+and neither existing name is unavailable.
+
+**The cost, stated plainly.** *Vendor* reads oddly for the two systems nobody sells: the host a daemon runs
+on, which the operator owns, and a self-hosted chat. That is a real cost of the name and it is accepted,
+because the alternative costs more — the retired name would put the code host and the payment rails under a
+*channel* they are not, which is a wrong reading rather than an awkward one, and the swap test
+(`principles.md#12-as-few-terms-as-the-design-needs-and-no-fewer-no-term-overlaps-another`) finds no
+sentence whose meaning changes when `vendor_binding` is substituted for it. An awkward name
+that reads every case correctly beats a comfortable one that reads two of them wrongly.
 
 **The question.** The per-instance binding of a system to an operator is named in
-this document's scope as two context entity types, `channel_config` and `vendor_binding`, and the
+this document's scope as two context entity types, `channel_config` (since retired) and `vendor_binding`, and the
 per-system documents use them by system: the mail system, the chat channel, and the calendar bind through
-`channel_config`; the code host and the rails through `vendor_binding`. Nothing in the foundation states
+`channel_config` (since retired); the code host and the rails through `vendor_binding`. Nothing in the foundation states
 what separates a channel from a vendor, and the documents lean on the division for one thing: routing — which
-chat receives which class of message — which the chat document reads from `channel_config`
+chat receives which class of message — which the chat document read from the retired `channel_config`
 (`telegram.md#chats-groups-and-who-can-see-what`). Two types for one role — which instance of an external
 system is this operator's, and under what settings — is the two-names signature (principle 9) unless the
 division carries a rule.
@@ -1453,7 +1480,7 @@ reads the two differently; if none does, they are one type under two names. Open
 33 ran it over every row of the matrix and reported the result
 (`conformance_suite.md#the-simplification-pass-verified-against-the-matrix`): "Four rows read a binding —
 TG-6, CA-6, PY-3a, and the bootstrap's step 13 — and every one reads it as the binding entity, with no
-observable that differs by type. The matrix finds no rule that reads `channel_config` and `vendor_binding`
+observable that differs by type. The matrix finds no rule that reads `channel_config` [since retired] and `vendor_binding`
 differently, which is the condition the pass named as deciding it." A decision whose deciding fact has been
 supplied is settled, and this ruling records that rather than re-arguing it. Principle 9 supplies the rest:
 two type names for one role is the two-names signature, and the one thing the division was leaned on for —
@@ -1474,6 +1501,63 @@ as a field's value. The matrix found none; one written later would be the distin
 option asked for, and the type would split on it.
 
 **Matrix.** AD-35 closes; TG-6, CA-6, and PY-3a are unchanged.
+
+### What separates a binding from a deployment's configuration
+
+**The rule: a `vendor_binding` says how to reach an external system the swarm does not own; a
+`deployment_configuration` says how to stand up and verify an instance of the swarm's own software on a
+host. They are two types, not two names for one, and the test between them is what the entity's fields
+are read *for*.** This is the distinguishing rule decision 35 named as the condition on which a binding type
+splits, applied here to keep a third type from being folded in by the same principle-9 argument that merged
+the first two.
+
+**Why the question arises at all.** Decision 90 sends "which hosts a deployment can target, what any one of
+them is called, how a companion instance is placed relative to the swarm on a given provider, and the
+commands that carry any of it out" to a `deployment_configuration` entity, and in the same paragraph says
+the host is an external system with a per-host binding that "adds a field's worth of obligation to that
+binding and no third name for it." Read together those say a deployment's per-instance settings both are and
+are not the binding decision 35 rules — which is why the clause is amended at
+`#the-clause-amended-decision-90s-no-third-name-for-it`.
+
+**The test.** A binding is read to *address* a system: which instance is this operator's, under what
+settings, presenting which credential, with which routing and which declared windows. Every rule in this
+corpus that reads one reads it that way — a chat the binding names, a drop window it declares, a confirmation
+depth it carries, a capability slot naming a secret. A deployment's configuration is read to *carry out and
+then check a procedure*: what command deploys, with which build arguments, onto which branch, and what URL
+proves it arrived. The first answers *where do I send this and as whom*; the second answers *what do I run,
+and how do I know it arrived*. A verification target is the mark of the second and is absent from the first:
+no binding in this design carries a field whose purpose is to prove the binding itself took effect, because
+a binding does not take effect — it is read.
+
+**Why the difference is a rule and not a shape.** Two types whose difference is only which fields they happen
+to carry is the two-names signature principle 9 refuses, and it is what merged the retired `channel_config`
+into `vendor_binding`. What makes this one a rule instead is that the design reads the two at different moments
+and to different ends. A binding is resolved at runtime by an adapter that is about to touch a system, on
+every event and every action. A deployment's configuration is read at a deployment, by whoever performs one,
+and the design's own statements about it — decision 90's three rules, and decision 91's controlling instance
+— are statements about a *deployment*, an act, not about an adapter's reach. A rule that reads one never
+reads the other: no step's declaration resolves a deploy command, and no deployment consults a drop window.
+That is the "rule that reads them differently" decision 35 asked for, and the design states it here rather
+than leaving it to be inferred from the entities.
+
+**What this does not license.** It does not admit a fourth binding-shaped type on a shape argument. A type
+proposed beside these two must show a rule that reads it differently, in this section's terms — addressing a
+system the swarm does not own, or carrying out and verifying a procedure on the swarm's own software — and a
+type that is neither is one of these two under a second name, which principle 9 retires on sight.
+
+**Where the boundary is genuinely thin, and which way it falls.** A deployment names a target host, and
+decision 45 rules the host an external system — so the host has a `vendor_binding` of its own, for the
+adapter that restarts and redeploys on it. That binding and the `deployment_configuration` for software
+placed on that host are different entities about the same machine, and the separation follows the test: the
+binding is what the host's adapter reads to reach the host at all; the configuration is what a deployment
+reads to place and verify software there. A field that says *how to reach this host* belongs to the binding
+however a deployment uses it; a field that says *what to run and how to confirm it ran* belongs to the
+configuration however the host's adapter reaches it.
+
+**Matrix.** No existing row changes: the four rows that read a binding (TG-6, CA-6, PY-3a, and the
+bootstrap's step 13) each read it as the addressing type this rule names, and no row reads a deployment's
+configuration. A row that tested a deployment would be the deployment side's first, and belongs with the
+deployment rules rather than with the adapters' admission obligations.
 
 ### Whether the host a daemon runs on is an external system
 
@@ -1670,10 +1754,10 @@ carrying both would owe a rule that turns on the difference. None does, and the 
 (`principles.md#12-as-few-terms-as-the-design-needs-and-no-fewer-no-term-overlaps-another`) run on this
 document's own sentences finds no use of either word whose meaning changes when the other is substituted.
 
-**What this states, and what it does not mint.** No term is added to `vocabulary.md` and no type is
-registered, because each piece has a home already. The host is an [external system](vocabulary.md#external-system)
+**What this states, and what it does not mint.** No term is added to `vocabulary.md`, because each piece has
+a home already. The host is an [external system](vocabulary.md#external-system)
 with a per-host binding (decision 45 above, and decision 35's one binding type, `#scope`) — this ruling adds
-a field's worth of obligation to that binding and no third name for it. The instance a deployment names is
+a field's worth of obligation to that binding. The instance a deployment names is
 carried by an explicit binding that fails closed when ambiguous, which is the shape `authority_model.md`
 takes for a read that resolves to no instance — this ruling says a deployment is where that binding is
 stated, not that a new one exists. And the recovery
@@ -1724,6 +1808,32 @@ That is the change that reopens this.
 decision 45's classes when that adapter is declared. FP-13, which reads the restore obligation, gains one
 case: a binding whose `recovery_paths[]` names a path on the deployment's own target host is a defect that
 row reads, beside the path with no cadence it already reads.
+
+#### The clause amended: decision 90's "no third name for it"
+
+**Amended (the vocabulary pass of 2026-09-15).** As ruled, the paragraph above read "this ruling adds a
+field's worth of obligation to that binding **and no third name for it**", and then, four paragraphs later,
+sent every per-instance deployment setting to "a `deployment_configuration` entity, which
+`migration.md#the-mapping` already lists among the context types the design resolves at runtime." Those two
+sentences contradict each other: the second names the third name the first forbids. The clause is struck,
+and the sentence now says only what decision 90 needed it to say — that the host's binding gains a field's
+worth of obligation.
+
+**What the amendment changes, and what it does not.** It changes no rule of decision 90. All three of its
+rules stand as ruled, the teardown guard stands, and *deployment* remains the single name against
+*installation* — that clause was about the act and is untouched. What is withdrawn is a claim about the
+**type inventory** that decision 90 was not deciding and that its own next paragraphs already contradicted.
+`deployment_configuration` is a standing distinct type, registered in `data_model.md` and entered in
+`vocabulary.md`, separated from the binding by the rule at
+`#what-separates-a-binding-from-a-deployments-configuration`.
+
+**Why struck rather than narrowed.** The clause could have been read narrowly — no third name *for the
+binding* — and left standing. It is struck instead because that reading is not what it says, and because
+the sentence does no work under it: the surrounding paragraph already states what the binding gains, and a
+clause whose only content is that nothing else was renamed is a claim about other types made in the wrong
+section. Decision 90's own principle applies to it — a rule that could only be written by naming something
+outside its scope is a rule about that thing — and the type inventory is `data_model.md`'s and
+`vocabulary.md`'s to state, not this ruling's.
 
 ### Which of a deployment's several instances takes its governance writes
 

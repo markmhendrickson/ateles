@@ -48,7 +48,7 @@ state change, the outbound operation per step, the recurrence question, and the 
 general adapter rules (`adapters.md`), the workflows whose steps take these operations (`workflows.md`),
 the gate's decision function (`gates_and_workflows.md`), what the adapter is granted
 (`authority_model.md#grants`), and the per-instance binding of a calendar to an operator, which is a
-`channel_config` context entity resolved at runtime and never named here — the same binding type the mail
+`vendor_binding` context entity resolved at runtime and never named here — the same binding type the mail
 system and the chat channel use (`adapters.md#scope`).
 
 ## What artifacts this system holds
@@ -165,7 +165,7 @@ Rows are marked **handled**, **deliberately ignored**, or **unhandled** — the 
 | an event's attachments changed | handled | an observation naming the attachment and its location; the adapter does not fetch the file unless a step declares the read |
 | a reminder or notification override changed on an event | deliberately ignored | `dropped`, reason `presentation_only`: a reminder is the calendar's own alerting for a human reader and says nothing about the work. **The swarm's own timing comes from the record**, never from a calendar reminder — a reminder that fires is not a trigger |
 | an event's colour, visibility, or transparency changed | deliberately ignored | `dropped`, reason `presentation_only` |
-| an event on a calendar the `channel_config` does not name | handled | `dropped`, reason `untracked_calendar` |
+| an event on a calendar the `vendor_binding` does not name | handled | `dropped`, reason `untracked_calendar` |
 | an event created by the swarm's own credential | handled | an action confirmation on the batch's `external_api_write`- or `send_external_comms`-class action whose `dedup_key` matches; the event is `PRODUCES` from the batch. **An event created by the swarm's credential matching no action is an observation and a defect to surface** |
 
 ### Calendars, sharing, and settings
@@ -320,7 +320,7 @@ the whole of whether a later reader can trust it.
 4. It never deletes a calendar, and never clears a primary calendar.
 5. It never adds, changes, or revokes an access rule, and never transfers ownership of a calendar.
 6. It never treats a calendar entry as step state, and never writes one to communicate one.
-7. It never reads a calendar the `channel_config` does not name.
+7. It never reads a calendar the `vendor_binding` does not name.
 8. It never treats a calendar reminder as a trigger.
 
 **1. It does not build a profile of anyone from their presence on a meeting.** An attendee list is a list
@@ -356,7 +356,7 @@ an adapter's to infer. The adapter observes such changes and announces them.
 of `gmail.md`'s label refusal: a swarm that writes a "blocked" event onto a calendar has built a second
 place step state lives, editable by anyone with write access and backed by no verdict.
 
-**7. It never reads a calendar the `channel_config` does not name.** The operator's calendar list may include
+**7. It never reads a calendar the `vendor_binding` does not name.** The operator's calendar list may include
 calendars belonging to other people and organizations; being able to read one is not authority to.
 
 **8. It never treats a calendar reminder as a trigger.** The swarm's timing comes from the record. A

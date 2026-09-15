@@ -800,7 +800,7 @@ declaration, [`action_policy`](#action_policy), an [agent grant](#grant), `swarm
 `action_policy`, because each of the eight defines what the swarm may do, what a [principal](#principal) is, or how
 work reaches the swarm.
 The list is stated once, at its one home, and never restated elsewhere in this document or any other; a type a
-[step](#step) reads as an input rather than one of the eight — a `task_policy`, a `channel_config`, a `priority_rubric` —
+[step](#step) reads as an input rather than one of the eight — a `task_policy`, a `vendor_binding`, a `priority_rubric` —
 is not a governance type. The write capability on a governance type is held by the [engine](#engine) alone
 (decision 56); every other principal's write to one is refused at admission, and a write naming no
 principal at all — a peer instance's, replicated by the record's own sync substrate — lands as an
@@ -1047,8 +1047,8 @@ An adapter is a [daemon](#daemon) in the work model's sense: it self-triggers on
 [task](#task); the [engine](#engine) reads only what the adapter wrote.
 **See:** [`adapters.md#the-two-invariants`](adapters.md#the-two-invariants),
 [`adapters.md#what-the-adapter-does-with-every-event`](adapters.md#what-the-adapter-does-with-every-event).
-**Never:** "connector", "plugin"; "calendar_routing_config" (retired as a binding type for
-`channel_config`: see [Retired names](#retired-names)).
+**Never:** "connector", "plugin"; "calendar_routing_config" and "channel_config" (both retired as binding
+type names for [`vendor_binding`](#vendor_binding): see [Retired names](#retired-names)).
 **Not for:** the engine for the adapter (the engine reads the record; the adapter reads the system);
 "gateway" for an adapter, unqualified.
 
@@ -1086,6 +1086,41 @@ own instead of a silent gap.
 drop counter; a resemblance nothing counts is prose, not this term); a data-model migration (`migration.md`'s
 sense); a `vendor_binding`'s per-instance fields (those bind an instance, they do not enumerate a system's
 events).
+
+### vendor_binding
+**Definition:** the context entity that binds one [external system](#external-system)'s instance to an
+[operator](#operator) — which instance is theirs, under what settings, presenting which [credential](#credential), and with
+what routing and declared windows — resolved at runtime by the [adapter](#adapter) that touches the system
+and never named in these documents. One binding type per external system (decision 35), routing a field of
+it; the [host](#external-system) a [daemon](#daemon) runs on takes one like any other system (decision 45).
+It names a credential and never carries its value, on the reference-never-value rule.
+**See:** [`adapters.md#whether-one-binding-type-or-two-names-an-external-systems-instance`](adapters.md#whether-one-binding-type-or-two-names-an-external-systems-instance),
+[`adapters.md#where-the-binding-is-declared-no-new-home-is-needed`](adapters.md#where-the-binding-is-declared-no-new-home-is-needed),
+[`adapters.md#scope`](adapters.md#scope).
+**Never:** "channel_config", "calendar_routing_config" (both retired into this name: see
+[Retired names](#retired-names)); "integration config" for a binding.
+**Not for:** a [deployment_configuration](#deployment_configuration), which carries out and verifies a
+procedure on the swarm's own software rather than addressing a system the swarm does not own
+([`adapters.md#what-separates-a-binding-from-a-deployments-configuration`](adapters.md#what-separates-a-binding-from-a-deployments-configuration));
+a [grant](#grant), which says what a credential permits rather than which instance presents it; a
+[principal binding](#principal-binding), which binds a credential to a principal.
+
+### deployment_configuration
+**Definition:** the context entity that carries what a **deployment** of the swarm's own software onto a
+host runs and how it is verified — the command, its build arguments, the branch deployed, and the target
+that proves the deployment arrived — resolved when a deployment is performed and never by an
+[adapter](#adapter) mid-step. Distinct from a [vendor_binding](#vendor_binding) by what its fields are read
+for: a binding addresses a system the swarm does not own; this carries out and then checks a procedure on
+software the swarm does own. A verification target is the mark of it, and no binding carries one.
+**See:** [`adapters.md#what-separates-a-binding-from-a-deployments-configuration`](adapters.md#what-separates-a-binding-from-a-deployments-configuration),
+[`adapters.md#where-a-swarm-is-deployed-and-what-its-deployment-names`](adapters.md#where-a-swarm-is-deployed-and-what-its-deployment-names),
+[`migration.md#context-entities-the-design-retrieves-and-never-migrates`](migration.md#context-entities-the-design-retrieves-and-never-migrates).
+**Never:** "deploy config", "release config", "infra config".
+**Not for:** a [vendor_binding](#vendor_binding) for the host being deployed to (that is what the host's
+adapter reads to reach the host; this is what a deployment reads to place and verify software on it); the
+list of hosts an operator has, or what any one is called, which is operational and in none of these
+documents; what is being shipped, which is the [artifact](#artifact) a deployment places rather than the
+procedure that places it.
 
 ### signal
 **Definition:** what an [inbound](#inbound) external [event](#event) is to the record: information about an [artifact](#artifact), which an
@@ -1955,7 +1990,8 @@ foundation prose only on a line that says it is retired.
 | `hot path` | [projection](#projection) | it named the reason a projection exists, and the projection's definition already states it |
 | `operator_preview` (a step name) | `consent` | three step names — `operator_preview`, `consent`, `present` — for the step that carries the gate's checkpoint to the operator; the two whose work is identical now share the name |
 | `merge` (as an action class) | `merge_pr` | the step is `merge` and the action it takes is `merge_pr`, as `github.md` and the code workflows already named it; one word for the step and the class made the class read as the step, and the lint's step rules treat `merge` as a step name |
-| `calendar_routing_config` (a binding type) | `channel_config` | `adapters.md#scope` names the per-instance binding types once; a third name for the same binding was a second home |
+| `calendar_routing_config` (a binding type) | [`vendor_binding`](#vendor_binding) | `adapters.md#scope` names the per-instance binding type once; a third name for the same binding was a second home. Retired into `channel_config` by the simplification pass of 2026-09-05, and carried to `vendor_binding` when that name absorbed `channel_config` in turn |
+| `channel_config` (a binding type) | [`vendor_binding`](#vendor_binding) | decision 35, [`adapters.md#whether-one-binding-type-or-two-names-an-external-systems-instance`](adapters.md#whether-one-binding-type-or-two-names-an-external-systems-instance): one binding type per external system, and the conformance matrix found no rule that read the two differently — the two-names signature (principle 9). `vendor_binding` is the surviving name because it already spans the code host, the rails, and the harness slot, while a code host is not a channel |
 | `blocked` (as a task status) | an open [checkpoint](#checkpoint) on the task, from which [claimable](#claimable) is derived | nothing wrote it and nothing cleared it; a task the swarm cannot advance is held by a checkpoint, and a status beside the checkpoint was a second held state (principle 6) that needed a process to keep true (principle 11) |
 | `sign-off`, `sign_off` | [verdict](#verdict), whose field is the [conclusion](#conclusion) | decision 72, [`#whether-the-record-that-closes-a-step-is-named-for-one-of-its-own-outcomes`](#whether-the-record-that-closes-a-step-is-named-for-one-of-its-own-outcomes): the record carries three conclusion values and `signed` was one of them, so the record was named for one of its own outcomes; the verb *to sign off* and the `signed` value are unchanged |
 | `pipeline` (the step-path publisher) | [engine](#engine) | decision 34, `work_model.md#whether-the-step-path-is-a-mechanism-of-its-own-and-what-the-engine-is-called`: "GitHub-hosted" named a fact about a checkout, not a design property, and `engine` was already used in three documents and defined in none |

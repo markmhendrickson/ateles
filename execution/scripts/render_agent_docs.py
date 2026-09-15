@@ -191,11 +191,16 @@ def _yaml_scalar(v) -> str:
 # Surfaced as `canonical_context_entities` frontmatter so a reader can see,
 # without parsing prose, which operator/locale/vendor/swarm config an agent
 # depends on.
+# `channel_config` and `calendar_routing_config` are retired names for
+# `vendor_binding` (decision 35; vocabulary.md#retired-names). They stay listed
+# because the record still holds rows under them — migration debt, not design.
 KNOWN_CONTEXT_ENTITIES = [
     "operator_profile", "product_profile", "locale_profile", "swarm_roster",
-    "channel_config", "vendor_binding", "tax_profile", "tax_preparer",
+    "vendor_binding", "tax_profile", "tax_preparer",
     "task_policy", "constitution", "payment_profile", "brand_voice",
-    "calendar_routing_config",
+    "deployment_configuration",
+    "channel_config",  # retired alias for vendor_binding (decision 35)
+    "calendar_routing_config",  # retired alias for vendor_binding (decision 35)
 ]
 
 

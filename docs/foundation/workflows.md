@@ -441,7 +441,7 @@ step: copy changes no behaviour.
 with the operator's consent recorded through the action gate before anything is public.
 
 **Entry condition:** intake closed naming `social_content`; the task names the content being shared and
-the target platforms, from the `channel_config` entity retrieved by type.
+the target platforms, from the `vendor_binding` entity retrieved by type.
 
 **Steps**
 
@@ -725,7 +725,7 @@ an `operator_only` action with reason `gate_hold`; the checkpoint is what this w
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
-| 1 | `present` | operator-facing agent | yes | | the task, its context, and the exact operator action it needs are carried to the operator through the channel the `channel_config` entity names; where an action exists, its checkpoint is what is carried, through the one decision queue |
+| 1 | `present` | operator-facing agent | yes | | the task, its context, and the exact operator action it needs are carried to the operator through the channel the `vendor_binding` entity names; where an action exists, its checkpoint is what is carried, through the one decision queue |
 | 2 | `await` | operator-facing agent | yes | | the confirmation, never the resolution alone, closes the step — an adapter's read-back, an arriving artifact, or, where declared, the operator's report of the action taken, written as a report attributed to the operator principal (`gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`); a `denied` resolution closes the step on its failing conclusion instead, with no confirmation to wait for; the lease is renewed throughout; the deferral is bounded and its exhaustion escalates the task with reason `rounds_exhausted` (`failure_posture.md#the-rules`, rule 5) |
 | 3 | `record` | operator-facing agent | yes | | the confirmation `await` closed on, or the failing conclusion, is where the outcome lands: written on the task and read back; the verdict closes the batch and names the successor the outcome calls for |
 
