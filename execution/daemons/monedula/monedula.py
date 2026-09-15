@@ -22,6 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -101,6 +102,14 @@ TELEGRAM_TOPIC_MONEDULA = os.environ.get(
 ) or os.environ.get("TELEGRAM_TOPIC_PAYMENTS", "")
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "")
+
+# N consecutive polls with zero approvals (channel failures, not declines) that
+# trip the dead-gate alarm (ateles#554). A daily schedule means N=3 is ~3 days
+# of a channel that cannot deliver a reply at all — long enough that a single
+# transient blip does not page, short enough that it cannot go unnoticed for
+# the ten weeks the real incident ran.
+MONEDULA_DEAD_GATE_THRESHOLD = int(os.environ.get("MONEDULA_DEAD_GATE_THRESHOLD", "3"))
+GATE_HEALTH_FILE = Path(__file__).parent / ".monedula_gate_health"
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -434,6 +443,326 @@ def telegram_long_poll_once(timeout_sec: int = 120) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Structured poll outcome (ateles#554)
+#
+# `telegram_long_poll_once` above collapses three operationally distinct
+# situations into one `None`: no credentials, a channel error (HTTP 409
+# Conflict — another process holding the bot token's long-poll — or any other
+# transport failure), and a genuine timeout with no reply. `main()` cannot
+# branch on the difference, so a permanently broken gate and a legitimate
+# "no reply yet" looked identical, and both looked identical to an explicit
+# operator decline once `_parse_reply` turned the `None` into an empty set.
+#
+# `telegram_poll_approval` is the structured replacement `main()` now uses.
+# `telegram_long_poll_once` is kept as-is (same retry-to-deadline behaviour,
+# same tests) because it is still a reasonable "just give me text or None"
+# primitive and rewriting it in place would have made the diff harder to
+# review for a payment path; `telegram_poll_approval` is a thin layer above
+# it plus the 409 short-circuit and the explicit channel-error/timeout split.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TelegramPollResult:
+    """Outcome of one `telegram_poll_approval` call.
+
+    kind:
+      "reply"         — a matching message arrived; `text` is set.
+      "timeout"       — the poll ran to its deadline with no channel error and
+                         no matching message. Not proof the operator declined
+                         (they may not have seen the prompt) — treated as a
+                         channel failure per #554, same as `channel_error`.
+      "channel_error" — missing credentials, an HTTP error (409 Conflict
+                         chief among them — the actual production failure),
+                         a transport failure, or a malformed/`ok:false`
+                         Telegram response.
+    """
+
+    kind: str  # "reply" | "timeout" | "channel_error"
+    text: str | None = None
+    error_code: int | None = None
+    error_detail: str = ""
+
+
+def telegram_poll_approval(timeout_sec: int = 120) -> TelegramPollResult:
+    """Long-poll Telegram getUpdates for an approval reply.
+
+    Structured sibling of `telegram_long_poll_once`. A 409 Conflict (another
+    process — Cyphorhinus — already holds this bot token's long-poll, per the
+    #554 investigation) short-circuits immediately rather than retrying to the
+    deadline: retrying cannot win a single-consumer lock held elsewhere, and
+    burning the full timeout on a lock we cannot acquire only delays the
+    escalation that should fire instead.
+    """
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log.error(
+            "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — channel_error, cannot poll"
+        )
+        return TelegramPollResult(
+            kind="channel_error", error_detail="missing_bot_token_or_chat_id"
+        )
+
+    offset_file = Path(__file__).parent / ".monedula_tg_offset"
+    offset = 0
+    if offset_file.exists():
+        try:
+            offset = int(offset_file.read_text().strip())
+        except ValueError:
+            offset = 0
+
+    deadline = time.monotonic() + timeout_sec
+    allowed_user_id = (
+        int(TELEGRAM_ALLOWED_USER_ID) if TELEGRAM_ALLOWED_USER_ID else None
+    )
+    chat_id = int(TELEGRAM_CHAT_ID)
+
+    log.info(
+        f"Polling Telegram for approval (timeout={timeout_sec}s, offset={offset})..."
+    )
+
+    while time.monotonic() < deadline:
+        remaining = int(deadline - time.monotonic())
+        if remaining <= 0:
+            break
+
+        poll_timeout = min(remaining, 30)  # max 30s per request
+        url = (
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+            f"?offset={offset}&timeout={poll_timeout}&allowed_updates=message"
+        )
+
+        try:
+            with urllib.request.urlopen(url, timeout=poll_timeout + 5) as resp:
+                data = json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            # 409 Conflict is the diagnosed production failure (#554,
+            # daemon_report ent_71b2ad5e84a9597b56b570e3): a second consumer
+            # (Cyphorhinus) holds this bot token's getUpdates. Short-circuit
+            # rather than retrying — we cannot win a lock held elsewhere, and
+            # every second spent retrying is a second the operator does not
+            # know the channel is down.
+            log.warning(
+                f"Telegram channel_error status={exc.code} {exc.reason} — "
+                "not retrying (likely single-consumer conflict)"
+            )
+            return TelegramPollResult(
+                kind="channel_error",
+                error_code=exc.code,
+                error_detail=f"HTTPError {exc.code}: {exc.reason}",
+            )
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            log.warning(f"Telegram getUpdates request failed: {exc} — retrying")
+            time.sleep(2)
+            continue
+        except json.JSONDecodeError as exc:
+            log.warning(f"Telegram getUpdates JSON parse error: {exc}")
+            time.sleep(2)
+            continue
+
+        if data.get("ok") is False:
+            log.warning(f"Telegram getUpdates returned ok=false: {data!r}")
+            return TelegramPollResult(
+                kind="channel_error", error_detail=f"ok=false: {data!r}"
+            )
+
+        updates = data.get("result") or []
+        for update in updates:
+            update_id = update.get("update_id", 0)
+            offset = max(offset, update_id + 1)
+            offset_file.write_text(str(offset))
+
+            msg = update.get("message") or {}
+            from_user = msg.get("from") or {}
+            msg_chat = msg.get("chat") or {}
+            user_id = from_user.get("id")
+            msg_chat_id = msg_chat.get("id")
+
+            # Filter to correct chat and allowed user
+            if msg_chat_id != chat_id:
+                continue
+            if allowed_user_id and user_id != allowed_user_id:
+                continue
+
+            text = (msg.get("text") or "").strip()
+            if text:
+                log.info(f"Received Telegram reply: {text!r}")
+                return TelegramPollResult(kind="reply", text=text)
+
+        if not updates:
+            # A real Telegram long-poll blocks server-side for ~poll_timeout
+            # before returning an empty result, so this loop is naturally
+            # throttled in production. But an empty `ok:true` response that
+            # returns instantly (a fast intermediary, a misbehaving proxy) has
+            # no other pacing in this branch — guard against a tight
+            # zero-sleep spin explicitly rather than relying on that
+            # incidental blocking.
+            time.sleep(1)
+
+    log.info("Telegram poll timed out — no reply received (channel failure, not decline)")
+    return TelegramPollResult(kind="timeout", error_detail="poll_deadline_exceeded")
+
+
+# ---------------------------------------------------------------------------
+# Gate health: dead-gate detector (ateles#554)
+#
+# A single channel failure escalates on its own (see `_emit_consent_escalation`
+# below). This tracks CONSECUTIVE failures across runs — a channel that never
+# once succeeds is a distinct, worse condition than one bad night, and it is
+# what actually happened: 480 consecutive zero-approval polls over ten weeks.
+# ---------------------------------------------------------------------------
+
+
+def _load_gate_health(path: Path | None = None) -> dict:
+    # `path` deliberately defaults to None rather than the module-level
+    # GATE_HEALTH_FILE: a mutable default is bound at function-definition
+    # time, so `monkeypatch.setattr(monedula, "GATE_HEALTH_FILE", tmp_path)`
+    # in a test would silently not redirect these functions. Reading the
+    # module global at call time is what makes the monkeypatch (and any
+    # runtime override) actually take effect.
+    if path is None:
+        path = GATE_HEALTH_FILE
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {"consecutive_channel_failures": 0}
+
+
+def _save_gate_health(state: dict, path: Path | None = None) -> None:
+    if path is None:
+        path = GATE_HEALTH_FILE
+    try:
+        path.write_text(json.dumps(state, indent=2, sort_keys=True))
+    except OSError as exc:
+        log.warning(f"could not persist gate health state: {exc}")
+
+
+def _record_gate_failure(kind: str, *, path: Path | None = None) -> int:
+    """Bump the consecutive-failure streak. Returns the new streak length."""
+    if path is None:
+        path = GATE_HEALTH_FILE
+    state = _load_gate_health(path)
+    streak = int(state.get("consecutive_channel_failures", 0)) + 1
+    state["consecutive_channel_failures"] = streak
+    state["last_failure_kind"] = kind
+    state["last_failure_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    _save_gate_health(state, path)
+    return streak
+
+
+def _reset_gate_failure_streak(*, path: Path | None = None) -> None:
+    """Any reply — approved or declined — proves the channel works. Reset."""
+    if path is None:
+        path = GATE_HEALTH_FILE
+    state = _load_gate_health(path)
+    if state.get("consecutive_channel_failures"):
+        state["consecutive_channel_failures"] = 0
+        _save_gate_health(state, path)
+
+
+# ---------------------------------------------------------------------------
+# Escalation writer (ateles#554)
+# ---------------------------------------------------------------------------
+
+
+def _post_escalation_entity(entity: dict, idempotency_key: str) -> bool:
+    """POST one escalation entity to Neotoma. Returns True on success.
+
+    Non-fatal on failure by design: a channel failure must still block
+    payment and still notify best-effort even when Neotoma itself is
+    unreachable. Mirrors `strandings._post_escalation`.
+    """
+    base_url = os.environ.get("NEOTOMA_BASE_URL", "").strip().rstrip("/")
+    bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "").strip()
+    if not base_url:
+        log.error("NEOTOMA_BASE_URL unset — cannot record consent-gate escalation")
+        return False
+
+    is_loopback = "localhost" in base_url or "127.0.0.1" in base_url
+    body = json.dumps(
+        {
+            "entities": [entity],
+            "idempotency_key": idempotency_key,
+            "observation_source": "workflow_state",
+        }
+    ).encode("utf-8")
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if bearer and not is_loopback:
+        headers["Authorization"] = f"Bearer {bearer}"
+
+    req = urllib.request.Request(
+        f"{base_url}/store", data=body, method="POST", headers=headers
+    )
+    req.add_header("User-Agent", NEOTOMA_USER_AGENT)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+        return True
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        log.error(f"consent-gate escalation write FAILED: {exc}")
+        return False
+
+
+def _emit_consent_escalation(
+    result: TelegramPollResult,
+    *,
+    pending_handler_names: list[str],
+    yesterday_str: str,
+    gate_failure_streak: int,
+) -> bool:
+    """Escalate a channel failure (409 / timeout / missing creds) to Neotoma.
+
+    Never carries payee names, IBANs, addresses, or amounts — only handler
+    labels (yoga/therapy — the same labels already public in this repo's
+    handler config) and the channel-failure diagnostics.
+    """
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    is_dead_gate = gate_failure_streak >= MONEDULA_DEAD_GATE_THRESHOLD
+    escalation_type = (
+        "monedula_dead_consent_gate"
+        if is_dead_gate
+        else "monedula_consent_channel_failure"
+    )
+    severity = "critical" if is_dead_gate else "error"
+
+    detail = (
+        f"kind={result.kind} error_code={result.error_code} "
+        f"detail={result.error_detail!r} consecutive_failures={gate_failure_streak} "
+        f"pending_handlers={pending_handler_names} payment_date={yesterday_str}"
+    )
+    entity = {
+        "entity_type": "escalation",
+        "title": (
+            "Monedula consent gate cannot ask for approval"
+            if not is_dead_gate
+            else f"Monedula consent gate DEAD — {gate_failure_streak} consecutive failures"
+        ),
+        "body": (
+            f"Monedula's Telegram consent channel failed while payments were "
+            f"pending. Payment is BLOCKED (fail-closed) — nothing was executed.\n\n"
+            f"{detail}\n\n"
+            f"This is a channel failure, not an operator decline: the operator "
+            f"was never able to see or respond to the approval prompt.\n\n"
+            + (
+                f"This is the {gate_failure_streak}th consecutive run with zero "
+                f"approvals — the gate has not worked at all across that span. "
+                f"See daemon_report ent_71b2ad5e84a9597b56b570e3 for the known "
+                f"Telegram getUpdates single-consumer conflict.\n\n"
+                if is_dead_gate
+                else ""
+            )
+            + "Escalated by the Monedula payment daemon."
+        ),
+        "severity": severity,
+        "source_agent": "monedula@ateles-swarm",
+        "source_entity_type": "telegram_consent_gate",
+        "status": "open",
+        "tags": ["monedula", "payments", "consent_gate", escalation_type],
+    }
+    idempotency_key = f"monedula-{escalation_type}-{today}"
+    return _post_escalation_entity(entity, idempotency_key)
+
+
+# ---------------------------------------------------------------------------
 # Payment dispatch logic
 # ---------------------------------------------------------------------------
 
@@ -589,10 +918,18 @@ def escalate_strandings(strandings: list) -> list:
 def main() -> bool:
     """Run one Monedula tick. Returns True for a clean run.
 
-    Returns False when an ACTIVE payment profile was stranded — i.e. a payment
-    that should have been possible was not. The entrypoint turns that into a
-    non-zero exit, so a run that could not pay no longer looks to launchd (or
-    to anyone reading the log) exactly like a run with nothing to do.
+    Returns False when an ACTIVE payment profile was stranded (ateles#553) OR
+    when the Telegram consent channel failed while a payment was pending
+    (ateles#554) — i.e. a payment that should have been possible, or should
+    have at least been askable, was not. Both are availability failures, not
+    payment-safety failures: no money moves in either case. The entrypoint
+    turns a False return into a non-zero exit, so a run that could not pay —
+    or could not even ask — no longer looks to launchd (or to anyone reading
+    the log) exactly like a run with nothing to do.
+
+    An explicit operator DECLINE (a real reply saying no, or one that fails to
+    name an attended session) is not a failure: it returns True and exits 0,
+    same as always. Only the inability to ask is treated as broken.
     """
     log.info("Monedula starting.")
 
@@ -708,9 +1045,60 @@ def main() -> bool:
         return not strandings
 
     # Wait for operator reply (2 minutes)
-    reply = telegram_long_poll_once(timeout_sec=120)
-
     handler_names = list(dict.fromkeys([h.name for h, _ in triggered]))
+    poll_result = telegram_poll_approval(timeout_sec=120)
+
+    if poll_result.kind in ("channel_error", "timeout"):
+        # Channel failure, NOT a decline. Fail closed (no execute, same as a
+        # decline) but make it LOUD instead of logging the byte-identical
+        # "No payments approved" line a decline would produce (ateles#554):
+        # that indistinguishability is precisely why a 0/480 gate went
+        # unnoticed for ten weeks.
+        streak = _record_gate_failure(poll_result.kind)
+        log.error(
+            f"Consent channel failed (kind={poll_result.kind}, "
+            f"error_code={poll_result.error_code}, "
+            f"detail={poll_result.error_detail!r}, "
+            f"consecutive_failures={streak}) — blocking payments, NOT treating "
+            "as a decline."
+        )
+        escalated = _emit_consent_escalation(
+            poll_result,
+            pending_handler_names=handler_names,
+            yesterday_str=yesterday_str,
+            gate_failure_streak=streak,
+        )
+        if not escalated:
+            log.error(
+                "consent-gate escalation could not be written to Neotoma — "
+                "still blocking payment and notifying best-effort."
+            )
+        _notify(
+            f"monedula: consent channel failed ({poll_result.kind}) with "
+            f"payments pending ({handler_names}) — {streak} consecutive "
+            "failure(s). Payments BLOCKED, not declined. See escalation.",
+            priority="blocker",
+        )
+        try:
+            telegram_send(
+                "🔴 Monedula: consent channel failed — payments blocked, "
+                "not declined. Escalated."
+            )
+        except Exception:
+            pass
+        # A channel failure is a run that could not even ask, distinct from
+        # both "nothing to do" and a stranding — but it must exit non-zero
+        # for the same reason strandings do: silent 0 is how this stayed
+        # invisible. Reuse the strandings-style False-return contract rather
+        # than inventing a second exit-code channel for the entrypoint.
+        return False
+
+    # poll_result.kind == "reply" from here — a genuine reply arrived, so the
+    # channel demonstrably works. Any reply (including a decline) resets the
+    # dead-gate streak: it proves the operator could see and respond to the
+    # prompt, which is the property the streak exists to detect the absence of.
+    _reset_gate_failure_streak()
+    reply = poll_result.text
     approved = _parse_reply(reply, handler_names)
 
     if not approved:
@@ -769,12 +1157,15 @@ if __name__ == "__main__":
         if clean:
             _notify("monedula run complete", priority="info")
         else:
-            # A stranded profile means a payment did not happen. Exiting 0
-            # here is what let sixteen consecutive days of this read as
-            # sixteen clean runs (ateles#553).
+            # False covers two distinct availability failures: a stranded
+            # payment profile (ateles#553) and a Telegram consent-channel
+            # failure while a payment was pending (ateles#554). Either way, a
+            # payment that should have been possible — or askable — was not.
+            # Exiting 0 here is what let sixteen consecutive days of #553 and
+            # ten weeks of #554 read as clean runs.
             log.error(
-                "Monedula run completed with STRANDED payment profiles — "
-                "see the escalations filed in Neotoma."
+                "Monedula run completed with a STRANDED payment profile or a "
+                "FAILED consent channel — see the escalations filed in Neotoma."
             )
             sys.exit(1)
     except Exception as exc:
