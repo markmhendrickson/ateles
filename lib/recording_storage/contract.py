@@ -332,7 +332,8 @@ def archive_recording(
 ) -> ArchivalRecord:
     """Copy then verify. Never moves/deletes the local source.
 
-    Idempotent on content hash: a prior verified journal entry skips put.
+    Idempotent on content hash: an existing archive object at the content-key
+    skips put, but every attempt still verifies current archive read-back.
     Interrupted copy or hash mismatch → failed status, no success marker,
     local file retained, retry entry left in the journal.
     """
