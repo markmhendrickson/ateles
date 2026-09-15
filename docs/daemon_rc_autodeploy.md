@@ -102,7 +102,12 @@ that were absent before reconciliation),
 restores all five prior plist configurations, reloads the prior fleet, and does
 not claim cutover complete. Both rollback sets are retained. The shared session
 clone is left untouched until all five pass. XDG relocation is out of scope.
-An existing plist that is a symlink, unreadable, or not a regular file aborts
+An installed plist symlink into the shared checkout is snapshotted with its
+exact link target, repointed to the corresponding RC plist without becoming a
+regular file, and restored to its original target during automatic rollback.
+The RC target must exist as a readable, regular plist and pass `plutil -lint`
+before state reconciliation or link replacement. Broken links, links outside
+the shared checkout, unreadable targets, and other non-regular inputs abort
 before state reconciliation; only a genuinely missing plist is recorded as
 absent. This preserves path identity as well as bytes.
 
