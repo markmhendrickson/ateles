@@ -42,6 +42,8 @@ from datetime import datetime, timezone
 
 import httpx
 
+from entity_lookup import resolve_entity
+
 log = logging.getLogger("apis.gate_waive")
 
 
@@ -56,6 +58,7 @@ CLEARED_GATE_STATES: frozenset[str] = frozenset(
 
 # The value a waived gate is set to.
 WAIVED = "waived"
+
 
 
 # ── Pure helpers (no I/O — unit tested directly) ─────────────────────────────
@@ -371,8 +374,27 @@ class IssueGateStore:
                 return True
         return False
 
+    def _hydrate(
+        self, state: IssueGateState, entity: dict, snap: dict
+    ) -> IssueGateState:
+        """Copy the gate fields off a matched entity into *state*."""
+        state.entity_id = str(
+            entity.get("entity_id") or entity.get("id") or snap.get("entity_id") or ""
+        )
+        raw_gates = snap.get("gate_status")
+        state.gate_status_was_string = isinstance(raw_gates, str)
+        state.gate_status = parse_gate_status(raw_gates)
+        state.owner_history = parse_owner_history(snap.get("owner_history"))
+        state.current_owner = str(snap.get("current_owner") or "")
+        return state
+
     async def load(self, repo: str, issue_number: int) -> IssueGateState:
         """Retrieve the gate state for ``repo#issue_number``.
+
+        Identity resolution is delegated to :func:`entity_lookup.resolve_entity`
+        (targeted ``snapshot_filters`` then recency-sorted scan) — see that
+        module for why the fallback exists and why a targeted hit is
+        re-verified rather than trusted.
 
         NOTE: prod exposes the read as POST ``/entities/query``, NOT
         ``/retrieve_entities`` (which 404s) — see issue_spec.py for the same
@@ -399,87 +421,22 @@ class IssueGateStore:
         fields are now tried, so the fast path works for either shape.
         """
         state = IssueGateState(repo=repo, issue_number=issue_number)
-        entities: list[dict] = []
-        for number_field in ("number", "github_number", "issue_number"):
-            data = await self._post(
-                "entities/query",
-                {
-                    "entity_type": self.ENTITY_TYPE,
-                    "limit": 10,
-                    "include_snapshots": True,
-                    "snapshot_filters": {
-                        number_field: {"op": "eq", "value": issue_number},
-                        "repo": {"op": "eq", "value": repo},
-                    },
-                },
-            )
-            if data is None:
-                return state
-            entities = data.get("entities", [])
-            if entities:
-                break
-        if not entities:
-            # Fall back to an unfiltered scan for entities whose snapshot does
-            # not carry the composite fields (e.g. legacy rows keyed by
-            # local_issue_id or title). Bounded and paged, so a miss here means
-            # the entity genuinely is not there.
-            entities = await self._scan_for_issue(repo, issue_number)
-        for entity in entities:
-            snap = entity.get("snapshot") or {}
-            # Some responses nest the field map one level deeper.
-            inner = snap.get("snapshot")
-            if isinstance(inner, dict):
-                snap = inner
-            if not self._matches(snap, repo, issue_number):
-                continue
-            state.entity_id = str(
-                entity.get("entity_id") or entity.get("id") or snap.get("entity_id") or ""
-            )
-            raw_gates = snap.get("gate_status")
-            state.gate_status_was_string = isinstance(raw_gates, str)
-            state.gate_status = parse_gate_status(raw_gates)
-            state.owner_history = parse_owner_history(snap.get("owner_history"))
-            state.current_owner = str(snap.get("current_owner") or "")
-            break
-        return state
-
-    async def _scan_for_issue(self, repo: str, issue_number: int) -> list[dict]:
-        """Paged fallback scan for entities lacking composite snapshot fields.
-
-        Uses cursor paging rather than a single truncated page, so "not found"
-        means absent rather than beyond an arbitrary window. Bounded by
-        ``_MAX_SCAN_PAGES`` so a pathological corpus cannot hang a gate check.
-        """
-        cursor = ""
-        for _ in range(self._MAX_SCAN_PAGES):
-            payload: dict = {
-                "entity_type": self.ENTITY_TYPE,
-                "limit": 200,
-                "include_snapshots": True,
-            }
-            if cursor:
-                payload["cursor"] = cursor
-            data = await self._post("entities/query", payload)
-            if not data:
-                return []
-            page = data.get("entities", [])
-            for entity in page:
-                snap = entity.get("snapshot") or {}
-                inner = snap.get("snapshot")
-                if isinstance(inner, dict):
-                    snap = inner
-                if self._matches(snap, repo, issue_number):
-                    return [entity]
-            cursor = data.get("next_cursor") or ""
-            if not cursor or not page:
-                return []
-        log.warning(
-            "[gate_waive] %s#%s: scan hit the %d-page bound without a match",
-            repo,
-            issue_number,
-            self._MAX_SCAN_PAGES,
+        hit = await resolve_entity(
+            self._post,
+            self.ENTITY_TYPE,
+            lambda snap: self._matches(snap, repo, issue_number),
+            [
+                {repo_field: repo, num_field: issue_number}
+                for repo_field in ("repo", "repository")
+                for num_field in ("number", "issue_number", "github_number")
+            ],
+            f"{repo}#{issue_number}",
+            ("issue_number", "github_number", "number"),
         )
-        return []
+        if hit is None:
+            return state
+        entity, snap = hit
+        return self._hydrate(state, entity, snap)
 
     def _encode_gate_status(
         self, state: IssueGateState, gate_status: dict[str, str]
