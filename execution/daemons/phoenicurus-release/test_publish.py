@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 _DAEMON_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _DAEMON_DIR.parent.parent.parent
 for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
@@ -917,3 +919,86 @@ def test_find_release_same_rc_reobserved_is_one_candidate(monkeypatch):
     ])
     r = publish.find_release("v0.20.0", None)  # must NOT raise
     assert r["last_observation_at"] == "2026-07-27T15:47:00Z"  # newest obs
+
+
+class TestPreflightDirtyTreeBlocksPublish:
+    """
+    The dirty-tree guard is what stalled the release checkout for six weeks
+    (ateles#1014): one uncommitted file from 2026-08-05 meant `publish.py`
+    refused to tag, and nothing reported that.
+
+    The guard itself is correct — publishing ships whatever is in the working
+    tree — so these tests pin the behaviour rather than change it, and pin the
+    observable unblock: a clean tree does not fail for this cause.
+    """
+
+    def test_dirty_non_release_file_raises(self, tmp_path, monkeypatch):
+        _write_package_json(tmp_path, "0.22.2")
+        monkeypatch.setattr(publish, "NEOTOMA_REPO_ROOT", tmp_path)
+        monkeypatch.setattr(
+            publish,
+            "run",
+            lambda cmd, **kw: _proc(
+                stdout=" M docs/developer/mcp/instructions.md\n"
+                if cmd[:3] == ["git", "status", "--porcelain"]
+                else ""
+            ),
+        )
+
+        with pytest.raises(publish.StepError) as exc:
+            publish.preflight("v0.22.3", "rc/v0.22.3", dry_run=True)
+
+        msg = str(exc.value)
+        assert "dirty" in msg.lower(), msg
+        # Name the offending path, so the operator does not have to go looking.
+        assert "docs/developer/mcp/instructions.md" in msg, msg
+
+    def test_clean_tree_does_not_raise_for_dirty_cause(self, tmp_path, monkeypatch):
+        """The unblock this issue delivers: a clean tree clears this gate."""
+        _write_package_json(tmp_path, "0.22.2")
+        monkeypatch.setattr(publish, "NEOTOMA_REPO_ROOT", tmp_path)
+        monkeypatch.setattr(publish, "run", lambda cmd, **kw: _proc(stdout=""))
+
+        # dry_run=True stops before npm auth; reaching that point without a
+        # StepError is exactly the assertion — the dirty gate did not fire.
+        publish.preflight("v0.22.3", "rc/v0.22.3", dry_run=True)
+
+    def test_dirty_only_under_docs_releases_is_allowed(self, tmp_path, monkeypatch):
+        """Release notes are written by the release itself — not blocking dirt."""
+        _write_package_json(tmp_path, "0.22.2")
+        monkeypatch.setattr(publish, "NEOTOMA_REPO_ROOT", tmp_path)
+        monkeypatch.setattr(
+            publish,
+            "run",
+            lambda cmd, **kw: _proc(
+                stdout=" M docs/releases/v0.22.3.md\n"
+                if cmd[:3] == ["git", "status", "--porcelain"]
+                else ""
+            ),
+        )
+
+        publish.preflight("v0.22.3", "rc/v0.22.3", dry_run=True)
+
+    def test_untracked_file_still_blocks(self, tmp_path, monkeypatch):
+        """
+        Untracked files are NOT ignored here, unlike in the drift guard.
+
+        The two answer different questions: drift asks "is this daemon running
+        stale code", where stray logs are noise; publish asks "is it safe to
+        ship this tree", where an untracked file is content that would be
+        tagged. Pinned so the two are not "harmonised" into agreeing.
+        """
+        _write_package_json(tmp_path, "0.22.2")
+        monkeypatch.setattr(publish, "NEOTOMA_REPO_ROOT", tmp_path)
+        monkeypatch.setattr(
+            publish,
+            "run",
+            lambda cmd, **kw: _proc(
+                stdout="?? secrets.env\n"
+                if cmd[:3] == ["git", "status", "--porcelain"]
+                else ""
+            ),
+        )
+
+        with pytest.raises(publish.StepError):
+            publish.preflight("v0.22.3", "rc/v0.22.3", dry_run=True)

@@ -233,6 +233,18 @@ def warn_on_drift(
     if not report.is_drifted:
         if report.state == "clean":
             log.debug(f"[{daemon_name}] {report.summary()}")
+        elif report.state in ("unknown", "not_a_repo"):
+            # A non-verdict is not reassurance, and at INFO it reads like one.
+            # Observed 2026-09-15: this guard logged "could not determine
+            # checkout state (no upstream branch configured)" on every run —
+            # the inspected checkout was on a detached HEAD, so the check had
+            # been vacuous for an unknown period while looking like it passed.
+            # A guard that cannot answer should be as loud as one that answers
+            # badly, or nobody notices it stopped working.
+            log.warning(
+                f"[{daemon_name}] checkout freshness UNVERIFIED — {report.summary()}. "
+                "This check is not currently protecting anything."
+            )
         else:
             log.info(f"[{daemon_name}] checkout freshness: {report.summary()}")
         return report
