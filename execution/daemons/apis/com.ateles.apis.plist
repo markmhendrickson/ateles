@@ -57,6 +57,9 @@
         <string>claude,codex,cursor</string>
         <key>APIS_ALLOW_METERED_HARNESS</key>
         <string>0</string>
+        <!-- SSE subscription id — must match installed LaunchAgents plist (ateles#642). -->
+        <key>NEOTOMA_SSE_SUBSCRIPTION_ID_APIS</key>
+        <string>75076982-1d71-4e9f-8859-43d633dbdccc</string>
     </dict>
 </dict>
 </plist>
