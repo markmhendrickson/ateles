@@ -86,3 +86,4 @@ def test_cutover_effect_suites_are_bound_to_required_ci():
         "execution/daemons/cotinga/ execution/daemons/cyphorhinus/ "
         "execution/daemons/sylvia/ -q"
     ) in command
+    assert "python -m pytest lib/daemon_runtime/ -q" in command

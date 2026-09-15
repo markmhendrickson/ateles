@@ -65,6 +65,8 @@ jobs:
 
       - name: Run ateles package tests
         run: uv run --extra dev python -m pytest ateles/ .claude/hooks/ -q
+      - name: Run daemon runtime tests
+        run: uv run --extra dev python -m pytest lib/daemon_runtime/ -q
       # Swarm daemon tests (qa #254 finding): test_swarm_dispatch.py and the
       # rest of the Apis daemon suite never ran in CI — the lane above is scoped
       # to ateles/**, so a daemon regression (e.g. a dangling call from a stale
