@@ -47,6 +47,13 @@ import {
   toHistory,
   writtenOnce,
 } from "./taskState";
+import {
+  type LinkCoverage,
+  type TaskLinks,
+  type TaskWorkLink,
+  refFromUrl,
+  taskLinks,
+} from "./taskLinks";
 import { AssignedTo } from "./AssignedTo";
 import { useRoster } from "./useRoster";
 import { absoluteTime, entityUrl, toBucket } from "./tasks";
@@ -468,7 +475,17 @@ function TaskStatePanel({ snap, id }: { snap: Record<string, unknown>; id: strin
  * OPERATOR'S OWN ANSWER (green). Rendering a suggestion where an answer belongs
  * would read downstream as a decision the operator made. See `tasks.ts`.
  */
-function TaskView({ snap, id }: { snap: Record<string, unknown>; id: string }) {
+function TaskView({
+  snap,
+  id,
+  links,
+  onOpenEntity,
+}: {
+  snap: Record<string, unknown>;
+  id: string;
+  links: TaskLinks;
+  onOpenEntity?: (id: string) => void;
+}) {
   const recommendation = str(snap.details)?.replace(/^\s*RECOMMENDATION:\s*/i, "") || null;
   const answer = str(snap.result);
   const description = str(snap.description);
@@ -480,6 +497,15 @@ function TaskView({ snap, id }: { snap: Record<string, unknown>; id: string }) {
           actually happened to it" is the question the operator opens a task
           with, and the description does not answer it. */}
       <TaskStatePanel snap={snap} id={id} />
+      {/* Which issue or PR this task is about, directly under its state: the
+          operator's second question after "can this move" is "what change is
+          this", and the answer was previously only a raw URL field far below. */}
+      <WorkLinks
+        links={links.links}
+        coverage={links.coverage}
+        sourceUrlOnly={links.sourceUrlOnly}
+        onOpen={onOpenEntity}
+      />
       {context && <Prose label="Context" text={context} />}
       {description && <Prose label="Description" text={description} />}
       {recommendation && (
@@ -739,6 +765,150 @@ function TemplateView({ snap }: { snap: Record<string, unknown> }) {
 
 /* ------------------------------------------------------------------ */
 
+/**
+ * A TASK'S ISSUES AND PULL REQUESTS.
+ *
+ * Answers the operator's ask directly — "I want to see links to those issues
+ * and PRs on the task page" — rather than leaving them as two more rows in the
+ * generic `Edges` list below, where an issue looks the same as a plan and
+ * carries no way out to GitHub.
+ *
+ * Every row is a STORED `REFERS_TO` edge. Nothing here is parsed out of a title
+ * or a description; see the module note in `taskLinks.ts`.
+ *
+ * THE TITLE IS THE LABEL, and the number is the qualifier beside it. A bare
+ * `#714` makes the reader go look it up; the title says what the change is.
+ * Where the title has not hydrated yet the row says so and shows the reference
+ * — a pending name is reported, never replaced by the number alone.
+ *
+ * TWO WAYS OUT, because they answer different questions. The title opens the
+ * entity page (`#/entities/<id>` — what this app knows), and the arrow opens
+ * GitHub (the issue itself, where the operator wanted to reach).
+ */
+function WorkLinks({
+  links,
+  coverage,
+  sourceUrlOnly,
+  onOpen,
+}: {
+  links: TaskWorkLink[];
+  coverage: LinkCoverage;
+  sourceUrlOnly: string | null;
+  onOpen?: (id: string) => void;
+}) {
+  /*
+   * DISCLOSE PARTIALITY — the app's `Coverage` contract, applied to one task's
+   * links. An unreadable edge list renders as unknown, never as "none": an
+   * empty list under this heading reads as "this task has no linked PRs", which
+   * is a claim the failed read cannot support.
+   */
+  if (coverage === "failed") {
+    return (
+      <section className="my-[10px]">
+        <div className="mb-[2px] text-[10px] uppercase tracking-[.06em] text-muted-foreground">
+          Issues and pull requests
+        </div>
+        <p className="m-0 text-[12px] leading-[1.5] text-muted-foreground">
+          Could not be read for this task — whether it links any issue or PR is unknown, not none.
+        </p>
+      </section>
+    );
+  }
+
+  // Nothing linked and nothing referenced: the task genuinely names no issue,
+  // so the section stays out of the way rather than printing an empty heading.
+  if (!links.length && !sourceUrlOnly && coverage === "read") return null;
+
+  return (
+    <section className="my-[10px]">
+      <div className="mb-[2px] flex items-baseline gap-[8px]">
+        <span className="text-[10px] uppercase tracking-[.06em] text-muted-foreground">
+          Issues and pull requests
+        </span>
+        <span className="text-[11px] text-muted-foreground">
+          stored links, from the task's own source URL
+        </span>
+      </div>
+
+      <ul className="m-0 list-none p-0">
+        {links.map((l) => (
+          <li key={l.id} className="border-b border-border/60 last:border-b-0">
+            <div className="flex items-baseline gap-[8px] px-[2px] py-[3px]">
+              <Badge variant="muted" className="flex-none font-mono text-[11px]">
+                {l.entityType === "pull_request" ? "PR" : "issue"}
+              </Badge>
+
+              <button
+                type="button"
+                onClick={() => onOpen?.(l.id)}
+                className="min-w-0 flex-1 truncate text-left text-[12.5px] hover:underline"
+                title={l.title ?? undefined}
+              >
+                {l.title ?? (
+                  <span className="text-muted-foreground">
+                    {l.ref ? `${l.ref} — title loading…` : "loading…"}
+                  </span>
+                )}
+              </button>
+
+              {/* The number, demoted to a qualifier: it identifies WHICH issue
+                  without being asked to describe it. */}
+              {l.ref && l.title && (
+                <span className="flex-none font-mono text-[11px] text-muted-foreground">
+                  {l.ref}
+                </span>
+              )}
+
+              {l.url && (
+                <a
+                  href={l.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex-none text-muted-foreground hover:text-foreground"
+                  title={`Open ${l.ref ?? "this"} on GitHub`}
+                >
+                  <ExternalLink className="h-[12px] w-[12px]" />
+                </a>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+
+      {/* Edges are known but a target has not loaded — said plainly, because a
+          list that is still filling in is not a list that is complete. */}
+      {coverage === "hydrating" && (
+        <p className="m-0 mt-[4px] text-[11px] leading-[1.5] text-muted-foreground">
+          Some links are still loading; more may appear.
+        </p>
+      )}
+
+      {/*
+       * THE DANGLING CASE, which is a finding rather than an absence.
+       * The task names a GitHub issue that was never stored as an entity, so no
+       * relationship could be created without inventing its target. 7 of the
+       * 216 GitHub URLs measured on 2026-09-02 were in this state. Rendering
+       * this as an empty list would report "no issue" for a task that plainly
+       * cites one.
+       */}
+      {sourceUrlOnly && (
+        <p className="m-0 mt-[4px] text-[11px] leading-[1.5] text-muted-foreground">
+          References{" "}
+          <a
+            href={sourceUrlOnly}
+            target="_blank"
+            rel="noreferrer"
+            className="underline hover:text-foreground"
+          >
+            {refFromUrl(sourceUrlOnly) ?? sourceUrlOnly}
+          </a>
+          , which has no stored entity — so it could not be linked, only named.
+        </p>
+      )}
+    </section>
+  );
+}
+
 /** Related entities, grouped by direction. Each row opens in the sheet. */
 function Edges({
   outgoing,
@@ -875,7 +1045,14 @@ export function EntityDetail({
   const body = (() => {
     switch (type) {
       case "task":
-        return <TaskView snap={snap} id={record.entity_id} />;
+        return (
+          <TaskView
+            snap={snap}
+            id={record.entity_id}
+            links={taskLinks(payload ?? null, str(snap.source_url))}
+            onOpenEntity={onOpenEntity}
+          />
+        );
       case "rendered_page":
         return <RenderedPageView snap={snap} id={record.entity_id} />;
       case "plan":
