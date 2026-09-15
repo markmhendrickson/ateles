@@ -7,12 +7,12 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/markmhendrickson/repos/ateles/.venv/bin/python3</string>
-        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/cyphorhinus/cyphorhinus.py</string>
+        <string>/Users/markmhendrickson/ateles-rc-src/.venv/bin/python3</string>
+        <string>/Users/markmhendrickson/ateles-rc-src/execution/daemons/cyphorhinus/cyphorhinus.py</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/markmhendrickson/repos/ateles</string>
+    <string>/Users/markmhendrickson/ateles-rc-src</string>
 
     <key>EnvironmentVariables</key>
     <dict>

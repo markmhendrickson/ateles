@@ -154,10 +154,10 @@ Daemons run **dedicated checkouts**, never the shared main clone where interacti
 
 | Daemon | Checkout |
 |---|---|
-| Ateles daemons (Apis, Phoenicurus prepare, …) | `~/ateles-rc-src` |
+| Ateles daemons (Apis, Phoenicurus prepare, cotinga, cyphorhinus, piculet, sylvia, …) | `~/ateles-rc-src` — startup **checkout-identity** enforced fail-closed for the five named in ateles#515 (`lib/daemon_runtime/checkout_identity.py`) |
 | Phoenicurus **release** (`NEOTOMA_REPO_ROOT`) | `~/neotoma-rc-src` |
 
-The shared clones (`~/repos/ateles`, `~/repos/neotoma`) are for sessions and are dirty most of the time. `publish.py` refuses to tag atop a dirty tree — correctly, since publishing ships whatever is in the working tree — so a release pointed at the shared clone blocks on whoever last left it dirty. That happened on 2026-08-10: an approved v0.21.5 publish refused over 12 modified files belonging to an unrelated session (ateles#412).
+The shared clones (`~/repos/ateles`, `~/repos/neotoma`) are for sessions and are dirty most of the time. `publish.py` refuses to tag atop a dirty tree — correctly, since publishing ships whatever is in the working tree — so a release pointed at the shared clone blocks on whoever last left it dirty. That happened on 2026-08-10: an approved v0.21.5 publish refused over 12 modified files belonging to an unrelated session (ateles#412). Incidents for wrong-tree / stranded deploy checkouts: ateles#339, #361, #412, #515.
 
 **Two consequences worth remembering when debugging a daemon:** verify against the checkout the daemon actually runs from, not the worktree you are editing in; and a merged fix does nothing until that checkout is updated.
 

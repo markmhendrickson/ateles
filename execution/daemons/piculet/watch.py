@@ -945,6 +945,15 @@ If no entities were extracted, output: ENTITY_SUMMARY: none
 
 
 def main() -> None:
+    from lib.daemon_runtime.checkout_identity import enforce_deploy_checkout
+
+    enforce_deploy_checkout(
+        "piculet",
+        Path(__file__).resolve(),
+        why="Watch loop transcribes audio and writes entities.",
+        plist_label="com.ateles.piculet",
+    )
+
     _notify_lib(
         f"piculet started — polling every {POLL_INTERVAL_SECONDS}s", priority="info"
     )

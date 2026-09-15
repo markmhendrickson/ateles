@@ -1,11 +1,11 @@
 name: ateles package tests
 
 # Enforces the W0/W1+ package test suite plus the Claude Code hook tests, the
-# phoenicurus-release daemon's regression tests, the shared approval lib tests,
-# and the ateles MCP server tests on every PR that touches any of them — the
-# regression lane the QA gate asked for. The daemon/lib paths are included so
-# changes there actually get their tests run in CI, rather than silently
-# skipping the lane.
+# daemon regression tests already assigned here, top-level shared daemon tests,
+# the shared approval lib tests, and the ateles MCP server tests on every PR that
+# touches any of them — the regression lane the QA gate asked for. The daemon/lib
+# paths are included so changes there actually get their tests run in CI, rather
+# than silently skipping the lane.
 
 on:
   pull_request:
@@ -13,9 +13,14 @@ on:
       - "ateles/**"
       - ".claude/hooks/**"
       - "execution/daemons/apis/**"
+      - "execution/daemons/test_*.py"
+      - "execution/daemons/cotinga/**"
+      - "execution/daemons/cyphorhinus/**"
       - "execution/daemons/phoenicurus-release/**"
       - "execution/daemons/monedula/**"
       - "execution/daemons/anthus/**"
+      - "execution/daemons/piculet/**"
+      - "execution/daemons/sylvia/**"
       - "execution/daemons/tyto/**"
       - "execution/mcp/**"
       - "lib/daemon_runtime/**"
@@ -60,6 +65,8 @@ jobs:
 
       - name: Run ateles package tests
         run: uv run --extra dev python -m pytest ateles/ .claude/hooks/ -q
+      - name: Run daemon runtime tests
+        run: uv run --extra dev python -m pytest lib/daemon_runtime/ -q
       # Swarm daemon tests (qa #254 finding): test_swarm_dispatch.py and the
       # rest of the Apis daemon suite never ran in CI — the lane above is scoped
       # to ateles/**, so a daemon regression (e.g. a dangling call from a stale
@@ -72,6 +79,16 @@ jobs:
         run: uv run --extra dev python -m pytest execution/daemons/phoenicurus-release/ -q
       - name: Run monedula daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/monedula/ -q
+      # ateles#515 (pr_review): the checkout guard and lossless cutover effects
+      # live in top-level execution/daemons/test_*.py, while cyphorhinus has a
+      # directory-local suite. None was collected by a required lane. Keep them
+      # in the existing daemon-owning job; cotinga/sylvia paths are included so
+      # edits to those guarded entrypoints also trigger the shared effect tests.
+      - name: Run shared and remaining deploy-bound daemon tests
+        run: >-
+          uv run --extra dev python -m pytest execution/daemons/test_*.py
+          execution/daemons/cotinga/ execution/daemons/cyphorhinus/
+          execution/daemons/sylvia/ -q
       # ateles#584 (qa lens, PR #596 round 1): the anthus orchestrator suite
       # (test_participation_state.py, test_dispatch_wiring.py,
       # test_orchestrator.py) was committed but collected by no lane. Its own
