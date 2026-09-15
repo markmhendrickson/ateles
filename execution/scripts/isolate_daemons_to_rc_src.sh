@@ -63,16 +63,118 @@ is_cutover_label() {
   return 1
 }
 
+resolved_path() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+PY
+}
+
+if ! SHARED_RESOLVED=$(resolved_path "$SHARED"); then
+  echo "FATAL: could not resolve shared checkout path: $SHARED" >&2
+  exit 1
+fi
+
+release_target_for_symlink() {
+  local plist="$1"
+  local resolved rel
+  if ! resolved=$(resolved_path "$plist"); then
+    return 1
+  fi
+  case "$resolved" in
+    "$SHARED_RESOLVED"/*)
+      rel="${resolved#"$SHARED_RESOLVED"/}"
+      printf '%s\n' "$RC/$rel"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+validate_plist_file() {
+  local plist="$1"
+  [ ! -L "$plist" ] && [ -f "$plist" ] && [ -r "$plist" ] && \
+    plutil -lint "$plist" >/dev/null 2>&1
+}
+
+replace_with_symlink() {
+  local plist="$1"
+  local target="$2"
+  local tmp
+  if ! tmp=$(mktemp "$(dirname "$plist")/.cutover-plist.XXXXXX"); then
+    return 1
+  fi
+  if ! rm -f "$tmp" || ! ln -s "$target" "$tmp" || ! mv -f "$tmp" "$plist"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+replace_with_file() {
+  local plist="$1"
+  local source="$2"
+  local tmp
+  if ! tmp=$(mktemp "$(dirname "$plist")/.cutover-plist.XXXXXX"); then
+    return 1
+  fi
+  if ! cp "$source" "$tmp" || ! mv -f "$tmp" "$plist"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+plist_references_shared() {
+  local plist="$1"
+  local resolved
+  if [ -L "$plist" ]; then
+    if resolved=$(resolved_path "$plist"); then
+      case "$resolved" in
+        "$SHARED_RESOLVED"/*) return 0 ;;
+      esac
+    fi
+  fi
+  grep -q "$SHARED/" "$plist" 2>/dev/null
+}
+
 snapshot_plists() {
   mkdir -p "$BACKUP"
-  local label plist
+  local label plist link_target source_target release_target
   for label in "${CUTOVER_LABELS[@]}"; do
     plist="$LA/$label.plist"
-    # Preserve path identity as well as bytes. cp follows a symlink while the
-    # later mv replaces it, so no symlink is a safe rollback snapshot input.
     if [ -L "$plist" ]; then
-      echo "FATAL: cannot snapshot existing symlink plist: $plist" >&2
-      return 1
+      if [ ! -e "$plist" ]; then
+        echo "FATAL: cannot snapshot existing symlink plist with missing target: $plist" >&2
+        return 1
+      fi
+      if ! release_target=$(release_target_for_symlink "$plist"); then
+        echo "FATAL: cannot snapshot existing symlink plist outside shared checkout: $plist" >&2
+        return 1
+      fi
+      if ! source_target=$(resolved_path "$plist") || \
+        ! validate_plist_file "$source_target"; then
+        echo "FATAL: cannot snapshot existing symlink plist with invalid target: $plist" >&2
+        return 1
+      fi
+      # Validate every destination before state reconciliation. A symlink
+      # cutover changes only the link; its RC target must already be a valid,
+      # regular plist in the release checkout.
+      if ! validate_plist_file "$release_target"; then
+        echo "FATAL: release target for symlink plist is missing or invalid: $release_target" >&2
+        return 1
+      fi
+      if ! link_target=$(readlink "$plist"); then
+        echo "FATAL: could not read existing symlink plist target: $plist" >&2
+        return 1
+      fi
+      if ! printf '%s' "$link_target" > "$BACKUP/$label.symlink" || \
+        ! cp "$plist" "$BACKUP/$label.plist"; then
+        echo "FATAL: could not preserve existing symlink plist: $plist" >&2
+        return 1
+      fi
+      continue
     fi
     if [ ! -e "$plist" ]; then
       : > "$BACKUP/$label.absent"
@@ -112,7 +214,7 @@ rollback_cutover() {
   # Roll back state and every member of the five-daemon plist fleet. Continue
   # through individual failures so a broken member cannot prevent recovery of
   # the remaining four. Retain both backup directories for audit/retry.
-  local failed=0 label plist saved
+  local failed=0 label plist saved saved_link link_target
   echo "── restoring daemon-local state from $STATE_BACKUP" >&2
   if ! run_cutover_python restore "$SHARED" "$RC" "$STATE_BACKUP"; then
     echo "FATAL: daemon-local state rollback failed" >&2
@@ -123,9 +225,26 @@ rollback_cutover() {
   for label in "${CUTOVER_LABELS[@]}"; do
     plist="$LA/$label.plist"
     saved="$BACKUP/$label.plist"
+    saved_link="$BACKUP/$label.symlink"
     unload_plist "$label" "$plist"
-    if [ -f "$saved" ]; then
-      if ! cp "$saved" "$plist"; then
+    if [ -f "$saved_link" ]; then
+      link_target=$(cat "$saved_link")
+      if ! replace_with_symlink "$plist" "$link_target"; then
+        echo "FATAL: could not restore $label plist symlink" >&2
+        failed=1
+        continue
+      fi
+      if [ ! -L "$plist" ] || ! plutil -lint "$plist" >/dev/null 2>&1; then
+        echo "FATAL: restored $label plist symlink target is invalid" >&2
+        failed=1
+        continue
+      fi
+      if ! load_plist "$plist"; then
+        echo "FATAL: could not reload prior $label configuration" >&2
+        failed=1
+      fi
+    elif [ -f "$saved" ]; then
+      if ! replace_with_file "$plist" "$saved"; then
         echo "FATAL: could not restore $label plist" >&2
         failed=1
         continue
@@ -278,7 +397,7 @@ for plist in "$LA"/com.ateles.*.plist; do
   nm=$(basename "$plist")
   label="${nm%.plist}"
   [ -f "$plist" ] && [ -r "$plist" ] || continue
-  if ! grep -q "$SHARED/" "$plist" 2>/dev/null; then continue; fi
+  if ! plist_references_shared "$plist"; then continue; fi
 
   # Under --apply, only touch the five cutover labels here; other shared-path
   # daemons are still reported in dry-run but must not be reloaded as part of
@@ -291,22 +410,35 @@ for plist in "$LA"/com.ateles.*.plist; do
   changed=$((changed+1))
   echo "── $nm references shared checkout"
   if [ "$APPLY" = "--apply" ]; then
-    if ! tmp=$(mktemp); then
-      fail_and_rollback "could not create temporary plist for $label" 1
-    fi
-    if ! sed "s#$SHARED/#$RC/#g" "$plist" > "$tmp"; then
-      rm -f "$tmp"
-      fail_and_rollback "could not rewrite $label plist" 1
-    fi
-    if ! plutil -lint "$tmp" >/dev/null 2>&1; then
-      echo "  ABORT: rewritten plist invalid, leaving $nm untouched"
-      rm -f "$tmp"
-      fail_and_rollback "plist rewrite failed for $label" 1
-    fi
-    unload_plist "$label" "$plist"
-    if ! mv "$tmp" "$plist"; then
-      rm -f "$tmp"
-      fail_and_rollback "could not install rewritten $label plist" 1
+    if [ -L "$plist" ]; then
+      if ! release_target=$(release_target_for_symlink "$plist"); then
+        fail_and_rollback "could not map $label plist symlink into the release checkout" 1
+      fi
+      if ! validate_plist_file "$release_target"; then
+        fail_and_rollback "release target for $label plist symlink is missing or invalid" 1
+      fi
+      unload_plist "$label" "$plist"
+      if ! replace_with_symlink "$plist" "$release_target"; then
+        fail_and_rollback "could not repoint $label plist symlink" 1
+      fi
+    else
+      if ! tmp=$(mktemp); then
+        fail_and_rollback "could not create temporary plist for $label" 1
+      fi
+      if ! sed "s#$SHARED/#$RC/#g" "$plist" > "$tmp"; then
+        rm -f "$tmp"
+        fail_and_rollback "could not rewrite $label plist" 1
+      fi
+      if ! plutil -lint "$tmp" >/dev/null 2>&1; then
+        echo "  ABORT: rewritten plist invalid, leaving $nm untouched"
+        rm -f "$tmp"
+        fail_and_rollback "plist rewrite failed for $label" 1
+      fi
+      unload_plist "$label" "$plist"
+      if ! mv "$tmp" "$plist"; then
+        rm -f "$tmp"
+        fail_and_rollback "could not install rewritten $label plist" 1
+      fi
     fi
     if ! load_plist "$plist"; then
       fail_and_rollback "could not reload $label from the release checkout" 1

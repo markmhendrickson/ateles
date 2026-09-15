@@ -24,6 +24,7 @@ LABELS = (
 
 
 def _write_plist(path: Path, label: str, root: Path) -> bytes:
+    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "Label": label,
         "ProgramArguments": [
@@ -34,6 +35,205 @@ def _write_plist(path: Path, label: str, root: Path) -> bytes:
     data = plistlib.dumps(payload)
     path.write_bytes(data)
     return data
+
+
+def _write_symlink_cutover_tools(fake_bin: Path) -> None:
+    launchctl = fake_bin / "launchctl"
+    launchctl.write_text("""#!/usr/bin/env bash
+set -eu
+if [ "${1:-}" = list ]; then
+  count=0
+  if [ -f "$CUTOVER_TEST_COUNT" ]; then count=$(cat "$CUTOVER_TEST_COUNT"); fi
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$CUTOVER_TEST_COUNT"
+  base=100
+  if [ "$count" -gt 5 ]; then base=200; fi
+  n=$base
+  for label in com.ateles.cotinga com.ateles.cyphorhinus com.ateles.piculet com.ateles.sylvia com.ateles.phoenicurus-prepare; do
+    printf '%s\\t0\\t%s\\n' "$n" "$label"
+    n=$((n + 1))
+  done
+  exit 0
+fi
+plist="${@: -1}"
+mode=missing
+if [ -f "$plist" ]; then
+  if grep -q "$CUTOVER_TEST_RC/" "$plist"; then mode=rc; else mode=shared; fi
+fi
+printf '%s|%s\\n' "$*" "$mode" >> "$CUTOVER_TEST_LOG"
+if [ "$CUTOVER_TEST_FAILURE" = reload ] && { [ "${1:-}" = bootstrap ] || [ "${1:-}" = load ]; } && [ "$plist" = "$HOME/Library/LaunchAgents/com.ateles.piculet.plist" ] && [ "$mode" = rc ]; then
+  exit 1
+fi
+exit 0
+""")
+    launchctl.chmod(0o755)
+
+    plutil = fake_bin / "plutil"
+    plutil.write_text("""#!/usr/bin/env bash
+set -eu
+plist="${@: -1}"
+printf '%s\\n' "$plist" >> "$CUTOVER_TEST_PLUTIL_LOG"
+if grep -q INVALID "$plist"; then exit 1; fi
+exit 0
+""")
+    plutil.chmod(0o755)
+
+    ps = fake_bin / "ps"
+    ps.write_text("""#!/usr/bin/env bash
+printf '%s/.venv/bin/python3 %s/execution/daemons/fake.py\\n' "$CUTOVER_TEST_RC" "$CUTOVER_TEST_RC"
+""")
+    ps.chmod(0o755)
+
+    sleep = fake_bin / "sleep"
+    sleep.write_text("#!/usr/bin/env bash\nexit 0\n")
+    sleep.chmod(0o755)
+
+
+def _symlink_fleet(tmp_path: Path):
+    home = tmp_path / "home"
+    shared = tmp_path / "shared"
+    rc = tmp_path / "rc"
+    launch_agents = home / "Library/LaunchAgents"
+    fake_bin = tmp_path / "bin"
+    launch_agents.mkdir(parents=True)
+    fake_bin.mkdir()
+    (rc / "lib/daemon_runtime").mkdir(parents=True)
+    shutil.copy2(HELPER, rc / "lib/daemon_runtime/cutover_state.py")
+
+    original_links = {}
+    release_targets = {}
+    for label in LABELS[:4]:
+        daemon = label.removeprefix("com.ateles.")
+        rel = Path("execution/daemons") / daemon / f"{label}.plist"
+        shared_target = shared / rel
+        release_target = rc / rel
+        _write_plist(shared_target, label, shared)
+        _write_plist(release_target, label, rc)
+        installed = launch_agents / f"{label}.plist"
+        installed.symlink_to(shared_target)
+        original_links[installed] = shared_target
+        release_targets[installed] = release_target
+
+    regular = launch_agents / f"{LABELS[-1]}.plist"
+    _write_plist(regular, LABELS[-1], shared)
+    _write_symlink_cutover_tools(fake_bin)
+    return home, shared, rc, fake_bin, original_links, release_targets, regular
+
+
+def _symlink_cutover_env(home: Path, shared: Path, rc: Path, fake_bin: Path):
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "ATELES_SHARED_CHECKOUT": str(shared),
+            "ATELES_REPO_PATH": str(rc),
+            "CUTOVER_TEST_LOG": str(fake_bin.parent / "launchctl.log"),
+            "CUTOVER_TEST_PLUTIL_LOG": str(fake_bin.parent / "plutil.log"),
+            "CUTOVER_TEST_COUNT": str(fake_bin.parent / "launchctl-count"),
+            "CUTOVER_TEST_RC": str(rc),
+            "CUTOVER_TEST_FAILURE": "none",
+        }
+    )
+    return env
+
+
+def test_successful_cutover_repoints_symlinks_to_validated_release_targets(tmp_path):
+    home, shared, rc, fake_bin, original_links, release_targets, regular = (
+        _symlink_fleet(tmp_path)
+    )
+    env = _symlink_cutover_env(home, shared, rc, fake_bin)
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--apply"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    for installed, release_target in release_targets.items():
+        assert installed.is_symlink()
+        assert installed.readlink() == release_target
+        assert str(release_target) in (tmp_path / "plutil.log").read_text().splitlines()
+    assert all(path.readlink() != target for path, target in original_links.items())
+    assert not regular.is_symlink()
+    assert str(rc) in regular.read_text()
+
+
+def test_successful_cutover_accepts_a_symlinked_checkout_prefix(tmp_path):
+    home, shared, rc, fake_bin, _original_links, release_targets, _regular = (
+        _symlink_fleet(tmp_path)
+    )
+    real_shared = tmp_path / "real-shared"
+    shared.rename(real_shared)
+    shared.symlink_to(real_shared, target_is_directory=True)
+    env = _symlink_cutover_env(home, shared, rc, fake_bin)
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--apply"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    for installed, release_target in release_targets.items():
+        assert installed.is_symlink()
+        assert installed.readlink() == release_target
+
+
+def test_later_failure_restores_original_symlink_targets_and_reloads_them(tmp_path):
+    home, shared, rc, fake_bin, original_links, _release_targets, _regular = (
+        _symlink_fleet(tmp_path)
+    )
+    env = _symlink_cutover_env(home, shared, rc, fake_bin)
+    env["CUTOVER_TEST_FAILURE"] = "reload"
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--apply"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "could not reload com.ateles.piculet" in result.stderr
+    calls = (tmp_path / "launchctl.log").read_text().splitlines()
+    for installed, original_target in original_links.items():
+        assert installed.is_symlink()
+        assert installed.readlink() == original_target
+        assert any(
+            call.endswith(f"{installed}|shared")
+            and (call.startswith("bootstrap ") or call.startswith("load "))
+            for call in calls
+        )
+
+
+def test_invalid_release_symlink_target_aborts_before_state_reconciliation(tmp_path):
+    home, shared, rc, fake_bin, original_links, release_targets, _regular = (
+        _symlink_fleet(tmp_path)
+    )
+    next(iter(release_targets.values())).write_text("INVALID\n")
+    env = _symlink_cutover_env(home, shared, rc, fake_bin)
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--apply"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "release target for symlink plist is missing or invalid" in result.stderr
+    for installed, original_target in original_links.items():
+        assert installed.is_symlink()
+        assert installed.readlink() == original_target
+    assert not (home / ".config/ateles/daemon-state-backups").exists()
 
 
 def _write_rewrite_failure_tools(fake_bin: Path) -> None:
