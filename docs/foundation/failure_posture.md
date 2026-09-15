@@ -50,7 +50,7 @@ refuse-and-requeue-as-fallback, and the hardcoded step-list floor (C5, below).
    original time, so the path shows no gap and a reader of it cannot mistake the outage of the path for a
    quiet swarm. No second channel is declared: it would be a second binding to keep current, and it fails
    the same way; the capture is read by hand when nothing else answers. The window is the one declared on
-   the binding that names the path (`channel_config`), and while the record is reachable every daemon
+   the binding that names the path (`vendor_binding`), and while the record is reachable every daemon
    writes one observation per window on its own `agent_session`, with zeros where nothing happened
    (`adapters.md#what-the-adapter-does-with-every-event`) — so a daemon silent past its window is a derived
    read, and an idle daemon and a dead one are distinguishable whenever the record is up.

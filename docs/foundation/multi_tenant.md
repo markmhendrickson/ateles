@@ -25,7 +25,7 @@ The swarm must support a spectrum, not a binary. Three shapes matter:
 | Shape | Humans | Tenants | What it requires |
 |---|---|---|---|
 | **Single-operator** (launch) | one | one | Current state. One `operator_profile`, one pager (Ateles), one `swarm_roster`. No isolation work needed beyond what already exists. |
-| **Fork** (Goal 6) | one (a *different* operator) | one (theirs) | Zero hardcoded operator identity. Everything operator-specific resolved from context entities at runtime: `operator_profile`, `locale_profile`, `swarm_roster`, `channel_config`, `payment_profile`, etc. A different operator stands up their own Neotoma, supplies their own context entities, mints their own AAuth keys. **Mostly already true** — agent prompts are operator-agnostic by policy. |
+| **Fork** (Goal 6) | one (a *different* operator) | one (theirs) | Zero hardcoded operator identity. Everything operator-specific resolved from context entities at runtime: `operator_profile`, `locale_profile`, `swarm_roster`, `vendor_binding`, `payment_profile`, etc. A different operator stands up their own Neotoma, supplies their own context entities, mints their own AAuth keys. **Mostly already true** — agent prompts are operator-agnostic by policy. |
 | **Org / team** | many | one (shared) | Multiple humans collaborate under one tenant: shared entity graph, but per-human routing, per-human identity, per-human capability scope, and per-customer ("for whom") visibility. This is the shape that, if not designed for now, forces a painful retrofit. |
 
 **The single-operator row's "current state" no longer describes the operator's own setup.** As of
@@ -83,7 +83,7 @@ Add a `tenant_id` field to Neotoma entities, exactly as `docs/durable_execution_
 
 Every domain entity carries `tenant_id`. The query default is **scope every retrieve to the caller's tenant** — the "absent = denied" instinct from the AAuth grant model (`docs/aauth.md`) applied to rows: a query without a tenant scope is a bug, not a wildcard. Cross-tenant reads require an explicit, audited capability that no normal agent holds.
 
-Configuration entities that are inherently per-tenant — `operator_profile`, `locale_profile`, `swarm_roster`, `channel_config`, `priority_rubric`, `payment_profile`, `agent`, `agent_grant` — are partitioned the same way. A solo operator's `swarm_roster` is theirs; an org's is shared across its operators.
+Configuration entities that are inherently per-tenant — `operator_profile`, `locale_profile`, `swarm_roster`, `vendor_binding`, `priority_rubric`, `payment_profile`, `agent`, `agent_grant` — are partitioned the same way. A solo operator's `swarm_roster` is theirs; an org's is shared across its operators.
 
 ---
 
@@ -123,7 +123,7 @@ Today **Ateles is the sole pager to one operator.** All notifications flow throu
 Routing becomes a function of **(tenant, role-or-person, channel)**, resolved from per-tenant config rather than a single global destination:
 
 - **Roster per tenant.** `swarm_roster` (already a context entity, resolved by role not hardcoded name) gains, per tenant, the set of operator humans and their roles (e.g. owner, finance approver, on-call).
-- **Per-human channels.** `channel_config` (already an established context entity) holds each operator's delivery endpoints (Telegram chat id, email, etc.). One operator, one set of channels; an org has many.
+- **Per-human channels.** `vendor_binding` (already an established context entity) holds each operator's delivery endpoints (Telegram chat id, email, etc.). One operator, one set of channels; an org has many.
 - **Routing keyed by who, not just severity.** `priority_rubric` already governs *whether/when* to deliver (silence windows, digest collapse, escalation ladder). Multi-human adds *to whom*: a notification carries a target — a specific person, or a role that resolves to a person via the roster. A finance approval pages the finance approver; a health nudge pages the beneficiary/owner; a generic system alert pages the tenant owner or on-call.
 
 ### 4.2 What this preserves
@@ -168,7 +168,7 @@ These are the items that are impossible or painful to backfill once data and tru
 4. **`match_tenant` on `agent_grant` admission** (or tenant-encoding in `sub`). Extends the existing grant match; no new mechanism.
 5. **Namespace AAuth subjects per tenant** (`<name>@<tenant>-swarm`), with `ateles` as the launch tenant slug. Cheap now; renaming live keys later is not.
 6. **Owner ref convention on beneficiary/customer entities.** Document "one owning operator per customer within a tenant"; lean on existing graph relationships where possible.
-7. **Routing target on notifications + per-human `channel_config` shape.** Make `lib/notify/` resolve destination per (tenant, target) even while there is exactly one target — so adding humans is config, not a code change.
+7. **Routing target on notifications + per-human `vendor_binding` shape.** Make `lib/notify/` resolve destination per (tenant, target) even while there is exactly one target — so adding humans is config, not a code change.
 8. **Fork validation as the now-deliverable for Goal 6.** Prove a clean fork stands up against a fresh Neotoma with only context entities supplied and no code edits. This is the single-tenant proof that nothing operator-specific is hardcoded — and it is shippable before any org work.
 
 ### 6.2 DEFER until a second operator/org exists (expensive — operational)

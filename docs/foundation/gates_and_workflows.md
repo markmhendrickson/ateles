@@ -872,7 +872,7 @@ a copy of it: a client that kept a picture of the queue beside the record would 
 for the operator's decisions, and stale in the direction that matters (principle 11).
 
 **What a channel carries is the exception, and it is declared, not judged per message.** Three things
-reach a chat, a mailbox, or any other channel the `channel_config` binding names, and nothing else does by
+reach a chat, a mailbox, or any other channel the `vendor_binding` binding names, and nothing else does by
 default. A **checkpoint awaiting the operator** is carried, because a decision nobody has seen is work
 stopped, and a queue nothing consumes is a report (principle 1); the operator-facing agent carries it
 (`workflows.md#operator-only`, `telegram.md#outbound-the-operations-a-step-takes-on-the-channel`). The
@@ -1015,7 +1015,7 @@ renders from), a `workflow` declaration (how every future batch of its type is e
 that admits a type is what a write to it changes: each of the eight defines what the swarm may do, what a
 principal is, or how work reaches the swarm, so a write to one asks the question the gate exists to ask,
 arriving through a door the gate cannot see while the rule is "where the write goes". A type a step reads as
-an input — a `task_policy`, a `channel_config`, a `priority_rubric` — is not on the list: a write to it
+an input — a `task_policy`, a `vendor_binding`, a `priority_rubric` — is not on the list: a write to it
 changes what the swarm knows, not what it may do, and reaches the gate only where it is lossy (below). The
 list is closed and short, so the rule is checkable by inspection rather than judged per write, and it has one
 home: every other document cites this section and none restates the members. It was found stated three ways

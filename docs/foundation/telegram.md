@@ -31,7 +31,7 @@ operation per step, the callback-payload trust distinction, and what the adapter
 general adapter rules (`adapters.md`), the workflows whose steps take these operations (`workflows.md`),
 the gate's decision function (`gates_and_workflows.md`), what the adapter is granted
 (`authority_model.md#grants`), and the per-instance binding of a chat to an operator, which is a
-`channel_config` context entity resolved at runtime and never named here.
+`vendor_binding` context entity resolved at runtime and never named here.
 
 ## Why this system gets its own document
 
@@ -235,7 +235,7 @@ together with the message's identifier within it, since a message id is unique o
 Three things that are **not** artifacts here, named because each is a plausible mistake:
 
 - **A chat is not an artifact.** It is where artifacts live, and which chat is bound to which principal is
-  the `channel_config` entity's, resolved at runtime. A chat has no batch and no workflow.
+  the `vendor_binding` entity's, resolved at runtime. A chat has no batch and no workflow.
 - **A checkpoint is not an artifact.** It is an entity in the record, and the message presenting it is the
   artifact. This distinction carries weight: the checkpoint is resolved on the record, and the message is
   the thing that happened in a system the swarm does not own.
@@ -350,7 +350,7 @@ difference matters for two separate reasons the design must not conflate.
 **Visibility.** Everything the swarm sends to a group is visible to every member of it, and everything a
 member sends is visible to the swarm. A checkpoint presented in a group discloses whatever the presentation
 carries — the action, its subject, and its options — to everyone in the room. That is a disclosure
-decision, and it belongs to the `channel_config` binding rather than to the adapter: the adapter sends
+decision, and it belongs to the `vendor_binding` binding rather than to the adapter: the adapter sends
 where it is told and never chooses a chat to reach a principal in.
 
 **Authorization, which visibility does not imply.** Membership in a chat is not a credential binding, and
@@ -758,7 +758,7 @@ truthfully and nothing it cannot.
 announcement path (`#outbound-the-operations-a-step-takes-on-the-channel`, the announcement row), which
 already exists, already runs without the record, and already carries exactly this content; it is addressed
 to the asker rather than broadcast, and that is the whole of the difference. It is sent **only in a chat the
-announcement path already reaches** — the adapter's copy of the `channel_config` binding, refreshed on every
+announcement path already reaches** — the adapter's copy of the `vendor_binding` binding, refreshed on every
 successful read of the record and carrying the staleness bound the binding itself declares — because the
 adapter cannot resolve a credential during a halt, and answering an unknown asker anywhere else would
 disclose the swarm's state to whoever asked. The copy is a cache, and it takes the rule every cache takes

@@ -67,7 +67,7 @@ Every rule `workflows.md` owns, one entry each: the rule's own statement from `c
 
 ## [operator-only](../workflows.md#operator-only)
 
-- **WF-20** — only the operator-facing agent claims; `present` through `channel_config`; `await` bounded to `rounds_exhausted`; `record` read back; the redirect is by this batch's close, not a new intake *[M]*
+- **WF-20** — only the operator-facing agent claims; `present` through `vendor_binding`; `await` bounded to `rounds_exhausted`; `record` read back; the redirect is by this batch's close, not a new intake *[M]*
 
 ## [session digestion](../workflows.md#session-digestion)
 
