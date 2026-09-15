@@ -3,13 +3,17 @@ lib/notify/notifier.py — Apprise-backed notification router for Ateles daemons
 
 Reads a priority_rubric entity from Neotoma at startup.
 Routes notifications by priority through Apprise (Telegram-primary).
-Respects silence windows and digest collapse.
+Respects silence windows. Routine INFO events are never emailed and never
+accumulate for a later flush; only actionable held notices (operator_decision /
+warn inside the silence window) persist, and they drain as individual deliveries
+— never as a bulk "Digest" message.
 
 Priority levels:
     critical          — immediate, bypasses silence window
     blocker           — send now
-    operator_decision — send now (operator must decide)
-    info              — queued for digest
+    operator_decision — send now (operator must decide); held across silence
+    warn              — send now outside silence; held across silence
+    info              — logged only (no digest, no queue)
 
 All times are in the rubric's configured timezone (default: Europe/Madrid).
 """
@@ -64,17 +68,33 @@ _DEFAULT_RUBRIC: dict[str, Any] = {
 }
 
 
+# Held-queue prefixes applied when operator_decision / warn are deferred
+# across the silence window. Used to classify legacy digest-queue files so
+# actionable notices survive while routine INFO listings are dropped.
+_ACTIONABLE_HELD_PREFIXES = ("⚠️", "⚠")
+
+
 class Priority(str, Enum):
     CRITICAL = "critical"
     BLOCKER = "blocker"
     OPERATOR_DECISION = "operator_decision"
     # WARN: degraded-but-running conditions (dispatch failures, skipped work).
-    # Delivers immediately outside the silence window, queues for digest inside
-    # it. Added because daemons (formica, neotoma-agent, apis a2a) already
-    # sent Priority.WARN, which crashed with AttributeError on the very paths
-    # meant to report failures.
+    # Delivers immediately outside the silence window; held for later individual
+    # delivery inside it. Added because daemons (formica, neotoma-agent, apis
+    # a2a) already sent Priority.WARN, which crashed with AttributeError on the
+    # very paths meant to report failures.
     WARN = "warn"
     INFO = "info"
+
+
+def is_actionable_held_notice(message: str) -> bool:
+    """True when a persisted queue item is an actionable held notice.
+
+    OPERATOR_DECISION items are prefixed with ⚠️; WARN with ⚠. Routine INFO
+    (and any other non-prefixed legacy digest residue) is not actionable.
+    """
+    text = (message or "").lstrip()
+    return text.startswith(_ACTIONABLE_HELD_PREFIXES)
 
 
 class Notifier:
@@ -131,12 +151,17 @@ class Notifier:
         # reader. Backing it with a file and draining it opportunistically on
         # the next send means a queued escalation survives a restart and leaves
         # the queue without needing a scheduler that does not exist.
+        #
+        # 2026-09-15 standing_rule: routine INFO digests are forbidden. The
+        # file-backed queue remains only for actionable holds across silence;
+        # drain classifies first, drops non-actionable residue, and never emits
+        # a bulk "📋 Digest" message (those were the noisy [Ateles] Digest emails).
         self._digest_path = Path(
             os.environ.get("ATELES_DIGEST_QUEUE_PATH", "").strip()
             or Path(tempfile.gettempdir()) / "ateles-notify-digest.json"
         )
         # Tyto can complete independent recording watchers on worker threads.
-        # Serialize the whole notification path: the persisted digest queue is
+        # Serialize the whole notification path: the persisted held queue is
         # a read-modify-write transaction, and delivery clients are shared too.
         self._notification_lock = threading.RLock()
         self._apprise: Any = None
@@ -186,7 +211,7 @@ class Notifier:
         """
         Route a notification by priority.
 
-        Returns True if sent immediately, False if queued or dropped.
+        Returns True if sent immediately, False if held, dropped, or undelivered.
         """
         with self._notification_lock:
             return self._send_locked(message, priority, handler, bypass_silence)
@@ -202,7 +227,7 @@ class Notifier:
         tag = f"[{handler}] " if handler else ""
         full_message = f"{tag}{message}"
 
-        # Give the persisted queue a reader on every send (see _maybe_flush_digest).
+        # Drain any prior held actionable notices before handling this send.
         self._maybe_flush_digest()
 
         if prio == Priority.CRITICAL:
@@ -219,7 +244,7 @@ class Notifier:
         if prio == Priority.OPERATOR_DECISION:
             if self._in_silence_window() and not bypass_silence:
                 log.info(
-                    "[notify] Operator decision in silence window — queuing for digest"
+                    "[notify] Operator decision in silence window — holding for later delivery"
                 )
                 self._queue_digest(f"⚠️ {full_message}")
                 return False
@@ -231,16 +256,19 @@ class Notifier:
                 return False
             return self._deliver(f"⚠ {full_message}", force=False)
 
-        # INFO — always digest
-        self._queue_digest(full_message)
-        log.debug(f"[notify] Queued for digest: {full_message!r}")
+        # INFO — never email, never queue, never flush later as a digest.
+        log.debug("[notify] Dropping routine INFO (no digest): %r", full_message)
         return False
 
-    # ── Digest queue (file-backed) ───────────────────────────────────────────
+    # ── Held-notice queue (file-backed; actionable only) ─────────────────────
 
     @property
     def _digest_queue(self) -> list[str]:
-        """Read the persisted queue. Fail-open: unreadable state => empty."""
+        """Read the persisted queue. Fail-open: unreadable state => empty.
+
+        Property name kept for test/compat callers; contents are held notices
+        (and any legacy digest residue awaiting classification).
+        """
         with self._notification_lock:
             try:
                 raw = json.loads(self._digest_path.read_text())
@@ -253,59 +281,106 @@ class Notifier:
                 )
                 return []
 
+    def _persist_queue(self, items: list[str]) -> None:
+        """Atomically rewrite the queue file. Caller must hold the lock."""
+        try:
+            self._digest_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._digest_path.with_suffix(".tmp")
+            if items:
+                tmp.write_text(json.dumps(items))
+                tmp.replace(self._digest_path)
+            else:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    self._digest_path.unlink(missing_ok=True)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[notify] could not clear empty held queue: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            log.error("[notify] could not persist held queue (%s)", exc)
+
     def _queue_digest(self, message: str) -> None:
-        """Append to the persisted queue, atomically. Never raises."""
+        """Append an actionable held notice. Never raises."""
         with self._notification_lock:
             try:
                 items = self._digest_queue
                 items.append(message)
-                self._digest_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = self._digest_path.with_suffix(".tmp")
-                tmp.write_text(json.dumps(items))
-                tmp.replace(self._digest_path)
+                self._persist_queue(items)
             except Exception as exc:  # noqa: BLE001
                 # Losing the queue write must not lose the alert: say so loudly.
                 log.error(
-                    "[notify] could not persist digest item (%s) — message not "
+                    "[notify] could not persist held notice (%s) — message not "
                     "queued and will NOT be delivered: %r",
                     exc,
                     message[:200],
                 )
 
-    def flush_digest(self) -> bool:
-        """Send all queued digest messages as a single message.
+    def classify_queue(
+        self, items: list[str] | None = None
+    ) -> tuple[list[str], list[str]]:
+        """Split queue items into (actionable, routine).
 
-        Clears the persisted queue only after a successful delivery, so a
-        failed send leaves the items for the next attempt instead of dropping
-        them silently.
+        Actionable held notices are preserved for individual delivery. Routine
+        INFO / activity listings are discarded so they cannot form a digest.
+        """
+        actionable: list[str] = []
+        routine: list[str] = []
+        for item in items if items is not None else self._digest_queue:
+            if is_actionable_held_notice(item):
+                actionable.append(item)
+            else:
+                routine.append(item)
+        return actionable, routine
+
+    def flush_digest(self) -> bool:
+        """Drain the held queue without sending a bulk digest.
+
+        Classifies first: routine INFO residue is dropped; actionable held
+        notices are delivered one-by-one. The queue is rewritten to only the
+        actionable items that failed to deliver. Never emits a ``📋 Digest``
+        body (those were the routine [Ateles] Digest emails).
         """
         with self._notification_lock:
             items = self._digest_queue
             if not items:
                 return False
-            body = "\n".join(f"• {m}" for m in items)
-            header = f"📋 Digest ({len(items)} items)\n\n"
-            ok = self._deliver(header + body, force=True)
-            if ok:
-                try:
-                    self._digest_path.unlink(missing_ok=True)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("[notify] digest sent but queue not cleared: %s", exc)
-            else:
-                log.warning(
-                    "[notify] digest delivery failed — keeping %d item(s) queued",
-                    len(items),
+
+            actionable, routine = self.classify_queue(items)
+            if routine:
+                log.info(
+                    "[notify] dropping %d routine digest item(s); preserving %d actionable",
+                    len(routine),
+                    len(actionable),
                 )
-            return ok
+
+            if not actionable:
+                self._persist_queue([])
+                return False
+
+            remaining: list[str] = []
+            any_ok = False
+            for item in actionable:
+                if self._deliver(item, force=True):
+                    any_ok = True
+                else:
+                    remaining.append(item)
+
+            self._persist_queue(remaining)
+            if remaining:
+                log.warning(
+                    "[notify] held-notice delivery incomplete — keeping %d actionable item(s)",
+                    len(remaining),
+                )
+            return any_ok
 
     def _maybe_flush_digest(self) -> None:
-        """Drain the queue opportunistically, on any send.
+        """Drain held actionable notices opportunistically.
 
-        Nothing in the tree ever called `flush_digest()`, so queued items were
-        immortal. Daemons do emit notifications continuously, so piggy-backing
-        the drain on the next send gives the queue a real reader without
-        introducing a scheduler. Also drains once the silence window has ended,
-        which is when the operator can actually act on what was held back.
+        Outside the silence window (or at legacy digest_times windows used as
+        release moments), deliver held actionable items individually. Never
+        self-flushes a bulk digest of accumulated INFO.
         """
         try:
             if not self._digest_queue:
@@ -313,10 +388,14 @@ class Notifier:
             if self.should_flush_digest() or not self._in_silence_window():
                 self.flush_digest()
         except Exception as exc:  # noqa: BLE001 — a drain must never break a send
-            log.warning("[notify] opportunistic digest flush failed: %s", exc)
+            log.warning("[notify] opportunistic held-notice flush failed: %s", exc)
 
     def should_flush_digest(self) -> bool:
-        """True if current time matches a digest window (within 5 min)."""
+        """True if current time matches a release window (within 5 min).
+
+        Named for historical callers; windows release held actionable notices,
+        not routine digests.
+        """
         now = self._now_local()
         for t_str in self._rubric.get("digest_times", "08:30,20:00").split(","):
             t_str = t_str.strip()
@@ -347,6 +426,13 @@ class Notifier:
         if not self._notify_to:
             return False
         first = (message.strip().splitlines() or ["notification"])[0]
+        # Refuse to mint a digest-shaped subject even if a caller bypasses flush.
+        if first.startswith("📋 Digest") or "Digest (" in first[:40]:
+            log.warning(
+                "[notify] refusing digest-shaped email subject (routine digests disabled): %r",
+                first[:80],
+            )
+            return False
         subject = f"[Ateles] {first[:80]}"
         cmd = ["gws", "gmail", "+send", "--to", self._notify_to,
                "--subject", subject, "--body", message]
@@ -364,6 +450,14 @@ class Notifier:
             return False
 
     def _deliver(self, message: str, force: bool = False) -> bool:
+        # Hard stop: never deliver a bulk digest payload on any channel.
+        first = (message.strip().splitlines() or [""])[0]
+        if first.startswith("📋 Digest") or message.lstrip().startswith("📋 Digest"):
+            log.warning(
+                "[notify] refusing bulk digest delivery (routine digests disabled): %r",
+                first[:80],
+            )
+            return False
         # E6: try email first when it's the configured primary transport; only
         # fall through to Telegram (break-glass) if email delivery fails.
         if self._email_primary:
