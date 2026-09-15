@@ -18,7 +18,8 @@ PLISTS = [
     REPO / "execution/daemons/cyphorhinus/com.ateles.cyphorhinus.plist",
     REPO / "execution/daemons/piculet/com.ateles.piculet.plist",
     REPO / "execution/daemons/sylvia/com.ateles.sylvia.plist",
-    REPO / "execution/daemons/phoenicurus-release/com.ateles.phoenicurus-prepare.plist.tmpl",
+    REPO
+    / "execution/daemons/phoenicurus-release/com.ateles.phoenicurus-prepare.plist.tmpl",
 ]
 
 
@@ -30,7 +31,10 @@ def test_program_arguments_use_ateles_rc_src(plist_path: Path):
     python, script = args[0], args[1]
     for entry in (python, script):
         assert "ateles-rc-src" in entry, f"{plist_path.name}: {entry}"
-        assert "repos/ateles" not in entry, f"{plist_path.name}: still shared clone: {entry}"
+        assert (
+            "repos/ateles" not in entry
+        ), f"{plist_path.name}: still shared clone: {entry}"
+
     # Same root for interpreter and script (no half-repoint).
     def _root(p: str) -> str:
         marker = "/ateles-rc-src/"
@@ -63,3 +67,21 @@ def test_no_ateles_daemon_doctor_in_identity_fix_block():
     assert "isolate_daemons_to_rc_src.sh --apply" in msg
     assert "isolate_daemons_to_rc_src.sh --apply" in FIX_BLOCK
     assert "ateles-daemon-doctor" not in msg
+
+
+def test_cutover_effect_suites_are_bound_to_required_ci():
+    workflow = (REPO / ".github/workflows/ateles-tests.yml").read_text()
+    for trigger in (
+        '"execution/daemons/test_*.py"',
+        '"execution/daemons/cotinga/**"',
+        '"execution/daemons/cyphorhinus/**"',
+        '"execution/daemons/sylvia/**"',
+    ):
+        assert trigger in workflow
+
+    command = " ".join(workflow.split())
+    assert (
+        "python -m pytest execution/daemons/test_*.py "
+        "execution/daemons/cotinga/ execution/daemons/cyphorhinus/ "
+        "execution/daemons/sylvia/ -q"
+    ) in command

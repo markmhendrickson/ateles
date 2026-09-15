@@ -198,12 +198,79 @@ def test_existing_nonregular_plist_aborts_before_mutation(tmp_path, invalid_kind
     )
 
     assert result.returncode != 0
-    assert "existing non-regular plist" in result.stderr
     if invalid_kind == "directory":
+        assert "existing non-regular plist" in result.stderr
         assert invalid.is_dir()
     else:
+        assert "existing symlink plist" in result.stderr
         assert invalid.is_symlink()
         assert invalid.readlink() == launch_agents / "missing-target"
+    assert not (home / ".config/ateles/daemon-state-backups").exists()
+
+
+def test_valid_symlink_plist_aborts_before_mutation_and_preserves_link(tmp_path):
+    home = tmp_path / "home"
+    shared = tmp_path / "shared"
+    rc = tmp_path / "rc"
+    launch_agents = home / "Library/LaunchAgents"
+    fake_bin = tmp_path / "bin"
+    launch_agents.mkdir(parents=True)
+    fake_bin.mkdir()
+    (rc / "lib/daemon_runtime").mkdir(parents=True)
+    shutil.copy2(HELPER, rc / "lib/daemon_runtime/cutover_state.py")
+
+    target = launch_agents / "cotinga-source.plist"
+    target_bytes = _write_plist(target, "com.ateles.cotinga", shared)
+    linked = launch_agents / "com.ateles.cotinga.plist"
+    linked.symlink_to(target.name)
+    for label in LABELS[1:]:
+        _write_plist(launch_agents / f"{label}.plist", label, shared)
+
+    launchctl = fake_bin / "launchctl"
+    launchctl.write_text("""#!/usr/bin/env bash
+set -eu
+if [ "${1:-}" = list ]; then
+  n=100
+  for label in com.ateles.cotinga com.ateles.cyphorhinus com.ateles.piculet com.ateles.sylvia com.ateles.phoenicurus-prepare; do
+    printf '%s\\t0\\t%s\\n' "$n" "$label"
+    n=$((n + 1))
+  done
+  exit 0
+fi
+plist="${@: -1}"
+if { [ "${1:-}" = bootstrap ] || [ "${1:-}" = load ]; } && [ "$plist" = "$HOME/Library/LaunchAgents/com.ateles.piculet.plist" ] && grep -q "$CUTOVER_TEST_RC/" "$plist"; then
+  exit 1
+fi
+exit 0
+""")
+    launchctl.chmod(0o755)
+    plutil = fake_bin / "plutil"
+    plutil.write_text("#!/usr/bin/env bash\nexit 0\n")
+    plutil.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "ATELES_SHARED_CHECKOUT": str(shared),
+            "ATELES_REPO_PATH": str(rc),
+            "CUTOVER_TEST_RC": str(rc),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--apply"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "existing symlink plist" in result.stderr
+    assert linked.is_symlink()
+    assert linked.readlink() == Path(target.name)
+    assert target.read_bytes() == target_bytes
     assert not (home / ".config/ateles/daemon-state-backups").exists()
 
 

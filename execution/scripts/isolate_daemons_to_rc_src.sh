@@ -68,7 +68,13 @@ snapshot_plists() {
   local label plist
   for label in "${CUTOVER_LABELS[@]}"; do
     plist="$LA/$label.plist"
-    if [ ! -e "$plist" ] && [ ! -L "$plist" ]; then
+    # Preserve path identity as well as bytes. cp follows a symlink while the
+    # later mv replaces it, so no symlink is a safe rollback snapshot input.
+    if [ -L "$plist" ]; then
+      echo "FATAL: cannot snapshot existing symlink plist: $plist" >&2
+      return 1
+    fi
+    if [ ! -e "$plist" ]; then
       : > "$BACKUP/$label.absent"
       continue
     fi
