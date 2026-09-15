@@ -6,7 +6,7 @@ Loxia genus: crossbills. T4 invocable via GHA — reviews PRs against the
 ateles mirror files and posts a structured review comment.
 
 Promotion path:
-  Phase 3/4: GHA + Claude API (this script, ~100 LOC)
+  GHA invokes the same provider routing and cooldown mechanism as daemon roles
   Phase 5+:  Promote to named T3 if Neotoma attribution or SSE is needed
 
 Review checklist:
@@ -17,7 +17,7 @@ Review checklist:
   - Ruff/yamllint issues (surface, don't block)
 
 Environment variables (set by GHA workflow):
-  ANTHROPIC_API_KEY     Claude API key
+  APIS_REVIEW_MODELS    JSON map of explicitly qualified provider/model pairs
   GITHUB_TOKEN          GHA token for posting PR comments
   LOXIA_PR_NUMBER       PR number to review
   LOXIA_REPO            GitHub repo slug (owner/repo)
@@ -29,10 +29,10 @@ Environment variables (set by GHA workflow):
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import os
-import shutil
 import subprocess
 import sys
 import urllib.error
@@ -42,14 +42,6 @@ from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-# Preferred: bill the operator's Anthropic Max subscription via an OAuth token
-# (CLAUDE_CODE_OAUTH_TOKEN), same account the swarm's `claude --print` panelists
-# use — no per-request metered spend. Falls back to the metered ANTHROPIC_API_KEY
-# when no subscription token is present. NOTE: subscription OAuth tokens EXPIRE;
-# in headless CI a lapsed token surfaces as an auth error, which the review-failure
-# path below now makes VISIBLE (red check) rather than a silent false-green.
-CLAUDE_OAUTH_TOKEN = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 PR_NUMBER = os.environ.get("LOXIA_PR_NUMBER", "")
 REPO = os.environ.get("LOXIA_REPO", "")
@@ -61,8 +53,6 @@ NEOTOMA_BASE_URL = os.environ.get(
     "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
 ).rstrip("/")
 
-CLAUDE_MODEL = "claude-opus-4-8"
-CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
 GITHUB_API_URL = "https://api.github.com"
 
 MAX_DIFF_CHARS = 40_000  # truncate large diffs to stay within context
@@ -140,119 +130,23 @@ def get_changed_files() -> list[str]:
         return []
 
 
-# ── Claude API ────────────────────────────────────────────────────────────────
+# ── Shared, subscription-backed inference ─────────────────────────────────────
+
+class ReviewError(RuntimeError):
+    """No qualified provider produced a review; never a review verdict."""
 
 
-class ClaudeReviewError(RuntimeError):
-    """Raised when Claude could not produce a real review (auth/credit/network/
-    empty response). Callers must treat this as a FAILED review — never post it
-    as if it were a verdict and never let the job exit green on it."""
+def call_review(prompt: str, *, role: str) -> str:
+    daemon_dir = Path(__file__).resolve().parents[1] / "daemons" / "apis"
+    if str(daemon_dir) not in sys.path:
+        sys.path.insert(0, str(daemon_dir))
+    from skill_runner import run_review_prompt
 
-
-def call_claude(prompt: str) -> str:
-    """Get a review from Claude for `prompt`; return the text response.
-
-    Prefers the operator's Max subscription via the `claude --print` CLI (same
-    path the swarm's panelists use — it manages auth and rate budgeting for the
-    subscription tier). Verified in CI: a raw /v1/messages call with the
-    subscription OAuth token authenticates but is persistently 429 rate-limited,
-    so the CLI is the correct transport. Falls back to a direct API call only
-    when the CLI is unavailable AND a metered ANTHROPIC_API_KEY is present.
-
-    Raises ClaudeReviewError on any failure to obtain a real review (no
-    credential, CLI/API error, timeout, or empty response). Deliberate: never
-    return an error string as if it were the review (that was the false-green
-    bug — a failed review must fail the check, not pass it).
-    """
-    if CLAUDE_OAUTH_TOKEN:
-        return _call_claude_cli(prompt)
-    if ANTHROPIC_API_KEY:
-        return _call_claude_api(prompt)
-    raise ClaudeReviewError(
-        "no Claude credential set (need CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY)"
-    )
-
-
-def _call_claude_cli(prompt: str) -> str:
-    """Run `claude --print` with the prompt on stdin (subscription-authed via
-    CLAUDE_CODE_OAUTH_TOKEN in the env). Mirrors the daemon panelist pattern."""
-    claude_bin = os.environ.get("CLAUDE_BIN", "claude")
-    if shutil.which(claude_bin) is None:
-        # CLI missing but we were told to use the subscription — fail visibly
-        # rather than silently degrade to a metered key the operator opted out of.
-        raise ClaudeReviewError(
-            f"'{claude_bin}' CLI not found on PATH — cannot use the Max "
-            f"subscription; install the Claude Code CLI in the runner."
-        )
-    try:
-        proc = subprocess.run(
-            [claude_bin, "--print", "--model", CLAUDE_MODEL],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=180,
-            env=os.environ,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise ClaudeReviewError("claude --print timed out") from exc
-    if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "").strip()
-        raise ClaudeReviewError(
-            f"claude --print exited {proc.returncode}: {err[:400]}"
-        )
-    text = (proc.stdout or "").strip()
-    if not text:
-        raise ClaudeReviewError("claude --print returned an empty review")
-    return text
-
-
-def _call_claude_api(prompt: str) -> str:
-    """Direct /v1/messages call with the metered ANTHROPIC_API_KEY (fallback)."""
-    payload = {
-        "model": CLAUDE_MODEL,
-        "max_tokens": 1024,
-        "messages": [{"role": "user", "content": prompt}],
-    }
-
-    req = urllib.request.Request(
-        CLAUDE_API_URL,
-        data=json.dumps(payload).encode(),
-        headers={
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        method="POST",
-    )
-    req.add_header("User-Agent", "ateles-neotoma-sync/1.0")
-
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read())
-    except urllib.error.HTTPError as exc:
-        # Surface the API error body. A bare "HTTP Error 400: Bad Request" hides
-        # the actual cause (e.g. the invalid_request_error / credit-exhausted
-        # message), which made an earlier 400 undiagnosable from the posted
-        # review comment alone.
-        try:
-            detail = exc.read().decode("utf-8", "replace").strip()
-        except Exception:
-            detail = ""
-        raise ClaudeReviewError(
-            f"Claude API HTTP {exc.code} — {detail or exc.reason}"
-        ) from exc
-    except (urllib.error.URLError, json.JSONDecodeError) as exc:
-        raise ClaudeReviewError(f"Claude API call failed: {exc}") from exc
-
-    try:
-        text = data["content"][0]["text"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise ClaudeReviewError(
-            f"Claude response missing content: {json.dumps(data)[:300]}"
-        ) from exc
-    if not text or not text.strip():
-        raise ClaudeReviewError("Claude returned an empty review")
-    return text
+    result = asyncio.run(run_review_prompt(role=role, prompt=prompt))
+    print(f"[{role}] provider={result.provider or 'none'}; attempts={','.join(result.attempted_providers) or 'none'}")
+    if not result.ok or not result.stdout.strip():
+        raise ReviewError(result.error or "No qualified provider returned a review")
+    return result.stdout
 
 
 # ── GitHub comment ─────────────────────────────────────────────────────────────
@@ -558,7 +452,7 @@ def build_prompt(reviewer: Reviewer, diff: str, changed_files: list[str]) -> str
 
 
 def run_reviewer(reviewer: Reviewer, diff: str, changed_files: list[str]) -> bool:
-    """Build the prompt, call Claude, and (unless dry-run) post the comment and
+    """Build the prompt, route inference, and (unless dry-run) post the comment and
     file a Neotoma issue on REQUEST_CHANGES — all attributed to this reviewer.
 
     Returns True if a real review was produced, False if it failed. A failure
@@ -566,10 +460,10 @@ def run_reviewer(reviewer: Reviewer, diff: str, changed_files: list[str]) -> boo
     reviewer is broken, not silently absent) and the caller exits non-zero.
     """
     prompt = build_prompt(reviewer, diff, changed_files)
-    print(f"[{reviewer.skill}] Calling Claude ({CLAUDE_MODEL})...")
+    print(f"[{reviewer.skill}] Routing review across qualified providers...")
     try:
-        review = call_claude(prompt)
-    except ClaudeReviewError as exc:
+        review = call_review(prompt, role=reviewer.skill)
+    except ReviewError as exc:
         print(f"[{reviewer.skill}] REVIEW FAILED: {exc}", file=sys.stderr)
         if not DRY_RUN:
             failure_body = (
@@ -609,24 +503,6 @@ def run_reviewer(reviewer: Reviewer, diff: str, changed_files: list[str]) -> boo
 def main() -> None:
     if not PR_NUMBER:
         print("[loxia] LOXIA_PR_NUMBER not set — nothing to review", file=sys.stderr)
-        sys.exit(1)
-
-    # Fail loud, not silent: a review job that can't actually call Claude must
-    # not exit green — that gives a false "reviewed" signal on the PR. Accept
-    # EITHER the Max subscription OAuth token (preferred) or the metered key. If
-    # neither is available (e.g. forks without secret access), set
-    # LOXIA_ALLOW_NO_KEY=true to downgrade to a skip that still exits 0.
-    if not CLAUDE_OAUTH_TOKEN and not ANTHROPIC_API_KEY:
-        msg = (
-            "[loxia] No Claude credential set — cannot perform a real review. "
-            "Set CLAUDE_CODE_OAUTH_TOKEN (Max subscription, preferred) or the "
-            "ANTHROPIC_API_KEY repo secret. Failing so the missing review is "
-            "visible rather than a false green."
-        )
-        if os.environ.get("LOXIA_ALLOW_NO_KEY", "false").lower() == "true":
-            print(msg + " (LOXIA_ALLOW_NO_KEY=true — exiting 0)", file=sys.stderr)
-            sys.exit(0)
-        print(msg, file=sys.stderr)
         sys.exit(1)
 
     print(f"[loxia] Reviewing PR #{PR_NUMBER} in {REPO} (dry_run={DRY_RUN})")

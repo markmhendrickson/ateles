@@ -3081,3 +3081,130 @@ class TestFoundationContract:
         assert "Design basis:" in text
         assert "no design applies" in text
         assert "docs/foundation/conformance.md" in text
+
+
+def test_prompt_review_quota_failover_preserves_role_prompt_and_cost_policy(monkeypatch, tmp_path):
+    harness_router.reset_state()
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+    monkeypatch.setenv("APIS_REVIEW_MODELS", '{"claude":"qualified-a","codex":"qualified-b"}')
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "metered-must-not-reach-child")
+    monkeypatch.setenv("GITHUB_TOKEN", "publisher-must-not-reach-child")
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude":"claude", "codex":"codex"})
+    monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **kw: None)
+    attempts = []
+
+    async def spawn(*cmd, **kwargs):
+        attempts.append((cmd, kwargs))
+        class Process:
+            returncode = 1 if cmd[0] == "claude" else 0
+            async def communicate(self, input=None):
+                attempts[-1][1]["input"] = input
+                if self.returncode:
+                    return b"", b"quota exceeded"
+                return b"Verdict: APPROVE", b""
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    result = asyncio.run(skill_runner.run_review_prompt(
+        role="loxia", prompt="EXACT ROLE AND HEAD REVIEW INPUT", timeout=1,
+    ))
+    assert result.ok and result.provider == "codex"
+    assert result.attempted_providers == ("claude", "codex")
+    assert len(attempts) == 2
+    for cmd, kw in attempts:
+        assert kw["input"] == b"EXACT ROLE AND HEAD REVIEW INPUT"
+        assert "ANTHROPIC_API_KEY" not in kw["env"]
+        assert "GITHUB_TOKEN" not in kw["env"]
+    assert "--tools" in attempts[0][0]
+    assert "read-only" in attempts[1][0]
+    assert "--ignore-user-config" in attempts[1][0]
+
+
+@pytest.mark.parametrize("failure", ["quota exceeded", "request timed out", "upstream unavailable"])
+def test_prompt_only_failover_retries_without_repeating_external_effects(monkeypatch, tmp_path, failure):
+    harness_router.reset_state()
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+    attempts = []
+    async def attempt(provider):
+        attempts.append(provider)
+        return skill_runner.SkillResult("loxia", provider == "codex", 1 if provider == "claude" else 0,
+                                        "" if provider == "claude" else "Verdict: APPROVE", "",
+                                        error=failure if provider == "claude" else "", provider=provider)
+    result = asyncio.run(skill_runner._run_provider_attempts(
+        "loxia", attempt, binaries={"claude":"a", "codex":"b"}, retry_safe=True,
+    ))
+    assert result.ok and attempts == ["claude", "codex"]
+
+
+def test_role_provider_preference_does_not_disable_capacity_failover(monkeypatch, tmp_path):
+    harness_router.reset_state()
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude":"a", "codex":"b"})
+    attempts = []
+    async def once(skill, prompt, **kwargs):
+        attempts.append((kwargs["provider"], kwargs["role"], prompt))
+        p = kwargs["provider"]
+        return skill_runner.SkillResult(skill, p == "claude", 0 if p == "claude" else 1,
+                                        "review" if p == "claude" else "", "quota exceeded" if p == "codex" else "", provider=p)
+    monkeypatch.setattr(skill_runner, "_run_skill_once", once)
+    result = asyncio.run(skill_runner.run_skill("falco", "exact input", role="falco", preferred_provider="codex"))
+    assert result.ok
+    assert attempts == [("codex", "falco", "exact input"), ("claude", "falco", "exact input")]
+
+
+def test_usable_providers_excludes_zero_headroom_preference(monkeypatch, tmp_path):
+    """The lens availability view must match the router's eligibility view."""
+    harness_router.reset_state()
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
+    monkeypatch.setenv(
+        "APIS_HARNESS_HEADROOM",
+        '{"claude": 1.0, "codex": 0.0}',
+    )
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+    monkeypatch.setattr(
+        skill_runner,
+        "_provider_binaries",
+        lambda: {"claude": "claude", "codex": "codex"},
+    )
+
+    assert skill_runner.usable_providers() == {"claude"}
+
+
+def test_zero_headroom_hard_pin_reports_provider_exclusion(monkeypatch, tmp_path):
+    """A hard pin must name why that provider is ineligible."""
+    harness_router.reset_state()
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
+    monkeypatch.setenv(
+        "APIS_HARNESS_HEADROOM",
+        '{"claude": 1.0, "codex": 0.0}',
+    )
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+
+    async def should_not_run(provider):
+        raise AssertionError(f"ineligible provider was attempted: {provider}")
+
+    result = asyncio.run(
+        skill_runner._run_provider_attempts(
+            "falco",
+            should_not_run,
+            binaries={"claude": "claude", "codex": "codex"},
+            provider="codex",
+        )
+    )
+
+    assert not result.ok
+    assert result.attempted_providers == ()
+    assert "provider 'codex' is ineligible" in result.error
+    assert "headroom=0.000" in result.error
+    assert "minimum=0.050" in result.error
+
+
+@pytest.mark.parametrize("models", ["", "[]", "broken", '{"claude":null}', '{"cursor":"qualified"}'])
+def test_prompt_review_requires_qualified_supported_adapter(monkeypatch, models):
+    monkeypatch.setenv("APIS_REVIEW_MODELS", models)
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude":"a", "codex":"b", "cursor":"c"})
+    result = asyncio.run(skill_runner.run_review_prompt(role="loxia", prompt="input"))
+    assert not result.ok and result.attempted_providers == ()

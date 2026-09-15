@@ -63,10 +63,11 @@ from foundation import (  # noqa: E402
     foundation_contract,
 )
 from harness_router import (  # noqa: E402
-    configured_providers,
     cool_down,
     cooling_providers,
     provider_candidates,
+    provider_exclusion_reason,
+    usable_provider_names,
 )
 
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
@@ -1775,13 +1776,7 @@ def usable_providers() -> set[str]:
     honored, so that pinning never turns into "the lens silently did not run"
     (review_panel.resolve_lens_provider).
     """
-    binaries = _provider_binaries()
-    cooling = cooling_providers()
-    return {
-        provider
-        for provider in configured_providers()
-        if binaries.get(provider) and provider not in cooling
-    }
+    return usable_provider_names(_provider_binaries())
 
 
 async def run_skill(
@@ -1797,6 +1792,7 @@ async def run_skill(
     include_github_contract: bool = False,
     cwd: str | None = None,
     provider: str | None = None,
+    preferred_provider: str | None = None,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
 
@@ -1809,9 +1805,41 @@ async def run_skill(
     Passing ``provider`` pins the invocation to one adapter, primarily for
     diagnostics and focused tests.
     """
-    binaries = _provider_binaries()
+    async def attempt(selected: str) -> SkillResult:
+        return await _run_skill_once(
+            skill, prompt, provider=selected, role=role,
+            task_entity_id=task_entity_id, timeout=timeout, env_extra=env_extra,
+            notifier=notifier, github_token=github_token,
+            include_github_contract=include_github_contract, cwd=cwd,
+        )
+
+    return await _run_provider_attempts(
+        skill, attempt, binaries=_provider_binaries(), provider=provider,
+        role=role, task_entity_id=task_entity_id, notifier=notifier,
+        preferred_provider=preferred_provider,
+    )
+
+
+async def _run_provider_attempts(
+    skill, attempt, *, binaries, provider=None, role=None, task_entity_id="",
+    notifier=None, retry_safe=False, preferred_provider=None,
+) -> SkillResult:
+    """One selection/cooldown/failover mechanism for every harness entrypoint.
+
+    ``retry_safe`` is reserved for tool-free inference: only those calls can
+    safely repeat after a timeout/outage without duplicating external effects.
+    """
     candidates = provider_candidates(binaries, preferred=provider)
+    if preferred_provider in candidates and provider is None:
+        candidates = [preferred_provider, *[p for p in candidates if p != preferred_provider]]
     if not candidates:
+        if provider is not None:
+            reason = provider_exclusion_reason(provider, binaries)
+            msg = (
+                f"subscription-backed harness provider '{provider}' is "
+                f"ineligible: {reason or 'not selected'}"
+            )
+            return SkillResult(skill, False, None, "", "", error=msg)
         configured = os.environ.get(
             "APIS_HARNESS_PROVIDERS", "claude,codex,cursor"
         )
@@ -1826,19 +1854,7 @@ async def run_skill(
     last_result: SkillResult | None = None
     for selected in candidates:
         attempted.append(selected)
-        result = await _run_skill_once(
-            skill,
-            prompt,
-            provider=selected,
-            role=role,
-            task_entity_id=task_entity_id,
-            timeout=timeout,
-            env_extra=env_extra,
-            notifier=notifier,
-            github_token=github_token,
-            include_github_contract=include_github_contract,
-            cwd=cwd,
-        )
+        result = await attempt(selected)
         result.attempted_providers = tuple(attempted)
         # A successful agent may legitimately discuss "usage limits" in its
         # answer. Only inspect stdout when the process itself failed; stderr and
@@ -1852,7 +1868,10 @@ async def run_skill(
 
         if result.ok and failure_kind is None:
             return result
-        if failure_kind is None and not launch_failure:
+        retryable_prompt_failure = retry_safe and (
+            not result.ok or failure_kind is not None
+        )
+        if failure_kind is None and not launch_failure and not retryable_prompt_failure:
             return result
 
         cool_down(selected)
@@ -1878,3 +1897,100 @@ async def run_skill(
         task_entity_id=task_entity_id,
     )
     return last_result
+
+
+async def run_review_prompt(*, role: str, prompt: str, timeout: int = 180) -> SkillResult:
+    """Route an inference-only review without granting any publisher authority.
+
+    The caller owns the role prompt and GitHub signature. Models must be
+    explicitly qualified in APIS_REVIEW_MODELS; an installed CLI alone is not
+    evidence of review capability. Cursor has no verified tool-free adapter and
+    is therefore ineligible on this surface until that adapter is provided.
+    """
+    try:
+        models = json.loads(os.environ.get("APIS_REVIEW_MODELS", "{}"))
+    except (TypeError, ValueError):
+        models = {}
+    if not isinstance(models, dict):
+        models = {}
+    binaries = {
+        provider: binary
+        for provider, binary in _provider_binaries().items()
+        if provider in {"claude", "codex"}
+        and isinstance(models.get(provider), str)
+        and models[provider].strip()
+    }
+    inherited = _subscription_only_env()
+    # Inference gets only its subscription authentication and runtime settings.
+    # GitHub/Neotoma credentials remain exclusively with the publisher process.
+    env = {
+        key: value for key, value in inherited.items()
+        if key in {
+            "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "CODEX_HOME",
+            "CLAUDE_CODE_OAUTH_TOKEN", "SSL_CERT_FILE", "SSL_CERT_DIR",
+            "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+        }
+    }
+
+    async def attempt(provider: str) -> SkillResult:
+        binary = binaries[provider]
+        model = models[provider].strip()
+        with tempfile.TemporaryDirectory(prefix="ateles-review-") as workdir:
+            if provider == "claude":
+                cmd = [binary, "--print", "--model", model, "--tools", "",
+                       "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+                       "--setting-sources", ""]
+            else:
+                cmd = [binary, "exec", "--model", model, "--ignore-user-config",
+                       "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check",
+                       "-c", "features.shell_tool=false", "-c", "features.unified_exec=false",
+                       "-c", "web_search=\"disabled\"", "-c", "forced_login_method=\"chatgpt\"",
+                       "--color", "never", "-"]
+            started = time.monotonic()
+            process = None
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE, cwd=workdir, env=env,
+                )
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(input=prompt.encode()), timeout=timeout,
+                )
+                out, err = stdout.decode(errors="replace"), stderr.decode(errors="replace")
+                result = SkillResult(role, process.returncode == 0 and bool(out.strip()),
+                                     process.returncode, out, err, provider=provider)
+                if result.ok:
+                    verdicts = re.findall(
+                        r"(?im)^\s*Verdict\s*:\s*(APPROVE|REQUEST_CHANGES|COMMENT)\s*$",
+                        out.replace("**", ""),
+                    )
+                    if len(verdicts) != 1:
+                        result.ok = False
+                        result.error = "review response must contain exactly one explicit verdict"
+                elif not out.strip() and process.returncode == 0:
+                    result.error = "empty review response"
+            except asyncio.TimeoutError:
+                if process is not None:
+                    process.kill()
+                    await process.communicate()
+                result = SkillResult(role, False, None, "", "",
+                                     error=f"review timed out after {timeout}s", provider=provider)
+            except OSError as exc:
+                result = SkillResult(role, False, None, "", "",
+                                     error=f"{provider} launch failed: {exc}", provider=provider)
+            try:
+                await asyncio.to_thread(
+                    _write_harness_event, task_entity_id="", role=role, agent_sub="",
+                    event_type="subprocess", tool_name=f"{provider}:{role}",
+                    success="true" if result.ok else "false",
+                    input_summary=f"tool-restricted review; requested model={model}",
+                    output_summary=f"provider={provider}; role={role}; {result.error or result.returncode}",
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
+            except Exception as exc:
+                log.debug("[apis] review attempt attribution unavailable: %s", exc)
+            return result
+
+    return await _run_provider_attempts(
+        role, attempt, binaries=binaries, role=role, retry_safe=True,
+    )

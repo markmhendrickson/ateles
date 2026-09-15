@@ -34,6 +34,9 @@ Run: pytest execution/daemons/apis/test_missing_lens_review_recovery.py -v
 
 from __future__ import annotations
 
+import harness_router
+import pytest
+import skill_runner
 import swarm_dispatch as sd
 
 
@@ -144,11 +147,6 @@ def test_every_known_lens_name_parses():
 
 # ---------------------------------------------------------------------------
 # The sweep — the recovery half
-# ---------------------------------------------------------------------------
-
-import pytest
-
-
 class _Notifier:
     def __init__(self) -> None:
         self.sent: list[str] = []
@@ -355,3 +353,52 @@ async def test_a_redispatched_verdict_is_persisted_and_posted(monkeypatch):
         "a recovered verdict must be persisted to Neotoma as well as posted, "
         "in the same order the primary panel loop uses"
     )
+
+
+@pytest.mark.asyncio
+async def test_zero_headroom_lens_preference_uses_remaining_provider(
+    monkeypatch, tmp_path
+):
+    """The #491 recovery path must use the same soft preference as the panel."""
+    d = _dispatcher()
+    harness_router.reset_state()
+    monkeypatch.setenv("APIS_SECURITY_LENS_PROVIDER", "codex")
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
+    monkeypatch.setenv(
+        "APIS_HARNESS_HEADROOM",
+        '{"claude": 1.0, "codex": 0.0}',
+    )
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+    monkeypatch.setattr(
+        skill_runner,
+        "_provider_binaries",
+        lambda: {"claude": "claude", "codex": "codex"},
+    )
+
+    class _Ok:
+        ok = True
+        stdout = "**APPROVE**"
+        error = None
+        returncode = 0
+
+    async def fake_run_skill(agent, *args, **kwargs):  # noqa: ANN001
+        assert "provider" not in kwargs
+        assert kwargs["preferred_provider"] is None
+        assert harness_router.provider_candidates(
+            skill_runner._provider_binaries(), now=100.0
+        ) == ["claude"]
+        return _Ok()
+
+    async def noop(*args, **kwargs):  # noqa: ANN001
+        return None
+
+    async def no_changed_files(*args, **kwargs):  # noqa: ANN001
+        return []
+
+    monkeypatch.setattr(sd, "run_skill", fake_run_skill)
+    monkeypatch.setattr(sd, "_token_for_agent_on_repo", lambda *args: "test-token")
+    monkeypatch.setattr(d, "_changed_files", no_changed_files)
+    monkeypatch.setattr(d, "_persist_panel_reviews", noop)
+    monkeypatch.setattr(d, "_post_missing_panel_comments", noop)
+
+    await d._redispatch_missing_lens("o/r", _pr(), "security")

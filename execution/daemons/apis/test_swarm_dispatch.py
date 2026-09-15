@@ -41,6 +41,7 @@ from swarm_dispatch import (
     _token_for_repo,
     agent_github_login,
     attribution_header,
+    compose_aggregation_marker,
     compose_fallback_comment,
     compose_superseded_verdict,
     compose_vanellus_fallback_comment,
@@ -436,6 +437,8 @@ def _pr_dispatcher_with_stubs(
             return SkillResult(skill, True, 0, vanellus_stdout, "")
         return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
 
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40))
+
     async def fake_changed_files(self, trigger):
         return ["src/x.ts"]
 
@@ -448,7 +451,7 @@ def _pr_dispatcher_with_stubs(
     async def fake_post_missing_vanellus(self, trigger, result):
         return None
 
-    async def fake_emit_review(self, trigger, verdict, body):
+    async def fake_emit_review(self, trigger, verdict, body, **kwargs):
         # ateles#241: record the native review emission so tests can assert the
         # event fired (and with which verdict) without real GitHub I/O.
         #
@@ -539,25 +542,24 @@ def test_formal_review_emitted_before_routing_decision(monkeypatch):
     assert kinds.index("review") < kinds.index("route"), kinds
 
 
-def test_handle_pr_unparseable_verdict_emits_comment_review(monkeypatch):
-    """An unparseable verdict still records a review, as the inert COMMENT —
-    never REQUEST_CHANGES, which would block merge on a parse failure."""
+def test_handle_pr_unparseable_verdict_never_emits_a_review(monkeypatch):
+    """A parser failure is incomplete work, never a synthetic review."""
     calls = []
     d = _pr_dispatcher_with_stubs(
         monkeypatch, vanellus_stdout="the panel had thoughts", calls=calls
     )
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
-    assert ("review", "COMMENT") in calls, calls
+    assert not any(kind == "review" for kind, _ in calls), calls
 
 
-def test_handle_pr_unparseable_verdict_routes_not_gates(monkeypatch):
+def test_handle_pr_unparseable_verdict_defers_not_routes(monkeypatch):
     calls = []
     d = _pr_dispatcher_with_stubs(
         monkeypatch, vanellus_stdout="the panel had thoughts", calls=calls
     )
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
-    # Unparseable → treated as not-clear → route (never silently gate ready).
-    assert any(c[0] == "route" for c in calls)
+    # No findings exist to route to an implementer; retry the missing review.
+    assert not any(c[0] == "route" for c in calls)
     assert ("gate", None) not in calls
 
 
@@ -567,6 +569,8 @@ def test_handle_pr_unparseable_verdict_routes_not_gates(monkeypatch):
 def _gate_blocked_dispatcher(monkeypatch, *, calls, auto_rereview):
     """Dispatcher whose Lanius returns GATE_INHERITANCE: blocked, recording
     which lens skills actually run so we can assert panel-skip vs re-review."""
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40))
 
     async def fake_run_skill(skill, prompt, **kwargs):
         if skill == "lanius":
@@ -4780,6 +4784,8 @@ def test_vanellus_fallback_non_fatal_when_post_raises(monkeypatch):
 
 def test_handle_pr_calls_vanellus_fallback_after_run(monkeypatch):
     """_handle_pr must call _post_missing_vanellus_comment after the Vanellus run."""
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40))
+
     fallback_calls: list[tuple] = []
     skill_calls: list[str] = []
 
@@ -6335,7 +6341,7 @@ def test_handle_panel_session_limit_notifies_at_info_not_digest(monkeypatch):
     )
     assert len(notifier.sent) == 1
     assert notifier.priorities == [swarm_dispatch.Priority.INFO]
-    assert "paused on a usage limit" in notifier.sent[0]
+    assert "usage limit" in notifier.sent[0]
 
 
 def test_handle_panel_session_limit_attributes_to_apis_dispatcher(monkeypatch):
@@ -6370,6 +6376,130 @@ def test_handle_panel_session_limit_attributes_to_apis_dispatcher(monkeypatch):
     assert len(comment_bodies) == 1
     assert attribution_header("apis", "swarm dispatcher") in comment_bodies[0]
     assert attribution_header("vanellus", "PR steward") not in comment_bodies[0]
+
+
+def test_non_capacity_review_failure_requires_action(monkeypatch):
+    """Execution failures must not borrow self-clearing quota promises."""
+    comment_bodies: list[str] = []
+
+    class _CapturingClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url, **kwargs):
+            return _FakeListResp([])
+        async def post(self, url, **kwargs):
+            comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+            return _FakeResp(201)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="x"))
+    asyncio.run(
+        d._handle_panel_session_limit(
+            _trigger(number=264, repository="owner/repo"),
+            None,
+            "vanellus",
+            "",
+            "",
+            reason="PR head changed during review or could not be verified",
+        )
+    )
+
+    assert notifier.priorities == [swarm_dispatch.Priority.BLOCKER]
+    assert len(comment_bodies) == 1
+    assert "no operator action is required" not in comment_bodies[0].lower()
+    assert "automatically after the limit resets" not in comment_bodies[0].lower()
+    assert d._REVIEW_DEFERRED_RE.search(comment_bodies[0]) is None
+    assert "operator attention is required" in comment_bodies[0].lower()
+
+
+def test_provider_capacity_failure_auto_resumes_with_partial_panel_detail(monkeypatch):
+    """Capacity exhaustion keeps the retry marker and names saved/missing lenses."""
+    comment_bodies: list[str] = []
+
+    class _CapturingClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url, **kwargs):
+            return _FakeListResp([])
+        async def post(self, url, **kwargs):
+            comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+            return _FakeResp(201)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="x"))
+    asyncio.run(
+        d._handle_panel_session_limit(
+            _trigger(number=264, repository="owner/repo"),
+            None,
+            "security",
+            "",
+            "",
+            reason="provider capacity exhausted",
+            completed_lenses=("pm",),
+            failed_lenses=(("security", "provider exhaustion"),),
+        )
+    )
+
+    assert notifier.priorities == [swarm_dispatch.Priority.INFO]
+    assert len(comment_bodies) == 1
+    body = comment_bodies[0]
+    assert d._REVIEW_DEFERRED_RE.search(body) is not None
+    assert "resume automatically" in body.lower()
+    assert "completed lens results preserved: pm" in body.lower()
+    assert "missing lens results: security (provider exhaustion)" in body.lower()
+
+
+def test_handle_pr_reports_successful_and_failed_lenses(monkeypatch):
+    """One failed lens leaves the successful results visible and names the gap."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**", calls=calls
+    )
+    monkeypatch.setattr(
+        swarm_dispatch,
+        "select_panel",
+        lambda **kwargs: [
+            Lens(agent="pavo", lens="pm", gate="pm", checks="scope"),
+            Lens(agent="falco", lens="security", gate=None, checks="security"),
+        ],
+    )
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "pavo":
+            return SkillResult(skill, True, 0, "**APPROVE**", "")
+        if skill == "falco":
+            return SkillResult(skill, False, 1, "", "process failed")
+        raise AssertionError(f"unexpected skill: {skill}")
+
+    persisted = []
+    deferred = {}
+
+    async def fake_persist(self, trigger, reviews, agents):
+        persisted.extend(reviews)
+
+    async def fake_deferral(self, *args, **kwargs):
+        deferred.update(kwargs)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_persist)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_panel_session_limit", fake_deferral)
+
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+    assert persisted == [("pm", "**APPROVE**")]
+    assert deferred["completed_lenses"] == ("pm",)
+    assert deferred["failed_lenses"] == (("security", "execution failure"),)
+    assert deferred["reason"] == "incomplete review panel"
 
 
 def test_parse_limit_reset_delay_reads_the_clock():
@@ -6742,7 +6872,8 @@ def _comments_client(monkeypatch, bodies, *, calls=None, raises=None):
                         {
                             "id": i + 1,
                             "created_at": f"2026-08-{10 + i:02d}T09:00:00Z",
-                            "body": b,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                            "body": b if "Reviewed commit:" in b else b + "\nReviewed commit: " + "a" * 40,
                         }
                         for i, b in enumerate(bodies)
                     ]
@@ -6754,6 +6885,7 @@ def _comments_client(monkeypatch, bodies, *, calls=None, raises=None):
 
 
 def _resolver(monkeypatch):
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40))
     return SwarmDispatcher(_StubNotifier(), _config())
 
 
@@ -6889,17 +7021,16 @@ def test_handle_pr_recovered_approve_gates_readiness(monkeypatch):
     assert ("review", "APPROVE") in calls, calls
 
 
-def test_handle_pr_still_comments_when_no_verdict_anywhere(monkeypatch):
-    """Regression guard: with neither stdout nor comment carrying a token, the
-    dispatcher behaves exactly as before — inert COMMENT review, blocking route."""
+def test_handle_pr_defers_when_no_verdict_anywhere(monkeypatch):
+    """Missing review capacity does not fabricate a verdict or implementation task."""
     calls = []
     d = _pr_dispatcher_with_stubs(
         monkeypatch, vanellus_stdout="the panel had thoughts", calls=calls
     )
     _comments_client(monkeypatch, ["nothing useful here"])
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
-    assert ("review", "COMMENT") in calls, calls
-    assert any(c[0] == "route" for c in calls), calls
+    assert not any(kind == "review" for kind, _ in calls), calls
+    assert not any(c[0] == "route" for c in calls), calls
 
 
 # ── Vanellus merge authorization tracks APIS_AUTONOMY_AUTO_MERGE (ateles#333) ──
@@ -7515,3 +7646,68 @@ def test_confirm_gates_clear_end_to_end_on_pr_waives_parent(monkeypatch):
 
     assert store.gates_for(50) == {g: "waived" for g in PRE_IMPL_GATES}
     assert 99 not in [n for _repo, n, _gates in store.waive_calls]
+
+
+def test_failed_aggregation_never_replays_historical_verdict(monkeypatch):
+    calls = []
+    d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="", calls=calls)
+    original = swarm_dispatch.run_skill
+
+    async def failed_aggregator(skill, *args, **kwargs):
+        if skill == "vanellus":
+            return SkillResult(skill, False, None, "", "", error="no eligible providers")
+        return await original(skill, *args, **kwargs)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", failed_aggregator)
+    # Head-scoped marker matches the live head, but failed aggregation must
+    # still refuse to publish — incomplete work is not a verdict (#993).
+    _comments_client(monkeypatch, [
+        f"{compose_aggregation_marker('a' * 40)}\n**REQUEST_CHANGES**"
+    ])
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls), calls
+
+
+def test_successful_aggregation_cannot_recover_verdict_for_old_head(monkeypatch):
+    # Marker pinned to head a must not recover when the live head is b (#764).
+    _comments_client(monkeypatch, [
+        f"{compose_aggregation_marker('a' * 40)}\n**APPROVE**"
+    ])
+    d = _resolver(monkeypatch)
+    monkeypatch.setattr(d, "_pr_head_sha", lambda _t: _async_return('b' * 40))
+    assert asyncio.run(d._resolve_review_verdict(_trigger(), "")) == (None, False)
+
+
+def test_same_head_historical_comment_is_not_from_current_run(monkeypatch):
+    d = _resolver(monkeypatch)
+    async def comments(*args):
+        return [{"id": 1, "created_at":"2026-09-01T00:00:00Z", "updated_at":"2026-09-01T00:00:00Z",
+                 "body":f"{compose_aggregation_marker('a' * 40)}\n**APPROVE**"}]
+    monkeypatch.setattr(d, "_all_issue_comments", comments)
+    assert asyncio.run(d._resolve_review_verdict(
+        _trigger(), "", expected_head="a" * 40,
+        started_at=datetime(2026, 9, 14, tzinfo=timezone.utc),
+    )) == (None, False)
+
+
+def test_fresh_comment_at_current_head_is_recovered(monkeypatch):
+    d = _resolver(monkeypatch)
+    async def comments(*args):
+        return [{"id": 1, "created_at":"2026-09-14T01:00:00Z", "updated_at":"2026-09-14T01:00:00Z",
+                 "body":f"{compose_aggregation_marker('a' * 40)}\n**APPROVE**"}]
+    monkeypatch.setattr(d, "_all_issue_comments", comments)
+    assert asyncio.run(d._resolve_review_verdict(
+        _trigger(), "", expected_head="a" * 40,
+        started_at=datetime(2026, 9, 14, tzinfo=timezone.utc),
+    )) == ("approve", True)
+
+
+@pytest.mark.parametrize("heads", [("a", "b"), ("a", "a", "b")])
+def test_head_movement_during_panel_or_aggregation_never_publishes(monkeypatch, heads):
+    calls = []
+    d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**", calls=calls)
+    values = iter(heads)
+    monkeypatch.setattr(d, "_pr_head_sha", lambda _t: _async_return(next(values) * 40))
+    _comments_client(monkeypatch, [])
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls), calls
