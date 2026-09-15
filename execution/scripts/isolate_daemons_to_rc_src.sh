@@ -72,6 +72,11 @@ print(os.path.realpath(sys.argv[1]))
 PY
 }
 
+if ! SHARED_RESOLVED=$(resolved_path "$SHARED"); then
+  echo "FATAL: could not resolve shared checkout path: $SHARED" >&2
+  exit 1
+fi
+
 release_target_for_symlink() {
   local plist="$1"
   local resolved rel
@@ -79,8 +84,8 @@ release_target_for_symlink() {
     return 1
   fi
   case "$resolved" in
-    "$SHARED"/*)
-      rel="${resolved#"$SHARED"/}"
+    "$SHARED_RESOLVED"/*)
+      rel="${resolved#"$SHARED_RESOLVED"/}"
       printf '%s\n' "$RC/$rel"
       ;;
     *)
@@ -127,7 +132,7 @@ plist_references_shared() {
   if [ -L "$plist" ]; then
     if resolved=$(resolved_path "$plist"); then
       case "$resolved" in
-        "$SHARED"/*) return 0 ;;
+        "$SHARED_RESOLVED"/*) return 0 ;;
       esac
     fi
   fi

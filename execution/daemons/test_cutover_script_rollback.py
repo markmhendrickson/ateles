@@ -162,6 +162,29 @@ def test_successful_cutover_repoints_symlinks_to_validated_release_targets(tmp_p
     assert str(rc) in regular.read_text()
 
 
+def test_successful_cutover_accepts_a_symlinked_checkout_prefix(tmp_path):
+    home, shared, rc, fake_bin, _original_links, release_targets, _regular = (
+        _symlink_fleet(tmp_path)
+    )
+    real_shared = tmp_path / "real-shared"
+    shared.rename(real_shared)
+    shared.symlink_to(real_shared, target_is_directory=True)
+    env = _symlink_cutover_env(home, shared, rc, fake_bin)
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--apply"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    for installed, release_target in release_targets.items():
+        assert installed.is_symlink()
+        assert installed.readlink() == release_target
+
+
 def test_later_failure_restores_original_symlink_targets_and_reloads_them(tmp_path):
     home, shared, rc, fake_bin, original_links, _release_targets, _regular = (
         _symlink_fleet(tmp_path)
