@@ -1022,6 +1022,22 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    # Checkout *identity* (right tree?) is always fatal for this deploy-bound
+    # daemon — distinct from freshness below. See ateles#515.
+    # Deliberately OUTSIDE any broad except: identity calls sys.exit directly.
+    sys.path.insert(0, str(PROJECT_ROOT / "lib" / "daemon_runtime"))
+    from checkout_identity import enforce_deploy_checkout  # noqa: PLC0415
+
+    enforce_deploy_checkout(
+        "phoenicurus-prepare",
+        Path(__file__).resolve(),
+        why=(
+            "This daemon drives releases. Running from a session clone risks "
+            "silent wrong-code execution (see ateles#339, #361, #412, #515)."
+        ),
+        plist_label="com.ateles.phoenicurus-prepare",
+    )
+
     # Report whether this daemon is running the code that is actually on main.
     # A daemon executes the checkout it was launched from, so a merged fix does
     # nothing until that checkout is updated — on 2026-08-09 this daemon ran a
@@ -1036,7 +1052,6 @@ def main() -> int:
     # silently-defeated-safety-mechanism failure this module exists to catch,
     # so the guard is scoped to import/path errors only (Loxia, ateles#405).
     try:
-        sys.path.insert(0, str(PROJECT_ROOT / "lib" / "daemon_runtime"))
         from checkout_drift import warn_on_drift  # noqa: PLC0415
     except Exception as exc:  # noqa: BLE001
         # A missing or broken check must never be the reason a release fails to

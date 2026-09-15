@@ -855,6 +855,15 @@ def build_shallow_briefing(
 
 
 def main() -> None:
+    from lib.daemon_runtime.checkout_identity import enforce_deploy_checkout
+
+    enforce_deploy_checkout(
+        "cotinga",
+        Path(__file__).resolve(),
+        why="Daily briefing runs from whatever tree launchd points at.",
+        plist_label="com.ateles.cotinga",
+    )
+
     log.info("Cotinga starting.")
 
     if not _acquire_lock():

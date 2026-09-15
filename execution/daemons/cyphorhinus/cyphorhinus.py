@@ -312,6 +312,15 @@ def _handle_reply(message: dict) -> None:
 
 # ── Main loop ───────────────────────────────────────────────────────────────
 def main() -> None:
+    from lib.daemon_runtime.checkout_identity import enforce_deploy_checkout
+
+    enforce_deploy_checkout(
+        "cyphorhinus",
+        Path(__file__).resolve(),
+        why="Reply-router stores operator follow-ups to Neotoma.",
+        plist_label="com.ateles.cyphorhinus",
+    )
+
     if not BOT_TOKEN or not CHAT_ID:
         log.error(
             "CYPHORHINUS_TELEGRAM_BOT_TOKEN / CYPHORHINUS_TELEGRAM_CHAT_ID not set — "

@@ -51,6 +51,16 @@ def test_plist_template_points_at_the_release_checkout():
     assert not root.endswith(SHARED_CLONE), f"still pointed at the shared clone: {root}"
 
 
+def test_plist_template_points_ateles_program_arguments_at_rc_src():
+    """Ateles ProgramArguments must use ateles-rc-src, not repos/ateles (#515)."""
+    data = plistlib.loads(PLIST_TMPL.read_bytes())
+    args = data["ProgramArguments"]
+    for entry in args:
+        if "ateles" in entry:
+            assert "ateles-rc-src" in entry, entry
+            assert "repos/ateles" not in entry, entry
+
+
 def test_plist_template_is_valid():
     """A malformed plist fails at launchd load time, long after the edit."""
     data = plistlib.loads(PLIST_TMPL.read_bytes())

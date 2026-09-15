@@ -35,7 +35,7 @@ build on any error).
 
 ## Per-daemon plist requirements
 
-The per-daemon plists (`com.ateles.{apis,formica,neotoma-agent}`) are
+The per-daemon plists (`com.ateles.{apis,formica,neotoma-agent,cotinga,cyphorhinus,piculet,sylvia,phoenicurus-prepare}`) are
 machine-local (gitignored) and must:
 
 1. Point `ProgramArguments` at `~/ateles-rc-src/.venv/bin/python3` and the
@@ -48,9 +48,67 @@ machine-local (gitignored) and must:
 3. Carry the daemon's `NEOTOMA_BASE_URL`, SSE subscription id, and (Apis) claude
    binary path, as before.
 
+## Checkout identity enforcement
+
+Deploy-bound daemons (`cotinga`, `cyphorhinus`, `piculet`, `sylvia`,
+`phoenicurus-prepare`) refuse to start unless their git checkout root is the
+documented deploy tree. This is **checkout identity** ("right tree?") — distinct
+from **checkout drift** ("current?") in `lib/daemon_runtime/checkout_drift.py`.
+
+Incidents: ateles#339, #361, #412, #515.
+
+Startup enforcement is **fail-closed** for those five daemons. There is no
+production bypass env. Tests may set `ATELES_CHECKOUT_IDENTITY_ROOT` (actual
+root override) or `ATELES_DEPLOY_CHECKOUT` (expected root; default
+`~/ateles-rc-src`).
+
+### Exit codes
+
+| Code | Condition | FATAL line 1 prefix |
+|---|---|---|
+| `78` | Wrong tree (`actual ≠ expected`) | `FATAL: wrong checkout — refusing to start.` |
+| `79` | Cannot verify (no `.git`, unreadable HEAD, …) | `FATAL: cannot determine checkout identity` |
+| `80` | Expected deploy root path does not exist | `FATAL: deploy checkout not provisioned` |
+| `81` | Unexpected I/O/permission during check | `FATAL: checkout identity check failed` |
+
+### FATAL message (verbatim shape)
+
+```
+FATAL: wrong checkout — refusing to start.
+
+  daemon:       phoenicurus-prepare
+  running from: /Users/markmhendrickson/repos/ateles  (branch: feature/example)
+  expected:     /Users/markmhendrickson/ateles-rc-src  (must track origin/main)
+
+  plist:        com.ateles.phoenicurus-prepare
+
+This daemon drives releases. Running from a session clone risks silent
+wrong-code execution (see ateles#339, #361, #412, #515).
+
+Fix:
+  bash ~/ateles-rc-src/execution/scripts/isolate_daemons_to_rc_src.sh --apply
+Docs: docs/daemon_rc_autodeploy.md
+```
+
+### Cutover (co-located state)
+
+`execution/scripts/isolate_daemons_to_rc_src.sh --apply` inventories daemon-local
+state in both trees, snapshots hashed rollback copies under
+`~/.config/ateles/daemon-state-backups/`, merges losslessly into the RC tree
+(or refuses), rewrites/reloads **only** the five labels above, then proves a
+**new PID** and executable/script paths under `~/ateles-rc-src`. On failure it
+rolls state back and does not claim cutover complete. The shared session clone
+is left untouched until all five pass. XDG relocation is out of scope.
+
+Credential boundary: the deploy checkout holds **code only**. Secrets stay in
+`~/.config/neotoma/.env`, `ateles-private/keys`, and plist `EnvironmentVariables`
+— never copied into `~/ateles-rc-src`.
+
 ## Setup
 
 ```bash
 ~/repos/ateles/execution/scripts/install_rc_autodeploy.sh
 # then repoint the per-daemon plists per "Per-daemon plist requirements" above
+# for the five wrong-tree daemons (or any still on ~/repos/ateles):
+bash ~/ateles-rc-src/execution/scripts/isolate_daemons_to_rc_src.sh --apply
 ```
