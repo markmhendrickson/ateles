@@ -16,8 +16,6 @@ Run: python execution/mcp/ateles/test_server.py
 
 from __future__ import annotations
 
-import json
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -26,9 +24,9 @@ from unittest.mock import patch
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
-import httpx
+import httpx  # noqa: E402
 
-import server as srv
+import server as srv  # noqa: E402
 
 
 def _set_token(module, value: str) -> None:
@@ -423,6 +421,189 @@ class TestResolveCheckpoint(unittest.TestCase):
         self.assertIn("failed to correct", result["error"])
 
 
+class TestBootstrapSession(unittest.TestCase):
+    """The MCP bootstrap must be useful before foundation cutover and honest
+    about why it has not selected the durable swarm path."""
+
+    @patch("server._get_dispatch_health")
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    def test_pre_foundation_selects_harness_local_and_loads_context(
+        self, mock_retrieve, mock_get, mock_health
+    ):
+        def retrieve(entity_type, **kwargs):
+            if entity_type == "agent_definition":
+                return [{
+                    "entity_id": "ent_ateles",
+                    "snapshot": {
+                        "name": "ateles",
+                        "status": "active",
+                        "prompt_markdown": "Canonical Ateles prompt",
+                        "aauth_sub": "ateles@example.invalid",
+                    },
+                }]
+            if entity_type == "operator_profile":
+                return [{
+                    "entity_id": "ent_profile",
+                    "snapshot": {
+                        "profile_key": "default",
+                        "preferred_name": "Operator",
+                        "communication_style": "direct",
+                        "consent_gate": "ask_before_external_effects",
+                    },
+                }]
+            if entity_type == "swarm_roster":
+                return [{
+                    "entity_id": "ent_roster",
+                    "snapshot": {
+                        "roster_key": "default",
+                        "roles": {"dispatcher": "apis", "code": "cicada"},
+                    },
+                }]
+            return []
+
+        mock_retrieve.side_effect = retrieve
+        mock_get.side_effect = lambda path, params=None: {
+            "/session": {
+                "attribution": {"tier": "unverified_client"},
+                "aauth": {"verified": False, "admitted": False},
+            },
+            "/entities/ent_task": {
+                "entity_id": "ent_task",
+                "entity_type": "task",
+                "snapshot": {"title": "Implement bootstrap", "status": "routed"},
+            },
+            "/entities/ent_task/relationships": {
+                "outgoing": [{
+                    "relationship_type": "REFERS_TO",
+                    "source_entity_id": "ent_task",
+                    "target_entity_id": "ent_skill",
+                }],
+                "incoming": [],
+            },
+            "/entities/ent_skill": {
+                "entity_id": "ent_skill",
+                "entity_type": "skill",
+                "snapshot": {
+                    "name": "continue-session",
+                    "version": "2",
+                    "content": "derive current state",
+                },
+            },
+        }.get(path)
+        mock_health.return_value = {"running": True}
+
+        result = srv._bootstrap_session(
+            harness="codex",
+            workstream_ref="ent_task",
+            native_delegation_available=True,
+        )
+
+        self.assertEqual(result["top_level_agent"]["name"], "ateles")
+        self.assertEqual(result["operator_profile"]["preferred_name"], "Operator")
+        self.assertEqual(result["workstream"]["entity_id"], "ent_task")
+        self.assertEqual(result["relevant_methods"][0]["source"], "top_level_agent")
+        self.assertEqual(result["relevant_methods"][1]["name"], "continue-session")
+        self.assertEqual(result["lineage"][0]["entity_id"], "ent_skill")
+        self.assertFalse(result["record_identity"]["principal_supplied_by_caller"])
+        self.assertEqual(result["execution"]["mode"], "harness_local")
+        self.assertTrue(result["execution"]["available"])
+        self.assertIn("record_admission", result["execution"]["failed_checks"])
+        self.assertFalse(result["execution"]["durable_swarm_claim"])
+
+    @patch("server._get_dispatch_health")
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    def test_daemon_presence_alone_never_selects_swarm(
+        self, mock_retrieve, mock_get, mock_health
+    ):
+        mock_retrieve.side_effect = lambda entity_type, **kwargs: [{
+            "entity_id": f"ent_{entity_type}",
+            "snapshot": {
+                "name": "ateles",
+                "status": "active",
+                "profile_key": "default",
+                "roster_key": "default",
+                "roles": {},
+            },
+        }]
+        mock_get.side_effect = lambda path, params=None: {
+            "attribution": {"tier": "verified_agent"},
+            "aauth": {"verified": True, "admitted": True},
+        } if path == "/session" else {
+            "entity_id": "ent_plan",
+            "entity_type": "plan",
+            "snapshot": {"title": "Foundation", "status": "active"},
+        } if path == "/entities/ent_plan" else {
+            "outgoing": [], "incoming": []
+        } if path == "/entities/ent_plan/relationships" else None
+        mock_health.return_value = {"running": True}
+
+        result = srv._bootstrap_session(
+            harness="claude",
+            workstream_ref="ent_plan",
+            native_delegation_available=True,
+        )
+
+        self.assertEqual(result["execution"]["mode"], "harness_local")
+        self.assertIn("bound_workflow", result["execution"]["failed_checks"])
+        self.assertIn("foundation_evidence", result["execution"]["failed_checks"])
+
+    @patch("server._get_dispatch_health")
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    def test_no_native_delegation_reports_held_local_execution(
+        self, mock_retrieve, mock_get, mock_health
+    ):
+        mock_retrieve.side_effect = lambda entity_type, **kwargs: [{
+            "entity_id": f"ent_{entity_type}",
+            "snapshot": {
+                "name": "ateles",
+                "status": "active",
+                "profile_key": "default",
+                "roster_key": "default",
+                "roles": {},
+            },
+        }]
+        mock_get.return_value = None
+        mock_health.return_value = {"running": False}
+
+        result = srv._bootstrap_session(
+            harness="tools-only",
+            native_delegation_available=False,
+        )
+
+        self.assertEqual(result["execution"]["mode"], "harness_local")
+        self.assertFalse(result["execution"]["available"])
+        self.assertEqual(result["execution"]["next_action"], "submit_or_inspect_only")
+
+    @patch("server._retrieve_entities")
+    def test_ambiguous_workstream_title_is_not_guessed(self, mock_retrieve):
+        mock_retrieve.side_effect = lambda entity_type, **kwargs: (
+            [
+                {
+                    "entity_id": "ent_task_one",
+                    "entity_type": "task",
+                    "snapshot": {"title": "Shared title"},
+                },
+                {
+                    "entity_id": "ent_task_two",
+                    "entity_type": "task",
+                    "snapshot": {"title": "Shared title"},
+                },
+            ]
+            if entity_type == "task"
+            else []
+        )
+
+        workstream, error = srv._resolve_workstream("Shared title")
+
+        self.assertIsNone(workstream)
+        self.assertIn("ambiguous workstream_ref", error)
+        self.assertIn("ent_task_one", error)
+        self.assertIn("ent_task_two", error)
+
+
 class TestGracefulDegradation(unittest.TestCase):
 
     def setUp(self):
@@ -785,17 +966,20 @@ class TestListCheckpoints(unittest.TestCase):
 class TestToolSchemas(unittest.TestCase):
 
     ACTION_TOOLS = {"get_swarm_roster", "route_task", "list_checkpoints", "resolve_checkpoint"}
+    CONTEXT_TOOLS = {"bootstrap_session"}
     # Read-only swarm observability. resolve_checkpoint stays the ONLY mutating
     # tool: see the self-certification boundary note in server.py — a session
     # must not be able to advance its own gate.
     OBSERVABILITY_TOOLS = {"get_gate_status", "list_pipeline_queue", "get_dispatch_health"}
 
     def test_tools_defined(self):
-        self.assertEqual(len(srv.TOOLS), len(self.ACTION_TOOLS | self.OBSERVABILITY_TOOLS))
+        expected = self.ACTION_TOOLS | self.CONTEXT_TOOLS | self.OBSERVABILITY_TOOLS
+        self.assertEqual(len(srv.TOOLS), len(expected))
 
     def test_tool_names(self):
         names = {t.name for t in srv.TOOLS}
-        self.assertEqual(names, self.ACTION_TOOLS | self.OBSERVABILITY_TOOLS)
+        expected = self.ACTION_TOOLS | self.CONTEXT_TOOLS | self.OBSERVABILITY_TOOLS
+        self.assertEqual(names, expected)
 
     def test_observability_tools_are_read_only(self):
         """Guards the boundary, not just the wiring.
@@ -811,6 +995,18 @@ class TestToolSchemas(unittest.TestCase):
                 if impl in chain:
                     chain += inspect.getsource(getattr(srv, impl))
             self.assertNotIn("_correct(", chain, f"{name} must not write to Neotoma")
+
+    def test_bootstrap_is_read_only(self):
+        import inspect
+
+        self.assertNotIn("_correct(", inspect.getsource(srv._bootstrap_session))
+
+    def test_bootstrap_cannot_accept_a_caller_supplied_principal(self):
+        bootstrap = next(tool for tool in srv.TOOLS if tool.name == "bootstrap_session")
+        properties = bootstrap.inputSchema["properties"]
+        self.assertTrue(
+            {"principal", "principal_id", "user_id", "aauth_sub"}.isdisjoint(properties)
+        )
 
     def test_every_tool_schema_rejects_unknown_properties(self):
         """Every inputSchema must set additionalProperties: false.
