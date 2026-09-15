@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import plistlib
 import shutil
@@ -33,6 +34,53 @@ def _write_plist(path: Path, label: str, root: Path) -> bytes:
     data = plistlib.dumps(payload)
     path.write_bytes(data)
     return data
+
+
+def test_reconciliation_exception_restores_earlier_state_mutation(tmp_path):
+    home = tmp_path / "home"
+    shared = tmp_path / "shared"
+    rc = tmp_path / "rc"
+    (rc / "lib/daemon_runtime").mkdir(parents=True)
+    shutil.copy2(HELPER, rc / "lib/daemon_runtime/cutover_state.py")
+
+    # Cotinga is reconciled before Piculet. Its shared-only state is therefore
+    # copied into RC before the malformed list member raises TypeError.
+    shared_cotinga = shared / "execution/daemons/cotinga/.cotinga_last_run"
+    rc_cotinga = rc / "execution/daemons/cotinga/.cotinga_last_run"
+    shared_cotinga.parent.mkdir(parents=True)
+    shared_cotinga.write_text("2026-09-15T12:00:00Z\n")
+
+    shared_seen = shared / "execution/daemons/piculet/seen_files.json"
+    rc_seen = rc / "execution/daemons/piculet/seen_files.json"
+    shared_seen.parent.mkdir(parents=True)
+    rc_seen.parent.mkdir(parents=True)
+    shared_seen.write_text(json.dumps(["meeting.wav"]) + "\n")
+    rc_seen_original = json.dumps([{"malformed": "entry"}]) + "\n"
+    rc_seen.write_text(rc_seen_original)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "ATELES_SHARED_CHECKOUT": str(shared),
+            "ATELES_REPO_PATH": str(rc),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--apply"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "unhashable type" in result.stderr
+    assert not rc_cotinga.exists()
+    assert rc_seen.read_text() == rc_seen_original
+    backups = list((home / ".config/ateles/daemon-state-backups").glob("*"))
+    assert len(backups) == 1
+    assert (backups[0] / "manifest.json").is_file()
 
 
 @pytest.mark.parametrize("failure_mode", ["rewrite", "reload", "readback"])

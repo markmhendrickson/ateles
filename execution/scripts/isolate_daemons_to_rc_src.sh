@@ -185,18 +185,24 @@ if cmd == "snapshot-and-reconcile":
     backup.mkdir(parents=True, exist_ok=True)
     items = inventory_state_files(shared, rc)
     snapshot_inventory(items, backup)
-    merges = reconcile_all(items)
     try:
+        # Reconciliation mutates entries in inventory order. Protect the whole
+        # post-snapshot phase so an unexpected exception after an earlier copy
+        # cannot strand a partially reconciled RC tree.
+        merges = reconcile_all(items)
         assert_reconciled(merges)
-    except RuntimeError as exc:
+        for m in merges:
+            print(f"  merge {m.ref.daemon}/{m.ref.rel_path}: {m.status} ({m.detail})")
+        # Write pre-PIDs for later read-back.
+        pre = {d: launchctl_pid(PLIST_LABELS[d]) for d in CUTOVER_DAEMONS}
+        (backup / "pre_pids.json").write_text(json.dumps(pre, indent=2) + "\n")
+    except Exception as exc:
         print(f"FATAL: {exc}", file=sys.stderr)
-        restore_from_backup(backup, shared, rc)
+        try:
+            restore_from_backup(backup, shared, rc)
+        except Exception as restore_exc:
+            print(f"FATAL: daemon-local state rollback failed: {restore_exc}", file=sys.stderr)
         sys.exit(2)
-    for m in merges:
-        print(f"  merge {m.ref.daemon}/{m.ref.rel_path}: {m.status} ({m.detail})")
-    # Write pre-PIDs for later read-back.
-    pre = {d: launchctl_pid(PLIST_LABELS[d]) for d in CUTOVER_DAEMONS}
-    (backup / "pre_pids.json").write_text(json.dumps(pre, indent=2) + "\n")
     sys.exit(0)
 
 if cmd == "restore":
