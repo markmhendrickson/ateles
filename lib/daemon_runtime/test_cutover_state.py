@@ -26,6 +26,7 @@ from cutover_state import (  # noqa: E402
     merge_state_pair,
     prove_daemon_cutover,
     reconcile_all,
+    restore_from_backup,
     snapshot_inventory,
     verify_release_paths,
 )
@@ -128,6 +129,27 @@ def test_snapshot_records_hashes(trees, tmp_path):
     manifest = snapshot_inventory(items, backup)
     assert manifest["files"]
     assert (backup / "manifest.json").is_file()
+
+
+def test_restore_removes_file_that_was_absent_before_reconciliation(trees, tmp_path):
+    """Rollback restores absence, not only the content of files that existed."""
+    shared, rc = trees
+    rel = DAEMON_REL_DIRS["cotinga"]
+    shared_state = shared / rel / ".cotinga_last_run"
+    rc_state = rc / rel / ".cotinga_last_run"
+    shared_state.write_text("2026-09-15\n")
+
+    items = inventory_state_files(shared, rc)
+    backup = tmp_path / "backup"
+    snapshot_inventory(items, backup)
+    merges = reconcile_all(items)
+    assert_reconciled(merges)
+    assert rc_state.is_file()
+
+    restore_from_backup(backup, shared, rc)
+
+    assert shared_state.read_text() == "2026-09-15\n"
+    assert not rc_state.exists()
 
 
 def test_verify_release_paths_rejects_shared_executable(tmp_path):

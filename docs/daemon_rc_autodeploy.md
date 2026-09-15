@@ -97,8 +97,10 @@ state in both trees, snapshots hashed rollback copies under
 `~/.config/ateles/daemon-state-backups/`, merges losslessly into the RC tree
 (or refuses), rewrites/reloads **only** the five labels above, then proves a
 **new PID** and executable/script paths under `~/ateles-rc-src`. On failure it
-rolls state back and does not claim cutover complete. The shared session clone
-is left untouched until all five pass. XDG relocation is out of scope.
+restores state (including files that were absent before reconciliation),
+restores all five prior plist configurations, reloads the prior fleet, and does
+not claim cutover complete. Both rollback sets are retained. The shared session
+clone is left untouched until all five pass. XDG relocation is out of scope.
 
 Credential boundary: the deploy checkout holds **code only**. Secrets stay in
 `~/.config/neotoma/.env`, `ateles-private/keys`, and plist `EnvironmentVariables`

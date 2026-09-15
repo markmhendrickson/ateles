@@ -190,9 +190,11 @@ def snapshot_inventory(
     items: list[InventoryItem], backup_dir: Path
 ) -> dict[str, Any]:
     """
-    Copy every existing side into ``backup_dir`` and return a manifest of hashes.
+    Record every side and copy existing files into ``backup_dir``.
 
     Layout: ``backup_dir/{shared,rc}/<daemon>/<filename>``.
+    Missing sides are recorded explicitly so rollback can restore absence when
+    reconciliation created a file on that side.
     """
     manifest: dict[str, Any] = {"files": []}
     for item in items:
@@ -200,20 +202,20 @@ def snapshot_inventory(
             ("shared", item.shared_exists, item.ref.shared_path, item.shared_hash),
             ("rc", item.rc_exists, item.ref.rc_path, item.rc_hash),
         ):
-            if not exists:
-                continue
-            dest = backup_dir / side / item.ref.daemon / item.ref.rel_path
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, dest)
-            manifest["files"].append(
-                {
-                    "daemon": item.ref.daemon,
-                    "rel_path": item.ref.rel_path,
-                    "side": side,
-                    "sha256": digest,
-                    "backup": str(dest),
-                }
-            )
+            entry = {
+                "daemon": item.ref.daemon,
+                "rel_path": item.ref.rel_path,
+                "side": side,
+                "exists": exists,
+                "sha256": digest,
+                "backup": None,
+            }
+            if exists:
+                dest = backup_dir / side / item.ref.daemon / item.ref.rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, dest)
+                entry["backup"] = str(dest)
+            manifest["files"].append(entry)
     manifest_path = backup_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return manifest
@@ -389,10 +391,16 @@ def restore_from_backup(backup_dir: Path, shared_root: Path, rc_root: Path) -> N
         daemon = entry["daemon"]
         rel = entry["rel_path"]
         side = entry["side"]
-        src = Path(entry["backup"])
         rel_dir = DAEMON_REL_DIRS[daemon]
         root = shared_root if side == "shared" else rc_root
         dest = root / rel_dir / rel
+        # Old manifests predate explicit absence records and contain only
+        # existing files. Treat a missing ``exists`` key as true for backward
+        # compatibility with retained rollback sets.
+        if not entry.get("exists", True):
+            dest.unlink(missing_ok=True)
+            continue
+        src = Path(entry["backup"])
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
 
@@ -455,9 +463,6 @@ def verify_release_paths(
     if not under_rc:
         return False, f"no path under release checkout ({rc}) in: {command!r}"
     if shared:
-        under_shared = [
-            t for t in tokens if t.startswith(shared + os.sep) or t == shared
-        ]
         # Allow shared only if it is clearly not the executable/script
         # (e.g. ATELES_PRIVATE_KEYS_DIR). Executable tokens are the first
         # absolute paths in the command.

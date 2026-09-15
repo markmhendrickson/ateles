@@ -38,7 +38,6 @@ STATE_BACKUP="$HOME/.config/ateles/daemon-state-backups/$STAMP"
 # checkout's copy when run from a worktree before cutover.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_FOR_HELPER="$(cd "$SCRIPT_DIR/../.." && pwd)"
-HELPER_PY="$REPO_FOR_HELPER/lib/daemon_runtime/cutover_state.py"
 if [ -f "$RC/lib/daemon_runtime/cutover_state.py" ]; then
   HELPER_ROOT="$RC"
 else
@@ -62,6 +61,88 @@ is_cutover_label() {
     [ "$x" = "$label" ] && return 0
   done
   return 1
+}
+
+snapshot_plists() {
+  mkdir -p "$BACKUP"
+  local label plist
+  for label in "${CUTOVER_LABELS[@]}"; do
+    plist="$LA/$label.plist"
+    if [ -f "$plist" ] && [ -r "$plist" ]; then
+      cp "$plist" "$BACKUP/$label.plist"
+    else
+      : > "$BACKUP/$label.absent"
+    fi
+  done
+}
+
+load_plist() {
+  local plist="$1"
+  if launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null; then
+    return 0
+  fi
+  launchctl load "$plist" 2>/dev/null
+}
+
+unload_plist() {
+  local label="$1"
+  local plist="$2"
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || \
+    launchctl unload "$plist" 2>/dev/null || true
+}
+
+rollback_cutover() {
+  # Roll back state and every member of the five-daemon plist fleet. Continue
+  # through individual failures so a broken member cannot prevent recovery of
+  # the remaining four. Retain both backup directories for audit/retry.
+  local failed=0 label plist saved
+  echo "── restoring daemon-local state from $STATE_BACKUP" >&2
+  if ! run_cutover_python restore "$SHARED" "$RC" "$STATE_BACKUP"; then
+    echo "FATAL: daemon-local state rollback failed" >&2
+    failed=1
+  fi
+
+  echo "── restoring and reloading the prior five-daemon plist fleet from $BACKUP" >&2
+  for label in "${CUTOVER_LABELS[@]}"; do
+    plist="$LA/$label.plist"
+    saved="$BACKUP/$label.plist"
+    unload_plist "$label" "$plist"
+    if [ -f "$saved" ]; then
+      if ! cp "$saved" "$plist"; then
+        echo "FATAL: could not restore $label plist" >&2
+        failed=1
+        continue
+      fi
+      if ! plutil -lint "$plist" >/dev/null 2>&1; then
+        echo "FATAL: restored $label plist is invalid" >&2
+        failed=1
+        continue
+      fi
+      if ! load_plist "$plist"; then
+        echo "FATAL: could not reload prior $label configuration" >&2
+        failed=1
+      fi
+    elif [ -f "$BACKUP/$label.absent" ]; then
+      if ! rm -f "$plist"; then
+        echo "FATAL: could not restore prior absence for $label plist" >&2
+        failed=1
+      fi
+    else
+      echo "FATAL: no pre-run plist snapshot for $label" >&2
+      failed=1
+    fi
+  done
+  return "$failed"
+}
+
+fail_and_rollback() {
+  local message="$1"
+  local code="$2"
+  echo "FATAL: $message" >&2
+  if ! rollback_cutover; then
+    echo "FATAL: rollback was incomplete; retained backups require operator inspection" >&2
+  fi
+  exit "$code"
 }
 
 run_cutover_python() {
@@ -118,6 +199,11 @@ if cmd == "snapshot-and-reconcile":
     (backup / "pre_pids.json").write_text(json.dumps(pre, indent=2) + "\n")
     sys.exit(0)
 
+if cmd == "restore":
+    backup = Path(sys.argv[4])
+    restore_from_backup(backup, shared, rc)
+    sys.exit(0)
+
 if cmd == "readback":
     backup = Path(sys.argv[4])
     pre = json.loads((backup / "pre_pids.json").read_text())
@@ -140,8 +226,6 @@ if cmd == "readback":
         assert_all_readbacks(results)
     except RuntimeError as exc:
         print(f"FATAL: {exc}", file=sys.stderr)
-        print("Rolling back daemon-local state from backup; plists may need manual restore from plist-backups.", file=sys.stderr)
-        restore_from_backup(backup, shared, rc)
         sys.exit(3)
     sys.exit(0)
 
@@ -155,6 +239,8 @@ echo "── daemon-local state inventory (shared=$SHARED  rc=$RC)"
 run_cutover_python inventory-dry "$SHARED" "$RC" || true
 
 if [ "$APPLY" = "--apply" ]; then
+  echo "── snapshot prior five-daemon plist fleet (backup: $BACKUP)"
+  snapshot_plists
   echo "── snapshot + lossless reconcile into RC (backup: $STATE_BACKUP)"
   run_cutover_python snapshot-and-reconcile "$SHARED" "$RC" "$STATE_BACKUP"
 fi
@@ -179,20 +265,26 @@ for plist in "$LA"/com.ateles.*.plist; do
   changed=$((changed+1))
   echo "── $nm references shared checkout"
   if [ "$APPLY" = "--apply" ]; then
-    mkdir -p "$BACKUP"; cp "$plist" "$BACKUP/$nm"
-    tmp=$(mktemp)
-    sed "s#$SHARED/#$RC/#g" "$plist" > "$tmp"
+    if ! tmp=$(mktemp); then
+      fail_and_rollback "could not create temporary plist for $label" 1
+    fi
+    if ! sed "s#$SHARED/#$RC/#g" "$plist" > "$tmp"; then
+      rm -f "$tmp"
+      fail_and_rollback "could not rewrite $label plist" 1
+    fi
     if ! plutil -lint "$tmp" >/dev/null 2>&1; then
       echo "  ABORT: rewritten plist invalid, leaving $nm untouched"
       rm -f "$tmp"
-      echo "FATAL: plist rewrite failed — rolling back state"
-      PYTHONPATH="$HELPER_ROOT/lib/daemon_runtime${PYTHONPATH:+:$PYTHONPATH}" \
-        python3 -c "from pathlib import Path; from cutover_state import restore_from_backup; restore_from_backup(Path('$STATE_BACKUP'), Path('$SHARED'), Path('$RC'))"
-      exit 1
+      fail_and_rollback "plist rewrite failed for $label" 1
     fi
-    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || launchctl unload "$plist" 2>/dev/null || true
-    mv "$tmp" "$plist"
-    launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || launchctl load "$plist" 2>/dev/null || true
+    unload_plist "$label" "$plist"
+    if ! mv "$tmp" "$plist"; then
+      rm -f "$tmp"
+      fail_and_rollback "could not install rewritten $label plist" 1
+    fi
+    if ! load_plist "$plist"; then
+      fail_and_rollback "could not reload $label from the release checkout" 1
+    fi
     echo "  reloaded $label from RC (backup: $BACKUP/$nm)"
     reloaded_cutover=$((reloaded_cutover+1))
     sleep 1
@@ -208,9 +300,7 @@ fi
 
 echo "── post-reload PID + path read-back (must all be under $RC)"
 if ! run_cutover_python readback "$SHARED" "$RC" "$STATE_BACKUP"; then
-  echo "FATAL: cutover read-back failed — state rolled back from $STATE_BACKUP"
-  echo "Restore plists from $BACKUP and reload manually if needed."
-  exit 3
+  fail_and_rollback "cutover read-back failed" 3
 fi
 
 echo
