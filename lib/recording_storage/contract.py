@@ -264,14 +264,22 @@ class ArchivalJournal:
         self.path = path
         self._state: dict[str, dict] = {}
         if path.exists():
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                # An unreadable or interrupted journal cannot prove that an
+                # archive copy was verified. Treat it as empty and let the
+                # next attempt rebuild evidence from archive read-back.
+                raw = None
             if isinstance(raw, dict):
                 self._state = raw
 
     def _flush(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp.write_text(json.dumps(self._state, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.write_text(
+            json.dumps(self._state, indent=2, sort_keys=True), encoding="utf-8"
+        )
         tmp.replace(self.path)
 
     def mark_pending(self, content_hash: str, record: dict) -> None:
@@ -331,16 +339,6 @@ def archive_recording(
     digest = content_sha256(source)
     key = archive_key_for(digest)
     source_s = str(source.resolve())
-
-    prior = journal.verified_record(digest)
-    if prior is not None:
-        return ArchivalRecord(
-            source_path=source_s,
-            archive_key=prior.get("archive_key", key),
-            content_sha256=digest,
-            status="verified",
-            verified_at=prior.get("verified_at"),
-        )
 
     base = {
         "source_path": source_s,
