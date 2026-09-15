@@ -1262,6 +1262,20 @@ async def main() -> None:
 
     async def deferred_review_sweep() -> None:
         while True:
+            # Head-scoped review supersession (#507). Webhook synchronize and
+            # reopen events retire stale verdicts synchronously; this pass is
+            # the bounded backup for missed deliveries. It shares the review
+            # sweep cadence, so secondary invalidation lag is at most
+            # APIS_DEFERRED_REVIEW_SWEEP_SECONDS (600s by default).
+            try:
+                await dispatcher.supersede_stale_review_verdicts(
+                    list(dispatcher.config.resume_repositories)
+                )
+            except Exception as exc:
+                log.error(
+                    f"[{DAEMON_NAME}] review-supersession sweep failed: {exc}",
+                    exc_info=True,
+                )
             try:
                 await dispatcher.resume_deferred_reviews(
                     list(dispatcher.config.resume_repositories)

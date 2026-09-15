@@ -93,6 +93,26 @@ Side-effecting steps stay operator-gated:
    parent issue via the GitHub API; each pre-registered agent joins the
    panel and reviews against exactly what it promised to check.
 
+### Head-scoped verdicts and supersession
+
+Every panel and aggregation verdict is bound to the full 40-hex PR head SHA in
+an HTML marker (`review:<lens> commit=<sha>` or
+`vanellus-aggregation commit=<sha>`). The marker is authoritative; prose such
+as `Reviewed commit:` is display text and never satisfies a gate. A legacy,
+malformed, mismatched, or visibly superseded aggregation is therefore inert
+when the current head is known.
+
+On `pull_request.synchronize` and `pull_request.reopened`, Apis retires stale
+bot verdicts before running Lanius or the panel. It edits stale comments in
+place with a visible superseded banner and dismisses stale bot-authored
+`CHANGES_REQUESTED` reviews through GitHub's Reviews API, then reads each write
+back. Human comments and reviews are never changed. A backup pass runs on the
+same interval as the deferred-review sweep
+(`APIS_DEFERRED_REVIEW_SWEEP_SECONDS`, 600 seconds by default), so a missed
+webhook leaves stale review state visible for no more than one sweep interval.
+This is local GitHub review invalidation; a shared cross-surface invalidation
+mechanism remains separate follow-up work.
+
 ## Operational setup
 
 1. Configure a GitHub webhook on each pipeline repo (ateles, neotoma):

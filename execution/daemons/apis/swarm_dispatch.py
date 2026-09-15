@@ -924,11 +924,11 @@ def verdict_to_review_event(verdict: str | None, body: str | None = None) -> str
 # pinned to the artifact state it judged") is HEAD-PINNING: a SIGNED_OFF only
 # counts against the PR head it was actually written against.
 #
-# Vanellus is already instructed (skill_runner.SWARM_GITHUB_CONTRACT via
-# docs/agents/vanellus.md) to include a `Reviewed commit: <full head SHA>`
-# line in its aggregation for exactly this reason. This is that instruction's
-# read side: parse the line, and let the caller compare it against the PR's
-# CURRENT head (`_pr_head_sha`) before trusting a SIGNED_OFF that predates it.
+# Historical SIGNED_OFF bodies often carried a prose `Reviewed commit:` line.
+# That line is a reader aid only for merge-readiness / presence (HTML marker +
+# formal-review commit_id are authoritative). This parser remains solely for
+# the ateles#938 SIGNED_OFF backlog guard below, which still reads the prose
+# pin when no marker-era signal exists on older comments.
 _REVIEWED_COMMIT_RE = re.compile(
     r"Reviewed commit:\s*`?([0-9a-f]{7,40})`?", re.IGNORECASE
 )
@@ -1374,10 +1374,13 @@ def attribution_header(agent: str, role: str) -> str:
     return f"**\U0001f916 {agent.capitalize()} — Ateles swarm, {role}**"
 
 
-def compose_fallback_comment(lens: str, agent: str, text: str) -> str:
+def compose_fallback_comment(
+    lens: str, agent: str, text: str, commit_sha: str = ""
+) -> str:
     """Body for a dispatcher-posted review comment (panelist could not post)."""
+    marker = compose_lens_review_marker(lens, commit_sha)
     return (
-        f"review:{lens}\n"
+        f"{marker}\nreview:{lens}\n"
         f"{attribution_header(agent, f'{lens} lens panelist')}\n\n"
         f"{text}\n\n"
         f"_Posted by the Apis dispatcher on behalf of {agent} — the "
@@ -1388,6 +1391,130 @@ def compose_fallback_comment(lens: str, agent: str, text: str) -> str:
 # Stable marker embedded in every Vanellus aggregation comment so the
 # dispatcher can detect whether the comment landed (dedup / missing-check).
 _VANELLUS_COMMENT_MARKER = "<!-- vanellus-aggregation -->"
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+_AGGREGATION_MARKER_RE = re.compile(
+    r"<!--\s*vanellus-aggregation(?P<attrs>(?:\s+[^>]*)?)-->", re.IGNORECASE
+)
+_AGGREGATION_SUPERSEDED_RE = re.compile(
+    r"<!--\s*vanellus-aggregation-superseded\s+by=(?P<sha>[0-9a-f]{40})\s*-->",
+    re.IGNORECASE,
+)
+_LENS_MARKER_RE = re.compile(
+    r"<!--\s*review:(?P<lens>[a-z0-9_-]+)\s+commit=(?P<sha>[0-9a-f]{40})\s*-->",
+    re.IGNORECASE,
+)
+_LENS_SUPERSEDED_RE = re.compile(
+    r"<!--\s*review:(?P<lens>[a-z0-9_-]+)-superseded\s+"
+    r"by=(?P<sha>[0-9a-f]{40})\s*-->", re.IGNORECASE,
+)
+
+
+def _normalise_full_sha(value: str) -> str:
+    sha = (value or "").strip().lower()
+    return sha if _FULL_SHA_RE.fullmatch(sha) else ""
+
+
+def compose_lens_review_marker(lens: str, commit_sha: str) -> str:
+    """Head-scoped lens marker, or a detectable legacy line if head is unknown."""
+    sha = _normalise_full_sha(commit_sha)
+    if sha:
+        return f"<!-- review:{lens} commit={sha} -->"
+    return f"review:{lens}"
+
+
+def compose_aggregation_marker(commit_sha: str, block_kind: str | None = None) -> str:
+    """Authoritative Vanellus marker for one exact PR head."""
+    sha = _normalise_full_sha(commit_sha)
+    if not sha:
+        return _VANELLUS_COMMENT_MARKER
+    kind = block_kind if block_kind in {"content", "process"} else None
+    suffix = f" block_kind={kind}" if kind else ""
+    return f"<!-- vanellus-aggregation commit={sha}{suffix} -->"
+
+
+def parse_aggregation_marker(body: str | None) -> dict[str, str | None]:
+    """Parse authoritative aggregation metadata; prose SHA lines are ignored."""
+    commit = block_kind = superseded_by = None
+    match = _AGGREGATION_MARKER_RE.search(body or "")
+    if match:
+        attrs = match.group("attrs") or ""
+        commit_match = re.search(r"(?:^|\s)commit=([0-9a-f]{40})(?:\s|$)", attrs, re.I)
+        kind_match = re.search(r"(?:^|\s)block_kind=(content|process)(?:\s|$)", attrs, re.I)
+        commit = commit_match.group(1).lower() if commit_match else None
+        block_kind = kind_match.group(1).lower() if kind_match else None
+    stale = _AGGREGATION_SUPERSEDED_RE.search(body or "")
+    if stale:
+        superseded_by = stale.group("sha").lower()
+    return {
+        "commit": commit,
+        "block_kind": block_kind,
+        "superseded_by": superseded_by,
+    }
+
+
+def compose_superseded_verdict(body: str, new_head_sha: str) -> str:
+    """Visibly retire a stale verdict while preserving its original body."""
+    sha = _normalise_full_sha(new_head_sha)
+    if not sha or parse_aggregation_marker(body)["superseded_by"] or _LENS_SUPERSEDED_RE.search(body):
+        return body
+    lens = _LENS_MARKER_RE.search(body or "")
+    legacy_lens = re.search(r"(?m)^review:([a-z0-9_-]+)\s*$", body or "", re.I)
+    lens_name = lens.group("lens") if lens else (legacy_lens.group(1) if legacy_lens else "")
+    marker = (
+        f"<!-- review:{lens_name}-superseded by={sha} -->"
+        if lens_name
+        else f"<!-- vanellus-aggregation-superseded by={sha} -->"
+    )
+    return (
+        f"> ⚠️ Superseded by commit `{sha[:7]}` — this verdict no longer reflects "
+        "the current head. See the latest review below.\n"
+        f"{marker}\n\n{body}"
+    )
+
+
+def _recognized_review_marker(body: str) -> tuple[str | None, str | None]:
+    """Return (kind, commit) for an aggregation or lens verdict marker."""
+    agg = parse_aggregation_marker(body)
+    if _AGGREGATION_MARKER_RE.search(body or ""):
+        return "aggregation", agg["commit"]
+    lens = _LENS_MARKER_RE.search(body or "")
+    if lens:
+        return "lens", lens.group("sha").lower()
+    if re.search(r"(?m)^review:[a-z0-9_-]+\s*$", body or "", re.I):
+        return "lens", None
+    return None, None
+
+
+def comment_verdict_matches_current_head(body: str | None, head_sha: str) -> bool:
+    """True when an HTML head marker pins ``body`` to ``head_sha``.
+
+    Merge-readiness / presence contract (PR #764): the non-superseded
+    ``commit=<40-hex>`` marker is authoritative. A prose ``Reviewed commit:``
+    line is ignored and cannot make a wrong-head, legacy, or superseded body
+    count as current.
+    """
+    expected = _normalise_full_sha(head_sha)
+    if not expected or not body:
+        return False
+    if parse_aggregation_marker(body)["superseded_by"] or _LENS_SUPERSEDED_RE.search(
+        body
+    ):
+        return False
+    kind, commit = _recognized_review_marker(body)
+    return bool(kind and commit == expected)
+
+
+def formal_review_matches_current_head(
+    commit_id: str | None, head_sha: str
+) -> bool:
+    """True when GitHub's formal-review ``commit_id`` equals ``head_sha``.
+
+    Formal reviews are pinned by ``commit_id``, not by any prose SHA in the
+    review body. A matching ``Reviewed commit:`` line never overrides a
+    mismatched or missing ``commit_id``.
+    """
+    expected = _normalise_full_sha(head_sha)
+    return bool(expected) and _normalise_full_sha(commit_id or "") == expected
 
 # Page cap for the comment scan (ateles#430). 50 pages = 5000 comments, far
 # beyond any real PR; it exists so a pathological thread cannot spin the loop,
@@ -1395,7 +1522,9 @@ _VANELLUS_COMMENT_MARKER = "<!-- vanellus-aggregation -->"
 _MAX_COMMENT_PAGES = 50
 
 
-def latest_aggregation_comment(comments: list[dict]) -> dict | None:
+def latest_aggregation_comment(
+    comments: list[dict], head_sha: str = ""
+) -> dict | None:
     """Return the NEWEST Vanellus aggregation comment, or None if there is none.
 
     ateles#430. GitHub's issue-comments endpoint SILENTLY IGNORES ``sort`` and
@@ -1416,9 +1545,17 @@ def latest_aggregation_comment(comments: list[dict]) -> dict | None:
     calling — with >100 comments the newest aggregation can sit on a later page,
     and sorting only what you fetched cannot find what was never returned.
     """
-    candidates = [
-        c for c in comments if _VANELLUS_COMMENT_MARKER in (c.get("body") or "")
-    ]
+    expected = _normalise_full_sha(head_sha)
+    candidates = []
+    for comment in comments:
+        body = comment.get("body") or ""
+        parsed = parse_aggregation_marker(body)
+        if not _AGGREGATION_MARKER_RE.search(body) or parsed["superseded_by"]:
+            continue
+        # Once a current head is known, only the exact full-SHA marker stands.
+        if expected and parsed["commit"] != expected:
+            continue
+        candidates.append(comment)
     if not candidates:
         return None
     return max(
@@ -1427,7 +1564,7 @@ def latest_aggregation_comment(comments: list[dict]) -> dict | None:
     )
 
 
-def vanellus_comment_missing(comment_bodies: list[str]) -> bool:
+def vanellus_comment_missing(comment_bodies: list[str], head_sha: str = "") -> bool:
     """Return True when no Vanellus aggregation comment has landed on the PR.
 
     Detects the stable HTML marker ``_VANELLUS_COMMENT_MARKER`` that the
@@ -1435,17 +1572,23 @@ def vanellus_comment_missing(comment_bodies: list[str]) -> bool:
     behalf, and that the _vanellus_prompt instructs Vanellus to include when
     it posts its own comment directly.  A missing comment means neither
     Vanellus nor a prior fallback post succeeded."""
-    return not any(_VANELLUS_COMMENT_MARKER in body for body in comment_bodies)
+    comments = [
+        {"body": body, "created_at": "", "id": i}
+        for i, body in enumerate(comment_bodies)
+    ]
+    return latest_aggregation_comment(comments, head_sha=head_sha) is None
 
 
-def compose_vanellus_fallback_comment(text: str) -> str:
+def compose_vanellus_fallback_comment(
+    text: str, commit_sha: str = "", block_kind: str | None = None
+) -> str:
     """Body for a dispatcher-posted Vanellus aggregation comment.
 
     Prefixed with the stable marker so future dedup checks can find it, and
     with the Vanellus attribution header so readers know which agent authored
     the verdict."""
     return (
-        f"{_VANELLUS_COMMENT_MARKER}\n"
+        f"{compose_aggregation_marker(commit_sha, block_kind)}\n"
         f"{attribution_header('vanellus', 'PR steward')}\n\n"
         f"{text}\n\n"
         "_Posted by the Apis dispatcher on behalf of Vanellus — "
@@ -1584,20 +1727,66 @@ def compose_auth_failure_comment(agent: str) -> str:
     )
 
 
+def _legacy_lens_prefix_present(body: str, lens: str) -> bool:
+    """True when a body still uses the unstamped ``review:<lens>`` prefix line."""
+    stripped = (body or "").lstrip()
+    prefix = f"review:{lens}"
+    if not stripped.startswith(prefix):
+        return False
+    rest = stripped[len(prefix) :]
+    return (not rest) or rest[0] in "\r\n\t "
+
+
+def lens_comment_satisfies_presence(
+    body: str, lens: str, head_sha: str = ""
+) -> bool:
+    """True when ``body`` is a non-superseded comment for ``lens`` at ``head_sha``.
+
+    Marker-first producer output (``<!-- review:<lens> commit=<sha> -->``) is the
+    authoritative presence signal. Legacy unstamped ``review:<lens>`` prefixes
+    still count only when no expected head is supplied — an unstamped line cannot
+    prove the current head. Superseded and wrong-head stamps never suppress
+    fallback.
+    """
+    text = body or ""
+    lens_l = (lens or "").lower()
+    if not lens_l:
+        return False
+    for stale in _LENS_SUPERSEDED_RE.finditer(text):
+        if stale.group("lens").lower() == lens_l:
+            return False
+    expected = _normalise_full_sha(head_sha)
+    for match in _LENS_MARKER_RE.finditer(text):
+        if match.group("lens").lower() != lens_l:
+            continue
+        commit = match.group("sha").lower()
+        if expected:
+            return commit == expected
+        return True
+    if expected:
+        return False
+    return _legacy_lens_prefix_present(text, lens)
+
+
 def lenses_missing_comments(
-    comment_bodies: list[str], lenses: list[str]
+    comment_bodies: list[str],
+    lenses: list[str],
+    head_sha: str = "",
 ) -> list[str]:
-    """Lenses whose `review:<lens>` comment never landed on the PR.
+    """Lenses whose current-head review comment never landed on the PR.
 
     Headless panelists post their own comment when they can; this identifies
     the ones that could not so the dispatcher can post the captured review
     itself (PR-87 self-dogfood finding: 3 of 4 panel reviews existed only on
-    stdout)."""
+    stdout). Presence uses the shared lens marker parser — the same contract
+    ``_panelist_prompt`` / ``compose_fallback_comment`` produce — with
+    current-head matching and supersession exclusion.
+    """
     posted = {
         lens
         for lens in lenses
         for body in comment_bodies
-        if body.lstrip().startswith(f"review:{lens}")
+        if lens_comment_satisfies_presence(body, lens, head_sha=head_sha)
     }
     return [lens for lens in lenses if lens not in posted]
 
@@ -2241,6 +2430,7 @@ class SwarmDispatcher:
                         action="synchronize",
                         head_ref=(pr.get("head") or {}).get("ref", ""),
                         base_ref=(pr.get("base") or {}).get("ref", ""),
+                        head_sha=(pr.get("head") or {}).get("sha", ""),
                     )
                     await self._handle_pr(trigger)
                     summary["resumed"] += 1
@@ -2349,6 +2539,7 @@ class SwarmDispatcher:
                         action="synchronize",
                         head_ref=(pr.get("head") or {}).get("ref", ""),
                         base_ref=(pr.get("base") or {}).get("ref", ""),
+                        head_sha=(pr.get("head") or {}).get("sha", ""),
                     )
                     await self._handle_pr(trigger)
                     summary["resumed"] += 1
@@ -2468,6 +2659,7 @@ class SwarmDispatcher:
                         action="synchronize",
                         head_ref=(pr.get("head") or {}).get("ref", ""),
                         base_ref=(pr.get("base") or {}).get("ref", ""),
+                        head_sha=(pr.get("head") or {}).get("sha", ""),
                     )
                     # Re-dispatch CICADA against the outstanding feedback — NOT
                     # `_handle_pr`. #511 rules the re-panel out explicitly
@@ -2762,6 +2954,7 @@ class SwarmDispatcher:
             action="synchronize",
             head_ref=(pr.get("head") or {}).get("ref", ""),
             base_ref=(pr.get("base") or {}).get("ref", ""),
+            head_sha=(pr.get("head") or {}).get("sha", ""),
         )
 
         # The qa lens authors and runs an eval, so it needs a writable checkout;
@@ -3873,6 +4066,13 @@ class SwarmDispatcher:
 
     async def _handle_pr(self, trigger: SwarmTrigger) -> None:
         ref = f"{trigger.repository}#{trigger.number}"
+        # A push/reopen changes which artifact may stand. Retire stale bot
+        # verdicts before any gate reads or new panel work begins. Missing SHA
+        # skips safely: supersession must never guess which head is current.
+        if trigger.kind in {"pr_synchronize", "pr_reopened"} and trigger.head_sha:
+            await self._supersede_stale_verdicts(
+                trigger.repository, trigger.number, trigger.head_sha
+            )
         parent = self._parent_issue_number(trigger.body, trigger.repository)
 
         # 0. Pipeline-bypass guard (ateles): a product-code PR with NO parent
@@ -4278,7 +4478,16 @@ class SwarmDispatcher:
         text = (body or "").strip() or (
             f"Aggregated swarm panel verdict: {verdict or 'unparseable'}."
         )
-        payload = {"event": event, "body": text[:65000]}
+        head_sha = _normalise_full_sha(t.head_sha)
+        if not head_sha:
+            head_sha = _normalise_full_sha((await self._pr_head_sha(t)) or "")
+        if not head_sha:
+            log.warning(
+                f"[{DAEMON_NAME}] current head unavailable — formal review "
+                f"skipped for {ref} rather than posting an unpinned verdict"
+            )
+            return None
+        payload = {"event": event, "body": text[:65000], "commit_id": head_sha}
 
         async def _post(p: dict) -> httpx.Response:
             async with httpx.AsyncClient(timeout=30) as client:
@@ -4543,6 +4752,22 @@ class SwarmDispatcher:
             for f in parse_findings(text, lens=lens):
                 if f.blocking:
                     by_lens.setdefault(lens, []).append(f)
+
+        if not by_lens and verdict == "blocked":
+            # BLOCKED without content findings means a process precondition was
+            # unmet. It is actionable context, not a malformed verdict and not
+            # code for Cicada to change.
+            if await self._claim_escalation(trigger, "process-blocked"):
+                detail = next((text.strip() for _, text in reviews if text.strip()), "")
+                self.notifier.send(
+                    f"ℹ️ Vanellus reports BLOCKED (process, not content): no "
+                    f"blocking findings, but a process gate is unmet. "
+                    f"{detail[:300]}. No code changes required — see PR "
+                    f"body/thread. PR {ref} remains held.",
+                    priority=Priority.OPERATOR_DECISION,
+                    handler=DAEMON_NAME,
+                )
+            return
 
         if not by_lens:
             # The review blocked the merge path but no parseable [BLOCKING] block
@@ -5445,7 +5670,9 @@ class SwarmDispatcher:
 
         # CI green: only advance the merge-ready signal if review is ALREADY
         # clear. An unreviewed PR going green is the panel path's job, not ours.
-        if not await self._pr_review_is_clear(trigger.repository, pr_number):
+        if not await self._pr_review_is_clear(
+            trigger.repository, pr_number, current_head
+        ):
             log.info(
                 f"[{DAEMON_NAME}] {ref}: CI green but no clear panel verdict yet "
                 "— leaving to the review path"
@@ -5494,12 +5721,11 @@ class SwarmDispatcher:
                 comments = await self._all_issue_comments(
                     t.repository, t.number, client
                 )
-                candidates = [
-                    c
-                    for c in comments
-                    if _VANELLUS_COMMENT_MARKER in (c.get("body") or "")
-                ]
-                comment = latest_aggregation_comment(comments)
+                head_sha = _normalise_full_sha(getattr(t, "head_sha", ""))
+                if not head_sha:
+                    head_sha = _normalise_full_sha((await self._pr_head_sha(t)) or "")
+                candidates = [c for c in comments if _AGGREGATION_MARKER_RE.search(c.get("body") or "")]
+                comment = latest_aggregation_comment(comments, head_sha=head_sha)
                 if comment is not None:
                     body = comment.get("body") or ""
                     fallback_verdict = parse_review_verdict(body)
@@ -5532,7 +5758,9 @@ class SwarmDispatcher:
             )
         return None, False
 
-    async def _pr_review_is_clear(self, repository: str, pr_number: int) -> bool:
+    async def _pr_review_is_clear(
+        self, repository: str, pr_number: int, head_sha: str = ""
+    ) -> bool:
         """True when the latest Vanellus aggregation on the PR is a clear verdict.
 
         Pages the PR's full comment list and selects the newest aggregation
@@ -5573,14 +5801,14 @@ class SwarmDispatcher:
                 comments = await self._all_issue_comments(
                     repository, pr_number, client
                 )
-                comment = latest_aggregation_comment(comments)
+                comment = latest_aggregation_comment(comments, head_sha=head_sha)
                 if comment is None:
                     return False
                 body = comment.get("body") or ""
                 verdict = parse_review_verdict(body)
                 if review_blocks_merge(verdict, body):
                     return False
-                if verdict == "signed_off":
+                if verdict == "signed_off" and not _normalise_full_sha(head_sha):
                     current_head = await self._pr_head_sha_for(repository, pr_number)
                     if not signed_off_is_head_pinned(body, current_head):
                         log.info(
@@ -5683,6 +5911,249 @@ class SwarmDispatcher:
                 "continuing; this check must never block startup"
             )
             return []
+    _SUPERSEDE_FAILURE_MARKER = "<!-- apis-supersede-failed commit={sha} -->"
+
+    async def _all_pr_reviews(
+        self, repository: str, number: int, client: httpx.AsyncClient
+    ) -> list[dict]:
+        """Every native GitHub review for a PR, following pagination."""
+        url = f"https://api.github.com/repos/{repository}/pulls/{number}/reviews"
+        out: list[dict] = []
+        for page in range(1, _MAX_COMMENT_PAGES + 1):
+            resp = await client.get(
+                url,
+                params={"per_page": 100, "page": page},
+                headers=self._github_headers(repository),
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+            if not batch:
+                break
+            out.extend(batch)
+            if len(batch) < 100:
+                break
+        return out
+
+    async def _supersede_stale_verdicts(
+        self, repository: str, pr_number: int, head_sha: str
+    ) -> dict[str, int]:
+        """Retire stale bot comments and blocking native reviews for one PR.
+
+        Comment history remains visible: recognized stale verdicts are patched
+        in place with a banner and superseded marker. Human-authored marker
+        lookalikes are never touched. Native stale CHANGES_REQUESTED reviews are
+        dismissed and read back; APPROVED and already-DISMISSED reviews remain.
+        """
+        head = _normalise_full_sha(head_sha)
+        counts = {"comments": 0, "reviews": 0, "failures": 0}
+        if not head:
+            return counts
+        headers = self._github_headers(repository)
+        failure_marker = self._SUPERSEDE_FAILURE_MARKER.format(sha=head)
+        repeated_failure = False
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._all_issue_comments(repository, pr_number, client)
+                repeated_failure = any(
+                    failure_marker in (comment.get("body") or "")
+                    for comment in comments
+                )
+                for comment in comments:
+                    body = comment.get("body") or ""
+                    author = (comment.get("user") or {}).get("login", "")
+                    kind, commit = _recognized_review_marker(body)
+                    if not kind or not _is_bot_author(author):
+                        continue
+                    if parse_aggregation_marker(body)["superseded_by"] or _LENS_SUPERSEDED_RE.search(body):
+                        continue
+                    if commit == head:
+                        continue
+                    new_body = compose_superseded_verdict(body, head)
+                    try:
+                        resp = await client.patch(
+                            f"https://api.github.com/repos/{repository}/issues/"
+                            f"comments/{comment.get('id')}",
+                            json={"body": new_body},
+                            headers=headers,
+                        )
+                        if resp.status_code >= 400:
+                            raise RuntimeError(
+                                f"HTTP {resp.status_code}: {(resp.text or '')[:240]}"
+                            )
+                        readback = await client.get(
+                            f"https://api.github.com/repos/{repository}/issues/"
+                            f"comments/{comment.get('id')}", headers=headers
+                        )
+                        readback.raise_for_status()
+                        if (readback.json() or {}).get("body") != new_body:
+                            raise RuntimeError("comment supersession read-back mismatch")
+                        counts["comments"] += 1
+                    except Exception as exc:
+                        counts["failures"] += 1
+                        log.warning(
+                            f"[{DAEMON_NAME}] stale comment {comment.get('id')} "
+                            f"supersession failed on {repository}#{pr_number}: "
+                            f"{str(exc)[:240]}"
+                        )
+
+                reviews = await self._all_pr_reviews(repository, pr_number, client)
+                for review in reviews:
+                    state = str(review.get("state") or "").upper()
+                    author = (review.get("user") or {}).get("login", "")
+                    commit = _normalise_full_sha(review.get("commit_id") or "")
+                    if (
+                        not _is_bot_author(author)
+                        or state in {"APPROVED", "DISMISSED"}
+                        or state != "CHANGES_REQUESTED"
+                        or commit == head
+                    ):
+                        continue
+                    review_id = review.get("id")
+                    try:
+                        resp = await client.put(
+                            f"https://api.github.com/repos/{repository}/pulls/"
+                            f"{pr_number}/reviews/{review_id}/dismissals",
+                            json={
+                                "message": (
+                                    f"Superseded by {head[:7]}: this review was "
+                                    "made against an earlier head and no longer "
+                                    "applies. A fresh panel review is required "
+                                    "against the current head; see the PR comment "
+                                    "thread for details."
+                                )
+                            },
+                            headers=headers,
+                        )
+                        if resp.status_code >= 400:
+                            raise RuntimeError(
+                                f"HTTP {resp.status_code}: {(resp.text or '')[:240]}"
+                            )
+                        check = await client.get(
+                            f"https://api.github.com/repos/{repository}/pulls/"
+                            f"{pr_number}/reviews/{review_id}", headers=headers
+                        )
+                        check.raise_for_status()
+                        if str((check.json() or {}).get("state") or "").upper() != "DISMISSED":
+                            raise RuntimeError("dismissal read-back did not report DISMISSED")
+                        counts["reviews"] += 1
+                    except Exception as exc:
+                        counts["failures"] += 1
+                        log.warning(
+                            f"[{DAEMON_NAME}] stale review {review_id} dismissal "
+                            f"failed on {repository}#{pr_number}: {str(exc)[:240]}"
+                        )
+
+                if counts["failures"] and not repeated_failure:
+                    try:
+                        marker_body = (
+                            f"{failure_marker}\n"
+                            f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+                            "Stale review supersession did not fully apply. The "
+                            "periodic review sweep will retry."
+                        )
+                        marker = await client.post(
+                            f"https://api.github.com/repos/{repository}/issues/"
+                            f"{pr_number}/comments",
+                            json={"body": marker_body},
+                            headers=headers,
+                        )
+                        marker.raise_for_status()
+                        marker_id = (marker.json() or {}).get("id")
+                        if marker_id:
+                            check = await client.get(
+                                f"https://api.github.com/repos/{repository}/issues/"
+                                f"comments/{marker_id}", headers=headers
+                            )
+                            check.raise_for_status()
+                            if failure_marker not in ((check.json() or {}).get("body") or ""):
+                                raise RuntimeError("failure marker read-back mismatch")
+                    except Exception as exc:
+                        log.warning(
+                            f"[{DAEMON_NAME}] could not persist supersession "
+                            f"failure marker: {str(exc)[:240]}"
+                        )
+        except Exception as exc:
+            counts["failures"] += 1
+            log.warning(
+                f"[{DAEMON_NAME}] verdict supersession scan failed for "
+                f"{repository}#{pr_number}: {str(exc)[:240]}"
+            )
+
+        if counts["failures"] and repeated_failure:
+            trigger = SwarmTrigger(
+                kind="pr_synchronize", repository=repository, number=pr_number,
+                title="", body="", author="", html_url=(
+                    f"https://github.com/{repository}/pull/{pr_number}"
+                ), delivery_id="supersede-sweep", action="synchronize", head_sha=head,
+            )
+            if await self._claim_escalation(trigger, "supersede-failed"):
+                self.notifier.send(
+                    f"PR {repository}#{pr_number}: stale review supersession "
+                    "failed on consecutive sweeps. The current review can run, "
+                    "but an old bot verdict may still appear standing.",
+                    priority=Priority.BLOCKER,
+                    handler=DAEMON_NAME,
+                )
+        return counts
+
+    async def supersede_stale_review_verdicts(
+        self, repositories: list[str]
+    ) -> dict[str, int]:
+        """Periodic backup for synchronize/reopen supersession (lag <= sweep).
+
+        Pages the full open-PR set. A single ``per_page=100`` request would leave
+        later-page PRs outside bounded-lag recovery after a missed webhook.
+        Each page is superseded as it arrives so a later-page list failure cannot
+        discard already-fetched earlier pages.
+        """
+        totals = {"prs": 0, "comments": 0, "reviews": 0, "failures": 0}
+        for repository in repositories:
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    for page in range(1, _MAX_COMMENT_PAGES + 1):
+                        try:
+                            resp = await client.get(
+                                f"https://api.github.com/repos/{repository}/pulls",
+                                params={
+                                    "state": "open",
+                                    "per_page": 100,
+                                    "page": page,
+                                },
+                                headers=self._github_headers(repository),
+                            )
+                            resp.raise_for_status()
+                            batch = resp.json()
+                        except Exception as exc:
+                            totals["failures"] += 1
+                            log.warning(
+                                f"[{DAEMON_NAME}] supersession sweep could not "
+                                f"list {repository} page {page}: "
+                                f"{str(exc)[:240]}"
+                            )
+                            break
+                        if not batch:
+                            break
+                        for pr in batch:
+                            head = ((pr.get("head") or {}).get("sha") or "")
+                            if not _normalise_full_sha(head):
+                                continue
+                            result = await self._supersede_stale_verdicts(
+                                repository, int(pr.get("number") or 0), head
+                            )
+                            totals["prs"] += 1
+                            for key in ("comments", "reviews", "failures"):
+                                totals[key] += result[key]
+                        if len(batch) < 100:
+                            break
+            except Exception as exc:
+                totals["failures"] += 1
+                log.warning(
+                    f"[{DAEMON_NAME}] supersession sweep failed for "
+                    f"{repository}: {str(exc)[:240]}"
+                )
+                continue
+        return totals
+
     async def _all_issue_comments(
         self, repository: str, number: int, client: httpx.AsyncClient
     ) -> list[dict]:
@@ -5765,6 +6236,7 @@ class SwarmDispatcher:
             action="synchronize",
             head_ref=(pr.get("head") or {}).get("ref", ""),
             base_ref=(pr.get("base") or {}).get("ref", ""),
+            head_sha=(pr.get("head") or {}).get("sha", ""),
         )
 
     async def _handle_push_main(self, trigger: SwarmTrigger) -> None:
@@ -7385,10 +7857,15 @@ class SwarmDispatcher:
                         t.body, where="the PR body"
                     )
         _panelist_role = f"{lens.lens} lens panelist"
+        lens_marker = compose_lens_review_marker(lens.lens, t.head_sha)
+        if not t.head_sha:
+            lens_marker = f"<!-- review:{lens.lens} commit=<full40hex> -->"
         if is_provisioned(lens.agent):
             comment_identity_block = (
                 f"Post your review as a PR comment using the gh CLI. The comment "
-                f"MUST begin with the line `review:{lens.lens}`. "
+                f"MUST begin with the line `{lens_marker}`, followed by "
+                f"`review:{lens.lens}`. If the SHA is not supplied above, fetch "
+                "the PR's current `headRefOid` and substitute the full 40-hex SHA. "
                 + _agent_prompt_instruction(lens.agent, _panelist_role)
                 + " Repeat the full review text in your reply here (the "
                 "dispatcher parses it and posts the comment for you if your gh "
@@ -7397,8 +7874,11 @@ class SwarmDispatcher:
         else:
             comment_identity_block = (
                 f"Post your review as a PR comment using the gh CLI. The comment "
-                f"MUST begin with the line `review:{lens.lens}` followed by "
+                f"MUST begin with the line `{lens_marker}`, followed by "
+                f"`review:{lens.lens}` and then "
                 f"`{attribution_header(lens.agent, _panelist_role)}` "
+                "If the SHA is not supplied above, fetch the PR's current "
+                "`headRefOid` and substitute the full 40-hex SHA. "
                 "so readers can tell which agent authored it (the GitHub account "
                 "is shared). Repeat the full review text in your reply here (the "
                 "dispatcher parses it and posts the comment for you if your gh "
@@ -7452,6 +7932,9 @@ class SwarmDispatcher:
             )
         else:
             panel_block = "(no panel lens reviews captured — GHA baseline only)"
+        marker = compose_aggregation_marker(t.head_sha)
+        if not t.head_sha:
+            marker = "<!-- vanellus-aggregation commit=<full40hex> -->"
         return (
             "Invoke the vanellus agent per your appended system prompt.\n\n"
             f"Aggregate the review panel for PR {t.repository}#{t.number}: "
@@ -7472,8 +7955,14 @@ class SwarmDispatcher:
             f"{_agent_prompt_instruction('vanellus', 'PR steward')}\n\n"
             "POST YOUR AGGREGATED VERDICT AS A PR COMMENT using the gh CLI "
             f"(`gh pr comment {t.number} --repo {t.repository} --body ...`). "
-            f"The comment MUST begin with the line `{_VANELLUS_COMMENT_MARKER}` "
-            "so the dispatcher can detect whether it landed. "
+            f"The comment MUST begin with the line `{marker}`. If the SHA is "
+            "not supplied above, fetch the PR's current `headRefOid` and "
+            "substitute its full 40-hex value. The HTML marker is the "
+            "authoritative freshness field; a prose `Reviewed commit:` line is "
+            "optional human redundancy and is ignored by the dispatcher. If "
+            "the verdict blocks on findings, add `block_kind=content` inside "
+            "the marker; if BLOCKED only because a process gate is unmet, add "
+            "`block_kind=process`. "
             "Repeat the full aggregated verdict text in your reply here (the "
             "dispatcher parses it and posts the comment for you if your gh "
             "call fails).\n\n"
@@ -7703,9 +8192,22 @@ class SwarmDispatcher:
                 bodies = [c.get("body", "") for c in resp.json()]
                 captured = dict(reviews)
                 agents = agents_by_lens or {}
-                for lens in lenses_missing_comments(bodies, list(captured)):
+                head_sha = _normalise_full_sha(t.head_sha)
+                if not head_sha:
+                    head_sha = _normalise_full_sha((await self._pr_head_sha(t)) or "")
+                if not head_sha:
+                    log.warning(
+                        f"[{DAEMON_NAME}] current head unavailable — fallback "
+                        f"review comments skipped for {t.repository}#{t.number} "
+                        "rather than posting unpinned verdicts"
+                    )
+                    return
+                for lens in lenses_missing_comments(
+                    bodies, list(captured), head_sha=head_sha
+                ):
                     body = compose_fallback_comment(
-                        lens, agents.get(lens, "unknown panelist"), captured[lens]
+                        lens, agents.get(lens, "unknown panelist"), captured[lens],
+                        head_sha,
                     )
                     post = await client.post(
                         url, json={"body": body}, headers=self._github_headers(t.repository)
@@ -8026,13 +8528,31 @@ class SwarmDispatcher:
                 )
                 resp.raise_for_status()
                 bodies = [c.get("body", "") for c in resp.json()]
-                if not vanellus_comment_missing(bodies):
+                head_sha = _normalise_full_sha(t.head_sha)
+                if not head_sha:
+                    head_sha = _normalise_full_sha((await self._pr_head_sha(t)) or "")
+                if not head_sha:
+                    log.warning(
+                        f"[{DAEMON_NAME}] current head unavailable — Vanellus "
+                        f"fallback skipped for {t.repository}#{t.number} rather "
+                        "than posting an unpinned aggregation"
+                    )
+                    return
+                if not vanellus_comment_missing(bodies, head_sha=head_sha):
                     log.debug(
                         f"[{DAEMON_NAME}] Vanellus aggregation comment already "
                         f"present on {t.repository}#{t.number} — no fallback needed"
                     )
                     return
-                body = compose_vanellus_fallback_comment(result.stdout)
+                fallback_verdict = parse_review_verdict(result.stdout)
+                block_kind = None
+                if body_has_blocking_findings(result.stdout) or fallback_verdict == "request_changes":
+                    block_kind = "content"
+                elif fallback_verdict == "blocked":
+                    block_kind = "process"
+                body = compose_vanellus_fallback_comment(
+                    result.stdout, head_sha, block_kind
+                )
                 post = await client.post(
                     url,
                     json={"body": body},

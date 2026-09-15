@@ -100,6 +100,9 @@ class SwarmTrigger:
     labels: list[str] = field(default_factory=list)
     head_ref: str = ""
     base_ref: str = ""
+    # Full commit reviewed by this trigger. An empty value means the source did
+    # not provide one; callers must fetch it rather than guessing.
+    head_sha: str = ""
     # issue_comment extras (ateles#112): populated when kind == "issue_comment"
     comment_id: int = 0
     comment_author: str = ""
@@ -204,6 +207,7 @@ def parse_github_event(
             labels=[lbl.get("name", "") for lbl in pr.get("labels", [])],
             head_ref=(pr.get("head") or {}).get("ref", ""),
             base_ref=(pr.get("base") or {}).get("ref", ""),
+            head_sha=(pr.get("head") or {}).get("sha", ""),
             raw=payload,
         )
 
@@ -252,6 +256,7 @@ def parse_github_event(
             action=action,
             head_ref=(pr.get("head") or {}).get("ref", ""),
             base_ref=(pr.get("base") or {}).get("ref", ""),
+            head_sha=(pr.get("head") or {}).get("sha", ""),
             review_state=(review.get("state") or "").lower(),
             review_author=(review.get("user") or {}).get("login", ""),
             raw=payload,
