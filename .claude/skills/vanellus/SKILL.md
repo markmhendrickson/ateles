@@ -103,17 +103,27 @@ Gate ONLY on those contexts (currently just `security_gates`). A PR is check-rea
 
 ### 2. Read the review VERDICT, matched to the current head SHA
 
-The dispatcher emits the native review from your parsed verdict (ateles#241), so `reviewDecision` reflects an `APPROVE` on a clean re-review. Still verify against the body rather than trusting the aggregate, because a verdict can be stale after a force-push or merge-commit (the head SHA changes but the prior review stays):
+The dispatcher emits the native review from your parsed verdict (ateles#241), so `reviewDecision` reflects an `APPROVE` on a clean re-review. Still verify against the underlying freshness signals rather than trusting the aggregate, because a verdict can be stale after a force-push or merge-commit (the head SHA changes but the prior review stays):
 
 ```bash
-gh pr view <N> --json headRefOid,reviews
+gh pr view <N> --json headRefOid,reviews,comments
 ```
 
-Find the most recent review whose body contains `Reviewed commit: <sha>` matching the current `headRefOid`, and read its `Verdict:` / `Blocking:` lines. Treat the PR as review-approved when, for the CURRENT head SHA:
-- `Verdict:` is `APPROVE` (or `COMMENT` with no blocking findings), AND
+Select the exact-current-head verdict by the **authoritative** signals — never by prose:
+
+1. **Issue/PR comment (panelist or Vanellus aggregation):** require a non-superseded HTML marker whose `commit=<40-hex>` equals the current `headRefOid`:
+   - lens: `<!-- review:<lens> commit=<sha> -->`
+   - aggregation: `<!-- vanellus-aggregation commit=<sha> -->` (optional `block_kind=` only when the verdict is `BLOCKED`)
+   A superseded marker (`…-superseded by=<sha>`) or a wrong-head / legacy unstamped marker does **not** count.
+2. **Formal GitHub review (`reviews[]`):** require `commit_id` equal to the current `headRefOid` (GitHub pins the review to the commit it judged). Prefer the newest non-dismissed formal review that matches.
+
+A prose `Reviewed commit: <sha>` line may remain as a **reader aid only**. It is never authoritative: do not select, accept, or reject a verdict because of that line, and never let a matching prose SHA override a mismatched or missing HTML marker / `commit_id`.
+
+Treat the PR as review-approved when, for the CURRENT head SHA under those rules:
+- the verdict token is `APPROVE` (or `COMMENT` with no blocking findings), AND
 - `Blocking: 0`.
 
-If the only approving verdict is for an OLDER commit than the current head, it is stale — require a fresh review (next step).
+If the only approving verdict is for an OLDER commit than the current head — wrong marker, superseded banner, or formal `commit_id` ≠ `headRefOid` — it is stale — require a fresh review (next step).
 
 ### 3. Get a fresh verdict when none matches the current head
 

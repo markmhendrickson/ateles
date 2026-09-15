@@ -62,6 +62,80 @@ def test_legacy_and_prose_sha_are_never_current():
     legacy = _comment("<!-- vanellus-aggregation -->\nReviewed commit: " + HEAD_A)
     assert sd.parse_aggregation_marker(legacy["body"])["commit"] is None
     assert sd.latest_aggregation_comment([legacy], head_sha=HEAD_A) is None
+    assert sd.comment_verdict_matches_current_head(legacy["body"], HEAD_A) is False
+
+
+def test_stale_prose_cannot_override_marker_or_commit_id():
+    """Effect regression for Accipiter #764: prose SHA is never authoritative.
+
+    A body whose HTML marker (or formal-review commit_id) points at the wrong
+    head must stay non-current even when `Reviewed commit:` names the current
+    head. The inverse — correct marker / commit_id with stale prose — stays
+    current.
+    """
+    # Wrong-head marker + prose claiming current head → not current.
+    conflict_agg = (
+        f"<!-- vanellus-aggregation commit={HEAD_B} -->\n"
+        f"**APPROVE**\nReviewed commit: {HEAD_A}"
+    )
+    assert sd.parse_aggregation_marker(conflict_agg)["commit"] == HEAD_B
+    assert sd.parse_reviewed_commit(conflict_agg) == HEAD_A
+    assert sd.comment_verdict_matches_current_head(conflict_agg, HEAD_A) is False
+    assert sd.latest_aggregation_comment(
+        [_comment(conflict_agg)], head_sha=HEAD_A
+    ) is None
+
+    # Correct marker + stale prose → still current.
+    aligned_agg = (
+        f"<!-- vanellus-aggregation commit={HEAD_A} -->\n"
+        f"**APPROVE**\nReviewed commit: {HEAD_B}"
+    )
+    assert sd.comment_verdict_matches_current_head(aligned_agg, HEAD_A) is True
+    assert (
+        sd.latest_aggregation_comment([_comment(aligned_agg)], head_sha=HEAD_A)[
+            "body"
+        ]
+        == aligned_agg
+    )
+
+    # Lens presence: same conflict contract.
+    conflict_lens = (
+        f"<!-- review:ux commit={HEAD_B} -->\n"
+        f"**REQUEST_CHANGES**\nReviewed commit: {HEAD_A}"
+    )
+    assert sd.lens_comment_satisfies_presence(conflict_lens, "ux", HEAD_A) is False
+    assert sd.comment_verdict_matches_current_head(conflict_lens, HEAD_A) is False
+    aligned_lens = (
+        f"<!-- review:ux commit={HEAD_A} -->\n"
+        f"**APPROVE**\nReviewed commit: {HEAD_B}"
+    )
+    assert sd.lens_comment_satisfies_presence(aligned_lens, "ux", HEAD_A) is True
+    assert sd.comment_verdict_matches_current_head(aligned_lens, HEAD_A) is True
+
+    # Formal GitHub review: commit_id wins; prose body is irrelevant.
+    assert sd.formal_review_matches_current_head(HEAD_B, HEAD_A) is False
+    assert sd.formal_review_matches_current_head(HEAD_A, HEAD_A) is True
+    # Even if a steward wrongly keyed off prose in the review body, the
+    # commit_id predicate must still refuse a mismatched pin.
+    misleading_body = f"**APPROVE**\nReviewed commit: {HEAD_A}"
+    assert sd.parse_reviewed_commit(misleading_body) == HEAD_A
+    assert (
+        sd.formal_review_matches_current_head(HEAD_B, HEAD_A) is False
+    ), "prose matching current head must not override formal commit_id"
+
+
+def test_vanellus_merge_readiness_docs_use_marker_not_prose():
+    """Docs/skill mirrors must teach the marker/commit_id freshness contract."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    for rel in ("docs/agents/vanellus.md", ".claude/skills/vanellus/SKILL.md"):
+        text = (root / rel).read_text()
+        assert "body contains `Reviewed commit:" not in text, rel
+        assert "Reviewed commit: <sha>` matching" not in text, rel
+        assert "commit_id" in text, rel
+        assert "reader aid" in text, rel
+        assert "<!-- vanellus-aggregation commit=" in text, rel
 
 
 def test_superseded_banner_is_idempotent_and_preserves_original():

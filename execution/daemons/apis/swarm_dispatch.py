@@ -924,11 +924,11 @@ def verdict_to_review_event(verdict: str | None, body: str | None = None) -> str
 # pinned to the artifact state it judged") is HEAD-PINNING: a SIGNED_OFF only
 # counts against the PR head it was actually written against.
 #
-# Vanellus is already instructed (skill_runner.SWARM_GITHUB_CONTRACT via
-# docs/agents/vanellus.md) to include a `Reviewed commit: <full head SHA>`
-# line in its aggregation for exactly this reason. This is that instruction's
-# read side: parse the line, and let the caller compare it against the PR's
-# CURRENT head (`_pr_head_sha`) before trusting a SIGNED_OFF that predates it.
+# Historical SIGNED_OFF bodies often carried a prose `Reviewed commit:` line.
+# That line is a reader aid only for merge-readiness / presence (HTML marker +
+# formal-review commit_id are authoritative). This parser remains solely for
+# the ateles#938 SIGNED_OFF backlog guard below, which still reads the prose
+# pin when no marker-era signal exists on older comments.
 _REVIEWED_COMMIT_RE = re.compile(
     r"Reviewed commit:\s*`?([0-9a-f]{7,40})`?", re.IGNORECASE
 )
@@ -1483,6 +1483,38 @@ def _recognized_review_marker(body: str) -> tuple[str | None, str | None]:
     if re.search(r"(?m)^review:[a-z0-9_-]+\s*$", body or "", re.I):
         return "lens", None
     return None, None
+
+
+def comment_verdict_matches_current_head(body: str | None, head_sha: str) -> bool:
+    """True when an HTML head marker pins ``body`` to ``head_sha``.
+
+    Merge-readiness / presence contract (PR #764): the non-superseded
+    ``commit=<40-hex>`` marker is authoritative. A prose ``Reviewed commit:``
+    line is ignored and cannot make a wrong-head, legacy, or superseded body
+    count as current.
+    """
+    expected = _normalise_full_sha(head_sha)
+    if not expected or not body:
+        return False
+    if parse_aggregation_marker(body)["superseded_by"] or _LENS_SUPERSEDED_RE.search(
+        body
+    ):
+        return False
+    kind, commit = _recognized_review_marker(body)
+    return bool(kind and commit == expected)
+
+
+def formal_review_matches_current_head(
+    commit_id: str | None, head_sha: str
+) -> bool:
+    """True when GitHub's formal-review ``commit_id`` equals ``head_sha``.
+
+    Formal reviews are pinned by ``commit_id``, not by any prose SHA in the
+    review body. A matching ``Reviewed commit:`` line never overrides a
+    mismatched or missing ``commit_id``.
+    """
+    expected = _normalise_full_sha(head_sha)
+    return bool(expected) and _normalise_full_sha(commit_id or "") == expected
 
 # Page cap for the comment scan (ateles#430). 50 pages = 5000 comments, far
 # beyond any real PR; it exists so a pathological thread cannot spin the loop,
