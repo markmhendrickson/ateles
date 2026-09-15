@@ -41,8 +41,21 @@ import swarm_dispatch as sd
 MARKER = "<!-- vanellus-aggregation -->"
 
 
-def _c(cid: int, created: str, verdict: str | None, marker: bool = True) -> dict:
-    body = f"{MARKER}\n**Vanellus**\n" if marker else "just a human comment\n"
+def _c(
+    cid: int,
+    created: str,
+    verdict: str | None,
+    marker: bool = True,
+    *,
+    head_sha: str = "",
+) -> dict:
+    if marker and head_sha:
+        prefix = f"{sd.compose_aggregation_marker(head_sha)}\n**Vanellus**\n"
+    elif marker:
+        prefix = f"{MARKER}\n**Vanellus**\n"
+    else:
+        prefix = "just a human comment\n"
+    body = prefix
     if verdict:
         body += f"\n**{verdict}**\n\nVerdict: {verdict}\n"
     return {"id": cid, "created_at": created, "body": body}
@@ -203,13 +216,12 @@ async def test_merge_gate_fails_closed_with_no_aggregation(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fallback_recovers_the_newest_verdict(monkeypatch):
-    """The exact neotoma#2153 shape."""
+    """The exact neotoma#2153 shape — newest head-scoped aggregation wins."""
     head = "a" * 40
     pages = [[
-        _c(1, "2026-08-10T11:54:23Z", "REQUEST_CHANGES"),
-        _c(2, "2026-08-19T10:08:46Z", "COMMENT"),
+        _c(1, "2026-08-10T11:54:23Z", "REQUEST_CHANGES", head_sha=head),
+        _c(2, "2026-08-19T10:08:46Z", "COMMENT", head_sha=head),
     ]]
-    pages[0][1]["body"] += f"\nReviewed commit: {head}\n"
     d, _ = _dispatcher(monkeypatch, pages)
     trigger = type("T", (), {"repository": "o/r", "number": 2153})()
 

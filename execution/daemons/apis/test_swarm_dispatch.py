@@ -41,6 +41,7 @@ from swarm_dispatch import (
     _token_for_repo,
     agent_github_login,
     attribution_header,
+    compose_aggregation_marker,
     compose_fallback_comment,
     compose_superseded_verdict,
     compose_vanellus_fallback_comment,
@@ -7658,16 +7659,19 @@ def test_failed_aggregation_never_replays_historical_verdict(monkeypatch):
         return await original(skill, *args, **kwargs)
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", failed_aggregator)
+    # Head-scoped marker matches the live head, but failed aggregation must
+    # still refuse to publish — incomplete work is not a verdict (#993).
     _comments_client(monkeypatch, [
-        f"{_VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**\nReviewed commit: {'a' * 40}"
+        f"{compose_aggregation_marker('a' * 40)}\n**REQUEST_CHANGES**"
     ])
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert not any(kind in {"review", "route", "gate"} for kind, _ in calls), calls
 
 
 def test_successful_aggregation_cannot_recover_verdict_for_old_head(monkeypatch):
+    # Marker pinned to head a must not recover when the live head is b (#764).
     _comments_client(monkeypatch, [
-        f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nReviewed commit: {'a' * 40}"
+        f"{compose_aggregation_marker('a' * 40)}\n**APPROVE**"
     ])
     d = _resolver(monkeypatch)
     monkeypatch.setattr(d, "_pr_head_sha", lambda _t: _async_return('b' * 40))
@@ -7678,7 +7682,7 @@ def test_same_head_historical_comment_is_not_from_current_run(monkeypatch):
     d = _resolver(monkeypatch)
     async def comments(*args):
         return [{"id": 1, "created_at":"2026-09-01T00:00:00Z", "updated_at":"2026-09-01T00:00:00Z",
-                 "body":f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nReviewed commit: {'a' * 40}"}]
+                 "body":f"{compose_aggregation_marker('a' * 40)}\n**APPROVE**"}]
     monkeypatch.setattr(d, "_all_issue_comments", comments)
     assert asyncio.run(d._resolve_review_verdict(
         _trigger(), "", expected_head="a" * 40,
@@ -7690,7 +7694,7 @@ def test_fresh_comment_at_current_head_is_recovered(monkeypatch):
     d = _resolver(monkeypatch)
     async def comments(*args):
         return [{"id": 1, "created_at":"2026-09-14T01:00:00Z", "updated_at":"2026-09-14T01:00:00Z",
-                 "body":f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nReviewed commit: {'a' * 40}"}]
+                 "body":f"{compose_aggregation_marker('a' * 40)}\n**APPROVE**"}]
     monkeypatch.setattr(d, "_all_issue_comments", comments)
     assert asyncio.run(d._resolve_review_verdict(
         _trigger(), "", expected_head="a" * 40,

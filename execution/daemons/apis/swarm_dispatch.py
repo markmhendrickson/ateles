@@ -5800,22 +5800,27 @@ class SwarmDispatcher:
                 comments = await self._all_issue_comments(
                     t.repository, t.number, client
                 )
-                head_sha = _normalise_full_sha(getattr(t, "head_sha", ""))
-                if not head_sha:
-                    head_sha = _normalise_full_sha((await self._pr_head_sha(t)) or "")
-                candidates = [c for c in comments if _AGGREGATION_MARKER_RE.search(c.get("body") or "")]
+                # #764: head pin is the authoritative HTML commit= marker, never
+                # a prose "Reviewed commit:" line. Pass the live head so legacy
+                # marker-only comments cannot recover a verdict for this head.
+                head_sha = _normalise_full_sha(current_head)
+                candidates = [
+                    c
+                    for c in comments
+                    if _AGGREGATION_MARKER_RE.search(c.get("body") or "")
+                ]
                 comment = latest_aggregation_comment(comments, head_sha=head_sha)
                 if comment is not None:
                     body = comment.get("body") or ""
-                    # A fallback is an artifact of THIS review at THIS head,
-                    # not an arbitrary historical aggregation. Existing commit
-                    # parser is shared with the sign-off gate; missing is closed.
-                    if not signed_off_is_head_pinned(body, current_head):
-                        return None, False
+                    # #993: a fallback must also be from THIS run. A same-head
+                    # historical comment updated before aggregation started is
+                    # not current work and must not stand in for stdout.
                     if started_at is not None:
                         stamp = comment.get("updated_at") or comment.get("created_at")
                         try:
-                            updated = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+                            updated = datetime.fromisoformat(
+                                str(stamp).replace("Z", "+00:00")
+                            )
                             if updated.tzinfo is None or updated < started_at:
                                 return None, False
                         except (TypeError, ValueError):
