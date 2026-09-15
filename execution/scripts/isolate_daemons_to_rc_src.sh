@@ -68,10 +68,21 @@ snapshot_plists() {
   local label plist
   for label in "${CUTOVER_LABELS[@]}"; do
     plist="$LA/$label.plist"
-    if [ -f "$plist" ] && [ -r "$plist" ]; then
-      cp "$plist" "$BACKUP/$label.plist"
-    else
+    if [ ! -e "$plist" ] && [ ! -L "$plist" ]; then
       : > "$BACKUP/$label.absent"
+      continue
+    fi
+    if [ ! -f "$plist" ]; then
+      echo "FATAL: cannot snapshot existing non-regular plist: $plist" >&2
+      return 1
+    fi
+    if [ ! -r "$plist" ]; then
+      echo "FATAL: cannot snapshot existing unreadable plist: $plist" >&2
+      return 1
+    fi
+    if ! cp "$plist" "$BACKUP/$label.plist"; then
+      echo "FATAL: could not copy existing plist into rollback backup: $plist" >&2
+      return 1
     fi
   done
 }
@@ -246,7 +257,10 @@ run_cutover_python inventory-dry "$SHARED" "$RC" || true
 
 if [ "$APPLY" = "--apply" ]; then
   echo "── snapshot prior five-daemon plist fleet (backup: $BACKUP)"
-  snapshot_plists
+  if ! snapshot_plists; then
+    echo "FATAL: plist snapshot incomplete; aborting before state reconciliation" >&2
+    exit 1
+  fi
   echo "── snapshot + lossless reconcile into RC (backup: $STATE_BACKUP)"
   run_cutover_python snapshot-and-reconcile "$SHARED" "$RC" "$STATE_BACKUP"
 fi

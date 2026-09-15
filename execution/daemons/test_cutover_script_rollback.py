@@ -36,6 +36,20 @@ def _write_plist(path: Path, label: str, root: Path) -> bytes:
     return data
 
 
+def _write_rewrite_failure_tools(fake_bin: Path) -> None:
+    launchctl = fake_bin / "launchctl"
+    launchctl.write_text("#!/usr/bin/env bash\nexit 0\n")
+    launchctl.chmod(0o755)
+    plutil = fake_bin / "plutil"
+    plutil.write_text("""#!/usr/bin/env bash
+set -eu
+plist="${@: -1}"
+if grep -q "$CUTOVER_TEST_RC/" "$plist"; then exit 1; fi
+exit 0
+""")
+    plutil.chmod(0o755)
+
+
 def test_reconciliation_exception_restores_earlier_state_mutation(tmp_path):
     home = tmp_path / "home"
     shared = tmp_path / "shared"
@@ -81,6 +95,116 @@ def test_reconciliation_exception_restores_earlier_state_mutation(tmp_path):
     backups = list((home / ".config/ateles/daemon-state-backups").glob("*"))
     assert len(backups) == 1
     assert (backups[0] / "manifest.json").is_file()
+
+
+def test_unreadable_existing_plist_aborts_before_mutation_and_preserves_bytes(tmp_path):
+    home = tmp_path / "home"
+    shared = tmp_path / "shared"
+    rc = tmp_path / "rc"
+    launch_agents = home / "Library/LaunchAgents"
+    fake_bin = tmp_path / "bin"
+    launch_agents.mkdir(parents=True)
+    fake_bin.mkdir()
+    (rc / "lib/daemon_runtime").mkdir(parents=True)
+    shutil.copy2(HELPER, rc / "lib/daemon_runtime/cutover_state.py")
+
+    unreadable = launch_agents / "com.ateles.cotinga.plist"
+    original = _write_plist(unreadable, "com.ateles.cotinga", shared)
+    unreadable.chmod(0)
+    assert not os.access(unreadable, os.R_OK)
+
+    # A later rewrite failure makes the old implementation consume the false
+    # absence marker and delete the pre-existing unreadable Cotinga plist.
+    _write_plist(
+        launch_agents / "com.ateles.cyphorhinus.plist",
+        "com.ateles.cyphorhinus",
+        shared,
+    )
+    shared_state = shared / "execution/daemons/cotinga/.cotinga_last_run"
+    shared_state.parent.mkdir(parents=True)
+    shared_state.write_text("2026-09-15T13:00:00Z\n")
+
+    _write_rewrite_failure_tools(fake_bin)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "ATELES_SHARED_CHECKOUT": str(shared),
+            "ATELES_REPO_PATH": str(rc),
+            "CUTOVER_TEST_RC": str(rc),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--apply"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "existing unreadable plist" in result.stderr
+    assert unreadable.exists()
+    unreadable.chmod(0o600)
+    assert unreadable.read_bytes() == original
+    assert not (home / ".config/ateles/daemon-state-backups").exists()
+
+
+@pytest.mark.parametrize("invalid_kind", ["directory", "broken_symlink"])
+def test_existing_nonregular_plist_aborts_before_mutation(tmp_path, invalid_kind):
+    home = tmp_path / "home"
+    shared = tmp_path / "shared"
+    rc = tmp_path / "rc"
+    launch_agents = home / "Library/LaunchAgents"
+    fake_bin = tmp_path / "bin"
+    launch_agents.mkdir(parents=True)
+    fake_bin.mkdir()
+    (rc / "lib/daemon_runtime").mkdir(parents=True)
+    shutil.copy2(HELPER, rc / "lib/daemon_runtime/cutover_state.py")
+
+    invalid = launch_agents / "com.ateles.cotinga.plist"
+    if invalid_kind == "directory":
+        invalid.mkdir()
+    else:
+        invalid.symlink_to(launch_agents / "missing-target")
+    _write_plist(
+        launch_agents / "com.ateles.cyphorhinus.plist",
+        "com.ateles.cyphorhinus",
+        shared,
+    )
+    shared_state = shared / "execution/daemons/cotinga/.cotinga_last_run"
+    shared_state.parent.mkdir(parents=True)
+    shared_state.write_text("2026-09-15T13:00:00Z\n")
+    _write_rewrite_failure_tools(fake_bin)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "ATELES_SHARED_CHECKOUT": str(shared),
+            "ATELES_REPO_PATH": str(rc),
+            "CUTOVER_TEST_RC": str(rc),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--apply"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "existing non-regular plist" in result.stderr
+    if invalid_kind == "directory":
+        assert invalid.is_dir()
+    else:
+        assert invalid.is_symlink()
+        assert invalid.readlink() == launch_agents / "missing-target"
+    assert not (home / ".config/ateles/daemon-state-backups").exists()
 
 
 @pytest.mark.parametrize("failure_mode", ["rewrite", "reload", "readback"])

@@ -102,6 +102,8 @@ that were absent before reconciliation),
 restores all five prior plist configurations, reloads the prior fleet, and does
 not claim cutover complete. Both rollback sets are retained. The shared session
 clone is left untouched until all five pass. XDG relocation is out of scope.
+An existing plist that is unreadable or not a regular file aborts before state
+reconciliation; only a genuinely missing plist is recorded as absent.
 
 Credential boundary: the deploy checkout holds **code only**. Secrets stay in
 `~/.config/neotoma/.env`, `ateles-private/keys`, and plist `EnvironmentVariables`
