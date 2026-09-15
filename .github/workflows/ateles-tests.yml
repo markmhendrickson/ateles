@@ -19,6 +19,7 @@ on:
       - "execution/daemons/phoenicurus-release/**"
       - "execution/daemons/monedula/**"
       - "execution/daemons/anthus/**"
+      - "execution/daemons/piculet/**"
       - "execution/daemons/sylvia/**"
       - "execution/daemons/tyto/**"
       - "execution/mcp/**"

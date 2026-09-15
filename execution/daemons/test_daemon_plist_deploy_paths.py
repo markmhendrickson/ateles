@@ -75,6 +75,7 @@ def test_cutover_effect_suites_are_bound_to_required_ci():
         '"execution/daemons/test_*.py"',
         '"execution/daemons/cotinga/**"',
         '"execution/daemons/cyphorhinus/**"',
+        '"execution/daemons/piculet/**"',
         '"execution/daemons/sylvia/**"',
     ):
         assert trigger in workflow
