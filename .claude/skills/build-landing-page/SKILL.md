@@ -214,14 +214,24 @@ Bind the spec to the upstream decisions:
 - Retrieve `brand_voice` and the relevant `style_guide` and apply them on the
   way in, not as a later editing pass.
 
-### Stage 6 — Input-context gathering
+### Stage 6 — Input-context inventory
 
-**Entity type: `analysis`,** with the product named in the title. `analysis` is
+**Entity type: `analysis`,** with the product named in `title`. `analysis` is
 the general-purpose type for a derived body of findings; no landing-page
 specific type is needed and none should be minted.
 
-Locate ALL source context and record WHERE each thing is, so stage 8 and every
-later run read the inventory instead of re-searching:
+**Declared fields (write + read-back homes — do not invent others):**
+
+| Payload | Declared field | Shape |
+|---|---|---|
+| Locator inventory | `source_artifacts` | `array` — each entry a locator string: entity id, repo path, or URL |
+| Surfaces searched | `sources_audited` | `array` — named surfaces/repos/queries that were checked |
+| Negative findings / what was not found | `gaps` | `string` — explicit "searched X, did not find Y"; empty only if nothing was missing |
+| One-line purpose of this inventory | `summary` | `string` — what stage 8 should use this inventory for |
+| Product name in title | `title` | already stated |
+
+Locate ALL source context and record WHERE each thing is in those fields, so
+stage 8 and every later run read the inventory instead of re-searching:
 
 - The repository: README, docs, positioning docs, comparison pages, the code
   itself where a claim depends on what it does.
@@ -229,30 +239,55 @@ later run read the inventory instead of re-searching:
   prior `analysis`, `research_finding`, `icp_signal`,
   `customer_development_note`, `feedback`, decision registers and plans.
 - Live surfaces: the current page, if one exists, and what it currently claims.
+- Product asset locators (logos, marks, screenshots) when stage 7 will
+  *consume* a shared design system — those assets live here in
+  `source_artifacts`, not on the shared DS entity.
 
-Record each item as a locator — entity id, file path, or URL — plus one line on
-what it is good for. An inventory of summaries is not an inventory; stage 8
-needs to reach the source.
+Do not invent undeclared keys (`inventory`, `locators`, `context_map`). They
+land in `raw_fragments` and fail contract rule 2.
 
-State what you searched and what you did NOT find. A negative finding that
-names its surfaces is usable; a silent absence is indistinguishable from a
-search that was never run.
+**Read-back (contract §3):** assert `source_artifacts` length ≥ 1 (or document
+an empty inventory in `gaps` and stop if stage 8 cannot proceed without
+sources). Assert `gaps` is present when any expected surface was missing.
+State those field names in the stage report.
 
 ### Stage 7 — Design system and assets
 
 **Entity type: `design_system`.** Declared: `design_system_name`, `scope`,
 `color_palette`, `type_scale`, `spacing_system`, `border_radius`,
-`positioning_principles`, `anti_patterns`, `status`.
+`positioning_principles`, `anti_patterns`, `status`, `content`.
 
 Almost always this is a CONSUME, not a create: retrieve the existing
 `design_system` for these surfaces and use it. Create one only when none
 exists, and say so.
 
-Assets — logos, marks, diagrams, screenshots — are recorded here as locators in
-the same entity. Do NOT use the `asset` entity type: despite the name it is a
-FINANCIAL asset (it declares `estimated_value_usd`), and storing a logo there
-is a type error that makes both uses unqueryable. Where an asset is a stored
-file, record its entity id or file id; where it is in the repository, its path.
+Asset locators bifurcate by path — do not invent undeclared keys
+(`asset_locators`, `assets`, `logo_paths`), and do NOT use the financial
+`asset` entity type (it declares `estimated_value_usd`).
+
+**Path A — CREATE a product-scoped `design_system` (none exists):**
+Put asset locators in the declared string field **`content`** as labelled
+prose (same pattern as stage 2 → `cta.content`):
+
+```
+Assets (locators only):
+- logo: <entity_id|path|URL> — <one line: what stage 8 uses it for>
+- mark: …
+- screenshot: …
+```
+
+Read-back: assert `content` contains the `Assets (locators only):` section and
+at least one locator string written. Palette/type/spacing stay in their
+declared object fields (`color_palette`, `type_scale`, `spacing_system`, …).
+
+**Path B — CONSUME an existing shared `design_system` (usual case):**
+Consume-only for visual tokens (palette/type/spacing). **Do not** `correct`
+asset locators onto the shared entity — it has no declared locator home and
+must not be polluted with product-specific logos. Record product asset
+locators in **stage 6** `source_artifacts` (note role in the locator line or
+in `summary`), and state in the stage 7 report: "assets: see stage 6 entity
+`<id>` field `source_artifacts`". Stage 8 reads tokens from the stage 7 entity
+and asset locators from stage 6.
 
 Note the ordering: the operator's own description puts this last, because
 design feels like the finishing pass. It is placed at 7 because it is an INPUT
@@ -263,11 +298,19 @@ to stage 8. Everything stage 8 needs must exist before stage 8 starts.
 **Entity type: `rendered_page`.** Declared: `title`, `slug`, `html_body`
 (and `custom_css` where used).
 
-Combine the stage 5 content, the stage 4 template, the stage 7 design system
-and assets, and the stage 6 context into the page. This stage makes NO new
-decisions. If a decision is needed here, the corresponding stage was
-incomplete — go back and correct that stage's entity, then resume. A decision
-made inside the build is invisible to everything downstream.
+Combine the stage 5 content, the stage 4 template, the stage 7 design system,
+and the stage 6 inventory into the page. Read fields by name — do not re-search
+or guess keys:
+
+- Stage 6: read `source_artifacts` (+ `gaps` / `summary`).
+- Stage 7 create-path: read `content` for assets + palette/type/spacing fields.
+- Stage 7 consume-path: read palette/type/spacing from the DS entity; assets
+  from stage 6 `source_artifacts`.
+
+This stage makes NO new decisions. If a decision is needed here, the
+corresponding stage was incomplete — go back and correct that stage's entity,
+then resume. A decision made inside the build is invisible to everything
+downstream.
 
 Mechanics, verified and non-obvious:
 
