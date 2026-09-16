@@ -30,7 +30,7 @@ Loaded automatically from `~/.config/neotoma/.env` at startup.
 |----------|---------|
 | `TELEGRAM_BOT_TOKEN` | Bot token used to send previews and long-poll for the approval reply |
 | `TELEGRAM_CHAT_ID` | Target chat/group ID |
-| `TELEGRAM_ALLOWED_USER_ID` | Operator's Telegram user ID |
+| `TELEGRAM_ALLOWED_USER_ID` | Operator's Telegram user ID. **Required.** Unset or non-numeric ⇒ the gate refuses every reply (`channel_error`) and escalates — it is never a wildcard. See "Who may approve" below. |
 | `TELEGRAM_TOPIC_PAYMENTS` | Thread ID for payments topic |
 | `MONEDULA_DEAD_GATE_THRESHOLD` | Consecutive channel failures before the dead-gate alarm fires (default `3`) |
 | `WISE_API_TOKEN` | Wise API bearer token |
@@ -48,6 +48,30 @@ confirm what else on the host is polling `getUpdates` for the same token
 before assuming it is Cyphorhinus; the two were never designed to share one.
 Host-side identification and elimination of the second consumer is tracked in
 ateles#890 (not closed by dead-gate alarming alone).
+
+### Who may approve
+
+`TELEGRAM_ALLOWED_USER_ID` names the single principal permitted to authorize a
+payment. It is resolved **before** polling, and the gate fails closed on every
+uncertain case:
+
+| Condition | Outcome |
+|---|---|
+| Message from the configured operator | approval accepted |
+| Message from anyone else in the chat | ignored, logged |
+| `TELEGRAM_ALLOWED_USER_ID` unset | `channel_error` + escalation, no reply accepted |
+| `TELEGRAM_ALLOWED_USER_ID` non-numeric | `channel_error` + escalation |
+| Message with no sender id (channel post) | ignored |
+
+Absence of a configured principal is the **absence of authority, never a
+wildcard**. Before this was enforced, an unset value skipped the identity check
+altogether (`if allowed_user_id and ...` short-circuits on `None`), so any member
+of the group topic could authorize an irreversible transfer.
+
+A misconfiguration surfaces as `channel_error` rather than `timeout` on purpose:
+#554 exists because a broken gate was indistinguishable from an operator
+declining, and a silently-degraded principal check would rebuild that same
+failure one layer down.
 
 ## Logs
 

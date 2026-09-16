@@ -95,6 +95,11 @@ STATE_FILE = Path(__file__).parent / ".monedula_last_run"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TELEGRAM_ALLOWED_USER_ID = os.environ.get("TELEGRAM_ALLOWED_USER_ID", "")
+# Telegram update offset. A module constant rather than an inline path so tests
+# can isolate it: two tests reusing an update_id would otherwise consume each
+# other's message, and an empty poll reads as "no reply" — the same outcome a
+# working guard produces, which would let stale state pass for a passing test.
+TG_OFFSET_FILE = Path(__file__).parent / ".monedula_tg_offset"
 # TELEGRAM_TOPIC_MONEDULA is the thread ID for Monedula notifications.
 # Legacy alias: TELEGRAM_TOPIC_PAYMENTS is also accepted for backwards compatibility.
 TELEGRAM_TOPIC_MONEDULA = os.environ.get(
@@ -376,7 +381,7 @@ def telegram_long_poll_once(timeout_sec: int = 120) -> str | None:
         log.error("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — cannot poll")
         return None
 
-    offset_file = Path(__file__).parent / ".monedula_tg_offset"
+    offset_file = TG_OFFSET_FILE
     offset = 0
     if offset_file.exists():
         try:
@@ -484,6 +489,35 @@ class TelegramPollResult:
     error_detail: str = ""
 
 
+def _resolve_operator_principal() -> tuple[int | None, str]:
+    """Resolve the Telegram user id permitted to authorize a payment.
+
+    Returns `(user_id, "")` on success, or `(None, reason)` when no principal
+    can be resolved — in which case the caller MUST refuse to accept any reply.
+
+    FAIL CLOSED. `TELEGRAM_ALLOWED_USER_ID` unset previously meant "accept
+    anyone": the guard read `if allowed_user_id and user_id != allowed_user_id`,
+    so an unset value short-circuited the comparison and every member of the
+    chat could authorize an irreversible transfer. Monedula posts into a group
+    topic, so that is a real set of people, not a theoretical one.
+
+    Absence of a configured principal is the ABSENCE of authority, never a
+    wildcard — `docs/foundation/authority_model.md#approval`: resolution is
+    authorized against the required approvers, not accepted from whoever writes
+    the status. A non-numeric value is likewise a misconfiguration, and is
+    caught here rather than raising ValueError out of the poll loop.
+    """
+    raw = (TELEGRAM_ALLOWED_USER_ID or "").strip()
+    if not raw:
+        return None, ("operator principal not configured "
+                      "(TELEGRAM_ALLOWED_USER_ID unset)")
+    try:
+        return int(raw), ""
+    except ValueError:
+        return None, ("operator principal malformed "
+                      "(TELEGRAM_ALLOWED_USER_ID is not a numeric user id)")
+
+
 def telegram_poll_approval(timeout_sec: int = 120) -> TelegramPollResult:
     """Long-poll Telegram getUpdates for an approval reply.
 
@@ -502,7 +536,7 @@ def telegram_poll_approval(timeout_sec: int = 120) -> TelegramPollResult:
             kind="channel_error", error_detail="missing_bot_token_or_chat_id"
         )
 
-    offset_file = Path(__file__).parent / ".monedula_tg_offset"
+    offset_file = TG_OFFSET_FILE
     offset = 0
     if offset_file.exists():
         try:
@@ -510,10 +544,20 @@ def telegram_poll_approval(timeout_sec: int = 120) -> TelegramPollResult:
         except ValueError:
             offset = 0
 
+    allowed_user_id, principal_error = _resolve_operator_principal()
+    if allowed_user_id is None:
+        # Refuse BEFORE polling. There is no principal who could approve, so a
+        # reply cannot be authorized no matter what it says. Surfacing this as
+        # channel_error (not timeout) keeps #554's core promise: a gate that
+        # cannot ask must be loud, never silently indistinguishable from an
+        # operator who declined.
+        log.error(f"Telegram channel_error: {principal_error} — refusing to "
+                  "accept any approval (fail closed)")
+        return TelegramPollResult(
+            kind="channel_error", error_detail=principal_error
+        )
+
     deadline = time.monotonic() + timeout_sec
-    allowed_user_id = (
-        int(TELEGRAM_ALLOWED_USER_ID) if TELEGRAM_ALLOWED_USER_ID else None
-    )
     chat_id = int(TELEGRAM_CHAT_ID)
 
     log.info(
@@ -577,10 +621,16 @@ def telegram_poll_approval(timeout_sec: int = 120) -> TelegramPollResult:
             user_id = from_user.get("id")
             msg_chat_id = msg_chat.get("id")
 
-            # Filter to correct chat and allowed user
+            # Filter to correct chat and the operator principal. Both
+            # comparisons are POSITIVE: `user_id` is None for a channel post
+            # (Telegram omits `from`), and an unverifiable sender must take the
+            # restrictive branch rather than compare equal to anything.
             if msg_chat_id != chat_id:
                 continue
-            if allowed_user_id and user_id != allowed_user_id:
+            if user_id is None or user_id != allowed_user_id:
+                log.warning(
+                    f"Ignoring Telegram message from non-operator sender "
+                    f"(user_id={user_id!r}) — not an approval")
                 continue
 
             text = (msg.get("text") or "").strip()

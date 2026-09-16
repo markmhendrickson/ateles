@@ -716,3 +716,165 @@ def test_payment_approved_never_referenced_to_gate_execute() -> None:
         "monedula.py must not reference payment_approved — the canonical "
         "gate is the Telegram attendance reply only"
     )
+
+
+# ── 8. Operator principal: fail closed (the #881 blocking finding) ───────────
+#
+# `TELEGRAM_ALLOWED_USER_ID` unset skipped the principal check entirely:
+#
+#     if allowed_user_id and user_id != allowed_user_id:
+#         continue
+#
+# With the env var unset, `allowed_user_id` is None, the condition short-circuits
+# and EVERY message in the chat is accepted as an approval. Monedula's chat is a
+# group topic, so that is any member — and the approved action is an irreversible
+# money transfer. Absence of a configured principal is the ABSENCE of authority,
+# never a wildcard.
+
+
+def _poll_with(monkeypatch, payload: dict, *, allowed: str, tmp_path=None):
+    """Drive one poll against a canned getUpdates payload.
+
+    The offset file is redirected into tmp_path: `telegram_poll_approval`
+    persists the Telegram update offset to a module-relative path, so tests
+    sharing an update_id would otherwise consume each other's message and the
+    second would see an empty poll. That artifact reads as "no reply" — exactly
+    the outcome under test — so leaving it unisolated would let a stale-state
+    bug masquerade as a passing guard.
+    """
+    monkeypatch.setattr(monedula, "TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setattr(monedula, "TELEGRAM_CHAT_ID", "12345")
+    monkeypatch.setattr(monedula, "TELEGRAM_ALLOWED_USER_ID", allowed)
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps(payload).encode()
+
+    if tmp_path is not None:
+        monkeypatch.setattr(monedula, "TG_OFFSET_FILE", tmp_path / ".offset")
+    monkeypatch.setattr(
+        monedula.urllib.request, "urlopen", lambda url, timeout=None: _FakeResponse()
+    )
+    # timeout_sec=10, not 1: the loop computes `int(deadline - monotonic())`,
+    # so with a 1s budget the truncation to 0 breaks out before the first
+    # request — a measurement artifact that reads as "no reply", which is the
+    # very outcome these tests assert. The canned response returns instantly,
+    # so a larger budget costs nothing.
+    return monedula.telegram_poll_approval(timeout_sec=10)
+
+
+def _msg(user_id, text="attended all", chat_id=12345):
+    from_block = {} if user_id is None else {"id": user_id}
+    return {
+        "ok": True,
+        "result": [{
+            "update_id": 1,
+            "message": {"text": text, "from": from_block, "chat": {"id": chat_id}},
+        }],
+    }
+
+
+def test_unset_allowed_user_id_does_not_authorize_anyone(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """THE blocking finding: no configured principal ⇒ nobody can approve.
+
+    Before the fix this returned kind="reply" with text "attended all", and
+    `main()` paid out on a message from an arbitrary group member.
+    """
+    result = _poll_with(monkeypatch, _msg(99999), allowed="", tmp_path=tmp_path)
+    assert result.kind != "reply"
+    assert result.text is None
+
+
+def test_unset_allowed_user_id_surfaces_as_channel_error_not_timeout(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A misconfiguration must be LOUD, not look like a quiet channel.
+
+    #554's whole subject is that a broken gate was indistinguishable from an
+    operator declining. Silently degrading an unconfigured principal into a
+    timeout would rebuild that exact failure one layer down: payments stop, and
+    the reason never reaches anyone.
+    """
+    result = _poll_with(monkeypatch, _msg(99999), allowed="", tmp_path=tmp_path)
+    assert result.kind == "channel_error"
+    assert "principal" in (result.error_detail or "").lower()
+
+
+def test_wrong_user_still_does_not_approve(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """The pre-existing guard must keep working when it IS configured."""
+    result = _poll_with(monkeypatch, _msg(99999), allowed="67890", tmp_path=tmp_path)
+    assert result.kind != "reply"
+
+
+def test_configured_operator_still_approves(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """The legitimate path must survive — a guard that breaks it is an outage,
+    and the next person to debug it will delete it."""
+    result = _poll_with(monkeypatch, _msg(67890), allowed="67890", tmp_path=tmp_path)
+    assert result.kind == "reply"
+    assert result.text == "attended all"
+
+
+def test_message_with_no_sender_id_does_not_approve(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """Telegram omits `from` for channel posts, so `user_id` is None.
+
+    Honest note on what this test does and does not prove: with a principal
+    configured, `None != 67890` already rejects, so the explicit `user_id is
+    None` clause is defence in depth rather than the thing doing the work here —
+    a mutation removing that clause alone does NOT turn this test red. It is
+    kept because the clause states the intent at the point of decision (absent
+    identity is not a comparison outcome, it is a refusal), which is what stops
+    a later refactor from reintroducing an `allowed_user_id`-style falsy guard.
+    The case that genuinely has no other backstop — no principal configured at
+    all — is covered by `test_unset_allowed_user_id_does_not_authorize_anyone`,
+    which mutation 1 does turn red.
+    """
+    result = _poll_with(monkeypatch, _msg(None), allowed="67890", tmp_path=tmp_path)
+    assert result.kind != "reply"
+
+
+def test_malformed_allowed_user_id_does_not_authorize_anyone(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A non-numeric TELEGRAM_ALLOWED_USER_ID is a misconfiguration.
+
+    Before this, `int(TELEGRAM_ALLOWED_USER_ID)` raised ValueError out of the
+    poll function and into the daemon loop — an uncaught crash in the consent
+    path. It must fail closed as a channel_error, not crash and not wildcard.
+    """
+    result = _poll_with(monkeypatch, _msg(67890), allowed="not-a-number", tmp_path=tmp_path)
+    assert result.kind == "channel_error"
+
+
+def test_unset_principal_blocks_payment_and_escalates(
+    monkeypatch: pytest.MonkeyPatch,
+    escalation_posts: list[tuple[dict, str]],
+    sent_messages: list,
+) -> None:
+    """EFFECT test: the misconfiguration must block money and be visible.
+
+    Asserts the reported effect end-to-end — no handler executes and an
+    escalation is written — rather than only that the poll returned a value.
+    """
+    handler = _RecordingHandler("yoga")
+    _install_handlers(monkeypatch, [handler])
+    monkeypatch.setattr(monedula, "TELEGRAM_ALLOWED_USER_ID", "")
+    monkeypatch.setattr(
+        monedula,
+        "telegram_poll_approval",
+        lambda **kw: monedula.TelegramPollResult(
+            kind="channel_error",
+            error_detail="operator principal not configured "
+                         "(TELEGRAM_ALLOWED_USER_ID unset)",
+        ),
+    )
+
+    ok = monedula.main()
+
+    assert ok is False                      # entrypoint maps False to exit 1
+    assert handler.execute_calls == []      # no money moved
+    assert escalation_posts                 # and it was surfaced
+    # The escalation must say WHY, or the operator gets an alarm with no cause.
+    entity, _ = escalation_posts[0]
+    assert "principal" in (entity["title"] + entity["body"]).lower()
