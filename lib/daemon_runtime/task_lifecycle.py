@@ -69,8 +69,41 @@ class TaskStatus(str, Enum):
     SUPERSEDED = "superseded"         # replaced by another task
 
 
+# Synonyms agents actually write for the canonical lifecycle spellings.
+#
+# `normalize()` is the single chokepoint every comparison in this module already
+# passes through, so mapping here makes every consumer correct at once rather
+# than each one separately — the same reason `SENTINEL_ASSIGNEES` in
+# `execution/daemons/apis/routing.py` gives absence one spelling and normalizes
+# to it, instead of each caller remembering that "unassigned" names nobody.
+#
+# The defect this closes (ateles#1039): `TaskStatus` declares DONE = "done",
+# agents write "completed", and "completed" was in neither TERMINAL nor ACTIVE
+# and was not a key in `_TRANSITIONS` — so `can_transition` took its permissive
+# unknown-origin branch and treated finished tasks as freely movable. A synonym
+# nobody mapped is indistinguishable from a status nobody has heard of, and the
+# unknown branch is the permissive one.
+#
+# Only synonyms for TERMINAL states are mapped. An active-state synonym would be
+# a convenience; a terminal-state synonym is a safety property, and this map is
+# deliberately limited to the values that carry the safety meaning.
+_STATUS_SYNONYMS: dict[str, str] = {
+    "completed": TaskStatus.DONE.value,
+    "complete": TaskStatus.DONE.value,
+    "finished": TaskStatus.DONE.value,
+    "cancelled": TaskStatus.DECLINED.value,
+    "canceled": TaskStatus.DECLINED.value,
+    "rejected": TaskStatus.DECLINED.value,
+    "replaced": TaskStatus.SUPERSEDED.value,
+}
+
 # Terminal states the dispatcher/watchdog never transition OUT of automatically.
 # (BLOCKED is intentionally NOT terminal — operator remediation reopens it.)
+#
+# Every member is a CANONICAL value, so a raw snapshot string must never be
+# tested against this set directly — a synonym would slip past. Use
+# `is_terminal()`, which normalizes first; that is the mistake it exists to make
+# unavailable.
 TERMINAL: frozenset[str] = frozenset(
     {TaskStatus.DONE.value, TaskStatus.DECLINED.value, TaskStatus.SUPERSEDED.value}
 )
@@ -139,7 +172,29 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
 
 
 def normalize(status: str | None) -> str:
-    return (status or "").strip().lower()
+    """Canonicalize a status string: strip, lowercase, and resolve synonyms.
+
+    Synonym resolution lives here rather than at each call site because every
+    comparison in this module already funnels through this function — so one
+    mapping makes `TERMINAL`, `ACTIVE`, `can_transition` and every consumer
+    correct together. A value with no synonym passes through unchanged, so an
+    unrecognized status is still recorded rather than rewritten.
+    """
+    raw = (status or "").strip().lower()
+    return _STATUS_SYNONYMS.get(raw, raw)
+
+
+def is_terminal(status: str | None) -> bool:
+    """True when `status` names a finished task, under any spelling.
+
+    The binding form of `TERMINAL`. Callers must use this rather than
+    `status in TERMINAL`: the set holds canonical values only, so testing a raw
+    snapshot string against it lets every synonym through — which is exactly how
+    finished tasks kept being re-dispatched (ateles#1038, ateles#1039).
+
+    Absence is NOT terminal: an unset status is a new task, not a finished one.
+    """
+    return normalize(status) in TERMINAL
 
 
 def can_transition(from_status: str | None, to_status: str | None) -> bool:
@@ -148,7 +203,14 @@ def can_transition(from_status: str | None, to_status: str | None) -> bool:
     Unknown from-states are permissive (return True) so this never blocks a
     write on legacy/ad-hoc status values it doesn't recognize — the goal is to
     *record* progress, not to police it. Re-entering the same state is allowed
-    (idempotent SSE replays / re-dispatch)."""
+    (idempotent SSE replays / re-dispatch).
+
+    That permissive branch is deliberately NARROW, not closed: `normalize()`
+    resolves terminal synonyms first, so a finished task spelled `completed` is
+    now recognized as terminal instead of falling through as "unknown". Before
+    ateles#1039 it did fall through, which is how `completed -> awaiting_approval`
+    read as legal and the gate wrote its reason string over finished work.
+    """
     f = normalize(from_status)
     t = normalize(to_status)
     if not t:
