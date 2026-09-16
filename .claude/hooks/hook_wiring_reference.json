@@ -47,6 +47,11 @@
       ""
     ],
     [
+      "Stop",
+      "workstream_coverage_gate.py",
+      ""
+    ],
+    [
       "UserPromptSubmit",
       "user_prompt_submit.py",
       ""
