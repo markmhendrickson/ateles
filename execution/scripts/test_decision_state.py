@@ -295,6 +295,34 @@ class TestBranchSweepIsMachineIndependent(unittest.TestCase):
             "other locally-configured mirror",
         )
 
+    def test_origin_pr_numeric_aliases_are_not_swept(self):
+        """The other common PR-head mapping sits inside origin/, not beside it.
+
+        `+refs/pull/*/head:refs/remotes/origin/pr/*` produces `origin/pr/1036`.
+        The namespace cut does not drop it; CI has never fetched it; the
+        committed file then names a ref the lane cannot see and `--check` fails.
+        """
+        self.assertTrue(ds.origin_ref_is_in_sweep("origin/decisions-85-105-106-2ba02e"))
+        self.assertFalse(ds.origin_ref_is_in_sweep("origin/pr/1036"))
+        self.assertFalse(ds.origin_ref_is_in_sweep("origin/HEAD"))
+        self.assertFalse(ds.origin_ref_is_in_sweep("origin/main"))
+
+    def test_workdir_label_follows_github_head_ref(self):
+        """CI names the PR branch via GITHUB_HEAD_REF, not a missing origin ref."""
+        import os
+
+        previous = os.environ.get("GITHUB_HEAD_REF")
+        os.environ["GITHUB_HEAD_REF"] = "decisions-103-104-556945"
+        try:
+            self.assertEqual(
+                ds.workdir_ref_label(), "origin/decisions-103-104-556945"
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("GITHUB_HEAD_REF", None)
+            else:
+                os.environ["GITHUB_HEAD_REF"] = previous
+
 
 class TestSupersessionIsJudgedOnContent(unittest.TestCase):
     """Staleness is a question about the row, not about commit history.
