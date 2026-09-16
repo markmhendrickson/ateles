@@ -22,6 +22,7 @@ on:
       - "execution/daemons/piculet/**"
       - "execution/daemons/sylvia/**"
       - "execution/daemons/tyto/**"
+      - "execution/daemons/turdus/**"
       - "execution/mcp/**"
       - "lib/daemon_runtime/**"
       - "lib/approval/**"
@@ -104,6 +105,12 @@ jobs:
       # committed-but-uncollected lane gap (#584, #524, #727).
       - name: Run tyto daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/tyto/ -q
+      # ateles#198 (qa lens): test_turdus_approval.py and
+      # test_turdus_self_guard.py were committed but collected by no lane —
+      # same defect class as anthus (#584/#596) and tyto above. Its own step
+      # for the same attributability reason.
+      - name: Run turdus daemon tests
+        run: uv run --extra dev python -m pytest execution/daemons/turdus/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
       - name: Run transcript clarity lib tests
