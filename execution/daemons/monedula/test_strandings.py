@@ -397,19 +397,18 @@ def test_run_with_a_stranded_profile_is_not_clean(monkeypatch, tmp_path):
     This is the assertion that would have broken the sixteen consecutive
     "clean" exits in #553. The daemon had nothing else to do that run — the
     'nothing to do' early return is exactly the path these strandings took.
+
+    Rebased onto the email-approval-loop architecture (ateles#174 rebuild):
+    there is no more STATE_FILE / daily-gate / telegram_send — a stranded
+    profile with no active handlers takes the "no active payment handlers"
+    early return in run(), which is the equivalent path today.
     """
     import sys
     import types
 
     import monedula
 
-    monkeypatch.setattr(monedula, "STATE_FILE", tmp_path / ".last_run")
     monkeypatch.setattr(monedula, "_notify", lambda *a, **k: None, raising=False)
-    monkeypatch.setattr(monedula, "telegram_send", lambda *a, **k: None, raising=False)
-    monkeypatch.setattr(
-        monedula, "fetch_due_payment_tasks", lambda *a, **k: [], raising=False
-    )
-    monkeypatch.setattr(monedula, "fetch_yesterday_events", lambda: [])
 
     filed: list = []
     monkeypatch.setattr(
@@ -437,13 +436,7 @@ def test_run_with_no_strandings_is_clean(monkeypatch, tmp_path):
 
     import monedula
 
-    monkeypatch.setattr(monedula, "STATE_FILE", tmp_path / ".last_run")
     monkeypatch.setattr(monedula, "_notify", lambda *a, **k: None, raising=False)
-    monkeypatch.setattr(monedula, "telegram_send", lambda *a, **k: None, raising=False)
-    monkeypatch.setattr(
-        monedula, "fetch_due_payment_tasks", lambda *a, **k: [], raising=False
-    )
-    monkeypatch.setattr(monedula, "fetch_yesterday_events", lambda: [])
 
     fake = types.ModuleType("handlers")
     fake.load_handlers = lambda strandings=None: []

@@ -2,9 +2,11 @@
 handlers/wise_transfer.py — Generic Wise transfer handler for Monedula.
 
 Executes a Wise IBAN transfer for any PaymentProfile with payment_type="wise".
-Contact (name + IBAN) is loaded from contacts.parquet using the profile's
-contact_id prefix and category/platform fallback — all driven by env vars,
-no business-specific values hardcoded here.
+Contact (name + IBAN, ideally + Wise recipient id) is resolved primarily from
+the Neotoma contact entity linked via profile.contact_id; contacts.parquet is
+consulted only as a legacy fallback when Neotoma yields no usable IBAN (see
+_load_contact). All values are driven by profile config / env vars, no
+business-specific values hardcoded here.
 
 Wise API flow:
   1. GET /v1/profiles → pick personal profile_id
@@ -28,10 +30,10 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from ..handler_base import PaymentHandler
+    from ..handler_base import PaymentHandler, match_events_for_profile
 except ImportError:
-    from handler_base import PaymentHandler  # type: ignore[no-redef]
-from .payment_profile import PaymentProfile
+    from handler_base import PaymentHandler, match_events_for_profile  # type: ignore[no-redef]
+from .payment_profile import NEOTOMA_USER_AGENT, PaymentProfile
 
 log = logging.getLogger(__name__)
 
@@ -53,30 +55,34 @@ class WiseTransferHandler(PaymentHandler):
 
         Two trigger kinds, deliberately kept separate:
 
-        * Recurring (calendar_keywords): a calendar event whose title matches.
-          These are ATTENDANCE-GATED — the event is not proof the session
-          happened, so approval must name the handler (see _parse_reply).
+        * Recurring (calendar_keywords / calendar_recurring_event_id /
+          calendar_event_ids): a calendar event that matches. These are
+          ATTENDANCE-GATED — the event is not proof the session happened, so
+          approval must name the handler (see _parse_reply). Matching prefers
+          a stable calendar_recurring_event_id / calendar_event_ids allowlist
+          when the profile configures one (see
+          handler_base.match_events_for_profile), falling back to
+          calendar_keywords title-substring matching otherwise.
         * One-off (due_date): an invoice due today or overdue. There is no
           session to attend, so there is no calendar event to match against.
 
         A one-off never matches on a calendar event, and a recurring profile
         never matches on a date — the two paths do not interact.
         """
-        # Calendar keywords win: a profile with them is recurring and therefore
-        # attendance-gated, even if it also carries a due_date. Only a profile
-        # with NO keywords is a one-off that may fire on a date alone — this is
-        # what stops a stray due_date from bypassing the attendance gate.
-        if not self.profile.calendar_keywords and self.profile.due_date:
+        # Calendar keywords/ids win: a profile with them is recurring and
+        # therefore attendance-gated, even if it also carries a due_date. Only
+        # a profile with NO keywords/ids at all is a one-off that may fire on
+        # a date alone — this is what stops a stray due_date from bypassing
+        # the attendance gate.
+        has_calendar_trigger = bool(
+            self.profile.calendar_keywords
+            or self.profile.calendar_recurring_event_id
+            or self.profile.calendar_event_ids
+        )
+        if not has_calendar_trigger and self.profile.due_date:
             return _due_date_matches(self.profile, self.name)
 
-        matched = []
-        for event in events:
-            summary = event.get("summary", "") or ""
-            low = summary.lower()
-            if any(kw in low for kw in self.profile.calendar_keywords):
-                log.info(f"[{self.name}] Matched event: {summary!r}")
-                matched.append({"event": event, "summary": summary})
-        return matched
+        return match_events_for_profile(self.profile, events, self.name)
 
     def preview(self, match: dict) -> str:
         summary = match.get("summary", self.profile.label)
@@ -237,22 +243,29 @@ def _due_date_matches(profile: PaymentProfile, name: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Contact loading (from contacts.parquet, generic)
+# Contact loading — profile-direct, then Neotoma, then contacts.parquet
 # ---------------------------------------------------------------------------
 
 
 def _load_contact(profile: PaymentProfile) -> dict | None:
     """
-    Resolve the payee for this profile.
+    Resolve the payment recipient (name + IBAN, ideally + Wise recipient id)
+    for this profile.
 
-    Order of precedence:
+    Resolution order:
       1. The profile's own wise_iban / wise_recipient_name. A one-off invoice
          payee (a law firm, a supplier) is not a standing contact, so the
          profile carries the details directly rather than requiring a
          contacts.parquet row.
-      2. contacts.parquet, by contact_id prefix then category+platform.
+      2. Neotoma: profile.contact_id -> retrieve the linked `contact` entity
+         and read its iban / wise_recipient_id / name fields directly.
+      3. contacts.parquet: ONLY as a legacy fallback when neither of the
+         above yields a usable IBAN (DATA_DIR unset, contact not found, or
+         field missing) — never a hard requirement.
 
-    Returns a dict with at least 'name' and 'iban', or None on failure.
+    Returns dict with at least 'name' and 'iban' (and 'wise_recipient_id'
+    when known), or None if no source has usable data — callers must treat
+    that as a fail-safe "do not execute" signal, not raise.
     """
     iban_on_profile = (getattr(profile, "wise_iban", "") or "").strip()
     name_on_profile = (getattr(profile, "wise_recipient_name", "") or "").strip()
@@ -265,14 +278,130 @@ def _load_contact(profile: PaymentProfile) -> dict | None:
             f"wise_recipient_name — both are required; falling back to contacts"
         )
 
+    contact = _load_contact_from_neotoma(profile)
+    if contact and contact.get("iban"):
+        return contact
+
+    parquet_contact = _load_contact_from_parquet(profile)
+    if parquet_contact and parquet_contact.get("iban"):
+        if contact:
+            # Neotoma had a partial record (e.g. name but no IBAN yet) —
+            # prefer Neotoma's fields, fill gaps from parquet.
+            merged = dict(parquet_contact)
+            merged.update({k: v for k, v in contact.items() if v})
+            return merged
+        return parquet_contact
+
+    # Neither source has a usable IBAN. Return whatever partial Neotoma
+    # record we found (if any) so preview()/execute() can still report a
+    # useful "No IBAN found" error with the recipient name — but never
+    # invent an IBAN.
+    return contact
+
+
+def _load_contact_from_neotoma(profile: PaymentProfile) -> dict | None:
+    """
+    Resolve recipient fields from the Neotoma contact entity linked via
+    profile.contact_id (expected to be a Neotoma entity id, e.g. "ent_...").
+
+    Reads the contact snapshot directly over the Neotoma HTTP API — no CLI
+    subprocess dependency, so this works even when the `neotoma` binary is
+    unavailable. Any failure (network, auth, missing entity, missing field)
+    returns None/partial rather than raising — fail-safe, never blocks the
+    parquet fallback path.
+    """
+    contact_id = (profile.contact_id or "").strip()
+    if not contact_id or not contact_id.startswith("ent_"):
+        # Not a Neotoma entity id (e.g. a legacy parquet contact_id prefix,
+        # or unset) — nothing to resolve here.
+        return None
+
+    import urllib.error
+    import urllib.request
+
+    # No localhost default: local Neotoma hosting was retired 2026-08-04 (see
+    # payment_profile.load_profiles_from_neotoma) — an unreachable default
+    # would read as "contact not found" and silently fall through to the
+    # parquet leg. Skip the Neotoma lookup rather than guess an endpoint.
+    base_url = os.environ.get("NEOTOMA_BASE_URL", "").strip().rstrip("/")
+    if not base_url:
+        log.warning(
+            f"[{profile.name}] NEOTOMA_BASE_URL not set — skipping Neotoma "
+            f"contact lookup for {contact_id}"
+        )
+        return None
+    bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "").strip()
+    is_loopback = "localhost" in base_url or "127.0.0.1" in base_url
+
+    headers = {"Accept": "application/json", "User-Agent": NEOTOMA_USER_AGENT}
+    if bearer and not is_loopback:
+        headers["Authorization"] = f"Bearer {bearer}"
+
+    # GET /entities/{id} — same route used by execution/scripts/render_plan_docs.py
+    # and phoenicurus-release/publish.py (neotoma_fetch_entity). Response nests
+    # fields under .snapshot (occasionally double-nested .snapshot.snapshot);
+    # unwrap defensively rather than relying on a single exact shape.
+    url = f"{base_url}/entities/{contact_id}"
+    try:
+        req = urllib.request.Request(url, method="GET", headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        log.warning(
+            f"[{profile.name}] Neotoma contact lookup failed for {contact_id}: {exc}"
+        )
+        return None
+
+    snap = data.get("snapshot", data) if isinstance(data, dict) else None
+    if isinstance(snap, dict) and isinstance(snap.get("snapshot"), dict):
+        snap = snap["snapshot"]
+    if not isinstance(snap, dict):
+        log.warning(f"[{profile.name}] Neotoma contact {contact_id} returned no snapshot")
+        return None
+
+    name = str(snap.get("name") or snap.get("full_name") or "").strip()
+    iban = str(snap.get("iban") or "").strip().replace(" ", "")
+    wise_recipient_id = str(snap.get("wise_recipient_id") or "").strip()
+    phone = str(snap.get("phone") or "").strip()
+
+    if not name and not iban:
+        log.warning(
+            f"[{profile.name}] Neotoma contact {contact_id} has neither name nor iban"
+        )
+        return None
+    if not iban:
+        log.warning(
+            f"[{profile.name}] Neotoma contact {contact_id} ({name!r}) has no iban field "
+            f"— will try contacts.parquet fallback"
+        )
+
+    result = {"name": name, "iban": iban, "phone": phone, "contact_id": contact_id}
+    if wise_recipient_id:
+        result["wise_recipient_id"] = wise_recipient_id
+    return result
+
+
+def _load_contact_from_parquet(profile: PaymentProfile) -> dict | None:
+    """
+    Legacy fallback: load payment contact from contacts.parquet using
+    profile config. Tries contact_id prefix first, then category+platform
+    fallback. Returns dict with at least 'name' and 'iban', or None.
+
+    Only consulted when neither the profile-direct fields nor Neotoma
+    resolution (_load_contact_from_neotoma) yields a usable IBAN — this path
+    must never be a hard requirement.
+    """
     data_dir = os.environ.get("DATA_DIR", "").strip()
     if not data_dir:
-        log.warning(f"[{profile.name}] DATA_DIR not set — cannot load contacts")
+        log.info(
+            f"[{profile.name}] DATA_DIR not set — skipping legacy contacts.parquet "
+            f"fallback (expected once Neotoma has the recipient data)"
+        )
         return None
 
     contacts_path = Path(data_dir) / "contacts" / "contacts.parquet"
     if not contacts_path.exists():
-        log.warning(f"[{profile.name}] contacts.parquet not found at {contacts_path}")
+        log.info(f"[{profile.name}] contacts.parquet not found at {contacts_path}")
         return None
 
     try:
@@ -286,7 +415,7 @@ def _load_contact(profile: PaymentProfile) -> dict | None:
     except ImportError:
         return _load_contact_pandas(contacts_path, profile)
     except Exception as exc:
-        log.error(f"[{profile.name}] Error loading contacts: {exc}")
+        log.error(f"[{profile.name}] Error loading contacts.parquet: {exc}")
         return None
 
 
