@@ -151,6 +151,85 @@ def gate_writeback_allowlist(tools: list[str]) -> list[str]:
     return merged
 
 
+# ── Per-agent Neotoma credential (ateles#795) ─────────────────────────────────
+# A lens that owns a pre-impl gate is INSTRUCTED to record its own verdict by
+# `correct()`-ing the parent issue entity. Neotoma admits that write against the
+# `agent_grant` matched on the principal the CALLER presents — so the child must
+# present the LENS's credential, or the write is refused however correct the
+# review was.
+#
+# It does not. The child reaches Neotoma over HTTP MCP, and the Authorization
+# header on that connection carries one process-wide `NEOTOMA_BEARER_TOKEN`
+# (see the `--mcp-config` block in `_run_skill_once`). Every lens therefore
+# presents the SAME principal — the daemon's — and a lens whose own grant names
+# `issue` never gets to use it, because the grant matched is not its own.
+#
+# The per-agent AAuth keypairs under ATELES_PRIVATE_KEYS_DIR do not close this.
+# They are injected as NEOTOMA_AAUTH_* env vars, which are read by the
+# TypeScript client signer (`lib/daemon_runtime/neotoma_signed.py` shells out to
+# it per request). An MCP HTTP session authenticates once, with a static header,
+# so a per-request signer cannot supply its identity. The keys are real and the
+# vars are set; they are simply not on this path.
+#
+# Consequence, and the reason ateles#795 stayed open after #762/#769 filed the
+# grants: the lens reviews, is refused, and `gate_status.<lens>` stays
+# `pending` — INDISTINGUISHABLE from a review that never ran. Nothing fails,
+# nothing logs at ERROR, and the gate merely looks outstanding.
+#
+# This resolves a per-agent bearer on the GitHub pattern already established by
+# `_token_for_agent_on_repo`: an agent-specific env name, falling back to the
+# shared daemon token. The fallback is deliberate — an advisory lens that owns
+# no gate still produces its whole product (a PR comment) unsigned, so degrading
+# there costs nothing. A gate OWNER's product is a durable write, so for that
+# case the caller refuses instead (`gate_writeback_identity_error`), per
+# CLAUDE.md "fail closed on the field that carries the safety meaning".
+NEOTOMA_IDENTITY_UNAVAILABLE = "per-agent Neotoma identity unavailable"
+
+
+def neotoma_token_env_name(role: str) -> str:
+    """Env var holding *role*'s own Neotoma bearer, e.g. `ACCIPITER_NEOTOMA_TOKEN`."""
+    return f"{role.upper().replace('-', '_')}_NEOTOMA_TOKEN"
+
+
+def neotoma_token_for_agent(role: str) -> tuple[str, bool]:
+    """Resolve (token, is_own_identity) for *role*'s Neotoma calls.
+
+    Tier 1 — `<ROLE>_NEOTOMA_TOKEN`: the agent's own principal. `is_own_identity`
+             is True only here.
+    Tier 2 — `NEOTOMA_BEARER_TOKEN`: the shared daemon bearer, preserving exact
+             current behaviour for every agent that has no credential of its own.
+
+    Returning the tier alongside the token is the point: a caller that needs the
+    write ATTRIBUTED (a gate writeback) must be able to tell the two apart, and a
+    bare token string cannot say which principal it speaks for.
+    """
+    own = os.environ.get(neotoma_token_env_name(role), "").strip()
+    if own:
+        return own, True
+    return os.environ.get("NEOTOMA_BEARER_TOKEN", ""), False
+
+
+def gate_writeback_identity_error(role: str, *, is_own_identity: bool) -> str | None:
+    """Why *role* cannot record its own gate verdict, or None when it can.
+
+    Pure, so the preflight is testable without a subprocess. Only a gate OWNER
+    calls this; an advisory lens runs on the shared bearer exactly as before.
+    """
+    if is_own_identity:
+        return None
+    return (
+        f"{NEOTOMA_IDENTITY_UNAVAILABLE}: '{role}' owns a pre-impl gate and must "
+        f"`correct()` the parent issue entity to record its verdict, but no "
+        f"{neotoma_token_env_name(role)} is set, so it would present the shared "
+        "daemon bearer instead of its own principal. Neotoma matches the "
+        f"agent_grant on the caller's principal, so the write would be refused "
+        "and the gate would stay `pending` — indistinguishable from a review "
+        f"that never ran (ateles#795). Provision {neotoma_token_env_name(role)} "
+        f"for '{role}@ateles-swarm' and file an agent_grant carrying retrieve + "
+        "correct on `issue`."
+    )
+
+
 def _require_neotoma_base_url() -> str:
     """Return NEOTOMA_BASE_URL (trailing slash stripped) or raise.
 
@@ -1204,6 +1283,7 @@ async def _run_skill_once(
     github_token: str | None = None,
     include_github_contract: bool = False,
     cwd: str | None = None,
+    owns_pending_gate: bool = False,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
@@ -1263,6 +1343,30 @@ async def _run_skill_once(
         msg = f"SKILL.md not found at {skill_path}"
         log.error(f"[apis] {skill} dispatch skipped — {msg}")
         return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+
+    # ateles#795 — a gate owner that cannot be ATTRIBUTED must not run silently.
+    # Running it anyway burns a full review whose verdict Neotoma will refuse,
+    # and leaves `gate_status.<lens>` at `pending` — the state that is
+    # indistinguishable from a review that never ran, which is the whole defect.
+    # Refusing BEFORE the subprocess turns that invisible loss into a named,
+    # loud failure the panel surfaces on the PR. Only gate owners are refused;
+    # an advisory lens still runs on the shared bearer exactly as before.
+    if owns_pending_gate:
+        _, _own_identity = neotoma_token_for_agent(_role)
+        identity_error = gate_writeback_identity_error(
+            _role, is_own_identity=_own_identity
+        )
+        if identity_error:
+            log.error(f"[apis] {skill} dispatch refused — {identity_error}")
+            return SkillResult(
+                skill,
+                False,
+                None,
+                "",
+                "",
+                error=identity_error,
+                provider=provider,
+            )
 
     try:
         skill_md = skill_path.read_text(encoding="utf-8")
@@ -1378,7 +1482,11 @@ async def _run_skill_once(
         _neotoma_base = os.environ.get(
             "NEOTOMA_BASE_URL", ""
         ).rstrip("/")
-        _neotoma_token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
+        # ateles#795: prefer the ROLE's own Neotoma principal. Falls back to the
+        # shared daemon bearer, so every agent without its own credential behaves
+        # exactly as before; a gate owner that needs attribution has already been
+        # refused upstream by the `owns_pending_gate` preflight.
+        _neotoma_token, _ = neotoma_token_for_agent(_role)
         _mcp_cfg: dict = {
             "mcpServers": {
                 "mcpsrv_neotoma": {
@@ -1502,6 +1610,15 @@ async def _run_skill_once(
     # We only inject when the role JWK file actually exists at the expected path;
     # if it is absent the child proceeds unsigned (graceful degradation, as today).
     # When degraded (empty prompt_markdown) we inject nothing — child runs unsigned.
+    #
+    # SCOPE (ateles#795): these vars reach only code paths that shell out to the
+    # TypeScript client signer (`lib/daemon_runtime/neotoma_signed.py`). They do
+    # NOT govern the child's Neotoma MCP connection, which authenticates once
+    # with the static Authorization header built above — an MCP session cannot
+    # carry a per-request signature. So a present JWK here is not evidence that
+    # a child's MCP writes are attributed to the role; the header is. Reading
+    # these three vars as "the lens writes as itself" is what let the shared
+    # bearer pass for a per-lens identity while ateles#795 stayed open.
     if not degraded and agent_def.aauth_sub:
         keys_dir = os.environ.get("ATELES_PRIVATE_KEYS_DIR", "")
         if keys_dir:
@@ -1793,6 +1910,7 @@ async def run_skill(
     cwd: str | None = None,
     provider: str | None = None,
     preferred_provider: str | None = None,
+    owns_pending_gate: bool = False,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
 
@@ -1804,6 +1922,10 @@ async def run_skill(
 
     Passing ``provider`` pins the invocation to one adapter, primarily for
     diagnostics and focused tests.
+
+    ``owns_pending_gate`` (ateles#795): the run must be able to record a durable
+    verdict as ITSELF. Without its own Neotoma credential the run is refused
+    rather than started, so a verdict cannot evaporate into a `pending` gate.
     """
     async def attempt(selected: str) -> SkillResult:
         return await _run_skill_once(
@@ -1811,6 +1933,7 @@ async def run_skill(
             task_entity_id=task_entity_id, timeout=timeout, env_extra=env_extra,
             notifier=notifier, github_token=github_token,
             include_github_contract=include_github_contract, cwd=cwd,
+            owns_pending_gate=owns_pending_gate,
         )
 
     return await _run_provider_attempts(

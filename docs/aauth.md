@@ -51,6 +51,40 @@ The repo currently maintains **two parallel keypair formats** for two contexts:
 
 Unifying these formats and publishing all public keys to the same JWKS is on the to-do list below.
 
+### A third context neither flavor reaches: the dispatched child's MCP session
+
+A **dispatched agent** (a review lens, or any role Apis spawns via `skill_runner`) does not use either
+flavor above for its Neotoma writes. It reaches Neotoma over **HTTP MCP**, and an MCP session
+authenticates **once**, with a static `Authorization` header — there is no per-request signature for a
+signer to supply. So neither keypair format governs what principal that child writes as.
+
+`skill_runner` does inject `NEOTOMA_AAUTH_PRIVATE_JWK_PATH` / `_SUB` / `_ISS` when the role's JWK exists,
+but those vars are read only by code that shells out to the TypeScript client signer
+(`lib/daemon_runtime/neotoma_signed.py`). **A present JWK is not evidence that a dispatched agent's MCP
+writes are attributed to its role.** Reading it that way is what let one shared bearer pass for a per-lens
+identity while [ateles#795](https://github.com/markmhendrickson/ateles/issues/795) stayed open: a review
+lens signed off, Neotoma matched the `agent_grant` on the *daemon's* principal rather than the lens's,
+refused the write, and `gate_status.<lens>` stayed `pending` — indistinguishable from a review that never
+ran.
+
+The header is therefore the identity for this context, and it resolves per agent:
+
+| Tier | Source | Principal |
+|---|---|---|
+| 1 | `<ROLE>_NEOTOMA_TOKEN` (e.g. `ACCIPITER_NEOTOMA_TOKEN`) | the agent's own |
+| 2 | `NEOTOMA_BEARER_TOKEN` | the shared daemon bearer |
+
+This mirrors `_token_for_agent_on_repo`'s tiering for GitHub, deliberately: the two credential systems
+should degrade the same way. Tier 2 is a real fallback for an **advisory** agent, whose product (a PR
+comment) survives an unattributed run. It is **not** acceptable for an agent that owns a pre-impl gate,
+whose product is a durable write: `skill_runner.run_skill(..., owns_pending_gate=True)` **refuses to
+dispatch** rather than produce a verdict Neotoma will discard.
+
+**To give a gate-owning role its own identity:** provision `<ROLE>_NEOTOMA_TOKEN` for
+`<role>@ateles-swarm`, and file an `agent_grant` matching that sub with `retrieve` + `correct` on `issue`
+(see [Neotoma grant entity](#neotoma-grant-entity)). Both halves are required — a token with no grant is
+refused at admission, and a grant with no token is never matched.
+
 ### Per-agent status (ground truth, May 2026)
 
 | Agent | `sub` | `kid` | Keypair on disk | Published in JWKS | `agent_grant` entity |
