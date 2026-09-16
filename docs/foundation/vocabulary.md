@@ -445,8 +445,11 @@ tools it names are a dimension of that principal's grant (decision 42,
 accountability carried as an `ownership_grant` [edge](#edge) to a principal, and a skill cannot be that
 edge's target. A file invoked by name produces what the principal executing it produces, under that
 principal's grant and that principal's accountability; anything it writes into the record is an **entity** of
-its own type, which is not an artifact at all. Whether a **role** may be seated to review what another
-principal produced under such a file is decision 110 and is open.
+its own type, which is not an artifact at all. Where a [role](#role) is to review what such a file
+produced, the seat is the **declaration's**, not the file's: the producing work is a [step](#step) and the
+reviewing role is that declaration's optional [review step](#review-step) under an `applies_when`, which
+reads what exists when it opens (decision 110,
+`gates_and_workflows.md#declaration-batch-projection`).
 **The seam between two skills is the seam the design already has.** Where a procedure produces something a
 second procedure then reads, the two are two steps of one declaration or two declarations joined by a
 [successor](#successor) and a [chain](#chain), and the seam is the producing step's closing condition read as
@@ -2007,39 +2010,40 @@ record.
 
 ## Whether a role may be seated to review what a named procedure produced
 
-This is decision 110, open. It is recorded here because the [skill](#skill) entry above is where the
-question surfaces, and the register obliges every open decision to have an argued home.
+This is decision 110, **ruled 2026-09-16: the question dissolves.** It is argued here because the
+[skill](#skill) entry above is where it surfaces.
 
-**What is already settled, and is not reopened by this.** A skill is a harness's file and source state, with
+**What is settled, and is not what the question asked.** A skill is a harness's file and source state, with
 no type in the design, no [credential](#credential), and no standing as a [principal](#principal); it
 [claims](#claim) nothing, [owns](#ownership) nothing, and is [granted](#grant) nothing. Whatever a principal
 writes into the record while executing one is an **entity** of its own type and never an
-[artifact](#artifact). A [role](#role) is a name a declaration carries, resolved by the roster at the moment
-it is acted on, and a [review step](#review-step) is a step whose work is a judgement of the
-[batch](#batch)'s change, closed by its owner's [verdict](#verdict) like any other. Ownership confers the
-required seat on a [checkpoint](#checkpoint) whose subject concerns the object, and nothing else.
+[artifact](#artifact). So a file cannot hold a seat, and the question was never really about the file.
 
-**What is not settled.** Every review seat the design names takes a **batch's change** as its subject. A
-seat whose subject is instead *the output of a procedure invoked by name* — the case that arises when a
-procedure produces something a role is accountable for, and the question is whether that role is asked
-before the output stands — is named nowhere in the four models. It is not enough to observe that the role
-exists and the output exists: what a review step is, and what it is a judgement *of*, is declared, and this
-subject is not among them.
+**The objection the dissolution had to survive.** Every review seat the design names takes a
+[batch](#batch)'s change as its subject, and `applies_when` is evaluated against what the batch's [tasks](#task) are
+and what their change touches. If that were the whole rule, an optional review step would not reach what a
+procedure produced, and the dissolution would only look like one.
 
-**The three candidates.** The producing work is a [step](#step) of a declaration and the reviewing role is
-that declaration's optional review step under an `applies_when`, which needs no new mechanism and would
-**dissolve the question** rather than answer it — there would be no procedure-output seat, only a batch as
-there always was. Or the reviewing role is seated by [ownership](#ownership) over the entity type produced,
-which makes the seat a property of the **type** and reaches every producer of it, at the cost of a seat that
-no declaration names and that no reading of a declaration would predict. Or the design declines the
-question, and the order of the two roles is whatever declaration names them both as [step owners](#step-owner),
-with nothing seated on a file's output at all.
+**It reaches it.** `gates_and_workflows.md#declaration-batch-projection` rules that an optional step's
+condition **reads what exists when the step would open**, and that a step placed after the step that
+produces the change may read the change. What an earlier [step](#step) persisted into the record is what
+exists when a later step opens, so a [review step](#review-step) seated after a producing step reads the
+produced entity as the change its condition is evaluated against. The placement is enforced rather than
+trusted: a condition whose declared inputs name a type no earlier step's `reads_to_close` names would always
+be unevaluable and open every time — an optional step in name only — and **that declaration is refused when
+it is written**. The seat is therefore real, conditional, and checked at declaration.
 
-**Why this is not ruled here.** The [operator](#operator)'s lean is that such a procedure produces and the role reviews.
-That lean is recorded and deliberately not taken: a [vocabulary](#skill) entry restates what the design
-rules and does not add a seat the design has never named, and the first candidate may make the question
-disappear — if the producing work is a step, the existing review step already answers it, and a ruling taken
-now would have stood up a second mechanism beside one that already generalizes.
+**So the answer is that the producing work is a step, and the seat belongs to the declaration.** Nothing is
+added to the design. The two rejected candidates: seating the reviewing [role](#role) by [ownership](#ownership) over
+the entity type produced would make the seat a property of the **type**, reaching every producer of it
+through a seat no declaration names and no reading of a declaration would predict — a second mechanism
+beside one that already generalizes, which invariant 6 refuses; and the design declining the question is
+moot once the first candidate holds.
+
+**What this does not license.** The seat is the declaration's and never the file's. A procedure invoked by
+name seats nothing, confers nothing, and reviews nothing; where it looks as though it does, what is doing
+the work is a declaration whose steps name a producing role and a reviewing role, and the file is the source
+state one of those steps was written from.
 
 ## Retired names
 
