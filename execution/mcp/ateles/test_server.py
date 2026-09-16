@@ -447,9 +447,18 @@ class TestGracefulDegradation(unittest.TestCase):
         self.assertIn("error", result)
 
     def test_list_checkpoints_without_token(self):
+        """A failed read must not be spelled the same way as an empty queue.
+
+        This assertion used to read `count == 0` — which PINNED the defect
+        (ateles#1037): with no token nothing was read at all, yet the tool
+        reported that the operator had zero decisions waiting. A missing token
+        is the one case where "no pending checkpoints" is certainly wrong, and
+        it looked identical to the all-clear.
+        """
         srv.NEOTOMA_BEARER_TOKEN = ""
         result = srv._list_checkpoints()
-        self.assertEqual(result["count"], 0)
+        self.assertIn("error", result)
+        self.assertNotEqual(result.get("count"), 0)
         self.assertEqual(result["checkpoints"], [])
 
     def test_resolve_checkpoint_without_token(self):
@@ -748,9 +757,9 @@ class TestGetSwarmRoster(unittest.TestCase):
 class TestListCheckpoints(unittest.TestCase):
 
     @patch("server._get")
-    @patch("server._retrieve_entities")
+    @patch("server._retrieve_page")
     def test_joins_task_title(self, mock_retrieve, mock_get):
-        mock_retrieve.return_value = [{
+        mock_retrieve.return_value = {"total": 1, "next_cursor": None, "entities": [{
             "entity_id": "ent_cp_1",
             "snapshot": {
                 "title": "PLAN checkpoint: deploy",
@@ -764,7 +773,7 @@ class TestListCheckpoints(unittest.TestCase):
                 "reason": "high blast radius",
                 "proposed_alternatives": [],
             },
-        }]
+        }]}
         mock_get.return_value = {
             "snapshot": {"title": "Deploy to production"},
         }
@@ -775,11 +784,16 @@ class TestListCheckpoints(unittest.TestCase):
         self.assertEqual(cp["task_title"], "Deploy to production")
         self.assertEqual(cp["blast_radius"], "high")
 
-    @patch("server._retrieve_entities")
+    @patch("server._retrieve_page")
     def test_empty_checkpoints(self, mock_retrieve):
-        mock_retrieve.return_value = []
+        """A genuinely empty queue still reports zero — the all-clear must
+        remain sayable, distinctly from a failed read (see the without-token
+        test above)."""
+        mock_retrieve.return_value = {"total": 0, "next_cursor": None, "entities": []}
         result = srv._list_checkpoints()
         self.assertEqual(result["count"], 0)
+        self.assertEqual(result["total"], 0)
+        self.assertNotIn("error", result)
 
 
 class TestToolSchemas(unittest.TestCase):

@@ -147,3 +147,13 @@ jobs:
         run: .mcp-venv/bin/python execution/mcp/ateles/test_server.py
       - name: Run ateles MCP server smoke tests
         run: .mcp-venv/bin/python execution/mcp/ateles/test_server_smoke.py
+      # ateles#1037: the two steps above run named files directly, so a
+      # pytest-style suite added under execution/mcp/ateles/ is collected by
+      # NOTHING — the committed-but-uncollected gap this workflow has already
+      # closed for anthus (#584), execution/scripts (#524), tyto and turdus
+      # (#198). Collect the whole directory so a new test file is run because
+      # it exists, not because someone remembered to name it here.
+      - name: Run ateles MCP server pytest suites
+        run: |
+          VIRTUAL_ENV=.mcp-venv uv pip install pytest
+          .mcp-venv/bin/python -m pytest execution/mcp/ateles/ -q
