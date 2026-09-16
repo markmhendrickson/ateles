@@ -3208,3 +3208,265 @@ def test_prompt_review_requires_qualified_supported_adapter(monkeypatch, models)
     monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude":"a", "codex":"b", "cursor":"c"})
     result = asyncio.run(skill_runner.run_review_prompt(role="loxia", prompt="input"))
     assert not result.ok and result.attempted_providers == ()
+
+
+# ── ateles#795: a gate owner's verdict must be recordable, or the run refused ──
+#
+# The defect these cover: a review lens seated because it OWNS a pending
+# pre-impl gate is instructed to `correct()` the parent issue entity to record
+# its verdict. Neotoma admits that write against the `agent_grant` matched on
+# the CALLER's principal — but every dispatched child reached Neotoma over HTTP
+# MCP carrying one shared `NEOTOMA_BEARER_TOKEN`, so the lens presented the
+# daemon's principal, not its own. The lens's own grant (filed by #762/#769)
+# never applied. The write was refused, the review evaporated, and
+# `gate_status.<lens>` stayed `pending` — indistinguishable from a review that
+# never ran.
+#
+# WHAT THESE LOOKED LIKE RED, before the fix:
+#   * test_mcp_header_uses_the_agents_own_neotoma_token
+#       AssertionError: Authorization header carries the shared daemon bearer
+#       ('Bearer shared-daemon-token'), not accipiter's own — every lens
+#       presents the same principal.
+#   * test_gate_owner_without_own_identity_is_refused
+#       AssertionError: expected the dispatch to be REFUSED, but it ran — the
+#       old code launched the review, and the verdict was written nowhere.
+#   * test_gate_owner_refusal_is_classified_distinctly
+#       ImportError: cannot import name 'NEOTOMA_IDENTITY_UNAVAILABLE'
+#       (before the constant existed); once stubbed, the refusal classed as
+#       the catch-all "execution failure".
+#   * test_advisory_lens_without_own_identity_still_runs
+#       PASSED before and after — it pins the deliberate non-regression, so a
+#       green here is only meaningful alongside the three reds above.
+
+
+class TestGateOwnerIdentity:
+    """ateles#795 — attribution for the write that clears a gate."""
+
+    def setup_method(self) -> None:
+        skill_runner._agent_def_cache.clear()
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_token_env_name_is_per_role(self) -> None:
+        assert skill_runner.neotoma_token_env_name("accipiter") == (
+            "ACCIPITER_NEOTOMA_TOKEN"
+        )
+        # A hyphenated role (neotoma-agent) must still yield a legal env name.
+        assert skill_runner.neotoma_token_env_name("neotoma-agent") == (
+            "NEOTOMA_AGENT_NEOTOMA_TOKEN"
+        )
+
+    def test_own_token_preferred_and_reported_as_own(self, monkeypatch) -> None:
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+        monkeypatch.setenv("ACCIPITER_NEOTOMA_TOKEN", "accipiter-own-token")
+        token, is_own = skill_runner.neotoma_token_for_agent("accipiter")
+        assert token == "accipiter-own-token"
+        assert is_own is True
+
+    def test_falls_back_to_shared_bearer_and_says_so(self, monkeypatch) -> None:
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+        monkeypatch.delenv("ACCIPITER_NEOTOMA_TOKEN", raising=False)
+        token, is_own = skill_runner.neotoma_token_for_agent("accipiter")
+        assert token == "shared-daemon-token"
+        # The load-bearing half: the caller must be able to TELL. A bare token
+        # string cannot say which principal it speaks for, which is exactly how
+        # the shared bearer passed for the lens's own identity for months.
+        assert is_own is False
+
+    def test_gate_writeback_identity_error_fails_closed(self) -> None:
+        assert (
+            skill_runner.gate_writeback_identity_error(
+                "accipiter", is_own_identity=True
+            )
+            is None
+        )
+        err = skill_runner.gate_writeback_identity_error(
+            "accipiter", is_own_identity=False
+        )
+        assert err is not None
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in err
+        # The remediation must name the exact env var and the grant scope, so
+        # the operator is not left to work out what to provision.
+        assert "ACCIPITER_NEOTOMA_TOKEN" in err
+        assert "issue" in err
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_mcp_header_uses_the_agents_own_neotoma_token(
+        self, MockLoader, mock_write_harness, monkeypatch, tmp_path
+    ) -> None:
+        """RED before the fix: the header carried the shared daemon bearer."""
+        fake_def = _make_def(
+            prompt_markdown="Role: Accipiter.",
+            aauth_sub="accipiter@ateles-swarm",
+            name="accipiter",
+        )
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.com")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+        monkeypatch.setenv("ACCIPITER_NEOTOMA_TOKEN", "accipiter-own-token")
+
+        captured_cmd: list = []
+        # Read the config INSIDE the exec stub: the runner deletes the temp
+        # file in a finally block, so reading it after the call is a race.
+        captured_cfg: dict = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            if "--mcp-config" in cmd:
+                import json as _json
+
+                _p = cmd[list(cmd).index("--mcp-config") + 1]
+                # Plain open(): Path.read_text is patched to return SKILL.md.
+                with open(_p, encoding="utf-8") as _f:
+                    captured_cfg.update(_json.load(_f))
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            self._run(
+                skill_runner.run_skill(
+                    "accipiter",
+                    "review prompt",
+                    role="accipiter",
+                    provider="claude",
+                    task_entity_id="ent_abc",
+                )
+            )
+
+        assert "--mcp-config" in captured_cmd
+        header = captured_cfg["mcpServers"]["mcpsrv_neotoma"]["headers"][
+            "Authorization"
+        ]
+        assert header == "Bearer accipiter-own-token", (
+            "The lens must present its OWN Neotoma principal; the shared daemon "
+            "bearer is the ateles#795 defect."
+        )
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_gate_owner_without_own_identity_is_refused(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """RED before the fix: the review RAN and its verdict went nowhere."""
+        fake_def = _make_def(
+            prompt_markdown="Role: Accipiter.",
+            aauth_sub="accipiter@ateles-swarm",
+            name="accipiter",
+        )
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+        monkeypatch.delenv("ACCIPITER_NEOTOMA_TOKEN", raising=False)
+
+        launched = []
+
+        async def fake_exec(*cmd, **kwargs):
+            launched.append(cmd)
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"**SIGNED_OFF**", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "accipiter",
+                    "review prompt",
+                    role="accipiter",
+                    provider="claude",
+                    task_entity_id="ent_abc",
+                    owns_pending_gate=True,
+                )
+            )
+
+        assert not result.ok, (
+            "A gate owner that cannot write its own verdict must FAIL LOUDLY, "
+            "not run and leave the gate reading `pending`."
+        )
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
+        assert launched == [], (
+            "The refusal must precede the subprocess — running the review burns "
+            "a full session whose verdict Neotoma will discard."
+        )
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_advisory_lens_without_own_identity_still_runs(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """Deliberate non-regression: only GATE OWNERS are refused.
+
+        An advisory lens's whole product is a PR comment, which survives an
+        unsigned run. Refusing it too would turn one silent failure into a
+        loud outage across every panel.
+        """
+        fake_def = _make_def(
+            prompt_markdown="Role: Falco.",
+            aauth_sub="falco@ateles-swarm",
+            name="falco",
+        )
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+        monkeypatch.delenv("FALCO_NEOTOMA_TOKEN", raising=False)
+
+        async def fake_exec(*cmd, **kwargs):
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"**COMMENT**", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "falco",
+                    "review prompt",
+                    role="falco",
+                    provider="claude",
+                    task_entity_id="ent_abc",
+                    owns_pending_gate=False,
+                )
+            )
+
+        assert result.ok, (
+            "An advisory lens must keep running on the shared bearer — its "
+            "product (a PR comment) does not need attribution to survive."
+        )

@@ -93,6 +93,7 @@ from review_panel import (
     select_panel,
 )
 from skill_runner import (
+    NEOTOMA_IDENTITY_UNAVAILABLE,
     REVIEW_VERDICT_TOKENS,
     SkillResult,
     run_skill,
@@ -1708,6 +1709,12 @@ def review_failure_class(result: SkillResult) -> str:
         return "usage limit"
     if "no subscription-backed harness provider" in (result.error or ""):
         return "provider exhaustion"
+    # ateles#795 — checked BEFORE the auth-failure probe. A refused gate owner
+    # never launched, so there is no 401 to find; classing it as a generic
+    # "execution failure" would put the one failure this fix exists to make
+    # legible back into the catch-all bucket.
+    if NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or ""):
+        return "gate identity unavailable"
     if detect_auth_failure(result.stdout, result.stderr, result.error):
         return "credential failure"
     return "execution failure"
@@ -4292,6 +4299,11 @@ class SwarmDispatcher:
                     preferred_provider=resolve_lens_provider(
                         lens, available_providers=usable_providers()
                     ),
+                    # ateles#795: a lens seated because it OWNS a pending gate
+                    # must be able to write that gate as itself. Passing the
+                    # flag lets the runner refuse up front rather than produce a
+                    # verdict Neotoma will discard.
+                    owns_pending_gate=lens.lens in pending_gates,
                 )
             finally:
                 await cleanup_pr_worktree(qa_worktree)

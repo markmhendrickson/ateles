@@ -7711,3 +7711,34 @@ def test_head_movement_during_panel_or_aggregation_never_publishes(monkeypatch, 
     _comments_client(monkeypatch, [])
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert not any(kind in {"review", "route", "gate"} for kind, _ in calls), calls
+
+
+# ── ateles#795: a refused gate owner must be legible as its own failure class ──
+#
+# WHAT THIS LOOKED LIKE RED, before the fix: the refusal fell through to the
+# catch-all and classed as "execution failure", putting the one failure this
+# change exists to make visible back into the bucket that hides it.
+class TestGateIdentityFailureClass:
+    def test_identity_refusal_is_its_own_class(self) -> None:
+        refused = SkillResult(
+            "accipiter",
+            False,
+            None,
+            "",
+            "",
+            error=(
+                f"{swarm_dispatch.NEOTOMA_IDENTITY_UNAVAILABLE}: 'accipiter' "
+                "owns a pre-impl gate ..."
+            ),
+            provider="claude",
+        )
+        assert (
+            swarm_dispatch.review_failure_class(refused)
+            == "gate identity unavailable"
+        )
+
+    def test_ordinary_failure_still_classes_as_execution_failure(self) -> None:
+        other = SkillResult(
+            "accipiter", False, 1, "", "boom", error="boom", provider="claude"
+        )
+        assert swarm_dispatch.review_failure_class(other) == "execution failure"
