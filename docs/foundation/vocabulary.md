@@ -1,6 +1,6 @@
 # Vocabulary: canonical terms
 
-**Keyed document:** read when a skill, an [agent](#agent) document, or the agent-doc renderer changes
+**Keyed document:** read when a [skill](#skill), an [agent](#agent) document, or the agent-doc renderer changes
 (`conformance.md`). **Kind:** foundation; defines terms by what they are in the design, never by what a
 checkout implements. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-03, PR-08, C10), prior
 art `ent_08460968e6f49dac21510f4a` (A2A `TaskState`, RFC 8693, Camunda), [task](#task)
@@ -421,6 +421,47 @@ declared [workflow](#workflow) with an owning [role](#role) rather than an emerg
 **Never:** —
 **Not for:** [daemon](#daemon) for a session (a daemon self-triggers; a session is driven by the operator);
 [runner](#runner) for a session (the runner is the process); a session as something that [claims](#claim).
+
+### skill
+**Definition:** a file a harness loads by path — `SKILL.md` under a repository root or a user root — carrying
+what an [agent](#agent) or an [interactive session](#interactive-session) is to do when it is invoked by that
+name; **source state the harnesses hold, and never a target of the design.**
+**The design has no `skill` type, and this is deliberate.** No [workflow](#workflow), [step](#step),
+[role](#role), or [principal](#principal) is a skill, and nothing in the work, [gate](#gate), data, or authority
+model names one (`migration.md#the-skills-source-state-the-harnesses-hold-and-where-each-kind-goes`). Every
+skill file is on the mirror side of the direction of truth
+(`conformance.md#direction-of-truth-per-class-of-record`), so a skill is where the swarm's knowledge of how
+work gets done is written **today, under a harness's shapes**, and the design's question for any skill is
+which target it already has: an [agent](#agent), a `workflow` declaration, a step of one, an
+[adapter](#adapter)'s operation, a `task_policy`, an `agent_policy`, or — for a file that only tells a
+harness how to reach the record or a tool — **none, which is correct and not a gap**.
+**A skill is not a [principal](#principal), holds no [authority](#authority), and is [granted](#grant)
+nothing.** A capability attaches to a principal matched on its [credential](#credential); a skill has no
+credential, [claims](#claim) no [task](#task) or step, and closes nothing with a [verdict](#verdict). What
+a skill's body appears to permit is the invoking principal's [permission scope](#permission-scope), and the
+tools it names are a dimension of that principal's grant (decision 42,
+`migration.md#where-a-skills-harness-mechanics-live`).
+**A skill owns no [artifact](#artifact) and owns no entity type.** [Ownership](#ownership) is named
+accountability carried as an `ownership_grant` [edge](#edge) to a principal, and a skill cannot be that
+edge's target. A file invoked by name produces what the principal executing it produces, under that
+principal's grant and that principal's accountability; anything it writes into the record is an **entity** of
+its own type, which is not an artifact at all. Whether a **role** may be seated to review what another
+principal produced under such a file is decision 110 and is open.
+**The seam between two skills is the seam the design already has.** Where a procedure produces something a
+second procedure then reads, the two are two steps of one declaration or two declarations joined by a
+[successor](#successor) and a [chain](#chain), and the seam is the producing step's closing condition read as
+the consuming step's `reads_to_enter` — not a property of the files. Splitting a file where the design
+declares no seam moves harness state around without changing what is declared.
+**See:** [`migration.md#the-skills-source-state-the-harnesses-hold-and-where-each-kind-goes`](migration.md#the-skills-source-state-the-harnesses-hold-and-where-each-kind-goes),
+[`migration.md#five-classes-of-skill`](migration.md#five-classes-of-skill),
+[`migration.md#where-a-skills-harness-mechanics-live`](migration.md#where-a-skills-harness-mechanics-live),
+[`conformance.md#direction-of-truth-per-class-of-record`](conformance.md#direction-of-truth-per-class-of-record).
+**Never:** a skill as a [principal](#principal), an owner, or a holder of a [grant](#grant); "the skill
+decides", "the skill claims", "the skill owns".
+**Not for:** [workflow](#workflow) for a skill (a declaration is the design's record of recurring work; a
+skill is a harness's file, and several skills collapse to one declaration); [agent](#agent) for a skill (a
+role skill mirrors an agent and is not one); [role](#role) for a skill; [step](#step) for a skill; a skill
+for an [artifact](#artifact) or for anything the swarm wrote into the record.
 
 ## Gate model (`gates_and_workflows.md`)
 
@@ -1963,6 +2004,42 @@ stays one; the `SIGNED_BY` [edge](#edge); the `signed_at` timestamp; and the ver
 is still what a [step owner](#step-owner) does when writing a verdict. `status.md`'s historical revision log
 is likewise left verbatim: it records what past passes said at the time, and rewriting it would falsify the
 record.
+
+## Whether a role may be seated to review what a named procedure produced
+
+This is decision 110, open. It is recorded here because the [skill](#skill) entry above is where the
+question surfaces, and the register obliges every open decision to have an argued home.
+
+**What is already settled, and is not reopened by this.** A skill is a harness's file and source state, with
+no type in the design, no [credential](#credential), and no standing as a [principal](#principal); it
+[claims](#claim) nothing, [owns](#ownership) nothing, and is [granted](#grant) nothing. Whatever a principal
+writes into the record while executing one is an **entity** of its own type and never an
+[artifact](#artifact). A [role](#role) is a name a declaration carries, resolved by the roster at the moment
+it is acted on, and a [review step](#review-step) is a step whose work is a judgement of the
+[batch](#batch)'s change, closed by its owner's [verdict](#verdict) like any other. Ownership confers the
+required seat on a [checkpoint](#checkpoint) whose subject concerns the object, and nothing else.
+
+**What is not settled.** Every review seat the design names takes a **batch's change** as its subject. A
+seat whose subject is instead *the output of a procedure invoked by name* — the case that arises when a
+procedure produces something a role is accountable for, and the question is whether that role is asked
+before the output stands — is named nowhere in the four models. It is not enough to observe that the role
+exists and the output exists: what a review step is, and what it is a judgement *of*, is declared, and this
+subject is not among them.
+
+**The three candidates.** The producing work is a [step](#step) of a declaration and the reviewing role is
+that declaration's optional review step under an `applies_when`, which needs no new mechanism and would
+**dissolve the question** rather than answer it — there would be no procedure-output seat, only a batch as
+there always was. Or the reviewing role is seated by [ownership](#ownership) over the entity type produced,
+which makes the seat a property of the **type** and reaches every producer of it, at the cost of a seat that
+no declaration names and that no reading of a declaration would predict. Or the design declines the
+question, and the order of the two roles is whatever declaration names them both as [step owners](#step-owner),
+with nothing seated on a file's output at all.
+
+**Why this is not ruled here.** The [operator](#operator)'s lean is that such a procedure produces and the role reviews.
+That lean is recorded and deliberately not taken: a [vocabulary](#skill) entry restates what the design
+rules and does not add a seat the design has never named, and the first candidate may make the question
+disappear — if the producing work is a step, the existing review step already answers it, and a ruling taken
+now would have stood up a second mechanism beside one that already generalizes.
 
 ## Retired names
 

@@ -54,7 +54,7 @@ The **Subject** column is a label of a few words, never a substitute for the row
 | 32 | whether a verdict's `conclusion` is a stored field or a read over … | yes | yes | unknown | — | — |
 | 33 | whether a stage, and the `phase` field on a step, names anything … | yes | yes | unknown | — | — |
 | 34 | whether the step path is an execution mechanism of its own, and … | yes | yes | unknown | — | — |
-| 35 | whether one binding type or two (`channel_config`, `vendor_binding`) names an external system's … | yes | yes | unknown | — | — |
+| 35 | whether one binding type or two (retired `channel_config`, `vendor_binding`) names an external … | yes | yes | unknown | — | — |
 | 36 | whether an intake rule may key on the work model's own records … | yes | yes | unknown | — | the evaluator's subject set; a rule on any other type is unaffected |
 | 37 | where the operator's view of work lives, and what a channel carries | yes | yes | unknown | — | — |
 | 38 | how the operator's input on closed work re-enters | yes | yes | unknown | — | — |
