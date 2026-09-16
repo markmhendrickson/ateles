@@ -654,6 +654,18 @@ def _write_harness_event(
     base_url = _require_neotoma_base_url()
     token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     if not token:
+        # Best-effort diagnostic write: log loudly and skip rather than raise.
+        # Every caller of this function already wraps it in
+        # `try/except Exception: log.debug(...)`, so a raise here would only
+        # get demoted to a debug line indistinguishable from a transient
+        # network blip — losing the signal instead of surfacing it. Logging
+        # at WARNING here, before returning, is what actually makes an empty
+        # token visible: the audit trail has a hole, but dispatch (the thing
+        # this event is only OBSERVING) is not the thing failing.
+        log.warning(
+            "[apis] NEOTOMA_BEARER_TOKEN is not set; skipping harness_event "
+            f"write (event_type={event_type}, task_entity_id={task_entity_id})"
+        )
         return
 
     event_at = datetime.now(timezone.utc).isoformat()
@@ -1487,18 +1499,39 @@ async def _run_skill_once(
         # exactly as before; a gate owner that needs attribution has already been
         # refused upstream by the `owns_pending_gate` preflight.
         _neotoma_token, _ = neotoma_token_for_agent(_role)
+        if not _neotoma_token:
+            # Unlike the harness_event writer above, this is not a
+            # best-effort diagnostic — it constructs the MCP config the
+            # spawned child actually connects with. Neotoma's /mcp endpoint
+            # requires auth (verified live: an unauthenticated POST to
+            # /mcp returns HTTP 401 with "Unauthorized: Authentication
+            # required"), so a missing token here is not a degraded-but-
+            # usable config — it is a config that guarantees the child's
+            # own MCP handshake fails, far from this call site and with no
+            # indication the cause was an empty env var in the parent.
+            # Raise here, matching _require_neotoma_base_url's convention,
+            # so the failure is attributed to its actual cause. This applies
+            # regardless of which tier (role-owned or shared daemon bearer)
+            # neotoma_token_for_agent() resolved from — both can be empty.
+            raise RuntimeError(
+                "NEOTOMA_BEARER_TOKEN is not set; refusing to construct an "
+                "--mcp-config for the dispatched child. Neotoma's /mcp "
+                "endpoint requires authentication, so a config built "
+                "without a bearer token would only fail later, inside the "
+                "child's own MCP handshake, with no trace back to this "
+                "cause. Under launchd the plist supplies this; for an "
+                "ad-hoc run, export it or source ~/.config/neotoma/.env "
+                "first."
+            )
         _mcp_cfg: dict = {
             "mcpServers": {
                 "mcpsrv_neotoma": {
                     "type": "http",
                     "url": f"{_neotoma_base}/mcp",
+                    "headers": {"Authorization": f"Bearer {_neotoma_token}"},
                 }
             }
         }
-        if _neotoma_token:
-            _mcp_cfg["mcpServers"]["mcpsrv_neotoma"]["headers"] = {
-                "Authorization": f"Bearer {_neotoma_token}"
-            }
 
         # Write the MCP config to a mode-0600 temp file to avoid argv exposure.
         try:
