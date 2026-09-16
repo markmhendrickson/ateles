@@ -8,10 +8,6 @@ triggers:
   - ship release
   - prepare a release
   - prep release
-  - new release
-  - create release
-  - publish
-  - /publish
 user_invocable: true
 ---
 
