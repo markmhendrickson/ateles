@@ -60,7 +60,7 @@ def _default_neotoma_bearer_token(monkeypatch):
     this file exercise unrelated behaviour (prompt composition, GitHub token
     injection, dispatch diagnostics, ...) and have no reason to care about
     token presence, so they get a harmless default here. Tests that actually
-    exercise the token-missing/empty paths (TestWriteHarnessEventTokenHandling,
+    exercise the token-missing/empty paths (TestHarnessEventEmptyToken,
     TestNeotomaMcpConfigInjection) call monkeypatch.delenv/setenv("") inside
     their own bodies, which runs after this fixture and overrides it.
     """
