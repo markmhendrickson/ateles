@@ -87,23 +87,32 @@ except ImportError:  # pragma: no cover - path-dependent import
         measure_sustained_rms_db as _measure_sustained_rms_db,
     )
 
-# --- Hallucination filter ----------------------------------------------------
-# The RMS gate above answers "was there sustained energy in this window" and
-# has a structural ceiling: ateles#777 measured a fabrication ("*sad music*")
-# at -44.0 dB and another ("Thank you.") at -45.8 dB, both above the -50 dB
-# gate, on a session where real quiet speech also lived in that band. No
-# threshold value separates the two populations (see the RMS gate section of
-# this module and the SKILL doc for the math). ``hallucination_filter`` looks
-# at what Whisper actually RETURNED instead of how loud the input was, so it
-# is additive to the gate, not a replacement for it — the gate still saves the
-# API call on true silence, and this catches what gets past it. Same module
-# ``local_whisper.py`` already wires in for the batch/file path; this is the
-# streaming path picking up the same defense.
+# --- Speech presence (ateles#777 Path B) --------------------------------
+# RMS cannot separate noisy-room fabrications from quiet speech. WebRTC VAD
+# speech-fraction is the local, language-independent layer. Phrase matching
+# (``hallucination_filter.screen_transcription``) is not the closer here —
+# that module stays on the batch path. See ``speech_presence.py``.
 try:
-    from scripts.hallucination_filter import screen_transcription
+    from scripts.speech_presence import (
+        DEFAULT_MIN_SPEECH_FRACTION,
+        DEFAULT_VAD_AGGRESSIVENESS,
+        SKIPPED_BELOW_THRESHOLD,
+        SKIPPED_VAD_NON_SPEECH,
+        apply_no_speech_prob,
+        classify_pre_transcription,
+        measure_speech_fraction,
+    )
     from scripts.local_whisper import NO_SPEECH_MARKER_PREFIX
 except ImportError:  # pragma: no cover - path-dependent import
-    from hallucination_filter import screen_transcription  # type: ignore[no-redef]
+    from speech_presence import (  # type: ignore[no-redef]
+        DEFAULT_MIN_SPEECH_FRACTION,
+        DEFAULT_VAD_AGGRESSIVENESS,
+        SKIPPED_BELOW_THRESHOLD,
+        SKIPPED_VAD_NON_SPEECH,
+        apply_no_speech_prob,
+        classify_pre_transcription,
+        measure_speech_fraction,
+    )
     from local_whisper import NO_SPEECH_MARKER_PREFIX  # type: ignore[no-redef]
 
 # --- Follow mode ------------------------------------------------------------
@@ -304,98 +313,24 @@ def apply_transcription_result(
     return consecutive_failures + 1
 
 
-# The distinct ``skipped`` value for a hallucination-filter suppression, kept
-# separate from the RMS gate's "below_threshold" so the two mechanisms are
-# measurable apart in the JSONL (ateles#777 acceptance criterion).
-FILTERED_HALLUCINATION = "hallucination_filtered"
+def apply_local_backend_marker(record: dict) -> bool:
+    """Treat local_whisper's ``[NO SPEECH DETECTED …]`` marker as already gated.
 
-
-def apply_hallucination_filter(
-    record: dict,
-    *,
-    expected_language: str | None = "en",
-    window_seconds: float | None = None,
-) -> bool:
-    """Screen a successfully-transcribed record's text; return True if filtered.
-
-    Only called for chunks that ``apply_transcription_result`` already marked
-    ``ok`` with non-empty ``text`` — silence and transcription errors are the
-    RMS gate's and the failure path's business, not this filter's. A filtered
-    chunk keeps the same ``{"silence": true, ...}`` shape the RMS gate uses so
-    a consumer reading ``if record.get("silence"): continue`` skips both kinds
-    uniformly, but ``skipped`` is set to a DIFFERENT value
-    (``FILTERED_HALLUCINATION`` vs. the gate's ``"below_threshold"``) so the two
-    mechanisms stay independently countable, per the module docstring in
-    ``hallucination_filter.py`` and ateles#777's acceptance criteria.
-
-    The fabricated text is preserved under ``filtered_text`` — never under
-    ``text`` — so a false positive stays recoverable by eye, matching
-    ``hallucination_filter``'s own "nothing is ever silently dropped" contract.
-
-    A crash inside the filter itself fails OPEN: the chunk is left exactly as
-    transcribed rather than raised or dropped, mirroring
-    ``measure_slice_rms_db``'s own None-on-failure contract for the RMS gate.
-    A broken filter must never take real audio down with it.
-
-    ``window_seconds`` is accepted but DELIBERATELY NOT threaded through to
-    ``screen_transcription`` from this module's own caller — see the
-    hardcoded ``window_seconds=None`` below. Measured against real audio
-    (ateles#777 chunk 6, "E aí E aí", 9 characters of genuine Portuguese
-    speech in a 40s window): passing the chunk's true duration makes
-    ``too_short_for_window`` fire on it, a false positive. That signal's
-    ``MIN_CHARS_PER_LONG_WINDOW=12`` floor was calibrated for batch/memo
-    transcription and for windows where nothing was said at all ("P", "you");
-    it was never calibrated against this tailer's 30-40s fixed-cadence
-    chunks, where a real interjection ("Yes.", "What?") is ordinary and can
-    legitimately be under 12 characters. ``local_whisper.py`` already avoids
-    this exact trap for the batch path for the same reason ("a short file
-    yielding short text is ordinary, not suspicious"); the same restraint
-    applies here until this signal is recalibrated against live-tailer
-    windows specifically. The parameter stays on the signature so a future
-    caller (or a recalibrated default) can opt in without a signature change.
+    The batch path still runs ``hallucination_filter`` inside ``transcribe_local``.
+    When it fires, stdout is that verdict's marker, not operator speech. Fold
+    it into silence with a reason other than ``below_threshold`` so it cannot
+    land under ``text``. This is not the #777 closer.
     """
     text = record.get("text")
     if not record.get("ok") or record.get("silence") or not text:
         return False
-
-    # The local whisper-cli backend already runs this SAME filter internally
-    # (local_whisper.py's transcribe_local -> screen_transcription) before
-    # transcribe_slice() ever sees the result. When it fires there, "text" is
-    # not a fresh transcript to screen — it is that batch-path verdict's OWN
-    # marker prose (NO_SPEECH_MARKER_PREFIX), describing what got suppressed
-    # and why. Re-running screen_transcription on the marker's diagnostic
-    # sentence would be screening the filter's own output, not the operator's
-    # audio, and the marker's phrasing happens to accidentally trip some
-    # signals and not others (observed on ateles#777 chunk 2 and 21: the
-    # marker text passed every signal untouched and would otherwise have been
-    # written to the JSONL's "text" field as if Whisper had said it). Treat
-    # it as an already-filtered chunk directly instead.
-    if text.startswith(NO_SPEECH_MARKER_PREFIX):
-        record["filtered_text"] = text
-        record["text"] = ""
-        record["silence"] = True
-        record["skipped"] = FILTERED_HALLUCINATION
-        record["filtered_reason"] = "local_backend_no_speech_marker"
-        return True
-
-    del window_seconds  # accepted for a future recalibration; see docstring
-    try:
-        verdict = screen_transcription(
-            text, expected_language=expected_language, window_seconds=None
-        )
-    except Exception as exc:  # noqa: BLE001 - fail open, never drop audio
-        log(f"hallucination filter failed ({exc!r}) — keeping chunk as transcribed")
+    if not text.startswith(NO_SPEECH_MARKER_PREFIX):
         return False
-    if not verdict.filtered:
-        return False
-
     record["filtered_text"] = text
     record["text"] = ""
     record["silence"] = True
-    record["skipped"] = FILTERED_HALLUCINATION
-    record["filtered_reason"] = verdict.reason
-    if verdict.detail:
-        record["filtered_detail"] = verdict.detail
+    record["skipped"] = SKIPPED_VAD_NON_SPEECH
+    record["filtered_reason"] = "local_backend_no_speech_marker"
     return True
 
 
@@ -490,7 +425,7 @@ def transcribe_slice(wav_path: Path, env: dict) -> tuple[bool, str]:
 # ...", "    Running whisper-cli on ..."). Stripping only the first banner
 # line (as this function did before) leaves the rest glued onto the front of
 # the real transcript — corrupting every chunk's text on the now-default
-# backend, and specifically corrupting the text the hallucination filter
+# backend, corrupting every chunk's `text` field.
 # judges. Two independent line shapes distinguish a banner from a transcript:
 # a bare KEY=VALUE line (all-caps key, no leading space, no spaces around
 # "="), and any line with leading whitespace, which is how every progress
@@ -545,16 +480,18 @@ def main(argv: list[str]) -> int:
                     default=DEFAULT_SILENCE_THRESHOLD_DB,
                     help=f"Skip transcription below this sustained RMS in dB "
                          f"(default: {DEFAULT_SILENCE_THRESHOLD_DB:g})")
-    ap.add_argument("--expected-language", type=str,
-                    default=os.environ.get("LIVE_TRANSCRIPT_EXPECTED_LANGUAGE", "en"),
-                    help="Session's spoken language, for the hallucination "
-                         "filter's language/script checks (default: en, env "
-                         "LIVE_TRANSCRIPT_EXPECTED_LANGUAGE)")
-    ap.add_argument("--no-hallucination-filter", action="store_true",
-                    default=os.environ.get("LIVE_TRANSCRIPT_NO_HALLUCINATION_FILTER", "") == "1",
-                    help="Disable the post-transcription hallucination filter "
-                         "(env LIVE_TRANSCRIPT_NO_HALLUCINATION_FILTER=1). The "
-                         "RMS silence gate still runs either way.")
+    ap.add_argument("--min-speech-fraction", type=float,
+                    default=DEFAULT_MIN_SPEECH_FRACTION,
+                    help="Skip transcription when WebRTC VAD speech-frame "
+                         f"fraction is below this (default: {DEFAULT_MIN_SPEECH_FRACTION:g})")
+    ap.add_argument("--vad-aggressiveness", type=int,
+                    default=DEFAULT_VAD_AGGRESSIVENESS,
+                    help="webrtcvad aggressiveness 0-3 "
+                         f"(default: {DEFAULT_VAD_AGGRESSIVENESS})")
+    ap.add_argument("--no-vad", action="store_true",
+                    default=os.environ.get("LIVE_TRANSCRIPT_NO_VAD", "") == "1",
+                    help="Disable the VAD speech-presence layer "
+                         "(env LIVE_TRANSCRIPT_NO_VAD=1). RMS gate still runs.")
     args = ap.parse_args(argv)
 
     if not TRANSCRIBE.exists():
@@ -586,10 +523,13 @@ def main(argv: list[str]) -> int:
     log(f"tailing: {recording.name}")
     log(f"chunk interval: {args.interval}s   starting at: {cursor:.0f}s")
     log(f"silence gate: skip below {args.silence_threshold_db:g} dB sustained RMS")
-    if args.no_hallucination_filter:
-        log("hallucination filter: OFF (--no-hallucination-filter)")
+    if args.no_vad:
+        log("speech presence: OFF (--no-vad); RMS gate only")
     else:
-        log(f"hallucination filter: on — expected language {args.expected_language!r}")
+        log(
+            f"speech presence: webrtcvad aggressiveness "
+            f"{args.vad_aggressiveness} min_frac {args.min_speech_fraction:g}"
+        )
     if args.follow:
         log(f"follow mode: on — pausing (not exiting) on stop, up to "
             f"{args.follow_timeout_min:g} min per break")
@@ -696,7 +636,8 @@ def main(argv: list[str]) -> int:
             tmp_path = Path(tmp.name)
 
             rms_db: float | None = None
-            skipped_silent = False
+            speech_frac: float | None = None
+            pre_skip: str | None = None
             try:
                 proc = subprocess.run(
                     [
@@ -711,14 +652,24 @@ def main(argv: list[str]) -> int:
                 if proc.returncode != 0:
                     ok, payload = False, f"ffmpeg slice failed: {(proc.stderr or '').strip()[:200]}"
                 else:
-                    # Gate BEFORE transcribing. A measurement failure returns
-                    # None and falls through to transcription — never drop audio
-                    # because the meter broke.
+                    # Gate BEFORE transcribing. Measurement failure returns
+                    # None and falls through — never drop audio because a
+                    # meter or VAD broke.
                     rms_db = measure_slice_rms_db(tmp_path)
-                    if rms_db is not None and rms_db < args.silence_threshold_db:
-                        skipped_silent = True
+                    if not args.no_vad:
+                        speech_frac = measure_speech_fraction(
+                            tmp_path, aggressiveness=args.vad_aggressiveness
+                        )
+                    pre_skip = classify_pre_transcription(
+                        rms_db,
+                        speech_frac,
+                        silence_threshold_db=args.silence_threshold_db,
+                        min_speech_fraction=args.min_speech_fraction,
+                    )
+                    if pre_skip != "transcribe":
                         ok, payload = True, ""
                     else:
+                        pre_skip = None
                         ok, payload = transcribe_slice(tmp_path, env)
             except subprocess.TimeoutExpired:
                 ok, payload = False, "ffmpeg slice timed out"
@@ -732,37 +683,23 @@ def main(argv: list[str]) -> int:
                 "end_s": round(cursor + available, 2),
                 "ok": ok,
             }
-            if skipped_silent:
-                # Same shape as post-hoc silence, plus the measurement that
-                # caused the skip. Not a failure: does not touch the streak.
+            if rms_db is not None:
+                record["rms_db"] = round(rms_db, 1)
+            if speech_frac is not None:
+                record["speech_frac"] = round(speech_frac, 3)
+            if pre_skip in (SKIPPED_BELOW_THRESHOLD, SKIPPED_VAD_NON_SPEECH):
                 record["text"] = ""
                 record["silence"] = True
-                record["skipped"] = "below_threshold"
-                record["rms_db"] = round(rms_db, 1)
+                record["skipped"] = pre_skip
             else:
-                if rms_db is not None:
-                    record["rms_db"] = round(rms_db, 1)
                 streak_before = consecutive_failures
                 consecutive_failures = apply_transcription_result(
                     record, ok, payload, consecutive_failures
                 )
-                # Second, independent screen: the RMS gate judged loudness
-                # before transcribing; this judges what Whisper actually
-                # returned. A chunk it catches must not count toward the
-                # failure streak either — it is a normal (if noisy) meeting
-                # state, not a broken transcription path. apply_transcription_
-                # result already reset the streak to 0 on this chunk's `ok`
-                # success (it had no way to know a filter would still reject
-                # it), so a filter hit must UNDO that reset and hold the
-                # streak at its pre-chunk value — same "neither increments nor
-                # resets" contract silence already gets.
-                if not args.no_hallucination_filter:
-                    if apply_hallucination_filter(
-                        record,
-                        expected_language=args.expected_language,
-                        window_seconds=available,
-                    ):
-                        consecutive_failures = streak_before
+                if apply_local_backend_marker(record) or apply_no_speech_prob(
+                    record, None
+                ):
+                    consecutive_failures = streak_before
 
             append(record)
 

@@ -674,87 +674,106 @@ def test_build_subprocess_env_tolerates_missing_dotenv(tmp_path):
     assert env == {"PATH": "/usr/bin"}
 
 
-# --------------------------------------------------------------------------
-# Hallucination filter wiring (ateles#777 re-measurement, 2026-09-16)
-#
-# The RMS gate answers "was there sustained energy"; it cannot separate a
-# fabrication that clears the threshold from real quiet speech — measured on
-# 2026-09-07 (ch5 hallucination -39.0 dB vs ch4 real speech -36.4 dB, 2.6 dB
-# apart) and again on 2026-09-16 ("*sad music*" -44.0 dB, "Thank you." -45.8
-# dB, both above -50 dB). ``hallucination_filter.screen_transcription`` judges
-# the TEXT Whisper returned instead, additively: the RMS gate still runs
-# first and still saves the API call on true silence.
-# --------------------------------------------------------------------------
+_FIXTURE_DIR = _SCRIPTS_DIR / "fixtures" / "stream_transcript_20260907"
+_LABELS = json.loads((_FIXTURE_DIR / "labels.json").read_text(encoding="utf-8"))["chunks"]
 
 
-def test_apply_hallucination_filter_catches_a_fabrication_and_preserves_it():
-    record = {"ok": True, "text": "*sad music*"}
-    filtered = lt.apply_hallucination_filter(record, expected_language="en")
-    assert filtered is True
-    assert record["text"] == ""
-    assert record["silence"] is True
-    assert record["skipped"] == lt.FILTERED_HALLUCINATION
-    assert record["filtered_text"] == "*sad music*"
-    assert record["filtered_reason"] == "non_speech_cue"
+def _gate_labelled_chunk(n: int) -> dict:
+    wav = _FIXTURE_DIR / f"ch{n}.wav"
+    assert wav.exists(), f"missing fixture {wav}"
+    rms = lt.measure_slice_rms_db(wav)
+    frac = lt.measure_speech_fraction(wav)
+    decision = lt.classify_pre_transcription(
+        rms,
+        frac,
+        silence_threshold_db=lt.DEFAULT_SILENCE_THRESHOLD_DB,
+        min_speech_fraction=lt.DEFAULT_MIN_SPEECH_FRACTION,
+    )
+    record: dict = {"ok": True, "rms_db": rms, "speech_frac": frac, "decision": decision}
+    if decision != "transcribe":
+        record["text"] = ""
+        record["silence"] = True
+        record["skipped"] = decision
+        return record
+    record["text"] = _LABELS[str(n)]["text"]
+    return record
 
 
-def test_apply_hallucination_filter_skipped_value_distinct_from_rms_gate():
-    """The two suppression mechanisms must be countable apart in the JSONL."""
-    rms_record = {"text": "", "silence": True, "skipped": "below_threshold"}
-    filter_record = {"ok": True, "text": "Thank you."}
-    lt.apply_hallucination_filter(filter_record, expected_language="en")
-    assert filter_record["skipped"] != rms_record["skipped"]
-    assert filter_record["skipped"] == "hallucination_filtered"
+def test_noisy_mic_20260907_ch2_ch5_not_emitted_as_transcript():
+    replay = {n: _gate_labelled_chunk(n) for n in range(6)}
+    for n in (0, 1, 4):
+        assert replay[n]["decision"] == "transcribe"
+        assert replay[n]["text"].strip()
+        assert "skipped" not in replay[n]
+    for n in (2, 5):
+        assert not replay[n].get("text")
+        assert replay[n]["silence"] is True
+        assert replay[n]["skipped"] != "below_threshold"
 
 
-def test_apply_hallucination_filter_leaves_real_speech_untouched():
-    record = {"ok": True, "text": "Let's review the session history for bugs."}
-    filtered = lt.apply_hallucination_filter(record, expected_language="en")
-    assert filtered is False
-    assert record["text"] == "Let's review the session history for bugs."
-    assert "silence" not in record
-    assert "skipped" not in record
-    assert "filtered_text" not in record
+def test_noisy_mic_20260907_level_gate_still_skips_ch3():
+    replay = _gate_labelled_chunk(3)
+    assert replay["skipped"] == "below_threshold"
+    assert not replay.get("text")
 
 
-def test_apply_hallucination_filter_is_not_the_silence_paths_business():
-    """Only a successful, non-empty transcription reaches the filter."""
-    silence_record = {"ok": True, "text": "", "silence": True}
-    assert lt.apply_hallucination_filter(silence_record, expected_language="en") is False
-    assert silence_record == {"ok": True, "text": "", "silence": True}
-
-    failed_record = {"ok": False, "error": "boom"}
-    assert lt.apply_hallucination_filter(failed_record, expected_language="en") is False
-    assert "filtered_text" not in failed_record
+def test_suppression_reason_distinct_from_below_threshold():
+    ch2 = _gate_labelled_chunk(2)
+    ch3 = _gate_labelled_chunk(3)
+    assert ch3["skipped"] == "below_threshold"
+    assert ch2["skipped"] == lt.SKIPPED_VAD_NON_SPEECH
+    assert ch2["skipped"] != ch3["skipped"]
 
 
-def test_apply_hallucination_filter_records_detail_when_present():
-    record = {"ok": True, "text": "[Music]"}
-    lt.apply_hallucination_filter(record, expected_language="en")
-    assert record["filtered_reason"] == "non_speech_cue"
-    assert record.get("filtered_detail") == "[Music]"
+def test_quiet_speech_near_overlap_still_emitted():
+    """ch4 is the quiet real-speech neighbour of ch5's overlapping RMS."""
+    replay = _gate_labelled_chunk(4)
+    assert replay["decision"] == "transcribe"
+    assert "explain" in replay["text"]
 
 
-def test_main_hallucination_filter_marks_a_chunk_distinctly_from_rms_skip(
-    tmp_path, monkeypatch
-):
-    """End-to-end: a chunk that clears the RMS gate but is a fabrication is
-    written with skipped=hallucination_filtered, not skipped=below_threshold,
-    and never appears as transcript text.
+def test_suppression_does_not_use_hallucination_phrase_matching():
+    """ch2 is dropped by VAD even if Whisper would have said real words.
+
+    ch4 is kept even if Whisper would have said caption boilerplate — survival
+    is the speech-fraction, not the transcript string.
     """
+    ch2 = _gate_labelled_chunk(2)
+    ch4 = _gate_labelled_chunk(4)
+    assert ch2["skipped"] == lt.SKIPPED_VAD_NON_SPEECH
+    assert ch4["decision"] == "transcribe"
+    assert "skipped" not in ch4
+
+
+def test_apply_local_backend_marker_does_not_emit_marker_as_transcript():
+    marker = "[NO SPEECH DETECTED — batch path already screened this]"
+    record = {"ok": True, "text": marker}
+    assert lt.apply_local_backend_marker(record) is True
+    assert record["text"] == ""
+    assert record["skipped"] == lt.SKIPPED_VAD_NON_SPEECH
+    assert record["filtered_reason"] == "local_backend_no_speech_marker"
+
+
+def test_apply_local_backend_marker_leaves_real_speech():
+    record = {"ok": True, "text": "Let's review the session history for bugs."}
+    assert lt.apply_local_backend_marker(record) is False
+    assert record["text"].startswith("Let's review")
+
+
+def test_main_vad_skip_does_not_call_transcribe(tmp_path, monkeypatch):
     recording = tmp_path / "meet_system.mp4"
     recording.write_bytes(b"x")
     out = tmp_path / "out.jsonl"
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-
     ffmpeg_ok = MagicMock(returncode=0, stderr="", stdout="")
 
     with (
         patch.object(lt, "probe_duration", side_effect=[10.0, None]),
         patch.object(lt.time, "sleep"),
         patch.object(lt.subprocess, "run", return_value=ffmpeg_ok),
-        patch.object(lt, "measure_slice_rms_db", return_value=-44.0),  # clears -50dB gate
-        patch.object(lt, "transcribe_slice", return_value=(True, "*sad music*")),
+        patch.object(lt, "measure_slice_rms_db", return_value=-39.0),
+        patch.object(lt, "measure_speech_fraction", return_value=0.05),
+        patch.object(lt, "transcribe_slice") as mock_tx,
     ):
         rc = lt.main(
             ["--file", str(recording), "--out", str(out), "--interval", "1",
@@ -762,34 +781,27 @@ def test_main_hallucination_filter_marks_a_chunk_distinctly_from_rms_skip(
         )
 
     assert rc == 0
-    lines = [json.loads(ln) for ln in out.read_text().splitlines() if ln.strip()]
-    assert len(lines) == 1
-    record = lines[0]
-    assert record["ok"] is True
+    mock_tx.assert_not_called()
+    record = json.loads(out.read_text().splitlines()[0])
+    assert record["skipped"] == "vad_non_speech"
     assert record["text"] == ""
-    assert record["silence"] is True
-    assert record["skipped"] == "hallucination_filtered"
-    assert record["filtered_text"] == "*sad music*"
-    assert record["filtered_reason"] == "non_speech_cue"
-    # Never sits under the below_threshold RMS-gate value
     assert record["skipped"] != "below_threshold"
 
 
-def test_main_hallucination_filter_does_not_touch_real_speech(tmp_path, monkeypatch):
+def test_main_rms_skip_still_below_threshold(tmp_path, monkeypatch):
     recording = tmp_path / "meet_system.mp4"
     recording.write_bytes(b"x")
     out = tmp_path / "out.jsonl"
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-
     ffmpeg_ok = MagicMock(returncode=0, stderr="", stdout="")
-    real_speech = "Let's review the session history for more bugs to fix."
 
     with (
         patch.object(lt, "probe_duration", side_effect=[10.0, None]),
         patch.object(lt.time, "sleep"),
         patch.object(lt.subprocess, "run", return_value=ffmpeg_ok),
-        patch.object(lt, "measure_slice_rms_db", return_value=-30.0),
-        patch.object(lt, "transcribe_slice", return_value=(True, real_speech)),
+        patch.object(lt, "measure_slice_rms_db", return_value=-56.3),
+        patch.object(lt, "measure_speech_fraction", return_value=0.01),
+        patch.object(lt, "transcribe_slice") as mock_tx,
     ):
         rc = lt.main(
             ["--file", str(recording), "--out", str(out), "--interval", "1",
@@ -797,75 +809,33 @@ def test_main_hallucination_filter_does_not_touch_real_speech(tmp_path, monkeypa
         )
 
     assert rc == 0
-    lines = [json.loads(ln) for ln in out.read_text().splitlines() if ln.strip()]
-    assert len(lines) == 1
-    record = lines[0]
-    assert record["text"] == real_speech
-    assert "silence" not in record
-    assert "skipped" not in record
+    mock_tx.assert_not_called()
+    record = json.loads(out.read_text().splitlines()[0])
+    assert record["skipped"] == "below_threshold"
 
 
-def test_main_no_hallucination_filter_flag_disables_the_filter(tmp_path, monkeypatch):
-    """--no-hallucination-filter must fall back to RMS-gate-only behaviour."""
+def test_main_vad_skip_does_not_count_toward_kill_switch(tmp_path, monkeypatch):
     recording = tmp_path / "meet_system.mp4"
     recording.write_bytes(b"x")
     out = tmp_path / "out.jsonl"
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-
-    ffmpeg_ok = MagicMock(returncode=0, stderr="", stdout="")
-
-    with (
-        patch.object(lt, "probe_duration", side_effect=[10.0, None]),
-        patch.object(lt.time, "sleep"),
-        patch.object(lt.subprocess, "run", return_value=ffmpeg_ok),
-        patch.object(lt, "measure_slice_rms_db", return_value=-44.0),
-        patch.object(lt, "transcribe_slice", return_value=(True, "*sad music*")),
-    ):
-        rc = lt.main(
-            ["--file", str(recording), "--out", str(out), "--interval", "1",
-             "--start-at", "0", "--no-hallucination-filter"]
-        )
-
-    assert rc == 0
-    lines = [json.loads(ln) for ln in out.read_text().splitlines() if ln.strip()]
-    assert len(lines) == 1
-    record = lines[0]
-    # Filter never ran — the fabrication is written straight to text, same as
-    # before this change. This is the escape hatch, not the default.
-    assert record["text"] == "*sad music*"
-    assert "skipped" not in record
-
-
-def test_main_hallucination_filtered_chunk_does_not_count_toward_kill_switch(
-    tmp_path, monkeypatch
-):
-    """A filtered chunk must not trip the 5-consecutive-failure kill switch.
-
-    Four real failures, then a filtered fabrication, then one more real
-    failure: the switch must fire on the FIFTH real failure, not be tripped
-    early by the filtered chunk (it is not a transcription failure at all).
-    """
-    recording = tmp_path / "meet_system.mp4"
-    recording.write_bytes(b"x")
-    out = tmp_path / "out.jsonl"
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-
     ffmpeg_ok = MagicMock(returncode=0, stderr="", stdout="")
     results = [
         (False, "e1"),
         (False, "e2"),
         (False, "e3"),
         (False, "e4"),
-        (True, "*sad music*"),
         (False, "e5"),
     ]
     durations = [10.0 * (i + 1) for i in range(6)] + [None]
+    fracs = [0.5, 0.5, 0.5, 0.5, 0.04, 0.5]
 
     with (
         patch.object(lt, "probe_duration", side_effect=durations),
         patch.object(lt.time, "sleep"),
         patch.object(lt.subprocess, "run", return_value=ffmpeg_ok),
-        patch.object(lt, "measure_slice_rms_db", return_value=-44.0),
+        patch.object(lt, "measure_slice_rms_db", return_value=-30.0),
+        patch.object(lt, "measure_speech_fraction", side_effect=fracs),
         patch.object(lt, "transcribe_slice", side_effect=results),
         patch.object(lt, "log") as mock_log,
     ):
@@ -877,100 +847,7 @@ def test_main_hallucination_filtered_chunk_does_not_count_toward_kill_switch(
     assert rc == 0
     lines = [json.loads(ln) for ln in out.read_text().splitlines() if ln.strip()]
     assert len(lines) == 6
-    assert lines[4]["skipped"] == "hallucination_filtered"
+    assert lines[4]["skipped"] == "vad_non_speech"
     assert any(
         "5 consecutive failures — stopping" in str(c) for c in mock_log.call_args_list
     )
-
-
-def test_apply_hallucination_filter_fails_open_on_screen_transcription_error(monkeypatch):
-    """A filter crash must never drop audio silently — matches the RMS gate's
-    own fail-open contract on a broken meter (measure_slice_rms_db -> None).
-
-    The chunk must be left exactly as transcribed, not raised and not marked
-    silent/filtered, so a broken filter degrades to "filter off for this
-    chunk" rather than taking the tailer down or eating real audio.
-    """
-    def boom(*args, **kwargs):
-        raise RuntimeError("filter blew up")
-
-    monkeypatch.setattr(lt, "screen_transcription", boom)
-    record = {"ok": True, "text": "some real transcript text"}
-    filtered = lt.apply_hallucination_filter(record, expected_language="en")
-    assert filtered is False
-    assert record["text"] == "some real transcript text"
-    assert "silence" not in record
-    assert "skipped" not in record
-
-
-def test_apply_hallucination_filter_recognizes_the_local_backends_own_marker():
-    """local_whisper.py already runs screen_transcription internally on the
-    default backend; when IT fires, the text handed back to transcribe_slice
-    is that verdict's own '[NO SPEECH DETECTED ...]' marker prose, not fresh
-    audio to re-screen. Observed on real audio (ateles#777 chunks 2 and 21):
-    the marker sentence itself passes every hallucination_filter signal
-    untouched and would otherwise land in the JSONL 'text' field as if the
-    operator had said it.
-    """
-    marker = (
-        "[NO SPEECH DETECTED — the model returned no speech content "
-        "(no_speech_content: no alphabetic characters). Raw output was "
-        "'... ... ...'. Sustained level -48.1 dB. Recorded as an empty "
-        "capture; there is no operator content in this file.]"
-    )
-    record = {"ok": True, "text": marker}
-    filtered = lt.apply_hallucination_filter(record, expected_language="en")
-    assert filtered is True
-    assert record["text"] == ""
-    assert record["silence"] is True
-    assert record["skipped"] == lt.FILTERED_HALLUCINATION
-    assert record["filtered_reason"] == "local_backend_no_speech_marker"
-    assert record["filtered_text"] == marker
-
-
-def test_marker_detection_does_not_re_screen_the_markers_own_prose():
-    """The marker prefix check must short-circuit before screen_transcription
-    ever sees the marker text — pinned by patching screen_transcription to
-    blow up if called.
-    """
-    marker = "[NO SPEECH DETECTED — anything at all]"
-    record = {"ok": True, "text": marker}
-    with patch.object(
-        lt, "screen_transcription", side_effect=AssertionError("must not be called")
-    ):
-        filtered = lt.apply_hallucination_filter(record, expected_language="en")
-    assert filtered is True
-    assert record["filtered_reason"] == "local_backend_no_speech_marker"
-
-
-def test_apply_hallucination_filter_does_not_use_too_short_for_window_signal():
-    """window_seconds is accepted but never forwarded to screen_transcription.
-
-    Measured on real audio (ateles#777 chunk 6): "E aí E aí" is genuine
-    Portuguese speech, 9 characters, in a 40s window. That is below
-    hallucination_filter's MIN_CHARS_PER_LONG_WINDOW=12 floor, which was
-    calibrated for batch transcription and empty-window fragments ("P",
-    "you") — not for this tailer's fixed-cadence chunks, where a short real
-    interjection is ordinary. Forwarding window_seconds here would turn
-    genuine short speech into a false positive; this pins that it does not.
-    """
-    record = {"ok": True, "text": "E aí E aí"}
-    filtered = lt.apply_hallucination_filter(
-        record, expected_language="en", window_seconds=40.0
-    )
-    assert filtered is False
-    assert record["text"] == "E aí E aí"
-    assert "silence" not in record
-
-
-@pytest.mark.parametrize(
-    "text",
-    ["Yes.", "What?", "No, thanks.", "Okay.", "Hmm."],
-)
-def test_apply_hallucination_filter_spares_short_real_interjections(text):
-    """A brief, genuine reply must survive even in a long fixed-cadence window."""
-    record = {"ok": True, "text": text}
-    filtered = lt.apply_hallucination_filter(
-        record, expected_language="en", window_seconds=35.0
-    )
-    assert filtered is False, f"{text!r} is a real short interjection, not a fabrication"

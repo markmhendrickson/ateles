@@ -186,7 +186,7 @@ Pass `--follow` (see [Pause and resume](#pause-and-resume-taking-a-break))
 whenever the operator might take a break. It is the difference between a break
 ending the stream and a break being a break.
 
-### 3b. Two layers against fabrication: the silence gate, then the hallucination filter
+### 3b. Two layers against fabrication: the silence gate, then speech presence
 
 Whisper **does not return empty on silence — it fabricates.** Observed on real
 silent audio from this machine: "Bon Appetit!", "thank you for watching",
@@ -194,33 +194,18 @@ silent audio from this machine: "Bon Appetit!", "thank you for watching",
 Each one also costs an API call (or, on the local backend, CPU time).
 
 **A single loudness threshold is not sufficient on some inputs.** ateles#777
-measured a fabrication ("*sad music*") at -44.0 dB sitting *above* real speech
-at -46 dB from this section's own calibration set, and a re-measurement on a
-separate 73:54 session found a hallucination at -39.0 dB just 2.6 dB from real
-speech at -36.4 dB. On a noisy mic, the populations overlap and no threshold
-value separates them — raising the gate to catch one starts dropping the
-other. So the tailer runs **two independent layers**, not one:
+measured a hallucination at −39.0 dB just 2.6 dB from real speech at −36.4 dB
+on the same noisy-mic session. The two populations overlap; no threshold value
+separates them. So the tailer runs **two independent pre-transcription layers**:
 
 1. **The silence gate (this section)** — measures each slice's sustained RMS
    *before* transcribing and skips the call entirely below a threshold. Cheap,
-   pre-API, and still the right tool for what it addresses: true silence with
-   no sustained energy at all.
-2. **The hallucination filter (§3c below)** — screens what Whisper actually
-   *returned*, after transcription. This is what closes the gap the gate
-   structurally cannot: judging the model's output instead of the input's
-   loudness catches a fabrication that cleared the gate on energy alone.
-
-Filtering the output was previously rejected in this doc as unworkable,
-reasoning that the fabrications are an open-ended, arbitrary-language set and
-catching them would mean pattern-matching every subtitle cliché in every
-language forever. That objection holds against phrase-matching *content*, and
-`hallucination_filter.py` deliberately does not do that: its signals are
-structural (script family, delimiter shape, repetition, dominance ratio) or
-the model's own reported language — none of them enumerate what a fabrication
-*says*, so they generalize across languages without a phrase list. See that
-module's docstring for the full signal-by-signal rationale, including two
-signals that were tried and rejected on measurement (`lone_word_turn`,
-`short_turn_duration`).
+   and still the right tool for true silence with no sustained energy. JSONL
+   `skipped` is `"below_threshold"`.
+2. **Speech presence (§3c)** — WebRTC VAD speech-frame fraction on the same
+   16 kHz slice. This is what closes the gap a level meter structurally cannot:
+   "is this human speech" vs "was this loud." Phrase matching against Whisper's
+   output is **not** the closer for this issue (signed ADR).
 
 **Silence gate:**
 
@@ -254,80 +239,44 @@ transfers. If real speech starts getting skipped, lower the threshold. **This
 calibration is still genuine and still useful — it is just not the whole
 defence** given the overlap ateles#777 measured; that is what §3c is for.
 
-### 3c. The hallucination filter
+### 3c. Speech presence (VAD), not an output-side phrase filter
 
-`hallucination_filter.screen_transcription()` runs on every chunk the silence
-gate passes through and actually transcribes. It is on by default; disable it
-with `--no-hallucination-filter` or `LIVE_TRANSCRIPT_NO_HALLUCINATION_FILTER=1`
-(the silence gate keeps running either way). The session's spoken language
-defaults to `en`; override with `--expected-language` or
-`LIVE_TRANSCRIPT_EXPECTED_LANGUAGE` when streaming in another language.
-
-Two things feed into the filter's judgement, both handled before a fresh
-screen ever runs:
-
-- **The local whisper-cli backend (the default since commit 32c99c10) already
-  runs this SAME filter internally**, inside `local_whisper.py`'s
-  `transcribe_local()`. When it fires there, what comes back over stdout is
-  not a transcript to re-screen — it is that verdict's own
-  `[NO SPEECH DETECTED ...]` marker sentence. The tailer recognizes this
-  marker by its stable prefix and treats it as an already-filtered chunk
-  directly (`filtered_reason: "local_backend_no_speech_marker"`), rather than
-  screening the marker's own diagnostic prose as if it were fresh audio.
-- **`transcribe_audio.py`'s CLI always runs verbose**, so its stdout carries
-  progress banners (`TRANSCRIPTION_BACKEND_SELECTED=...`,
-  `TRANSCRIPTION_ENGINE=...`, indented lines like "Model: ..." and "Running
-  whisper-cli on ..."). These are stripped before anything reaches the
-  filter or the JSONL — on the local backend they used to glue onto the
-  front of the real transcript, corrupting every chunk's `text` and whatever
-  judged it.
+After the RMS gate, the tailer measures WebRTC VAD speech-frame fraction on
+the slice (`speech_presence.py`, aggressiveness 3). If the fraction is below
+`0.075` (`--min-speech-fraction` / `LIVE_TRANSCRIPT_MIN_SPEECH_FRACTION`), the
+chunk is skipped **before** Whisper runs.
 
 | | |
 |---|---|
-| On filter | JSONL gets `{"silence": true, "skipped": "hallucination_filtered", "filtered_text": "...", "filtered_reason": "...", "filtered_detail": "..."}` — the fabricated text is preserved under `filtered_text`, never under `text` |
-| Distinct from the silence gate | `skipped` is `"hallucination_filtered"`, never `"below_threshold"` — the two mechanisms are independently countable in the JSONL |
-| On filter failure | **Keeps the chunk as transcribed** — never drop or mute audio because the filter broke |
-| On real speech | Untouched — `text` keeps the transcript, no `silence` key added |
+| On VAD skip | JSONL gets `{"silence": true, "skipped": "vad_non_speech", "speech_frac": 0.05, "rms_db": -39.0}` — never `"below_threshold"` |
+| Disable | `--no-vad` or `LIVE_TRANSCRIPT_NO_VAD=1` (RMS gate still runs; fail-open if webrtcvad is missing) |
+| On VAD failure | **Transcribes anyway** |
 
-Skipped slices advance the cursor normally and do **not** count toward the
-consecutive-failure kill switch, same as the silence gate.
+Measured on `20260907 1114 mic.mp4` at the live JSONL windows (aggressiveness 3):
+ch0 0.531 / ch1 0.117 / ch2 0.050 / ch3 0.013 / ch4 0.090 / ch5 0.066. The
+0.075 floor keeps ch0/ch1/ch4 and drops ch2/ch5. **Do not enable
+`too_short_for_window` to catch leftovers** — it false-positives genuine
+Portuguese "E aí E aí" on this tailer's 30–40s cadence.
 
-**What it does not catch.** Measured against ateles#777's own recording
-(`20260907 1114 mic.mp4`, local whisper-cli, 23 chunks): the filter caught
-every fabrication that repeated an existing signal (caption boilerplate,
-script mismatch, the bracketed-cue pattern below) but missed one fluent,
-plausible-English fabrication with no structural tell at all — a fabrication
-that *reads like real speech* is a semantic judgement, not a structural one,
-and this filter deliberately does not attempt semantic judgement (that would
-require the model's own confidence signals, `no_speech_prob` /
-`avg_logprob`, which are OpenAI-API-only and not available on the local
-backend this tailer defaults to). Chunks 2, 16, and 21 of that recording were
-still correctly caught; the miss (chunk 5) is a known residual, documented
-here rather than silently absorbed.
+**What this does not claim.** ateles#631 measured webrtcvad scoring a *loud*
+fabrication as more speech-like than real speech. That class still wants
+Whisper `no_speech_prob` when a backend surfaces it. Today's default
+`transcribe_slice()` is local whisper-cli and those fields do not populate;
+the tailer will apply `skipped: "no_speech_prob"` only when segments are
+actually present. It does **not** substitute caption/boilerplate phrase
+matching. Batch `hallucination_filter.py` remains on `local_whisper.py` only.
 
-**A signal deliberately NOT enabled here:** `too_short_for_window` requires
-`window_seconds`, and the tailer intentionally does not pass its chunk
-duration to the filter. Measured on the same recording, chunk 6 ("E aí E
-aí" — 9 characters of genuine Portuguese speech in a 40s window) would be a
-false positive under that signal's `MIN_CHARS_PER_LONG_WINDOW=12` floor, which
-was calibrated for batch transcription and true empty-window fragments ("P",
-"you") — not for this tailer's fixed 30-40s cadence, where a short real
-interjection ("Yes.", "What?") is ordinary. `local_whisper.py`'s batch path
-already avoids this same trap for the same reason.
+`transcribe_audio.py`'s CLI always runs verbose, so stdout banners
+(`TRANSCRIPTION_BACKEND_SELECTED=...`, indented progress lines) are stripped
+before the JSONL `text` field is written.
 
-**New non-speech-cue signal, added 2026-09-16.** A whole chunk that is
-nothing but a bracketed or starred sound-effect caption —
-`*sad music*`, `[Music]`, `(applause)`, `♪ music ♪` — is caught by
-`hallucination_filter.is_non_speech_cue()`. Structural, not a phrase list: it
-matches the *delimiter wrapping the entire chunk*, not any word inside it, so
-it generalizes to whatever gets described in the brackets, in any language.
-"the music started to play" is an ordinary sentence and is untouched; a
-chunk that is *only* `*music*` is caption-convention notation with no words
-in it. Added after a re-measurement found "*sad music*" at -44.0 dB and a
-bare "Thank you." at -45.8 dB both clearing the -50 dB gate on a separate
-73:54 session — "Thank you." was already caught by the existing
-`caption_boilerplate` signal, but no existing signal caught "*sad music*"
-until this one.
+If the local backend's own `[NO SPEECH DETECTED …]` marker comes back over
+stdout, the tailer records it as silence with `filtered_reason:
+"local_backend_no_speech_marker"` so the marker prose cannot land as
+operator speech. That is not the #777 closer.
+
+Skipped VAD slices do **not** count toward the consecutive-failure kill
+switch, same as the silence gate.
 
 ### Pause and resume (taking a break)
 
@@ -432,20 +381,17 @@ The tailer's stderr names what happened:
 | `recording appears to have stopped — flushing final Ns slice` then `final slice written — exiting` | Same, with a trailing remnant shorter than one chunk | **Run the `stop` sequence automatically** — the last words are in the final chunk |
 | `could not probe duration — recording ended?` | File vanished or became unreadable | Run `stop`; note the anomaly. Under `--follow` this pauses instead |
 | `5 consecutive failures — stopping` | Transcription is genuinely broken | Do **not** treat as meeting-over; surface the errors — the recording may still be running |
-| `hallucination filter failed (...) — keeping chunk as transcribed` | The filter itself crashed on one chunk (§3c) | **Do nothing.** Fail-open: that one chunk's text is kept as transcribed rather than dropped or raised. If this repeats, the filter may need attention, but it never stops the tailer |
 
 The first three lines only ever appear with `--follow`. **Only the lines marked
 "run the `stop` sequence" end the meeting** — a pause does not.
 
-None of the three "nothing to show" outcomes count toward the failure streak.
+None of the "nothing to show" outcomes count toward the failure streak.
 A quiet interval that reached Whisper and came back genuinely empty is written
-as `{"ok": true, "text": "", "silence": true}`; one skipped before
-transcription adds `"skipped": "below_threshold"` and `rms_db`; one caught by
-the hallucination filter after transcription (§3c) adds
-`"skipped": "hallucination_filtered"`, `"filtered_reason"`, and
-`"filtered_text"` holding what Whisper actually said. All three render as
+as `{"ok": true, "text": "", "silence": true}`; one skipped by the RMS gate
+adds `"skipped": "below_threshold"` and `rms_db`; one skipped by VAD adds
+`"skipped": "vad_non_speech"` and `speech_frac`. All of these render as
 nothing in the Monitor pipeline above (`if r.get('silence'): continue`), so a
-mid-meeting lull — or a suppressed fabrication — cannot kill the tailer.
+mid-meeting lull — or a suppressed non-speech slice — cannot kill the tailer.
 
 **On a terminal state — and only these — run the `/stream-transcript stop`
 sequence without being asked:**
