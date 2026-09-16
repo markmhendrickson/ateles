@@ -1578,44 +1578,86 @@ halt is the state in which nothing can be (`failure_posture.md#what-a-checkpoint
 
 ## What a verdict on an issue is pinned to
 
-**Open.** Registered in `conformance.md#the-register-of-open-design-decisions` as decision 106.
+**Ruled (decision 106, 2026-09-10): a verdict on an issue is pinned to the body content it judged — the
+exact text, or its hash — on the `artifact_refs[]` pattern the code artifact already uses.** Registered in
+`conformance.md#the-register-of-open-design-decisions`.
 
 `data_model.md#record-conventions` rules that a verdict is pinned to the artifact state it judged, so a
 conclusion against a superseded state is readable as one rather than being indistinguishable from a live
-conclusion. That list of pinned-state kinds is closed, and an issue body is not among them.
+conclusion. That list of pinned-state kinds was closed, and an issue body was not among them.
 
-So a conclusion on an issue records what a principal concluded and never what it read. A conclusion and a
-later rewrite of the body are two facts in the record with no relation between them, and no reader can tell
-whether the second invalidates the first.
+So a conclusion on an issue recorded what a principal concluded and never what it read. A conclusion and a
+later rewrite of the body were two facts in the record with no relation between them, and no reader could
+tell whether the second invalidated the first.
 
-The two directions are not symmetric, which is why this is a design question rather than a defect to repair
-once. A conclusion that **holds** work is recoverable: the work does not proceed, and a principal
+The two directions are not symmetric, which is why this was a design question rather than a defect to
+repair once. A conclusion that **holds** work is recoverable: the work does not proceed, and a principal
 eventually asks why. A conclusion that **permits** work is not, because nothing waits — the work proceeds
-on a body nobody judged, and nothing prompts a reader to look.
+on a body nobody judged, and nothing prompts a reader to look. The permitting case is the one the ruling is
+judged on, for that reason.
 
-Bounded by invariant 1, since a pin nothing reads is not a control, so a candidate must say what refuses
+Bounded by invariant 1, since a pin nothing reads is not a control, so the ruling must say what refuses
 when the states diverge; by principle 2, whose read-back makes a pinned state evidence rather than a claim;
 and by invariant 9, since a derived staleness read must not become a second home for what the artifact's
 own observations already carry.
 
-**Candidates.** *The body as read*, on the `artifact_refs[]` pattern the code artifact already uses. *A
-derived staleness read* over the artifact's own observations, carrying no pin of its own. Or *the design
-ruling an issue's conclusion unpinned*, because a body is not evidence in the way a head is. The third
-satisfies the bounds only if it also says what a reader does when the body has moved, since leaving that
-silent is the permitting case above.
+**The ruling, and why it beats the other two candidates.** Three candidates stood: the body as read, a
+derived staleness read over the artifact's own observations carrying no pin of its own, and the design
+ruling an issue's conclusion unpinned because a body is not evidence in the way a head is. The body as read
+is the ruling, for the same reason `data_model.md#record-conventions` picked `head` for a code artifact and
+the message itself for mail or chat: in every one of the closed list's existing kinds, the pinned state is
+**what the step owner actually read**, not a location that keeps changing under it — a commit's head is
+resolved before the step's work begins precisely so a later commit cannot re-anchor the conclusion, and a
+mail or chat message's pinned state is the message itself because an edit to it is an observation and never
+a re-identification. An issue body is the same shape: it is content, read at a moment, and the ruling pins
+to that content — its exact text or a hash of it — rather than to "the issue," which is a location a body
+can be rewritten under. The **unpinned** candidate fails invariant 1 outright, since a pin nothing reads is
+not a control and leaving the conclusion unpinned is choosing to have no control over the permitting case
+at all; it also does not satisfy its own stated condition, since it would still have to say what a reader
+does when the body has moved, and answering that is this same ruling under a different name. The **derived
+staleness read** is close but under-specifies: a staleness read needs something to compare the current
+body against, and that something is the pinned content — so the staleness candidate presupposes this
+ruling rather than replacing it; what it correctly adds, and what this ruling folds in, is that staleness
+itself stays a derived comparison and is never a stored flag (invariant 11), matching how the code
+artifact's own staleness read already works.
 
-**The two directions, each as a case.** A conclusion that holds: a review step concludes blocking on a body stating
-one requirement; the body is rewritten to state another; the work stays stopped and the step owner is asked
-why, so the divergence surfaces through the person waiting on it. A conclusion that permits: a review step
-signs on a body stating one scope; the body is rewritten to state a wider one; the batch proceeds, the
-merge takes, and nothing in the record distinguishes that from a conclusion on the body as merged. The
-second is the case a candidate is judged on.
+**Consistent with decision 85: pinning to content is compatible with the body being a rendering.**
+Decision 85, ruled above in `github.md#where-an-agents-artifact-about-an-issue-or-a-pull-request-lives`,
+rules that the GitHub body is a projection rendered from record entities, and that a rendering may merge
+because merging a projection loses nothing. This ruling does not pin a verdict to *which entities* produced
+the body, and does not need to: it pins to the **rendered content the step owner read**, whatever produced
+it. A verdict judges the text in front of it, not the provenance behind that text — the same separation
+decision 85 draws between where attribution lives (the record) and what the body is (a rendering of it).
+A rendering may merge without disturbing this ruling, and this ruling constrains a rendering without
+disturbing decision 85: the body may still be composed from several agents' record entities at read time;
+what changes is only that the moment a step owner reads it, that read's content is what any conclusion on
+it is pinned to, exactly as if it had been a single document with one author.
+
+**The two directions, each as a case.** A conclusion that holds: a review step concludes blocking on a body
+stating one requirement; the body is rewritten to state another; the work stays stopped and the step owner
+is asked why, so the divergence surfaces through the person waiting on it. A conclusion that permits: a
+review step signs on a body stating one scope; the body is rewritten to state a wider one; under the prior
+silence the batch would proceed and the merge would take with nothing in the record distinguishing that
+from a conclusion on the body as merged. Under this ruling the pinned content no longer matches the current
+body, and the divergence is a derived read available to any reader who checks it before the merge — the
+same way a pull request's pinned head is checked against its current head before a step owner treats an
+old conclusion as current.
 
 **What a reader is told when they diverge** — placeholders, since the copy is the operator-facing agent's
 to write: `[COPY: the state this conclusion was pinned to]`, `[COPY: the state the artifact carries now]`,
 and `[COPY: the act that resolves it — re-conclude on the current state, or reopen the step]`. A bare
 staleness marker with neither state named satisfies invariant 1 and fails the reader, which is why the
 placeholders name three things rather than one.
+
+**What this forecloses.** A verdict on an issue is never read as current merely because the issue is still
+open and the step's status still reads `signed` — a reader (human or step) that needs to know whether a
+conclusion is current compares the pinned content against the body as it stands now, the same discipline
+`data_model.md#record-conventions` already states for a code artifact's head. No second, unpinned form of
+"the conclusion on this issue" is created alongside the pinned one; the pinned verdict is the only verdict.
+And an issue joins the closed list of pinned-state kinds in `data_model.md#record-conventions` on exactly
+the terms that list already states for a kind admitted later — its pinned state stated in its system's
+document, under linkage (`adapters.md#what-an-adapters-document-must-contain`) — rather than as an
+exception the list carves out for GitHub.
 
 ## Contradictions this document settles
 
