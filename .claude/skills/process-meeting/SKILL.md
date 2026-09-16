@@ -78,9 +78,10 @@ Flags:
 | 11. Meeting value + relationship significance | Value | `meeting_value_assessment` |
 | 12. Recommend follow-up communications | Recommend | `recommended_message` + `task` per message |
 | 13. Recommend the recap rendered page | Recommend | `recommended_rendered_page` + `task` |
+| 13.5. Build the internal operator recap page | Review | `rendered_page` (internal) + email to operator |
 | 14. Report, issues, persist, surface | Delivery | Report, Neotoma stores |
 
-Phases 5–11 may run **concurrently as subagents** once Phase 4 completes — see [Concurrency](#concurrency). Phases 1–4 are strictly sequential. Phases 12–13 run after 11, because a recommendation depends on knowing the meeting's value and each relationship's state.
+Phases 5–11 may run **concurrently as subagents** once Phase 4 completes — see [Concurrency](#concurrency). Phases 1–4 are strictly sequential. Phases 12–13 run after 11, because a recommendation depends on knowing the meeting's value and each relationship's state. Phase 13.5 runs after 13, because the internal page reports what every prior phase concluded.
 
 ---
 
@@ -426,6 +427,72 @@ Where a Phase 12 recommendation has `references_recap_page: true`, note the depe
 
 ---
 
+## Phase 13.5: Build the internal operator recap page (ALWAYS)
+
+Phases 12 and 13 recommend outbound artifacts and build nothing. **This phase is the exception, and the only one**: it always builds a page, and it always emails it — because its audience is exactly one person, the operator, and the operator is the person this run reports to.
+
+**Why the outbound ban does not apply here.** The ban exists so that no participant ever receives words this skill wrote about them. An internal recap has no recipient but the operator. Nothing on it is for anyone else's eyes, which is precisely why it may — and should — carry the material every outbound artifact is forbidden to carry.
+
+**This phase is not conditional.** There is no "should there be one?" gate. A one-sentence 1:1 gets a short page; a four-hour negotiation gets a long one. Skipping it is a failed run: the operator's ability to review the whole run in one place is the deliverable, not a bonus.
+
+### What it is for
+
+A run of this skill produces dozens of entities across fourteen phases, scattered over a report file, a Neotoma graph, and a chat reply that scrolls away. The operator has no single surface on which to review what the run concluded and check whether it got the meeting right. This page is that surface. Build it so that reading it start to finish is a complete substitute for reading the run.
+
+### Audience and access
+
+- `audience` is the operator alone. Not participants, not colleagues.
+- **Mint no guest token.** The operator reads it authenticated to the Neotoma app, so the page is reachable at `/entities/<id>/html` under their own session. A token would create a shareable link to internal content — the opposite of what this page is.
+- Set `sharing_posture: internal_only` and say so on the page itself, in a visible banner at the top, so a later reader never mistakes it for something shareable.
+- Because it is never shared, the Phase 13 `must_not_include` list does **not** apply. Phase 8 positions and Phase 11 relationship reads belong here; they are among the most useful things on the page.
+
+### Required sections
+
+Mirror the report's structure so the two stay legible together, and lead with what answers "was this worth it" and "what do I owe":
+
+1. **Banner** — internal-only, audience: operator, meeting title, date, participants, duration.
+2. **Value and relationships** (Phase 11) — the overall read, then one line per participant with trajectory.
+3. **What I owe and what they owe** (Phase 5 + 10) — action items split Mine / Theirs / Joint, each linked to its `task` entity, with due dates and priorities.
+4. **Decisions** (Phase 5) — and, when the honest answer is none, say so plainly rather than promoting hedged talk into decisions.
+5. **Recommended follow-ups** (Phase 12) — per recipient: channel, timing, intent, key points, and what must not be included. Intent and points, never drafted prose: the ban still holds for the *content*, even on an internal page.
+6. **Recommended recap page** (Phase 13) — recommended or not, with the rationale and target instance.
+7. **Open questions** (Phase 5) — including the operator's own questions a participant answered obliquely or not at all. These are the ones that go missing.
+8. **Topics** (Phase 7) — one block per topic with its sub-analysis.
+9. **Participant positions** (Phase 8) — the arguments each participant made, evaluated. Internal-only by standing rule, and this page is where they are readable.
+10. **Research findings** (Phase 9) — each claim, what was checked, the conclusion, and confidence. Name explicitly what could not be verified; an unverifiable claim is a finding, not an omission.
+11. **Graph reconciliation** (Phase 6) — confirmed / extended / corrected / introduced / ambiguous, with entity ids.
+12. **Transcription profile** (Phase 3) — grade, coverage measured, artifacts and how they were proven to be artifacts, and what was skipped. When coverage is `partial`, state what is missing and where the original lives.
+13. **Everything this run created** — a table of every entity with id, type, and one-line purpose, so the operator can audit the run's full output without querying the graph.
+
+Sections with no content render `_None._` — never dropped, because an empty section is information.
+
+### Build rules
+
+- Follow the house rendered-page standard: retrieve the `rendered-page-visual-default` style_guide (`ent_bc6c17c3b1b73e986859218c`) and apply it. Theme toggle, both palettes, host-template `!important` overrides.
+- **No JavaScript.** Pages are served in a sandboxed frame without `allow-scripts`; a script is stored, served, and never runs. Use radio inputs plus `:checked` sibling selectors for any interaction.
+- **Write the body with `correct()`, not `publish_rendered_page`.** `publish_rendered_page` silently discards `html_body` and returns a working URL for an empty page — and its only other function, minting a guest token, is something this page must not have. So: `store` the `rendered_page` entity, then `correct(entity_id, entity_type: "rendered_page", field: "html_body", value: <html>)`.
+- **Verify the served bytes before reporting the page exists.** `curl` the URL under operator auth and check the byte count and two distinctive strings from the content. A ~1845-byte response means the body is empty. A success code is not a landed write.
+- Link every entity id to its Inspector URL, and link the report file path as text. Internal page, operator-authenticated: entity links resolve for them.
+
+### The email
+
+Email the page link to the operator. This is a send, so it is gated — but it is a send to the operator themselves, about their own meeting, and it is what makes the page reachable from their inbox rather than only from a chat reply that scrolls away.
+
+- **Recipient is the operator and only the operator**, resolved from `operator_profile`. Never a participant, never a cc. A recap email that reaches a participant is a disclosure incident.
+- Subject: `Meeting recap: <short title> — <YYYY-MM-DD>`.
+- Body: HTML per the operator's email standard. Keep it short — it is a pointer, not a duplicate of the page. The link, the headline value read, what the operator owes with due dates, and the decisions-or-none line. Everything else lives on the page.
+- Send with `gws gmail`, with the inline `ATELES_ALLOW_GMAIL_SEND=1` prefix on the send command itself. The send gate requires the inline prefix per command; an exported variable is deliberately ignored.
+- **Never use `drafts update` to edit a staged draft** — re-supplying `raw` + `threadId` can consume the draft into a sent message. Build a new draft instead.
+- Verify delivery by reading back the sent message id, and report it. A `SENT` label precedes delivery; report what was verified, not what was assumed.
+
+### Entity and task
+
+Store one `rendered_page` entity with `title`, `html_body`, `custom_css`, `audience: operator`, `sharing_posture: internal_only`, and `source: process-meeting`. Link it `REFERS_TO` the `meeting_analysis` and `PART_OF` the plan.
+
+**No companion task.** Phases 12 and 13 file tasks because their work is still owed. This phase's work is done when the phase ends, so a task would be a task that is already complete.
+
+---
+
 ## Phase 14: Report, issues, persist, surface
 
 ### 14a. PII scrubbing rules (public-facing text only)
@@ -548,13 +615,14 @@ Render the `🧠 Neotoma` section per the display rule, grouping Created / Updat
 
 ## Concurrency
 
-Phases 1–4 are sequential — everything downstream depends on preserved source, a transcript, and resolved identities. Once Phase 4 completes, dispatch Phases 7, 8, and 9 as parallel subagents (topic sub-analyses fan out one per topic; research fans out one per inquiry). Phase 6 runs on the main thread because it writes corrections and must not race itself. Phases 10 and 11 join after 6–9 return. Phases 12–13 run after 11.
+Phases 1–4 are sequential — everything downstream depends on preserved source, a transcript, and resolved identities. Once Phase 4 completes, dispatch Phases 7, 8, and 9 as parallel subagents (topic sub-analyses fan out one per topic; research fans out one per inquiry). Phase 6 runs on the main thread because it writes corrections and must not race itself. Phases 10 and 11 join after 6–9 return. Phases 12–13 run after 11, and Phase 13.5 after 13 — it renders their outputs, so it cannot precede them.
 
 Do not fan out beyond the depth caps — `standard` means 3 topics and 5 inquiries, and exceeding it quietly is the same failure as truncating it quietly.
 
 ## Behavior rules
 
-- **Draft nothing outbound.** No recap emails, no messages, no Gmail drafts, no `rendered_page` bodies, no guest tokens. Phases 12–13 recommend and brief; they never write copy. A drafted sentence a recipient could receive verbatim is a contract violation regardless of where it appears.
+- **Draft nothing outbound — one exception, and it is audience-defined.** No messages to participants, no Gmail drafts addressed to anyone but the operator, no shareable `rendered_page` bodies, no guest tokens. Phases 12–13 recommend and brief; they never write copy. A drafted sentence a *participant* could receive verbatim is a contract violation regardless of where it appears. **Phase 13.5 is the exception**: it always builds an internal page and always emails it, because its only reader is the operator. The test is the audience, not the artifact — an email to the operator about their own meeting is a report, while the same page with a guest token is a disclosure. Never mint a token for the internal page, and never cc a participant on its email.
+- **The internal recap page is not optional.** Phase 13.5 runs on every meeting, whatever its size. A run that analyzed a meeting and left the operator no single surface to review it on is incomplete.
 - **Preserve before you analyze.** A run that analyzed a recording it failed to store is a failed run. Report `preservation_status` honestly.
 - **Never repeat a known-bad expensive operation.** Phase 3 exists to be read, not just written. A run that re-transcribes a good transcript, or re-runs an operation a prior profile marked useless, wasted the operator's money.
 - **No invented commitments, quotes, emotions, or praise.** Every action item, decision, position, and relationship claim traces to specific transcript text or a stored entity. Paraphrase is labeled.
@@ -575,8 +643,8 @@ Do not fan out beyond the depth caps — `standard` means 3 topics and 5 inquiri
 ## Out of scope
 
 - **Writing any follow-up message** — Phase 12 recommends; the operator or a later drafting run writes and sends.
-- **Building or publishing the recap page** — Phase 13 recommends; [`draft-rendered-page`](../draft-rendered-page/SKILL.md) builds it, mints the guest link, and owns the page's design rules.
-- Sending anything, ever.
+- **Building or publishing the SHARED recap page** — Phase 13 recommends; [`draft-rendered-page`](../draft-rendered-page/SKILL.md) builds it, mints the guest link, and owns the page's design rules. The *internal* operator page is different and is built here, in Phase 13.5.
+- Sending anything to anyone but the operator. The Phase 13.5 recap email to the operator is the sole send this skill performs, it is gated by the inline send-gate override, and it never carries another recipient.
 - Closing the loop on action items — other workflows own completion.
 - The Neotoma customer-development analysis — [`analyze-neotoma-feedback`](../analyze-neotoma-feedback/SKILL.md) owns it; both fire when the Neotoma heuristic in [`record_meeting`](../record_meeting/SKILL.md) triggers.
 - Diarization repair beyond `speaker_label_map` and `--participants` — deeper repair lives in `transcribe_audio.py`.
