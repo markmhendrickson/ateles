@@ -156,25 +156,61 @@ is, so the mark sits on the registered type and the mechanisms that read it are 
 (`data_model.md#record-conventions`). A marker on the read would be a second place to say the same thing, and
 one that a declaration could omit.
 
-**Whether a step's declaration is a floor or a ceiling, and whether it covers writes.** *Open, registered
-in `conformance.md#the-register-of-open-design-decisions` (decision 103).* What the rule above states is a
-floor, and it is enforced on one side only. A step that cannot read a type it declared does not proceed —
-that binds at runtime, on the step. A step that reads a type it did **not** declare is a declaration error
-caught in the pull request that introduced it — that binds at review, on the author. So the two halves of
-"declared" are held by two different mechanisms at two different moments, and only the first refuses
-anything while a batch is moving. The asymmetry is deliberate and argued above: an undeclared dependency is
-visibly missing where an unstated one is invisible until a read fails silently and something proceeds on
-the gap. What is registered here is whether that is the design's answer or its starting position.
+**Whether a step's declaration is a floor or a ceiling, and whether it covers writes.** *Ruled
+(decision 103, 2026-09-16).* **Symmetry without a runtime ceiling.** Writes get a declaration mechanism
+equivalent to `reads_to_enter` and `reads_to_close` — a step names the entity types it is expected to
+write, the same way it already names what it must read. No runtime ceiling is added on either side.
+Reading, or writing, beyond what a step declared stays a review-time defect, caught in the pull request
+that introduced the declaration, and not a runtime refusal.
 
-**The write side has no declaration at all.** `reads_to_enter` and `reads_to_close` have no counterpart:
-nothing in a step's declaration names the entity types it writes. What governs a write is the executing
-principal's `agent_grant`, default-deny per entity type (decision 41), which is a property of the
-**principal** and not of the step — so a principal granted a type may write it from any step it claims, and
-the declaration answers "what must this step be able to read" while nothing answers "what does this step
-change". Whether that gap is closed is part of this question and is also a defect on its own terms,
-registered separately as an issue, since it stands however the floor-or-ceiling half rules.
+**What the rule above states is a floor, and it stays one.** A step that cannot read a type it declared
+does not proceed — that binds at runtime, on the step. A step that reads a type it did **not** declare is a
+declaration error caught at review, on the author. That asymmetry was already argued above and is not
+reopened: an undeclared dependency is visibly missing where an unstated one is invisible until a read
+fails silently and something proceeds on the gap. What this ruling adds is a name for what a step writes,
+held to the same review-time discipline as the undeclared-read half, and it declines to add a third
+mechanism — a runtime check that a step touched only what it declared — on either side of the
+declaration.
 
-**What this does not reopen.** External systems are already settled and are not the subject: the adapter
+**The write side had no declaration at all, and this closes that gap.** `reads_to_enter` and
+`reads_to_close` had no counterpart: nothing in a step's declaration named the entity types it writes.
+What governs a write remains the executing principal's `agent_grant`, default-deny per entity type
+(decision 41), which is a property of the **principal** and not of the step — a principal granted a type
+may still write it from any step it claims. The declaration now answers "what does this step change" the
+way it already answers "what must this step be able to read", but the grant, not the declaration, stays
+the thing a write is checked against at the write itself.
+
+**Why option 2 — exhaustive declaration enforced at runtime — was not taken, and why it stays revisitable.**
+Option 2 has a real and distinct argument behind it: attestability, the same argument decision 100 already
+accepted for proving. A step executed by an AI agent reasoning under a model, rather than by fixed code,
+makes a declaration read **as written** and a step's behavior **as executed** two different claims — the
+exact distinction decision 100's second ground draws for proving a workflow before it binds production
+work. An exhaustive declaration refused at runtime when exceeded would extend that same attestability
+argument from "was this declaration proven before it ran" to "did this execution stay inside what it
+declared", and the argument is not weaker for writes than it was for the proving question.
+
+It was declined here on cost, not on merit. The design's enforcement point for a read or a write already
+sits at the record, checking the **principal's** grant against the entity type — decision 97's ruling, that
+the record's own admission check is the enforcement point and a proxy in front of it is never the
+enforcement point. Making a runtime ceiling step-scoped rather than principal-scoped would require
+teaching that enforcement point which step the principal is claimed against, which is a second axis the check does not
+carry today and a change to where invariant 6 already asks enforcement to stay concentrated, not an
+extension of it. That is a real engineering cost against a benefit — catching an overrun at the moment it
+happens rather than at the next review — that has not yet been measured against how often a step-scoped
+overrun actually occurs in production.
+
+So this is recorded as **worth revisiting once there are enough production step-executions to know whether
+attestability matters in practice** — whether a step reasoning under a model in fact writes outside its
+declaration often enough, or consequentially enough, that review-time catching is not the answer, mirroring
+exactly the "what would reopen it" the corpus already states for decision 100's proving ruling. Until that
+evidence exists, the declared write is a floor caught at review, symmetric with the declared read's
+review-time half, and ceiling enforcement is deferred rather than rejected.
+
+**What this does not reopen.** Decisions 41, 94, and 97 — the record-level bound on which entity types a
+principal may read or write at all, default-deny, checked at the write and at the read — are the **outer**
+bound this question sits inside and are not reopened by it; this ruling concerns only the narrower
+step-level **inner** bound, what a step's own declaration names beyond what its principal's grant already
+permits. External systems are already settled and are not the subject: the adapter
 runs before and after a step and never during it
 (`adapters.md#the-adapter-runs-before-and-after-a-step-never-during-it`), so during a step the step works on
 what hydration resolved and reaches no external system itself. That is topology — there is no live path out
@@ -183,48 +219,13 @@ already qualifies a declared read rather than bounding an undeclared one: a read
 of what the step declared is `unknown` for that step, never a smaller success, and holds the step as an
 unreadable one does.
 
-**The candidates.**
-
-1. **Requirements only — the floor, made explicit.** The declaration states what a step must be able to
-   read, and anything else it reads within its principal's grant is permitted; an undeclared read stays what
-   it is today, a defect caught at review. This is the corpus as written, stated as an answer rather than
-   left as a silence. For it: the grant already carries the ceiling, matched on the credential at the read
-   (decision 94), so a per-step ceiling would be a second place stating what a principal may touch, which
-   invariant 9 forbids and invariant 6 asks to avoid by extending the mechanism that generalizes. Against
-   it: nothing ever checks that a step touched only what it declared, so the ceiling half is reporting and
-   not a control, which is invariant 1's defect in its plainest form — and this candidate has to own that
-   rather than describe review as enforcement, since the review catches what a reader notices in a diff and
-   not what a step does at runtime.
-
-2. **Exhaustive and enforced at runtime.** Reads and writes are both declared, and anything outside the
-   declaration is refused when attempted. For it: it makes a step's reach **attestable** — what a verdict
-   could have rested on is readable from the declaration rather than taken on trust, which matters most
-   where a step is executed by a principal reasoning under a model and no one can read the code to know what
-   it looked at. That is the argument decision 100 accepted for proving, that a declaration as written and a
-   declaration as executed are different claims for a step no code determines. Against it: the design's
-   enforcement point for admission is the record (decision 97), and the record sees the requesting principal
-   and its grant, not the step that principal executes — so a step-scoped refusal needs the enforcement
-   point to become step-aware, which is an architectural cost and which this candidate must argue is
-   extending the record's admission check rather than standing a second gate beside it (invariant 6, and the
-   second gate decision 97 already rejected). It also has to say what a genuinely unanticipated read raises,
-   given that hydration runs before the step and a late read has nowhere to go: `underdetermined_inputs` and
-   `undeclared_dependency` are distinct classes that must not be collapsed
-   (`failure_posture.md#a-task-whose-inputs-cannot-be-resolved-is-put-to-the-operator-not-executed-on-a-guess`), and a read the step never declared is not a dependency it could not
-   reach.
-
-3. **Symmetry without a ceiling.** Writes get the declaration reads already have — declared, the floor
-   enforced at runtime, the undeclared caught at review — and neither side gains a runtime ceiling. For it:
-   it closes the read/write asymmetry, which is a defect whichever way the ceiling question rules, and it
-   needs nothing of the enforcement point, so it is available whether or not candidate 2 is ever reachable.
-   Against it: it inherits candidate 1's answer to invariant 1 on both sides rather than one, so it doubles
-   what is stated and not what binds.
-
-**What any answer owes.** Decision 41 and decision 94 rule admission per entity type, per principal,
-default-deny, checked at the write and at the read. Those are the **outer** bound and this question is
-about an **inner** one, the same relation `data_model.md#concepts` already states when it says a step's
-declared reads narrow what the grant admits and that neither may widen the other. An answer must say why
-both exist and what each answers, or it reads as reopening 41 and 94 rather than as bounding a step within
-them.
+**What a genuinely unanticipated read raises, which the write declaration does not change.** Hydration runs
+before the step and a late read has nowhere to go: `underdetermined_inputs` and `undeclared_dependency` are
+distinct classes that must not be collapsed
+(`failure_posture.md#a-task-whose-inputs-cannot-be-resolved-is-put-to-the-operator-not-executed-on-a-guess`),
+and a read the step never declared is not a dependency it could not reach. This ruling leaves that
+distinction exactly where it was; the write-side declaration answers a different question, what a step is
+expected to change, and does not touch what a step does when an input it depends on cannot be resolved.
 
 **A hydration failure is the step's failure, and it takes the path a failed read already takes.** An
 adapter that cannot fulfil a read it was asked for does not return an empty result: the read is `unknown`,
