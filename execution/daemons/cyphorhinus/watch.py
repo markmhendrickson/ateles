@@ -319,9 +319,13 @@ def report_meeting_recording(recording: Path) -> None:
     parent = recording.parent
 
     transcript = parent / f"{stem}.txt"
-    analysis = parent / f"{stem}_meeting_analysis.md"
+    # Phase 14 writes `_meeting_processed.md`; accept legacy `_meeting_analysis.md`
+    # during cutover so pre-rename sidecars still notify.
+    processed = parent / f"{stem}_meeting_processed.md"
+    legacy = parent / f"{stem}_meeting_analysis.md"
+    analysis_ready = processed.exists() or legacy.exists()
 
-    if transcript.exists() and analysis.exists():
+    if transcript.exists() and analysis_ready:
         notify(
             "Meeting recording",
             f"✅ Transcription + analysis complete: {recording.name}",

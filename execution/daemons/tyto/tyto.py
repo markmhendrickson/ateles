@@ -373,7 +373,7 @@ def _run_analysis(
 These instructions are injected by the Tyto daemon and MUST be followed before
 running the standard /process-meeting phases.
 
-### 1. Back-to-back meeting detection (REQUIRED before Step 1)
+### 1. Back-to-back meeting detection (REQUIRED before Phase 4)
 
 Before treating this as a single meeting, scan the full transcript for natural
 session boundaries: greetings ("hi", "hello", "good morning", "nice to meet you",
@@ -394,7 +394,7 @@ Rules:
 - When in doubt (ambiguous boundary), prefer splitting. A false split costs one extra
   analysis; a missed split loses a meeting's follow-ups entirely.
 
-### 2. Google Calendar context (REQUIRED as part of Step 1)
+### 2. Google Calendar context (REQUIRED as part of Phase 4)
 
 The recording file was created at: **{recording_ts_str}** (UTC).
 
@@ -407,7 +407,9 @@ For each matched calendar event:
 - Cross-reference attendees with speaker labels in the transcript to resolve real names
   for diarized [Speaker_0], [Speaker_1], etc. labels.
 - Store a `calendar_event` entity and link it to the `meeting_analysis` via REFERS_TO.
-- Use attendee emails to stage Gmail recap drafts (per Step 5 of the skill).
+- Resolve attendee emails onto `contact` / `calendar_event` entities. Outbound stays
+  Phase 12–13 **recommendations only** — do not stage participant Gmail drafts, and do
+  not draft participant-facing message bodies here.
 
 If no calendar event matches within the ±90-minute window, note
 `_Calendar: no matching event found._` and proceed without it.
