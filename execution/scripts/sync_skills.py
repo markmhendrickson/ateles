@@ -63,10 +63,20 @@ DO_NOT_EDIT = (
     "execution/scripts/sync_skills.py. -->\n"
 )
 
-# Frontmatter keys we project from the entity (used only when writing a brand-new
-# mirror that has no existing frontmatter to preserve). `content` is the body.
+# Frontmatter keys we project from the entity (used both when writing a
+# brand-new mirror and when reconciling an existing one's drifted values).
+# `content` is the body.
 FM_SCALAR = ["name", "description", "slug", "user_invocable"]
 FM_LIST = ["triggers", "supported_harnesses"]
+
+# The frontmatter keys the ENTITY owns. Drift in any of these is a real defect:
+# a harness reads `description` and `triggers` to decide whether to load a skill
+# at all, so a stale value silently mis-advertises the skill's contract.
+#
+# Keys NOT listed here are harness-local (e.g. `entity_type`, `allowed-tools`,
+# `model`) or mirror bookkeeping (`entity_id`). They are preserved verbatim and
+# never reported as drift, because the entity has no opinion about them.
+ENTITY_OWNED_FM_KEYS = tuple(FM_SCALAR) + tuple(FM_LIST)
 
 
 # --------------------------------------------------------------------------- IO
@@ -168,6 +178,145 @@ def _yaml_scalar(v) -> str:
     return s
 
 
+def _fm_inner(fm_block: str) -> tuple[str, list[str], str]:
+    """Split a frontmatter block into (leading_header, yaml_lines, trailing).
+
+    `fm_block` is what _split_frontmatter returns: an optional leading HTML
+    comment, then `---`, the YAML lines, then the closing `---`. Returns the
+    header+opening fence, the YAML body lines (no fences, keepends stripped),
+    and the closing fence line.
+    """
+    lines = fm_block.splitlines(keepends=True)
+    open_idx = next((i for i, ln in enumerate(lines) if ln.strip() == "---"), None)
+    if open_idx is None:
+        return fm_block, [], ""
+    close_idx = next(
+        (i for i in range(len(lines) - 1, open_idx, -1) if lines[i].strip() == "---"),
+        None,
+    )
+    if close_idx is None:
+        return fm_block, [], ""
+    head = "".join(lines[: open_idx + 1])
+    inner = [ln.rstrip("\n") for ln in lines[open_idx + 1 : close_idx]]
+    tail = lines[close_idx]
+    return head, inner, tail
+
+
+def _unquote(s: str):
+    """Decode a scalar the way our own writer and common YAML encode it.
+
+    Deliberately narrow: this handles the shapes that actually occur in skill
+    frontmatter (plain, single- and double-quoted, and the booleans/None our
+    writer emits). It is NOT a general YAML implementation.
+    """
+    s = s.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        if s[0] == '"':
+            try:
+                return json.loads(s)
+            except Exception:
+                return s[1:-1]
+        return s[1:-1].replace("''", "'")
+    if s in ("true", "True"):
+        return True
+    if s in ("false", "False"):
+        return False
+    if s in ("null", "~", ""):
+        return None
+    return s
+
+
+def parse_frontmatter_values(fm_block: str) -> dict:
+    """Parse a frontmatter block to a dict of KEY -> VALUE.
+
+    This is what makes drift detection value-level rather than text-level: two
+    blocks that differ only in quoting, key order, or how a long string is
+    wrapped parse to equal dicts, so reconciling never churns formatting. Only a
+    genuine change in a value shows up as a difference.
+
+    Supports the shapes present in this repo's mirrors:
+      * plain / quoted scalars            key: value
+      * block lists                       key:\n  - a\n  - b
+      * inline flow lists                 key: [a, b]
+      * folded / literal block scalars    key: >\n  wrapped text...
+    Unrecognized constructs are recorded as raw strings; they are still compared
+    consistently, they just are not interpreted.
+    """
+    _, inner, _ = _fm_inner(fm_block)
+    out: dict = {}
+    i = 0
+    while i < len(inner):
+        raw = inner[i]
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            i += 1
+            continue
+        if raw[:1] in " \t" or ":" not in raw:
+            i += 1
+            continue
+        key, _, rest = raw.partition(":")
+        key = key.strip()
+        rest = rest.strip()
+        i += 1
+
+        if rest.startswith("[") and rest.endswith("]"):
+            body = rest[1:-1].strip()
+            out[key] = [_unquote(x) for x in body.split(",") if x.strip()] if body else []
+            continue
+
+        if rest[:1] in (">", "|"):
+            # Folded (>) or literal (|) block scalar: consume the indented run.
+            chunks: list[str] = []
+            while i < len(inner) and (not inner[i].strip() or inner[i][:1] in " \t"):
+                chunks.append(inner[i].strip())
+                i += 1
+            while chunks and not chunks[-1]:
+                chunks.pop()
+            if rest[:1] == "|":
+                out[key] = "\n".join(chunks)
+            else:
+                # Folded: blank lines become paragraph breaks, others join with a
+                # space. This is what makes re-wrapping invisible to the compare.
+                text, prev_blank = "", False
+                for c in chunks:
+                    if not c:
+                        prev_blank = True
+                        continue
+                    if not text:
+                        text = c
+                    elif prev_blank:
+                        text += "\n" + c
+                    else:
+                        text += " " + c
+                    prev_blank = False
+                out[key] = text
+            continue
+
+        if rest == "":
+            # Either a block list or an empty value.
+            items: list = []
+            saw_item = False
+            while i < len(inner) and (not inner[i].strip() or inner[i][:1] in " \t"):
+                stripped = inner[i].strip()
+                if stripped.startswith("- "):
+                    saw_item = True
+                    items.append(_unquote(stripped[2:]))
+                elif stripped == "-":
+                    saw_item = True
+                    items.append(None)
+                elif not stripped:
+                    pass
+                else:
+                    # nested mapping or other structure — keep raw, do not guess
+                    items.append(stripped)
+                    saw_item = True
+                i += 1
+            out[key] = items if saw_item else None
+            continue
+
+        out[key] = _unquote(rest)
+    return out
+
+
 def _split_frontmatter(text: str) -> tuple[str, str]:
     """Return (frontmatter_block_including_fences_and_leading_header, body).
 
@@ -225,6 +374,140 @@ def _fresh_frontmatter(skill: dict) -> str:
     return "\n".join(fm_lines) + "\n"
 
 
+def _entity_fm_values(skill: dict) -> dict:
+    """The frontmatter values the ENTITY asserts, normalized for comparison.
+
+    Only keys the entity actually carries are returned — a key the entity leaves
+    unset is not drift, it is simply not owned, so the mirror's value stands.
+    """
+    vals: dict = {}
+    for k in FM_SCALAR:
+        v = skill.get(k)
+        if v is None or v == "":
+            continue
+        vals[k] = v.strip() if isinstance(v, str) else v
+    for k in FM_LIST:
+        v = skill.get(k)
+        if isinstance(v, str):
+            try:
+                v = json.loads(v)
+            except Exception:
+                v = [v]
+        if not v:
+            continue
+        vals[k] = [x.strip() if isinstance(x, str) else x for x in v]
+    return vals
+
+
+def _values_equal(disk, entity) -> bool:
+    """Compare a parsed on-disk value against an entity value.
+
+    Strings compare on whitespace-collapsed content so that re-wrapping a folded
+    scalar, or a trailing newline, is not drift. Lists compare element-wise
+    under the same rule. This is the line between VALUE drift (real, reported)
+    and FORMATTING churn (invisible, never rewritten).
+    """
+    def norm(x):
+        if isinstance(x, str):
+            return " ".join(x.split())
+        if isinstance(x, bool) or x is None:
+            return x
+        if isinstance(x, (int, float)):
+            return str(x)
+        return x
+
+    if isinstance(entity, list) or isinstance(disk, list):
+        d = disk if isinstance(disk, list) else ([] if disk is None else [disk])
+        e = entity if isinstance(entity, list) else ([] if entity is None else [entity])
+        if len(d) != len(e):
+            return False
+        return all(norm(a) == norm(b) for a, b in zip(d, e))
+    if isinstance(entity, bool) or isinstance(disk, bool):
+        def as_bool(x):
+            if isinstance(x, bool):
+                return x
+            if isinstance(x, str):
+                return x.strip().lower() in ("true", "yes", "1")
+            return x
+        return as_bool(disk) == as_bool(entity)
+    return norm(disk) == norm(entity)
+
+
+def frontmatter_drift(skill: dict, existing_fm: str) -> list[str]:
+    """Return the entity-owned frontmatter keys whose VALUE differs on disk.
+
+    Empty list == the mirror advertises what the entity says, whatever the
+    formatting looks like.
+    """
+    disk_vals = parse_frontmatter_values(existing_fm)
+    entity_vals = _entity_fm_values(skill)
+    drifted = []
+    for key in ENTITY_OWNED_FM_KEYS:
+        if key not in entity_vals:
+            continue
+        if not _values_equal(disk_vals.get(key), entity_vals[key]):
+            drifted.append(key)
+    return drifted
+
+
+def _render_fm_entry(key: str, value) -> list[str]:
+    """Render one frontmatter key back to YAML lines, in our canonical style."""
+    if isinstance(value, list):
+        lines = [f"{key}:"]
+        lines += [f"  - {_yaml_scalar(item)}" for item in value]
+        return lines
+    return [f"{key}: {_yaml_scalar(value)}"]
+
+
+def _reconcile_frontmatter(existing_fm: str, skill: dict, drifted: list[str]) -> str:
+    """Rewrite ONLY the drifted keys in place, preserving everything else.
+
+    Preserved verbatim: the do-not-edit header, `entity_id`, key ORDER, and any
+    harness-local key the entity does not own. Non-drifted entity keys keep
+    their existing formatting too — including folded block scalars — because a
+    key that already says the right thing is never re-rendered. That is what
+    keeps a reconcile from churning the 90+ mirrors that are already correct.
+    """
+    if not drifted:
+        return existing_fm
+    head, inner, tail = _fm_inner(existing_fm)
+    if not tail:
+        return existing_fm
+
+    entity_vals = _entity_fm_values(skill)
+    out: list[str] = []
+    seen: set[str] = set()
+    i = 0
+    while i < len(inner):
+        raw = inner[i]
+        # Identify the key this line opens, if any.
+        key = None
+        if raw.strip() and not raw.lstrip().startswith("#") and raw[:1] not in " \t" and ":" in raw:
+            key = raw.partition(":")[0].strip()
+
+        if key in drifted:
+            seen.add(key)
+            out += _render_fm_entry(key, entity_vals[key])
+            # Skip this key's continuation lines (block list items, folded text).
+            i += 1
+            while i < len(inner) and (not inner[i].strip() or inner[i][:1] in " \t"):
+                i += 1
+            continue
+
+        out.append(raw)
+        if key:
+            seen.add(key)
+        i += 1
+
+    # A drifted key that was absent from the file entirely: append before the
+    # closing fence so it starts being advertised.
+    for key in drifted:
+        if key not in seen:
+            out += _render_fm_entry(key, entity_vals[key])
+
+    return head + "".join(ln + "\n" for ln in out) + tail
+
+
 def canonical_text(skill: dict, existing: str | None) -> str:
     """The on-disk text this skill SHOULD have.
 
@@ -233,10 +516,21 @@ def canonical_text(skill: dict, existing: str | None) -> str:
     in prod. Split content into (its own fm, its body) first so we never stack
     two frontmatter blocks.
 
-    Frontmatter precedence: the existing file's fm (preserve it — don't churn
-    formatting/ordering on a reconcile) → else the entity content's own fm →
-    else minimal generated fm. Exactly one block is emitted, with `entity_id`
-    guaranteed present in it.
+    Frontmatter precedence: the existing file's fm, RECONCILED against the
+    entity's own values → else the entity content's own fm → else minimal
+    generated fm. Exactly one block is emitted, with `entity_id` guaranteed
+    present in it.
+
+    "Reconciled" rather than "preserved": the entity owns `description`,
+    `triggers`, `slug`, `user_invocable`, `supported_harnesses` and `name`, so a
+    change to any of them must reach the mirror — a harness reads `description`
+    and `triggers` to decide whether to load the skill at all. Only the keys
+    whose parsed VALUE actually differs are rewritten; everything else (header,
+    `entity_id`, key order, harness-local keys, and the formatting of keys that
+    already agree) is preserved byte-for-byte, so a reconcile still never churns
+    formatting or ordering. That was the original intent of preserving the block
+    wholesale, and it is kept — what is dropped is the part that made
+    entity-side changes permanently invisible to `--check`.
     """
     content_fm, content_body = _split_frontmatter(skill["content"])
     body = content_body.strip("\n") + "\n"
@@ -246,7 +540,8 @@ def canonical_text(skill: dict, existing: str | None) -> str:
         existing_fm, _ = _split_frontmatter(existing)
 
     if existing_fm:
-        fm_block = existing_fm
+        drifted = frontmatter_drift(skill, existing_fm)
+        fm_block = _reconcile_frontmatter(existing_fm, skill, drifted)
     elif content_fm:
         # content's fm may already carry its own do-not-edit header (captured by
         # _split_frontmatter); only prepend ours if it doesn't, to avoid stacking
@@ -342,15 +637,20 @@ def run_check(skills: list[dict], id_index: dict, slug_index: dict, install_root
             continue
         existing = path.read_text()
         if existing != canonical_text(s, existing):
-            drift.append((s["_slug"], path))
+            existing_fm, _ = _split_frontmatter(existing)
+            fm_keys = frontmatter_drift(s, existing_fm) if existing_fm else []
+            drift.append((s["_slug"], path, fm_keys))
     if not drift and not missing:
-        print(f"OK — {len(skills)} skill mirror(s) match Neotoma (body-level).")
+        print(f"OK — {len(skills)} skill mirror(s) match Neotoma "
+              f"(body and entity-owned frontmatter).")
         return 0
     for slug, p in missing:
         print(f"MISSING  {slug:28} (entity-only; no mirror on disk) -> {p}")
-    for slug, p in drift:
-        print(f"DRIFTED  {slug:28} {p}")
-    print(f"\n{len(missing)} missing, {len(drift)} drifted (body differs from Neotoma).")
+    for slug, p, fm_keys in drift:
+        why = f"frontmatter: {', '.join(fm_keys)}" if fm_keys else "body"
+        print(f"DRIFTED  {slug:28} [{why}]  {p}")
+    print(f"\n{len(missing)} missing, {len(drift)} drifted "
+          f"(body or entity-owned frontmatter differs from Neotoma).")
     print("Run without --check to write, or --install <slug> for a missing one.")
     return 1
 
