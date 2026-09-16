@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Install the monedula daemon as a launchd calendar agent.
-# Runs once daily at 07:00 UTC (09:00 Madrid summer / 08:00 winter).
+# Install the monedula daemon as a launchd agent.
+# Polls every 15 minutes (StartInterval=900): notifies per session as it ends
+# and sweeps email replies for payment approvals.
 set -euo pipefail
 
 PLIST="com.markmhendrickson.monedula.plist"
@@ -20,7 +21,7 @@ cp "$SCRIPT_DIR/$PLIST" "$DEST"
 launchctl load "$DEST"
 
 echo "✓ monedula installed."
-echo "  Schedule: daily at 07:00 UTC (09:00 Madrid summer / 08:00 winter)"
+echo "  Schedule: polls every 15 minutes (StartInterval=900)"
 echo "  Logs: $HOME/Library/Logs/ateles/monedula.log"
 echo ""
 echo "To uninstall:"
