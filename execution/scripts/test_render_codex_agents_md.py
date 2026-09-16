@@ -77,7 +77,7 @@ class TestRender(unittest.TestCase):
                 "NEVER `git stash`",
                 "One worktree, one agent",
                 "Verify before asserting",
-                "Merge stays gated; credentials and material deployments stay operator-gated",
+                "Merge stays gated; product releases, credentials, sends, and grants keep their existing gates",
                 "Proceed with your recommendation",
                 "End every turn with the decisions",
                 "Capture reusable operator feedback as a standing rule",
@@ -86,6 +86,23 @@ class TestRender(unittest.TestCase):
                 "Maintain a live session workboard",
             ):
                 self.assertIn(rule, text, f"missing standing rule: {rule}")
+
+    def test_routine_deployment_is_distinct_from_product_release(self) -> None:
+        """Provider deployment records must not recreate the retired consent gate."""
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp) / "AGENTS.md"
+            run("--out", str(out))
+            for text in (
+                CLAUDE_MD.read_text(encoding="utf-8"),
+                out.read_text(encoding="utf-8"),
+            ):
+                self.assertIn("Routine deployments", text)
+                self.assertIn("deployment revision", text)
+                self.assertIn("product release decision", text)
+                self.assertNotIn(
+                    "Production or client-instance deployment remains operator-gated",
+                    text,
+                )
 
     def test_states_that_claude_code_hooks_do_not_run_here(self) -> None:
         """A Codex session must not rely on a guard that is not running.
