@@ -1,6 +1,6 @@
 # Vocabulary: canonical terms
 
-**Keyed document:** read when a skill, an [agent](#agent) document, or the agent-doc renderer changes
+**Keyed document:** read when a [skill](#skill), an [agent](#agent) document, or the agent-doc renderer changes
 (`conformance.md`). **Kind:** foundation; defines terms by what they are in the design, never by what a
 checkout implements. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-03, PR-08, C10), prior
 art `ent_08460968e6f49dac21510f4a` (A2A `TaskState`, RFC 8693, Camunda), [task](#task)
@@ -421,6 +421,50 @@ declared [workflow](#workflow) with an owning [role](#role) rather than an emerg
 **Never:** —
 **Not for:** [daemon](#daemon) for a session (a daemon self-triggers; a session is driven by the operator);
 [runner](#runner) for a session (the runner is the process); a session as something that [claims](#claim).
+
+### skill
+**Definition:** a file a harness loads by path — `SKILL.md` under a repository root or a user root — carrying
+what an [agent](#agent) or an [interactive session](#interactive-session) is to do when it is invoked by that
+name; **source state the harnesses hold, and never a target of the design.**
+**The design has no `skill` type, and this is deliberate.** No [workflow](#workflow), [step](#step),
+[role](#role), or [principal](#principal) is a skill, and nothing in the work, [gate](#gate), data, or authority
+model names one (`migration.md#the-skills-source-state-the-harnesses-hold-and-where-each-kind-goes`). Every
+skill file is on the mirror side of the direction of truth
+(`conformance.md#direction-of-truth-per-class-of-record`), so a skill is where the swarm's knowledge of how
+work gets done is written **today, under a harness's shapes**, and the design's question for any skill is
+which target it already has: an [agent](#agent), a `workflow` declaration, a step of one, an
+[adapter](#adapter)'s operation, a `task_policy`, an `agent_policy`, or — for a file that only tells a
+harness how to reach the record or a tool — **none, which is correct and not a gap**.
+**A skill is not a [principal](#principal), holds no [authority](#authority), and is [granted](#grant)
+nothing.** A capability attaches to a principal matched on its [credential](#credential); a skill has no
+credential, [claims](#claim) no [task](#task) or step, and closes nothing with a [verdict](#verdict). What
+a skill's body appears to permit is the invoking principal's [permission scope](#permission-scope), and the
+tools it names are a dimension of that principal's grant (decision 42,
+`migration.md#where-a-skills-harness-mechanics-live`).
+**A skill owns no [artifact](#artifact) and owns no entity type.** [Ownership](#ownership) is named
+accountability carried as an `ownership_grant` [edge](#edge) to a principal, and a skill cannot be that
+edge's target. A file invoked by name produces what the principal executing it produces, under that
+principal's grant and that principal's accountability; anything it writes into the record is an **entity** of
+its own type, which is not an artifact at all. Where a [role](#role) is to review what such a file
+produced, the seat is the **declaration's**, not the file's: the producing work is a [step](#step) and the
+reviewing role is that declaration's optional [review step](#review-step) under an `applies_when`, which
+reads what exists when it opens (decision 110,
+`gates_and_workflows.md#declaration-batch-projection`).
+**The seam between two skills is the seam the design already has.** Where a procedure produces something a
+second procedure then reads, the two are two steps of one declaration or two declarations joined by a
+[successor](#successor) and a [chain](#chain), and the seam is the producing step's closing condition read as
+the consuming step's `reads_to_enter` — not a property of the files. Splitting a file where the design
+declares no seam moves harness state around without changing what is declared.
+**See:** [`migration.md#the-skills-source-state-the-harnesses-hold-and-where-each-kind-goes`](migration.md#the-skills-source-state-the-harnesses-hold-and-where-each-kind-goes),
+[`migration.md#five-classes-of-skill`](migration.md#five-classes-of-skill),
+[`migration.md#where-a-skills-harness-mechanics-live`](migration.md#where-a-skills-harness-mechanics-live),
+[`conformance.md#direction-of-truth-per-class-of-record`](conformance.md#direction-of-truth-per-class-of-record).
+**Never:** a skill as a [principal](#principal), an owner, or a holder of a [grant](#grant); "the skill
+decides", "the skill claims", "the skill owns".
+**Not for:** [workflow](#workflow) for a skill (a declaration is the design's record of recurring work; a
+skill is a harness's file, and several skills collapse to one declaration); [agent](#agent) for a skill (a
+role skill mirrors an agent and is not one); [role](#role) for a skill; [step](#step) for a skill; a skill
+for an [artifact](#artifact) or for anything the swarm wrote into the record.
 
 ## Gate model (`gates_and_workflows.md`)
 
@@ -1963,6 +2007,43 @@ stays one; the `SIGNED_BY` [edge](#edge); the `signed_at` timestamp; and the ver
 is still what a [step owner](#step-owner) does when writing a verdict. `status.md`'s historical revision log
 is likewise left verbatim: it records what past passes said at the time, and rewriting it would falsify the
 record.
+
+## Whether a role may be seated to review what a named procedure produced
+
+This is decision 110, **ruled 2026-09-16: the question dissolves.** It is argued here because the
+[skill](#skill) entry above is where it surfaces.
+
+**What is settled, and is not what the question asked.** A skill is a harness's file and source state, with
+no type in the design, no [credential](#credential), and no standing as a [principal](#principal); it
+[claims](#claim) nothing, [owns](#ownership) nothing, and is [granted](#grant) nothing. Whatever a principal
+writes into the record while executing one is an **entity** of its own type and never an
+[artifact](#artifact). So a file cannot hold a seat, and the question was never really about the file.
+
+**The objection the dissolution had to survive.** Every review seat the design names takes a
+[batch](#batch)'s change as its subject, and `applies_when` is evaluated against what the batch's [tasks](#task) are
+and what their change touches. If that were the whole rule, an optional review step would not reach what a
+procedure produced, and the dissolution would only look like one.
+
+**It reaches it.** `gates_and_workflows.md#declaration-batch-projection` rules that an optional step's
+condition **reads what exists when the step would open**, and that a step placed after the step that
+produces the change may read the change. What an earlier [step](#step) persisted into the record is what
+exists when a later step opens, so a [review step](#review-step) seated after a producing step reads the
+produced entity as the change its condition is evaluated against. The placement is enforced rather than
+trusted: a condition whose declared inputs name a type no earlier step's `reads_to_close` names would always
+be unevaluable and open every time — an optional step in name only — and **that declaration is refused when
+it is written**. The seat is therefore real, conditional, and checked at declaration.
+
+**So the answer is that the producing work is a step, and the seat belongs to the declaration.** Nothing is
+added to the design. The two rejected candidates: seating the reviewing [role](#role) by [ownership](#ownership) over
+the entity type produced would make the seat a property of the **type**, reaching every producer of it
+through a seat no declaration names and no reading of a declaration would predict — a second mechanism
+beside one that already generalizes, which invariant 6 refuses; and the design declining the question is
+moot once the first candidate holds.
+
+**What this does not license.** The seat is the declaration's and never the file's. A procedure invoked by
+name seats nothing, confers nothing, and reviews nothing; where it looks as though it does, what is doing
+the work is a declaration whose steps name a producing role and a reviewing role, and the file is the source
+state one of those steps was written from.
 
 ## Retired names
 
