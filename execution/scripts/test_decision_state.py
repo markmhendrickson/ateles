@@ -323,6 +323,34 @@ class TestBranchSweepIsMachineIndependent(unittest.TestCase):
             else:
                 os.environ["GITHUB_HEAD_REF"] = previous
 
+    def test_empty_origin_scan_still_reads_the_working_tree(self):
+        """The foundation-checks lane fetches origin/main only.
+
+        A regenerate against every local origin/* head then failed --check there
+        (ateles#1051) because CI could not see those refs. The default collect
+        must still read the files on disk, so this PR's own rulings remain
+        visible without fetching every origin head.
+        """
+        rows, read, _stale = ds.collect([], include_workdir=True)
+        self.assertIn(ds.workdir_ref_label(), read)
+        workdir = ds.register_from_workdir() or {}
+        main = ds.register_at(ds.MAIN_REF) or {}
+        observed = False
+        by_num = {r.number: r for r in rows}
+        for num, data in workdir.items():
+            if data["status"] not in ds.RULED_STATUSES:
+                continue
+            if main.get(num, {}).get("status") != "open":
+                continue
+            self.assertEqual(by_num[num].ruled, "yes")
+            self.assertEqual(by_num[num].merged, "no")
+            observed = True
+            break
+        if not observed:
+            self.skipTest(
+                "this checkout has no ruled-but-unmerged register row versus origin/main"
+            )
+
 
 class TestSupersessionIsJudgedOnContent(unittest.TestCase):
     """Staleness is a question about the row, not about commit history.
