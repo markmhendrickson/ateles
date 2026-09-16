@@ -767,6 +767,101 @@ class TestRoleSigningEnvInjection:
         )
 
 
+# ── _write_harness_event token handling ───────────────────────────────────────
+
+
+class TestWriteHarnessEventTokenHandling:
+    """An unset/empty NEOTOMA_BEARER_TOKEN must never skip this write silently.
+
+    This is a best-effort diagnostic write (the module docstring says so, and
+    its own network call is already wrapped in `except Exception`), so an
+    absent token must NOT raise — that would take down a dispatch that would
+    otherwise succeed, over the write that exists only to observe it. It must
+    instead log loudly at ERROR so the skipped write is visible, mirroring in
+    spirit (not literally — this site's risk profile is lower) the hard-fail
+    ateles#1071 applied to the analogous empty-GH_TOKEN case in this file.
+    """
+
+    def _kwargs(self) -> dict:
+        return dict(
+            task_entity_id="ent_abc",
+            role="gryllus",
+            agent_sub="gryllus@ateles-swarm",
+            event_type="dispatch_start",
+            tool_name="skill_runner",
+            success="true",
+        )
+
+    def test_logs_error_and_skips_write_when_token_unset(
+        self, monkeypatch, caplog
+    ) -> None:
+        import logging as _logging
+
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.delenv("NEOTOMA_BEARER_TOKEN", raising=False)
+
+        with patch("skill_runner.urllib.request.urlopen") as mock_urlopen:
+            with caplog.at_level(_logging.ERROR, logger="apis.skill_runner"):
+                skill_runner._write_harness_event(**self._kwargs())
+
+        mock_urlopen.assert_not_called()
+        errors = [
+            r.getMessage() for r in caplog.records if r.levelno >= _logging.ERROR
+        ]
+        assert any("NEOTOMA_BEARER_TOKEN is not set" in m for m in errors), (
+            f"Expected an ERROR log naming the missing token; got {errors}"
+        )
+
+    def test_logs_error_and_skips_write_when_token_empty_string(
+        self, monkeypatch, caplog
+    ) -> None:
+        import logging as _logging
+
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "")
+
+        with patch("skill_runner.urllib.request.urlopen") as mock_urlopen:
+            with caplog.at_level(_logging.ERROR, logger="apis.skill_runner"):
+                skill_runner._write_harness_event(**self._kwargs())
+
+        mock_urlopen.assert_not_called()
+        errors = [
+            r.getMessage() for r in caplog.records if r.levelno >= _logging.ERROR
+        ]
+        assert any("NEOTOMA_BEARER_TOKEN is not set" in m for m in errors), (
+            f"Expected an ERROR log naming the missing token; got {errors}"
+        )
+
+    def test_proceeds_to_write_when_token_present(self, monkeypatch, caplog) -> None:
+        """A valid token must not be logged (content, prefix, or length) and
+        must reach the HTTP call with the correct Authorization header —
+        proving the ERROR path above is reached only for a missing token,
+        not on every call."""
+        import logging as _logging
+
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-bearer-xyz")
+
+        with patch("skill_runner.urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value.__enter__ = MagicMock()
+            mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
+            with caplog.at_level(_logging.ERROR, logger="apis.skill_runner"):
+                skill_runner._write_harness_event(**self._kwargs())
+
+        mock_urlopen.assert_called_once()
+        sent_req = mock_urlopen.call_args[0][0]
+        assert sent_req.get_header("Authorization") == "Bearer test-bearer-xyz"
+        errors = [
+            r.getMessage() for r in caplog.records if r.levelno >= _logging.ERROR
+        ]
+        assert not errors, f"Expected no ERROR logs with a valid token; got {errors}"
+        # The token value itself must never appear in any log record.
+        all_messages = " ".join(r.getMessage() for r in caplog.records)
+        assert "test-bearer-xyz" not in all_messages, (
+            "Token value must never be logged, even on the success path"
+        )
+
+
 # ── Stage 6: Neotoma MCP config injection (ateles#1687) ──────────────────────
 
 
@@ -859,21 +954,23 @@ class TestNeotomaMcpConfigInjection:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_mcp_config_no_auth_header_without_token(
+    def test_mcp_config_hard_fails_when_token_unset(
         self, MockLoader, mock_write_harness, monkeypatch
     ) -> None:
-        """When NEOTOMA_BEARER_TOKEN is absent/empty, --mcp-config is still injected
-        but the config must omit the Authorization header (local dev-mode Neotoma
-        accepts no-bearer).
+        """When NEOTOMA_BEARER_TOKEN is unset (and no per-role token exists
+        either), run_skill must raise rather than construct a --mcp-config
+        with no Authorization header.
 
-        Strategy: intercept tempfile.mkstemp so we get the path, read the content
-        immediately after the fd is opened and written (before cleanup), then verify.
-        We do NOT patch os.path.exists here so skill_runner can stat the real temp
-        file — only Path.exists is patched (for the SKILL.md check).
+        The live Neotoma /mcp endpoint requires auth (verified by direct
+        unauthenticated request during this fix — 401 "Authentication
+        required"), so a config missing the header would only fail later,
+        inside the spawned child, far from this cause. This replaces the old
+        `test_mcp_config_no_auth_header_without_token`, which had codified the
+        silent-degradation behaviour as intended (its own docstring called it
+        "local dev-mode Neotoma accepts no-bearer" — untrue of the live
+        instance). Mirrors ateles#1071's fix for the analogous empty-GH_TOKEN
+        case in this same file.
         """
-        import json as _json
-        import tempfile as _tempfile
-
         fake_def = _make_def(prompt_markdown="Role: Gryllus.", tool_allowlist="*")
         instance = MagicMock()
         instance.load.return_value = fake_def
@@ -881,68 +978,80 @@ class TestNeotomaMcpConfigInjection:
 
         monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
         monkeypatch.delenv("NEOTOMA_BEARER_TOKEN", raising=False)
+        monkeypatch.delenv("GRYLLUS_NEOTOMA_TOKEN", raising=False)
 
         captured_cmd: list = []
-        written_contents: list[dict] = []
-
-        # Intercept mkstemp to record the path; also wrap os.fdopen to capture content.
-        _real_mkstemp = _tempfile.mkstemp
-        captured_paths: list[str] = []
-
-        def _capturing_mkstemp(**kwargs):
-            fd, path = _real_mkstemp(**kwargs)
-            captured_paths.append(path)
-            return fd, path
-
-        async def fake_exec(*cmd, **kwargs):
-            captured_cmd.extend(cmd)
-            proc = MagicMock()
-            proc.returncode = 0
-
-            async def _communicate(input=None):
-                # Read the file content from the known path while proc is "running".
-                # os.path.exists is NOT patched so the real file is accessible.
-                if captured_paths:
-                    import os as _real_os
-
-                    fpath = captured_paths[-1]
-                    if _real_os.path.isfile(fpath):
-                        with open(fpath) as f:
-                            written_contents.append(_json.load(f))
-                return b"output", b""
-
-            proc.communicate = _communicate
-            return proc
 
         with (
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
             patch.object(Path, "exists", return_value=True),
             patch.object(Path, "read_text", return_value="skill md"),
-            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
-            patch("skill_runner.tempfile.mkstemp", side_effect=_capturing_mkstemp),
-            # Patch os.path.exists only for the JWK file check (return False = no JWK).
-            patch("skill_runner.os.path.exists", return_value=False),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._make_exec_capturer(captured_cmd),
+            ),
+            patch("os.path.exists", return_value=False),
         ):
-            result = self._run(
-                skill_runner.run_skill(
-                    "gryllus", "work prompt", role="gryllus", task_entity_id="ent_abc"
+            with pytest.raises(RuntimeError, match="No Neotoma bearer token"):
+                self._run(
+                    skill_runner.run_skill(
+                        "gryllus",
+                        "work prompt",
+                        role="gryllus",
+                        task_entity_id="ent_abc",
+                    )
                 )
-            )
 
-        assert result.ok
-        assert "--mcp-config" in captured_cmd
-        assert len(written_contents) == 1, (
-            "Expected MCP config to be read during communicate"
+        assert not captured_cmd, (
+            "No subprocess should ever be spawned with a --mcp-config missing "
+            "its Authorization header"
         )
-        cfg = written_contents[0]
-        neotoma_cfg = cfg["mcpServers"]["mcpsrv_neotoma"]
-        assert neotoma_cfg["url"].endswith("/mcp"), (
-            f"Expected url ending in /mcp, got {neotoma_cfg['url']!r}"
-        )
-        # No Authorization header when no token.
-        headers = neotoma_cfg.get("headers", {})
-        assert "Authorization" not in headers, (
-            "Expected no Authorization header when NEOTOMA_BEARER_TOKEN is unset"
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_mcp_config_hard_fails_when_token_empty_string(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """Same as the unset case, but for NEOTOMA_BEARER_TOKEN='' (empty but
+        SET). Empty-but-set is the shape that silently falls through an
+        `if token:` truthiness check exactly like an unset var does — the two
+        must be indistinguishable in outcome (both raise), matching the
+        empty-vs-unset distinction called out for GH_TOKEN in ateles#1071.
+        """
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.", tool_allowlist="*")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "")
+        monkeypatch.delenv("GRYLLUS_NEOTOMA_TOKEN", raising=False)
+
+        captured_cmd: list = []
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._make_exec_capturer(captured_cmd),
+            ),
+            patch("os.path.exists", return_value=False),
+        ):
+            with pytest.raises(RuntimeError, match="No Neotoma bearer token"):
+                self._run(
+                    skill_runner.run_skill(
+                        "gryllus",
+                        "work prompt",
+                        role="gryllus",
+                        task_entity_id="ent_abc",
+                    )
+                )
+
+        assert not captured_cmd, (
+            "No subprocess should ever be spawned with a --mcp-config missing "
+            "its Authorization header"
         )
 
     @patch("skill_runner._write_harness_event")

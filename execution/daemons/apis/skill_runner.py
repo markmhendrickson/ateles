@@ -650,10 +650,23 @@ def _write_harness_event(
     dispatch_usage.py). Its fields are merged in only when actually reported —
     a harness that reports nothing adds no keys, so an absent field reads as
     "not reported" rather than as a measured zero.
+
+    An unset/empty NEOTOMA_BEARER_TOKEN used to skip this write with no trace
+    at all — the audit trail grew a hole nobody could see (see #1071 for the
+    analogous GH_TOKEN case). This is a best-effort diagnostic write, so an
+    absent token still must not raise — that would take down a dispatch that
+    would otherwise have succeeded on its actual job, over the very write that
+    exists to observe it. Instead it logs loudly at ERROR (never the token's
+    content, prefix, or length) so the skipped write is visible in the daemon
+    log rather than merely absent from Neotoma.
     """
     base_url = _require_neotoma_base_url()
     token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     if not token:
+        log.error(
+            "[apis] Skipping harness_event write: NEOTOMA_BEARER_TOKEN is not "
+            f"set. event_type={event_type} role={role} task_entity_id={task_entity_id}"
+        )
         return
 
     event_at = datetime.now(timezone.utc).isoformat()
@@ -1487,18 +1500,34 @@ async def _run_skill_once(
         # exactly as before; a gate owner that needs attribution has already been
         # refused upstream by the `owns_pending_gate` preflight.
         _neotoma_token, _ = neotoma_token_for_agent(_role)
+        if not _neotoma_token:
+            # The live Neotoma /mcp endpoint requires auth (verified: an
+            # unauthenticated POST to <base>/mcp returns 401 "Authentication
+            # required"). Omitting the Authorization header here used to hand
+            # the spawned child a --mcp-config that could only ever fail at
+            # first tool call, with the real cause (no NEOTOMA_BEARER_TOKEN /
+            # <ROLE>_NEOTOMA_TOKEN in the daemon's own env) nowhere near the
+            # error the child eventually surfaces. Fail here instead, at
+            # construction, matching the convention _require_neotoma_base_url
+            # already sets for the other half of this same connection (see
+            # #1071 for the analogous GH_TOKEN case).
+            raise RuntimeError(
+                f"No Neotoma bearer token available for role '{_role}': neither "
+                f"{neotoma_token_env_name(_role)} nor NEOTOMA_BEARER_TOKEN is "
+                "set. The Neotoma /mcp endpoint requires authentication, so a "
+                "--mcp-config built without an Authorization header would only "
+                "fail later, inside the dispatched child, far from this cause. "
+                "Provision one of those env vars before dispatching this role."
+            )
         _mcp_cfg: dict = {
             "mcpServers": {
                 "mcpsrv_neotoma": {
                     "type": "http",
                     "url": f"{_neotoma_base}/mcp",
+                    "headers": {"Authorization": f"Bearer {_neotoma_token}"},
                 }
             }
         }
-        if _neotoma_token:
-            _mcp_cfg["mcpServers"]["mcpsrv_neotoma"]["headers"] = {
-                "Authorization": f"Bearer {_neotoma_token}"
-            }
 
         # Write the MCP config to a mode-0600 temp file to avoid argv exposure.
         try:
