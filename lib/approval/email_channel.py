@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import subprocess
+from email.utils import parseaddr
 from pathlib import Path
 from typing import Any, Callable
 
@@ -127,6 +128,66 @@ def send_request(subject: str, body: str, to: str | None = None) -> bool:
         return False
 
 
+def _parse_address(raw: str) -> str:
+    """Return the bare email address from a From: header, lowercased.
+
+    Handles the forms gws actually returns: a bare `op@example.com` and the
+    display-name form `Mark H <op@example.com>`. Returns "" when no
+    well-formed address can be extracted — the caller MUST treat "" as
+    unverified, never as a match.
+
+    Uses stdlib `parseaddr`, which implements the RFC 5322 grammar, rather than
+    a hand-rolled regex: the address-in-display-name spoof
+    (`op@example.com <attacker@evil.example>`) resolves to the REAL address
+    under the grammar, and to the wrong one under naive substring matching.
+    """
+    _, addr = parseaddr(raw or "")
+    addr = (addr or "").strip().lower()
+    # parseaddr is lenient — it returns bare words like "not-an-address"
+    # unchanged. Require the structural minimum of an address before we are
+    # willing to compare it to the operator's.
+    if addr.count("@") != 1:
+        return ""
+    local, _, domain = addr.partition("@")
+    if not local or "." not in domain or domain.startswith(".") or domain.endswith("."):
+        return ""
+    return addr
+
+
+def sender_is_operator(from_header: str) -> bool:
+    """True only when `from_header` is provably the operator's address.
+
+    FAIL CLOSED. Every uncertain case returns False:
+      - OPERATOR_EMAIL unset or unparseable  → no principal is configured, so
+        nothing can be authorized
+      - From: absent, empty, or malformed    → the sender is unverifiable
+      - address mismatch                     → not the operator
+
+    Comparison is on the PARSED address, whole and exact, so neither a lookalike
+    domain (`op@example.com.evil.example`) nor an address hidden in a display
+    name can satisfy it.
+
+    NOTE ON STRENGTH: this is a header check. A From: header is forgeable in
+    general; what makes it meaningful here is that these messages have already
+    been accepted and classified into the operator's OWN mailbox by Gmail, whose
+    SPF/DKIM/DMARC evaluation a spoofed sender has to survive first. So this
+    closes "anyone who holds the token can approve" — it does not by itself
+    defeat an attacker who can forge mail that passes the operator's domain
+    authentication. Defence in depth (a shared secret in the BODY, or a channel
+    that authenticates the principal directly) is the stronger form and is
+    deliberately left as follow-up rather than bundled into a security fix.
+    """
+    operator = _parse_address(operator_email())
+    if not operator:
+        log.warning("approval: OPERATOR_EMAIL unset or unparseable — refusing "
+                    "to treat any reply as approved (fail closed)")
+        return False
+    sender = _parse_address(from_header)
+    if not sender:
+        return False
+    return sender == operator
+
+
 def read_replies(
     tokens: list[str],
     max_msgs: int = 40,
@@ -162,6 +223,19 @@ def read_replies(
             mid = str(m.get("id") or "")
             subject = str(m.get("subject") or "")
             if not mid or mid in seen_ids or not subject.upper().startswith("RE:"):
+                continue
+            # AUTHORIZATION, not merely authentication. The triage query is a
+            # full-text mailbox search for the token, so ANY message carrying
+            # the token string lands here — and the token rides in the subject
+            # line, where every forward, auto-reply and CC'd thread carries it.
+            # Possession of it proves the sender SAW the request, never that
+            # they are the operator. Reject before the `+read` so an untrusted
+            # body never enters the process and the callback never fires for it.
+            sender = str(m.get("from") or m.get("sender") or m.get("From") or "")
+            if not sender_is_operator(sender):
+                log.warning(
+                    f"approval: ignoring reply {mid} — sender is not the "
+                    "operator (token present but unverified sender)")
                 continue
             seen_ids.add(mid)
             body_data = gws_json(["gmail", "+read", "--id", mid, "--headers",
