@@ -129,6 +129,38 @@ class _RecordingHandler:
         return {"status": "unapproved payment executed"}
 
 
+class _RecordingJobHandle:
+    """Records `finished`/`failed` calls without sending Telegram or writing
+    the activity log."""
+
+    def __init__(self, calls: list[tuple[str, str]]) -> None:
+        self._calls = calls
+
+    def finished(self, summary: str) -> None:
+        self._calls.append(("finished", summary))
+
+    def failed(self, summary: str) -> None:
+        self._calls.append(("failed", summary))
+
+
+class _RecordingActivityLogger:
+    """Test double for `lib.activity.ActivityLogger`.
+
+    `main()` calls `_activity.started(...)` / the returned handle's
+    `.finished(...)` for every executed payment (`monedula.py:685`). The real
+    logger sends a Telegram message and writes a production `activity_log`
+    entry on every call — exactly the outbound effect this fixture exists to
+    neutralise, so `_activity` needs the same treatment as `telegram_send`.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def started(self, summary: str, *, job_id: str | None = None) -> _RecordingJobHandle:
+        self.calls.append(("started", summary))
+        return _RecordingJobHandle(self.calls)
+
+
 @pytest.fixture
 def sent_messages(tmp_path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Neutralise every outbound effect of `main()` and capture Telegram sends."""
@@ -138,6 +170,7 @@ def sent_messages(tmp_path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
         monedula, "fetch_due_payment_tasks", lambda *a, **k: [], raising=False
     )
     monkeypatch.setattr(monedula, "fetch_yesterday_events", lambda: [])
+    monkeypatch.setattr(monedula, "_activity", _RecordingActivityLogger(), raising=False)
 
     sent: list[str] = []
     monkeypatch.setattr(
@@ -193,8 +226,11 @@ def test_partial_approval_executes_only_the_named_handler(
     vacuously if execution never reaches the loop; the `yoga` half proves the
     loop was entered and did pay the approved handler. `sent_messages` is
     required even though the body reads it only for the confirmation — it is
-    the fixture that neutralises `STATE_FILE`, `_notify`, and the outbound
-    Telegram send.
+    the fixture that neutralises `STATE_FILE`, `_notify`, the outbound
+    Telegram send, and `_activity` (this test is the only one in the suite
+    that reaches `monedula.py:685`, so it is the only one that would otherwise
+    call the real `ActivityLogger` and send a live Telegram message / write a
+    production `activity_log` entry).
     """
     yoga = _RecordingHandler("yoga")
     therapy = _RecordingHandler("therapy")
@@ -220,3 +256,11 @@ def test_partial_approval_executes_only_the_named_handler(
     assert any(
         m.startswith(f"📋 Monedula results for {yesterday_str}:") for m in sent_messages
     ), "a partial approval must still confirm what was paid"
+
+    activity_calls = monedula._activity.calls
+    assert ("started", "executing yoga payment") in activity_calls
+    assert ("finished", "yoga payment executed") in activity_calls, (
+        "the activity double, not the real ActivityLogger, must have recorded "
+        "this — proves :685 was exercised without a live Telegram send or "
+        "activity_log write"
+    )
