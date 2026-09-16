@@ -169,6 +169,15 @@ def test_success_carries_count_and_detail():
     assert r.detail["releases"] == 16
 
 
+def test_skipped_is_ok_with_skip_markers():
+    r = ConnectorResult.skipped("set FLY_APP or DEPLOYMENT_CONFIGURATION_ID")
+    assert r.ok
+    assert r.error == ""
+    assert r.records_written == 0
+    assert r.detail["skipped"] is True
+    assert "FLY_APP" in r.detail["skip_reason"]
+
+
 # ── hybrid ingestion: push supplies latency, verify supplies liveness ───────
 
 

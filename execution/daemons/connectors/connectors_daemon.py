@@ -102,8 +102,9 @@ def build_connectors() -> list:
     allowed = enabled_connector_names()
 
     # ── stage 2 ──
-    # from lib.connectors.fly import FlyConnector
-    # connectors.append(FlyConnector())
+    from lib.connectors.fly import FlyConnector
+
+    connectors.append(FlyConnector())
 
     if allowed is not None:
         connectors = [c for c in connectors if getattr(c, "name", "") in allowed]
@@ -166,6 +167,9 @@ def alert_on_failures(store: ConnectorStore, results: "dict[str, ConnectorResult
     alarm derived from a stale observation ("5 releases behind", computed from
     a day-old reading) asserts a present it cannot see. A connector that
     stopped working is both certain and more actionable.
+
+    Soft outcomes (``ConnectorResult.skipped`` → ``ok=True``) never alert —
+    unbound/idle must not page. Only ``not result.ok`` enters this path.
     """
     for name, result in results.items():
         if result.ok:

@@ -87,7 +87,10 @@ def run_connector(
 
     _record_status(connector, store, result, attempt_at=attempt_at)
 
-    if result.ok:
+    if result.detail.get("skipped"):
+        reason = result.detail.get("skip_reason") or "skipped"
+        log.info(f"[{name}] skipped — {reason}")
+    elif result.ok:
         log.info(f"[{name}] ok — {result.records_written} record(s)")
     else:
         log.error(f"[{name}] FAILED — {result.error}")
@@ -114,27 +117,46 @@ def _record_status(
     prior = store.read_status(name)
     prior_success = prior.last_success_at if prior else None
     prior_failures = prior.consecutive_failures if prior else 0
+    prior_status = prior.status if prior else "never_run"
+    prior_written = prior.records_written if prior else 0
     # The push clock belongs to the push path, which runs outside this loop.
     # A verify must never clear it: "verified, and events are also arriving" and
     # "verified, but nothing has pushed in a week" are different situations, and
     # the second is how a silently-dead webhook becomes visible.
     prior_push = prior.last_push_at if prior else None
 
-    status = ConnectorStatus(
-        connector_name=name,
-        status="ok" if result.ok else "failing",
-        last_attempt_at=attempt_at,
-        last_success_at=attempt_at if result.ok else prior_success,
-        last_error="" if result.ok else result.error,
-        records_written=result.records_written if result.ok else (
-            prior.records_written if prior else 0
-        ),
-        poll_interval_seconds=interval,
-        stale_after_seconds=stale_after_for(interval),
-        consecutive_failures=0 if result.ok else prior_failures + 1,
-        ingestion_mode=str(getattr(connector, "ingestion_mode", "poll") or "poll"),
-        last_push_at=prior_push,
-    )
+    skipped = bool(result.detail.get("skipped"))
+    if skipped:
+        # Unbound / idle: attempt happened, but do not treat as verify success
+        # (no last_success_at advance) and do not accumulate failures/alerts.
+        status_label = prior_status if prior_status in ("ok", "failing") else "never_run"
+        status = ConnectorStatus(
+            connector_name=name,
+            status=status_label,
+            last_attempt_at=attempt_at,
+            last_success_at=prior_success,
+            last_error=str(result.detail.get("skip_reason") or ""),
+            records_written=prior_written,
+            poll_interval_seconds=interval,
+            stale_after_seconds=stale_after_for(interval),
+            consecutive_failures=prior_failures,
+            ingestion_mode=str(getattr(connector, "ingestion_mode", "poll") or "poll"),
+            last_push_at=prior_push,
+        )
+    else:
+        status = ConnectorStatus(
+            connector_name=name,
+            status="ok" if result.ok else "failing",
+            last_attempt_at=attempt_at,
+            last_success_at=attempt_at if result.ok else prior_success,
+            last_error="" if result.ok else result.error,
+            records_written=result.records_written if result.ok else prior_written,
+            poll_interval_seconds=interval,
+            stale_after_seconds=stale_after_for(interval),
+            consecutive_failures=0 if result.ok else prior_failures + 1,
+            ingestion_mode=str(getattr(connector, "ingestion_mode", "poll") or "poll"),
+            last_push_at=prior_push,
+        )
 
     try:
         store.write_status(status)

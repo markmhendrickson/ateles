@@ -449,24 +449,54 @@ Install the launchd resident agent from the repo root:
 ./execution/daemons/connectors/install.sh
 ```
 
-Stage 1 has no source connector registered yet. That empty state is valid:
-`build_connectors()` returns `[]`, the daemon still starts, and when Neotoma
-credentials are configured it writes a `connector_status` heartbeat for
-`connectors` with `records_written: 0`. Stage 2 replaces that framework-only
-heartbeat with the Fly connector's real source status and observations.
+Stage 2a registers `FlyConnector` by default in
+`execution/daemons/connectors/connectors_daemon.py` (`build_connectors()`).
+Unbound hosts still start cleanly: Fly observes as a non-alerting **skip** until
+binding env is set. To leave Fly off the list entirely, set
+`ATELES_CONNECTORS` to a comma-separated allow-list that omits `fly`.
 
-Verify the trigger, not just the manual command:
+### Binding and auth (env names only)
+
+| Variable | Role |
+|---|---|
+| `FLY_APP` **or** `DEPLOYMENT_CONFIGURATION_ID` | Binding — app from env, or a `deployment_configuration` entity that carries `fly_app` |
+| `FLY_CONFIG_PATH` | Optional; default `fly.toml` |
+| `FLY_API_TOKEN` | Fly API auth (with `flyctl` on `PATH`) |
+| `NEOTOMA_BEARER_TOKEN` | Neotoma writes (base URL via `NEOTOMA_BASE_URL` when not default) |
+| `ATELES_CONNECTORS` | Optional allow-list; omit `fly` to disable Fly |
+
+Before durable Fly writes succeed, connector schemas must verify:
+
+```bash
+python3 execution/daemons/connectors/register_schemas.py --json
+```
+
+### One-pass verify (bound vs unbound)
+
+```bash
+# Unbound (no FLY_APP / DEPLOYMENT_CONFIGURATION_ID):
+python3 execution/daemons/connectors/connectors_daemon.py --once
+# expect: fly skip/empty + remediation string mentioning FLY_APP /
+#         DEPLOYMENT_CONFIGURATION_ID; 0 deployment_observation writes;
+#         NO alert path
+
+# Bound:
+FLY_APP=<your-app> FLY_API_TOKEN=… NEOTOMA_BEARER_TOKEN=… \
+  python3 execution/daemons/connectors/connectors_daemon.py --once
+# expect: connector_status for fly; deployment_observation rows verified by
+#         read-back when releases exist (after schemas are registered)
+```
+
+Verify the scheduled trigger, not just the manual command:
 
 ```bash
 launchctl list | grep com.ateles.connectors
 tail -f ~/Library/Logs/ateles/connectors.log
 ```
 
-The expected first log line is `connector daemon starting — poll every 900s`,
-followed by a clean "no connectors registered" pass and heartbeat status write
-until Stage 2 adds Fly.
-`python3 execution/daemons/connectors/connectors_daemon.py --once` remains the
-manual one-pass check, but it is not a substitute for the scheduled agent.
+The expected first log story is `connector daemon starting — poll every 900s`,
+then a pass with **Fly registered** (either `skipped — …` when unbound, or a
+real observe when bound) — not Stage 1's empty "no connectors registered".
 
 Installer failures should be actionable:
 
@@ -475,27 +505,45 @@ Installer failures should be actionable:
 - `launchctl bootstrap` failure: inspect `~/Library/Logs/ateles/connectors.log` and
   `launchctl print gui/$UID/com.ateles.connectors`.
 - Neotoma unavailable: the resident loop logs the failure and continues; a
-  manual `--once` returns non-zero when registered connectors fail or the
-  Stage 1 heartbeat cannot be verified by read-back.
+  manual `--once` returns non-zero when registered connectors hard-fail or when
+  Stage 2a status/observation read-back cannot be verified.
 
-## Schema registration — done, verified by read-back
+## Schema registration — register, then verify by read-back
 
-Both types are registered on the hosted instance (2026-09-02, once it recovered
-from the outage that blocked this initially) and **verified by read-back** —
-`describe_entity_type` returns all declared fields with their descriptions, not
-merely a `success: true`.
+Do **not** treat schemas as done from a write success code or from #671 being
+CLOSED. Live prod historically held a legacy chat/provider `connector_status`
+v1.0 (no `connector_name` / machine / drift fields) and **no**
+`deployment_observation` type. Stage 2a registers:
 
-- **`connector_status`** — 11 fields, `connector_name` required and canonical.
-  `reducer_config` sets `last_write` with an `observed_at` tie-breaker on every
-  mutable field, so concurrent writers cannot clobber one another.
-- **`deployment_observation`** — 9 fields, `instance_ref` required. **Immutable**
-  (one record per release, never corrected), so it needs no merge policy beyond
-  the default.
+- **`connector_status` v2.0** — supersedes the legacy active shape for daemon
+  use. Identity: `canonical_name_fields: ["connector_name"]`. Declares Stage 1
+  status fields plus Fly Stage 2a machine/drift fields. Reducers: `last_write`
+  + `observed_at` tie-breaker on every mutable non-identity field.
+- **`deployment_observation` v1.0** — append-only. Identity: composite
+  `instance_ref + release_id` (not `version` — same version label can cover
+  distinct images). Empty `merge_policies`. Deploy actor is stored as an
+  **opaque** `triggered_by` hash, never a raw email.
+
+```bash
+python3 execution/daemons/connectors/register_schemas.py --json
+# exit 0 only when both schemas verify by GET /schemas/{type} read-back
+```
+
+Fly durable writes are gated on that contract matching. Until read-back passes,
+bound observes fail loud with a remediation pointing at `register_schemas.py`
+rather than writing undeclared fields into `raw_fragments`.
 
 Two registration notes for whoever adds the next type:
 
 - The REST route is **`POST /register_schema`**, not `/schemas/register` — the
   latter 404s. This is the same MCP-tool-name-is-not-a-route trap that
   `scripts/linters/check_neotoma_rest_paths.py` exists to catch.
-- The server's pluralization check **false-positives on `connector_status`**,
-  suggesting `connector_statu`. "Status" is not a plural. Pass `force: true`.
+- The server's pluralization lint may warn on `connector_status` (suggesting
+  `connector_statu`). "Status" is not a plural; `register_schemas.py` passes
+  `force: true` for that type.
+
+### Observation model note (privacy)
+
+Release history records who triggered a deploy as an opaque `triggered_by`
+ref (hash of the Fly user email/name). No raw `@` addresses are stored in
+`deployment_observation` rows.

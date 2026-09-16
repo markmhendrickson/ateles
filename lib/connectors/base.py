@@ -265,6 +265,21 @@ class ConnectorResult:
     def success(cls, records_written: int = 0, **detail: object) -> "ConnectorResult":
         return cls(ok=True, records_written=records_written, detail=dict(detail))
 
+    @classmethod
+    def skipped(cls, reason: str, **detail: object) -> "ConnectorResult":
+        """Unbound / intentionally idle — not a verify success, not a failure.
+
+        ``ok=True`` so the daemon does not alert; ``detail["skipped"]=True`` so
+        the runner does not stamp freshness or clear consecutive_failures as if
+        data were verified. ``error`` stays empty — remediation lives in
+        ``skip_reason``.
+        """
+        line = " ".join(str(reason).split())[:300]
+        payload = dict(detail)
+        payload["skipped"] = True
+        payload["skip_reason"] = line
+        return cls(ok=True, records_written=0, error="", detail=payload)
+
 
 # ── The durable status record ───────────────────────────────────────────────
 
