@@ -190,6 +190,8 @@ from lib.daemon_runtime.gating import (  # noqa: E402
 )
 from lib.daemon_runtime.task_lifecycle import (  # noqa: E402
     TaskStatus,
+    is_terminal,
+    normalize as normalize_status,
     set_task_status,
 )
 from lib.notify import Notifier, Priority  # noqa: E402
@@ -529,6 +531,40 @@ async def dispatch_task(
     """
     title = snapshot.get("title", "(untitled)")
     current_status = snapshot.get("status")
+
+    # ── Terminal guard: a finished task is not dispatchable (ateles#1038) ────
+    #
+    # MUST come before every other path — before the ROUTED write, before the
+    # readiness gate, and before the execution gate. This used to be absent
+    # entirely: `current_status` was read on the line above and then passed to
+    # `set_task_status(..., from_status=...)` as a LABEL only, never tested. So
+    # a `task.created` event — including an SSE redelivery or a replay — re-ran
+    # finished work, and the gate's AWAITING_APPROVAL write landed on top of
+    # `done`/`completed`, manufacturing an operator decision about work that was
+    # already done.
+    #
+    # `gate_override` does NOT bypass this. That flag means "the operator
+    # approved this checkpoint", which is consent to skip the gate, not an
+    # instruction to re-run a task that has since finished — and a stale
+    # approval replaying is exactly the path where this matters most.
+    #
+    # `is_terminal` rather than `current_status in TERMINAL`: the set holds
+    # canonical values, and agents write synonyms. Testing the raw snapshot
+    # string would let every task spelled `completed` straight through
+    # (ateles#1039) — a guard that misses the most common spelling of the state
+    # it guards against is not a control.
+    #
+    # Deliberately NOT terminal: BLOCKED (operator remediation reopens it) and
+    # absent/empty (an unset status is a new task, not a finished one). Reading
+    # either as terminal would stop the dispatcher dispatching live work, which
+    # is a larger outage than the queue noise this closes.
+    if is_terminal(current_status):
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} is already terminal "
+            f"(status={normalize_status(current_status)!r}, trigger={trigger}) "
+            "— not dispatching; finished work is not re-opened"
+        )
+        return
 
     # The snapshot read fine, so any prior unreadable streak for this task is
     # over; forget it so a later blip starts counting from zero rather than
