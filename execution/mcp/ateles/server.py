@@ -168,13 +168,26 @@ def _post(path: str, body: dict) -> dict | None:
     return _request("POST", path, body=body)
 
 
-def _retrieve_entities(
+def _retrieve_page(
     entity_type: str,
     search: str | None = None,
     snapshot_filters: dict | None = None,
     limit: int = 100,
     include_snapshots: bool = True,
-) -> list[dict]:
+    cursor: str | None = None,
+) -> dict | None:
+    """One page, WITH the response's own `total` and `next_cursor` preserved.
+
+    `_retrieve_entities` throws both away and hands back a bare list, which is
+    how `list_checkpoints` came to report a 50-item page as a 372-deep queue
+    (ateles#1037). A caller that needs to know how much it did NOT receive must
+    use this; a caller that genuinely wants "up to N" can keep using the list
+    form.
+
+    Returns None — distinct from an empty page — when the read FAILED. Those
+    must not be spelled the same way: a failed read reported as an empty queue
+    tells the operator they have nothing to decide.
+    """
     body: dict[str, Any] = {
         "entity_type": entity_type,
         "limit": limit,
@@ -184,9 +197,27 @@ def _retrieve_entities(
         body["search"] = search
     if snapshot_filters:
         body["snapshot_filters"] = snapshot_filters
+    if cursor:
+        body["cursor"] = cursor
     # POST /entities/query — NOT /retrieve, which 404s. The GET /entities list
     # endpoint does not exist either; see lib/daemon_runtime/agent_loader.py.
-    data = _post("/entities/query", body)
+    return _post("/entities/query", body)
+
+
+def _retrieve_entities(
+    entity_type: str,
+    search: str | None = None,
+    snapshot_filters: dict | None = None,
+    limit: int = 100,
+    include_snapshots: bool = True,
+) -> list[dict]:
+    data = _retrieve_page(
+        entity_type,
+        search=search,
+        snapshot_filters=snapshot_filters,
+        limit=limit,
+        include_snapshots=include_snapshots,
+    )
     if data is None:
         return []
     return data.get("entities", [])
@@ -503,12 +534,54 @@ def _action_blast_radius(action_type: str, policy: dict) -> str:
     return "never"
 
 
-def _list_checkpoints() -> dict:
-    entities = _retrieve_entities(
+#: Briefs returned per call. The queue is 372 deep as of 2026-09-16, so a
+#: single response cannot both carry every brief and stay a readable tool
+#: result. The cap is therefore kept — what changed is that the response now
+#: STATES what it left out and how to reach it, instead of reporting the page
+#: as the queue.
+CHECKPOINT_PAGE_SIZE = 50
+
+
+def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> dict:
+    """Pending checkpoint briefs — the operator's decision queue.
+
+    Reports the queue's TRUE depth (`total`) separately from what this page
+    carries (`returned`), and hands back a `next_cursor` whenever there is more.
+
+    The defect this closes (ateles#1037): the old version passed a hardcoded
+    `limit=50`, never a cursor, and returned `{"count": len(checkpoints)}` —
+    the page size under a name that reads as the queue size. Measured against
+    prod on 2026-09-16 it reported `count: 50` against a real 372, and because
+    entities come back by `entity_id` ascending and ids are immutable, the same
+    50 reappeared on every call: 322 briefs were unreachable through this tool
+    no matter how often it was called.
+
+    A truncated list that cannot be distinguished from a complete one is worse
+    than no list, because it is acted on with confidence. That is why
+    `truncated` is stated explicitly rather than left to be inferred from
+    comparing two numbers.
+    """
+    page_size = limit or CHECKPOINT_PAGE_SIZE
+    data = _retrieve_page(
         "checkpoint_brief",
         snapshot_filters={"status": {"op": "eq", "value": "awaiting_operator"}},
-        limit=50,
+        limit=page_size,
+        cursor=cursor,
     )
+
+    # A failed read must NOT be spelled the same way as an empty queue. Reported
+    # as `count: 0` it would tell the operator they have nothing to decide,
+    # which is the most dangerous output this tool can produce.
+    if data is None:
+        return {
+            "error": "could not read the checkpoint queue from Neotoma",
+            "detail": _describe_transport_error(),
+            "checkpoints": [],
+        }
+
+    entities = data.get("entities", [])
+    total = data.get("total")
+    next_cursor = data.get("next_cursor")
 
     checkpoints = []
     for ent in entities:
@@ -538,7 +611,33 @@ def _list_checkpoints() -> dict:
             "proposed_alternatives": snap.get("proposed_alternatives", []),
         })
 
-    return {"count": len(checkpoints), "checkpoints": checkpoints}
+    returned = len(checkpoints)
+    if total is None:
+        # The endpoint did not report a total. Say so rather than substituting
+        # the page size, which is the exact conflation this fix exists to end.
+        total = returned if next_cursor is None else None
+
+    result: dict[str, Any] = {
+        # The queue's real depth. Named `total` so a caller reading one field
+        # gets the alarming number, not the reassuring one.
+        "total": total,
+        # What THIS page carries. Never a synonym for the queue size.
+        "returned": returned,
+        # Retained so existing callers keep working, but aligned to `total`
+        # rather than to the page: `count` read as the queue size for months,
+        # and leaving it meaning the page would preserve the defect under its
+        # original name.
+        "count": total if total is not None else returned,
+        "checkpoints": checkpoints,
+    }
+    if next_cursor:
+        result["truncated"] = True
+        result["next_cursor"] = next_cursor
+        result["note"] = (
+            f"Showing {returned} of {total if total is not None else 'an unknown number of'} "
+            "pending checkpoints. Pass `cursor` to retrieve the next page."
+        )
+    return result
 
 
 def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
@@ -1343,13 +1442,28 @@ TOOLS = [
     Tool(
         name="list_checkpoints",
         description=(
-            "Returns all pending checkpoint_briefs (status: awaiting_operator) with "
-            "task title, assigned agent, blast radius, confidence vs threshold, and "
-            "reason pre-joined. These are the operator's decision queue."
+            "Returns a PAGE of pending checkpoint_briefs (status: awaiting_operator) "
+            "with task title, assigned agent, blast radius, confidence vs threshold, "
+            "and reason pre-joined. These are the operator's decision queue. "
+            "`total` is the queue's real depth and `returned` is how many this page "
+            "carries; when `truncated` is true, pass `next_cursor` back as `cursor` "
+            "to reach the rest. Never treat one page as the whole queue — it used to "
+            "say it returned 'all' while showing 50 of 372 (ateles#1037)."
         ),
         inputSchema={
             "type": "object",
-            "properties": {},
+            "properties": {
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque cursor from a previous response's `next_cursor`.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": f"Briefs per page (default {CHECKPOINT_PAGE_SIZE}).",
+                    "minimum": 1,
+                    "maximum": 500,
+                },
+            },
             "additionalProperties": False,
         },
     ),
@@ -1432,7 +1546,9 @@ TOOL_HANDLERS = {
     "route_task": lambda args: _route_task(
         args["task_description"], args.get("action_type")
     ),
-    "list_checkpoints": lambda args: _list_checkpoints(),
+    "list_checkpoints": lambda args: _list_checkpoints(
+        cursor=args.get("cursor"), limit=args.get("limit")
+    ),
     "resolve_checkpoint": lambda args: _resolve_checkpoint(
         args["checkpoint_id"], args["action"]
     ),
