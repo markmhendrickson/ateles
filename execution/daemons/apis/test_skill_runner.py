@@ -50,6 +50,23 @@ def _claude_only_test_router(monkeypatch, tmp_path):
     harness_router.reset_state()
 
 
+@pytest.fixture(autouse=True)
+def _default_neotoma_bearer_token(monkeypatch):
+    """Give every test a Neotoma bearer token by default.
+
+    run_skill now hard-fails (ateles#1071-analogous fix) when neither
+    `<ROLE>_NEOTOMA_TOKEN` nor `NEOTOMA_BEARER_TOKEN` resolves to a non-empty
+    string, matching the live /mcp endpoint's auth requirement. Most tests in
+    this file exercise unrelated behaviour (prompt composition, GitHub token
+    injection, dispatch diagnostics, ...) and have no reason to care about
+    token presence, so they get a harmless default here. Tests that actually
+    exercise the token-missing/empty paths (TestWriteHarnessEventTokenHandling,
+    TestNeotomaMcpConfigInjection) call monkeypatch.delenv/setenv("") inside
+    their own bodies, which runs after this fixture and overrides it.
+    """
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-default-bearer-token")
+
+
 def _make_def(
     *,
     prompt_markdown: str = "You are Gryllus, an issue worker.",
