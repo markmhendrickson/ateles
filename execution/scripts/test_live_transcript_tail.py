@@ -538,6 +538,61 @@ def test_transcribe_slice_always_passes_no_store_and_no_diarize(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# Case 9 — banner stripper regression (#777 / PR #1035 QA)
+#
+# docs/foundation/principles.md §4: these must go red if _extract_transcript_text
+# is reverted. Local whisper-cli banners (KEY=VALUE + indented progress) and the
+# legacy OpenAI prefixes must not leak into the transcript the filter judges.
+# --------------------------------------------------------------------------
+
+
+def test_extract_transcript_text_strips_key_value_and_indented_banners():
+    stdout = "\n".join(
+        [
+            "TRANSCRIPTION_BACKEND_SELECTED=local",
+            "TRANSCRIPTION_ENGINE=whisper-cli",
+            "    Model: ggml-base.en.bin",
+            "    Running whisper-cli on /tmp/slice.wav…",
+            "hello from the mic",
+        ]
+    )
+    assert lt._extract_transcript_text(stdout) == "hello from the mic"
+
+
+def test_extract_transcript_text_preserves_legacy_openai_banner_strip():
+    stdout = "\n".join(
+        [
+            "Transcribing audio file: /tmp/slice.wav",
+            "Warning: File extension does not match audio format",
+            "legacy transcript line",
+        ]
+    )
+    assert lt._extract_transcript_text(stdout) == "legacy transcript line"
+
+
+def test_transcribe_slice_uses_extractor(tmp_path):
+    """Pin the call site: transcribe_slice must run banners through the helper."""
+    wav = tmp_path / "slice.wav"
+    wav.write_bytes(b"x")
+    banner_stdout = "\n".join(
+        [
+            "TRANSCRIPTION_BACKEND_SELECTED=local",
+            "TRANSCRIPTION_ENGINE=whisper-cli",
+            "    Model: ggml-base.en.bin",
+            "    Running whisper-cli on /tmp/slice.wav…",
+            "clean transcript only",
+        ]
+    )
+    proc = MagicMock(returncode=0, stderr="", stdout=banner_stdout)
+
+    with patch.object(lt.subprocess, "run", return_value=proc):
+        ok, payload = lt.transcribe_slice(wav, env={"PATH": "/usr/bin"})
+
+    assert ok is True
+    assert payload == "clean transcript only"
+
+
+# --------------------------------------------------------------------------
 # Case 10 — build_subprocess_env() credential scope (#558 legal review)
 #
 # The tailer hands an env to the transcribe_audio.py subprocess. The
