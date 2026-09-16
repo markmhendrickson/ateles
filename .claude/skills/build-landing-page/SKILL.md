@@ -19,11 +19,11 @@ entity_id: ent_0a0a481fb03a8fd9ea292bcb
 
 # build-landing-page
 
-Produce a landing page through eight explicit stages, each writing ONE durable
-Neotoma entity that the later stages retrieve. The page is the output of stage
-8 only. Stages 1-7 produce the decisions the page is built from, and each one
-is retrievable afterwards, so a second page, a revision, or a different session
-reads the decision rather than re-deriving it.
+Build a landing page through explicit stages, each writing ONE durable Neotoma
+entity that the later stages retrieve. The page is the output of the final
+stage only. The earlier stages produce the decisions the page is built from,
+and each is retrievable afterwards, so a second page, a revision, or a
+different session reads the decision rather than re-deriving it.
 
 The constraint this skill exists to enforce: **separating the steps makes each
 one rigorous, instead of winging a whole site and all its design elements in
@@ -31,122 +31,186 @@ one pass.** A run that jumps from raw material to finished HTML has skipped the
 skill even if the HTML is good, because nothing downstream can tell which
 decisions were made or revisit one of them in isolation.
 
+## The argument comes from elsewhere
+
+This skill EXECUTES an argument; it does not form one. Before stage 1, three
+things must already be settled and stored, and this skill consumes them:
+
+| What | Where it comes from | Entity |
+|---|---|---|
+| Category noun, retired nouns, parent problem, placement rule | `/define-category`, else the product's decision register | `category_definition` or a register decision |
+| ICP with anti-profile | `/frame-product-argument` | `target_persona` |
+| The incumbent and its defects | `/frame-product-argument` | `research_finding` |
+| Chronic vs acute pain, with the lead marked | `/frame-product-argument` | `analysis` |
+
+**If any is missing, run `/frame-product-argument` first.** Do not derive them
+here. A page is a surface; deriving the argument inside the surface is how two
+surfaces end up making different arguments for the same product.
+
+Where the register encodes `decisions` as a JSON-encoded STRING, parse it
+rather than reading it as an object — reading a JSON string as a dict is a
+known false zero that yields nothing and looks like an empty decision set.
+
 ## When to use
 
 - A new landing page or product homepage is needed.
-- An existing landing page needs a rebuild whose decisions should be inspectable.
+- An existing landing page needs a rebuild whose decisions should be
+  inspectable.
 - Someone asks why a page is structured the way it is — the stage entities are
   the answer, and a missing stage entity is the finding.
 
 Do NOT use for: a one-off outreach or proposal page for a named recipient
-(`/draft-rendered-page` owns that genre), or for creating the repository and
-deployment path a site lives in (`/create-website` owns that).
+(`/draft-rendered-page` owns that genre), creating the repository and deploy
+path a site lives in (`/create-website` owns that), or rolling a settled
+category across existing public surfaces (`/apply-category` owns that).
 
 ## Relationship to the skills that already exist
 
-This skill is deliberately separate from the three adjacent ones, and does not
-replace any of them.
-
 | Skill | Owns | Why this is not that |
 |---|---|---|
-| `/create-website` | Repo creation, submodule placement, deploy wiring | Scaffolding — WHERE a site lives, not how it is designed. It says nothing about ICP, CTA, structure, or copy. A page built here may later be placed by that skill. |
-| `/draft-rendered-page` | A visual page for ONE named recipient | Single-recipient outreach, grounded in that recipient's own words and palette. A landing page addresses a SEGMENT, and its success is a conversion rate, not one reply. Its theming/contrast/mobile rules still apply and are referenced, not duplicated. |
+| `/define-category` | The category noun, parent problem, headline, competitor boundary, ICP + anti-profile, standing copy rules | Upstream. Its definition is READ here and never relitigated. |
+| `/frame-product-argument` | ICP, incumbent defects, chronic/acute pain | Upstream. This skill's predecessor; it stores the argument this page executes. |
+| `/apply-category` | Auditing every public surface against a settled category, filing one task per surface | A finished page becomes a new surface for it. It proposes copy changes; it does not design. |
+| `/draft-rendered-page` | A visual page for ONE named recipient — and the canonical mechanics for ALL `rendered_page` output | Single-recipient outreach grounded in that recipient's own words and palette. A landing page addresses a SEGMENT and is judged by a conversion rate, not one reply. Its mechanics are REFERENCED here, never restated. |
+| `/create-website` | Repo creation, submodule placement, deploy wiring | Scaffolding — WHERE a site lives, not how it is designed. |
 | `/deploy-website` | Sync, export, cache, push, verify for one existing site | Deployment of an already-designed site. |
-| `/define-category` | The category noun, parent problem, ICP + anti-profile | UPSTREAM of stage 1. When a `category_definition` exists for this product, stage 1 CONSUMES its ICP rather than re-deriving one. |
 
 If the run needs scaffolding or deployment, invoke those skills; do not
 reimplement them here.
 
 ## The entity contract
 
-Every stage writes one entity and links it. The contract is the same at each
-stage, and the stage is not complete until all four hold:
+Every stage writes one entity and links it. The stage is not complete until all
+five hold:
 
 1. **Check for an existing upstream entity FIRST.** Every stage accepts a
-   supplied or already-settled entity instead of deriving its own. Retrieve by
-   id when one is named; otherwise `retrieve_entities` with the stage's
-   `entity_type` and a search for the product. If a current one exists, READ IT
-   and move on. Re-deriving a settled decision is the failure this skill exists
-   to prevent — a stage that silently re-decides something already ruled makes
-   the page contradict the record.
-2. **Check the DECLARED fields before storing.** `describe_entity_type` (or an
-   existing entity of that type) tells you what the schema declares. Undeclared
-   fields are accepted by `/store` and silently routed to `raw_fragments` —
-   the write succeeds and the field is not on the snapshot. Put content in a
-   declared field or nowhere.
-3. **Read the write back.** After storing, retrieve the entity and assert the
-   specific field you wrote holds the value you wrote. A 2xx and a
-   `success: true` are not evidence. State in the stage report which field was
-   read back.
-4. **Link it.** `PART_OF` the plan for this work; `REFERS_TO` each upstream
-   stage entity it consumed. The links are what let stage 8 — or a later
-   session — walk the chain instead of guessing which ICP a page was built for.
+   supplied or already-settled entity instead of deriving its own. If a current
+   one exists, READ IT and move on.
+2. **Check the DECLARED fields before storing.** Undeclared fields are accepted
+   by `/store` and silently routed to `raw_fragments` — the write succeeds and
+   the field is not on the snapshot. Put content in a declared field or nowhere.
+3. **Read the write back** and assert the specific field holds the value you
+   wrote. A 2xx and a `success: true` are not evidence. State in the stage
+   report which field was read back.
+4. **A write that reports FAILURE has not necessarily failed.** Where a store
+   persists the entity and then errors, recover by read-back plus `correct` —
+   never re-create, which produces a duplicate under a canonical-name match.
+5. **Link it.** `PART_OF` the plan for this work; `REFERS_TO` each upstream
+   entity consumed. The links are what let the build — or a later session —
+   walk the chain instead of guessing which ICP a page was built for.
 
 Stop the run if a stage's entity cannot be verified. A later stage reading a
 field that silently landed in `raw_fragments` reads nothing and proceeds
 confidently, which is worse than stopping.
 
-## The stages
+**Each stage entity records which agent role reviews it,** in a declared prose
+field, as a line reading `Reviewed by: <role>`. This skill produces the
+artifact and names its reviewer; it does not assert ownership of the artifact
+type. Resolve the role from the swarm roster by ROLE, never by a hardcoded
+agent name.
 
-Stage order is the dependency order. Stage 7 is stated last by most people
-describing this process, because design and assets feel like the finishing
-touch — but they are an INPUT to the build, not part of it. Placing them at 7
-means stage 8 is pure assembly with every input already decided. A run that
-reaches stage 8 and then goes looking for a logo has moved a decision into the
-build, which is the thing the staging is for.
+## Category reinforcement — a standing constraint, not a stage
 
-### Stage 1 — ICP
+The category is settled once per product and every page reinforces it. It is a
+constraint applied at three points rather than a stage of its own, because a
+stage would invite a run to re-derive a noun that has already been ruled.
 
-**Entity type: `target_persona`.** Declared fields include `name`, `archetype`,
-`company_type`, `stack`, `stage`, `core_jtbd`, `trigger_moment`,
-`messaging_good`, `messaging_bad`, `ideal_entry_point`, `one_line_summary`.
+**The category is READ, never re-derived.** Retired nouns are retired: a noun
+the definition or register lists as superseded may not appear on the page, in
+any inflection, however well it reads.
 
-Determine who the page is for, and equally who it is NOT for. The anti-profile
-is what makes the ICP usable: without it every later stage can rationalize any
-copy as on-target.
+| Stage | Check |
+|---|---|
+| 1 — Template | The structure may not bury the noun. Whatever placement rule the source carries (for example: the hero states the PROBLEM and the noun sits in sub-headline, nav, and footer) constrains `section_order` and `section_guidance`. Record which decision key the template honors. |
+| 2 — Content specification | The drafted copy carries the noun where the placement rule puts it, with its article when the decision specifies one, and contains no retired noun. |
+| 5 — Build | FAIL the build on any retired noun found in the assembled page, and assert the current noun is present in its required positions. This is the mechanical check; the two above are authoring checks, and a check that only ever runs at authoring time does not bind. |
 
-**Consuming an existing decision.** In order of preference:
+## Stage 1 — Template
 
-1. A `target_persona` entity for this product already exists → use it.
-2. A `category_definition` entity exists (from `/define-category`) → its ICP +
-   anti-profile fields are the ICP. Project them into a `target_persona` and
-   record in `messaging_bad` that the anti-profile came from there, with the
-   source entity id. Do not re-argue it.
-3. A plan or decision register has settled it → read the decision and project
-   it, citing the decision key and plan id. A settled ICP is settled; this
-   skill reads rulings, it does not reopen them.
-4. Nothing exists → derive one, from `product_profile`, the repository, prior
-   `icp_signal` / `customer_development_note` entities, and real user
-   conversations. Derived, mark `stage` or `one_line_summary` so it is legible
-   as derived rather than ruled.
+**Entity type: `rendered_page_template`.** Declared: `name`, `description`,
+`purpose`, `core_rule`, `section_order`, `section_guidance`, `anti_patterns`,
+`mechanical_rules`, `references`, `example_entity_ids`, `status`, `notes`.
+`name` is required and is the canonical name.
 
-Where a decision register encodes the ICP as a JSON-encoded STRING field, parse
-it rather than reading it as an object. Reading a JSON string as a dict is a
-known false-zero: it yields nothing and looks like an empty decision set.
+This type exists exactly for this: it was built so structural lessons live as
+data rather than as prose buried in a skill file. Extend it; do not mint a
+parallel template type.
 
-### Stage 2 — CTA and success metric
+The template holds the structural DECISIONS, not the content. It says what
+content to show, in what order, in what format — never what that content says.
+The test: the template must be usable for a second product with a different
+message. If a section's guidance only makes sense for this one product, copy
+has leaked into the template and belongs in stage 2.
 
-**Entity type: `cta`.** Only `name`, `title`, and `content` are declared, so
-put the structured detail in `content` as labelled prose. Do not invent
-undeclared fields; they will not land.
+- `core_rule` — the single organizing principle, derived from the CTA and the
+  converting pain the upstream pain analysis marked as leading. Usually a
+  statement about what the reader must be able to do on first screen.
+- `section_order` — top to bottom.
+- `section_guidance` — per section: what belongs, what does not, and the
+  rationale tracing to an upstream artifact or a stage-3 finding.
+- `anti_patterns` — the structural mistakes this template prevents, each with
+  why it fails THIS reader.
+- `references` — point at rules that still apply and are deliberately not
+  duplicated, notably `/draft-rendered-page`'s theming, contrast, and mobile
+  rules.
 
-One primary CTA for that ICP. The CTA and the success metric are the same
-decision: the metric is the conversion rate on that CTA. State in `content`:
+Apply the category check above.
 
-- The CTA itself, in the words that appear on the button.
+## Stage 2 — CTA and content specification
+
+**Entity types: `cta` and `specification`.** On `cta` only `name`, `title`, and
+`content` are declared, so structured detail goes in `content` as labelled
+prose. On `specification`: `title`, `name`, `content`, `status`.
+
+**The CTA and its success metric are one decision:** the metric is the
+conversion rate on that CTA. State in `cta.content`:
+
+- The CTA in the words that appear on the button.
 - The ONE metric the page is judged by, and how it is measured.
-- The commitment the CTA asks for, and why the ICP will pay it at this stage.
-  A CTA asking for more than the ICP will give is the most common reason a
-  page converts at zero, and it is invisible unless stated here.
-- Secondary CTAs, explicitly subordinate. If two CTAs are co-primary, the page
-  has no CTA — force the choice at this stage, not in the build.
+- The commitment it asks for, and why this ICP will pay it at this stage. A CTA
+  asking more than the ICP will give is the most common reason a page converts
+  at zero, and it is invisible unless stated here.
+- Secondary CTAs, explicitly subordinate. If two are co-primary, the page has
+  no CTA — force the choice here, not in the build.
 
-### Stage 3 — Best-practice research
+Choose the CTA against the INCUMBENT, not in the abstract: the reader is
+already doing something, and the CTA asks them to stop doing it. A CTA chosen
+without reading the incumbent artifact asks for a switch the reader has no
+reason to make.
+
+**The specification is a separate artifact from the template.** That separation
+is load-bearing: it lets the message change without renegotiating the
+structure, and the structure change without rewriting every line.
+
+For each section the template names, the spec gives the actual content — the
+headline, sub-headline, body, proof, button label. Write the words, not
+descriptions of the words. "A headline conveying reliability" is not a
+specification; it defers the hardest work to the build, where it gets done
+fastest and worst.
+
+Bind the spec to the upstream decisions:
+
+- The lead pain is the one the pain analysis marked as leading, not the one
+  that was easiest to write.
+- Anchor the messaging against the incumbent and its named defects — the reader
+  is comparing this product to what they already do, whether or not the page
+  acknowledges it. Claim only the defects the incumbent artifact says the
+  product resolves.
+- Every claim traceable to something the product actually does. Check the
+  repository; do not write a capability from memory.
+- Copy consistent with the ICP's `messaging_good` / `messaging_bad`.
+- Apply the category check above, plus any standing copy rules the definition
+  carries — a retired framing, a banned phrase, a required article.
+- Retrieve `brand_voice` and the relevant `style_guide` and apply them on the
+  way in, not as a later editing pass.
+
+## Stage 3 — Best-practice research
 
 **Entity type: `research_finding`.** Declared: `title`, `subject`, `method`,
 `summary`, `conclusion`, `confidence`, `sources`, `options`, `researched_date`.
 Note several legacy fields on this type from an earlier analysis-specific use;
-ignore them.
+ignore them. This is the same registered type the upstream incumbent artifact
+uses; the two are distinguished by `subject` and `title`, not by a new type.
 
 Research two things together, because neither answers the question alone:
 
@@ -158,206 +222,172 @@ Research two things together, because neither answers the question alone:
 
 Put each source in `sources` and be honest in `confidence` about what is
 established versus inferred. A convention with no evidence behind it is a
-preference; label it as one so stage 4 can weigh it.
+preference; label it as one so the template can weigh it.
 
-### Stage 4 — Template
+## Stage 4 — Input-context inventory and design system
 
-**Entity type: `rendered_page_template`.** Declared: `name`, `description`,
-`purpose`, `core_rule`, `section_order`, `section_guidance`, `anti_patterns`,
-`mechanical_rules`, `references`, `example_entity_ids`, `status`, `notes`.
-`name` is required and is the canonical name.
+**Inventory entity type: `analysis`,** with the product named in `title`.
 
-This type exists exactly for this: it was built so structural lessons live as
-data rather than as prose buried in a skill file. Extend it; do not mint a
-parallel template type.
-
-The template holds the best-practice DECISIONS, not the content. It says what
-content to show, in what order, in what format — never what that content says.
-The test: the template must be usable for a second product with a different
-message. If a section's guidance only makes sense for this one product, the
-copy has leaked into the template and belongs in stage 5.
-
-- `core_rule` — the single organizing principle, derived from the CTA. Usually
-  a statement about what the reader must be able to do on first screen.
-- `section_order` — top to bottom.
-- `section_guidance` — per section: what belongs, what does not belong, and the
-  rationale tracing back to a stage 3 finding or the stage 2 CTA.
-- `anti_patterns` — the structural mistakes this template prevents, each with
-  why it fails THIS reader.
-- `references` — point at rules that still apply and are deliberately not
-  duplicated, notably the `/draft-rendered-page` theming, contrast, and mobile
-  rules, and the `style_guide` for rendered-page visual defaults.
-
-### Stage 5 — Content specification
-
-**Entity type: `specification`.** Declared: `title`, `name`, `content`,
-`status`. The spec body goes in `content`.
-
-Drafted SEPARATELY from the template, as its own artifact. This separation is
-load-bearing: it is what lets the message change without renegotiating the
-structure, and the structure change without rewriting every line.
-
-For each section the template names, the spec gives the actual content — the
-headline, the sub-headline, the body, the proof, the button label. Write the
-words, not descriptions of the words. "A headline conveying reliability" is not
-a specification; it defers the hardest work to the build, where it gets done
-fastest and worst.
-
-Bind the spec to the upstream decisions:
-
-- Every claim traceable to something the product actually does. Check the
-  repository; do not write a capability from memory.
-- Copy consistent with the ICP's `messaging_good` / `messaging_bad`.
-- Any standing copy rule from the decision register applied here — a retired
-  framing, a banned phrase, a required article on a category noun. These are
-  usually recorded as decisions and are invisible unless read.
-- Retrieve `brand_voice` and the relevant `style_guide` and apply them on the
-  way in, not as a later editing pass.
-
-### Stage 6 — Input-context inventory
-
-**Entity type: `analysis`,** with the product named in `title`. `analysis` is
-the general-purpose type for a derived body of findings; no landing-page
-specific type is needed and none should be minted.
-
-**Declared fields (write + read-back homes — do not invent others):**
+**Declared field homes — do not invent others:**
 
 | Payload | Declared field | Shape |
 |---|---|---|
-| Locator inventory | `source_artifacts` | `array` — each entry a locator string: entity id, repo path, or URL |
-| Surfaces searched | `sources_audited` | `array` — named surfaces/repos/queries that were checked |
-| Negative findings / what was not found | `gaps` | `string` — explicit "searched X, did not find Y"; empty only if nothing was missing |
-| One-line purpose of this inventory | `summary` | `string` — what stage 8 should use this inventory for |
-| Product name in title | `title` | already stated |
+| Locator inventory | `source_artifacts` | `array` — each entry a locator: entity id, repo path, or URL |
+| Surfaces searched | `sources_audited` | `array` |
+| Negative findings | `gaps` | `string` — explicit "searched X, did not find Y" |
+| One-line purpose | `summary` | `string` — what the build should use this for |
 
-Locate ALL source context and record WHERE each thing is in those fields, so
-stage 8 and every later run read the inventory instead of re-searching:
+Locate ALL source context and record WHERE each thing is, so the build and
+every later run read the inventory instead of re-searching: the repository
+(README, docs, positioning docs, the code itself where a claim depends on what
+it does); everything Neotoma already holds about the product; the current live
+page and what it claims today; and product asset locators (logos, marks,
+screenshots).
 
-- The repository: README, docs, positioning docs, comparison pages, the code
-  itself where a claim depends on what it does.
-- Everything Neotoma already holds about the product: `product_profile`,
-  prior `analysis`, `research_finding`, `icp_signal`,
-  `customer_development_note`, `feedback`, decision registers and plans.
-- Live surfaces: the current page, if one exists, and what it currently claims.
-- Product asset locators (logos, marks, screenshots) when stage 7 will
-  *consume* a shared design system — those assets live here in
-  `source_artifacts`, not on the shared DS entity.
+Do not invent undeclared keys (`inventory`, `locators`, `context_map`) — they
+land in `raw_fragments`.
 
-Do not invent undeclared keys (`inventory`, `locators`, `context_map`). They
-land in `raw_fragments` and fail contract rule 2.
+**Read-back:** assert `source_artifacts` length >= 1, or document an empty
+inventory in `gaps` and stop if the build cannot proceed without sources.
 
-**Read-back (contract §3):** assert `source_artifacts` length ≥ 1 (or document
-an empty inventory in `gaps` and stop if stage 8 cannot proceed without
-sources). Assert `gaps` is present when any expected surface was missing.
-State those field names in the stage report.
+**Design system entity type: `design_system`.** Declared:
+`design_system_name`, `scope`, `color_palette`, `type_scale`,
+`spacing_system`, `border_radius`, `positioning_principles`, `anti_patterns`,
+`status`, `content`.
 
-### Stage 7 — Design system and assets
+Almost always a CONSUME, not a create: retrieve the existing `design_system`
+for these surfaces and use it. Create one only when none exists, and say so.
 
-**Entity type: `design_system`.** Declared: `design_system_name`, `scope`,
-`color_palette`, `type_scale`, `spacing_system`, `border_radius`,
-`positioning_principles`, `anti_patterns`, `status`, `content`.
+Asset locators bifurcate by path. Do not invent undeclared keys
+(`asset_locators`, `assets`, `logo_paths`), and do NOT use the `asset` entity
+type — despite the name it is a FINANCIAL type (it declares
+`estimated_value_usd`), so storing a logo there is a type error that makes both
+uses unqueryable.
 
-Almost always this is a CONSUME, not a create: retrieve the existing
-`design_system` for these surfaces and use it. Create one only when none
-exists, and say so.
+- **CREATE path** (none exists): put asset locators in the declared `content`
+  field as labelled prose under an `Assets (locators only):` heading, one line
+  per asset with what the build uses it for. Palette, type, and spacing stay in
+  their declared object fields. Read-back: assert `content` contains that
+  heading and at least one locator.
+- **CONSUME path** (usual): consume-only for visual tokens. Do NOT `correct`
+  asset locators onto a shared entity — it has no declared locator home and
+  must not be polluted with product-specific logos. Record product asset
+  locators in the inventory's `source_artifacts` instead, and state in the
+  stage report where the build should read them.
 
-Asset locators bifurcate by path — do not invent undeclared keys
-(`asset_locators`, `assets`, `logo_paths`), and do NOT use the financial
-`asset` entity type (it declares `estimated_value_usd`).
+Design and assets are an INPUT to the build, not part of it. A run that reaches
+the build and then goes looking for a logo has moved a decision into the build,
+which is what the staging exists to prevent.
 
-**Path A — CREATE a product-scoped `design_system` (none exists):**
-Put asset locators in the declared string field **`content`** as labelled
-prose (same pattern as stage 2 → `cta.content`):
+## Stage 5 — Build
 
-```
-Assets (locators only):
-- logo: <entity_id|path|URL> — <one line: what stage 8 uses it for>
-- mark: …
-- screenshot: …
-```
+**Entity type: `rendered_page`.** Declared: `title`, `slug`, `html_body` (and
+`custom_css` where used).
 
-Read-back: assert `content` contains the `Assets (locators only):` section and
-at least one locator string written. Palette/type/spacing stay in their
-declared object fields (`color_palette`, `type_scale`, `spacing_system`, …).
+Combine the stage 2 specification, the stage 1 template, the stage 4 design
+system, and the stage 4 inventory into the page. Read fields by name — do not
+re-search or guess keys.
 
-**Path B — CONSUME an existing shared `design_system` (usual case):**
-Consume-only for visual tokens (palette/type/spacing). **Do not** `correct`
-asset locators onto the shared entity — it has no declared locator home and
-must not be polluted with product-specific logos. Record product asset
-locators in **stage 6** `source_artifacts` (note role in the locator line or
-in `summary`), and state in the stage 7 report: "assets: see stage 6 entity
-`<id>` field `source_artifacts`". Stage 8 reads tokens from the stage 7 entity
-and asset locators from stage 6.
+This stage makes NO new decisions. If a decision is needed here, an earlier
+stage was incomplete — go back and correct that stage's entity, then resume. A
+decision made inside the build is invisible to everything downstream.
 
-Note the ordering: the operator's own description puts this last, because
-design feels like the finishing pass. It is placed at 7 because it is an INPUT
-to stage 8. Everything stage 8 needs must exist before stage 8 starts.
+Apply the category check above before storing: fail on any retired noun, and
+assert the current noun is present where the placement rule puts it.
 
-### Stage 8 — Build
+### `rendered_page` mechanics are owned elsewhere — read them there
 
-**Entity type: `rendered_page`.** Declared: `title`, `slug`, `html_body`
-(and `custom_css` where used).
+`/draft-rendered-page` is the canonical authority for ALL `rendered_page`
+output: how a page is written, served, themed, and shared. Its rules are also
+expressed as machine-readable data on the `conformance_policy` entity it names,
+which drives both the authoring path and the share-time path so the two cannot
+drift.
 
-Combine the stage 5 content, the stage 4 template, the stage 7 design system,
-and the stage 6 inventory into the page. Read fields by name — do not re-search
-or guess keys:
+**This skill does not restate those rules, and where the two ever disagree,
+`/draft-rendered-page` wins.** One operational fact has one home; a second copy
+in a second skill is the parallel mechanism the standing rules forbid, and it
+is exactly how the two drift.
 
-- Stage 6: read `source_artifacts` (+ `gaps` / `summary`).
-- Stage 7 create-path: read `content` for assets + palette/type/spacing fields.
-- Stage 7 consume-path: read palette/type/spacing from the DS entity; assets
-  from stage 6 `source_artifacts`.
+Read from `/draft-rendered-page` before building: theming and the light/dark
+requirement, contrast, mobile responsiveness, the tokenized cross-link rule,
+and the CSP capability note. **Do not reason about any of them from memory** —
+the "no JavaScript" belief in particular was verified WRONG against the live
+CSP and corrected there, which is precisely why this skill points at that skill
+rather than carrying a snapshot of it.
 
-This stage makes NO new decisions. If a decision is needed here, the
-corresponding stage was incomplete — go back and correct that stage's entity,
-then resume. A decision made inside the build is invisible to everything
-downstream.
+### What this stage adds, which is not in the sibling skill
 
-Mechanics, verified and non-obvious:
+The two calls do different jobs, and conflating them is the failure worth
+naming:
 
-- **Updating an existing page: use `correct` on `html_body`, never
-  `publish_rendered_page`.** On an existing entity `publish_rendered_page` can
-  return success and write nothing — `created:false`, provenance unchanged,
-  observation count unmoved — including with a fresh idempotency key. Hosted
-  instances have also served the previous bytes after a successful publish.
-- **Verify by fetching the page back** and checking the byte count moved and
-  that a known string from the new copy is present. A success response with a
-  stale or blank body is a known failure mode, not a hypothetical one.
-- **No JavaScript.** Hosted rendered pages are sandboxed and strip it. Inline
-  SVG only.
-- **Mobile responsive from the first draft,** and both light and dark themes.
-- Keep the page's entity id stable across revisions so the URL does not change.
+- **Updating the body of an existing page is `correct` on `html_body`** (with
+  `custom_css` in the same pass when both change). Editing the body this way
+  does not change or invalidate an existing guest token — the token is scoped
+  to the page, not to a body revision — so a page that already has a share link
+  keeps it across a rebuild.
+- **`publish_rendered_page` is the create-or-publish path that mints the guest
+  token and returns the shareable URL.** Call it when the page needs a share
+  link it does not yet have, or when the link must be re-surfaced. It is
+  MCP-only: there is no REST mount, so a REST probe returning 404 is the
+  designed behaviour, not evidence the route is broken or undeployed.
+- **Neither call is banned and neither substitutes for the other.** Do not read
+  "use `correct`" as "never publish", and do not read "publish mints the link"
+  as "publish is how you update the body."
 
-Close the run by reporting, for each stage, the entity id and whether it was
-consumed or created.
+**Known failure mode, which is why verification below is mandatory:** on an
+existing entity `publish_rendered_page` has returned success while writing
+nothing — `created:false`, provenance unchanged, observation count unmoved,
+including with a fresh idempotency key — and hosted instances have served the
+previous bytes after a successful publish. That is a reason to VERIFY the
+effect, not a reason to avoid the call.
 
-## Migrating to a multi-agent workflow
+**Verify the effect, not the response.** After any write, fetch the page back
+and assert the byte count moved and that a known string from the new copy is
+present. A success response with a stale or blank body is a known failure, not
+a hypothetical one. When a share link was minted or re-surfaced, fetch that URL
+unauthenticated and assert it serves 200. Inspect any `conformance_warnings`
+the publish call returns and treat a non-empty list as must-fix before
+surfacing the page.
 
-This is ONE skill run by ONE agent, sequentially, because the foundation for
-explicit steps owned by different agents is not in place yet. The stages are
-structured so that migration needs no restructuring:
+**Keep the page's entity id stable across revisions** so the URL does not
+change. A rebuild corrects the existing entity; it does not create a second one.
+
+## Closing the run
+
+Report, for each stage: the entity id, whether it was consumed or created, the
+declared field read back, and the reviewing role recorded. Name the upstream
+argument entities consumed and how the category resolved.
+
+When the page should now be reflected across other public surfaces,
+`/apply-category` is the successor.
+
+## Migrating to a multi-agent chain
+
+This is ONE skill run by ONE agent, sequentially. The stages are structured so
+migration needs no restructuring:
 
 - Each stage has exactly one input contract (named upstream entities) and one
   output contract (one entity of a named type, verified and linked). That pair
   is already a step declaration.
 - No stage reads another stage's working state — only its committed entity. So
-  a stage can move to a different agent, a different process, or a different
-  machine without changing what any other stage does.
+  a stage can move to a different agent, process, or machine without changing
+  what any other stage does.
 - Stage boundaries are the natural gate points. A stage whose entity is stored
   and read back is a step whose exit condition is checkable by something other
   than the agent that ran it.
 
 To migrate: declare each stage a step owned by a role, with the stage's entity
 type as its declared output and the upstream entity ids as its declared inputs.
-The handoff is the entity, which is why every stage stores one even when the
-same agent continues to the next. Running the stages in one agent must not
+The artifact is what passes between steps, which is why every stage stores one
+even when the same agent continues. Running the stages in one agent must not
 become a reason to let one stage pass state to the next in conversation — that
 is the coupling that would make the migration a rewrite.
 
 ## Scope rules
 
-- Skill prompts are public and PII-free. Describe the role generically;
-  resolve product, operator, locale, and brand specifics from context entities
-  at runtime. No client identifiers, no operator data, no hardcoded hosts.
+- Skill prompts are public and PII-free. Describe the role generically; resolve
+  product, operator, locale, and brand specifics from context entities at
+  runtime. No client identifiers, no operator data, no hardcoded hosts.
 - Where a context entity is missing, degrade safely or surface a blocker. Never
   silently substitute a default — a page built on an invented ICP is worse than
   a stopped run, because nothing marks it as invented.
