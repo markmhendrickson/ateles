@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 HOOK = str(Path(__file__).with_name("gh_identity_guard.py"))
 
 BLOCK = [
@@ -59,52 +61,43 @@ def run(command, tool="Bash"):
     return p.returncode
 
 
-def main():
-    failures = []
-    print("=== SHOULD BLOCK (expect 2) ===")
-    for label, cmd in BLOCK:
-        rc = run(cmd)
-        ok = rc == 2
-        print(f"  [{'ok' if ok else 'FAIL'}] exit={rc}  {label}")
-        if not ok:
-            failures.append(label)
+@pytest.mark.parametrize("label,cmd", BLOCK, ids=[label for label, _ in BLOCK])
+def test_block_empty_token_mutating_gh(label, cmd):
+    assert run(cmd) == 2, label
 
-    print("\n=== SHOULD ALLOW (expect 0) ===")
-    for label, cmd in ALLOW:
-        rc = run(cmd)
-        ok = rc == 0
-        print(f"  [{'ok' if ok else 'FAIL'}] exit={rc}  {label}")
-        if not ok:
-            failures.append(label)
 
-    print("\n=== EDGE CASES (expect 0) ===")
-    edges = [
-        ("non-Bash tool", lambda: run('GH_TOKEN="" gh pr create --title x', tool="Edit")),
-        ("malformed json", lambda: subprocess.run(
-            [sys.executable, HOOK], input="not json", capture_output=True, text=True
-        ).returncode),
-        ("empty stdin", lambda: subprocess.run(
-            [sys.executable, HOOK], input="", capture_output=True, text=True
-        ).returncode),
-        ("no tool_input", lambda: subprocess.run(
-            [sys.executable, HOOK],
-            input=json.dumps({"tool_name": "Bash"}),
-            capture_output=True, text=True,
-        ).returncode),
-    ]
-    for label, fn in edges:
-        rc = fn()
-        ok = rc == 0
-        print(f"  [{'ok' if ok else 'FAIL'}] exit={rc}  {label}")
-        if not ok:
-            failures.append(label)
+@pytest.mark.parametrize("label,cmd", ALLOW, ids=[label for label, _ in ALLOW])
+def test_allow_safe_or_read_only(label, cmd):
+    assert run(cmd) == 0, label
 
-    if failures:
-        print(f"\n{len(failures)} FAILURE(S): {failures}")
-        return 1
-    print(f"\nAll {len(BLOCK) + len(ALLOW) + len(edges)} cases passed.")
-    return 0
+
+def test_non_bash_tool_is_ignored():
+    assert run('GH_TOKEN="" gh pr create --title x', tool="Edit") == 0
+
+
+def test_malformed_json_fail_open():
+    p = subprocess.run(
+        [sys.executable, HOOK], input="not json", capture_output=True, text=True
+    )
+    assert p.returncode == 0
+
+
+def test_empty_stdin_fail_open():
+    p = subprocess.run(
+        [sys.executable, HOOK], input="", capture_output=True, text=True
+    )
+    assert p.returncode == 0
+
+
+def test_missing_tool_input_fail_open():
+    p = subprocess.run(
+        [sys.executable, HOOK],
+        input=json.dumps({"tool_name": "Bash"}),
+        capture_output=True,
+        text=True,
+    )
+    assert p.returncode == 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(pytest.main([__file__]))
