@@ -17,10 +17,11 @@ Registered in `~/.claude.json` as the `ateles` server, launched via
 | `get_gate_status` | no | An issue's `gate_status`, `current_owner`, blocking gates, recent `owner_history`, and pipeline state |
 | `list_pipeline_queue` | no | What holds the issue-pipeline slot, what is queued, and how long each has waited |
 | `get_dispatch_health` | no | Dispatcher liveness, recent pipeline activity, recent dispatch failures |
+| `get_session_workboard` | no | On-demand derived read of one session digest with a caller-selected display plan; `include_history` returns its cumulative ledger |
 
 ### Read-only by construction
 
-The three observability tools never write gate state. A session advancing its own
+The four observability tools never write gate state or a second status record. A session advancing its own
 gate is the self-certification boundary the dispatcher already maintains
 (ateles#230 arch §4, and the `SELF-CERTIFICATION BOUNDARY` comment in
 `execution/daemons/apis/swarm_dispatch.py`, where even an auto-re-review never
@@ -31,6 +32,25 @@ observability handler can reach `_correct`. **Treat any diff that weakens or
 removes that test as a blocking architectural concern, not a QA nit.** A future
 mutating tool belongs behind the same operator-approval path as
 `resolve_checkpoint`, never as a free-form gate setter.
+
+`get_session_workboard` reads the existing `session_digest`, an explicit
+caller-selected display plan, and referenced task or plan snapshots. It has no
+harness argument or harness-specific configuration: a connected Claude, Codex,
+or Cursor session uses the same MCP read. It is an on-demand derived read, not
+a canonical projection or a session/authority binding. Stored task and plan
+fields render as **Recorded state**. An `active` row requires separately
+re-read live lease and observed-activity evidence; a queued row requires an
+explicit claimability result; operator-needed requires a live open checkpoint
+or gate. The table distinguishes assigned principal, lease holder, runner, and
+declared step owner rather than collapsing them into an executor.
+
+The optional history is deliberately unfiltered. The compact view can retire a
+completed item only after its verified discharge and one surface, or locally
+omit a leaf once another durable task or plan tracks its dependencies, next
+step, session context, and no remaining operator checkpoint. Local omission is
+a visibility decision only: it does not transfer a claim or assert completion.
+Email work stays live until incorporation review and Gmail send verification
+are recorded.
 
 ### Reads fail closed
 
