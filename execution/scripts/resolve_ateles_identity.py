@@ -33,13 +33,14 @@ must solve for itself:
    read, print the cached definition PLUS an explicit banner naming the
    failure and the cache's age. Cached text is never presented as current.
 
-3. Fail-open. Any unexpected error must exit 0 having printed *something*
-   usable (the cache, or nothing) rather than raising — a session that cannot
-   start is worse than one that starts on stale rules. The calling hook
-   (ateles-session-start.sh) additionally falls back to the git-tracked
-   .claude/skills/ateles/SKILL.md if this script produces no usable output at
-   all, so there are two independent layers between a Neotoma outage and a
-   session with zero identity context.
+3. Fail-open. Any unexpected error must exit 0 having printed a marked
+   fallback (cache, or the static mirror, each with a STALE IDENTITY banner)
+   rather than raising — a session that cannot start is worse than one that
+   starts on stale rules. Printing nothing is not fail-open: the calling hook
+   would then inject the mirror as if it were current. The hook
+   (ateles-session-start.sh) still banners that mirror itself when this
+   script is missing or prints only whitespace, so a missing script cannot
+   skip the marker.
 
 Design basis: docs/foundation/principles.md invariant #6 ("Extend the
 mechanism that already generalizes; do not build a parallel one" — AgentLoader
@@ -70,8 +71,8 @@ relying on the model having reported it faithfully in conversation.
 Usage:
     execution/scripts/resolve_ateles_identity.py
         Prints the resolved identity markdown to stdout and exits 0.
-        Never raises past main(); any unexpected error prints nothing and
-        exits 0 so the calling hook can fall back further.
+        Never raises past main(); an unexpected error degrades through the
+        same cache-then-mirror banner as a failed load, then exits 0.
 
 Env:
     NEOTOMA_BASE_URL, NEOTOMA_BEARER_TOKEN — read directly if set; otherwise
@@ -157,7 +158,7 @@ def _log_outcome(outcome: str, detail: str) -> None:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         row = {
             "ts": datetime.now(timezone.utc).isoformat(),
-            "outcome": outcome,  # "live" | "cached" | "failed_no_cache" | "error"
+            "outcome": outcome,  # live | warned | cached | failed_no_cache | refused | error
             "detail": detail,
         }
         with LOG_FILE.open("a") as f:
@@ -212,9 +213,57 @@ def _fallback_static_mirror_banner(reason: str) -> str:
     )
 
 
+def _refused_identity_banner(reason: str) -> str:
+    """First line contains REFUSED IDENTITY so the hook can stop before adopt."""
+    return (
+        "> **REFUSED IDENTITY — agent_definition status forbids adoption.** "
+        f"{reason}. The live prompt was not cached and is not printed. "
+        "Do not adopt this identity for the session.\n"
+    )
+
+
+def _status_warn_prefix(reason: str) -> str:
+    return f"> **STATUS WARNING.** {reason}\n"
+
+
+def _degrade_to_cache_or_mirror(reason: str) -> "tuple[str, str]":
+    """Cache, else static mirror, each prefixed with a STALE IDENTITY banner.
+
+    Shared by resolve()'s failed-load path and main()'s unexpected-exception
+    path so an uncaught error cannot print nothing and exit 0. An OSError
+    reading the mirror still returns the banner (non-empty) so the hook does
+    not treat that failure as "no output" and cat the mirror unmarked.
+    """
+    cached = _read_cache()
+    if cached is not None:
+        markdown, age = cached
+        return _staleness_banner(age, reason) + "\n" + markdown, "cached"
+
+    banner = _fallback_static_mirror_banner(reason)
+    if FALLBACK_MIRROR.exists():
+        try:
+            static_markdown = FALLBACK_MIRROR.read_text()
+        except OSError:
+            return banner, "failed_no_cache"
+        if static_markdown:
+            return banner + "\n" + static_markdown, "failed_no_cache"
+    return "", "failed_no_cache"
+
+
+def _emit(markdown: str) -> None:
+    if not markdown:
+        return
+    sys.stdout.write(markdown)
+    if not markdown.endswith("\n"):
+        sys.stdout.write("\n")
+
+
 def resolve() -> "tuple[str, str]":
-    """Return (markdown_to_print, outcome) where outcome is one of
-    "live" | "cached" | "failed_no_cache" | "error"."""
+    """Return (markdown_to_print, outcome).
+
+    outcome is one of "live" | "warned" | "cached" | "failed_no_cache" |
+    "refused". "error" is logged only by main() when resolve() itself raises.
+    """
     _load_env()
 
     # Imported after _load_env() populates os.environ, because agent_loader
@@ -222,12 +271,21 @@ def resolve() -> "tuple[str, str]":
     # at import time.
     lib_dir = REPO_ROOT / "lib" / "daemon_runtime"
     sys.path.insert(0, str(lib_dir))
-    from agent_loader import AgentLoader  # type: ignore  # noqa: E402
+    from agent_loader import AgentLoader, StatusAction, evaluate_status  # type: ignore  # noqa: E402
 
     loader = AgentLoader("ateles")
     agent_def = loader.load()
 
     if not agent_def.is_stub and agent_def.prompt_markdown:
+        # evaluate_status, not enforce_status_or_exit: the latter sys.exit(1)s
+        # on REFUSE, SystemExit is not an Exception, and the hook's `|| true`
+        # would then cat the mirror with no banner.
+        action, reason = evaluate_status(agent_def.status)
+        if action is StatusAction.REFUSE:
+            return _refused_identity_banner(reason), "refused"
+        if action is StatusAction.WARN:
+            _write_cache(agent_def.prompt_markdown)
+            return _status_warn_prefix(reason) + "\n" + agent_def.prompt_markdown, "warned"
         _write_cache(agent_def.prompt_markdown)
         return agent_def.prompt_markdown, "live"
 
@@ -235,26 +293,7 @@ def resolve() -> "tuple[str, str]":
     # does on a genuine success — see AgentDefinition docstring). Fall back to
     # the cache, announcing staleness rather than silently substituting it.
     reason = agent_def.load_error or "unknown load failure"
-    cached = _read_cache()
-    if cached is not None:
-        markdown, age = cached
-        return _staleness_banner(age, reason) + "\n" + markdown, "cached"
-
-    # No cache at all (first-ever run, or cache dir wiped). Fall back to the
-    # git-tracked static mirror one level further down, rather than injecting
-    # nothing.
-    if FALLBACK_MIRROR.exists():
-        try:
-            static_markdown = FALLBACK_MIRROR.read_text()
-        except OSError:
-            static_markdown = ""
-        if static_markdown:
-            return (
-                _fallback_static_mirror_banner(reason) + "\n" + static_markdown,
-                "failed_no_cache",
-            )
-
-    return "", "failed_no_cache"
+    return _degrade_to_cache_or_mirror(reason)
 
 
 def main() -> int:
@@ -262,18 +301,20 @@ def main() -> int:
         markdown, outcome = resolve()
     except Exception as exc:  # noqa: BLE001 - fail-open is the whole point
         _log_outcome("error", f"{type(exc).__name__}: {exc}")
+        markdown, _degraded = _degrade_to_cache_or_mirror(
+            f"resolver raised {type(exc).__name__}: {exc}"
+        )
+        _emit(markdown)
         return 0
 
     detail = ""
     if outcome == "cached":
         cached = _read_cache()
         detail = f"cache_age_seconds={cached[1]:.0f}" if cached else ""
+    elif outcome == "refused":
+        detail = "status refused; prompt not cached"
     _log_outcome(outcome, detail)
-
-    if markdown:
-        sys.stdout.write(markdown)
-        if not markdown.endswith("\n"):
-            sys.stdout.write("\n")
+    _emit(markdown)
     return 0
 
 

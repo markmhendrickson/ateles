@@ -24,20 +24,31 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RESOLVER="$REPO_ROOT/execution/scripts/resolve_ateles_identity.py"
-SKILL="$REPO_ROOT/.claude/skills/ateles/SKILL.md"
+# Overridable so tests can point at stubs without copying this script.
+# Unset, both paths are the repo defaults.
+RESOLVER="${ATELES_IDENTITY_RESOLVER:-$REPO_ROOT/execution/scripts/resolve_ateles_identity.py}"
+SKILL="${ATELES_IDENTITY_SKILL:-$REPO_ROOT/.claude/skills/ateles/SKILL.md}"
 
-# Fail-open at every layer: if the resolver script is missing, or produces no
-# output for any reason (it itself is fail-open and should never raise), fall
-# back to the git-tracked static mirror; if that too is missing (e.g. a
-# partial checkout), stay silent rather than failing the session start.
+# Fail-open at every layer, but never present an unknown read as the current
+# definition. Empty or whitespace-only resolver output (missing script, exit 0
+# with no stdout, or an error that printed nothing) is prefixed with a
+# STALE IDENTITY banner before the git-tracked mirror. A REFUSED IDENTITY
+# banner is not wrapped in the adopt-Ateles directive below — a banner after
+# that directive does not refuse. If the mirror is also missing, stay silent
+# rather than failing the session start.
 IDENTITY=""
 if [[ -f "$RESOLVER" ]]; then
     IDENTITY="$(python3 "$RESOLVER" 2>/dev/null || true)"
 fi
-if [[ -z "$IDENTITY" ]]; then
+if [[ "$IDENTITY" == *"REFUSED IDENTITY"* ]]; then
+    printf '%s\n' "$IDENTITY"
+    exit 0
+fi
+# Whitespace-only counts as empty: the hook must not treat it as a definition.
+if [[ -z "${IDENTITY//[[:space:]]/}" ]]; then
     [[ -f "$SKILL" ]] || exit 0
-    IDENTITY="$(cat "$SKILL")"
+    STALE_BANNER='> **STALE IDENTITY — resolver produced no stdout.** The live resolver printed nothing (missing script, empty output, or an error with no stdout). Falling back to the git-tracked `.claude/skills/ateles/SKILL.md` mirror, which may itself be out of date relative to the live entity. Treat anything time-sensitive in it as unverified.'
+    IDENTITY="${STALE_BANNER}"$'\n'"$(cat "$SKILL")"
 fi
 
 cat <<'DIRECTIVE'
