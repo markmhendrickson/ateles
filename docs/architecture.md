@@ -81,7 +81,7 @@ A `tool_allowlist` entry that scopes a bash command to a specific subcommand MUS
 - ❌ `bash:gh pr*` — silently dropped; the agent never actually gets this grant
 - ❌ `bash:git*` — same defect
 
-`scripts/linters/validate_tool_allowlist.py` (wired into `scripts/lint.sh` and the `agent-config-validation` CI workflow) fails the build if a `bash:` prefix reappears in any `agent_definition.tool_allowlist`. Edit the Neotoma entity via `correct()`, then regenerate the `docs/agents/*.md` / `.claude/skills/*/SKILL.md` mirrors with `execution/scripts/render_agent_docs.py` — never hand-edit the mirrored `.md` files.
+`scripts/linters/validate_tool_allowlist.py` (wired into `scripts/lint.sh` and the `agent-config-validation` CI workflow) fails the build if a `bash:` prefix reappears in any `agent_definition.tool_allowlist`. Edit the Neotoma entity via `correct()`, then regenerate the `docs/agents/*.md` / `.claude/skills/*/SKILL.md` mirrors with `execution/scripts/render_agent_docs.py` — never hand-edit the mirrored `.md` files. `scripts/lint.sh` exits non-zero when the agent-doc check fails, while `.github/workflows/agent-config-validation.yml` still runs that informational step with `continue-on-error: true`, so a GitHub build can stay green.
 
 ### AAuth identity and capability grants
 Each daemon has a per-role AAuth keypair (`sub = <name>@ateles-swarm`). All Neotoma observations carry agent attribution. Capabilities are enforced at the data layer via `agent_grant` entities — Menura cannot write private entities regardless of what code it runs.

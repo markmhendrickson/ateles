@@ -102,3 +102,99 @@ class TestMirrorsMatchFreshRender:
         assert not stale_corrected, (
             f"corrected-agent mirrors are stale relative to Neotoma: {stale_corrected}"
         )
+
+
+_ONE_AGENT = {
+    "name": "ateles",
+    "status": "active",
+    "tier": "core",
+    "prompt_markdown": "operational prompt",
+}
+
+
+def _bind_mirror_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Point every path check() resolves at one tmp tree.
+
+    check() does path.relative_to(REPO_ROOT). A skills dir outside that root
+    raises, and the test errors instead of asserting the exit status.
+    """
+    monkeypatch.setattr(render_agent_docs, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(
+        render_agent_docs, "AGENTS_DOC_DIR", tmp_path / "docs" / "agents"
+    )
+    monkeypatch.setattr(
+        render_agent_docs, "SKILLS_DIR", tmp_path / ".claude" / "skills"
+    )
+
+
+def _write_canonical_targets(agents: list[dict]) -> None:
+    for path, content in render_agent_docs._targets(agents).items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = content if content.endswith("\n") else content + "\n"
+        path.write_text(text)
+
+
+class TestMirrorCheckContract:
+    """--check is selected by argv, not by calling check() directly.
+
+    No live Neotoma and no skip when NEOTOMA_BASE_URL is unset: CI never sets it.
+    """
+
+    def _prepare(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agents: list[dict]
+    ) -> None:
+        _bind_mirror_roots(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            render_agent_docs, "_load_env", lambda: ("http://example.invalid", "token")
+        )
+        monkeypatch.setattr(
+            render_agent_docs, "fetch_agents", lambda _base, _token: agents
+        )
+        monkeypatch.setattr(sys, "argv", ["render_agent_docs.py", "--check"])
+        _write_canonical_targets(agents)
+
+    def test_planted_line_makes_check_exit_nonzero(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._prepare(monkeypatch, tmp_path, [dict(_ONE_AGENT)])
+        skill = render_agent_docs.SKILLS_DIR / "ateles" / "SKILL.md"
+        skill.write_text(skill.read_text() + "planted-extra-line\n")
+
+        assert render_agent_docs.main() == 1
+        out = capsys.readouterr().out
+        assert "AGENT MIRROR CHECK FAILED — disk differs from Neotoma:" in out
+        assert ".claude/skills/ateles/SKILL.md" in out
+        fix_lines = [line for line in out.splitlines() if "Fix:" in line]
+        assert fix_lines == [render_agent_docs.MIRROR_FIX_LINE]
+        assert "--check" not in fix_lines[0]
+
+    def test_matching_mirrors_exit_zero(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._prepare(monkeypatch, tmp_path, [dict(_ONE_AGENT)])
+
+        assert render_agent_docs.main() == 0
+        out = capsys.readouterr().out
+        assert "agent mirror check OK" in out
+        assert "AGENT MIRROR CHECK FAILED" not in out
+
+    def test_check_empty_does_not_print_ok_or_fix(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _bind_mirror_roots(monkeypatch, tmp_path)
+        _write_canonical_targets([])
+
+        assert render_agent_docs.check([]) == 1
+        out = capsys.readouterr().out
+        assert out.strip() == render_agent_docs.ZERO_ROWS_LINE
+        assert "OK" not in out
+        assert "Fix:" not in out

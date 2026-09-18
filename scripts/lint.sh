@@ -172,12 +172,25 @@ if [ -n "$NEOTOMA_BASE_URL" ]; then
     # rules that exist in Neotoma reach nothing. Four rules were undelivered for
     # eleven days that way. A check disarmed with `|| true` is documentation,
     # not a control (docs/foundation/principles.md#1).
+    # Differ/orphan is the only result that is drift. Unreachable Neotoma and
+    # zero agent_definition rows are also non-zero, and they are not a match
+    # and not drift (docs/foundation/principles.md §3 and §7) — do not name
+    # the regenerate command for them. Do not append `|| true`.
     echo "  - Checking agent-doc mirrors are in sync with Neotoma..."
-    if ! python3 execution/scripts/render_agent_docs.py --check; then
-        echo "    ERROR: agent-doc mirrors drifted from Neotoma."
-        echo "    Fix: python3 execution/scripts/render_agent_docs.py  (never hand-edit the mirrors)"
+    mirror_status=0
+    mirror_out=$(python3 execution/scripts/render_agent_docs.py --check) || mirror_status=$?
+    if [ -n "$mirror_out" ]; then
+        printf '%s\n' "$mirror_out"
+    fi
+    if [ "$mirror_status" -ne 0 ]; then
         ERRORS=$((ERRORS + 1))
     fi
+    case "$mirror_out" in
+        *"AGENT MIRROR CHECK FAILED"*)
+            echo "    ERROR: agent-doc mirrors drifted from Neotoma."
+            echo "    Fix: python3 execution/scripts/render_agent_docs.py  (never hand-edit the mirrors)"
+            ;;
+    esac
 else
     echo "  - Skipping tool_allowlist + agent-doc-mirror checks (NEOTOMA_BASE_URL unset)"
 fi
