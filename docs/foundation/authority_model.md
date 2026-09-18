@@ -333,6 +333,7 @@ the credential form here untouched, since the several-instance case this ruling 
 
 - A degraded read never synthesizes a value more permissive than success would have returned.
 - Write admission per entity type is default-deny, and the grant is the allowlist (ruled, decision 41, 2026-09-06).
+- Write admission per **relationship** type is the same default-deny shape, on an optional `relationship_types[]` beside `entity_types[]` (ruled, decision 111, 2026-09-18, operator ruling on ateles#925).
 - A harness provides only the capabilities the principal's grant names, and a non-enforcing provider is one of them (ruled, decision 87, 2026-09-08).
 - A parameter constraint on a write capability is a field allowlist.
 - The tenant a grant is scoped to is carried on the grant, and is never derived from the credential's subject (ruled, decision 80, 2026-09-07).
@@ -461,6 +462,60 @@ they narrow what an admitted principal reads for that step, and they never widen
 retrieval contract already states. **What would reopen it:** an enforcement point where the existence
 disclosure is not a schema fact — a per-row read refusal that leaks whether a named person is in the
 record — which is the tenancy question above and would be argued there, not here.
+
+**Write admission per relationship type is default-deny, and the grant is the allowlist, on the same
+shape decision 41 already states for entity types (ruled, decision 111, 2026-09-18, operator ruling on
+ateles#925).** Registered in `conformance.md#the-register-of-open-design-decisions`. Decision 41 rules
+write admission for entities; it says nothing about a relationship write, and before this ruling nothing
+in the corpus did — the only hit anywhere for "relationship write" or "edge write" governs acyclicity
+(`conformance.md` register row 102), not admission. The gap became concrete under decision 101: minting
+the `principal_binding` edge that lets a credential act as a principal is the single most powerful write
+in the record, and no rule admitted or refused it. **This rules it: a capability entry gains an optional
+`relationship_types[]` beside its `entity_types[]`, and absent or empty means default-deny for edges,
+exactly as zero entity types already means deny for entities.** A capability naming a relationship type
+permits writes of that type and denies every other; a wildcard over relationship types is not an
+allowlist but the same fail-open shape the entity-type wildcard already names above.
+
+Three grounds, carried from the ruling rather than re-derived here. It extends the mechanism that already
+generalizes (principle 6) instead of standing a second gate on the write path — the shape decisions 56 and
+97 each already rejected, decision 56 for a governance write's enforcement point and decision 97 for every
+agent's read and write, both on the same invariant. It is additive: a grant naming no relationship type
+keeps exactly today's meaning until enforcement, which this row does not assert, so nothing already granted
+changes semantics on the day this lands. And it
+needs nothing the tuple does not already have — a capability is already operation × entity types ×
+repositories with zero grants deny, and decision 41 already calls a wildcard over types "the fail-open
+shape, not an allowlist," which a wildcard over relationship types would be too.
+
+**Two bounding conditions, part of the ruling and not separable from it.** A relationship write inside
+decision 43's closed thirteen-record bootstrap set is admitted by membership in that set and by nothing
+else — no standing operator bypass, so the operator's own credential binding (bootstrap step 3, written
+before any grant exists to admit it) stays admitted the way it is admitted today. And no register row may
+read **ruled** for enforcement of a *named* relationship type while G25 (the relationship-type registry,
+neotoma#2357, in review) is unlanded: a grant cannot name a type the record has no registry for, and the
+relationship vocabulary today is a fixed enum in the tool schema, not data a grant can reference. This rule
+is ruled on the admission *shape*; enforcement of it for any named type waits on that dependency.
+
+**What this does not do.** It does not close the 2026-09-07 exposure in which a subagent read a credential
+file whole and obtained thirty-five variables no grant declared (`conformance.md` register row 105). That
+is a read of a process environment, not a record write, so no admission rule at the record intercepts it;
+it stays ateles#946 and ateles#1047's, judged by AU-11 below. What this ruling changes is what a stolen
+credential is *worth*: with edge writes governed, the credentials that can exist are the ones a
+`principal_binding`-writing grant minted, so revocation reaches every one of them through the same read
+AU-13 already makes, rather than through a convention nothing enforced.
+
+**What this does not settle**, left open on the ruling's own instruction: whether `principal_binding` and
+`delegation_edge` join the closed governance list of eight and who is sole writer for each; whether
+`ownership_grant` passes the admission test at all, given `#what-owning-confers-the-required-seat` bounds
+it to naming accountability rather than the ability to act; whether read admission (decision 94, above)
+widens to relationship types the way it is ruled for entity types; and whether a parameter constraint — a
+field allowlist on an entity write — has an edge-property analogue, which for `principal_binding` would
+now reach `credential_value`.
+
+**Recorded as a live-record fact, not a design one, and not resolved here.** Four `agent_grant` entities
+on the live instance already carry `create_relationship` scoped `["*"]` — edge authority issued as an
+all-or-nothing wildcard. Under this ruling that is exactly the default-allow shape this rule and decision
+41 both reject. This ruling neither narrows, revokes, nor grandfathers them; the migration question is
+open.
 
 **A parameter constraint on a write capability is a field allowlist.** The grant that admits a principal's
 writes to a type may name the fields it may write, and a write carrying a field outside them is denied at
