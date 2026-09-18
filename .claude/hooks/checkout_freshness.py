@@ -29,28 +29,28 @@ whatever `refs/remotes/origin/main` already points to locally — the same
 non-fetching comparison `checkout_drift.py` falls back to when
 `ATELES_CHECKOUT_DRIFT_NO_FETCH=1` is set, just made the default here instead
 of the opt-in. Set `ATELES_SESSION_FRESHNESS_FETCH=1` to fetch first for a
-fully current answer; this hook still never blocks on a slow or failed fetch
-(a timeout or offline host falls back to the unfetched comparison).
+fully current answer. A failed or timed-out opt-in fetch is `unknown` and
+does not consult the local ref. Unset `ATELES_SESSION_FRESHNESS_FETCH` still
+does not fetch. This hook still never blocks: it reports and exits 0.
 
 ## `unknown` is not `current`
 
 A failed or absent comparison — no `origin/main` remote-tracking ref, a
-detached HEAD with nothing to compare, a git error — reports `unknown` and
-prints nothing further. It is NOT reported as fresh. `checkout_drift.py`
-makes exactly this distinction on the same reasoning: offline (or otherwise
-unanswerable) must not look identical to up-to-date, or the day it actually
-matters is the day nobody notices the check went silent. This hook only ever
-prints when it has a positive, unknown-safe verdict of drift — clean and
-unknown are both silent, which mirrors `checkout_drift.py`'s own posture
-where `is_drifted` excludes `unknown`.
+detached HEAD with nothing to compare, a git error, a failed opt-in fetch, a
+failed `git status` — reports `unknown`. `clean` prints nothing; `unknown`
+prints one unverified line and does not call `banner()`; `not_a_repo` prints
+nothing. It is NOT reported as fresh. `checkout_drift.py` makes the same
+distinction: offline (or otherwise unanswerable) must not look identical to
+up-to-date. `is_drifted` still excludes `unknown`, so the unverified line is
+not the drift warning.
 
 ## Fail-open, stdlib-only
 
 Follows `.claude/hooks/hook_wiring_reference.py`'s stated rationale: this
 runs on every session start in every environment, including sandboxed and
-offline agent runs, so a checker that can hang or throw becomes the new
-silent failure. Any exception here is swallowed and the hook exits 0 with no
-output.
+offline agent runs, so a checker that can hang or throw must not halt the
+session. An exception prints the unverified line (exception class name only)
+and the hook still exits 0.
 """
 
 from __future__ import annotations
@@ -135,9 +135,14 @@ def check_freshness(
 
     do_fetch = fetch if fetch is not None else os.environ.get(FETCH_ENV) == "1"
     if do_fetch:
-        # Best-effort only — a failed/slow fetch must not block or flip the
-        # verdict to unknown; it just means we fall back to the local ref.
-        _git(["fetch", "--quiet", "--no-tags", "origin", "main"], repo)
+        rc, out = _git(["fetch", "--quiet", "--no-tags", "origin", "main"], repo)
+        if rc != 0:
+            # _git already maps TimeoutExpired and OSError to return code 1.
+            return FreshnessReport(
+                state="unknown",
+                head=head,
+                detail=f"fetch failed: {out[:120]}",
+            )
 
     # Compare against the local remote-tracking ref, never a live fetch by
     # default (see module docstring). `origin/main` is the convention this
@@ -171,11 +176,16 @@ def check_freshness(
         state = "diverged"  # ahead-only: unpushed local commits, not "current"
     else:
         rc, dirty = _git(["status", "--porcelain"], repo)
-        tracked = (
-            [ln for ln in dirty.splitlines() if ln[:2] not in ("??",)]
-            if rc == 0
-            else []
-        )
+        if rc != 0:
+            return FreshnessReport(
+                state="unknown",
+                behind=behind,
+                ahead=ahead,
+                head=head,
+                detail=(dirty[:120] or "git status failed"),
+                worktree_path=str(repo) if in_linked_worktree else "",
+            )
+        tracked = [ln for ln in dirty.splitlines() if ln[:2] not in ("??",)]
         state = "dirty" if tracked else "clean"
 
     return FreshnessReport(
@@ -234,8 +244,19 @@ def main() -> int:
         report = check_freshness()
         if report.is_drifted:
             print(banner(report))
-    except Exception:  # noqa: BLE001 — fail open, never delay or break session start
-        pass
+        elif report.state == "unknown":
+            # Not banner(): that line claims drift (WARNING / BEHIND / --detach).
+            print(
+                "[checkout-freshness] UNVERIFIED: could not compare this "
+                f"checkout to origin/main ({report.detail}). This check is "
+                "not currently protecting anything."
+            )
+    except Exception as exc:  # noqa: BLE001 — report, never halt session start
+        print(
+            "[checkout-freshness] UNVERIFIED: the freshness check raised "
+            f"({type(exc).__name__}). This check is not currently protecting "
+            "anything."
+        )
     return 0
 
 

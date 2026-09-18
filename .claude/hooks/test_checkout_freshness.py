@@ -18,11 +18,14 @@ deleted or its detection logic regresses to always reporting "clean"/"unknown".
 
 from __future__ import annotations
 
+import io
 import subprocess
 import sys
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 HOOKS = Path(__file__).resolve().parent
 sys.path.insert(0, str(HOOKS))
@@ -80,7 +83,8 @@ class TestCleanIsSilent(FreshnessFixture):
 
     def test_clean_report_produces_no_banner_text(self) -> None:
         report = cf.check_freshness(self.clone)
-        # main() only prints for a drifted report — assert the gate directly.
+        # Drift banners are gated on is_drifted. Silence of main() for clean
+        # is asserted by TestBehind.test_main_prints_nothing_for_clean_checkout.
         self.assertFalse(report.is_drifted)
 
 
@@ -127,6 +131,7 @@ class TestBehind(FreshnessFixture):
         """Same entrypoint, fresh clone — silence is the healthy case."""
         fresh = self.tmp / "clone2"
         _run(["clone", "-q", str(self.origin), str(fresh)], self.tmp)
+        _run(["checkout", "-q", "-B", "main", "origin/main"], fresh)
         p = subprocess.run(
             [sys.executable, str(HOOKS / "checkout_freshness.py")],
             cwd=str(fresh),
@@ -212,8 +217,8 @@ class TestUnknownIsNotCurrent(FreshnessFixture):
         self.assertEqual(report.state, "not_a_repo")
         self.assertFalse(report.is_drifted)
 
-    def test_unknown_and_not_a_repo_never_print_a_banner(self) -> None:
-        """main() must stay silent on a non-verdict, not report false confidence."""
+    def test_not_a_repo_main_prints_nothing(self) -> None:
+        """A non-repo cwd is not a checkout. main() stays silent and exits 0."""
         plain = self.tmp / "not_a_repo2"
         plain.mkdir()
         p = subprocess.run(
@@ -225,6 +230,115 @@ class TestUnknownIsNotCurrent(FreshnessFixture):
         )
         self.assertEqual(p.returncode, 0)
         self.assertEqual(p.stdout.strip(), "")
+
+    def test_unknown_main_prints_unverified_line_distinct_from_clean(self) -> None:
+        """No origin/main must print UNVERIFIED, not the same silence as clean."""
+        solo = self.tmp / "solo-main"
+        solo.mkdir()
+        _run(["init", "-q", "-b", "main"], solo)
+        _run(["config", "user.email", "test@example.com"], solo)
+        _run(["config", "user.name", "Test"], solo)
+        (solo / "f.txt").write_text("one\n", encoding="utf-8")
+        _run(["add", "f.txt"], solo)
+        _run(["commit", "-q", "-m", "initial"], solo)
+
+        report = cf.check_freshness(solo)
+        self.assertEqual(report.state, "unknown")
+        self.assertFalse(report.is_drifted)
+
+        unknown = subprocess.run(
+            [sys.executable, str(HOOKS / "checkout_freshness.py")],
+            cwd=str(solo),
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(unknown.returncode, 0)
+        self.assertIn("[checkout-freshness]", unknown.stdout)
+        self.assertIn("UNVERIFIED", unknown.stdout)
+        self.assertNotIn("BEHIND", unknown.stdout)
+        self.assertNotIn("WARNING: this session's working tree", unknown.stdout)
+        self.assertNotIn("git checkout --detach", unknown.stdout)
+
+        clean = subprocess.run(
+            [sys.executable, str(HOOKS / "checkout_freshness.py")],
+            cwd=str(self.clone),
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(clean.returncode, 0)
+        self.assertEqual(clean.stdout.strip(), "")
+        self.assertNotEqual(unknown.stdout.strip(), clean.stdout.strip())
+
+
+def _scripted_git(responses: dict[str, tuple[int, str]]):
+    """Return (calls, fake) mapping the first git subcommand to a scripted result."""
+    calls: list[list[str]] = []
+
+    def fake(args: list[str], cwd: Path) -> tuple[int, str]:
+        calls.append(list(args))
+        key = args[0]
+        if key == "rev-parse":
+            if "--show-toplevel" in args:
+                return responses.get("toplevel", (0, "/tmp/repo"))
+            if "--short" in args:
+                return responses.get("head", (0, "abc1234"))
+            if "--git-dir" in args:
+                return responses.get("git_dir", (0, "/tmp/repo/.git"))
+            if "--git-common-dir" in args:
+                return responses.get("common", (0, "/tmp/repo/.git"))
+            if "--verify" in args:
+                return responses.get("verify", (0, ""))
+        if key in responses:
+            return responses[key]
+        return 1, f"unscripted: {' '.join(args)}"
+
+    return calls, fake
+
+
+class TestFailedComparisonIsUnknown(unittest.TestCase):
+    """A comparison that did not succeed must not fall through to clean."""
+
+    def test_failed_opt_in_fetch_is_unknown_and_skips_rev_list(self) -> None:
+        calls, fake = _scripted_git(
+            {"fetch": (1, "fatal: unable to access origin")}
+        )
+        # An even rev-list is scripted so a fall-through would look clean.
+        calls_holder = calls
+
+        def fake_with_clean_rev_list(args: list[str], cwd: Path) -> tuple[int, str]:
+            if args and args[0] == "rev-list":
+                calls_holder.append(list(args))
+                return 0, "0\t0"
+            if args and args[0] == "status":
+                calls_holder.append(list(args))
+                return 0, ""
+            return fake(args, cwd)
+
+        with patch.object(cf, "_git", side_effect=fake_with_clean_rev_list):
+            report = cf.check_freshness("/tmp/repo", fetch=True)
+
+        self.assertEqual(report.state, "unknown")
+        self.assertIn("fetch failed", report.detail)
+        self.assertFalse(any(c and c[0] == "rev-list" for c in calls_holder))
+        self.assertFalse(any(c and c[0] == "status" for c in calls_holder))
+
+    def test_status_nonzero_after_even_rev_list_is_unknown(self) -> None:
+        calls, fake = _scripted_git(
+            {
+                "rev-list": (0, "0\t0"),
+                "status": (1, "fatal: status failed"),
+            }
+        )
+        with patch.object(cf, "_git", side_effect=fake):
+            report = cf.check_freshness("/tmp/repo", fetch=False)
+
+        self.assertEqual(report.state, "unknown")
+        self.assertNotEqual(report.state, "clean")
+        self.assertIn("fatal: status failed", report.detail)
+        self.assertTrue(any(c and c[0] == "rev-list" for c in calls))
+        self.assertTrue(any(c and c[0] == "status" for c in calls))
 
 
 class TestWorktreeAwareRemedy(FreshnessFixture):
@@ -257,6 +371,24 @@ class TestFailOpen(unittest.TestCase):
                 timeout=15,
             )
             self.assertEqual(p.returncode, 0)
+
+    def test_main_prints_unverified_when_check_raises(self) -> None:
+        """An exception is not silence. Exit stays 0; the class name is the only detail."""
+        buf = io.StringIO()
+        with patch.object(
+            cf, "check_freshness", side_effect=RuntimeError("secret detail")
+        ):
+            with redirect_stdout(buf):
+                rc = cf.main()
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("UNVERIFIED", out)
+        self.assertNotEqual(out.strip(), "")
+        self.assertIn("RuntimeError", out)
+        self.assertNotIn("secret detail", out)
+        self.assertNotIn("BEHIND", out)
+        self.assertNotIn("WARNING: this session's working tree", out)
+        self.assertNotIn("git checkout --detach", out)
 
 
 if __name__ == "__main__":
