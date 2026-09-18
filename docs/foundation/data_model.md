@@ -59,6 +59,63 @@ the sync bookkeeping principle 11 forbids adapters from keeping (`#what-each-act
 below): a second ledger, beside the record's own observations, that a process would have to keep consistent
 with them.
 
+**Two governance types the design named for years and never gave a row, and what declaring them settles.**
+`agent_policy` is named by `conformance.md#direction-of-truth-per-class-of-record` as the authoritative
+home of an agent behavioural rule and of a skill's body, and by
+`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other` as one of the eight
+governance types; `swarm_roster` is the resolver every `owner_role` on every declaration depends on
+(`workflows.md`), and the bootstrap cannot reach its first declaration without it
+(`conformance_suite.md#the-minimal-record-set-in-order`, step 9). Neither had a row here, which is the
+condition `#concepts`' own rule makes worst: a concept with no row is a concept the design does not
+persist, so two types the design leans on were, by this document's own reading, undeclared. The roster's
+absence was already registered as a gap (`migration.md`, G21) and is closed by the row above;
+`agent_policy`'s was not registered at all, which is the sharper finding — a type can be authoritative in
+one document and absent from the document that says what authority means, with nothing detecting the
+disagreement. The check registered in `conformance.md#mechanical-checks-on-this-directory` is what makes a
+repeat of either detectable rather than a thing a reader happens to notice.
+
+**Three things the `agent_policy` row decides, each against a live shape that does not hold.** The rows
+above state the design; what the record carries is `status.md`'s and `migration.md`'s, and the three
+disagreements are named here because a declaration that quietly ratified them would be stating the
+implementation rather than the design.
+
+*Which field scopes a rule to an agent.* `agent_sub`, and nothing else. The alternative is not
+hypothetical: the field exists and is populated in no row, while rules meant for one agent carry that
+agent's `sub` in `domain` instead — so a reader filtering on `agent_sub` finds nothing and a reader
+filtering on `domain` conflates "the agent this binds" with "the subject this is about". Two fields that
+can each carry the target is one field too many (principle 9): `agent_sub` names *whom the rule binds*,
+`domain` names *what it is about*, and a write putting an agent identifier in `domain` is a write of the
+wrong field, not a second spelling a tolerant reader should learn. This is deliberately **not** the
+tolerant-reader case `#record-conventions` describes — that convention is for one concept written under
+several field names, and these are two concepts, so widening the reader would make the conflation
+permanent rather than transitional.
+
+*What `rule_kind` takes, and what absence means.* Two values, `mandatory` and `advisory`, and **absence
+reads as `mandatory`**. The design takes the restrictive branch because this is the field carrying the
+safety meaning (`principles.md`, principle 5), and the failure it guards against is the one a permissive
+default produces exactly backwards: a rule whose author never said whether it binds would become the rule
+a reader is free to ignore. Bounding the vocabulary to two is the other half — an open vocabulary makes
+every unrecognized value a fresh decision at every read, and a reader that cannot classify a value cannot
+fail closed on it in any principled way. The live shape has six values and three rows with none, and the
+conflict this bound is chosen against is one the design must make *derivable*: two rules in force at one
+scope, stating the same subject, disagreeing on whether it binds. Reading either alone looks correct,
+which is why the row makes it a derived read and a refusal at the write rather than something a reader is
+asked to spot.
+
+*A rule bound to a condition rather than a date.* Argued in full at
+#whether-a-rules-end-is-a-date-a-condition-or-a-task below; in short: `effective_until` takes a date, and the design does not
+close this gap — it names it. A rule that binds "until the console provides the same projection" has no
+date to write, and the live record's answer is to put the condition in `scope`, where it is free text that
+no filter can read and that silently widens a field the row above closes to three values. Two shapes would
+close it, and neither is derivable from what the design states today: an `effective_until_condition`
+naming the fact that ends the rule, which makes the end of a rule a thing a reader can evaluate but needs
+a stated vocabulary of facts to evaluate against; or the rule's end being a *task* — the condition is work
+someone does, and the rule is retired by correction when that task lands, which needs no new field and
+makes every conditional rule a tracked obligation rather than a standing prose claim. The second fits the
+design's own posture that state needing a process to stay correct is not a field (principle 11), and it is
+recorded here as the candidate rather than the ruling, because which one holds is a design decision and
+not a documentation one. Registered in `conformance.md#the-register-of-open-design-decisions`.
+
 <!-- rendered: data_model concepts -->
 
 | Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
@@ -78,6 +135,8 @@ with them.
 | intake rule | `intake_rule` | `subject_types[]` (entity types; never a work-model record type, a rule naming one refused at the write — decision 36, `work_model.md#whether-an-intake-rule-may-key-on-the-work-models-own-records`); `change_kinds[]` (`created`, `updated`, `corrected`); `predicate` (over the entity's fields after the change); `provenance_predicate` (system, instance, writer); `task_title`, `task_description` (the text the created task carries, naming the entity that fired it); `ceiling`, `window`; `ended_at` (a rule is ended by correction, never deleted) | — (the tasks it created carry provenance naming the rule and the change; no edge) | the tasks a rule created, by provenance; fires and drops per window; whether a rule is live | — | a last-evaluated cursor; a fired count the evaluator maintains; a successor, a workflow, a step, an action class, or an `assigned_to` for the created task (intake's); a batch it opens (the created task's intake batch opens on creation, as every task's does — `work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`) |
 | agent session | `agent_session` | `runner_id`; `host`, `checkout`, `branch`, `head`; `started_at`, `last_seen_at`; on a daemon's session, one observation per declared window carrying the window, the coverage of the polls or deliveries made in it, and the dispositions counted — the write a successful empty poll makes (`adapters.md#what-the-adapter-does-with-every-event`) | `REFERS_TO` → task | active (with the lease); silent (no window observation past the declared window, while the record is reachable — `failure_posture.md#the-rules`, rule 2) | — | a history of runners; the session's transcript or reasoning; a copy of what the step read (`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`) |
 | agent | `agent` | `name`, `prompt_markdown`, `context_entity_types[]`, version | `principal_binding` ← credential, **two edges** where the agent acts in a human's interest and not one: its AAuth edge ends at this `agent` (attribution, A-for-B) and its acts-as edge at the `operator` (the edge decision 48's counting rule reads), told apart by `credential_kind` — see the `principal` row and `#relationships`; `LEASE` → task or batch | — | — | the lease holder as a field on the task |
+| agent behavioural rule | `agent_policy` | `rule` (the rule itself, in the imperative — what an agent is to do or not do; the field a reader applies, and the one a rule with only a `description` does not have); `rule_kind` (**closed**: `mandatory`, or `advisory`. Absence, or a value outside the two, reads as `mandatory` — the restrictive branch, because this is the field carrying the safety meaning (`principles.md`, principle 5) and a rule whose bindingness is unstated is one no reader may weaken); `scope` (**closed**: `global`, `swarm`, or `agent`; a free-text scope is a scope nothing can filter on, and where the scope is `agent` the target is `agent_sub` and never `scope`); `agent_sub` (the one field that scopes a rule to an agent, naming the `agent` the rule binds — the `sub` its `principal_binding` carries; a rule of `scope: agent` with no `agent_sub` is refused at the write, and a rule of any other scope with one is refused too); `domain` (the subject the rule is about, for grouping rules a reader selects together — never an agent identifier, which is `agent_sub`'s); `status` (`active`, `provisional`, or `retired`); `effective_from`, `effective_until` (dates; a rule bound to a **condition** rather than a date has no field here and the gap is stated below); `supersedes` → the rule this one replaces; `rationale` (why the rule exists, so a later reader can judge whether it still holds) | `SUPERSEDES` → `agent_policy` (the rule it replaces, which stays readable as what was ruled then); `REFERS_TO` ← finding (the standing finding whose institutionalization wrote it — `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`) | the rules in force for an agent at a time (its `agent_sub` rules and every rule of wider scope, `status` `active` or `provisional`, `effective_from` past and `effective_until` absent or future, that no later rule supersedes); whether two rules in force at one scope state the same subject and disagree on `rule_kind` — a conflict a reader of either alone cannot see, so it is derived and refused rather than left to the reader | the rendered `.claude/skills/` and `docs/agents/` mirrors (`conformance.md#direction-of-truth-per-class-of-record`) | an operator's name, figure, or locale (operator-specific content is a `task_policy` — `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`); an agent identifier in `domain` or `scope`; a maturation or drift-signal record serialized into a prose field (it is an observation, or it is a field the registry declares); a `enabled` flag beside `status`; a copy of the rule in a harness memory file, which is a cache and never its home |
+| roster | `swarm_roster` | `declaration_scope` (the scope the roster is for — `workflow` and this type are the two per-scope governance types, and the key is the declaration scope and never the planning record at the `project` level, decision 70, `planning_model.md#project-names-a-planning-level-the-scoping-key-on-a-declaration-is-a-different-term`); `roles` (role → the `agent` filling it, one agent per role; the map every `owner_role` on a workflow's `steps[]` is resolved against, at claim and at declaration — `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`) | `REFERS_TO` → `agent` (one edge per filled role, carrying the role on the edge; the map's values are edges and not name strings, so a renamed or retired agent cannot leave a role resolving to nothing — `conformance.md`'s rule that a rename leaves no reference behind) | which agent fills a role in a scope; whether every `owner_role` a declaration names resolves (an unresolved role raises `unresolvable_assignee` at declaration, and a role resolving to an agent with no runner raises `unspawnable_assignee` — `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`); the roles an agent fills, read back along the edges | — | an agent's credential, harness preference, or model tier (the `agent_grant` and the `vendor_binding` carry those — `adapters.md#where-the-binding-is-declared-no-new-home-is-needed`); a per-role channel or delivery preference (the `vendor_binding`'s, decision 35); an operator's identity (the `operator` principal); a second agent on one role, or a role with no agent held as an empty value rather than absent |
 | adapter | `agent` (a daemon; `adapters.md`) | `name`; the `system` it adapts | `principal_binding` → principal; provenance on every write it makes (the adapter, the system, the delivery id) | which artifacts it tracks (by `system`) | — | a per-artifact map of satisfied steps; an event log beside the artifact's observations; a workflow it reads |
 | principal | `operator` (human) or `agent` (non-human) | identity only — the type exists to be a principal; the identifier's form is `multi_tenant.md` section 7 | `principal_binding` ← credential (edge-keyed; no credential entity; many-to-one: one edge per credential carrying `credential_kind`, `credential_value`, `credential_issuer`, `expires_at` — e.g. `store_user_id` / host login to the `operator`; AAuth `sub`+`iss` to the `agent` that presented it, the principal that credential identifies. An agent that acts in a human's interest holds a **second** `principal_binding`, its acts-as binding, whose endpoint is the `operator` — the edge decision 48's counting rule names. The two are the same edge type, told apart by `credential_kind`, and both are required: the first attributes the write to the agent (A-for-B), the second makes two agents under one operator one interest); `ownership_grant` ← object; `delegation_edge` → principal | authority chain; whether a write resolves to a principal at all | — | a login string, an address, or a magic value standing in for the principal; a separate credential entity; `operator_profile` (the descriptive record beside the `operator`, carrying no authority edges); locale or preferences on the principal; a stored credit (a read model over attribution — `authority_model.md#credit-is-a-read-model-over-attribution`) |
 | grant | `agent_grant` | `sub`, `iss`; `capabilities[]` (operation × entity types × repositories, and the tools a principal may invoke — `migration.md#where-a-skills-harness-mechanics-live`; a governance type on the engine's grant alone — `gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits`; the right to propose an initiative as the `task` write capability constrained to the initiative class — `authority_model.md#what-stops-is-a-task-the-owner-seat-confirms-it-through-the-checkpoint-and-proposing-is-a-grant-capability`); `param_constraints` (per-tool parameter constraints; a field allowlist on a write capability — `authority_model.md#grants`; a budget, the bound on a resource a capability may consume, attenuating down a delegation chain — `authority_model.md#budget-is-a-scope-term-that-attenuates`); `expires_at` | — | permit, deny, or indeterminate for one request; what has been consumed against a budget (a read over confirmed actions) | — | a wildcard for a human; a harness preference or a model tier (a `vendor_binding`'s capability slot for the harness); a balance or a consumed amount; a governance type on any grant but the engine's |
@@ -109,6 +168,55 @@ with them.
 | `delegation_edge` | principal → principal | scoped, time-bounded transfer of rights | the authority chain; attenuation (a budget in `scope` narrows down the chain — `authority_model.md#budget-is-a-scope-term-that-attenuates`) |
 
 <!-- /rendered -->
+
+## Whether a rule's end is a date, a condition, or a task
+
+**Open.** Registered in `conformance.md#the-register-of-open-design-decisions` (decision 111). The
+`agent_policy` row above gives a rule `effective_from` and `effective_until`, both dates, and a rule whose
+end is a **condition** rather than a date has nowhere to put it. This is not a hypothetical shape: a rule
+binding "until the full console provides the same projection" is a real one, and the record's answer today
+is to write that clause into `scope` — a field the row above closes to three values precisely so a reader
+can filter on it, turned back into free text by the one rule that needed somewhere else to go. A field
+carrying prose no filter reads is the shape principle 9 calls a second home, and it is here because the
+first home does not fit.
+
+**Why it is not settled by saying "write a date".** The condition is genuinely not a date. Nobody knows
+when the console will provide the projection, and a date guessed in its place is either an expiry that
+fires while the rule still binds — a safety rule silently lapsing — or one so far out that it never fires
+and the field is decoration. Principle 5 makes the direction of that error the question rather than a
+detail: a rule that ends too early fails open, which is the branch the `rule_kind` default above is chosen
+to avoid taking by accident.
+
+**The candidates.**
+
+1. **An `effective_until_condition` field.** The rule names the fact that ends it, and a reader evaluates
+   the fact. It keeps the rule's end on the rule, which is where a reader looking for it will look. What it
+   has to say is what a condition is written *against* — a vocabulary of facts a reader can evaluate — and
+   it has to answer principle 11's question, because a condition nothing evaluates is exactly the stored
+   state a watchdog would have to sweep to keep true. An unevaluated condition is worse than a date: the
+   rule reads as bounded and is in fact permanent.
+
+2. **The rule's end is a task.** The condition is work someone does, so the rule carries no end at all;
+   the work is a task, and the rule is retired by correction when that task lands. It needs no new field,
+   it makes every conditional rule a tracked obligation rather than a standing prose claim, and it puts
+   the end of the rule on the same mechanism every other "this stops when that happens" in the design uses
+   (`work_model.md`). What it costs is directness: a reader of the rule sees no end and must follow an
+   edge to find that one is pending, and the design would owe that edge — `REFERS_TO` → task, from the
+   rule — so the pending end is reachable rather than merely somewhere in the record.
+
+3. **The design declines it, and a conditional rule is written as an unbounded one.** Honest about what
+   the record can evaluate, and it is what is effectively true today. What it has to accept is that the
+   distinction between "binds until something changes" and "binds indefinitely" stops being recorded at
+   all, which is a real loss on a governance type whose whole subject is what binds.
+
+**What any answer has to survive.** Principle 11 is the sharpest: whichever shape is taken, something must
+make the rule's end *happen*, or the end is a claim the record carries and nothing acts on. Candidate 2
+answers it by construction, which is the design's own precedent — a condition discovered mid-flight is a
+hold with a finding naming what would resolve it (`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`),
+not a field on the thing held. And whatever is ruled, the `scope` field is **not** it: a rule's end does
+not belong in the field that says who the rule applies to, and correcting the live rows that put it there
+is work the ruling produces rather than work that waits for it.
+
 
 ## Whether acyclicity is a property of a relationship type or of the graph
 

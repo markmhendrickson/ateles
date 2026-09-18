@@ -120,6 +120,13 @@ python3 execution/scripts/check_foundation_decision_101.py || ERRORS=$((ERRORS +
 echo "  - Checking foundation vocabulary (no Never word in the prose)..."
 python3 execution/scripts/check_foundation_vocabulary.py || ERRORS=$((ERRORS + 1))
 
+# Data model coverage: a governance type conformance_suite.md names must have a row in
+# data_model.md#concepts. `agent_policy` was authoritative in conformance.md and declared zero times
+# in data_model.md, with nothing failing — the gap this closes. Exit 2 means the check did not run
+# (its input moved), which is counted as an error and not as a pass.
+echo "  - Checking data model declares every governance type..."
+python3 execution/scripts/render_data_model.py --check || ERRORS=$((ERRORS + 1))
+
 echo "  - Checking vocabulary term links (first mentions link their definition)..."
 python3 execution/scripts/link_vocabulary_terms.py --check || ERRORS=$((ERRORS + 1))
 
