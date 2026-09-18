@@ -480,7 +480,8 @@ Three grounds, carried from the ruling rather than re-derived here. It extends t
 generalizes (principle 6) instead of standing a second gate on the write path — the shape decisions 56 and
 97 each already rejected, decision 56 for a governance write's enforcement point and decision 97 for every
 agent's read and write, both on the same invariant. It is additive: a grant naming no relationship type
-keeps exactly today's meaning, so nothing already granted changes semantics on the day this lands. And it
+keeps exactly today's meaning until enforcement, which this row does not assert, so nothing already granted
+changes semantics on the day this lands. And it
 needs nothing the tuple does not already have — a capability is already operation × entity types ×
 repositories with zero grants deny, and decision 41 already calls a wildcard over types "the fail-open
 shape, not an allowlist," which a wildcard over relationship types would be too.
