@@ -628,7 +628,32 @@ def _selected(skills: list[dict], only: list[str]) -> list[dict]:
     return sel
 
 
+def required_skill_rule_gaps(name: str, content: str) -> list[str]:
+    """Rules 3–5 missing from a loaded skill body. Not a mirror drift signal."""
+    text = content or ""
+    gaps: list[str] = []
+    if name == "writing-voice":
+        emotion = (
+            "evidence present → the claim only with that evidence shown; "
+            "no evidence → omit the claim."
+        )
+        if emotion not in text or "## 3. Never invent" not in text:
+            gaps.append("skill_rule_missing writing-voice 3")
+    elif name == "email-mechanics":
+        if "If showing the draft fails, say the show failed." not in text:
+            gaps.append("skill_rule_missing email-mechanics 4")
+        if (
+            "names the discarded draft id" not in text
+            or "the delete is permanent" not in text
+        ):
+            gaps.append("skill_rule_missing email-mechanics 5")
+    return gaps
+
+
 def run_check(skills: list[dict], id_index: dict, slug_index: dict, install_root: str) -> int:
+    for s in skills:
+        for line in required_skill_rule_gaps(s.get("_slug") or "", s.get("content") or ""):
+            print(line)
     drift, missing = [], []
     for s in skills:
         path = _target_path(s, id_index, slug_index, install_root)

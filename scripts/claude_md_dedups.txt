@@ -25,3 +25,13 @@ Proceed on your recommendation instead of stopping to ask. => Proceed with your 
 # preference for a reopen over a gate waive. Main's "not mistaken for
 # flapping" clause is present in both.
 Re-request review yourself when monitoring shows it is warranted. => Re-request review yourself whenever monitoring shows it is warranted — do not wait to be asked.
+
+# ateles#1102 — the rule's DELIVERY mechanism changed; its content did not.
+# The dropped lead prescribed end-of-turn prose, which is the behaviour the
+# operator corrected on 2026-09-16 when he asked for the harness questions
+# tool. Verified clause by clause: the survivor carries "enough context to
+# decide: the options, what each implies, what is already settled", "never
+# re-raise one by name alone", "keep repeating each turn until answered", and
+# "carry every open decision, not just the most recent" — and adds the tool,
+# the recommendation, the say-nothing default, and the "unchanged" ban.
+End every turn with the decisions that need Mark => Put every decision that needs Mark through the harness questions tool

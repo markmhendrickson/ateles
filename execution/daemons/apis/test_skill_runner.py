@@ -50,6 +50,23 @@ def _claude_only_test_router(monkeypatch, tmp_path):
     harness_router.reset_state()
 
 
+class _OfflineOperatorRules:
+    """Keeps existing run_skill assertions byte-identical unless a test overrides."""
+
+    status = "unbound"
+    missing = [1, 2, 6]
+    block = ""
+
+
+@pytest.fixture(autouse=True)
+def _operator_rules_offline(monkeypatch):
+    monkeypatch.setattr(
+        skill_runner,
+        "resolve_operator_rules",
+        lambda agent_name="ateles": _OfflineOperatorRules(),
+    )
+
+
 def _make_def(
     *,
     prompt_markdown: str = "You are Gryllus, an issue worker.",
@@ -108,6 +125,126 @@ class TestBuildSystemPrompt:
         prompt, degraded = skill_runner.build_system_prompt(agent_def, skill_md)
         assert degraded
         assert prompt == skill_md
+
+    def test_empty_operator_rules_is_byte_identical(self) -> None:
+        agent_def = _make_def(prompt_markdown="DEFINITION_ANCHOR")
+        skill_md = "SKILL_ANCHOR"
+        omitted, _ = skill_runner.build_system_prompt(
+            agent_def, skill_md, include_github_contract=True
+        )
+        empty, _ = skill_runner.build_system_prompt(
+            agent_def, skill_md, include_github_contract=True, operator_rules=""
+        )
+        assert omitted == empty
+        assert "Pose every open decision" not in omitted
+
+    def test_bound_block_sits_after_definition_before_contract(self) -> None:
+        agent_def = _make_def(prompt_markdown="DEFINITION_ANCHOR")
+        skill_md = "SKILL_ANCHOR"
+        block = "RULE_ONE_SENTENCE\nRULE_TWO_SENTENCE\nRULE_SIX_SENTENCE"
+        prompt, degraded = skill_runner.build_system_prompt(
+            agent_def,
+            skill_md,
+            include_github_contract=True,
+            operator_rules=block,
+        )
+        assert degraded is False
+        assert (
+            prompt.index("DEFINITION_ANCHOR")
+            < prompt.index("RULE_ONE_SENTENCE")
+            < prompt.index(skill_runner.SWARM_GITHUB_CONTRACT)
+            < prompt.index("SKILL_ANCHOR")
+        )
+
+    def test_bound_block_at_start_when_definition_empty(self) -> None:
+        agent_def = _make_def(prompt_markdown="")
+        prompt, degraded = skill_runner.build_system_prompt(
+            agent_def,
+            "SKILL_ANCHOR",
+            include_github_contract=True,
+            operator_rules="RULE_ONE_SENTENCE",
+        )
+        assert degraded is True
+        assert prompt.index("RULE_ONE_SENTENCE") < prompt.index(
+            skill_runner.SWARM_GITHUB_CONTRACT
+        )
+
+    def test_unbound_block_does_not_flip_degraded(self) -> None:
+        agent_def = _make_def(prompt_markdown="DEFINITION_ANCHOR")
+        unbound = (
+            "[rules-unbound] missing=1,2,6 hint=resolve the related entity on the "
+            "agent; do not paste rule text into prompt_markdown or CLAUDE.md — "
+            "docs/operator_rules.md"
+        )
+        prompt, degraded = skill_runner.build_system_prompt(
+            agent_def,
+            "SKILL_ANCHOR",
+            include_github_contract=True,
+            operator_rules=unbound,
+        )
+        assert degraded is False
+        assert unbound in prompt
+        assert "Pose every open decision through the harness questions tool" not in prompt
+        assert "Give a full URL for every pull request" not in prompt
+        assert "Dispatch a subagent on every pulled email" not in prompt
+
+
+class TestRunSkillOperatorRules:
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_run_skill_resolves_ateles_not_the_role(self, monkeypatch) -> None:
+        seen = {}
+
+        class _Bound:
+            status = "bound"
+            missing = []
+            block = "BOUND_RULE_BLOCK"
+
+        def fake(*args, **kwargs):
+            seen["args"] = args
+            seen["kwargs"] = kwargs
+            return _Bound()
+
+        monkeypatch.setattr(skill_runner, "resolve_operator_rules", fake)
+
+        stub = AgentDefinition(name="gryllus", prompt_markdown="ROLE_DEF", tool_allowlist="*")
+        captured_cmd: list = []
+
+        async def fake_exec(*cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.AgentLoader") as MockLoader,
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="SKILL_BODY"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch("skill_runner._write_harness_event"),
+        ):
+            MockLoader.return_value.load.return_value = stub
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "work prompt",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                )
+            )
+
+        assert result.ok
+        assert seen["args"] == ()
+        assert seen["kwargs"].get("agent_name", "ateles") == "ateles"
+        sys_prompt = captured_cmd[captured_cmd.index("--append-system-prompt") + 1]
+        assert "BOUND_RULE_BLOCK" in sys_prompt
 
 
 # ── _load_agent_def caching ────────────────────────────────────────────────────
