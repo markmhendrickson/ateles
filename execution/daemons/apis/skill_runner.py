@@ -1597,7 +1597,30 @@ async def _run_skill_once(
     # (all SSE task-path and non-GitHub call sites), this block is skipped and
     # the child inherits the daemon's ambient tokens unchanged — exact
     # current behaviour, no regression.
-    if github_token:
+    #
+    # github_token == "" (requested but resolved EMPTY) is a distinct, more
+    # dangerous case and must NOT take the same silent-skip path as None.
+    # `_token_for_agent_on_repo`/`_token_for_repo` return "" (not None) when
+    # every configured PAT env var is unset — and a truthiness check here
+    # (`if github_token:`) previously treated "" identically to "not
+    # requested", so the child silently inherited the daemon's AMBIENT
+    # environment instead. On a host where `gh` has an active keyring
+    # session, that ambient identity is the operator's own personal GitHub
+    # account, not the agent's — this produced a PR opened as
+    # markmhendrickson instead of the intended agent identity, with no error
+    # anywhere in the path. Fail loudly instead of falling back.
+    if github_token is not None:
+        if not github_token:
+            raise RuntimeError(
+                "[apis] github_token was explicitly requested for this dispatch "
+                "but resolved to an EMPTY string (no <AGENT>_AGENT_PAT, "
+                "ATELES_AGENT_PAT, NEOTOMA_AGENT_PAT, or GITHUB_TOKEN configured "
+                "for this agent/repo). Refusing to spawn the child with the "
+                "daemon's ambient GitHub identity — that silent fallback is "
+                "exactly what let a PR land under the operator's own account "
+                "instead of the agent's. Provision the missing PAT before "
+                "retrying; never proceed unauthenticated or on keyring fallback."
+            )
         subprocess_env["GITHUB_TOKEN"] = github_token
         subprocess_env["GH_TOKEN"] = github_token
 

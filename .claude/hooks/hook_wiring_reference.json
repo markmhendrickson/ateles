@@ -8,6 +8,11 @@
     ],
     [
       "PreToolUse",
+      "gh_identity_guard.py",
+      "Edit|Write|NotebookEdit|Bash"
+    ],
+    [
+      "PreToolUse",
       "git_stash_guard.py",
       "Edit|Write|NotebookEdit|Bash"
     ],
