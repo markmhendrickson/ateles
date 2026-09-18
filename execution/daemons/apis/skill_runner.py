@@ -57,6 +57,7 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
         sys.path.insert(0, _p)
 
 from lib.daemon_runtime import AgentDefinition, AgentLoader  # noqa: E402
+from lib.daemon_runtime.agent_loader import resolve_operator_rules  # noqa: E402
 from dispatch_usage import DispatchUsage, parse_dispatch_usage  # noqa: E402
 from foundation import (  # noqa: E402
     SWARM_FOUNDATION_CONTRACT,  # noqa: F401 — re-exported beside the sibling contracts
@@ -564,6 +565,7 @@ def build_system_prompt(
     agent_def: AgentDefinition,
     skill_md: str,
     include_github_contract: bool = False,
+    operator_rules: str = "",
 ) -> tuple[str, bool]:
     """
     Build the composite system prompt for a role dispatch.
@@ -596,6 +598,12 @@ def build_system_prompt(
     so absent — on a checkout with no docs/foundation/conformance.md, so the
     prompt only ever names a reading list the agent can open; the day a kernel
     document lands, the injected text changes to name it.
+
+    ``operator_rules`` defaults to empty, which keeps every existing caller
+    byte-identical. A non-empty block is inserted after the definition (or at
+    the start, when the definition is empty) and before the GitHub contract.
+    It is not written into ``prompt_markdown``. ``degraded`` stays true only
+    when ``prompt_markdown`` is empty.
     """
     contracts = ""
     if include_github_contract:
@@ -604,24 +612,35 @@ def build_system_prompt(
         if foundation:
             contracts = f"{contracts}\n\n---\n\n{foundation}"
     definition_prompt = (agent_def.prompt_markdown or "").strip()
-    if definition_prompt:
-        if include_github_contract:
+    rules = (operator_rules or "").strip()
+    if not rules:
+        if definition_prompt:
+            if include_github_contract:
+                return (
+                    f"{definition_prompt}\n\n"
+                    "---\n\n"
+                    f"{contracts}\n\n"
+                    "---\n\n"
+                    f"{skill_md}",
+                    False,
+                )
             return (
-                f"{definition_prompt}\n\n"
-                "---\n\n"
-                f"{contracts}\n\n"
-                "---\n\n"
-                f"{skill_md}",
+                f"{definition_prompt}\n\n---\n\n{skill_md}",
                 False,
             )
-        return (
-            f"{definition_prompt}\n\n---\n\n{skill_md}",
-            False,
-        )
-    # Degraded: no definition_prompt.
+        # Degraded: no definition_prompt.
+        if include_github_contract:
+            return f"{contracts}\n\n---\n\n{skill_md}", True
+        return skill_md, True
+
+    chunks: list[str] = []
+    if definition_prompt:
+        chunks.append(definition_prompt)
+    chunks.append(rules)
     if include_github_contract:
-        return f"{contracts}\n\n---\n\n{skill_md}", True
-    return skill_md, True
+        chunks.append(contracts)
+    chunks.append(skill_md)
+    return "\n\n---\n\n".join(chunks), not bool(definition_prompt)
 
 
 # ── Neotoma harness_event writer ───────────────────────────────────────────────
@@ -1382,8 +1401,14 @@ async def _run_skill_once(
         )
 
     # ── Build system prompt (Stage 1 + Stage 5) ────────────────────────────────
+    # Rules 1, 2, and 6 come from the ateles agent, not the dispatched role.
+    # run_skill does not query Neotoma itself; the resolver owns that read.
+    operator_block = resolve_operator_rules().block
     system_prompt, degraded = build_system_prompt(
-        agent_def, skill_md, include_github_contract=include_github_contract
+        agent_def,
+        skill_md,
+        include_github_contract=include_github_contract,
+        operator_rules=operator_block,
     )
 
     if degraded:

@@ -17,22 +17,12 @@ WHAT IT CHECKS, all string-detectable in the assistant's own final message:
    no consent-gated action. `CLAUDE.md`: "Laying out a recommendation and
    asking permission to execute it IS the violation."
 
-   This item previously described the check as also exempting a turn
-   containing `AskUserQuestion`. It never did — `findings()` has never
-   matched that string, and the token appeared nowhere else in the repo.
-   The description was removed rather than implemented, because implementing
-   it would have inverted the operator's actual rule. `AskUserQuestion` is
-   how a decision that is genuinely the operator's MUST be posed (CLAUDE.md,
-   "Put every decision that needs Mark through the harness questions tool";
-   ateles `prompt_markdown`, "Pose every decision through the harness
-   questions tool"). Written as an exemption, the one place the tool was
-   named in enforcement code made it look like a way to PASS this gate while
-   the obligation to use it was stated nowhere — an agent reading only the
-   hook would reasonably conclude the tool is optional. A positive obligation
-   does not belong in a gate's exemption list, and this gate does not check
-   it: the obligation now lives in the two always-on prompt sources, and
-   what this check still does is catch a permission question standing in for
-   an action. See ateles#1102.
+   AskUserQuestion is not an input to this check. `findings()` does not
+   match that string. The obligation to pose a genuine operator decision
+   with that tool lives in `CLAUDE.md` ("Put every decision that needs Mark
+   through the harness questions tool"), not in this hook. This check still
+   only catches a permission question standing in for an action. See
+   ateles#1102.
 
 2. A DECISION CARRIED BY NAME ALONE. The closing section marks a decision
    "unchanged", or lists a bare issue reference with no options and no
@@ -56,7 +46,7 @@ the finding would be written where no one reads it, which is invariant 1 in an
 artifact built to enforce standing rules.
 
 BECAUSE A FALSE POSITIVE NOW COSTS THE OPERATOR A VISIBLE INTERRUPTION, the
-checks are scoped tighter than a naive match. The consent exemption is judged on
+checks are scoped tighter than a naive match. The consent case is judged on
 the SENTENCE the question sits in, not the whole tail — matching the tail let an
 unrelated mention of "deploy" suppress a real finding. The operator-only check
 fires only on an ACTIONABLE line, since explanatory prose ("rotation is

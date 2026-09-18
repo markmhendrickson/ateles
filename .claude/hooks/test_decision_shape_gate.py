@@ -378,3 +378,17 @@ class TestWarnVsBlockBranch:
         code = dsg.main()
         assert code == 0
         assert calls == []
+
+
+def test_module_docstring_is_not_an_exemption():
+    import inspect
+
+    doc = decision_shape_gate_doc()
+    assert "exemption" not in doc
+    assert "PASS" not in doc
+    assert "AskUserQuestion is not an input to this check" in doc
+    assert "AskUserQuestion" not in inspect.getsource(dsg.findings)
+
+
+def decision_shape_gate_doc() -> str:
+    return dsg.__doc__ or ""

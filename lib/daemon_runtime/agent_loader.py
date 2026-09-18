@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from enum import Enum
@@ -476,3 +477,203 @@ class AgentLoader:
             rule = p.get("rule") or p.get("description", "")
             lines.append(f"- ({kind}, {status}) {rule}")
         return "\n".join(lines)
+
+
+# Rules 1, 2, and 6 bind only when this agent REFERS_TO a standing_rule.
+# Pasting the sentences into prompt_markdown does not count (ateles#1102).
+_REQUIRED_OPERATOR_RULES = (1, 2, 6)
+_RULE_TITLE_RE = re.compile(r"^([0-9]+)\. ")
+_RULES_HINT = (
+    "hint=resolve the related entity on the agent; "
+    "do not paste rule text into prompt_markdown or CLAUDE.md — docs/operator_rules.md"
+)
+
+
+@dataclass
+class OperatorRules:
+    """Resolved operator-rule block for one injecting surface.
+
+    ``status`` is ``bound``, ``unbound``, or ``incomplete``. This is not an
+    agent-definition stub: ``is_stub`` is never set here.
+    """
+
+    status: str
+    missing: list[int]
+    block: str
+
+
+def _rules_token_line(kind: str, missing: list[int]) -> str:
+    numbers = ",".join(str(n) for n in missing)
+    return f"[{kind}] missing={numbers} {_RULES_HINT}"
+
+
+def unbound_operator_rules() -> OperatorRules:
+    missing = list(_REQUIRED_OPERATOR_RULES)
+    return OperatorRules(
+        status="unbound",
+        missing=missing,
+        block=_rules_token_line("rules-unbound", missing),
+    )
+
+
+def _incomplete_operator_rules(missing: list[int]) -> OperatorRules:
+    ordered = sorted(missing)
+    return OperatorRules(
+        status="incomplete",
+        missing=ordered,
+        block=_rules_token_line("rules-incomplete", ordered),
+    )
+
+
+def _entity_fields(row: dict) -> dict:
+    """Flatten the snapshot shapes /entities/query and /relationships return."""
+    if not isinstance(row, dict):
+        return {}
+    outer_type = row.get("entity_type")
+    snap = row.get("snapshot")
+    if isinstance(snap, dict):
+        inner = snap.get("snapshot")
+        fields = dict(inner) if isinstance(inner, dict) else dict(snap)
+    else:
+        fields = dict(row)
+    if outer_type and not fields.get("entity_type"):
+        fields["entity_type"] = outer_type
+    return fields
+
+
+def _rule_enabled(fields: dict) -> bool:
+    if "enabled" not in fields:
+        return True
+    value = fields.get("enabled")
+    if value is False:
+        return False
+    if isinstance(value, str) and value.strip().lower() == "false":
+        return False
+    return True
+
+
+def _related_rows(payload: dict, agent_id: str) -> list[dict]:
+    """Standing-rule neighbors this agent is the source of a REFERS_TO edge to."""
+    if not isinstance(payload, dict):
+        return []
+    related = payload.get("related_entities") or {}
+    if not isinstance(related, dict):
+        related = {}
+    if payload.get("outgoing") is not None:
+        edges = payload.get("outgoing") or []
+    else:
+        edges = payload.get("relationships") or []
+    rows: list[dict] = []
+    for rel in edges:
+        if not isinstance(rel, dict):
+            continue
+        if str(rel.get("relationship_type", "")).upper() != "REFERS_TO":
+            continue
+        if rel.get("source_entity_id") != agent_id:
+            continue
+        target_id = rel.get("target_entity_id")
+        row = related.get(target_id) if target_id else None
+        if row is None and isinstance(rel.get("target"), dict):
+            row = rel["target"]
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _kept_rule_text(rows: list[dict]) -> dict[int, str]:
+    """Map rule number → text. Empty string means the neighbor passed filters
+    but ``rule_text`` is blank. A number absent from the map did not pass.
+    """
+    texts: dict[int, list[str]] = {}
+    for row in rows:
+        fields = _entity_fields(row)
+        if str(fields.get("entity_type") or "") != "standing_rule":
+            continue
+        if fields.get("scope") != "ateles":
+            continue
+        if not _rule_enabled(fields):
+            continue
+        match = _RULE_TITLE_RE.match(str(fields.get("title") or ""))
+        if not match:
+            continue
+        number = int(match.group(1))
+        texts.setdefault(number, []).append(str(fields.get("rule_text") or ""))
+    kept: dict[int, str] = {}
+    for number, values in texts.items():
+        usable = [value.strip() for value in values if value.strip()]
+        kept[number] = usable[0] if usable else ""
+    return kept
+
+
+def _get_related(loader: AgentLoader, entity_id: str) -> dict:
+    """GET the related-entity route.
+
+    The spec names ``/entities/<id>/related``. The registered Neotoma route is
+    ``/entities/<id>/relationships`` (actions.ts). A 404 on the spec path falls
+    back so a session can still receive the edges; any other error stays unbound.
+    """
+    primary = (
+        f"{NEOTOMA_BASE_URL}/entities/{entity_id}/related?expand_entities=true"
+    )
+    try:
+        return loader._neotoma("GET", primary)
+    except httpx.HTTPStatusError as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status != 404:
+            raise
+    fallback = (
+        f"{NEOTOMA_BASE_URL}/entities/{entity_id}/relationships"
+        "?expand_entities=true"
+    )
+    return loader._neotoma("GET", fallback)
+
+
+def resolve_operator_rules(agent_name: str = "ateles") -> OperatorRules:
+    """Resolve rules 1, 2, and 6 for ``agent_name`` from related standing_rule rows.
+
+    Does not call ``_stub`` and does not read ``prompt_markdown``. A name-query
+    failure, a missing entity, or a related-list failure is ``unbound``.
+    """
+    loader = AgentLoader(agent_name)
+    try:
+        data = loader._neotoma(
+            "POST",
+            f"{NEOTOMA_BASE_URL}/entities/query",
+            {
+                "entity_type": "agent_definition",
+                "search": loader.agent_name,
+                "limit": 5,
+                "include_snapshots": True,
+            },
+        )
+    except Exception:
+        return unbound_operator_rules()
+
+    entity_id = ""
+    for ent in data.get("entities") or []:
+        if not isinstance(ent, dict):
+            continue
+        outer = ent.get("snapshot") or {}
+        snap = outer.get("snapshot", outer) if isinstance(outer, dict) else {}
+        if not isinstance(snap, dict):
+            continue
+        if str(snap.get("name", "")).lower() == loader.agent_name:
+            entity_id = str(ent.get("entity_id") or "")
+            break
+    if not entity_id:
+        return unbound_operator_rules()
+
+    try:
+        related = _get_related(loader, entity_id)
+    except Exception:
+        return unbound_operator_rules()
+
+    kept = _kept_rule_text(_related_rows(related, entity_id))
+    present = [n for n in _REQUIRED_OPERATOR_RULES if n in kept]
+    if not present:
+        return unbound_operator_rules()
+    missing = [n for n in _REQUIRED_OPERATOR_RULES if not kept.get(n, "").strip()]
+    if missing:
+        return _incomplete_operator_rules(missing)
+    block = "\n".join(kept[n] for n in _REQUIRED_OPERATOR_RULES)
+    return OperatorRules(status="bound", missing=[], block=block)

@@ -15,6 +15,7 @@ Two properties matter as much as the detection:
   unreadable reference, or no reference at all, degrades to silence.
 """
 
+import io
 import json
 import runpy
 import sys
@@ -214,6 +215,62 @@ class TestSessionStartIntegration(unittest.TestCase):
     def test_healthy_repo_prints_no_wiring_banner(self) -> None:
         """This repo's own settings must match its own reference snapshot."""
         self.assertEqual(hw.missing(), [], hw.missing())
+
+    def _stdout(self, resolve):
+        repo = Path(__file__).resolve().parents[2]
+        if str(repo) not in sys.path:
+            sys.path.insert(0, str(repo))
+        import lib.daemon_runtime.agent_loader as loader  # noqa: PLC0415
+
+        buf = io.StringIO()
+        quiet = mock.Mock(returncode=0, stdout="")
+        with mock.patch.object(loader, "resolve_operator_rules", resolve):
+            with mock.patch("subprocess.run", return_value=quiet):
+                with mock.patch("sys.stdout", buf):
+                    with mock.patch("sys.stdin", new=mock.MagicMock(read=lambda: "{}")):
+                        code = self._run_hook()
+        return code, buf.getvalue()
+
+    def test_bound_stdout_has_sentences_not_token(self) -> None:
+        sentences = (
+            "Pose every open decision through the harness questions tool",
+            "Give a full URL for every pull request that needs the operator's approval",
+            "Dispatch a subagent on every pulled email",
+        )
+
+        def resolve(agent_name="ateles"):
+            return mock.Mock(status="bound", block="\n".join(sentences))
+
+        code, out = self._stdout(resolve)
+        self.assertEqual(code, 0)
+        for sentence in sentences:
+            self.assertIn(sentence, out)
+        self.assertNotIn("[rules-unbound]", out)
+        self.assertNotIn("[rules-incomplete]", out)
+        self.assertNotIn("rules bound", out)
+        self.assertNotIn("no decisions", out)
+
+    def test_unbound_stdout_prints_token_and_exits_zero(self) -> None:
+        line = (
+            "[rules-unbound] missing=1,2,6 hint=resolve the related entity on the "
+            "agent; do not paste rule text into prompt_markdown or CLAUDE.md — "
+            "docs/operator_rules.md"
+        )
+
+        def resolve(agent_name="ateles"):
+            return mock.Mock(status="unbound", block=line)
+
+        code, out = self._stdout(resolve)
+        self.assertEqual(code, 0)
+        self.assertIn(line, out)
+
+    def test_resolver_raise_prints_unbound_not_silence(self) -> None:
+        def resolve(agent_name="ateles"):
+            raise RuntimeError("neotoma down")
+
+        code, out = self._stdout(resolve)
+        self.assertEqual(code, 0)
+        self.assertIn("[rules-unbound] missing=1,2,6", out)
 
 
 class TestReferenceIsGenerated(unittest.TestCase):

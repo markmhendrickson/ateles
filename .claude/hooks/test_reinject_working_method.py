@@ -42,13 +42,69 @@ HOOK_PATH = Path(__file__).resolve().parent / "reinject_working_method.py"
 # 1. Happy path
 # ---------------------------------------------------------------------------
 class TestHappyPath:
-    def test_main_prints_reminder_and_exits_zero(self, capsys):
+    def test_main_prints_reminder_and_exits_zero(self, capsys, monkeypatch):
+        repo = Path(__file__).resolve().parents[2]
+        if str(repo) not in sys.path:
+            sys.path.insert(0, str(repo))
+        import lib.daemon_runtime.agent_loader as loader  # noqa: PLC0415
+
+        monkeypatch.setattr(
+            loader,
+            "resolve_operator_rules",
+            lambda agent_name="ateles": type(
+                "R", (), {"status": "unbound", "block": "[rules-unbound] missing=1,2,6"}
+            )(),
+        )
         code = hook.main()
         out = capsys.readouterr().out
         assert code == 0
         assert "[working-method]" in out
         assert "1. DISPATCH" in out
         assert "5. PROCEED" in out
+
+    def test_compact_prints_the_same_block(self, capsys, monkeypatch):
+        repo = Path(__file__).resolve().parents[2]
+        if str(repo) not in sys.path:
+            sys.path.insert(0, str(repo))
+        import lib.daemon_runtime.agent_loader as loader  # noqa: PLC0415
+
+        sentences = (
+            "Pose every open decision through the harness questions tool",
+            "Give a full URL for every pull request that needs the operator's approval",
+            "Dispatch a subagent on every pulled email",
+        )
+        monkeypatch.setattr(
+            loader,
+            "resolve_operator_rules",
+            lambda agent_name="ateles": type(
+                "R", (), {"status": "bound", "block": "\n".join(sentences)}
+            )(),
+        )
+        assert hook.main() == 0
+        out = capsys.readouterr().out
+        for sentence in sentences:
+            assert sentence in out
+        assert "[rules-unbound]" not in out
+        assert "Dispatch a subagent on every pulled email" not in hook.REMINDER
+
+    def test_compact_unbound_prints_token(self, capsys, monkeypatch):
+        repo = Path(__file__).resolve().parents[2]
+        if str(repo) not in sys.path:
+            sys.path.insert(0, str(repo))
+        import lib.daemon_runtime.agent_loader as loader  # noqa: PLC0415
+
+        line = (
+            "[rules-unbound] missing=1,2,6 hint=resolve the related entity on the "
+            "agent; do not paste rule text into prompt_markdown or CLAUDE.md — "
+            "docs/operator_rules.md"
+        )
+        monkeypatch.setattr(
+            loader,
+            "resolve_operator_rules",
+            lambda agent_name="ateles": type("R", (), {"status": "unbound", "block": line})(),
+        )
+        assert hook.main() == 0
+        assert line in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
