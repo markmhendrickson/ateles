@@ -2630,26 +2630,44 @@ def save_transcription(
         entities_path = tmp.name
 
     try:
-        cmd = _neotoma_prod_cli_argv(
-            [
-                "store",
-                "--file",
-                entities_path,
-                "--idempotency-key",
-                idem,
-                "--observation-source",
-                observation_source,
-            ]
-        )
         if attach_wav:
-            cmd += [
-                "--file-path",
-                str(resolved_audio),
-                "--interpretation-source-ref",
-                "unstructured",
-                "--file-idempotency-key",
-                file_idem,
-            ]
+            # `store --file-path` sends a path the server resolves on its OWN
+            # filesystem. That was correct when Neotoma ran co-located with
+            # this daemon; against hosted Neotoma the server has no such path
+            # and rejects it with ERR_FILE_PATH_IS_SERVER_LOCAL (ateles#1083),
+            # silently losing every voice-memo transcription. `ingest
+            # --source-file` composes the same /store call but has the CLI
+            # decide the transport itself: it uploads the bytes as
+            # `file_content` whenever the target base URL is not localhost,
+            # and only falls back to a server-side `file_path` when the API
+            # actually is local. Do not reintroduce `store --file-path` here.
+            cmd = _neotoma_prod_cli_argv(
+                [
+                    "ingest",
+                    "--entities",
+                    entities_path,
+                    "--source-file",
+                    str(resolved_audio),
+                    "--idempotency-key",
+                    idem,
+                    "--file-idempotency-key",
+                    file_idem,
+                    "--observation-source",
+                    observation_source,
+                ]
+            )
+        else:
+            cmd = _neotoma_prod_cli_argv(
+                [
+                    "store",
+                    "--file",
+                    entities_path,
+                    "--idempotency-key",
+                    idem,
+                    "--observation-source",
+                    observation_source,
+                ]
+            )
         proc = subprocess.run(
             cmd,
             capture_output=True,

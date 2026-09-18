@@ -640,6 +640,77 @@ def test_stored_entity_records_transcription_engine_and_model(tmp_path, monkeypa
     assert entity["transcription_model"] == "ggml-test.bin"
 
 
+def test_attach_uses_remote_safe_ingest_not_server_local_file_path(tmp_path, monkeypatch):
+    """ateles#1083 regression: hosted Neotoma rejects `store --file-path` with
+    ERR_FILE_PATH_IS_SERVER_LOCAL because the path only resolves on the
+    daemon's own filesystem, not the server's. Attaching audio must go
+    through `neotoma ingest --source-file`, which lets the CLI itself decide
+    whether to upload bytes (`file_content`) or reference a local path
+    (`file_path`) based on the target base URL — never a bare `store
+    --file-path` call. This test fails if that call shape reappears.
+    """
+    audio = _write_audio(tmp_path / "memo.m4a")
+    captured = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = json.dumps(
+            {
+                "structured": {
+                    "entities": [{"entity_id": "ent_stored", "entity_type": "transcription"}]
+                },
+                "unstructured": {"source_id": "src_stored"},
+            }
+        )
+        stderr = ""
+
+    def fake_run(cmd, *args, **kwargs):
+        captured["cmd"] = cmd
+        for i, token in enumerate(cmd):
+            if token == "--entities":
+                captured["entities"] = json.loads(Path(cmd[i + 1]).read_text())
+        return _Proc()
+
+    def fake_cli_json(args):
+        if args[:2] == ["entities", "get"]:
+            return {"snapshot": captured["entities"][0]}
+        if args[:2] == ["observations", "list"]:
+            return {
+                "observations": [
+                    {"source_id": "src_stored", "entity_id": "ent_stored"}
+                ]
+            }
+        if args[:2] == ["sources", "get"]:
+            return {"source": {"content_hash": captured["entities"][0]["audio_content_sha256"]}}
+        raise AssertionError(f"unexpected CLI call in test: {args}")
+
+    monkeypatch.setattr(ta.subprocess, "run", fake_run)
+    monkeypatch.setattr(ta, "_neotoma_prod_cli_argv", lambda args: ["neotoma", *args])
+    monkeypatch.setattr(ta.shutil, "which", lambda name: "/usr/bin/neotoma")
+    monkeypatch.setattr(ta, "_neotoma_auth_preflight", lambda: (True, "ok"))
+    monkeypatch.setattr(ta, "_neotoma_cli_json", fake_cli_json)
+    monkeypatch.setattr(ta, "_write_transcript_sidecars", lambda *a, **k: None)
+
+    ta.save_transcription(
+        audio,
+        {"transcription_text": "hello from a memo", "language": "en"},
+        attach_audio_file=True,
+    )
+
+    cmd = captured["cmd"]
+    assert "ingest" in cmd, f"attach must use `neotoma ingest`, got: {cmd}"
+    assert "--source-file" in cmd
+    assert str(audio.resolve()) in cmd
+    # The permanent regression: a server-local file_path handed to `store`.
+    assert "--file-path" not in cmd, (
+        "attach must never pass --file-path to `store` — hosted Neotoma "
+        "resolves that path on its OWN filesystem and rejects it with "
+        "ERR_FILE_PATH_IS_SERVER_LOCAL (ateles#1083)"
+    )
+    entity = captured["entities"][0]
+    assert entity["transcription_text"] == "hello from a memo"
+
+
 def test_record_meeting_audio_imports_in_clean_checkout(tmp_path):
     """The recorder must not depend on the gitignored scripts/config.py."""
     script = Path(__file__).with_name("record_meeting_audio.py")

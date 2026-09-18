@@ -561,6 +561,25 @@ class ScreenshotWatcher:
 
 # ── Recording watcher ─────────────────────────────────────────────────────────
 
+# Neotoma store/ingest error codes that are deterministic rejections of the
+# call shape, not transient service trouble — retrying them changes nothing
+# and only spins the loop (ateles#1083: 22,878 retries of
+# ERR_FILE_PATH_IS_SERVER_LOCAL rate-limited the daemon's own Telegram
+# notification channel, hiding the failure and starving every other daemon's
+# alerts on the same channel). A memo that fails with one of these codes is
+# recorded as permanently failed after one attempt and never retried again;
+# an unrecognized error stays transient so recoverable work is preserved.
+PERMANENT_STORE_ERROR_CODES = ("ERR_FILE_PATH_IS_SERVER_LOCAL",)
+
+
+def _classify_store_error(exc: BaseException) -> str | None:
+    """Return the permanent error code found in ``exc``'s text, or ``None``."""
+    text = str(exc)
+    for code in PERMANENT_STORE_ERROR_CODES:
+        if code in text:
+            return code
+    return None
+
 
 class RecordingWatcher:
     """
@@ -625,6 +644,12 @@ class RecordingWatcher:
             None if max_files_per_poll is None else max(1, max_files_per_poll)
         )
         self._pending_retries: dict[Path, float] = {}
+        # Permanent failures: path → {"error_code", "at", "notified"}. A path
+        # in here is never retried again and is skipped by every later poll
+        # (ateles#1083 — a deterministic rejection retried forever, which
+        # generated the error volume that rate-limited Telegram and hid the
+        # failure). Only populated for watchers with a durable journal.
+        self._hard_failed: dict[Path, dict[str, Any]] = {}
         self._retry_state_available = True
         if self._retry_state_path is not None:
             self._load_retry_state()
@@ -642,17 +667,21 @@ class RecordingWatcher:
             self._seed_existing()
 
     def _load_retry_state(self) -> None:
-        """Load durable pending retries, failing closed if the journal is unreadable."""
+        """Load durable pending retries, failing closed if the journal is unreadable.
+
+        Accepts v1 (``pending`` only) and v2 (``pending`` + ``hard_failed``).
+        A v1 journal is read as-is in memory; the next save writes it back as
+        v2. Older readers of a v2 file are not a concern — this journal has
+        exactly one reader/writer (this watcher instance).
+        """
         assert self._retry_state_path is not None
         if not self._retry_state_path.exists():
             return
         try:
             payload = json.loads(self._retry_state_path.read_text())
-            if (
-                not isinstance(payload, dict)
-                or payload.get("version") != 1
-                or not isinstance(payload.get("pending"), list)
-            ):
+            if not isinstance(payload, dict) or payload.get("version") not in (1, 2):
+                raise ValueError("unsupported retry-state format")
+            if not isinstance(payload.get("pending"), list):
                 raise ValueError("unsupported retry-state format")
             for item in payload["pending"]:
                 if not isinstance(item, dict) or not isinstance(item.get("path"), str):
@@ -660,6 +689,14 @@ class RecordingWatcher:
                 self._pending_retries[Path(item["path"])] = float(
                     item.get("retry_after", 0)
                 )
+            for item in payload.get("hard_failed", []) or []:
+                if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                    raise ValueError("invalid hard-failed entry")
+                self._hard_failed[Path(item["path"])] = {
+                    "error_code": item.get("error_code", "unknown"),
+                    "at": item.get("at", ""),
+                    "notified": bool(item.get("notified", False)),
+                }
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             self._retry_state_available = False
             log.error(
@@ -670,15 +707,21 @@ class RecordingWatcher:
             )
 
     def _save_retry_state(self) -> bool:
-        """Atomically persist pending retries before relying on in-memory state."""
+        """Atomically persist pending retries and hard failures (journal v2)."""
         if self._retry_state_path is None:
             return True
         payload = {
-            "version": 1,
+            "version": 2,
             "pending": [
                 {"path": str(path), "retry_after": retry_after}
                 for path, retry_after in sorted(
                     self._pending_retries.items(), key=lambda item: str(item[0])
+                )
+            ],
+            "hard_failed": [
+                {"path": str(path), **info}
+                for path, info in sorted(
+                    self._hard_failed.items(), key=lambda item: str(item[0])
                 )
             ],
         }
@@ -706,6 +749,30 @@ class RecordingWatcher:
 
     def _clear_pending(self, path: Path) -> bool:
         self._pending_retries.pop(path, None)
+        return self._save_retry_state()
+
+    def _mark_hard_failed(self, path: Path, error_code: str) -> bool:
+        """Record a permanent failure once and stop this path from ever retrying.
+
+        Idempotent: a path already hard-failed keeps its original ``notified``
+        state rather than resetting it, so a later poll cannot re-trigger a
+        notification for the same permanent failure.
+        """
+        self._pending_retries.pop(path, None)
+        existing = self._hard_failed.get(path)
+        if existing is None:
+            self._hard_failed[path] = {
+                "error_code": error_code,
+                "at": datetime.now(tz=UTC).isoformat(),
+                "notified": False,
+            }
+        return self._save_retry_state()
+
+    def _mark_hard_failure_notified(self, path: Path) -> bool:
+        entry = self._hard_failed.get(path)
+        if entry is None or entry.get("notified"):
+            return True
+        entry["notified"] = True
         return self._save_retry_state()
 
     def _seed_existing(self) -> None:
@@ -835,6 +902,22 @@ class RecordingWatcher:
                 continue
             if path in self._transcribed:
                 continue
+            if path in self._hard_failed:
+                # Permanent, deterministic rejection (e.g.
+                # ERR_FILE_PATH_IS_SERVER_LOCAL) — retrying would not change
+                # the outcome, only regenerate the alert storm this guards
+                # against (ateles#1083). Notify exactly once, then skip on
+                # every later poll.
+                if not self._hard_failed[path].get("notified"):
+                    self._notifier.send(
+                        f"Transcription permanently failed for {path.name}: "
+                        f"{self._hard_failed[path].get('error_code', 'unknown')} "
+                        "(will not retry; see retry journal)",
+                        priority=Priority.BLOCKER,
+                        handler=DAEMON_NAME,
+                    )
+                    self._mark_hard_failure_notified(path)
+                continue
             if self._pending_retries.get(path, 0) > now:
                 continue
             # Backlog guard: an old file is never a fresh recording. Checked
@@ -867,14 +950,26 @@ class RecordingWatcher:
                 f"[{DAEMON_NAME}] Recording settled, transcribing: {path.name}"
                 + (f" + {mic_path.name}" if mic_path else " (remote only)")
             )
-            succeeded = await self._handle_recording(path, mic_path)
-            if succeeded:
+            outcome, error_code = await self._handle_recording(path, mic_path)
+            if outcome == "success":
                 self._transcribed.add(path)
                 if durable_retry:
                     if not self._clear_pending(path):
                         self._transcribed.discard(path)
                 else:
                     self._pending_retries.pop(path, None)
+            elif outcome == "permanent" and durable_retry:
+                # Only the durably-journaled watcher (Voice Memos) can make a
+                # failure permanent; other watchers have no journal to record
+                # it in and fall through to the transient path below.
+                self._mark_hard_failed(path, error_code or "unknown")
+                self._notifier.send(
+                    f"Transcription permanently failed for {path.name}: "
+                    f"{error_code} (will not retry)",
+                    priority=Priority.BLOCKER,
+                    handler=DAEMON_NAME,
+                )
+                self._mark_hard_failure_notified(path)
             else:
                 retry_after = datetime.now(tz=UTC).timestamp() + self._retry_secs
                 if durable_retry:
@@ -888,7 +983,16 @@ class RecordingWatcher:
             ):
                 break
 
-    async def _handle_recording(self, remote_path: Path, mic_path: Path | None) -> bool:
+    async def _handle_recording(
+        self, remote_path: Path, mic_path: Path | None
+    ) -> tuple[str, str | None]:
+        """Transcribe one recording.
+
+        Returns ``(outcome, error_code)`` where ``outcome`` is one of
+        ``"success"``, ``"permanent"`` (deterministic rejection — caller
+        should stop retrying and journal it), or ``"transient"`` (worth
+        retrying later). ``error_code`` is set only for ``"permanent"``.
+        """
         label = remote_path.name + (f" + {mic_path.name}" if mic_path else "")
         self._notifier.send(
             f"Auto-transcribing: {label}",
@@ -905,12 +1009,19 @@ class RecordingWatcher:
                 f"[{DAEMON_NAME}] Transcription error for {label}: {exc}",
                 exc_info=True,
             )
-            self._notifier.send(
-                f"Transcription failed for {label}: {exc}",
-                priority=Priority.BLOCKER,
-                handler=DAEMON_NAME,
-            )
-            return False  # don't attempt analysis if transcription failed
+            error_code = _classify_store_error(exc)
+            if error_code is None:
+                # Only alert here for transient failures; a permanent one is
+                # reported once by the caller after it journals the failure,
+                # so this path must not also alert (ateles#1083 — duplicate
+                # per-attempt alerts are exactly what rate-limited Telegram).
+                self._notifier.send(
+                    f"Transcription failed for {label}: {exc}",
+                    priority=Priority.BLOCKER,
+                    handler=DAEMON_NAME,
+                )
+                return "transient", None
+            return "permanent", error_code
 
         if ANALYZE_ENABLED:
             try:
@@ -927,7 +1038,7 @@ class RecordingWatcher:
                     priority=Priority.BLOCKER,
                     handler=DAEMON_NAME,
                 )
-        return True
+        return "success", None
 
     def _run_transcription(self, remote_path: Path, mic_path: Path | None) -> str | None:
         """
