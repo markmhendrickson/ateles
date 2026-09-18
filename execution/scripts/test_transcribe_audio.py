@@ -854,3 +854,421 @@ def test_no_speech_marker_is_not_run_through_stutter_cleanup(tmp_path, monkeypat
 
     assert result["transcription_text"] == marker
     assert result["silence"] is True
+
+
+# --------------------------------------------------------------------------
+# Provider fallback: OpenAI quota/spend-limit/auth/5xx degrades to another
+# backend instead of failing the run. NO live OpenAI/ElevenLabs call is ever
+# made in these tests — every provider error is a locally-constructed mock
+# exception, per the hard constraint against spending against a capped
+# account during development.
+# --------------------------------------------------------------------------
+
+import httpx  # noqa: E402
+from openai import (  # noqa: E402
+    APIConnectionError,
+    AuthenticationError,
+    BadRequestError,
+    InternalServerError,
+    PermissionDeniedError,
+    RateLimitError,
+)
+
+
+def _fake_rate_limit_error(error_code: str, error_type: str, message: str = "error"):
+    req = httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")
+    body = {"error": {"code": error_code, "type": error_type, "message": message}}
+    resp = httpx.Response(429, request=req, json=body)
+    return RateLimitError(message, response=resp, body=body)
+
+
+def _fake_bad_request_error(message: str = "invalid file format"):
+    req = httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")
+    body = {"error": {"code": "invalid_request_error", "message": message}}
+    resp = httpx.Response(400, request=req, json=body)
+    return BadRequestError(message, response=resp, body=body)
+
+
+def _fake_auth_error(message: str = "Invalid API key"):
+    req = httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")
+    body = {"error": {"code": "invalid_api_key", "message": message}}
+    resp = httpx.Response(401, request=req, json=body)
+    return AuthenticationError(message, response=resp, body=body)
+
+
+def _fake_permission_error(message: str = "insufficient permissions"):
+    req = httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")
+    body = {"error": {"code": "permission_denied", "message": message}}
+    resp = httpx.Response(403, request=req, json=body)
+    return PermissionDeniedError(message, response=resp, body=body)
+
+
+def _fake_internal_server_error(message: str = "server error"):
+    req = httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")
+    body = {"error": {"code": "server_error", "message": message}}
+    resp = httpx.Response(500, request=req, json=body)
+    return InternalServerError(message, response=resp, body=body)
+
+
+def _fake_connection_error(message: str = "connection failed"):
+    req = httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")
+    return APIConnectionError(message=message, request=req)
+
+
+class TestIsPermanentQuotaError:
+    def test_insufficient_quota_by_code(self):
+        assert ta._is_permanent_quota_error("insufficient_quota", "", "") is True
+
+    def test_insufficient_quota_by_type(self):
+        assert ta._is_permanent_quota_error("", "insufficient_quota", "") is True
+
+    def test_insufficient_quota_by_message_substring(self):
+        assert (
+            ta._is_permanent_quota_error("", "", "error: insufficient_quota exceeded")
+            is True
+        )
+
+    def test_organization_spend_limit_exceeded_by_code(self):
+        assert (
+            ta._is_permanent_quota_error(
+                "organization_spend_limit_exceeded", "", ""
+            )
+            is True
+        )
+
+    def test_organization_spend_limit_exceeded_by_message(self):
+        assert (
+            ta._is_permanent_quota_error(
+                "", "", "error: organization_spend_limit_exceeded"
+            )
+            is True
+        )
+
+    def test_ordinary_rate_limit_is_not_permanent(self):
+        # A plain 429 with no quota/spend-limit marker is transient — retried,
+        # not treated as a permanent billing condition.
+        assert ta._is_permanent_quota_error("rate_limit_exceeded", "", "") is False
+
+
+class TestTranscribeWithRetryRaisesProviderUnavailable:
+    """transcribe_with_retry must raise OpenAIProviderUnavailable — not a bare
+    RuntimeError — for every fall-through-worthy condition, and must NOT retry
+    a permanent quota/spend-limit error (retrying a capped account is pointless
+    and burns the retry budget for nothing)."""
+
+    def test_insufficient_quota_raises_provider_unavailable_without_retry(
+        self, tmp_path, monkeypatch
+    ):
+        audio = tmp_path / "a.m4a"
+        audio.write_bytes(b"x")
+        client = MagicMock()
+        client.audio.transcriptions.create.side_effect = _fake_rate_limit_error(
+            "insufficient_quota", "insufficient_quota"
+        )
+        monkeypatch.setattr(ta.time, "sleep", lambda *_: None)
+        with pytest.raises(ta.OpenAIProviderUnavailable):
+            ta.transcribe_with_retry(client, audio, verbose=False)
+        # No retry: exactly one call attempted.
+        assert client.audio.transcriptions.create.call_count == 1
+
+    def test_organization_spend_limit_exceeded_raises_provider_unavailable(
+        self, tmp_path, monkeypatch
+    ):
+        audio = tmp_path / "a.m4a"
+        audio.write_bytes(b"x")
+        client = MagicMock()
+        client.audio.transcriptions.create.side_effect = _fake_rate_limit_error(
+            "organization_spend_limit_exceeded", "organization_spend_limit_exceeded",
+            "You exceeded your current organization spend limit.",
+        )
+        monkeypatch.setattr(ta.time, "sleep", lambda *_: None)
+        with pytest.raises(ta.OpenAIProviderUnavailable):
+            ta.transcribe_with_retry(client, audio, verbose=False)
+        assert client.audio.transcriptions.create.call_count == 1
+
+    def test_auth_error_raises_provider_unavailable(self, tmp_path, monkeypatch):
+        audio = tmp_path / "a.m4a"
+        audio.write_bytes(b"x")
+        client = MagicMock()
+        client.audio.transcriptions.create.side_effect = _fake_auth_error()
+        monkeypatch.setattr(ta.time, "sleep", lambda *_: None)
+        with pytest.raises(ta.OpenAIProviderUnavailable):
+            ta.transcribe_with_retry(client, audio, verbose=False)
+
+    def test_permission_denied_raises_provider_unavailable(self, tmp_path, monkeypatch):
+        audio = tmp_path / "a.m4a"
+        audio.write_bytes(b"x")
+        client = MagicMock()
+        client.audio.transcriptions.create.side_effect = _fake_permission_error()
+        monkeypatch.setattr(ta.time, "sleep", lambda *_: None)
+        with pytest.raises(ta.OpenAIProviderUnavailable):
+            ta.transcribe_with_retry(client, audio, verbose=False)
+
+    def test_internal_server_error_raises_provider_unavailable(
+        self, tmp_path, monkeypatch
+    ):
+        audio = tmp_path / "a.m4a"
+        audio.write_bytes(b"x")
+        client = MagicMock()
+        client.audio.transcriptions.create.side_effect = _fake_internal_server_error()
+        monkeypatch.setattr(ta.time, "sleep", lambda *_: None)
+        with pytest.raises(ta.OpenAIProviderUnavailable):
+            ta.transcribe_with_retry(client, audio, verbose=False)
+
+    def test_connection_error_raises_provider_unavailable(self, tmp_path, monkeypatch):
+        audio = tmp_path / "a.m4a"
+        audio.write_bytes(b"x")
+        client = MagicMock()
+        client.audio.transcriptions.create.side_effect = _fake_connection_error()
+        monkeypatch.setattr(ta.time, "sleep", lambda *_: None)
+        with pytest.raises(ta.OpenAIProviderUnavailable):
+            ta.transcribe_with_retry(client, audio, verbose=False)
+
+    def test_malformed_request_does_not_raise_provider_unavailable(
+        self, tmp_path, monkeypatch
+    ):
+        """A BadRequestError (malformed/corrupt input) is a property of THIS
+        request. Every provider would reject the same bytes, so this must NOT
+        be marked fall-through-worthy — it should propagate as some other
+        exception type, never OpenAIProviderUnavailable."""
+        audio = tmp_path / "a.m4a"
+        audio.write_bytes(b"x")
+        client = MagicMock()
+        client.audio.transcriptions.create.side_effect = _fake_bad_request_error()
+        monkeypatch.setattr(ta.time, "sleep", lambda *_: None)
+        with pytest.raises(Exception) as exc_info:
+            ta.transcribe_with_retry(client, audio, verbose=False)
+        assert not isinstance(exc_info.value, ta.OpenAIProviderUnavailable)
+
+    def test_transient_rate_limit_retries_then_raises_provider_unavailable(
+        self, tmp_path, monkeypatch
+    ):
+        """A plain 429 (no quota/spend-limit marker) retries up to MAX_RETRIES,
+        then raises OpenAIProviderUnavailable — still fall-through-worthy once
+        the retry budget is exhausted, since another provider does not share
+        OpenAI's rate-limit bucket."""
+        audio = tmp_path / "a.m4a"
+        audio.write_bytes(b"x")
+        client = MagicMock()
+        client.audio.transcriptions.create.side_effect = _fake_rate_limit_error(
+            "rate_limit_exceeded", "rate_limit_exceeded"
+        )
+        monkeypatch.setattr(ta.time, "sleep", lambda *_: None)
+        with pytest.raises(ta.OpenAIProviderUnavailable):
+            ta.transcribe_with_retry(client, audio, verbose=False)
+        assert client.audio.transcriptions.create.call_count == ta.MAX_RETRIES
+
+
+class TestOpenAIFallback:
+    """End-to-end: transcribe_audio_file(backend='openai') degrades to another
+    backend on a provider-level failure, in the documented order
+    (ElevenLabs when a key is configured, else local), records the fallback
+    visibly, and tries at most one alternate backend."""
+
+    def test_falls_through_to_elevenlabs_when_key_present(self, tmp_path, monkeypatch):
+        audio = tmp_path / "call.m4a"
+        audio.write_bytes(b"fake-audio-bytes")
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-a-real-credential")
+        monkeypatch.setenv("ELEVENLABS_API_KEY", "test-el-key-not-a-real-credential")
+        monkeypatch.setattr(ta, "get_audio_duration", lambda _p: 12.0)
+
+        with patch.object(ta, "OpenAI") as mock_openai_cls, patch.object(
+            ta, "transcribe_with_retry"
+        ) as mock_retry, patch.object(
+            ta, "transcribe_with_elevenlabs_speech_to_text"
+        ) as mock_el:
+            mock_openai_cls.return_value = MagicMock()
+            mock_retry.side_effect = ta.OpenAIProviderUnavailable(
+                "OpenAI API quota exceeded (organization_spend_limit_exceeded)."
+            )
+            mock_el.return_value = {
+                "transcription_text": "Fallback transcript via ElevenLabs.",
+                "language": "en",
+                "backend": ta.BACKEND_ELEVENLABS,
+                "transcription_engine": "elevenlabs_stt",
+                "transcription_model": "scribe_v2",
+                "raw_response": {"text": "Fallback transcript via ElevenLabs."},
+            }
+            result = ta.transcribe_audio_file(audio, language="en", backend="openai")
+
+        assert result["transcription_text"] == "Fallback transcript via ElevenLabs."
+        assert result["backend"] == ta.BACKEND_ELEVENLABS
+        # Visible as a fallback: engine string is suffixed, not a plain
+        # "elevenlabs_stt" indistinguishable from an ordinary ElevenLabs run.
+        assert result["transcription_engine"] == "elevenlabs_stt_fallback_from_openai"
+        assert result["provider_fallback"]["preferred_backend"] == ta.BACKEND_OPENAI
+        assert result["provider_fallback"]["actual_backend"] == ta.BACKEND_ELEVENLABS
+        assert "organization_spend_limit_exceeded" in result["provider_fallback"]["reason"]
+        # OpenAI was attempted exactly once — no retry loop across providers.
+        assert mock_retry.call_count == 1
+        assert mock_el.call_count == 1
+
+    def test_falls_through_to_local_when_no_elevenlabs_key(self, tmp_path, monkeypatch):
+        audio = tmp_path / "memo.m4a"
+        audio.write_bytes(b"fake-audio-bytes")
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-a-real-credential")
+        monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+        monkeypatch.setattr(ta, "get_audio_duration", lambda _p: 5.0)
+
+        with patch.object(ta, "OpenAI") as mock_openai_cls, patch.object(
+            ta, "transcribe_with_retry"
+        ) as mock_retry, patch.object(ta, "transcribe_local") as mock_local:
+            mock_openai_cls.return_value = MagicMock()
+            mock_retry.side_effect = ta.OpenAIProviderUnavailable(
+                "OpenAI API quota exceeded (insufficient_quota)."
+            )
+            mock_local.return_value = {
+                "transcription_text": "Fallback transcript via local whisper-cli.",
+                "language": "en",
+                "backend": ta.BACKEND_LOCAL,
+                "transcription_engine": ta.TRANSCRIPTION_ENGINE_LOCAL,
+                "transcription_model": ta.DEFAULT_MODEL_NAME,
+                "rms_db": -30.0,
+                "silence": False,
+            }
+            result = ta.transcribe_audio_file(audio, language="en", backend="openai")
+
+        assert result["transcription_text"] == "Fallback transcript via local whisper-cli."
+        assert result["backend"] == ta.BACKEND_LOCAL
+        assert result["transcription_engine"] == f"{ta.TRANSCRIPTION_ENGINE_LOCAL}_fallback_from_openai"
+        assert result["provider_fallback"]["actual_backend"] == ta.BACKEND_LOCAL
+        assert "insufficient_quota" in result["provider_fallback"]["reason"]
+        assert mock_retry.call_count == 1
+        assert mock_local.call_count == 1
+
+    def test_falls_through_to_local_when_elevenlabs_also_fails(
+        self, tmp_path, monkeypatch
+    ):
+        """If BOTH the preferred (OpenAI) and the first fallback (ElevenLabs)
+        fail, degrade once more to local rather than raising — local never
+        needs a key or network, so it is the backstop of last resort."""
+        audio = tmp_path / "call.m4a"
+        audio.write_bytes(b"fake-audio-bytes")
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-a-real-credential")
+        monkeypatch.setenv("ELEVENLABS_API_KEY", "test-el-key-not-a-real-credential")
+        monkeypatch.setattr(ta, "get_audio_duration", lambda _p: 5.0)
+
+        with patch.object(ta, "OpenAI") as mock_openai_cls, patch.object(
+            ta, "transcribe_with_retry"
+        ) as mock_retry, patch.object(
+            ta, "transcribe_with_elevenlabs_speech_to_text"
+        ) as mock_el, patch.object(ta, "transcribe_local") as mock_local:
+            mock_openai_cls.return_value = MagicMock()
+            mock_retry.side_effect = ta.OpenAIProviderUnavailable("quota exceeded")
+            mock_el.side_effect = RuntimeError("ElevenLabs also down")
+            mock_local.return_value = {
+                "transcription_text": "Last-resort local transcript.",
+                "language": "en",
+                "backend": ta.BACKEND_LOCAL,
+                "transcription_engine": ta.TRANSCRIPTION_ENGINE_LOCAL,
+                "transcription_model": ta.DEFAULT_MODEL_NAME,
+                "rms_db": -28.0,
+                "silence": False,
+            }
+            result = ta.transcribe_audio_file(audio, language="en", backend="openai")
+
+        assert result["transcription_text"] == "Last-resort local transcript."
+        assert result["backend"] == ta.BACKEND_LOCAL
+        assert result["provider_fallback"]["actual_backend"] == ta.BACKEND_LOCAL
+
+    def test_malformed_input_does_not_fall_through(self, tmp_path, monkeypatch):
+        """A bad-request-shaped failure must propagate as-is, never triggering
+        a fallback — every provider would reject the same malformed bytes, so
+        falling through would just burn three attempts on one bad request."""
+        audio = tmp_path / "corrupt.m4a"
+        audio.write_bytes(b"not-real-audio")
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-a-real-credential")
+        monkeypatch.setenv("ELEVENLABS_API_KEY", "test-el-key-not-a-real-credential")
+        monkeypatch.setattr(ta, "get_audio_duration", lambda _p: 5.0)
+
+        with patch.object(ta, "OpenAI") as mock_openai_cls, patch.object(
+            ta, "transcribe_with_retry"
+        ) as mock_retry, patch.object(
+            ta, "transcribe_with_elevenlabs_speech_to_text"
+        ) as mock_el:
+            mock_openai_cls.return_value = MagicMock()
+            mock_retry.side_effect = ValueError(
+                "SKIP: Audio file appears corrupted or invalid: corrupt.m4a."
+            )
+            with pytest.raises(ValueError, match="SKIP"):
+                ta.transcribe_audio_file(audio, language="en", backend="openai")
+        # ElevenLabs must never be tried for a malformed-input failure.
+        assert mock_el.call_count == 0
+
+    def test_chunked_path_falls_through_on_provider_unavailable(
+        self, tmp_path, monkeypatch
+    ):
+        """A large file (chunked path) that fails partway through with a
+        provider-level error must ALSO fall through, not just the single-file
+        path — the per-chunk exception handler must not swallow
+        OpenAIProviderUnavailable back into a plain RuntimeError."""
+        audio_path = tmp_path / "long_call.m4a"
+        audio_path.write_bytes(b"fake-audio-bytes")
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-a-real-credential")
+        monkeypatch.setenv("ELEVENLABS_API_KEY", "test-el-key-not-a-real-credential")
+
+        chunk_paths = [tmp_path / "chunk0.m4a", tmp_path / "chunk1.m4a"]
+        for c in chunk_paths:
+            c.write_bytes(b"fake-chunk-bytes")
+
+        with patch.object(ta, "OpenAI") as mock_openai_cls, patch.object(
+            ta, "get_audio_duration", return_value=1200.0
+        ), patch.object(
+            ta, "split_audio_file", return_value=chunk_paths
+        ), patch.object(
+            ta,
+            "transcribe_with_retry",
+            side_effect=ta.OpenAIProviderUnavailable("spend limit exceeded"),
+        ), patch.object(
+            ta, "transcribe_with_elevenlabs_speech_to_text"
+        ) as mock_el:
+            mock_openai_cls.return_value = MagicMock()
+            mock_el.return_value = {
+                "transcription_text": "Chunked fallback via ElevenLabs.",
+                "language": "en",
+                "backend": ta.BACKEND_ELEVENLABS,
+                "transcription_engine": "elevenlabs_stt",
+                "transcription_model": "scribe_v2",
+            }
+            with patch.object(Path, "stat") as mock_stat:
+                mock_stat.return_value = types.SimpleNamespace(
+                    st_size=30 * 1024 * 1024
+                )
+                result = ta.transcribe_audio_file(
+                    audio_path, language="en", backend="openai"
+                )
+
+        assert result["transcription_text"] == "Chunked fallback via ElevenLabs."
+        assert result["provider_fallback"]["actual_backend"] == ta.BACKEND_ELEVENLABS
+
+    def test_default_backend_never_touches_openai_and_cannot_trigger_fallback(
+        self, tmp_path, monkeypatch
+    ):
+        """The fallback machinery only ever engages when OpenAI was the
+        EXPLICITLY selected backend. The default (no --backend) path goes
+        straight to local and never constructs an OpenAI client at all."""
+        audio = tmp_path / "memo.m4a"
+        audio.write_bytes(b"fake-audio-bytes")
+        monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+        monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+        monkeypatch.setattr(ta, "get_audio_duration", lambda _p: 5.0)
+
+        with patch.object(ta, "OpenAI") as mock_openai_cls, patch.object(
+            ta, "transcribe_local"
+        ) as mock_local:
+            mock_local.return_value = {
+                "transcription_text": "Ordinary local transcript.",
+                "language": "en",
+                "backend": ta.BACKEND_LOCAL,
+                "transcription_engine": ta.TRANSCRIPTION_ENGINE_LOCAL,
+                "transcription_model": ta.DEFAULT_MODEL_NAME,
+                "rms_db": -25.0,
+                "silence": False,
+            }
+            result = ta.transcribe_audio_file(audio, language="en")
+
+        assert result["transcription_text"] == "Ordinary local transcript."
+        # No fallback marker: this was never routed through OpenAI at all.
+        assert "provider_fallback" not in result
+        assert result["transcription_engine"] == ta.TRANSCRIPTION_ENGINE_LOCAL
+        mock_openai_cls.assert_not_called()
