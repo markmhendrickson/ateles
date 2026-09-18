@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from enum import Enum
 
+from lib.gate_names import normalize_gate_name
+
 
 class TypeLabel(str, Enum):
     """Issue/PR type classification."""
@@ -194,11 +196,20 @@ def labels_for_gate_status(
     desired: set[str] = set()
     status = gate_status or {}
 
+    # Gate names in `gate_status` are hand-written into the entity, so reduce
+    # them to the same normalized form the workflow_definition gates were
+    # reduced to. Matching raw would miss a gate recorded as "PM" or with a
+    # unicode lookalike, and a missed CLEARED state only costs a label — but a
+    # missed name in the blocking loop below is a block that never appears.
+    normalized_status: dict[str, str] = {}
     for gate, state in status.items():
         if not isinstance(state, str):
             continue
-        if state.strip().lower() in _CLEARED_STATES:
-            label = _GATE_TO_LABEL.get(gate.strip().lower())
+        normalized_status[normalize_gate_name(gate)] = state.strip().lower()
+
+    for gate, state in normalized_status.items():
+        if state in _CLEARED_STATES:
+            label = _GATE_TO_LABEL.get(gate)
             if label is not None:
                 desired.add(label.value)
 
@@ -209,13 +220,22 @@ def labels_for_gate_status(
         else _UNSUPPLIED_PRE_IMPL_GATES
     )
     for gate in blocking_gates:
-        state = str(status.get(gate, "")).strip().lower()
-        if state and state not in _CLEARED_STATES and state != "not_required":
+        # A gate the workflow declares but `gate_status` does not mention has
+        # not been signed off — it has not been STARTED. It must block.
+        #
+        # This previously read `if state and ...`, so a declared gate missing
+        # from `gate_status` fell through the guard and emitted no
+        # `blocked/gates` label. That is the same fail-open shape as the
+        # vacuous empty sequence: the less the record said, the greener the
+        # issue read. Absence now takes the restrictive branch, spelled as
+        # `pending` so it is indistinguishable from an explicitly pending gate.
+        state = normalized_status.get(normalize_gate_name(gate), "pending")
+        if state not in _CLEARED_STATES and state != "not_required":
             desired.add(BLOCKED_GATES_LABEL)
             break
 
     if current_owner:
-        owner = current_owner.strip().lower()
+        owner = normalize_gate_name(current_owner)
         gate_name = _AGENT_TO_GATE.get(owner, owner)
         phase = _OWNER_TO_PHASE.get(gate_name)
         if phase is not None:

@@ -106,6 +106,8 @@ from typing import Any, Callable, Iterable
 
 import httpx
 
+from lib.gate_names import IMPL_GATE_NAME, normalize_gate_name
+
 log = logging.getLogger("ateles.workflow_resolver")
 
 NEOTOMA_BASE_URL = os.environ.get(
@@ -122,9 +124,23 @@ QUERY_TIMEOUT_SECONDS = float(
     os.environ.get("ATELES_WORKFLOW_QUERY_TIMEOUT_SECONDS", "15")
 )
 
-# The gate whose phase separates "before implementation" from "after". Every
-# workflow that implements anything declares it.
-IMPL_GATE_NAME = "impl"
+# Workflows that legitimately declare no pre-impl gate, by `workflow_type`.
+#
+# An empty pre-impl sequence is indistinguishable, at the point of use, between
+# "this workflow genuinely gates nothing before implementation" and "the gate
+# list did not survive the read". The first is a real property of
+# `ateles|release` — it has no `impl` gate, so nothing can precede one. The
+# second is a missing list, a gates field that failed to parse, or an `impl`
+# gate whose name did not match because it was stored as `Impl` or with a
+# unicode lookalike.
+#
+# Only the caller that can tell the two apart may treat empty as green, and it
+# can only tell them apart by asking whether THIS workflow is allowed to be
+# empty. Membership here is that answer, and it is deliberately a closed list:
+# a workflow type absent from it that resolves to zero pre-impl gates is
+# treated as a failed read, not as an all-clear (see
+# `ResolvedWorkflow.permits_no_pre_impl_gates`).
+NO_PRE_IMPL_WORKFLOW_TYPES = frozenset({"release"})
 
 
 class WorkflowUnresolvedError(RuntimeError):
@@ -181,6 +197,29 @@ class ResolvedWorkflow:
         earlier.sort(key=lambda g: (g.phase, g.gate_name))
         return tuple(g.gate_name for g in earlier)
 
+    def permits_no_pre_impl_gates(self) -> bool:
+        """Whether an empty pre-impl sequence is a real property of this workflow.
+
+        True only when the workflow_type is on `NO_PRE_IMPL_WORKFLOW_TYPES`
+        AND the definition genuinely declares no `impl` gate — both, because
+        the allowlist says "this type may be empty" while the missing impl gate
+        is the reason it is. A `release` workflow that grew an `impl` gate and
+        then lost its pre-impl gates to a bad edit is NOT permitted to be
+        empty; it is a failed read wearing an allowlisted name.
+
+        Everything else answering empty is treated as a failed read. That is
+        the restrictive branch for the field that carries the safety meaning:
+        the cost of a wrong False is a build handoff that waits, the cost of a
+        wrong True is a PR opened on gates nobody signed.
+        """
+        if self.workflow_type_key() not in NO_PRE_IMPL_WORKFLOW_TYPES:
+            return False
+        return not any(g.gate_name == IMPL_GATE_NAME for g in self.gates)
+
+    def workflow_type_key(self) -> str:
+        """The workflow_type in the one form comparisons use."""
+        return normalize_gate_name(self.workflow_type)
+
     def gate_order(self) -> tuple[str, ...]:
         """Every gate name in execution order — for reporting and blocking checks."""
         ordered = sorted(self.gates, key=lambda g: (g.phase, g.gate_name))
@@ -228,7 +267,9 @@ def validate_gates(raw_gates: list[dict], *, entity_id: str) -> tuple[ResolvedGa
         )
     out: list[ResolvedGate] = []
     for g in raw_gates:
-        name = str(g.get("gate_name", "")).strip()
+        # Normalized at the boundary, once, so no downstream comparison can be
+        # written against the raw form and silently miss `Impl`.
+        name = normalize_gate_name(g.get("gate_name"))
         if not name:
             raise WorkflowUnresolvedError(
                 f"{entity_id}: a gate has no gate_name — refusing the definition"
@@ -461,8 +502,53 @@ def resolve_pre_impl_gates(
     Replaces `swarm_dispatch.PRE_IMPL_GATES` and
     `lib.issue_labels.PRE_IMPL_GATE_NAMES`. Raises `WorkflowUnresolvedError`
     rather than returning a default — see the module docstring.
+
+    NOTE for callers that gate an ACTION on the result: an empty tuple here is
+    ambiguous on its own (see `NO_PRE_IMPL_WORKFLOW_TYPES`). Use
+    `require_pre_impl_gates` instead, which refuses an empty sequence unless
+    the workflow is allowed to have one.
     """
     return resolve_workflow(repository, labels, fetcher=fetcher).pre_impl_gate_names()
+
+
+def require_pre_impl_gates(
+    repository: str,
+    labels: Iterable[str] = (),
+    *,
+    fetcher: Callable[[str], list[ResolvedWorkflow]] | None = None,
+) -> tuple[str, ...]:
+    """Pre-impl gate names, refusing an empty sequence that is not accounted for.
+
+    This is the entry point for any caller whose decision is "may work start".
+    `resolve_pre_impl_gates` answers what the record says; this one additionally
+    refuses to answer at all when an empty sequence cannot be explained.
+
+    The distinction matters because every consumer of an empty tuple iterates
+    it, and iterating nothing produces a vacuous pass — "no gate is unsigned"
+    is True when there are no gates. The vacuity is not in the caller's loop,
+    it is in accepting an unexplained empty list as an answer, so the refusal
+    belongs here where the workflow is still in hand to explain it.
+
+    Raises `WorkflowUnresolvedError` when the sequence is empty and the
+    workflow is not on `NO_PRE_IMPL_WORKFLOW_TYPES`.
+    """
+    workflow = resolve_workflow(repository, labels, fetcher=fetcher)
+    gates = workflow.pre_impl_gate_names()
+    if gates:
+        return gates
+    if workflow.permits_no_pre_impl_gates():
+        return ()
+    raise WorkflowUnresolvedError(
+        f"{workflow.entity_id or '<no entity>'}: workflow "
+        f"{workflow.project}|{workflow.workflow_type} resolved to NO pre-impl "
+        "gates, and its workflow_type is not one that may have none "
+        f"({sorted(NO_PRE_IMPL_WORKFLOW_TYPES)}). Treating this as a failed "
+        "read rather than an all-clear: a missing gate list, a gates field "
+        "that did not parse, or an impl gate declared in the earliest phase "
+        "all produce exactly this empty sequence.",
+        project=workflow.project,
+        workflow_type=workflow.workflow_type,
+    )
 
 
 def resolve_gates(

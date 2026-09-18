@@ -77,8 +77,12 @@ if str(_REPO_ROOT) not in sys.path:
 # error, and it began returning live roster data the moment this import was
 # added as a package import.
 #
-# The resolver module itself imports nothing from its package, so loading it
-# directly is equivalent minus the bootstrap.
+# The resolver module imports nothing from `lib.daemon_runtime`, so loading it
+# directly is equivalent minus the bootstrap. Its one intra-repo import is
+# `lib.gate_names`, a top-level module with no package `__init__` of its own to
+# run — which is why the gate-name normalizer lives at `lib/gate_names.py`
+# rather than under `lib/daemon_runtime/`, where importing it would drag in the
+# very env bootstrap this shim exists to avoid.
 import importlib.util as _importlib_util  # noqa: E402
 
 _resolver_spec = _importlib_util.spec_from_file_location(
@@ -91,6 +95,8 @@ _resolver = _importlib_util.module_from_spec(_resolver_spec)
 sys.modules[_resolver_spec.name] = _resolver
 _resolver_spec.loader.exec_module(_resolver)
 resolve_gates = _resolver.resolve_gates
+
+from lib.gate_names import normalize_gate_name  # noqa: E402
 
 log = logging.getLogger("ateles")
 
@@ -738,11 +744,22 @@ def _blocking_gates(
     reporting only.
     """
     order = tuple(gate_order) if gate_order else _GATE_ORDER_FALLBACK
-    out = [g for g in order if str(gate_status.get(g, "")).strip().lower() not in _CLEARED_GATE_STATES]
+    # Compare in the normalized space so a gate recorded as "PM" or with a
+    # unicode lookalike matches the declared "pm" instead of reading as both an
+    # unsigned declared gate AND an unknown extra one.
+    normalized = {
+        normalize_gate_name(k): str(v).strip().lower()
+        for k, v in (gate_status or {}).items()
+    }
+    order_keys = {normalize_gate_name(g) for g in order}
+    out = [
+        g for g in order
+        if normalized.get(normalize_gate_name(g), "") not in _CLEARED_GATE_STATES
+    ]
     out += [
         g for g in sorted(gate_status)
-        if g not in order
-        and str(gate_status.get(g, "")).strip().lower() not in _CLEARED_GATE_STATES
+        if normalize_gate_name(g) not in order_keys
+        and normalized.get(normalize_gate_name(g), "") not in _CLEARED_GATE_STATES
     ]
     return out
 

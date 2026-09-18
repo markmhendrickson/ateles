@@ -98,8 +98,9 @@ from lib.daemon_runtime.checkpoint_posture import PostureOutcome, evaluate_with_
 from lib.daemon_runtime.gating import load_policy
 from lib.daemon_runtime.workflow_resolver import (
     WorkflowUnresolvedError,
-    resolve_pre_impl_gates,
+    require_pre_impl_gates,
 )
+from lib.gate_names import normalize_gate_name
 from lib.notify import Notifier, Priority
 
 log = logging.getLogger("apis.swarm_dispatch")
@@ -290,14 +291,21 @@ async def _pre_impl_gates_for(trigger: SwarmTrigger) -> tuple[str, ...]:
     """Pre-impl gate names for *trigger*'s issue, read from the record.
 
     Raises `WorkflowUnresolvedError` when no workflow_definition governs the
-    issue. Callers decline the decision rather than substituting a default:
-    a fallback sequence would be exactly the second source of truth this
-    replaced, and would apply precisely when the record is not answering
-    (same posture as the Neotoma halt in
+    issue, AND when the resolved sequence is empty without the workflow being
+    one that may have none. Callers decline the decision rather than
+    substituting a default: a fallback sequence would be exactly the second
+    source of truth this replaced, and would apply precisely when the record is
+    not answering (same posture as the Neotoma halt in
     `lib/daemon_runtime/neotoma_reachability.py`).
+
+    The empty case is refused here rather than returned because both callers
+    treat the sequence as exhaustive: the waive path would report success
+    having written nothing, and `_gates_green` would pass vacuously. Neither
+    can tell an empty list from a failed read, so the refusal happens where the
+    workflow is still in hand to explain it.
     """
     return await asyncio.to_thread(
-        resolve_pre_impl_gates, trigger.repository, list(trigger.labels or [])
+        require_pre_impl_gates, trigger.repository, list(trigger.labels or [])
     )
 
 # Operator GitHub login — only this login may waive gates via the comment
@@ -3321,6 +3329,16 @@ class SwarmDispatcher:
         judged against `ateles|bug`'s single `pm` gate instead of a feature
         workflow's `pm, ux, arch`. An unresolvable workflow fails CLOSED for the
         same reason an unreadable entity does.
+
+        An EMPTY pre-impl sequence also fails closed, via
+        `require_pre_impl_gates`. The check below is a "no gate is unsigned"
+        test, which is vacuously true over an empty list — so the more
+        completely the gate data failed to load, the more certainly this
+        returned True. The four inputs that produce an empty sequence are a
+        missing gate list, an `impl` gate stored as `Impl`, an `impl` gate
+        written with a unicode lookalike, and a workflow whose gates all sit in
+        the impl phase. Only a workflow allowlisted as having no pre-impl gates
+        (`ateles|release`) may answer empty and still be green.
         """
         if not lanius.ok:
             return False
@@ -3330,13 +3348,13 @@ class SwarmDispatcher:
         ref = f"{repository}#{issue_number}"
         try:
             pre_impl_gates = await asyncio.to_thread(
-                resolve_pre_impl_gates, repository, list(labels or [])
+                require_pre_impl_gates, repository, list(labels or [])
             )
         except WorkflowUnresolvedError as exc:
             log.warning(
-                f"[{DAEMON_NAME}] {ref}: no workflow_definition governs this "
-                f"issue ({exc.reason}) — treating gates as NOT green (fail "
-                "closed)"
+                f"[{DAEMON_NAME}] {ref}: no usable pre-impl gate sequence for "
+                f"this issue ({exc.reason}) — treating gates as NOT green "
+                "(fail closed)"
             )
             return False
 
@@ -3359,10 +3377,19 @@ class SwarmDispatcher:
             )
             return False
 
+        # `gate_status` keys are hand-written into the entity too, so match them
+        # in the same normalized space the gate names were reduced to. A gate
+        # recorded under "PM" must satisfy the "pm" the workflow declares —
+        # otherwise the lookup misses, the gate reads `pending`, and the issue
+        # blocks forever on a signature it already has.
+        normalized_status = {
+            normalize_gate_name(key): value
+            for key, value in (state.gate_status or {}).items()
+        }
         unsigned = [
             gate
             for gate in pre_impl_gates
-            if (state.gate_status.get(gate) or "pending").strip().lower()
+            if (normalized_status.get(gate) or "pending").strip().lower()
             not in CLEARED_GATE_STATES
         ]
         if unsigned:

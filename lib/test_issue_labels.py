@@ -100,7 +100,34 @@ def test_blocked_state_also_sets_blocked_flag():
 
 def test_all_pre_impl_gates_cleared_drops_blocked_flag():
     out = labels_for_gate_status(
-        {"pm": "signed_off", "arch": "waived"}, pre_impl_gates=FEATURE_PRE_IMPL
+        {"pm": "signed_off", "ux": "signed_off", "arch": "waived"},
+        pre_impl_gates=FEATURE_PRE_IMPL,
+    )
+    assert BLOCKED_GATES_LABEL not in out
+
+
+def test_a_declared_gate_missing_from_gate_status_still_blocks():
+    """A gate nobody has STARTED is not a gate that has been signed off.
+
+    This case previously passed the `if state and ...` guard by being falsy:
+    `ux` declared pre-impl but absent from `gate_status` emitted no
+    `blocked/gates` label at all. The test above used to assert exactly this
+    shape under the name "all pre_impl gates cleared" while supplying only two
+    of the three — it ratified the fail-open rather than catching it, which is
+    why it is corrected here rather than xfailed.
+    """
+    out = labels_for_gate_status(
+        {"pm": "signed_off", "arch": "signed_off"},  # `ux` never written
+        pre_impl_gates=FEATURE_PRE_IMPL,
+    )
+    assert BLOCKED_GATES_LABEL in out
+
+
+def test_gate_status_key_casing_does_not_hide_a_signature():
+    """A gate recorded as "PM"/"UX" satisfies the declared lowercase names."""
+    out = labels_for_gate_status(
+        {"PM": "signed_off", "UX": "signed_off", "Arch": "waived"},
+        pre_impl_gates=FEATURE_PRE_IMPL,
     )
     assert BLOCKED_GATES_LABEL not in out
 

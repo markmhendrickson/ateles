@@ -170,3 +170,108 @@ async def test_unreadable_entity_fails_closed(monkeypatch):
     monkeypatch.setattr(sd.IssueGateStore, "load", boom)
 
     assert await d._gates_green(_Ok(), "o/r", 1) is False
+
+
+# ── the vacuous-empty fail-open (PR #719 security review) ────────────────────
+#
+# Everything above asserts that a NAMED pre-impl gate left pending blocks the
+# handoff. None of it could catch the sequence being EMPTY, because "no gate is
+# unsigned" is vacuously true over an empty list — the check passed hardest
+# precisely when the least gate data survived the read.
+#
+# These drive `_gates_green` end to end, through the real resolver, with a
+# workflow_definition shaped like each of the four inputs the review named.
+
+
+def _serve_workflow(monkeypatch, workflow_type: str, gates: list[dict]):
+    """Replace the conftest `ateles|feature` default with a specific workflow."""
+    from lib.daemon_runtime import workflow_resolver as _wr
+
+    def _fetch(project: str):
+        return [
+            _wr.ResolvedWorkflow(
+                entity_id="ent_vacuity",
+                project=project,
+                workflow_type=workflow_type,
+                gates=_wr.validate_gates(gates, entity_id="ent_vacuity"),
+            )
+        ]
+
+    monkeypatch.setattr(_wr, "_fetch_definitions", _fetch)
+    _wr.clear_cache()
+
+
+def _g(phase: int, name: str) -> dict:
+    return {"phase": phase, "gate_name": name, "owner_agent": "x", "required": True}
+
+
+@pytest.mark.asyncio
+async def test_capitalised_impl_does_not_green_the_handoff(monkeypatch):
+    """`Impl` matched no impl phase, so pm/ux vanished and this returned True."""
+    _serve_workflow(monkeypatch, "feature",
+                    [_g(1, "pm"), _g(2, "ux"), _g(3, "Impl")])
+    _stub_gate_status(monkeypatch, {"pm": "pending", "ux": "pending"})
+    d = _dispatcher()
+
+    assert await d._gates_green(_Ok(), "o/r", 719) is False
+
+
+@pytest.mark.asyncio
+async def test_unicode_lookalike_impl_does_not_green_the_handoff(monkeypatch):
+    """Fullwidth `ｉｍｐｌ` — same mechanism, different character range."""
+    _serve_workflow(monkeypatch, "feature",
+                    [_g(1, "pm"), _g(2, "arch"), _g(3, "ｉｍｐｌ")])
+    _stub_gate_status(monkeypatch, {"pm": "pending", "arch": "pending"})
+    d = _dispatcher()
+
+    assert await d._gates_green(_Ok(), "o/r", 719) is False
+
+
+@pytest.mark.asyncio
+async def test_no_pre_impl_gates_on_a_feature_workflow_fails_closed(monkeypatch):
+    """Zero pre-impl gates on a workflow allowed none is a FAILED READ."""
+    _serve_workflow(monkeypatch, "feature", [_g(1, "impl"), _g(2, "pr_review")])
+    _stub_gate_status(monkeypatch, {})
+    d = _dispatcher()
+
+    assert await d._gates_green(_Ok(), "o/r", 719) is False
+
+
+@pytest.mark.asyncio
+async def test_gate_in_the_same_phase_as_impl_fails_closed(monkeypatch):
+    """Nothing is strictly earlier, so the sequence empties — the 4th input."""
+    _serve_workflow(monkeypatch, "feature", [_g(1, "pm"), _g(1, "impl")])
+    _stub_gate_status(monkeypatch, {"pm": "pending"})
+    d = _dispatcher()
+
+    assert await d._gates_green(_Ok(), "o/r", 719) is False
+
+
+@pytest.mark.asyncio
+async def test_capitalised_gate_status_key_still_counts_as_signed(monkeypatch):
+    """Normalizing must not invent a BLOCK either.
+
+    A gate recorded as "PM"/"UX"/"ARCH" is the signature the workflow's
+    lowercase names asked for. Without normalizing the lookup this returned
+    False forever on an issue that was fully signed — the opposite error, and
+    the reason the fix normalizes both sides rather than only the declaration.
+    """
+    _serve_workflow(monkeypatch, "feature",
+                    [_g(1, "pm"), _g(2, "ux"), _g(3, "impl")])
+    _stub_gate_status(monkeypatch, {"PM": "signed_off", "UX": "waived"})
+    d = _dispatcher()
+
+    assert await d._gates_green(_Ok(), "o/r", 719) is True
+
+
+@pytest.mark.asyncio
+async def test_a_release_workflow_may_have_no_pre_impl_gates(monkeypatch):
+    """The one permitted empty — proves the fix is not "refuse everything"."""
+    _serve_workflow(monkeypatch, "release", [_g(1, "pm"), _g(2, "pr_review")])
+    _stub_gate_status(monkeypatch, {})
+    d = _dispatcher()
+
+    # The `release` label is required: `select_workflow` falls through to the
+    # `feature` default otherwise, and a release definition under a feature
+    # request is itself an unresolved workflow.
+    assert await d._gates_green(_Ok(), "o/r", 719, labels=["release"]) is True
