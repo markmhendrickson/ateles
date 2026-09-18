@@ -1055,7 +1055,7 @@ numbers are separate and only two of these are opened as decisions below.
   it. The agent loader's definition carries no field of that name and its projection never reads one; it issues an
   entity fetch and a query-by-name and traverses no relationship. The prompt composer builds from the definition's
   prompt text, static module constants, and the procedure file, and resolves no entity. Every occurrence of the
-  field name in code is display or passthrough — echoed in a response, rendered into a documentation table, shown in
+  field name in code is display or copied through unchanged — echoed in a response, rendered into a documentation table, shown in
   a dashboard. A procedure file is located by concatenating a path, so the graph is not consulted for that either,
   and the type the instance uses for an all-agent behavioural rule has no consumer in code at all. **So the
   mechanism the design names as the reason a rule need not be copied does not bind**, which is invariant 1 —
