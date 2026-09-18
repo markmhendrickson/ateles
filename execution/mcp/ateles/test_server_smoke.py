@@ -6,7 +6,7 @@ Spawns the real server.py subprocess over stdio (no mocking) and drives the
 actual MCP JSON-RPC protocol to confirm:
 
   - initialize succeeds and the server advertises SERVER_INSTRUCTIONS
-  - tools/list returns exactly the 4 documented tools with valid schemas
+  - tools/list returns exactly the documented tools with valid schemas
   - tools/call against a real tool, with no NEOTOMA_BEARER_TOKEN set,
     degrades gracefully (structured error, not a crash/exception)
 
@@ -127,12 +127,15 @@ def test_initialize_and_tools_list():
         tools = responses[2]["result"]["tools"]
         names = {t["name"] for t in tools}
         assert names == {
+            "bootstrap_session",
             "get_swarm_roster", "route_task", "list_checkpoints", "resolve_checkpoint",
             # Read-only swarm observability (see server.py).
             "get_gate_status", "list_pipeline_queue", "get_dispatch_health",
         }, names
         route_task = next(t for t in tools if t["name"] == "route_task")
         assert route_task["inputSchema"]["required"] == ["task_description"]
+        bootstrap = next(t for t in tools if t["name"] == "bootstrap_session")
+        assert bootstrap["inputSchema"]["required"] == ["harness"]
     finally:
         proc.kill()
         try:
