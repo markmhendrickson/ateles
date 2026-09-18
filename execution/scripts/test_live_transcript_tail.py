@@ -538,6 +538,61 @@ def test_transcribe_slice_always_passes_no_store_and_no_diarize(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# Case 9 — banner stripper regression (#777 / PR #1035 QA)
+#
+# docs/foundation/principles.md §4: these must go red if _extract_transcript_text
+# is reverted. Local whisper-cli banners (KEY=VALUE + indented progress) and the
+# legacy OpenAI prefixes must not leak into the transcript the filter judges.
+# --------------------------------------------------------------------------
+
+
+def test_extract_transcript_text_strips_key_value_and_indented_banners():
+    stdout = "\n".join(
+        [
+            "TRANSCRIPTION_BACKEND_SELECTED=local",
+            "TRANSCRIPTION_ENGINE=whisper-cli",
+            "    Model: ggml-base.en.bin",
+            "    Running whisper-cli on /tmp/slice.wav…",
+            "hello from the mic",
+        ]
+    )
+    assert lt._extract_transcript_text(stdout) == "hello from the mic"
+
+
+def test_extract_transcript_text_preserves_legacy_openai_banner_strip():
+    stdout = "\n".join(
+        [
+            "Transcribing audio file: /tmp/slice.wav",
+            "Warning: File extension does not match audio format",
+            "legacy transcript line",
+        ]
+    )
+    assert lt._extract_transcript_text(stdout) == "legacy transcript line"
+
+
+def test_transcribe_slice_uses_extractor(tmp_path):
+    """Pin the call site: transcribe_slice must run banners through the helper."""
+    wav = tmp_path / "slice.wav"
+    wav.write_bytes(b"x")
+    banner_stdout = "\n".join(
+        [
+            "TRANSCRIPTION_BACKEND_SELECTED=local",
+            "TRANSCRIPTION_ENGINE=whisper-cli",
+            "    Model: ggml-base.en.bin",
+            "    Running whisper-cli on /tmp/slice.wav…",
+            "clean transcript only",
+        ]
+    )
+    proc = MagicMock(returncode=0, stderr="", stdout=banner_stdout)
+
+    with patch.object(lt.subprocess, "run", return_value=proc):
+        ok, payload = lt.transcribe_slice(wav, env={"PATH": "/usr/bin"})
+
+    assert ok is True
+    assert payload == "clean transcript only"
+
+
+# --------------------------------------------------------------------------
 # Case 10 — build_subprocess_env() credential scope (#558 legal review)
 #
 # The tailer hands an env to the transcribe_audio.py subprocess. The
@@ -617,3 +672,182 @@ def test_build_subprocess_env_tolerates_missing_dotenv(tmp_path):
         materialized=tmp_path / "absent", base_env={"PATH": "/usr/bin"}
     )
     assert env == {"PATH": "/usr/bin"}
+
+
+_FIXTURE_DIR = _SCRIPTS_DIR / "fixtures" / "stream_transcript_20260907"
+_LABELS = json.loads((_FIXTURE_DIR / "labels.json").read_text(encoding="utf-8"))["chunks"]
+
+
+def _gate_labelled_chunk(n: int) -> dict:
+    wav = _FIXTURE_DIR / f"ch{n}.wav"
+    assert wav.exists(), f"missing fixture {wav}"
+    rms = lt.measure_slice_rms_db(wav)
+    frac = lt.measure_speech_fraction(wav)
+    decision = lt.classify_pre_transcription(
+        rms,
+        frac,
+        silence_threshold_db=lt.DEFAULT_SILENCE_THRESHOLD_DB,
+        min_speech_fraction=lt.DEFAULT_MIN_SPEECH_FRACTION,
+    )
+    record: dict = {"ok": True, "rms_db": rms, "speech_frac": frac, "decision": decision}
+    if decision != "transcribe":
+        record["text"] = ""
+        record["silence"] = True
+        record["skipped"] = decision
+        return record
+    record["text"] = _LABELS[str(n)]["text"]
+    return record
+
+
+def test_noisy_mic_20260907_ch2_ch5_not_emitted_as_transcript():
+    replay = {n: _gate_labelled_chunk(n) for n in range(6)}
+    for n in (0, 1, 4):
+        assert replay[n]["decision"] == "transcribe"
+        assert replay[n]["text"].strip()
+        assert "skipped" not in replay[n]
+    for n in (2, 5):
+        assert not replay[n].get("text")
+        assert replay[n]["silence"] is True
+        assert replay[n]["skipped"] != "below_threshold"
+
+
+def test_noisy_mic_20260907_level_gate_still_skips_ch3():
+    replay = _gate_labelled_chunk(3)
+    assert replay["skipped"] == "below_threshold"
+    assert not replay.get("text")
+
+
+def test_suppression_reason_distinct_from_below_threshold():
+    ch2 = _gate_labelled_chunk(2)
+    ch3 = _gate_labelled_chunk(3)
+    assert ch3["skipped"] == "below_threshold"
+    assert ch2["skipped"] == lt.SKIPPED_VAD_NON_SPEECH
+    assert ch2["skipped"] != ch3["skipped"]
+
+
+def test_quiet_speech_near_overlap_still_emitted():
+    """ch4 is the quiet real-speech neighbour of ch5's overlapping RMS."""
+    replay = _gate_labelled_chunk(4)
+    assert replay["decision"] == "transcribe"
+    assert "explain" in replay["text"]
+
+
+def test_suppression_does_not_use_hallucination_phrase_matching():
+    """ch2 is dropped by VAD even if Whisper would have said real words.
+
+    ch4 is kept even if Whisper would have said caption boilerplate — survival
+    is the speech-fraction, not the transcript string.
+    """
+    ch2 = _gate_labelled_chunk(2)
+    ch4 = _gate_labelled_chunk(4)
+    assert ch2["skipped"] == lt.SKIPPED_VAD_NON_SPEECH
+    assert ch4["decision"] == "transcribe"
+    assert "skipped" not in ch4
+
+
+def test_apply_local_backend_marker_does_not_emit_marker_as_transcript():
+    marker = "[NO SPEECH DETECTED — batch path already screened this]"
+    record = {"ok": True, "text": marker}
+    assert lt.apply_local_backend_marker(record) is True
+    assert record["text"] == ""
+    assert record["skipped"] == lt.SKIPPED_VAD_NON_SPEECH
+    assert record["filtered_reason"] == "local_backend_no_speech_marker"
+
+
+def test_apply_local_backend_marker_leaves_real_speech():
+    record = {"ok": True, "text": "Let's review the session history for bugs."}
+    assert lt.apply_local_backend_marker(record) is False
+    assert record["text"].startswith("Let's review")
+
+
+def test_main_vad_skip_does_not_call_transcribe(tmp_path, monkeypatch):
+    recording = tmp_path / "meet_system.mp4"
+    recording.write_bytes(b"x")
+    out = tmp_path / "out.jsonl"
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    ffmpeg_ok = MagicMock(returncode=0, stderr="", stdout="")
+
+    with (
+        patch.object(lt, "probe_duration", side_effect=[10.0, None]),
+        patch.object(lt.time, "sleep"),
+        patch.object(lt.subprocess, "run", return_value=ffmpeg_ok),
+        patch.object(lt, "measure_slice_rms_db", return_value=-39.0),
+        patch.object(lt, "measure_speech_fraction", return_value=0.05),
+        patch.object(lt, "transcribe_slice") as mock_tx,
+    ):
+        rc = lt.main(
+            ["--file", str(recording), "--out", str(out), "--interval", "1",
+             "--start-at", "0"]
+        )
+
+    assert rc == 0
+    mock_tx.assert_not_called()
+    record = json.loads(out.read_text().splitlines()[0])
+    assert record["skipped"] == "vad_non_speech"
+    assert record["text"] == ""
+    assert record["skipped"] != "below_threshold"
+
+
+def test_main_rms_skip_still_below_threshold(tmp_path, monkeypatch):
+    recording = tmp_path / "meet_system.mp4"
+    recording.write_bytes(b"x")
+    out = tmp_path / "out.jsonl"
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    ffmpeg_ok = MagicMock(returncode=0, stderr="", stdout="")
+
+    with (
+        patch.object(lt, "probe_duration", side_effect=[10.0, None]),
+        patch.object(lt.time, "sleep"),
+        patch.object(lt.subprocess, "run", return_value=ffmpeg_ok),
+        patch.object(lt, "measure_slice_rms_db", return_value=-56.3),
+        patch.object(lt, "measure_speech_fraction", return_value=0.01),
+        patch.object(lt, "transcribe_slice") as mock_tx,
+    ):
+        rc = lt.main(
+            ["--file", str(recording), "--out", str(out), "--interval", "1",
+             "--start-at", "0"]
+        )
+
+    assert rc == 0
+    mock_tx.assert_not_called()
+    record = json.loads(out.read_text().splitlines()[0])
+    assert record["skipped"] == "below_threshold"
+
+
+def test_main_vad_skip_does_not_count_toward_kill_switch(tmp_path, monkeypatch):
+    recording = tmp_path / "meet_system.mp4"
+    recording.write_bytes(b"x")
+    out = tmp_path / "out.jsonl"
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    ffmpeg_ok = MagicMock(returncode=0, stderr="", stdout="")
+    results = [
+        (False, "e1"),
+        (False, "e2"),
+        (False, "e3"),
+        (False, "e4"),
+        (False, "e5"),
+    ]
+    durations = [10.0 * (i + 1) for i in range(6)] + [None]
+    fracs = [0.5, 0.5, 0.5, 0.5, 0.04, 0.5]
+
+    with (
+        patch.object(lt, "probe_duration", side_effect=durations),
+        patch.object(lt.time, "sleep"),
+        patch.object(lt.subprocess, "run", return_value=ffmpeg_ok),
+        patch.object(lt, "measure_slice_rms_db", return_value=-30.0),
+        patch.object(lt, "measure_speech_fraction", side_effect=fracs),
+        patch.object(lt, "transcribe_slice", side_effect=results),
+        patch.object(lt, "log") as mock_log,
+    ):
+        rc = lt.main(
+            ["--file", str(recording), "--out", str(out), "--interval", "1",
+             "--start-at", "0"]
+        )
+
+    assert rc == 0
+    lines = [json.loads(ln) for ln in out.read_text().splitlines() if ln.strip()]
+    assert len(lines) == 6
+    assert lines[4]["skipped"] == "vad_non_speech"
+    assert any(
+        "5 consecutive failures — stopping" in str(c) for c in mock_log.call_args_list
+    )

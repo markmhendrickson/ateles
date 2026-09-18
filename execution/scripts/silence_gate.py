@@ -25,11 +25,8 @@ and NOT the peak. Measured on 39 labelled chunks of a real session:
 
 WHAT THIS GATE CANNOT DO
 It answers "was there sustained acoustic energy", which does not separate a
-fabrication that arrives at speech level (observed: a Georgian-script chunk at
--31.6 dB, inside the operator's verified -28 to -37 dB speech range). That class
-is the job of ``hallucination_filter.py``, which inspects the RESULT. The two are
-complements: this gate saves the work on true silence, that filter catches what
-gets past it.
+fabrication that arrives at speech level. The live tailer adds a VAD
+speech-presence layer (``speech_presence.py``) for that question.
 """
 
 from __future__ import annotations

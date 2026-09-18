@@ -25,6 +25,7 @@ from hallucination_filter import (  # noqa: E402
     foreign_diacritics,
     is_caption_boilerplate,
     is_degenerate_repetition,
+    is_non_speech_cue,
     max_consecutive_repetition,
     non_latin_ratio,
     normalize_language,
@@ -461,3 +462,98 @@ def test_the_diacritic_reason_names_the_actual_evidence():
         "A widać o mnie.", expected_language="en", vad_closed=True
     )
     assert "ć" in (verdict.detail or "")
+
+
+# ---------------------------------------------------------------------------
+# Non-speech cue: bracketed/starred sound captions (ateles#777, re-measured
+# 2026-09-16 on a separate 73:54 session)
+# ---------------------------------------------------------------------------
+#
+# "*sad music*" at -44.0 dB and a bare "Thank you." at -45.8 dB both cleared
+# the -50 dB RMS gate. "Thank you." was already caught by caption_boilerplate;
+# "*sad music*" was not caught by ANY existing signal — it is not a foreign
+# script, not a repeated phrase, not the boilerplate phrase list, has letters,
+# and is not too short for a 30s window. That gap is what this signal closes.
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "*sad music*",
+        "*music*",
+        "[Music]",
+        "[MUSIC]",
+        "(music)",
+        "(applause)",
+        "[Applause]",
+        "[laughter]",
+        "*laughs*",
+        "[BLANK_AUDIO]",
+        "[ Silence ]",
+        "♪ sad music ♪",
+        "♪ music",
+    ],
+)
+def test_non_speech_cue_signal_catches_bracketed_and_starred_captions(text):
+    assert is_non_speech_cue(text), f"{text!r} is a caption-convention non-speech cue"
+    verdict = screen_transcription(text, expected_language="en", vad_closed=True)
+    assert verdict.filtered
+    assert verdict.reason == "non_speech_cue"
+
+
+def test_non_speech_cue_reproduces_the_777_remeasurement():
+    """The exact case that motivated the signal: '*sad music*' at -44.0 dB.
+
+    'Thank you.' at -45.8 dB from the same re-measurement was already caught by
+    caption_boilerplate — pinned here so a future edit cannot silently lose
+    coverage of either documented case.
+    """
+    music_verdict = screen_transcription(
+        "*sad music*", expected_language="en", detected_language="en"
+    )
+    assert music_verdict.filtered
+    assert music_verdict.reason == "non_speech_cue"
+
+    thanks_verdict = screen_transcription(
+        "Thank you.", expected_language="en", detected_language="en"
+    )
+    assert thanks_verdict.filtered
+    assert thanks_verdict.reason == "caption_boilerplate"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The music in this scene was great.",
+        "I think we should play some music tonight.",
+        "Music theory is hard.",
+        "We watched the applause after the show ended.",
+        "Let's go to the (unnamed) location first.",
+        "He said *this* is important, not that.",
+        "*laughs* No, I am serious about it.",
+        "The parenthetical (as noted above) clarifies the point.",
+        "(As I mentioned earlier) we should revisit the budget.",
+    ],
+)
+def test_non_speech_cue_does_not_flag_real_speech_that_mentions_or_uses_delimiters(text):
+    """A delimiter or the word 'music' inside real speech is not a caption.
+
+    The signal fires only when the delimited span covers the ENTIRE chunk — an
+    aside, a mid-sentence emphasis, or ordinary use of the word is untouched.
+    """
+    assert not is_non_speech_cue(text)
+    verdict = screen_transcription(text, expected_language="en", vad_closed=True)
+    assert not verdict.filtered, f"{text!r} is real speech, not a caption"
+
+
+def test_non_speech_cue_requires_the_whole_chunk_to_be_delimited():
+    """A caption glued to real text either side is not a pure cue."""
+    assert not is_non_speech_cue("*music* and then he started talking")
+    assert not is_non_speech_cue("Before the applause, (applause) started")
+
+
+def test_non_speech_cue_reason_names_the_actual_text():
+    verdict = screen_transcription(
+        "[Music]", expected_language="en", vad_closed=True
+    )
+    assert verdict.detail == "[Music]"
