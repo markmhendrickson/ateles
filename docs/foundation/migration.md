@@ -1087,6 +1087,32 @@ numbers are separate and only two of these are opened as decisions below.
   The design's row makes `rule` the field a reader applies. This one **is** a tolerant-reader case in
   form (two spellings of the rule's text) and is not one in substance for those nine rows, because there
   is no text to read tolerantly: they need their bodies ingested, not their field names widened.
+- **G32 — a write of a raw file is admitted without the declared boundary being consulted at all.** Decision
+  112 closes the registry by a set the instance declares, and decision 113 rules that the read of that set
+  refuses when it cannot be evaluated. Neither reaches a write that carries a file rather than an entity of a
+  declared type: the boundary is evaluated on the structured write path, and a raw upload reaches the record
+  beside it. The exclusion is deliberate where it has been implemented and is pinned as such, which is the
+  right posture for a gap — it is visible rather than silent — but the design has not said whether it is
+  *correct*, and the two readings are far apart. Either a file is not an entity of a type, so a boundary over
+  types has nothing to say about it and the exclusion needs no rule; or a file lands in the record as surely
+  as an entity does, and a boundary that every writer can step around by choosing the other write path is the
+  mechanism-that-does-not-bind invariant 1 names. This document records the gap and takes neither reading:
+  what a declared boundary means for a write that carries no declared type is a design question, and it is
+  unasked rather than answered. Not opened as a decision, because the question needs a statement of what the
+  boundary is a boundary *over* before options can be put, and that statement is decision 112's to extend if
+  the operator wants it extended.
+- **G33 — a property declared on a type has no stated failure direction when it fails to resolve.** Decision
+  113 rules the boundary read alone, and says in terms that it is not extending that ruling to a gate reading
+  a property the type declares — whether it holds person data, what sensitivity its fields carry, what lawful
+  basis it requires — because the boundary is a set read whole while a property is resolved per type, and the
+  two can fail in opposite directions in one evaluation. What the design has therefore not stated is the
+  direction for the property: whether a type that declares itself restricted and a type whose declaration
+  merely failed to load must be distinguishable at the gate, or may be treated alike. Principle 5 and
+  invariant 7 both bear on it — a failed read that resolves to "declares nothing sensitive" synthesizes a
+  declaration the type never made, and grants more than a successful read would — but neither has been
+  applied to this subject, and decision 113 deliberately declines to apply them by proximity. Recorded here
+  so the condition is findable where it is unstated; it is a candidate decision rather than a ruled one, and
+  the corpus says nothing about it until one is opened.
 
 ## The decisions this document opened, and how each was ruled
 

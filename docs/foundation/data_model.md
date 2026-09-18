@@ -550,7 +550,11 @@ runs through a second type, which stays true whether the per-type check is decla
   back against the registry (principle 2) and made by or on behalf of the type's `ownership_grant` principal. A test run that
   registers a type — most visibly one whose name carries a timestamp to keep runs from colliding — leaves
   that type in the production registry permanently, where nothing distinguishes it from a designed one.
-  Tests register into their own registry or use a type that already exists.
+  Tests register into their own registry or use a type that already exists. **Which types an instance may
+  register at all is a boundary the instance declares** — the rule, and what a write outside the declared
+  set is, are stated at
+  `#the-registry-is-closed-by-default-and-registering-outside-the-declared-set-is-a-governance-write`
+  (decision 112).
 - **A schema version does not migrate values already sitting in `raw_fragments`.** Declaring a field
   changes what *subsequent* writes may land in it; every earlier write that carried that field is still in
   `raw_fragments`, and stays there until something reads it out and re-writes it as the declared field.
@@ -569,6 +573,111 @@ runs through a second type, which stays true whether the per-type check is decla
   again, which silently drops every edge whose producer is gone, and edge loss after a merge is invisible
   because the survivor still looks well-formed. The bounded retrieval below is what keeps most merges from
   being necessary at all.
+
+## The registry is closed by default, and registering outside the declared set is a governance write
+
+**Ruled (decision 112, 2026-09-18).** Registered in
+`conformance.md#the-register-of-open-design-decisions`. An instance **declares the set of entity types it
+holds**, and a registration outside that set is a governance write — refused at the record like any other,
+and admitted only through the engine's grant on a permit (decision 56). The declared set is the boundary;
+the registry is not a space any writer may extend by writing into it.
+
+This is one claim and not two. The conventions above already make registration an owned decision write,
+read back (`#record-conventions`) — that rule governs **how** a type is registered and by whom. It says
+nothing about **whether the instance admits the type at all**, which is the question a writer minting a
+type the design never named does not ask. Both rules are needed for the same reason principle 5 gives: the
+owned-write rule alone fails open, because a writer holding the registration capability can extend the
+registry indefinitely without any statement of what the instance is for ever being consulted.
+
+**Why default-deny, and why this is decision 41 rather than a new posture.** Decision 41 ruled write
+admission per entity type default-deny by grant, on the ground that a wildcard over types is the fail-open
+shape and not an allowlist. Decision 63 then applied the same reading to a *type* rather than to a write:
+a type nobody registered is a type no owner claimed, and registering it is strictly a widening of what the
+existing mechanisms cover. This decision is the third application of that one argument, and mints no new
+principle: an instance that has declared no boundary has made no claim about what it holds, and a
+registration it never contemplated is admitted by nothing. An **empty declaration is not a closed
+registry** — it is the absence of a declaration, and an instance that has declared nothing is governed by
+the owned-write rule alone, which is the state every instance starts in. Closure binds once the set is
+declared, never before; an empty set read as "deny everything" would brick an instance at the moment it
+first writes a policy, which is the fail-shut error rather than the fail-safe one.
+
+**What a redundant type is, and what this rule does about it.** A registration that duplicates a type the
+registry already holds is a [redundant type](vocabulary.md#redundant-type) — the term invariant 6's
+prohibition had no noun for. The closure is the mechanism that makes the prohibition reachable: a
+registration outside the declared set stops at the boundary whether the writer intended a new type or a
+second spelling of an old one, so the redundancy is caught at the write rather than found later by a
+census. The census (`#concepts`) stays the check for the types already held.
+
+**The options considered.** Leaving the registry open and relying on the owned-write rule, on the argument
+that an owner is accountable for what they register and a boundary adds a second mechanism where one
+exists (invariant 6) — rejected, because the owner is accountable for the *shape* of a type they chose to
+register and is never asked whether the instance should hold it, so the two rules answer different
+questions and neither substitutes; a boundary the swarm derives from the design's own concept list rather
+than one an instance declares — rejected, because the design deliberately never states which types a
+checkout has registered (`#scope`, and the front matter's own "Which types and edge types the registry
+holds is `status.md`"), so deriving the set here would put a state claim in a design document; and
+declaring the set per principal rather than per instance — rejected as the wildcard shape decision 41
+already refuses, since a per-principal set is what a grant's capabilities already are, and a boundary that
+every principal states separately is not a boundary the instance has. **What would have decided it
+otherwise:** whether any instance legitimately needs to mint types it cannot enumerate in advance. The one
+candidate is a type minted per run or per correction, which is the defect this rule exists to stop and not
+a need it must accommodate.
+
+**What reopens it.** An instance whose legitimate work requires types unknowable at declaration time —
+which would make the boundary a per-run governance write and defeat it — or the declared set proving
+unmaintainable in practice, where every ordinary registration becomes a governance write and the cost
+exceeds the drift it prevents. Neither is the observed failure: the drift that motivates this rule is a
+type minted mechanically by a process nobody decided to give a type to.
+
+## What the declared boundary refuses when the instance cannot evaluate it
+
+**Ruled (decision 113, 2026-09-18).** Registered in
+`conformance.md#the-register-of-open-design-decisions`. The rule is scoped to the step it can be stated
+about, and the scoping is the ruling rather than a caveat on it.
+
+**The boundary read fails closed.** Where the instance cannot read its own declaration of what it holds,
+the write is refused — not admitted on the reading that an unreadable boundary declares nothing. This is
+the Indeterminate-is-Deny pattern the failure posture already states (`failure_posture.md`, and invariant
+7: unknown stays distinct from a conclusion): an outage that silently suspends every boundary an instance
+declares grants strictly more than a successful read would, and the refusal says *infrastructure* rather
+than *policy*, so a writer retries rather than narrowing what it stores. **A declaration that is absent is
+not a declaration that is unreadable** — the first is an instance that has declared no boundary, and the
+write proceeds under the previous section's rule; the second is an instance whose boundary cannot be
+consulted, and the write does not.
+
+**What this rule does not claim.** It does not state that every gate keyed to a type fails closed, and the
+distinction is load-bearing rather than fastidious. A gate that reads a **property declared on the type** —
+whether the type holds person data, what sensitivity its fields carry, what lawful basis it requires — is
+evaluating a different thing from the boundary, and the two can fail in opposite directions in one
+evaluation: the boundary is a set the instance declares and reads whole, while a property is resolved per
+type at the moment of the write and can fail to resolve for one type while the boundary is intact. Stating
+a single fail-closed rule over both would assert a uniformity the design does not have and would be
+contradicted by any implementation that resolves them separately, which is the defect invariant 1 names —
+a rule that reads as a control while binding nothing.
+
+**What is therefore still open, and where it is recorded.** Whether a property that fails to *resolve*
+must be treated as the restrictive value of that property — so that a type declaring itself restricted and
+a type whose declaration merely failed to load are not indistinguishable — is a separate question from
+this one, on the same principle 5 reasoning and with a different subject. It is not ruled here because it
+is not the boundary's question, and the corpus must not appear to have ruled it by proximity. Recorded as
+gap G33 in `migration.md#gaps-and-contradictions-the-mapping-exposed`, which is where a condition the
+design has not yet stated belongs while it is unstated.
+
+**The options considered.** One rule over the boundary and every type-keyed gate alike, on the argument
+that a reader should not have to know which is which — rejected, because the uniform claim is the one an
+implementation can contradict, and a rule contradicted by the thing it governs is worse than a narrower
+rule that holds (invariant 1); scoping the rule to the boundary and saying nothing about the properties —
+rejected as the reporting-without-binding shape, since a reader would take the silence for indifference
+rather than for an open question; and deferring the whole rule until the property question is ruled —
+rejected because the boundary's own failure direction is settled, needs nothing from that question, and is
+the half that decision 112's closure actually depends on. **What would have decided it otherwise:** whether
+the boundary and the type properties are read in one step or two. They are two — a set consulted once
+against a declaration, and a resolution per type — which is what makes the scoping honest rather than
+merely cautious.
+
+**What reopens it.** The property question being ruled, which would let the two halves be stated together
+if they turn out to fail in the same direction; or a boundary that is itself resolved per type rather than
+read whole, which would collapse the distinction this ruling rests on.
 
 ## What each actor reads and writes
 
