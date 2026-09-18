@@ -1864,6 +1864,31 @@ proved equal to its source by a [reconciler](#reconciler), such as `step_status`
 **Not for:** source of truth for a projection; history for a projection; cache for a projection; a
 projection for a [fast path](#fast-path) (a declared skip of steps).
 
+### redundant type
+**Definition:** a registered entity type that duplicates another registered type's meaning, found by
+applying invariant 12's swap test to the two type names: two names that resist substitution are two types,
+and two that do not are one type spelled twice, the second being a defect in the registry rather than a
+synonym in it.
+The swap is tested on the corpus's and the record's own uses of each type, never on a sentence invented to
+defend the pair, and the pair is judged by whether the *design* distinguishes what each type holds, never
+by whether the two names read differently in ordinary English — the load-bearing half of invariant 12,
+applied to the registry's names rather than to this file's terms, which is where that invariant's own
+enforcement (an audit of every vocabulary entry) does not reach. This term names what invariant 6 already
+forbids without a noun for it: a registered second type for one of the design's singletons is the parallel
+mechanism that invariant forbids, and a redundant type is that defect stated generally, for any pair of
+types rather than for the singletons alone (decision 111).
+**See:** [`principles.md#12-as-few-terms-as-the-design-needs-and-no-fewer-no-term-overlaps-another`](principles.md#12-as-few-terms-as-the-design-needs-and-no-fewer-no-term-overlaps-another),
+[`principles.md#6-extend-the-mechanism-that-already-generalizes-do-not-build-a-parallel-one`](principles.md#6-extend-the-mechanism-that-already-generalizes-do-not-build-a-parallel-one),
+[`data_model.md#the-registry-is-closed-by-default-and-registering-outside-the-declared-set-is-a-governance-write`](data_model.md#the-registry-is-closed-by-default-and-registering-outside-the-declared-set-is-a-governance-write).
+**Never:** "alias type" for a redundant type (the [record](#record) holds no type aliases — decision 31
+ruled the merge form and built none, so the words name a mechanism that does not exist).
+**Not for:** a type whose rows overlap another's (two types may hold rows about one subject and stay
+distinct — the test is on what the type means, never on what its rows are about); a name already retired
+in favour of another ([retired names](#retired-names) records a pair the design has ruled on, and its
+remedy is decision 31's merge, not this finding); a schema version of a type (a version is the same type);
+a [planning level](#planning-level)'s mark or any other registry mark that two types may share (types
+marked alike are not thereby one type).
+
 ## Conformance (`conformance.md`)
 
 ### kernel document
