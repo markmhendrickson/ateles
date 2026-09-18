@@ -1047,6 +1047,29 @@ numbers are separate and only two of these are opened as decisions below.
   predicate is an `applies_when` on an optional review step of its declaration whose verdict carries that
   role's findings on the record (`workflows.md#planning`;
   `planning_model.md#maintenance-is-work-the-planning-workflow`).
+- **G34 — `context_entity_types[]` is the design's delivery mechanism for a rule's value, and no code path
+  reads it.** The rule above (`#standing-rules-inside-skills-go-to-task_policy-by-kind-and-never-by-value`) states
+  that a rule's value is written on the entity and "read at runtime by every agent whose `context_entity_types[]`
+  names the type". That clause is the whole reason the same sentence can forbid reproducing the value in a prompt:
+  the entity is reachable, so the copy is redundant. The checkout establishes by code reading that nothing resolves
+  it. The agent loader's definition carries no field of that name and its projection never reads one; it issues an
+  entity fetch and a query-by-name and traverses no relationship. The prompt composer builds from the definition's
+  prompt text, static module constants, and the procedure file, and resolves no entity. Every occurrence of the
+  field name in code is display or copied through unchanged — echoed in a response, rendered into a documentation table, shown in
+  a dashboard. A procedure file is located by concatenating a path, so the graph is not consulted for that either,
+  and the type the instance uses for an all-agent behavioural rule has no consumer in code at all. **So the
+  mechanism the design names as the reason a rule need not be copied does not bind**, which is invariant 1 —
+  a mechanism that does not bind is not a control (`principles.md#1-a-mechanism-that-does-not-bind-is-not-a-control`) — inside the mechanism meant to deliver the
+  rules that state it. The consequence is not that the rule above is wrong: it is that a rule written only on the
+  entity reaches nobody, so every rule is driven into the prompt text by necessity and the corpus's prohibition on
+  reproducing it cannot be honoured while the entity is the only sanctioned home and the prompt is the only working
+  channel. **The divergence is the substrate's to close, not the design's**: the design statement is correct as
+  written and needs no amendment, and what is missing is resolution in the loader — where every consumer already
+  passes — rather than in any one caller. Listed here because a gap between what the design requires and what a
+  checkout does is this document's subject, and because until it closes, a reader is entitled to read that clause as
+  describing something that happens. Scoping the resolution is decision 114
+  (`conformance.md#the-register-of-open-design-decisions`), which asks which type is an all-agent rule's home; the
+  resolution is the same traversal whichever way that rules, so the two are sequenced and not blocked on each other.
 
 ## The decisions this document opened, and how each was ruled
 
