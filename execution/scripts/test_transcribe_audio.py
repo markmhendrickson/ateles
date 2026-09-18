@@ -579,24 +579,26 @@ def test_stored_entity_records_the_content_hash(tmp_path, monkeypatch):
 # operator recording is ever read here.
 # ─────────────────────────────────────────────────────────────────────────────
 
-import shutil as _shutil  # noqa: E402
-import subprocess as _subprocess  # noqa: E402
+import sys as _sys  # noqa: E402
+
+_sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from lib.audio_fixture_support import (  # noqa: E402
+    make_synthetic_audio as _build_synthetic_audio,
+    require_ffmpeg as _require_ffmpeg,
+)
 
 
-def _make_synthetic_audio(path: Path, channels: int, seconds: float = 1.0) -> bool:
-    """Generate a synthetic tone with `channels` channels. False if no ffmpeg."""
-    ffmpeg = _shutil.which("ffmpeg")
-    if not ffmpeg:
-        return False
-    layout = "mono" if channels == 1 else "stereo"
-    cmd = [
-        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-        "-f", "lavfi",
-        "-i", f"sine=frequency=440:duration={seconds}:sample_rate=16000",
-        "-ac", str(channels), "-channel_layout", layout,
-        str(path),
-    ]
-    return _subprocess.run(cmd, capture_output=True).returncode == 0 and path.is_file()
+def _make_synthetic_audio(path: Path, channels: int, seconds: float = 1.0) -> Path:
+    """Synthetic fixture, or fail/skip per ATELES_REQUIRE_AUDIO_FIXTURES.
+
+    Previously returned False when ffmpeg was missing and every caller turned
+    that into a pytest.skip — which is how run 34240779554 reported
+    "413 passed, 13 skipped" while every routing test below was skipped
+    (ateles#866). The missing-tool decision is now made once, in
+    require_ffmpeg(), and CI sets the flag that makes it a hard failure.
+    """
+    _require_ffmpeg()
+    return _build_synthetic_audio(path, channels, seconds=seconds)
 
 
 @pytest.fixture
@@ -628,9 +630,7 @@ def _fake_local_whisper_available(monkeypatch, available: bool = True):
 
 def test_mono_audio_routes_to_local_whisper(tmp_path, _routing_env):
     """A mono voice memo stays on the machine even when the EL key is set."""
-    audio = tmp_path / "mono.wav"
-    if not _make_synthetic_audio(audio, channels=1):
-        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    audio = _make_synthetic_audio(tmp_path / "mono.wav", 1)
     _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
     _fake_local_whisper_available(_routing_env, True)
 
@@ -639,9 +639,7 @@ def test_mono_audio_routes_to_local_whisper(tmp_path, _routing_env):
 
 def test_stereo_audio_routes_to_elevenlabs_diarization(tmp_path, _routing_env):
     """A multi-channel capture keeps the diarization path."""
-    audio = tmp_path / "stereo.wav"
-    if not _make_synthetic_audio(audio, channels=2):
-        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    audio = _make_synthetic_audio(tmp_path / "stereo.wav", 2)
     _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
     _fake_local_whisper_available(_routing_env, True)
 
@@ -650,18 +648,16 @@ def test_stereo_audio_routes_to_elevenlabs_diarization(tmp_path, _routing_env):
 
 def test_channel_count_detection_mono_and_stereo(tmp_path):
     """ffprobe channel detection — the signal the whole rule rests on."""
-    mono, stereo = tmp_path / "m.wav", tmp_path / "s.wav"
-    if not _make_synthetic_audio(mono, 1) or not _make_synthetic_audio(stereo, 2):
-        pytest.skip("ffmpeg not available to generate synthetic fixtures")
+    mono = _make_synthetic_audio(tmp_path / "m.wav", 1)
+    stereo = _make_synthetic_audio(tmp_path / "s.wav", 2)
     assert ta.get_audio_channel_count(mono) == 1
     assert ta.get_audio_channel_count(stereo) == 2
 
 
 def test_explicit_engine_flag_overrides_audio_routing(tmp_path, _routing_env):
     """--engine elevenlabs wins over a mono file; --engine local over stereo."""
-    mono, stereo = tmp_path / "m.wav", tmp_path / "s.wav"
-    if not _make_synthetic_audio(mono, 1) or not _make_synthetic_audio(stereo, 2):
-        pytest.skip("ffmpeg not available to generate synthetic fixtures")
+    mono = _make_synthetic_audio(tmp_path / "m.wav", 1)
+    stereo = _make_synthetic_audio(tmp_path / "s.wav", 2)
     _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
     _fake_local_whisper_available(_routing_env, True)
 
@@ -681,9 +677,7 @@ def test_explicit_engine_flag_overrides_audio_routing(tmp_path, _routing_env):
 
 def test_no_diarize_flag_prefers_local_not_openai(tmp_path, _routing_env):
     """--no-diarize used to mean 'the other paid API'; now it means local."""
-    stereo = tmp_path / "s.wav"
-    if not _make_synthetic_audio(stereo, 2):
-        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    stereo = _make_synthetic_audio(tmp_path / "s.wav", 2)
     _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
     _fake_local_whisper_available(_routing_env, True)
 
@@ -695,9 +689,7 @@ def test_no_diarize_flag_prefers_local_not_openai(tmp_path, _routing_env):
 
 def test_diarize_flag_forces_elevenlabs_on_mono(tmp_path, _routing_env):
     """--diarize on a mono file still gets acoustic diarization."""
-    mono = tmp_path / "m.wav"
-    if not _make_synthetic_audio(mono, 1):
-        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    mono = _make_synthetic_audio(tmp_path / "m.wav", 1)
     _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
     _fake_local_whisper_available(_routing_env, True)
 
@@ -710,9 +702,7 @@ def test_diarize_flag_forces_elevenlabs_on_mono(tmp_path, _routing_env):
 def test_missing_local_whisper_falls_back_to_api(tmp_path, _routing_env, capsys):
     """No binary/model installed → degrade to an API engine, never crash — and
     never silently: a stderr line names the reason and the fallback engine."""
-    mono = tmp_path / "m.wav"
-    if not _make_synthetic_audio(mono, 1):
-        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    mono = _make_synthetic_audio(tmp_path / "m.wav", 1)
     _fake_local_whisper_available(_routing_env, False)
 
     _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
@@ -730,9 +720,7 @@ def test_missing_local_whisper_falls_back_to_api(tmp_path, _routing_env, capsys)
 
 def test_engine_local_raises_when_local_whisper_unavailable(tmp_path, _routing_env):
     """--engine local fails closed: no silent downgrade to a paid API."""
-    mono = tmp_path / "m.wav"
-    if not _make_synthetic_audio(mono, 1):
-        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    mono = _make_synthetic_audio(tmp_path / "m.wav", 1)
     _fake_local_whisper_available(_routing_env, False)
     _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
 
@@ -744,9 +732,7 @@ def test_engine_local_degrade_escape_hatch_still_warns(
     tmp_path, _routing_env, capsys
 ):
     """TRANSCRIBE_ENGINE_ALLOW_LOCAL_DEGRADE=1 restores the degrade — loudly."""
-    mono = tmp_path / "m.wav"
-    if not _make_synthetic_audio(mono, 1):
-        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    mono = _make_synthetic_audio(tmp_path / "m.wav", 1)
     _fake_local_whisper_available(_routing_env, False)
     _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
     _routing_env.setenv("TRANSCRIBE_ENGINE_ALLOW_LOCAL_DEGRADE", "1")
@@ -788,9 +774,7 @@ def test_legacy_routing_escape_hatch_restores_key_presence_rule(
     tmp_path, _routing_env
 ):
     """The old behaviour is recoverable without a code change."""
-    mono = tmp_path / "m.wav"
-    if not _make_synthetic_audio(mono, 1):
-        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    mono = _make_synthetic_audio(tmp_path / "m.wav", 1)
     _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
     _routing_env.setenv("TRANSCRIBE_ENGINE_LEGACY_ROUTING", "1")
     _fake_local_whisper_available(_routing_env, True)
@@ -811,9 +795,7 @@ def test_unknown_channel_count_treated_as_single_source(tmp_path, _routing_env):
 
 def test_engine_recorded_on_transcription_result(tmp_path, _routing_env):
     """transcribe_audio_file names the engine that ran, for the stored entity."""
-    mono = tmp_path / "m.wav"
-    if not _make_synthetic_audio(mono, 1, seconds=1.0):
-        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    mono = _make_synthetic_audio(tmp_path / "m.wav", 1, seconds=1.0)
     _fake_local_whisper_available(_routing_env, True)
     _routing_env.setattr(
         ta,
@@ -835,9 +817,7 @@ def test_transcribe_audio_file_falls_back_when_local_engine_fails(
     tmp_path, _routing_env
 ):
     """A local failure mid-run degrades to the API path instead of crashing."""
-    mono = tmp_path / "m.wav"
-    if not _make_synthetic_audio(mono, 1):
-        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    mono = _make_synthetic_audio(tmp_path / "m.wav", 1)
     _fake_local_whisper_available(_routing_env, True)
     _routing_env.setenv("ELEVENLABS_API_KEY", "test-key-not-a-real-credential")
 

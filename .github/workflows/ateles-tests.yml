@@ -16,9 +16,16 @@ on:
       - "execution/daemons/phoenicurus-release/**"
       - "execution/daemons/monedula/**"
       - "execution/daemons/anthus/**"
+      # ateles#866 (qa lens): test_tyto_routing.py was committed but no lane
+      # collected it — the same unbound-suite defect as #524/#584. The daemon's
+      # routing decision (mono -> local Whisper, multi-channel -> ElevenLabs)
+      # had zero CI coverage.
+      - "execution/daemons/tyto/**"
       - "execution/mcp/**"
       - "lib/daemon_runtime/**"
       - "lib/approval/**"
+      - "lib/audio_fixture_support.py"
+      - "lib/test_audio_fixture_support.py"
       - "lib/transcript_clarity.py"
       - "lib/test_transcript_clarity.py"
       - "execution/scripts/**"
@@ -38,11 +45,33 @@ permissions:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    env:
+      # ateles#866: this lane CLAIMS to cover transcription-engine routing, so
+      # a missing ffmpeg must turn it RED, not silently skip the tests that
+      # carry the claim. See lib/audio_fixture_support.py for the rule.
+      ATELES_REQUIRE_AUDIO_FIXTURES: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
+      # ateles#866 (qa lens, BLOCKING #2): the transcription-routing tests
+      # generate synthetic multi-channel fixtures with ffmpeg, and the
+      # production channel counters end in ffprobe (tyto's is ffprobe-ONLY).
+      # Without it on the runner every routing test SKIPPED and the lane still
+      # went green — run 34240779554 read "413 passed, 13 skipped".
+      #
+      # Installing ffmpeg is necessary but is NOT by itself the control: if a
+      # later edit drops this step, the tests return to passing-by-skipping and
+      # nothing fails. ATELES_REQUIRE_AUDIO_FIXTURES below is what binds it —
+      # with the flag set, a missing ffmpeg is a hard failure rather than a
+      # skip (lib/audio_fixture_support.py). That is the thing that fails.
+      - name: Install ffmpeg (audio-routing fixtures + ffprobe channel counts)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
       # ateles#320: retired agent names in runtime routing code. This linter
       # lives in scripts/lint.sh, which NO workflow invokes — so it never ran in
       # CI. Wired here as a blocking step because the failure it catches is
@@ -74,10 +103,22 @@ jobs:
       # ship a same-named top-level module today.
       - name: Run anthus daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/anthus/ -q
+      # ateles#866 (qa lens, BLOCKING #1): test_tyto_routing.py was collected by
+      # no lane. Its own step, matching the attributability convention of the
+      # apis/anthus steps above, and paired with the path trigger that makes a
+      # change under execution/daemons/tyto/** actually run it.
+      - name: Run tyto daemon (transcription routing) tests
+        run: uv run --extra dev python -m pytest execution/daemons/tyto/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
       - name: Run transcript clarity lib tests
         run: uv run --extra dev python -m pytest lib/test_transcript_clarity.py -q
+      # The guard that turns a missing ffmpeg into a failure needs its own
+      # coverage, or it is one more mechanism nothing checks. These tests assert
+      # the fail branch is REACHABLE — reverting require_ffmpeg() to an
+      # unconditional skip turns this step red.
+      - name: Run audio-fixture guard tests
+        run: uv run --extra dev python -m pytest lib/test_audio_fixture_support.py -q
       # ateles#524 (qa lens, PR #527 round 2): execution/scripts/ has its own
       # test_*.py files (SOPS token fallback, Loxia review, agent-doc render,
       # transcription) but no lane ran them — this closes that gap.

@@ -11,15 +11,27 @@ no network, no daemon runtime — while still exercising the real code.
 
 Fixtures are SYNTHETIC audio generated with ffmpeg at test time. No operator
 recording is ever read here.
+
+A missing ffmpeg SKIPS locally but FAILS when ATELES_REQUIRE_AUDIO_FIXTURES=1,
+which CI sets — see lib/audio_fixture_support.py. Tyto's _audio_channel_count
+is ffprobe-only, so without it there is no routing behaviour left to test and a
+skip would report green for a subject that never ran (ateles#866).
 """
 
 import ast
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from lib.audio_fixture_support import (  # noqa: E402
+    make_synthetic_audio,
+    require_ffmpeg,
+)
 
 _TYTO_PY = Path(__file__).resolve().parent / "tyto.py"
 _ROUTING_FUNCS = ("_audio_channel_count", "_should_diarize")
@@ -66,57 +78,45 @@ def clean_env(monkeypatch):
     return monkeypatch
 
 
-def _make_audio(path: Path, channels: int) -> bool:
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        return False
-    cmd = [
-        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-        "-f", "lavfi", "-i", "sine=frequency=440:duration=1:sample_rate=16000",
-        "-ac", str(channels),
-        "-channel_layout", "mono" if channels == 1 else "stereo",
-        str(path),
-    ]
-    return subprocess.run(cmd, capture_output=True).returncode == 0 and path.is_file()
+def _make_audio(path: Path, channels: int) -> Path:
+    """Synthetic fixture, or fail/skip per ATELES_REQUIRE_AUDIO_FIXTURES.
+
+    Unlike the previous bool-returning version, this never hands the caller a
+    "could not build it" value to turn into a skip — the missing-tool decision
+    is made once, in require_ffmpeg(), and CI makes it a failure.
+    """
+    require_ffmpeg()
+    return make_synthetic_audio(path, channels)
 
 
 def test_mono_single_file_does_not_diarize(routing, tmp_path, clean_env):
     """A mono voice memo goes to local transcription, not ElevenLabs."""
-    audio = tmp_path / "memo.wav"
-    if not _make_audio(audio, 1):
-        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    audio = _make_audio(tmp_path / "memo.wav", 1)
     assert routing["_should_diarize"](audio, None) is False
 
 
 def test_stereo_file_diarizes(routing, tmp_path, clean_env):
     """A multi-channel meeting capture keeps the diarization path."""
-    audio = tmp_path / "meeting.wav"
-    if not _make_audio(audio, 2):
-        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    audio = _make_audio(tmp_path / "meeting.wav", 2)
     assert routing["_should_diarize"](audio, None) is True
 
 
 def test_mic_pair_diarizes_even_when_each_track_is_mono(routing, tmp_path, clean_env):
     """Two separate sources are two speakers by construction."""
-    remote, mic = tmp_path / "remote.wav", tmp_path / "mic.wav"
-    if not _make_audio(remote, 1) or not _make_audio(mic, 1):
-        pytest.skip("ffmpeg not available to generate synthetic fixtures")
+    remote = _make_audio(tmp_path / "remote.wav", 1)
+    mic = _make_audio(tmp_path / "mic.wav", 1)
     assert routing["_should_diarize"](remote, mic) is True
 
 
 def test_missing_mic_file_is_not_a_pair(routing, tmp_path, clean_env):
     """A mic path that does not exist must not trigger the paid path."""
-    remote = tmp_path / "remote.wav"
-    if not _make_audio(remote, 1):
-        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    remote = _make_audio(tmp_path / "remote.wav", 1)
     assert routing["_should_diarize"](remote, tmp_path / "absent-mic.wav") is False
 
 
 def test_record_meeting_diarize_zero_still_forces_off(routing, tmp_path, clean_env):
     """The existing kill switch keeps working on multi-channel audio."""
-    audio = tmp_path / "meeting.wav"
-    if not _make_audio(audio, 2):
-        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    audio = _make_audio(tmp_path / "meeting.wav", 2)
     clean_env.setenv("RECORD_MEETING_DIARIZE", "0")
     assert routing["_should_diarize"](audio, None) is False
 
@@ -126,17 +126,13 @@ def test_no_elevenlabs_key_never_diarizes(routing, tmp_path, monkeypatch):
     monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
     monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
     monkeypatch.delenv("TRANSCRIBE_ENGINE_LEGACY_ROUTING", raising=False)
-    audio = tmp_path / "meeting.wav"
-    if not _make_audio(audio, 2):
-        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    audio = _make_audio(tmp_path / "meeting.wav", 2)
     assert routing["_should_diarize"](audio, None) is False
 
 
 def test_legacy_routing_restores_key_presence_behaviour(routing, tmp_path, clean_env):
     """The escape hatch brings back 'diarize whenever the key is set'."""
-    audio = tmp_path / "memo.wav"
-    if not _make_audio(audio, 1):
-        pytest.skip("ffmpeg not available to generate a synthetic fixture")
+    audio = _make_audio(tmp_path / "memo.wav", 1)
     clean_env.setenv("TRANSCRIBE_ENGINE_LEGACY_ROUTING", "1")
     assert routing["_should_diarize"](audio, None) is True
 
@@ -149,8 +145,7 @@ def test_channel_count_returns_none_for_unprobeable_file(routing, tmp_path):
 
 
 def test_channel_count_reads_real_channels(routing, tmp_path):
-    mono, stereo = tmp_path / "m.wav", tmp_path / "s.wav"
-    if not _make_audio(mono, 1) or not _make_audio(stereo, 2):
-        pytest.skip("ffmpeg not available to generate synthetic fixtures")
+    mono = _make_audio(tmp_path / "m.wav", 1)
+    stereo = _make_audio(tmp_path / "s.wav", 2)
     assert routing["_audio_channel_count"](mono) == 1
     assert routing["_audio_channel_count"](stereo) == 2
