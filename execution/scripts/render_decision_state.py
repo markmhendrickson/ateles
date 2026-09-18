@@ -82,6 +82,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -142,6 +143,14 @@ BRANCH_LIST_ARGS = (
     "--format=%(refname)",
     "refs/remotes/origin/",
 )
+
+# A second common extra refspec maps pull-request heads onto
+# ``refs/remotes/origin/pr/<n>`` (``+refs/pull/*/head:refs/remotes/origin/pr/*``).
+# Those refs sit *inside* ``origin/``, so the namespace cut above does not drop
+# them. CI never has them; a clone that does renders a second name for the same
+# PR branch and `--check` fails on a machine-local alias. The ruling itself is
+# not lost: it lives on the branch the pull request is opened from.
+_PR_HEAD_ON_ORIGIN = re.compile(r"^origin/pr/\d+$")
 
 # Rows whose ruling names an artefact this repository can be asked about, mapped
 # to the check that asks. Each entry is (script, what a pass establishes).
@@ -240,6 +249,21 @@ def register_at(ref: str) -> dict[str, dict[str, str]] | None:
     return rows or None
 
 
+def origin_ref_is_in_sweep(short: str, exclude: str = MAIN_REF) -> bool:
+    """True when ``short`` (e.g. ``origin/foo``) belongs in the branch sweep.
+
+    Answerable from the ref name alone, so two machines with different extra
+    refspecs still render the same document.
+    """
+    if not short or short.endswith("/HEAD"):
+        return False
+    if short == exclude.removeprefix("refs/remotes/"):
+        return False
+    if _PR_HEAD_ON_ORIGIN.fullmatch(short):
+        return False
+    return True
+
+
 def remote_branches(exclude: str = MAIN_REF) -> list[str]:
     code, out = run(list(BRANCH_LIST_ARGS))
     if code != 0:
@@ -247,10 +271,10 @@ def remote_branches(exclude: str = MAIN_REF) -> list[str]:
     names = []
     for line in out.split("\n"):
         ref = line.strip()
-        if not ref or ref.endswith("/HEAD"):
+        if not ref:
             continue
         short = ref.removeprefix("refs/remotes/")
-        if short == exclude.removeprefix("refs/remotes/"):
+        if not origin_ref_is_in_sweep(short, exclude=exclude):
             continue
         names.append(short)
     return sorted(names)
@@ -321,7 +345,68 @@ def is_superseded(
     return main_row["status"] == "reopened"
 
 
-def collect(refs_scanned: list[str]) -> tuple[list[Row], list[str], list[str]]:
+def register_from_workdir() -> dict[str, dict[str, str]] | None:
+    """The register on disk in this checkout, or None if the file is absent."""
+    path = FOUNDATION_DIR / REGISTER_DOC
+    if not path.is_file():
+        return None
+    rows = parse_rows(path.read_text(encoding="utf-8"))
+    return rows or None
+
+
+def workdir_ref_label() -> str:
+    """A stable name for this checkout's register copy.
+
+    Pull-request CI often has no ``origin/<branch>`` ref — only origin/main
+    plus the files on disk. Naming the working tree after ``GITHUB_HEAD_REF``
+    (or the current branch) keeps the projection's label the same on CI and on
+    a developer clone of that branch.
+    """
+    name = os.environ.get("GITHUB_HEAD_REF", "").strip()
+    if not name:
+        code, out = run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+        name = out.strip() if code == 0 else ""
+    if not name or name == "HEAD":
+        return "HEAD"
+    if name.startswith("origin/"):
+        return name
+    return f"origin/{name}"
+
+
+def admit_register(
+    rows: dict[str, Row],
+    main_rows: dict[str, dict[str, str]],
+    ref: str,
+    branch_rows: dict[str, dict[str, str]] | None,
+    read: list[str],
+    stale: list[str],
+) -> None:
+    """Fold one register copy's rulings into ``rows``."""
+    if branch_rows is None:
+        return
+    if ref not in read:
+        read.append(ref)
+    for num, data in branch_rows.items():
+        if data["status"] not in RULED_STATUSES:
+            continue
+        existing = rows.get(num)
+        if existing is None:
+            continue
+        if existing.main_status in RULED_STATUSES:
+            continue
+        if existing.main_status in NON_QUESTION_STATUSES:
+            continue
+        if is_superseded(main_rows.get(num), data):
+            stale.append(f"{ref} (row {num})")
+            continue
+        if ref not in existing.ruled_on_branches:
+            existing.ruled_on_branches.append(ref)
+
+
+def collect(
+    refs_scanned: list[str],
+    include_workdir: bool = True,
+) -> tuple[list[Row], list[str], list[str]]:
     """Build every row's three axes.
 
     Returns (rows, refs read and current, refs read but stale).
@@ -347,31 +432,17 @@ def collect(refs_scanned: list[str]) -> tuple[list[Row], list[str], list[str]]:
     read: list[str] = []
     stale: list[str] = []
     for ref in refs_scanned:
-        branch_rows = register_at(ref)
-        if branch_rows is None:
-            continue
-        read.append(ref)
-        for num, data in branch_rows.items():
-            if data["status"] not in RULED_STATUSES:
-                continue
-            existing = rows.get(num)
-            if existing is None:
-                # A row this branch opens and main has never seen. It is not a
-                # ruling main is missing; it is a question main does not have.
-                continue
-            if existing.main_status in RULED_STATUSES:
-                continue  # already merged; a branch copy adds nothing
-            if existing.main_status in NON_QUESTION_STATUSES:
-                continue
-            if is_superseded(main_rows.get(num), data):
-                # Decision 95's case: main has moved this row's own status on
-                # since the branch's copy was written, so the branch carries a
-                # ruling main deliberately unsettled. Admitting it would report
-                # a reopened question as answered. Judged per row, on the row's
-                # own content, because that is what the claim is about.
-                stale.append(f"{ref} (row {num})")
-                continue
-            existing.ruled_on_branches.append(ref)
+        admit_register(rows, main_rows, ref, register_at(ref), read, stale)
+
+    if include_workdir:
+        admit_register(
+            rows,
+            main_rows,
+            workdir_ref_label(),
+            register_from_workdir(),
+            read,
+            stale,
+        )
 
     for row in rows.values():
         row.ruled_on_branches.sort()
@@ -406,7 +477,7 @@ def render(rows: list[Row], refs_read: list[str], refs_stale: list[str]) -> str:
     )
     add(
         "<!-- Source: conformance.md#the-register-of-open-design-decisions, read "
-        f"on {MAIN_REF} and every `origin/*` branch. -->"
+        f"on {MAIN_REF} and this checkout's working tree. -->"
     )
     add("")
     add("# Decision state: ruled, merged, implemented")
@@ -416,7 +487,10 @@ def render(rows: list[Row], refs_read: list[str], refs_stale: list[str]) -> str:
         "`execution/scripts/render_decision_state.py`, held equal to its source by "
         "`--check` in `scripts/lint.sh`. **Source:** the register table at "
         "`conformance.md#the-register-of-open-design-decisions`, read on "
-        f"`{MAIN_REF}` and on every `origin/*` branch carrying a copy of it."
+        f"`{MAIN_REF}` and on this checkout's working tree. Other `origin/*` "
+        "heads are not the default source: CI fetches `origin/main` only, and "
+        "sweeping every local remote branch made `--check` depend on which "
+        "machine rendered the file."
     )
     add("")
     add(
@@ -434,8 +508,8 @@ def render(rows: list[Row], refs_read: list[str], refs_stale: list[str]) -> str:
     add("")
     add(
         "- **ruled?** — the question has an answer, wherever that answer currently "
-        "lives. Read from the register's status on any `origin/*` ref that\n"
-        "carries one."
+        "lives. Read from the register's status on "
+        f"`{MAIN_REF}` and on this checkout."
     )
     add(
         "- **merged?** — the ruling is on "
@@ -520,15 +594,16 @@ def render(rows: list[Row], refs_read: list[str], refs_stale: list[str]) -> str:
     add("## What was read")
     add("")
     add(
-        f"The register on `{MAIN_REF}`, and the copy carried by every "
-        "`refs/remotes/origin/*` branch. That namespace and not every remote "
-        "ref: a clone configured with an extra refspec (pull-request heads, a "
-        "second mirror) carries refs another machine has never fetched, and a "
-        "sweep over those renders a different document per machine. Only "
-        "forward movement is counted: a branch whose copy predates a ruling "
+        f"The register on `{MAIN_REF}`, and the copy in this checkout's "
+        "working tree — the files the pull request actually carries. That pair "
+        "is what every machine that can run `--check` has: a full clone's extra "
+        "`origin/*` heads, and a pull-request checkout's missing ones, are not "
+        "sources. A sweep over whatever remotes happen to be present is how this "
+        "file failed `--check` on CI after a regenerate that nobody had edited. "
+        "Only forward movement is counted: a copy that predates a ruling "
         f"reads **open** where `{MAIN_REF}` reads **ruled**, and treating that "
         "as a retraction would invent a reopening no one performed. A row a "
-        f"branch opens and `{MAIN_REF}` has never seen is not a ruling "
+        f"checkout opens and `{MAIN_REF}` has never seen is not a ruling "
         f"`{MAIN_REF}` is missing, and is not carried here."
     )
     add("")
@@ -604,12 +679,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--no-branches",
         action="store_true",
-        help=f"read only {MAIN_REF}; every ruling on a branch is then invisible",
+        help=f"read only {MAIN_REF}; the working tree and other branches are then invisible",
+    )
+    parser.add_argument(
+        "--all-origin-branches",
+        action="store_true",
+        help="also sweep origin/* heads; not the --check default, because CI "
+        "does not fetch them",
     )
     args = parser.parse_args(argv)
 
-    refs = [] if args.no_branches else remote_branches()
-    rows, refs_read, refs_stale = collect(refs)
+    refs: list[str] = []
+    if args.all_origin_branches and not args.no_branches:
+        refs = remote_branches()
+    rows, refs_read, refs_stale = collect(
+        refs, include_workdir=not args.no_branches
+    )
 
     if args.json:
         sys.stdout.write(as_json(rows, refs_read, refs_stale))

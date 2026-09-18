@@ -295,6 +295,62 @@ class TestBranchSweepIsMachineIndependent(unittest.TestCase):
             "other locally-configured mirror",
         )
 
+    def test_origin_pr_numeric_aliases_are_not_swept(self):
+        """The other common PR-head mapping sits inside origin/, not beside it.
+
+        `+refs/pull/*/head:refs/remotes/origin/pr/*` produces `origin/pr/1036`.
+        The namespace cut does not drop it; CI has never fetched it; the
+        committed file then names a ref the lane cannot see and `--check` fails.
+        """
+        self.assertTrue(ds.origin_ref_is_in_sweep("origin/decisions-85-105-106-2ba02e"))
+        self.assertFalse(ds.origin_ref_is_in_sweep("origin/pr/1036"))
+        self.assertFalse(ds.origin_ref_is_in_sweep("origin/HEAD"))
+        self.assertFalse(ds.origin_ref_is_in_sweep("origin/main"))
+
+    def test_workdir_label_follows_github_head_ref(self):
+        """CI names the PR branch via GITHUB_HEAD_REF, not a missing origin ref."""
+        import os
+
+        previous = os.environ.get("GITHUB_HEAD_REF")
+        os.environ["GITHUB_HEAD_REF"] = "decisions-103-104-556945"
+        try:
+            self.assertEqual(
+                ds.workdir_ref_label(), "origin/decisions-103-104-556945"
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("GITHUB_HEAD_REF", None)
+            else:
+                os.environ["GITHUB_HEAD_REF"] = previous
+
+    def test_empty_origin_scan_still_reads_the_working_tree(self):
+        """The foundation-checks lane fetches origin/main only.
+
+        A regenerate against every local origin/* head then failed --check there
+        (ateles#1051) because CI could not see those refs. The default collect
+        must still read the files on disk, so this PR's own rulings remain
+        visible without fetching every origin head.
+        """
+        rows, read, _stale = ds.collect([], include_workdir=True)
+        self.assertIn(ds.workdir_ref_label(), read)
+        workdir = ds.register_from_workdir() or {}
+        main = ds.register_at(ds.MAIN_REF) or {}
+        observed = False
+        by_num = {r.number: r for r in rows}
+        for num, data in workdir.items():
+            if data["status"] not in ds.RULED_STATUSES:
+                continue
+            if main.get(num, {}).get("status") != "open":
+                continue
+            self.assertEqual(by_num[num].ruled, "yes")
+            self.assertEqual(by_num[num].merged, "no")
+            observed = True
+            break
+        if not observed:
+            self.skipTest(
+                "this checkout has no ruled-but-unmerged register row versus origin/main"
+            )
+
 
 class TestSupersessionIsJudgedOnContent(unittest.TestCase):
     """Staleness is a question about the row, not about commit history.
