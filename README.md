@@ -167,7 +167,7 @@ fleet spans the operator's whole surface area, company and life alike:
 | **Email** | Triage inbox, draft replies, route operator replies back to run threads, daily digests | `turdus`, `riparia` daemons; `email-triage`, `email-triage-auto` skills |
 | **Calendar & scheduling** | 05:00 meeting-prep briefings, recurring-task ↔ calendar sync, slot-finding | `cotinga`, `sylvia` daemons; `remember-calendar`, `find-technician-slot` skills |
 | **Payments & finance** | Calendar-triggered recurring payments in fiat (Wise) and Bitcoin, portfolio/liquidity analysis, expense capture | `monedula` daemon; `fringilla`, `run-scorecard`, `extract-amazon-order`, `quarterly-portfolio-review` skills |
-| **Meetings** | Toggle recording, transcribe (with consent tracking), extract decisions/action items, draft recaps | `strix`, `tyto`, `piculet` daemons; `record_meeting`, `analyze-meeting`, `import-audio` skills |
+| **Meetings** | Toggle recording, transcribe (with consent tracking), extract decisions/action items, recommend follow-ups | `strix`, `tyto`, `piculet` daemons; `record_meeting`, `process-meeting`, `import-audio` skills |
 | **Health & fitness** | Log workouts, analyze progression, nudge on inactivity | `gorilla` daemon; `gorilla`, `scrape-chatgpt-workout` skills |
 | **Content & GTM** | Long-form and build-in-public writing, platform-adapted social, marketing/positioning, brand & UX | `corvus`, `write`, `write-blog-post`, `social`, `ciconia`, `manucode`, `aythya`, `accipiter` skills |
 | **Customer development** | ICP synthesis, feedback analysis, interview scheduling, contact intake | `hirundo`, `analyze-neotoma-feedback`, `process-feedback`, `interview-admin`, `intake-relationship` skills |
