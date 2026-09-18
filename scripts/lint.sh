@@ -165,11 +165,32 @@ if [ -n "$NEOTOMA_BASE_URL" ]; then
 
     # Generated agent-doc mirrors must be fresh (docs/agents/*.md,
     # .claude/skills/*/SKILL.md are rendered FROM Neotoma agent_definition
-    # entities — never hand-edited). Informational only for now: pre-existing
-    # drift unrelated to any one PR currently fails this check repo-wide (see
-    # .github/workflows/agent-config-validation.yml for the tracking note).
-    echo "  - Checking agent-doc mirrors are in sync with Neotoma (informational)..."
-    python3 execution/scripts/render_agent_docs.py --check || true
+    # entities — never hand-edited). BINDING as of 2026-09-18: the repo-wide
+    # drift that forced `|| true` is cleared (81 files / 40 agents match), and a
+    # stale mirror is not cosmetic — `.claude/hooks/ateles-session-start.sh`
+    # cat()s `.claude/skills/ateles/SKILL.md` into EVERY session, so drift means
+    # rules that exist in Neotoma reach nothing. Four rules were undelivered for
+    # eleven days that way. A check disarmed with `|| true` is documentation,
+    # not a control (docs/foundation/principles.md#1).
+    # Differ/orphan is the only result that is drift. Unreachable Neotoma and
+    # zero agent_definition rows are also non-zero, and they are not a match
+    # and not drift (docs/foundation/principles.md §3 and §7) — do not name
+    # the regenerate command for them. Do not append `|| true`.
+    echo "  - Checking agent-doc mirrors are in sync with Neotoma..."
+    mirror_status=0
+    mirror_out=$(python3 execution/scripts/render_agent_docs.py --check) || mirror_status=$?
+    if [ -n "$mirror_out" ]; then
+        printf '%s\n' "$mirror_out"
+    fi
+    if [ "$mirror_status" -ne 0 ]; then
+        ERRORS=$((ERRORS + 1))
+    fi
+    case "$mirror_out" in
+        *"disk differs from Neotoma"*|*"stale orphan files"*)
+            echo "    ERROR: agent-doc mirrors drifted from Neotoma."
+            echo "    Fix: python3 execution/scripts/render_agent_docs.py  (never hand-edit the mirrors)"
+            ;;
+    esac
 else
     echo "  - Skipping tool_allowlist + agent-doc-mirror checks (NEOTOMA_BASE_URL unset)"
 fi
