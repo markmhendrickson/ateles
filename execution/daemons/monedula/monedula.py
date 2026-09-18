@@ -390,10 +390,24 @@ def telegram_long_poll_once(timeout_sec: int = 120) -> str | None:
             offset = 0
 
     deadline = time.monotonic() + timeout_sec
-    allowed_user_id = (
-        int(TELEGRAM_ALLOWED_USER_ID) if TELEGRAM_ALLOWED_USER_ID else None
-    )
-    chat_id = int(TELEGRAM_CHAT_ID)
+    # Same fail-closed rule as `telegram_poll_approval`, via the same resolver.
+    # #1044 closed the fail-open on the payment path but left it here, one
+    # caller away: this function still read
+    #     if allowed_user_id and user_id != allowed_user_id
+    # so an unset principal short-circuited the comparison and any member of
+    # the group chat was accepted. A guard that holds on one of two paths is
+    # not a guard on the vulnerability, only on the path that was audited.
+    allowed_user_id, principal_error = _resolve_operator_principal()
+    if allowed_user_id is None:
+        log.error(
+            f"{principal_error} — refusing to poll (fail closed). Returning no "
+            "reply rather than accepting one from any chat member."
+        )
+        return None
+    chat_id, chat_error = _resolve_chat_id()
+    if chat_id is None:
+        log.error(f"{chat_error} — refusing to poll (fail closed)")
+        return None
 
     log.info(f"Polling Telegram for reply (timeout={timeout_sec}s, offset={offset})...")
 
@@ -435,7 +449,10 @@ def telegram_long_poll_once(timeout_sec: int = 120) -> str | None:
             # Filter to correct chat and allowed user
             if msg_chat_id != chat_id:
                 continue
-            if allowed_user_id and user_id != allowed_user_id:
+            # Unconditional, and `user_id is None` rejects positively:
+            # Telegram omits `from` on channel posts. Mirrors the guard
+            # #1044 already applied in `telegram_poll_approval`.
+            if user_id is None or user_id != allowed_user_id:
                 continue
 
             text = (msg.get("text") or "").strip()
@@ -518,6 +535,26 @@ def _resolve_operator_principal() -> tuple[int | None, str]:
                       "(TELEGRAM_ALLOWED_USER_ID is not a numeric user id)")
 
 
+def _resolve_chat_id() -> tuple[int | None, str]:
+    """Resolve the approval chat id, failing CLOSED when it is not usable.
+
+    Same `(value, reason)` contract as `_resolve_operator_principal`. Split out
+    for the same reason: `int(TELEGRAM_CHAT_ID)` raised an uncaught ValueError
+    out of the poll loop on a malformed value, crashing the run BEFORE it could
+    escalate — so the one path built to make a broken gate loud (#554) was
+    skipped by the very misconfiguration it should have reported.
+    """
+    raw = (TELEGRAM_CHAT_ID or "").strip()
+    if not raw:
+        return None, "approval chat not configured (TELEGRAM_CHAT_ID unset)"
+    try:
+        return int(raw), ""
+    except ValueError:
+        return None, (
+            "approval chat malformed (TELEGRAM_CHAT_ID is not a numeric chat id)"
+        )
+
+
 def telegram_poll_approval(timeout_sec: int = 120) -> TelegramPollResult:
     """Long-poll Telegram getUpdates for an approval reply.
 
@@ -558,7 +595,13 @@ def telegram_poll_approval(timeout_sec: int = 120) -> TelegramPollResult:
         )
 
     deadline = time.monotonic() + timeout_sec
-    chat_id = int(TELEGRAM_CHAT_ID)
+    chat_id, chat_error = _resolve_chat_id()
+    if chat_id is None:
+        # Same reasoning as the principal above: a malformed chat id must
+        # produce the structured channel_error that escalates, not an
+        # uncaught ValueError that kills the run before it can.
+        log.error(f"Telegram channel_error: {chat_error} — refusing to poll")
+        return TelegramPollResult(kind="channel_error", error_detail=chat_error)
 
     log.info(
         f"Polling Telegram for approval (timeout={timeout_sec}s, offset={offset})..."
