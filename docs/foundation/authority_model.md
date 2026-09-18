@@ -516,32 +516,79 @@ a different credential and make the retry a second first attempt.
 
 ### Where a credential comes from, and what happens when that source cannot be read
 
-**Open.** Registered in `conformance.md#the-register-of-open-design-decisions` as decision 105. The rules
-above govern a credential the swarm already holds: how it is kept out of a resident process, how it is
-returned as a value rather than written into an environment, how it is resolved once per invocation, and
-which grant it matches. None of them says where it came from.
+**Ruled (decision 105, 2026-09-10, on the operator's question): a secret store is named as a parameter on
+the deployment, beside the target host and the instance of the record.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. The rules above govern a credential the swarm
+already holds: how it is kept out of a resident process, how it is returned as a value rather than written
+into an environment, how it is resolved once per invocation, and which grant it matches. None of them said
+where it came from.
 
-That silence is total rather than partial. Counting every occurrence, including the ones in this sentence,
-the verb *materialize* appears seven times across the whole directory — five in this document, of which
-two are the custody rule's own statement that a long-lived credential is never materialized into a
+That silence was total rather than partial. Counting every occurrence, including the ones in this
+sentence, the verb *materialize* appears seven times across the whole directory — five in this document, of
+which two are the custody rule's own statement that a long-lived credential is never materialized into a
 resident process and a revocable one may be, two are this sentence counting them, and one is this
 section's later use below; plus one each in `conformance.md` and `conformance_suite.md`. Not one of the
-seven names a source. The design has no term for the store, no
-statement of who may write one, no rule for how a credential reaches the process that holds it, and no
-posture for the interval when the source is unreachable.
+seven named a source. The design had no term for the store, no statement of who may write one, no rule for
+how a credential reaches the process that holds it, and no posture for the interval when the source is
+unreachable.
 
-Four things bound an answer, and each is already stated elsewhere. Principle 5 makes an unreadable store
-the safety field's own case — a credential that cannot be fetched is `unknown`, and a principal that
-proceeds without one has failed open. Custody by revocability already divides credentials in two, and the
-credential that is never materialized cannot share a lifecycle with the one that may be. Invariant 9
-refuses a second home, so a credential whose origin could be read from a deployment *and* from a
-`vendor_binding` has two answers and no authority. And the dual-admit window binds the source as much as
-the grant: a store that cannot hold two live values for one principal makes the staged rotation above
-unimplementable.
+**The ruling extends a mechanism the design already has, rather than adding one.** Decision 90 already
+makes the target host and the instance of the record parameters of a deployment — named at the deployment,
+never assumed from the software, never a property of any record entity. A secret store is the same shape:
+where a deployment's credentials are read from is a fact about *this* deployment, not about the swarm's
+software in general, and two deployments of the same swarm may read from two different stores exactly as
+they may target two different hosts. Naming it as a third deployment parameter, beside the two decision 90
+already ruled, is invariant-12 discipline applied to itself — extending the mechanism that already
+generalizes rather than building a parallel one for a fact of the same kind.
+
+**Why this satisfies the four bounds, in the order the corpus states them.** *Invariant 9, one home.* The
+store is named once, at the deployment, the same place the host and the instance are named; a
+`vendor_binding` is read to *address* a system the swarm does not own (`adapters.md#what-separates-a-binding-from-a-deployments-configuration`),
+and a credential's origin is not that — it is a fact about how this deployment of the swarm's own software
+is provisioned, which is the deployment side of that same distinguishing rule, not the binding side. A
+credential whose origin could be read from both would be the two-homes defect the ruling exists to avoid,
+so the deployment is the only place it is named. *The dual-admit window.* A store named on the deployment
+is not a single slot; it is a location a deployment points at, and the rotation rule's requirement — two
+live values for one principal at once — is a property of what the store holds, not of how the deployment
+names it. Naming the store as a parameter says nothing about its internal shape and so forecloses nothing
+the dual-admit window needs; a store that cannot hold two live credentials fails the rotation rule on its
+own account, not because of where the deployment points. *Fail closed when unreadable.* Principle 5's rule
+for the safety field already gives the answer a new mechanism would only restate: a credential that cannot
+be fetched from the named store is `unknown`, and a principal that proceeds without one has failed open,
+which this design forbids everywhere else and does not carve an exception for here. *Custody by
+revocability.* The two kinds of credential the custody rule already distinguishes — one that is the asset
+and is never materialized into a resident process, one that is revocable and may be — do not share a
+lifecycle, and naming a store as a deployment parameter does not merge them: the parameter says where a
+credential is read from, and the custody rule, unchanged, still governs what happens to it once read.
+
+**What this forecloses.** No second place names where a deployment's credentials come from — not a field
+on `vendor_binding`, which addresses external systems and not the swarm's own provisioning, and not an
+inferred default read from the host or the software. A deployment that names no store is not one that
+falls back to an implicit source; under principle 5 it is one that cannot resolve a credential and reports
+`unknown` rather than one that guesses. And a mechanism that reads a credential store whole — rather than
+resolving the one value a check names — is foreclosed by the custody rules already in force above, which
+this ruling does not relax: they govern a credential already held, and this ruling answers where it is
+reached from without granting anything that reaches for more than the check named.
+
+**Live evidence that the question was unsettled, and what the ruling closes.** On 2026-09-07 a subagent
+looking for one credential variable read a credential file whole and obtained many others (task
+`ent_cbf9bdbdf475eda8900d6b49`). The custody rules above did not prevent it, because they govern a
+credential already held and say nothing about how one is reached — the incident is exactly the gap this
+section describes, a swarm with rules for holding a credential and none for fetching it. Naming the store
+as a deployment parameter does not, by itself, prevent a wholesale read of it; what it forecloses is the
+prior absence of any named, single place to *point* a fetch at, which is the precondition for a fetch
+mechanism to resolve one value rather than a file. The mechanism that resolves one credential at a time
+from the named store is decision 105's own next question and is not settled here (`invariant 12`): this
+ruling names where the store is, not how a value is drawn from it.
 
 What this does not reopen: G17 and decision 101 ask what the credential-to-principal binding carries, and
-decisions 96 and 97 rule what a check reads at the moment of the action. This asks what exists before any
-of those apply.
+decisions 96 and 97 rule what a check reads at the moment of the action. This ruling answers what exists
+before any of those apply, and does not touch what they already settled.
+
+**What would reopen it.** A deployment model in which the record is not per-deployment — the same
+condition that would reopen decision 90 — since this ruling's parameter rides on that one's; or a secret
+store whose own product shape cannot be addressed per deployment at all, which would leave no place for
+the parameter to point and would argue for resolving the store some other way than naming it.
 
 **Rotation is staged, never a flag day.** Because a grant is matched on the credential (`sub`, `iss`), a
 credential replaced in one step is a principal whose grants stop matching. So the new credential is

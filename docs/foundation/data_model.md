@@ -225,7 +225,11 @@ runs through a second type, which stays true whether the per-type check is decla
   a thread; the dated fact for a calendar occurrence and the declaration as read for a series (decisions 23
   and 24 — `gmail.md#a-thread-and-its-messages-are-each-artifacts-related-by-part_of`,
   `calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of`); the rail state as read
-  for a transfer (`payments.md#terminal-is-not-permanent-and-the-design-must-not-assume-it-is`). A kind
+  for a transfer (`payments.md#terminal-is-not-permanent-and-the-design-must-not-assume-it-is`); the body
+  content as read — its exact text, or a hash of it — for a GitHub issue or pull request (decision 106,
+  `gates_and_workflows.md#what-a-verdict-on-an-issue-is-pinned-to`), on the same ground as the code
+  artifact's head: the pinned state is what the step owner actually read, not a location a later write can
+  move it out from under. A kind
   admitted later states its pinned state in its system's document, under linkage
   (`adapters.md#what-an-adapters-document-must-contain`), so the derived staleness read below has a value to
   compare on every kind. For the code artifact, which the rest of this bullet is written against, the head is resolved

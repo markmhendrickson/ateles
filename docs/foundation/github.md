@@ -466,15 +466,15 @@ recovery is an action a principal takes through the gate
 (`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`).
 
 **Which of these rows a principal's own artifact takes — its own comment, or a merged body several
-principals rewrite — is open (decision 85, 2026-09-07, on the operator's question).** Registered in
+principals rewrite — is ruled (decision 85, 2026-09-07, on the operator's question).** Registered in
 `conformance.md#the-register-of-open-design-decisions`, argued below.
 
 ## Where an agent's artifact about an issue or a pull request lives
 
-**Open (decision 85, 2026-09-07, on the operator's question).** Registered in
+**Ruled (decision 85, 2026-09-07, on the operator's question).** Registered in
 `conformance.md#the-register-of-open-design-decisions`. The outbound table above gives a step one row for
 editing an issue and one row for commenting on it, and says nothing about which of the two an agent's own
-contribution takes. Where several agents each produce something about the same issue, that silence decides
+contribution takes. Where several agents each produce something about the same issue, that silence decided
 itself: today they are merged into one block in the issue description, rewritten in full by whichever agent
 contributed last, and the merged text names the review step that produced each part but never the
 principal that wrote it.
@@ -483,52 +483,89 @@ The question is general and not only about a specification: **where does an arti
 about an issue or a pull request live — in its own place on the host, or merged into a body several
 principals rewrite?** It applies equally to a specification section, a review verdict, and a triage summary.
 
-**What already bears on it, and does not settle it.** Five rules touch the shape without deciding it.
+**What already bears on it, and none of it alone settled it.** Five rules touch the shape without
+deciding it by themselves.
 
-- **Invariant 9, one source defined once.** A value the swarm reads has one home. A merged body is one
-  value with several writers rather than one value with several homes, which is the neighbouring fault and
-  not the one the invariant names; whether the invariant reaches it is part of the question.
+- **Invariant 9, one source defined once.** A value the swarm reads has one home. A merged body looked
+  like one value with several writers rather than one value with several homes, which is the neighbouring
+  fault and not the one the invariant names — until the ruling below identifies which side of the merge is
+  the value's home and which is a reading of it.
 - **C1 and `work_model.md#there-is-no-task-lifecycle-there-are-batches`.** A task carries status and edges
   only, because a fact about a batch or a verdict written onto the task needs a process to keep it true.
   A merged block is the same shape one level up — several principals' output on one field, kept correct by
-  each writer's discipline rather than by the record — but the rule is stated about a task's fields, and
-  extending it to an external system's body is an argument this section does not make for it.
+  each writer's discipline rather than by the record — and the ruling below is that extension, stated for
+  an external system's body rather than for a task's fields.
 - **Attribution (`authority_model.md#attribution`).** Every write carries the agent that made it and the
-  principal it acted for. That rule binds writes to the record; whether the artifact rendered onto the host
-  must carry the same attribution is not stated, and the merged body is where the two come apart.
+  principal it acted for. That rule binds writes to the record; it does not by itself say whether the
+  artifact rendered onto the host must carry the same attribution, and the merged body was where the two
+  came apart.
 - **The four outcomes (`adapters.md`).** They classify what arrives *inbound*, so they constrain how the
   host's own comments and reviews are read, not where an agent's outbound artifact is put. The outbound
-  half is this document's table, which is where the silence is.
+  half is this document's table, which is where the silence was.
 - **Decision 69, ruled** (`adapters.md#a-per-agent-credential-is-an-obligation-where-the-system-issues-one`).
   Where the host issues per-agent credentials, each agent holds its own, because a shared one leaves the
   host unable to carry a verdict at all. That ruling is about *who writes*; this question is about *what
-  is written into*, and the two meet here — a body several principals rewrite loses on the content side
-  what a shared credential loses on the identity side. Whether the same ground decides both is the
-  question, and 69 did not reach it.
+  is written into*. Decision 85 answers the second with the same shape 69 used for the first: each writer
+  keeps its own — 69 its credential, 85 its record entity — and what the host displays is downstream of
+  that, never the place the writing happens.
 
-**The dispositions, none of them taken here.**
+**The ruling: record-first.** Each agent's judgment about an issue or a pull request is its own record
+entity, carrying its own provenance — the principal that wrote it, when, and what it read. The GitHub
+body is a **rendering** of those entities, produced at read (or at write-time render, for a host that has
+no read-time composition) from whichever entities are attached to the issue or pull request. A rendering
+may merge, because **merging a projection loses nothing**: the entities it was built from still exist,
+each still attributed, and a second render from the same entities reproduces the same body. What is
+forbidden is treating the body itself as the record — writing an agent's judgment only into the merged
+text, with no entity behind it, which is the shape that drops attribution today.
 
-- **One artifact, one home, per author.** Each agent's contribution is its own comment on the host and its
-  own record entity; nothing merges, and any combined reading is a projection derived at read time. The
-  cost is that a reader of the issue sees a sequence of comments rather than one document, and a
-  specification loses the single ordered text a later build step reads as its source.
-- **Merged body, attribution preserved.** Sections stay in one body, each carrying the principal that
-  wrote it, and only that principal may write its own. This keeps the assembled document and adds the
-  attribution the merge currently drops; the cost is that the body still has several writers, so the
-  ownership is a convention the writers keep rather than a property the host enforces.
-- **Record-first.** Each contribution is an entity in the record, which is the source; the host carries a
-  rendering, and a rendering may merge because merging a projection loses nothing. This is close to what
-  the specification mechanism already does — the per-agent field is corrected in the record and the body
-  rewritten from it — and the question it leaves is whether a rendering several agents rewrite is
-  distinguishable, to a reader on the host, from a source they share.
-- **Nothing.** A specification is one document with several authors, so a shared block is the right shape
-  for it, and the concern is answered by attribution rather than by separation. The cost is that the rule
-  stays unstated, and the next artifact class to arrive settles it again by whichever mechanism is built.
+This closes the clause decision 85 registered as open: *"whether a rendering several agents rewrite is
+distinguishable, to a reader on the host, from a source they share."* It is not, to a reader looking only
+at the host, and that is the ruling's own point rather than a gap in it. The host was never the place
+attribution had to be legible — the record is, and the record answers it fully: `retrieve_field_provenance`
+over the record entities reconstructs exactly who wrote which part and when, which is strictly more than a
+per-section byline in the body would carry, since a byline names a writer but not what that writer read or
+when a later entity superseded it. A reader who needs attribution reads the record; a reader who needs the
+current combined text reads the rendering; neither reader is served by asking the second to carry what
+only the first can.
+
+**Why the other three dispositions lose to this one, rather than merely differing from it.** *One
+artifact, one home, per author* keeps attribution but gives up the single ordered text a later build step
+or a human skimming the issue reads as source — a cost record-first does not pay, because the record
+supplies the entities and the rendering supplies the ordered text, so nothing distinguishing is bought by
+also splitting the host's own view into separate comments. *Merged body, attribution preserved* asks the
+host's writers to maintain an invariant — only the owning principal edits its own section — that nothing
+enforces; record-first enforces the same invariant the ordinary way, since a principal corrects its own
+record entity under the same admission check that governs every other write, and the render step is what
+merges, not the writers. *Nothing* leaves the question to be answered again by whichever mechanism the
+next artifact class happens to build, which is the two-homes failure invariant 9 forbids one level later
+rather than avoided.
+
+**What this forecloses.** No per-body attribution byline, section-ownership convention, or edit lock on
+the GitHub body is needed or should be built: the body is not where attribution is asked to live, and a
+mechanism built to make it carry that is solving a problem the record already answers. A rendering that
+merges several agents' record entities into one issue or pull-request body is not a defect to fix — it is
+the design working as ruled. Where a reader needs to know which principal is answerable for which part of
+a body, the answer is retrieved from the record, never inferred from the body's prose or its edit history
+on the host.
+
+**The corollary the ruling implies rather than states as a separate rule.** Record-first makes a
+concurrent write to the same *rendering* harmless — the next render is correct regardless of write
+order, because it is derived fresh from the entities — but it does not make a concurrent write to the same
+*entity* harmless, and nothing above claims it does. Where two agents would otherwise both want to hold the
+pen on one artifact — the same specification section, the same triage summary — the practical answer is
+the one the operator raised alongside this ruling: **agents should generally avoid writing to the same
+artifact where separate treatment is desirable.** Single-writer discipline is what keeps collisions rare in
+the first place; the projection rule is what makes them harmless on the rare occasion one still happens,
+because even a collided write is still an observation in an append-only record, still attributed, and still
+superseded rather than lost. The two are a pair, not a substitute for each other — the corollary reduces
+how often the ruling is tested, and the ruling is what makes the corollary's failure mode cheap rather than
+a reason to build a locking mechanism this design otherwise has no use for.
 
 **What is settled, and is not part of this question:** an artifact attaches to its task by an edge, every
 outbound operation is an `action` evaluated at the gate, and a superseded effect stays readable rather than
-being deleted. The question is which outbound row a principal's own artifact takes, and whether the answer
-is the same for every artifact class.
+being deleted. The question was which outbound row a principal's own artifact takes, and the answer above
+is the same for every artifact class — a specification section, a review verdict, a triage summary — because
+none of the argument above turned on which kind of judgment the entity carried.
 
 ## What the host must be configured to be, for this mapping to mean what it says
 
