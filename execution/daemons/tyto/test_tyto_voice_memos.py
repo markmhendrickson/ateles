@@ -164,7 +164,7 @@ def _poll(watcher: tyto.RecordingWatcher) -> list[tuple[Path, Path | None]]:
 
     async def _record(remote_path, mic_path):
         calls.append((remote_path, mic_path))
-        return True
+        return "success", None
 
     with patch.object(watcher, "_handle_recording", side_effect=_record):
         asyncio.run(watcher.poll_once())
@@ -331,7 +331,7 @@ def test_failed_backlog_item_is_retried_without_blocking_later_items(tmp_path):
 
     async def fail_first(remote_path, mic_path):
         calls.append((remote_path, mic_path))
-        return False
+        return "transient", None
 
     with patch.object(watcher, "_handle_recording", side_effect=fail_first):
         asyncio.run(watcher.poll_once())
@@ -582,7 +582,7 @@ def test_failed_memo_is_retried_and_cleared_only_after_success(tmp_path):
     )
     memo = _write(memo_dir, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
     _settled(watcher)
-    outcomes = iter((False, True))
+    outcomes = iter((("transient", None), ("success", None)))
     calls = []
 
     async def _record(remote_path, mic_path):
@@ -601,6 +601,173 @@ def test_failed_memo_is_retried_and_cleared_only_after_success(tmp_path):
     assert memo in watcher._transcribed
     assert watcher._pending_retries == {}
     assert json.loads(state_path.read_text())["pending"] == []
+
+
+# ── Permanent-failure retry cap (ateles#1083) ────────────────────────────────
+#
+# A deterministic rejection like ERR_FILE_PATH_IS_SERVER_LOCAL cannot be fixed
+# by retrying — the call shape is wrong every time. Retrying it anyway is what
+# produced 22,878 error-log lines and a Telegram 429 that hid the failure
+# behind a ~3.7 hour rate limit, silently starving every other daemon's
+# alerts on the same channel. These tests plant that exact permanent
+# rejection and assert the memo is hard-failed once, journaled durably, and
+# never retried again — with exactly one notification, not one per poll.
+
+
+def test_permanent_store_error_is_classified_and_not_transient(tmp_path):
+    """_classify_store_error recognizes the exact rejection from ateles#1083."""
+    exc = RuntimeError(
+        'Neotoma store failed: {"error_code":"ERR_FILE_PATH_IS_SERVER_LOCAL",'
+        '"message":"ERR_FILE_PATH_IS_SERVER_LOCAL: \'file_path\' is resolved '
+        'on the server\'s filesystem"}'
+    )
+    assert tyto._classify_store_error(exc) == "ERR_FILE_PATH_IS_SERVER_LOCAL"
+    assert tyto._classify_store_error(RuntimeError("connection reset")) is None
+
+
+def test_handle_recording_returns_permanent_for_the_server_local_path_error(tmp_path):
+    """The real call path classifies this exact error as permanent, not transient."""
+    memo = _write(tmp_path, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    watcher = _make_watcher(tmp_path, capture_method="voice_memo", paired=False)
+    failed = MagicMock(
+        returncode=1,
+        stdout="TRANSCRIPTION_BACKEND_SELECTED=local\n",
+        stderr=(
+            'Error transcribing audio: Neotoma store failed: '
+            '{"error_code":"ERR_FILE_PATH_IS_SERVER_LOCAL",'
+            '"message":"ERR_FILE_PATH_IS_SERVER_LOCAL: '
+            "'file_path' is resolved on the server's filesystem\"}"
+        ),
+    )
+
+    with patch.object(tyto.subprocess, "run", return_value=failed):
+        outcome, error_code = asyncio.run(watcher._handle_recording(memo, None))
+
+    assert outcome == "permanent"
+    assert error_code == "ERR_FILE_PATH_IS_SERVER_LOCAL"
+
+
+def test_permanent_failure_is_hard_failed_once_and_never_retried(tmp_path):
+    """A planted permanent rejection must not become an unbounded retry loop."""
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    state_path = tmp_path / "retry.json"
+    watcher = _make_watcher(
+        memo_dir,
+        capture_method="voice_memo",
+        paired=False,
+        extensions={".m4a"},
+        max_age_secs=3600,
+        seed_existing=True,
+        retry_state_path=state_path,
+        retry_secs=0,  # would immediately retry a transient failure
+    )
+    memo = _write(memo_dir, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    _settled(watcher)
+
+    calls = []
+
+    async def _permanent(remote_path, mic_path):
+        calls.append((remote_path, mic_path))
+        return "permanent", "ERR_FILE_PATH_IS_SERVER_LOCAL"
+
+    with patch.object(watcher, "_handle_recording", side_effect=_permanent):
+        asyncio.run(watcher.poll_once())
+        asyncio.run(watcher.poll_once())
+        asyncio.run(watcher.poll_once())
+
+    # Exactly one attempt across three polls — the retry cap, not the backoff
+    # window, is what stopped it (retry_secs=0 would otherwise permit an
+    # attempt on every single poll).
+    assert calls == [(memo, None)]
+    assert memo in watcher._hard_failed
+    assert watcher._hard_failed[memo]["error_code"] == "ERR_FILE_PATH_IS_SERVER_LOCAL"
+    assert memo not in watcher._pending_retries
+    assert memo not in watcher._transcribed
+
+    journal = json.loads(state_path.read_text())
+    assert journal["version"] == 2
+    assert journal["pending"] == []
+    assert len(journal["hard_failed"]) == 1
+    assert journal["hard_failed"][0]["path"] == str(memo)
+    assert journal["hard_failed"][0]["error_code"] == "ERR_FILE_PATH_IS_SERVER_LOCAL"
+
+    # Exactly one BLOCKER notification for the permanent failure, not one per
+    # poll (the 22k-error/429 storm this guards against).
+    blocker_messages = [
+        call.args[0]
+        for call in watcher._notifier.send.call_args_list
+        if call.kwargs.get("priority") == tyto.Priority.BLOCKER
+    ]
+    permanent_messages = [m for m in blocker_messages if "permanently failed" in m]
+    assert len(permanent_messages) == 1
+
+
+def test_hard_failed_journal_survives_a_restart(tmp_path):
+    """A permanent failure must not be re-attempted after the daemon restarts."""
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    state_path = tmp_path / "retry.json"
+    first = _make_watcher(
+        memo_dir,
+        capture_method="voice_memo",
+        paired=False,
+        extensions={".m4a"},
+        max_age_secs=3600,
+        seed_existing=True,
+        retry_state_path=state_path,
+        retry_secs=0,
+    )
+    memo = _write(memo_dir, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    _settled(first)
+
+    async def _permanent(_remote_path, _mic_path):
+        return "permanent", "ERR_FILE_PATH_IS_SERVER_LOCAL"
+
+    with patch.object(first, "_handle_recording", side_effect=_permanent):
+        asyncio.run(first.poll_once())
+
+    restarted = _make_watcher(
+        memo_dir,
+        capture_method="voice_memo",
+        paired=False,
+        extensions={".m4a"},
+        max_age_secs=3600,
+        seed_existing=True,
+        retry_state_path=state_path,
+        retry_secs=0,
+    )
+    assert memo in restarted._hard_failed
+
+    calls = _poll(restarted)
+
+    assert calls == []  # never handed to _handle_recording again
+
+
+def test_v1_journal_loads_with_no_hard_failed_entries(tmp_path):
+    """A journal written before this change (no hard_failed key) must still load."""
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    memo = _write(memo_dir, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+    state_path = tmp_path / "retry.json"
+    state_path.write_text(json.dumps({
+        "version": 1,
+        "pending": [{"path": str(memo), "retry_after": 0}],
+    }))
+
+    watcher = _make_watcher(
+        memo_dir,
+        capture_method="voice_memo",
+        paired=False,
+        extensions={".m4a"},
+        max_age_secs=3600,
+        seed_existing=True,
+        retry_state_path=state_path,
+    )
+
+    assert watcher._retry_state_available is True
+    assert memo in watcher._pending_retries
+    assert watcher._hard_failed == {}
 
 
 def test_startup_seeding_preserves_a_failed_new_memo_retry(tmp_path):
@@ -622,7 +789,7 @@ def test_startup_seeding_preserves_a_failed_new_memo_retry(tmp_path):
     _settled(first)
 
     async def _fail(_remote_path, _mic_path):
-        return False
+        return "transient", None
 
     with patch.object(first, "_handle_recording", side_effect=_fail):
         asyncio.run(first.poll_once())
@@ -666,7 +833,7 @@ def test_failed_memo_obeys_retry_backoff(tmp_path):
 
     async def _fail(remote_path, mic_path):
         calls.append((remote_path, mic_path))
-        return False
+        return "transient", None
 
     with patch.object(watcher, "_handle_recording", side_effect=_fail):
         asyncio.run(watcher.poll_once())
@@ -743,7 +910,7 @@ def test_failed_memo_backoff_starts_after_transcription_finishes(tmp_path):
 
     async def _slow_failure(_remote_path, _mic_path):
         await asyncio.sleep(1.1)
-        return False
+        return "transient", None
 
     with patch.object(watcher, "_handle_recording", side_effect=_slow_failure):
         asyncio.run(watcher.poll_once())
@@ -858,7 +1025,9 @@ def test_failure_notification_names_attempted_backend(tmp_path):
     )
 
     with patch.object(tyto.subprocess, "run", return_value=failed):
-        assert asyncio.run(watcher._handle_recording(memo, None)) is False
+        outcome, error_code = asyncio.run(watcher._handle_recording(memo, None))
+    assert outcome == "transient"
+    assert error_code is None
 
     messages = [call.args[0] for call in watcher._notifier.send.call_args_list]
     assert any("backend=local_whisper_cpp" in message for message in messages)

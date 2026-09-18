@@ -16,7 +16,14 @@ def storage(tmp_path, monkeypatch):
     monkeypatch.setattr(ta, "_neotoma_auth_preflight", lambda: (True, "ok"))
     monkeypatch.setattr(ta, "_neotoma_prod_cli_argv", lambda args: ["neotoma", *args])
     def run(cmd, **kwargs):
-        entity = json.loads(Path(cmd[cmd.index("--file") + 1]).read_text())[0]
+        # attach_audio_file=True (the default) now composes via `ingest
+        # --entities <path> --source-file <audio>` (ateles#1083 — `store
+        # --file-path` sent a path hosted Neotoma cannot resolve on its own
+        # filesystem); attach_audio_file=False still uses plain `store
+        # --file <path>`. Read the entities payload from whichever flag the
+        # call under test actually used.
+        entities_flag = "--entities" if "--entities" in cmd else "--file"
+        entity = json.loads(Path(cmd[cmd.index(entities_flag) + 1]).read_text())[0]
         state["entity"] = entity
         state["cmd"] = cmd
         return SimpleNamespace(returncode=1 if state["mismatch"] else 0,
@@ -65,7 +72,11 @@ def test_combined_store_readback_success(storage, capsys):
     state, save = storage
     assert save()["entity_id"] == "ent_fixture"
     assert "NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_fixture" in capsys.readouterr().out
-    assert "--interpretation-source-ref" in state["cmd"]
+    # Attaching audio composes via `ingest --source-file`, not a bare `store
+    # --file-path` (ateles#1083); `ingest` has no --interpretation-source-ref.
+    assert "ingest" in state["cmd"]
+    assert "--source-file" in state["cmd"]
+    assert "--file-path" not in state["cmd"]
     assert state["entity"]["file_size_bytes"] == len(b"RIFF-synthetic-audio")
 
 
