@@ -186,7 +186,7 @@ if [ -n "$NEOTOMA_BASE_URL" ]; then
         ERRORS=$((ERRORS + 1))
     fi
     case "$mirror_out" in
-        *"AGENT MIRROR CHECK FAILED"*)
+        *"disk differs from Neotoma"*|*"stale orphan files"*)
             echo "    ERROR: agent-doc mirrors drifted from Neotoma."
             echo "    Fix: python3 execution/scripts/render_agent_docs.py  (never hand-edit the mirrors)"
             ;;

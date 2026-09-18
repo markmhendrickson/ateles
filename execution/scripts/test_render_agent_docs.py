@@ -195,6 +195,16 @@ class TestMirrorCheckContract:
 
         assert render_agent_docs.check([]) == 1
         out = capsys.readouterr().out
-        assert out.strip() == render_agent_docs.ZERO_ROWS_LINE
-        assert "OK" not in out
+        # Literal, not the constant: a paraphrase of the signed empty-state
+        # text used to pass because the assertion compared the constant to itself.
+        # "OK" is a substring of NEOTOMA_BEARER_TOKEN, so match the OK line.
+        signed = (
+            "AGENT MIRROR CHECK FAILED — Neotoma returned no agent_definition rows; "
+            "refusing to treat that as a match.\n"
+            "Check NEOTOMA_BASE_URL and NEOTOMA_BEARER_TOKEN; "
+            "do not regenerate against an empty result."
+        )
+        assert render_agent_docs.ZERO_ROWS_LINE == signed
+        assert out.strip() == signed
+        assert "agent mirror check OK" not in out
         assert "Fix:" not in out

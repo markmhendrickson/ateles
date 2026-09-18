@@ -215,7 +215,14 @@ class TestLintAgentMirrorBinding:
         assert proc.returncode != 0, proc.stdout + proc.stderr
         assert _DRIFT_ERROR not in proc.stdout
         assert "Fix:" not in proc.stdout
-        assert "0 agent_definition rows" in proc.stdout
+        assert (
+            "AGENT MIRROR CHECK FAILED — Neotoma returned no agent_definition rows; "
+            "refusing to treat that as a match."
+        ) in proc.stdout
+        assert (
+            "Check NEOTOMA_BASE_URL and NEOTOMA_BEARER_TOKEN; "
+            "do not regenerate against an empty result."
+        ) in proc.stdout
 
     def test_unreachable_exits_nonzero_without_drift_pair(self, tmp_path: Path) -> None:
         proc = _run_lint_binding(LINT_SH.read_text(), "unreachable", tmp_path)

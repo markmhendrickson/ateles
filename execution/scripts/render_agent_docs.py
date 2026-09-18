@@ -65,8 +65,9 @@ MIRROR_FIX_LINE = (
     "Fix: python3 execution/scripts/render_agent_docs.py  (never hand-edit the mirrors)"
 )
 ZERO_ROWS_LINE = (
-    "agent mirror check failed — 0 agent_definition rows (not a match). "
-    "Check NEOTOMA_BASE_URL and the bearer token. Do not regenerate."
+    "AGENT MIRROR CHECK FAILED — Neotoma returned no agent_definition rows; "
+    "refusing to treat that as a match.\n"
+    "Check NEOTOMA_BASE_URL and NEOTOMA_BEARER_TOKEN; do not regenerate against an empty result."
 )
 
 SKILL_HEADER = (
