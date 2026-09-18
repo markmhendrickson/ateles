@@ -95,19 +95,51 @@ class TestBuildSystemPrompt:
         prompt, _ = skill_runner.build_system_prompt(agent_def, skill_md)
         assert "---" in prompt
 
-    def test_empty_prompt_markdown_returns_skill_md_only(self) -> None:
+    def test_empty_prompt_markdown_returns_skill_md_with_worktree_contract(
+        self,
+    ) -> None:
+        """Degraded mode is SKILL.md plus the unconditional worktree contract.
+
+        No longer byte-identical to skill_md alone: SWARM_WORKTREE_CONTRACT is
+        injected regardless of include_github_contract (see build_system_prompt's
+        docstring) because the worktree/no-stash rule must reach every dispatch
+        path, not only the 13 GitHub-triggered call sites that set that flag.
+        """
         agent_def = _stub_def()
         skill_md = "Fallback instructions."
         prompt, degraded = skill_runner.build_system_prompt(agent_def, skill_md)
         assert degraded
-        assert prompt == skill_md
+        assert prompt.endswith(skill_md)
+        assert skill_runner.SWARM_WORKTREE_CONTRACT in prompt
+        assert "one worktree, one agent" in prompt.lower()
 
     def test_whitespace_only_prompt_markdown_treated_as_empty(self) -> None:
         agent_def = _make_def(prompt_markdown="   \n\n  ")
         skill_md = "Task instructions."
         prompt, degraded = skill_runner.build_system_prompt(agent_def, skill_md)
         assert degraded
-        assert prompt == skill_md
+        assert prompt.endswith(skill_md)
+        assert skill_runner.SWARM_WORKTREE_CONTRACT in prompt
+
+    def test_worktree_contract_present_even_without_github_contract(self) -> None:
+        """The worktree contract is NOT gated behind include_github_contract."""
+        agent_def = _make_def(prompt_markdown="Identity.")
+        skill_md = "Task instructions."
+        prompt, _ = skill_runner.build_system_prompt(
+            agent_def, skill_md, include_github_contract=False
+        )
+        assert skill_runner.SWARM_WORKTREE_CONTRACT in prompt
+        assert "NEVER run `git stash`" in prompt
+
+    def test_worktree_contract_present_alongside_github_contract(self) -> None:
+        agent_def = _make_def(prompt_markdown="Identity.")
+        skill_md = "Task instructions."
+        prompt, _ = skill_runner.build_system_prompt(
+            agent_def, skill_md, include_github_contract=True
+        )
+        assert skill_runner.SWARM_WORKTREE_CONTRACT in prompt
+        assert skill_runner.SWARM_GITHUB_CONTRACT in prompt
+        assert skill_runner.SWARM_PRIOR_ART_CONTRACT in prompt
 
 
 # ── _load_agent_def caching ────────────────────────────────────────────────────
@@ -215,7 +247,10 @@ class TestRunSkill:
     def test_skill_md_only_when_no_definition(
         self, MockLoader, mock_write_harness
     ) -> None:
-        """When prompt_markdown is empty, the system prompt is SKILL.md alone."""
+        """When prompt_markdown is empty, the system prompt is SKILL.md plus the
+        unconditional worktree contract (SWARM_WORKTREE_CONTRACT) — no longer
+        skill_md alone, since that contract must reach every dispatched agent
+        including this degraded, non-GitHub path."""
         stub = _stub_def()
         instance = MagicMock()
         instance.load.return_value = stub
@@ -253,7 +288,8 @@ class TestRunSkill:
         assert result.ok
         sys_prompt_idx = captured_cmd.index("--append-system-prompt") + 1
         system_prompt_arg = captured_cmd[sys_prompt_idx]
-        assert system_prompt_arg == skill_md_content
+        assert system_prompt_arg.endswith(skill_md_content)
+        assert skill_runner.SWARM_WORKTREE_CONTRACT in system_prompt_arg
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -1376,16 +1412,20 @@ class TestSwarmGithubContractInjection:
         assert skill_runner.SWARM_GITHUB_CONTRACT in prompt
         assert "Fallback instructions." in prompt
 
-    def test_degraded_no_contract_returns_skill_md_only(self) -> None:
-        """Degraded + contract=False: prompt is exactly skill_md (original behaviour)."""
+    def test_degraded_no_contract_returns_skill_md_plus_worktree_contract(self) -> None:
+        """Degraded + contract=False: no SWARM_GITHUB_CONTRACT, but
+        SWARM_WORKTREE_CONTRACT is still present — it is unconditional and does
+        not ride the include_github_contract flag (see build_system_prompt)."""
         agent_def = _stub_def()
         skill_md = "Fallback instructions."
         prompt, degraded = skill_runner.build_system_prompt(
             agent_def, skill_md, include_github_contract=False
         )
         assert degraded
-        assert prompt == skill_md
+        assert prompt.endswith(skill_md)
         assert skill_runner.SWARM_GITHUB_CONTRACT not in prompt
+        assert skill_runner.SWARM_PRIOR_ART_CONTRACT not in prompt
+        assert skill_runner.SWARM_WORKTREE_CONTRACT in prompt
 
     # ── run_skill threads the flag ──────────────────────────────────────────────
 

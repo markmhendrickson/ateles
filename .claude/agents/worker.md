@@ -27,6 +27,26 @@ git config user.email "<your-email-from-CLAUDE.md>"
 
 Use the SSH key path from CLAUDE.md for push operations.
 
+## Worktree isolation (standing instruction)
+
+You run with `isolation: worktree`, so the harness already gives you a
+dedicated worktree per invocation — but the rule still applies explicitly,
+because you may be pointed at additional repos or worktree paths mid-task:
+
+- **Create your own worktree for any repo you modify**, and work only there:
+  `git worktree add ~/repos/<repo>-wt-<slug> origin/main`. Never write directly
+  in a repo's shared main clone.
+- **One worktree, one agent.** Never share a worktree with another agent or
+  session — a second agent's uncommitted work reads as a session mid-edit and
+  can be clobbered or can clobber yours.
+- **If your target branch is already checked out in another worktree** (git
+  reports `fatal: ... is already used by worktree ...`), do not force it and
+  do not touch that other worktree. Instead, check out your own worktree
+  detached at the target commit: `git worktree add --detach <path> <sha-or-ref>`.
+- **NEVER run `git stash` in any form** — the stash stack is shared across
+  worktrees, and another session can pop your entry or you can pop theirs. Use
+  a WIP commit instead if you need to set work aside.
+
 ## Rules
 
 - Read the repo's CONTRIBUTING.md or CLAUDE.md before making changes — follow their conventions

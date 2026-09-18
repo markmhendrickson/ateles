@@ -556,6 +556,47 @@ successful outcome, not a failed one — do not treat "I was told to build it" a
 a reason to build something the repository already has.\
 """
 
+# ── Worktree contract (isolation before you write) ─────────────────────────────
+# Injected into EVERY dispatched agent's system prompt, unconditionally —
+# deliberately NOT gated behind include_github_contract like the two contracts
+# above. SWARM_PRIOR_ART_CONTRACT and SWARM_GITHUB_CONTRACT only reach the 13
+# GitHub-triggered call sites in swarm_dispatch.py; the Neotoma-task, one-off
+# (dispatch_role.py), and periodic (aquila.py) dispatch paths all call
+# build_system_prompt with include_github_contract left at its False default,
+# so a rule gated the same way would never reach them. The worktree rule binds
+# to any agent that might run `git`, `Edit`, or `Write` against a repo —
+# that's every role, not just GitHub-dispatched ones — so it cannot be gated
+# behind a flag that most dispatch paths never set. See CLAUDE.md's "One
+# worktree, one agent" and "NEVER `git stash`" rules, which this contract
+# exists to carry to sessions that never load CLAUDE.md at all (that file is
+# read only by interactive sessions in this checkout; a dispatched agent is
+# spawned fresh and never sees it).
+SWARM_WORKTREE_CONTRACT = """\
+## Worktree contract — isolate your writes before you make them
+
+If your task will modify a repository (edit, write, or run a mutating git
+command), create your own dedicated worktree first and work only inside it:
+
+    git worktree add ~/repos/<repo>-wt-<slug> origin/main
+
+Never write directly in a repo's shared main clone (e.g. `~/repos/ateles`,
+`~/repos/neotoma`) — another session's uncommitted work there reads as an
+unknown session mid-edit, and your edit can clobber it or get clobbered.
+
+**One worktree, one agent.** Never share a worktree with another agent or
+session. If you were pointed at a specific worktree path and find its branch
+already checked out elsewhere (`fatal: ... is already used by worktree ...`),
+do not force it and do not touch the other worktree. Instead, create your own
+worktree detached at the target commit:
+
+    git worktree add --detach ~/repos/<repo>-wt-<slug>-alt <target-sha-or-branch>
+
+**NEVER run `git stash` in any form** — the stash stack is shared across
+worktrees and other sessions can pop your entry or you can pop theirs. Use a
+WIP commit instead (`git add -A && git commit -m "wip: <note>"`) if you need
+to set work aside.\
+"""
+
 
 # ── System-prompt assembly ─────────────────────────────────────────────────────
 
@@ -580,8 +621,9 @@ def build_system_prompt(
     the definition prompt and the skill_md so all GitHub-dispatched agents receive
     the shared comment convention in ONE place.  The contract is injected even in
     degraded mode (no definition_prompt) because it is useful guidance regardless.
-    When include_github_contract=False (the default), behaviour is byte-identical
-    to the pre-contract implementation — the SSE/non-GitHub task path is unchanged.
+    When include_github_contract=False (the default), behaviour is otherwise
+    unchanged from the pre-contract implementation for the SSE/non-GitHub task
+    path — EXCEPT for SWARM_WORKTREE_CONTRACT, which is unconditional (below).
 
     SWARM_PRIOR_ART_CONTRACT is injected on the SAME condition, immediately after
     the GitHub contract.  It is deliberately not given its own flag: the whole
@@ -596,6 +638,16 @@ def build_system_prompt(
     so absent — on a checkout with no docs/foundation/conformance.md, so the
     prompt only ever names a reading list the agent can open; the day a kernel
     document lands, the injected text changes to name it.
+
+    SWARM_WORKTREE_CONTRACT is injected UNCONDITIONALLY — not on
+    include_github_contract at all, unlike every other contract above. Only 13
+    call sites in swarm_dispatch.py ever pass include_github_contract=True; the
+    Neotoma-task (apis.py), one-off (dispatch_role.py), and periodic (aquila.py)
+    dispatch paths all leave it at the False default, so a rule gated the same
+    way as the others would silently never reach them. The worktree/no-stash
+    rule binds to any agent that might touch a repo, which is not a
+    GitHub-dispatch-specific concern, so it cannot ride the same flag. It is
+    injected in degraded mode too, for the same reason as the others.
     """
     contracts = ""
     if include_github_contract:
@@ -603,25 +655,23 @@ def build_system_prompt(
         foundation = foundation_contract()
         if foundation:
             contracts = f"{contracts}\n\n---\n\n{foundation}"
+    contracts = (
+        f"{contracts}\n\n---\n\n{SWARM_WORKTREE_CONTRACT}"
+        if contracts
+        else SWARM_WORKTREE_CONTRACT
+    )
     definition_prompt = (agent_def.prompt_markdown or "").strip()
     if definition_prompt:
-        if include_github_contract:
-            return (
-                f"{definition_prompt}\n\n"
-                "---\n\n"
-                f"{contracts}\n\n"
-                "---\n\n"
-                f"{skill_md}",
-                False,
-            )
         return (
-            f"{definition_prompt}\n\n---\n\n{skill_md}",
+            f"{definition_prompt}\n\n"
+            "---\n\n"
+            f"{contracts}\n\n"
+            "---\n\n"
+            f"{skill_md}",
             False,
         )
     # Degraded: no definition_prompt.
-    if include_github_contract:
-        return f"{contracts}\n\n---\n\n{skill_md}", True
-    return skill_md, True
+    return f"{contracts}\n\n---\n\n{skill_md}", True
 
 
 # ── Neotoma harness_event writer ───────────────────────────────────────────────
