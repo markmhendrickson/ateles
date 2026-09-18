@@ -101,6 +101,23 @@ else
   echo "    (skipped — origin/main not fetched in this checkout)"
 fi
 
+# Codex AGENTS.md rule parity. Codex inlines ~/.codex/AGENTS.md into every
+# session the way Claude Code re-injects CLAUDE.md after compaction, so that file
+# is where the standing rules bind in Codex — and on 2026-09-13 it was 0 bytes,
+# meaning a Codex session ran with none of them. The check reuses
+# verify_claude_md_merge.py's rule extractor, so the rule identities gated above
+# are the same ones gated here.
+#
+# SKIPPED (not failed) where no Codex home exists: this repo is not
+# Codex-specific and a machine without Codex installed has nothing to keep in
+# sync. Failing there would train the reader to ignore the row.
+echo "  - Checking Codex AGENTS.md carries every CLAUDE.md standing rule..."
+if [ -d "${CODEX_HOME:-$HOME/.codex}" ]; then
+  python3 execution/scripts/render_codex_agents_md.py --check || ERRORS=$((ERRORS + 1))
+else
+  echo "    (skipped — no Codex home at ${CODEX_HOME:-$HOME/.codex})"
+fi
+
 # Hook-wiring reference (ateles#973). The snapshot session_start.py compares a
 # checkout against is generated from .claude/settings.json, so it must not drift
 # from it — a stale reference makes the banner lie in both directions.
