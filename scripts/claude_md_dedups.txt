@@ -25,3 +25,13 @@ Proceed on your recommendation instead of stopping to ask. => Proceed with your 
 # preference for a reopen over a gate waive. Main's "not mistaken for
 # flapping" clause is present in both.
 Re-request review yourself when monitoring shows it is warranted. => Re-request review yourself whenever monitoring shows it is warranted — do not wait to be asked.
+
+# 2026-09-15 — the operator granted hosted client instance deploys as a bounded
+# standing authorization, so the rule no longer guards "two classes" and its
+# lead was renamed to match what it now says. Verified clause-by-clause against
+# the surviving rule: no-merge-while-a-live-blocking-review-stands, "live means
+# its finding is unaddressed, not merely that it exists", credential rotation
+# stays the operator's, and "regardless of how obvious the next step looks" are
+# all present. The dropped half (hosted deploys) did not disappear — it moved to
+# its own bullet as a fail-closed authorization requiring a deployment_configuration.
+Merge stays gated, and two classes stay Mark's absolutely. => Merge stays gated, and credential rotation stays Mark's absolutely.
