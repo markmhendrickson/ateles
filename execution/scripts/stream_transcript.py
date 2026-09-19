@@ -1071,6 +1071,16 @@ def session_update_message(
         "type": "session.update",
         "session": {
             "type": "transcription",
+            # Per-token confidence, which the hallucination filter's
+            # `low_confidence` signal needs. Verified against the live socket:
+            # the server accepts this key and echoes it back on
+            # `session.updated`, and `...transcription.completed` then carries a
+            # `logprobs` array alongside the transcript.
+            #
+            # This is the signal an earlier pass in this workstream concluded
+            # did not exist. It does; the earlier conclusion came from reading
+            # documentation instead of asking the socket.
+            "include": ["item.input_audio_transcription.logprobs"],
             "audio": {
                 "input": {
                     "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
@@ -1457,6 +1467,7 @@ async def stream_session(
                                 window_seconds=max(0.0, end_s - start_s),
                                 vad_closed=vad_closed,
                                 plausible_languages=languages.plausible,
+                                logprobs=event.get("logprobs"),
                             )
                             if verdict.filtered:
                                 log(
