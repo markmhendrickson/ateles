@@ -155,6 +155,22 @@ else
   echo "  - Skipping decision state (no origin/main to read the register from)"
 fi
 
+# Skill inventory: docs/foundation/skill_inventory.md is stage 0 of the skill
+# migration (migration.md stage 11 migrates skills BY CLASS, so an
+# uninventoried skill is never classified and never migrated). Generated, never
+# authored; --check holds it equal to the measured system.
+#
+# OPT-IN, not default. Unlike the rule inventory this needs no credential --
+# the Neotoma read is a committed snapshot -- but it walks every checkout under
+# ~/repos and ~/agent-work, which is ~60s on this machine and depends on
+# filesystem state no CI runner shares. Running it by default would make an
+# unrelated PR fail because a worktree appeared or vanished, which is a gate
+# that trains people to ignore it. Set ATELES_CHECK_SKILL_INVENTORY=1 to run.
+if [ "${ATELES_CHECK_SKILL_INVENTORY:-0}" = "1" ]; then
+  echo "  - Checking skill inventory is in sync with the measured system..."
+  python3 execution/scripts/render_skill_inventory.py --check || ERRORS=$((ERRORS + 1))
+fi
+
 # tool_allowlist grant grammar (ateles#255 — bash: prefix is silently dropped
 # by the CLI's --allowedTools parser; only Bash(<command>:*) is honored).
 # Requires live Neotoma; skipped (not failed) when NEOTOMA_BASE_URL is unset
