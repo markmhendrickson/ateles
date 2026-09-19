@@ -123,6 +123,24 @@ Env overrides:
 - `record_meeting:status`
   - Reports whether recorder is currently running.
 
+## Transcript filenames (no personal names)
+
+The script's own outputs derive their stem from the audio filename and are already
+de-identified. This rule governs any transcript or analysis file **you** place by hand —
+copying a transcript out of a scratchpad into a durable directory, for example.
+
+Name it `YYYYMMDD-HHMM-<engagement-slug>[-NN]`, where `<engagement-slug>` is the
+engagement, project, or workstream (a repo name, a client/brand name, a matter slug) and
+**never a participant's personal name**. Do not substitute initials or a shortened form of
+a name — that shortens the leak rather than removing it.
+
+Filenames are locators: they get pasted into digests, issues, plans, and commit messages,
+most of which reach a public surface. `review-sessions` forbids private-individual names in
+any `session_digest` field including `evidence_pointers`, so a name in the path forces a
+citing author to choose between leaking it and writing a locator that does not resolve.
+Participant identity belongs in the `transcription` / `meeting_analysis` / `contact`
+entities instead. Full rule: [`analyze-meeting`](../analyze-meeting/SKILL.md#transcript-and-analysis-filenames).
+
 ## Device setup (macOS)
 
 1. **System audio:** Install [BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole) (e.g. `brew install blackhole-2ch`), **reboot**, then in **Audio MIDI Setup** create a **Multi-Output Device** that includes your speakers/headphones **and** BlackHole so meeting apps play into BlackHole.
