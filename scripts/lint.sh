@@ -155,6 +155,24 @@ else
   echo "  - Skipping decision state (no origin/main to read the register from)"
 fi
 
+# Rule inventory: docs/foundation/rule_inventory.md is stage 0 of the rule
+# migration — every place a rule is stated, clustered by kind. Regenerate with
+# the same script and no flag.
+#
+# It measures the RUNNING MACHINE (harness rule files at ~, the entity stores on
+# Neotoma prod), not just the repository, so a checkout on another host will
+# legitimately differ and a bare `--check` there would report drift that is not
+# drift. It therefore runs only where the reader can reach the record, and is
+# SKIPPED otherwise — the same honest-unknown posture as the decision-state row
+# above, and for the same reason: a row that fails on an instrument it could not
+# run teaches the reader to ignore it.
+if [ -n "${NEOTOMA_BEARER_TOKEN:-}" ]; then
+  echo "  - Checking rule inventory is in sync with the measured system..."
+  python3 execution/scripts/render_rule_inventory.py --check || ERRORS=$((ERRORS + 1))
+else
+  echo "  - Skipping rule inventory (no NEOTOMA_BEARER_TOKEN to read the stores)"
+fi
+
 # tool_allowlist grant grammar (ateles#255 — bash: prefix is silently dropped
 # by the CLI's --allowedTools parser; only Bash(<command>:*) is honored).
 # Requires live Neotoma; skipped (not failed) when NEOTOMA_BASE_URL is unset

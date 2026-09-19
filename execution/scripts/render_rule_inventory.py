@@ -1,0 +1,1742 @@
+#!/usr/bin/env python3
+"""Stage 0 of the rule migration: the machine-generated rule inventory.
+
+`docs/foundation/migration.md` defines "stage 0, inventory" as a real migration
+stage, and it has been run twice before -- a record inventory (`status.md`
+revision 28), a skill inventory (revision 32). This is the third: every place a
+rule is STATED across the system, extracted per rule rather than per file,
+clustered by KIND rather than by value, and written to
+`docs/foundation/rule_inventory.md`.
+
+Why a script and not a table someone typed
+------------------------------------------
+The prose version of this inventory (ateles#1114's comment thread) was wrong
+twice, both times caught only by re-measuring: Cursor was reported as 5 files
+when it holds 31, and "five lenses citing three foundation files" was five
+lenses citing five different files. A hand-count cannot be diffed and cannot
+detect its own drift. This can: re-run it and `--check` fails if the committed
+output no longer matches the measured system.
+
+The four properties the inventory has to have
+---------------------------------------------
+1. MACHINE-GENERATED. Re-runnable, so drift is detectable rather than asserted.
+
+2. PER-RULE, NOT PER-FILE. `~/.codex/AGENTS.md` is 26KB of many rules; a file
+   count says nothing. Statements are extracted individually.
+
+3. FIELD-NAME AGNOSTIC for entities. `standing_rule` text lives in
+   `instruction` (30 rows), `content` (13), `rule` (10), `summary` (6), and
+   `rule_text` (5); 4 rows carry none and 12 carry more than one. `agent_policy`
+   uses a different set again (`description`, `rule`, `body`, `summary`). A
+   reader checking one field name drops rows SILENTLY and reports a clean run --
+   the undeclared-field failure `CLAUDE.md` already names, on the read side. So
+   every known spelling is read, `raw_fragments` included, and rows with no text
+   at all are reported rather than skipped.
+
+4. DEDUPLICATED BY KIND, NOT BY VALUE. This is the governing constraint from
+   `migration.md`: "standing rules go to `task_policy` by kind, never by value."
+   Never-stash stated in five harnesses is ONE rule with five statements, not
+   five rules. Clustering is by kind signature, and the cluster reports every
+   location plus whether the statements AGREE or DIVERGE.
+
+   A kind is decided by the MERGE TEST: two statements are the same rule only
+   if a session cannot satisfy one while violating the other. The first
+   revision clustered by TOPIC instead, which merged distinct rules -- the
+   harness-questions-tool rule vanished into a status-update cluster and the
+   absence was caught by the operator, not by the instrument. So every cluster
+   now reports its distinct-statement count and one that is a topical bucket
+   is emitted as NEEDS-SPLIT rather than counted as a rule. The test binds in
+   both directions: over-splitting inflates the rule count and understates the
+   duplication the migration exists to collapse, and is equally wrong.
+
+PII posture -- read this before changing the emitter
+----------------------------------------------------
+Both repos are PUBLIC and at least five rule entities carry operator specifics
+(a live BTC address, a payee first name, a vendor, an instructor, a gym, EUR
+amounts). The inventory therefore records a rule's LOCATION and KIND and NEVER
+its operator-specific VALUE. `screen_for_pii()` runs over every string before it
+is emitted and replaces a statement that trips it with "operator-specific, value
+withheld"; `--check` re-runs the screen so a value that lands later still fails
+the gate. A PII-shaped literal in a committed inventory is the exact failure
+this workstream already had to rewrite git history to undo (ateles#1099).
+
+Reachability is measured, not assumed
+-------------------------------------
+ateles#1118: `agent_loader.py` filters every `agent_policy` on `agent_sub`,
+which is empty in all 25 rows, so every agent loads zero policies. A store can
+be fully populated and deliver nothing. Each store therefore carries a
+`reachable` verdict distinct from its populated count.
+
+Read-only. Neotoma PROD, never the dev instance. Writes one repo file.
+
+Usage:
+    python3 execution/scripts/render_rule_inventory.py            # write
+    python3 execution/scripts/render_rule_inventory.py --check    # verify
+    python3 execution/scripts/render_rule_inventory.py --json OUT # raw dump
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+OUTPUT = REPO_ROOT / "docs" / "foundation" / "rule_inventory.md"
+
+NEOTOMA_BASE_URL = os.environ.get(
+    "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
+)
+
+# Every field name under which a rule's normative text is known to live, across
+# both entity types. Property 3: a single-field reader drops rows silently.
+TEXT_FIELDS = (
+    "instruction",
+    "content",
+    "rule",
+    "summary",
+    "rule_text",
+    "rule_body",
+    "description",
+    "body",
+    "policy_text",
+    "policy",
+    "guidance",
+    "text",
+    "details",
+)
+
+# The entity types that hold rules. `task_policy` is the migration's target home
+# for operator preferences and is itself a live rule store, so it is inventoried
+# rather than treated only as a destination.
+RULE_ENTITY_TYPES = ("standing_rule", "agent_policy", "task_policy")
+
+
+# ---------------------------------------------------------------------------
+# PII screen
+# ---------------------------------------------------------------------------
+
+# Patterns for operator-specific VALUES that must never reach a public file.
+# Deliberately over-broad: a false positive costs one withheld statement, a
+# false negative costs a history rewrite.
+PII_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("btc_address", r"\b(?:bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}\b"),
+    ("iban", r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b"),
+    ("eur_amount", r"(?:€\s?\d|(?<![\w.])\d[\d.,]*\s?(?:EUR|euros?)\b)"),
+    ("usd_amount", r"\$\s?\d[\d.,]*"),
+    ("email", r"\b[\w.+-]+@[\w-]+\.[\w.]{2,}\b"),
+    ("phone", r"(?:\+\d{1,3}[\s-]?)?(?:\d[\s-]?){9,}\d"),
+    ("stx_address", r"\bS[PM][0-9A-Z]{30,}\b"),
+)
+
+# Allowed because they name a SYSTEM, not an operator value. An agent's AAuth
+# sub and the swarm domain are role identifiers and appear throughout the
+# public corpus already.
+PII_ALLOW = re.compile(
+    r"@ateles-swarm|@anthropic\.com|noreply@|example\.(?:com|org)|"
+    r"markmhendrickson\.com|@neotoma|user@host",
+    re.I,
+)
+
+# A PATTERN screen catches structured values -- an address, an IBAN, an amount.
+# It does NOT catch a NAME, and names are what the operator-specific rule
+# entities actually carry: a payee's first name, an instructor, a gym, a vendor.
+# Verified directly: all five entities named in the brief as carrying PII pass
+# the pattern screen cleanly, because their PII is a proper noun. So a second
+# screen keys on the DOMAINS where a statement is about the operator's own
+# affairs rather than the swarm's conduct. It is deliberately blunt: in these
+# domains the statement is withheld and only its kind recorded, which is what
+# "record the LOCATION and KIND, never the VALUE" requires.
+PII_DOMAIN = re.compile(
+    r"\b(?:yoga|therapy|therapist|instructor|gym|trainer|massage|physio|"
+    r"payee|landlord|tenant|invoice to|pay(?:ment)?s? to|send (?:btc|money|eur)|"
+    r"wallet|wise|iban|bizum|salary|rent|utility bill|supplement|"
+    r"doctor|clinic|prescription|diagnos|medication|blood|lab result)\b",
+    re.I,
+)
+
+
+def screen_for_pii(text: str) -> tuple[bool, list[str]]:
+    """Return (is_clean, reasons). Applied to every string before emission.
+
+    Two screens, because one is not enough. The pattern screen catches
+    structured values; the domain screen catches statements about the
+    operator's personal affairs, whose PII is typically a proper noun no
+    pattern matches. Over-broad on purpose: a false positive costs one withheld
+    statement, a false negative costs a git-history rewrite (ateles#1099).
+    """
+    if not text:
+        return True, []
+    reasons = []
+    for name, pat in PII_PATTERNS:
+        for m in re.finditer(pat, text):
+            if PII_ALLOW.search(m.group(0)):
+                continue
+            reasons.append(name)
+            break
+    if PII_DOMAIN.search(text):
+        reasons.append("operator_personal_domain")
+    return (not reasons), sorted(set(reasons))
+
+
+WITHHELD = "operator-specific, value withheld"
+
+# Substituted for the text of an entity whose fields trip the screen. It is not
+# empty, because the inventory still has to record that a rule is STATED here --
+# the location and the fact of it are the point; only the value is withheld.
+# Such a statement lands in no kind cluster (it matches no signature), so it is
+# counted and located, and never classified on evidence nobody can see.
+WITHHELD_MARKER = WITHHELD
+
+
+# Volatile identifiers a quoted statement may carry. They are state claims, and
+# `conformance.md#phases-and-implementation-state` keeps those out of this
+# directory: a commit hash or an issue number belongs to `status.md`, not to a
+# design document. They are also no part of a rule's KIND -- which is what this
+# inventory clusters on -- so redacting them loses nothing it measures and
+# keeps the quotation from smuggling a state claim into the corpus.
+VOLATILE = (
+    (re.compile(r"\b[0-9a-f]{7,40}\b"), "<sha>"),
+    (re.compile(r"(?<![\w/])#\d{2,6}\b"), "<issue>"),
+)
+
+
+def safe_statement(text: str, limit: int = 120) -> str:
+    """One line describing a rule, screened. Never emits an operator value."""
+    clean, _ = screen_for_pii(text)
+    if not clean:
+        return WITHHELD
+    flat = " ".join(text.split())
+    # Redact volatile identifiers BEFORE stripping markdown: the `#` strip would
+    # otherwise take the sigil off an issue number and leave a bare integer the
+    # redaction can no longer recognise.
+    for rx, repl in VOLATILE:
+        flat = rx.sub(repl, flat)
+    flat = re.sub(r"[`*_#\[\]]", "", flat)
+    if len(flat) > limit:
+        flat = flat[: limit - 1].rsplit(" ", 1)[0] + "…"
+    return flat or "(no text)"
+
+
+# ---------------------------------------------------------------------------
+# Records
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Statement:
+    """One place a rule is stated. The unit of measurement."""
+
+    store: str
+    location: str  # file path or entity id
+    locator: str  # line number or field name
+    text: str
+    kind: str = ""  # assigned by classify()
+    last_modified: str = ""
+
+    @property
+    def safe_text(self) -> str:
+        return safe_statement(self.text)
+
+
+@dataclass
+class Store:
+    """One rule store, with its reachability verdict."""
+
+    name: str
+    location: str
+    populated: int = 0
+    statements: int = 0
+    last_modified: str = ""
+    reachable: str = "unknown"
+    reach_note: str = ""
+    note: str = ""
+    read_ok: bool = True
+    read_error: str = ""
+
+
+# Thresholds for the NEEDS-SPLIT probe.
+#
+# At 0.85/8 the probe fires on every cluster the operator's own reading found
+# over-merged. It is deliberately tuned to over-report rather than under-
+# report: a false flag costs one human read of a cluster, a missed one is the
+# failure this probe exists to prevent, and it is invisible.
+#
+# What the probe measures is statement VARIETY, which is a proxy for rule
+# identity and not the thing itself. Two consequences, both observed in the
+# corpus rather than supposed: a cluster can be flagged because it genuinely
+# holds several rules (the questions-tool case), or because a correctly-merged
+# rule has collected statements that merely mention it (the never-stash case,
+# which catches a hook's own test fixture). The probe cannot tell these apart
+# -- it reports the cluster, a human reads it, and the remedy is a split in
+# the first case and a narrower signature in the second.
+#
+# MIN_STATEMENTS_TO_JUDGE exists because the ratio is meaningless in the small
+# tail: two statements worded differently sit at 1.0, which is ordinary.
+SPLIT_RATIO = 0.85
+MIN_STATEMENTS_TO_JUDGE = 8
+
+
+@dataclass
+class Cluster:
+    """One RULE. Possibly stated in many places, possibly divergently."""
+
+    kind: str
+    label: str
+    statements: list[Statement] = field(default_factory=list)
+
+    @property
+    def rule_id(self) -> str:
+        h = hashlib.sha256(self.kind.encode()).hexdigest()[:6]
+        return f"R-{h}"
+
+    @property
+    def stores(self) -> list[str]:
+        return sorted({s.store for s in self.statements})
+
+    @property
+    def distinct_openings(self) -> int:
+        """How many DIFFERENT statements this cluster holds.
+
+        The over-merge probe. A rule restated across stores repeats itself --
+        never-stash is stated in five harnesses in close to the same words --
+        so a genuine cluster has far fewer distinct openings than statements.
+        A cluster whose distinct count approaches its statement count is
+        holding statements that merely share vocabulary: a topical bucket.
+
+        Six words, because that is enough to separate "never invent quotes"
+        from "never invent commitments" while still collapsing the same rule
+        quoted with different leading whitespace or list markers.
+        """
+        return len({" ".join(s.text.lower().split()[:6])
+                    for s in self.statements})
+
+    @property
+    def needs_split(self) -> bool:
+        """True when the cluster is a topical bucket rather than a rule.
+
+        Emitted as NEEDS-SPLIT rather than as a rule, so over-merge is visible
+        in the OUTPUT. The first revision of this inventory merged the
+        harness-questions-tool rule into a status-update cluster, and the
+        absence was caught by the operator noticing a rule he knew existed was
+        missing -- not by the instrument. An inventory whose only over-merge
+        detector is a reader's memory is not measuring its own clustering.
+
+        The threshold is a FLAG, not a verdict, and the document says so. Two
+        checks, because the ratio alone misreads both tails: a 2-statement
+        cluster is at ratio 1.0 whenever the two are worded differently, which
+        is ordinary, and a large cluster can be a genuine bucket at 0.85. So a
+        cluster must be both large enough to judge and near-unique to trip it.
+        """
+        n = len(self.statements)
+        return n >= MIN_STATEMENTS_TO_JUDGE and (
+            self.distinct_openings / n >= SPLIT_RATIO)
+
+    @property
+    def shapes(self) -> set[str]:
+        """The normative shapes present, ignoring statements that mark none.
+
+        An "unmarked" statement mentions the rule without saying how strongly it
+        binds -- narration, a cross-reference, a heading. It is not evidence of
+        disagreement, so it does not make a cluster diverge. Counting it as a
+        shape flagged 28 of 36 clusters, which is a property of the test rather
+        than of the corpus.
+        """
+        return {_normative_shape(s.text) for s in self.statements} - {"unmarked"}
+
+    @property
+    def diverges(self) -> bool:
+        """Property 4: same rule, stated with different binding force.
+
+        The highest-value output. Divergence is judged on whether statements
+        agree about how strongly the rule BINDS, not on wording -- two
+        statements of never-stash phrased differently agree; one saying "never"
+        and one saying "prefer" do not. This is the ateles#1115 shape: two live
+        `agent_policy` rows, same safety rule, one `recommended` and one
+        `mandatory`.
+
+        A prohibition and a bare mandatory are NOT a divergence: "never force
+        push" and "always use --ff-only" bind equally. The disagreement that
+        matters is binding versus advisory.
+        """
+        if len(self.statements) < 2:
+            return False
+        sh = self.shapes
+        binding = {"prohibitive/binding", "mandatory"} & sh
+        advisory = {"advisory"} & sh
+        return bool(binding and advisory)
+
+
+def _normative_shape(text: str) -> str:
+    """Reduce a statement to how strongly it binds."""
+    low = text.lower()
+    if re.search(r"\bnever\b|\bmust not\b|\bdo not\b|\bdon't\b|\bforbidden\b|"
+                 r"\bhard-block|\brefus|\bmandatory\b", low):
+        return "prohibitive/binding"
+    if re.search(r"\balways\b|\bmust\b|\brequired\b|\bshall\b", low):
+        return "mandatory"
+    if re.search(r"\bprefer\b|\bshould\b|\brecommend|\bdefault to\b|"
+                 r"\bwhere possible\b|\badvisory\b|\btry to\b", low):
+        return "advisory"
+    return "unmarked"
+
+
+# ---------------------------------------------------------------------------
+# Rule KINDS -- the deduplication axis
+# ---------------------------------------------------------------------------
+#
+# THE MERGE TEST
+# --------------
+# Two statements are the SAME RULE only if **a session cannot satisfy one while
+# violating the other**. Topical similarity is not sufficient and never has
+# been. If a session can obey one statement and break the other in the same
+# turn, they are two rules however alike they read.
+#
+# `CLAUDE.md` already carries the governing principle, in the rule-parity
+# checker's own terms: "Near-identical leads are reported but never collapsed
+# -- `Dispatch, don't work inline` and `Dispatch, don't drift inline` are two
+# rules." The merge test is that principle made mechanical for this inventory.
+#
+# Worked: "give status updates unprompted" and "pose every open decision
+# through the harness questions tool" are both about surfacing things to the
+# operator. A session that ends its turn with a prose decision list has
+# satisfied the first and violated the second. Two rules. The first revision of
+# this table merged them, and the absence was noticed by the operator rather
+# than by the instrument -- which is why the NEEDS-SPLIT probe below exists.
+#
+# The converse failure is equally wrong. A rule genuinely restated across seven
+# stores is ONE rule with seven statements, not seven rules: never-stash is
+# stated in five harnesses in five wordings and a session cannot obey any one
+# of them while breaking another. Splitting that would inflate the rule count
+# and understate the duplication the migration exists to collapse. The test is
+# satisfy/violate, applied honestly in BOTH directions.
+#
+# A kind is what the rule is ABOUT, not what it says. This is the "by kind,
+# never by value" constraint made mechanical: the signature decides the
+# cluster, and the cluster carries every location plus the agree/diverge
+# verdict.
+#
+# ORDER IS SIGNIFICANT. `classify()` assigns a statement to EVERY kind it
+# matches, so a broad signature sitting beside a narrow one silently absorbs
+# the narrow rule's statements into both. Where two kinds overlap by
+# vocabulary, the narrow one carries a negative lookahead or a distinguishing
+# token rather than relying on position -- position alone is not a mechanism.
+#
+# Deliberately conservative. A statement matching no signature lands in the
+# unclassified pile rather than being forced into a neighbour -- an over-eager
+# merge hides a divergence, which is the one output this inventory exists to
+# produce.
+
+KIND_SIGNATURES: tuple[tuple[str, str, str], ...] = (
+    # (kind key, human label, regex over lowercased text)
+    # The prohibition and the recovery procedure are two rules. A session that
+    # never stashes cannot violate the recovery rule, and a session recovering
+    # another agent's stash has already had the prohibition broken for it. The
+    # recovery signature is listed FIRST and the prohibition excludes it, so
+    # `apply <sha>, never pop` does not also count as a statement of never-stash.
+    ("git_stash_recovery", "Recover a stash by apply-with-SHA, never pop a shared stack",
+     r"stash (?:apply|list|push)|never.{0,10}\bpop\b|apply by sha|"
+     r"stash recovery|drop that entry"),
+    # The prohibition excludes statements that are really about the recovery
+    # PROCEDURE, and the exclusion is applied to the whole statement -- a
+    # lookahead at the match position is not enough, since a statement reading
+    # "`git stash push -u -m` — never bare `git stash`" carries the recovery
+    # verb before the prohibition token.
+    #
+    # It keys on the recovery COMMANDS, never on the bare word "pop". The
+    # canonical statement of this rule is "NEVER `git stash` in any form — the
+    # stash stack is shared across worktrees and other sessions pop it", so a
+    # bare-`pop` exclusion drops the rule's own primary statement in two
+    # harnesses and keeps only its restatements. A rule whose signature
+    # excludes its own canonical wording is worse than an over-merge: the
+    # over-merge is at least visible in a count.
+    ("git_never_stash", "Never use git stash; WIP-commit instead",
+     r"^(?!.*(?:stash (?:apply|list|push)|\bpop\b (?:that|the) (?:entry|stash)|"
+     r"apply by sha|never.{0,5}\bpop\b))"
+     r".*(?:git stash|never stash|\bstash\b.{0,40}(?:forbidden|never|guard))"),
+    # SPLIT from one "worktree" kind that matched the bare word and so swept in
+    # every rule that merely mentions a worktree. Two rules, plus the recovery
+    # rule the never-stash kind was also absorbing. A session can give each
+    # agent its own worktree (satisfying the first) and still commit into a
+    # sibling repo's shared clone (violating the second): they have separate
+    # enforcement -- `one worktree, one agent` is prose, the sibling-repo guard
+    # is a PreToolUse hook.
+    ("worktree_one_per_agent", "One worktree, one agent; never point two at the same tree",
+     r"one worktree.{0,15}one agent|one agent.{0,20}one worktree|"
+     r"two agents.{0,30}same worktree|its own worktree"),
+    ("shared_clone_no_mutation",
+     "Never mutate a sibling repo's shared main clone; add a worktree first",
+     r"shared (?:main )?clone|sibling.?repo|sibling_repo_worktree_guard|"
+     r"git worktree add|main clone"),
+    ("neotoma_prod_only", "Always use the Neotoma prod instance, never dev",
+     r"neotoma prod|prod.{0,20}never.{0,15}dev|mcpsrv_neotoma.{0,30}always"),
+    ("gws_over_gmail_mcp", "Use the gws CLI for Google Workspace, not the MCP",
+     r"\bgws\b.{0,60}(cli|gmail|mcp)|gmail mcp"),
+    ("gmail_send_gate", "Gmail sends and draft-updates need per-message approval",
+     r"drafts update|draft.{0,15}can send|messages send|send gate|never send.{0,25}(mail|email)"),
+    ("public_repo_pii", "Both repos are public; scrub PII before committing",
+     r"public repo|both repos are public|scrub.{0,20}(pii|client|username)|"
+     r"strip pii|no operator data|pii-free"),
+    ("verify_write_landed", "Read a write back; a success code is not a landed write",
+     r"read it back|write that reports success|verify.{0,25}(write|landed)|"
+     r"not treat a 2xx|success.{0,15}is not"),
+    # SPLIT. "Verify the claim against the system of record" and "validate the
+    # instrument before believing what it returned" are separately stated in
+    # both `CLAUDE.md` and `neotoma/AGENTS.md`, and are separately violable: a
+    # session that queries the live system of record and believes a false zero
+    # has satisfied the first and violated the second. That is the shape of the
+    # three independent false zeros `CLAUDE.md` records on one day.
+    ("verify_before_asserting", "Verify against the live system of record before asserting",
+     r"verify before assert|check the live system|"
+     r"verified only when you just checked|before asserting"),
+    ("validate_the_instrument",
+     "Validate the instrument before believing a measurement; a surprising zero is the tool",
+     r"validate the instrument|surprising (?:number|zero)|"
+     r"claim about (?:your tooling|the query)|false zero|"
+     r"prove the instrument"),
+    ("fail_closed", "Absent or malformed safety values take the restrictive branch",
+     r"fail clos|fail-clos|restrictive branch|fail open|fail-open"),
+    # SPLIT because `CLAUDE.md` names these as two rules by its own parity
+    # rule: "`Dispatch, don't work inline` and `Dispatch, don't drift inline`
+    # are two rules." The first is about where work is FILED at the moment it
+    # is recommended; the second is about a session that files correctly and
+    # then does the work anyway, one small step at a time. A session violates
+    # the second precisely by satisfying the first and then not stopping.
+    ("dispatch_not_inline", "Dispatch work to the owning agent; file it as you recommend it",
+     r"dispatch, don't work|dispatch.{0,25}not inline|inline execution|"
+     r"owning agent|orchestrat.{0,20}not.{0,15}workhorse|delegate"),
+    ("dispatch_no_drift", "Do not drift into an agent's work one step at a time",
+     r"dispatch, don't drift|drift inline|"
+     r"one small step at a time|agent's whole job itself"),
+    ("durable_work_not_task_chip",
+     "Durable work goes to a dispatched agent, never a harness task chip",
+     r"task chip|spawn_task|never.{0,20}chip|chip is not an entity|"
+     r"unclaimable and invisible"),
+    ("no_merge_over_objection", "Do not merge while a live blocking review stands",
+     r"blocking review|do not merge|merge.{0,20}gated|required approval"),
+    ("no_verify_bypass", "Never bypass the pre-commit hook with --no-verify",
+     r"--no-verify|no-verify|skip_tests"),
+    # SPLIT from one "irreversible actions need approval" kind. Three rules
+    # that pull against each other and so must be counted separately -- the
+    # whole point of the consent boundary is WHERE it falls, and a single
+    # cluster made the boundary invisible. A session can correctly proceed
+    # without asking on a reversible action (satisfying the second) while
+    # sending mail without approval (violating the first); the third bounds
+    # which actions never pass to an agent at all.
+    ("consent_gate_external",
+     "Irreversible or outward-facing actions need per-action operator approval",
+     r"consent gate|operator approval|irreversible|outward-facing|"
+     r"never.{0,20}without.{0,20}approval|confirm with"),
+    ("operator_only_actions",
+     "Some actions stay the operator's absolutely; hand them back with the command",
+     r"operator[- ]only|stay(?:s)? mark's|remain the operator's|"
+     r"credential rotation|hand back.{0,25}operator|exact command"),
+    ("blast_radius_classification",
+     "Classify an action's blast radius before acting on it",
+     r"blast[- ]radius|low_blast|high_blast|"
+     r"(?:low|high)-risk operations|autonomy calibration"),
+    ("secrets_never_hardcoded", "Never hardcode secrets or credentials",
+     r"hardcode.{0,20}(secret|credential|token|iban)|never commit.{0,20}secret|"
+     r"secrets? (management|from env)"),
+    ("config_from_entity", "Operator-specific config comes from entities, not code",
+     r"config-source|hardcoded config|operator-specific config|"
+     r"context entit|from env|portable|fork test"),
+    # SPLIT from one "durable memory in Neotoma" kind. Storing an artifact in
+    # Neotoma, storing it PROACTIVELY rather than when asked, and storing the
+    # full body rather than a path or a summary are three rules a session can
+    # satisfy and violate independently: a session that stores a `task` with a
+    # file path in it has stored to Neotoma and still lost the content.
+    ("store_in_neotoma", "Durable memory belongs in Neotoma, not harness files",
+     r"neotoma first|durable memory|store.{0,25}neotoma|"
+     r"memory file|not.{0,15}markdown file"),
+    ("store_proactively", "Store artifacts as the work happens, not at session end",
+     r"proactive(?:ly)? stor|store.{0,20}proactiv|"
+     r"do not wait until end of session|same turn as the work|"
+     r"store artifacts as"),
+    ("store_body_not_pointer",
+     "Store the full body, not a path or a summary standing in for it",
+     r"a path field is not storage|full markdown in|"
+     r"body.{0,25}full (?:prose )?narrative|populate the.{0,15}body|"
+     r"summary entity is not a source"),
+    ("persist_every_turn", "Persist every conversation turn to Neotoma",
+     r"turn-by-turn|every turn|conversation_message|per-turn"),
+    ("plan_merge_before_correct", "Re-read and merge a plan field before correcting it",
+     r"re-read.{0,25}merge|correct.{0,20}replaces|merge.{0,20}before writing|"
+     r"stale in-memory"),
+    ("no_done_without_artifact", "Never mark work done citing an unverifiable artifact",
+     r"never mark.{0,25}done|unverifiable completion|verify the artifact exists"),
+    ("agent_prompts_public", "Agent prompts are public and carry no operator data",
+     r"prompts are (always )?public|pii-free|prompt.{0,30}no operator|"
+     r"public.{0,20}prompt"),
+    ("renamed_agent_no_refs", "A renamed agent leaves no stale reference",
+     r"renamed agent|retired name|stale reference|rename.{0,25}same change"),
+    ("daemon_checkout_fresh", "Daemons run dedicated checkouts that must be fresh",
+     r"rc-src|deployment checkout|checkout drift|ff-only|daemon.{0,25}checkout"),
+    ("restart_daemons", "Restart affected daemons after a merge, then verify",
+     r"restart.{0,20}daemon|launchctl|redeploy"),
+    ("test_must_fail_red", "A test that cannot fail on its subject is decoration",
+     r"cannot fail|goes red|revert the fix|ratifies the bug|decoration"),
+    ("reuse_prior_art", "Extend the mechanism that exists; do not build a parallel one",
+     r"prior art|already exists|parallel (mechanism|one)|reuse the existing"),
+    ("summarize_operator_input", "Echo the operator's input, cleaned up, each reply",
+     r"summarize what the operator|transcrib|cleaned up|relay.{0,20}speech"),
+    # SPLIT from a single "status updates and open decisions" kind. Three
+    # rules, not one: a turn can carry a status update and no decision list, a
+    # decision list posed as prose rather than through the questions tool, or a
+    # decision list that names a carried decision without restating it. Each is
+    # separately violable, and the questions-tool rule -- a live standing_rule
+    # entity -- was invisible while the three shared a bucket.
+    ("status_update_unprompted", "Give status updates unprompted, per workstream",
+     r"status update|give status|updates? unprompted|"
+     r"what moved.{0,30}what is blocked"),
+    ("decisions_end_every_turn", "End every turn with the decisions that need the operator",
+     r"end every turn|decisions that need|carry every open decision|"
+     r"re-?raise.{0,25}by name|repeat(?:ing)? (?:them|pending) (?:each|every) turn"),
+    ("decisions_via_questions_tool",
+     "Pose open decisions through the harness questions tool, not inline prose",
+     r"askuserquestion|questions tool|harness question|"
+     r"pose.{0,30}decision.{0,30}(tool|call)|labeled options"),
+    ("proceed_with_recommendation", "Act on your recommendation; ask only at a real fork",
+     r"proceed with your recommendation|don't ask|auto-proceed|"
+     r"genuine fork|take it and report"),
+    ("pr_body_from_file", "Pass PR and comment bodies by file, never inline",
+     r"body-file|--body-file|body from a file"),
+    ("verify_gh_identity", "Verify the GitHub identity before any write",
+     r"gh api user|verify.{0,20}(gh|github).{0,20}(account|identity)|"
+     r"unset GH_TOKEN"),
+    ("recurring_never_done", "Recurring obligations roll their date; never complete",
+     r"never.{0,20}mark.{0,25}complet|roll.{0,20}due_date|recurring obligation"),
+    # SPLIT from one "never invent facts, quotes, emotion, or reactions" kind.
+    # The memory corpus states these separately and they are separately
+    # violable: a draft can be scrupulous about quotes and still assert what
+    # the operator felt; a report can invent no emotion and still fabricate a
+    # finding. Each has its own correction history. The single kind held 45
+    # statements at 44 distinct openings -- a topical bucket, not a rule.
+    ("no_invented_facts", "Never invent facts about the operator's life, tools, or past",
+     r"never invent or assume facts|no invented facts|invent.{0,30}\bfacts\b|"
+     r"never invent.{0,25}(amounts?|fields?|credential|hostname|next step)"),
+    ("no_invented_quotes", "Never invent a quote; every quote traces to its source",
+     r"never invent quotes?|no invented quotes?|verify every quote|"
+     r"invent.{0,20}quotes?|verbatim quote.{0,40}never"),
+    ("no_fabricated_operator_state",
+     "Never assert what the operator feels, thinks, or said without evidence",
+     r"fabricate operator emotion|operator (?:emotion|internal state)|"
+     r"never assert what the operator|unverified.{0,20}speech|"
+     r"fabricated.{0,20}(emotion|admission)|never said he"),
+    ("no_invented_findings",
+     "Never fabricate a finding or a conclusion to appear useful",
+     r"no invented findings|fabricate a finding|invent.{0,20}findings?|"
+     r"speculation is labeled|confident fabrication"),
+    ("no_invented_praise",
+     "Never invent praise or a judgement of someone else's work",
+     r"invented praise|unverifiable superlative|claimed judgments|"
+     r"praise of their work|masterclass in"),
+    ("no_predicted_third_party_reaction",
+     "Never predict or assert a third party's reaction",
+     r"third.?part(?:y|ies)'? reaction|predict a third|"
+     r"never predict.{0,25}reaction|put words in a participant"),
+    ("pii_minimization", "Minimize personal data at capture; purpose-bind it",
+     r"rgpd|gdpr|minimi[sz]e at capture|legitimate interest|art\. ?9|"
+     r"personal data"),
+    ("no_untested_remediation", "Never assert a remediation you have not tested",
+     r"untested remediation|never assert.{0,25}not tested|reproduce before"),
+    ("squash_merge", "Merge by squash",
+     r"squash"),
+    ("conventional_commits", "Commit and PR titles follow the live title convention",
+     r"conventional commit|commit message format|pr title"),
+    ("test_colocation", "Tests follow this repo's naming and placement convention",
+     r"test_\*\.py|\.test\.ts|test file.{0,25}(naming|placement|colocat)"),
+)
+
+_COMPILED_KINDS = [(k, lbl, re.compile(rx, re.I | re.S))
+                   for k, lbl, rx in KIND_SIGNATURES]
+
+KIND_LABELS = {k: lbl for k, lbl, _ in KIND_SIGNATURES}
+
+
+def classify(text: str) -> list[str]:
+    """Return every kind a statement matches. A statement may state two rules."""
+    hits = [k for k, _lbl, rx in _COMPILED_KINDS if rx.search(text)]
+    return hits
+
+
+# ---------------------------------------------------------------------------
+# Target home, per the conformance authority table
+# ---------------------------------------------------------------------------
+#
+# `docs/foundation/conformance.md`, "Direction of truth per class of record":
+#   Agent behavioural rule      -> agent_policy entities
+#   Operator preferences        -> task_policy entities
+#   Session standing instruction-> CLAUDE.md
+#   Design invariants           -> docs/foundation/, PR-reviewed
+#
+# A kind whose home cannot be derived from the table is reported UNCLASSIFIED
+# rather than guessed -- the authority table is the authority, and inventing a
+# home here would be exactly the kind of quiet re-decision the migration exists
+# to prevent.
+
+TARGET_HOME: dict[str, str] = {
+    "git_never_stash": "agent_policy",
+    "worktree_isolation": "agent_policy",
+    "neotoma_prod_only": "agent_policy",
+    "gws_over_gmail_mcp": "agent_policy",
+    "gmail_send_gate": "agent_policy",
+    "public_repo_pii": "agent_policy",
+    "verify_write_landed": "agent_policy",
+    "verify_before_asserting": "agent_policy",
+    "fail_closed": "docs/foundation/",
+    "dispatch_not_inline": "agent_policy",
+    "no_merge_over_objection": "docs/foundation/",
+    "no_verify_bypass": "agent_policy",
+    "consent_gate_external": "docs/foundation/",
+    "secrets_never_hardcoded": "agent_policy",
+    "config_from_entity": "agent_policy",
+    "store_in_neotoma": "agent_policy",
+    "persist_every_turn": "agent_policy",
+    "plan_merge_before_correct": "agent_policy",
+    "no_done_without_artifact": "agent_policy",
+    "agent_prompts_public": "agent_policy",
+    "renamed_agent_no_refs": "agent_policy",
+    "daemon_checkout_fresh": "agent_policy",
+    "restart_daemons": "CLAUDE.md",
+    "test_must_fail_red": "agent_policy",
+    "reuse_prior_art": "agent_policy",
+    "summarize_operator_input": "task_policy",
+    "status_update_unprompted": "task_policy",
+    "proceed_with_recommendation": "task_policy",
+    "pr_body_from_file": "agent_policy",
+    "verify_gh_identity": "agent_policy",
+    "recurring_never_done": "task_policy",
+    "no_invented_content": "task_policy",
+    "pii_minimization": "docs/foundation/",
+    "no_untested_remediation": "agent_policy",
+    "squash_merge": "agent_policy",
+    "conventional_commits": "agent_policy",
+    "test_colocation": "agent_policy",
+    "git_stash_recovery": "agent_policy",
+    "worktree_one_per_agent": "agent_policy",
+    "shared_clone_no_mutation": "agent_policy",
+    "decisions_end_every_turn": "task_policy",
+    "decisions_via_questions_tool": "task_policy",
+    "no_invented_facts": "task_policy",
+    "no_invented_quotes": "task_policy",
+    "no_fabricated_operator_state": "task_policy",
+    "no_invented_findings": "task_policy",
+    "no_invented_praise": "task_policy",
+    "no_predicted_third_party_reaction": "task_policy",
+    "store_proactively": "agent_policy",
+    "store_body_not_pointer": "agent_policy",
+    "operator_only_actions": "docs/foundation/",
+    "blast_radius_classification": "docs/foundation/",
+    "dispatch_no_drift": "agent_policy",
+    "durable_work_not_task_chip": "agent_policy",
+    "validate_the_instrument": "agent_policy",
+}
+
+
+# ---------------------------------------------------------------------------
+# PROPOSED: rules mined from session transcripts, NOT measured inventory
+# ---------------------------------------------------------------------------
+#
+# Everything in this section is a PROPOSAL awaiting an operator ruling, and it
+# is deliberately a static block rather than generated output. The rest of this
+# file is measured: re-run it and the numbers move with the system. These are
+# not. Generating them from a corpus scan would dress a judgement as a
+# measurement, and the counts above must never absorb them.
+#
+# Source: genuine operator messages in ~/.claude/projects/*/*.jsonl over the
+# 21 days to 2026-09-19 -- 3,068 transcripts, 10,171 user-role messages, of
+# which 4,806 survive filtering for tool_result payloads, <system-reminder>,
+# <command-*> blocks, task notifications and agent dispatch prompts, and 338
+# are correction-shaped. Candidates were then checked against every store
+# before being proposed: the eight file stores and the three entity types.
+#
+# PII: the transcripts carry the operator's personal life in quantity. Each
+# rule below is stated generically and no incident's specifics are reproduced.
+# Candidates that could not be generalized without naming a person, vendor,
+# client, health fact or amount were DROPPED rather than sanitized -- one
+# genuine rule about how personal-fitness records are structured is omitted
+# entirely for this reason, and the omission is recorded here rather than
+# hidden.
+
+PROPOSED_SECTION = """## PROPOSED: rules with no home in any store
+
+**Nothing in this section is counted anywhere above.** The inventory measures what is WRITTEN DOWN. An operator correction given in conversation and never persisted is invisible to it, however many times it was given. This section is the result of reading recent session transcripts for corrections that state a durable rule and then checking each against every store.
+
+It is **not measured inventory**, it is a proposal, and it must not be merged into the counts without an operator ruling. Each entry is marked `PROPOSED`.
+
+**Method and its limits.** 3,068 transcripts from the 21 days to 2026-09-19; 10,171 user-role messages, 4,806 after filtering out tool results, system-reminders, command blocks, task notifications and agent dispatch prompts; 338 correction-shaped. Each candidate was then searched for across all eight file stores and all three entity types, and **most candidates were rejected at that step because the rule was already captured** — the harness questions tool, elaborating a re-posed decision, HTML email formatting, fixing the swarm rather than routing around it, and linking entities by id are all already stated somewhere. Two of the four examples this work was calibrated against turned out to be present too. Recall is NOT claimed: a correction phrased without an imperative marker is invisible to the filter.
+
+**PII.** Session transcripts carry the operator's personal life in quantity. Every rule below is stated generically and no incident's specifics appear. Candidates that could not be generalized without naming a person, vendor, client, health fact or amount were dropped rather than sanitized; one genuine rule about how personal records are structured was dropped for exactly this reason.
+
+### A. Rules stated in conversation and persisted nowhere
+
+| # | PROPOSED rule | Verified absent from | Scope |
+|---|---|---|---|
+| P1 | A retraction posted as a COMMENT does not clear an APPROVED review; the approval stands until it is formally dismissed | 8 file stores, 3 entity types | PR review and merge gating |
+| P2 | A prose-matching guard fires on text that names its own rule, so a document describing a rule trips the gate that enforces it | 8 file stores, 3 entity types | Hook and linter authoring |
+| P3 | Durable work goes to a dispatched agent, never a harness task chip — a chip is not an entity, so it is unclaimable and invisible to the swarm | 8 file stores, 3 entity types | All work dispatch |
+| P4 | Monitoring does not end at merge: carry a change through release and deployment until it is confirmed live on every instance that needs it | 8 file stores, 3 entity types | Release and deploy |
+| P5 | Assign the operator as a reviewer on any PR that is gated on their approval, rather than only naming it in a report | 8 file stores, 3 entity types | PR shepherding |
+| P6 | Stage a reply at the END of its thread, having first checked the external system for the thread's latest message | 8 file stores, 3 entity types | Correspondence |
+| P7 | On resuming an interrupted watcher, import everything that arrived during the gap — not only what arrives afterward | 8 file stores, 3 entity types | Import and monitoring pipelines |
+| P8 | Check durable storage for an already-imported source before importing it again | 8 file stores, 3 entity types | Import pipelines |
+| P9 | Produce an internal recap for the operator covering the work done, distinct from any outward-facing recap | 8 file stores, 3 entity types | Meeting and session processing |
+| P10 | Avoid a named stylistic tell in generated prose because it reads as machine-written | 8 file stores, 3 entity types | All generated writing |
+
+`P3` is the clearest case of the gap this section exists to show: it is stated in `CLAUDE.md` as part of the dispatch rule's prose, but as a rule in its own right — the thing a session actually violates — it is nowhere, and the inventory's own `R-ae9bca` cluster is flagged NEEDS-SPLIT partly because of it.
+
+### B. Proposed generalizations of rules stated too narrowly
+
+A rule stated as the fix to one incident binds only that incident. Each row below proposes the principle the narrow rule instances. **Generalizing raises reach and risks losing the actionable specific, so the trade-off is stated per row and the narrow rule is never deleted — the proposal is to state the principle ALONGSIDE it.** This is not applied silently: each needs a ruling.
+
+| # | Narrow rule as stated | Proposed generalization | Trade-off |
+|---|---|---|---|
+| G1 | `R-b5f10c` Pass PR and comment bodies by file, never inline (one statement, one store) | Never interpolate untrusted or code-bearing text into a shell command; write it to a file and pass the path | **Gain:** covers every sink, not just `gh` — the recorded incident had a backtick substitution actually EXECUTE a script, which is a shell-injection class, not a formatting quirk. **Loss:** `--body-file` is a concrete flag a reader can act on; "avoid interpolation" is not. Keep both, or the rule stops being actionable. |
+| G2 | Restart the specific daemons a change touches, then verify from the running process | Any deployment step is unverified until read back from the thing that now runs — process, endpoint, or record | **Gain:** unifies this with the read-back-a-write rule, which is the same principle at a different layer. **Loss:** the daemon rule names `launchctl`, the checkout, and a new pid; the general form names none of them, and the specific sequence is what makes it followable. |
+| G3 | Gmail sends and draft-updates need per-message approval | Any action whose effect leaves the system and cannot be recalled needs per-action approval, and an approval never carries forward to a later action | **Gain:** the Gmail gate's real lesson is that `drafts update` was not recognized AS a send; a general form catches the next unrecognized sink. **Loss:** the Gmail rule is enforced by a hook with a 51-case test suite. A general principle cannot be enforced that way, so generalizing must ADD to the specific rule, never replace it. |
+
+### C. What this section does not claim
+
+- **Not a measurement.** No count above includes these. They are proposals.
+- **Not exhaustive.** The filter keys on imperative markers, so a rule stated without one is invisible. Recall is unknown and not claimed.
+- **Not ruled.** Several may be deliberate non-rules, one-offs the operator would not want bound, or already covered by a rule phrased differently enough that the search missed it. The ruling is the operator's.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Readers
+# ---------------------------------------------------------------------------
+
+
+def _portable(path: str) -> str:
+    """Strip this checkout's location from an emitted path.
+
+    A worktree name is a session artifact and a weak identifier; committing one
+    makes the inventory unreproducible from another checkout and leaks the
+    session's own naming. The repo root is stripped BEFORE `~`, because the
+    worktree lives under the home directory and the other order leaves the
+    worktree name in place.
+    """
+    p = str(path)
+    root = str(REPO_ROOT)
+    if p.startswith(root + "/"):
+        return p[len(root) + 1:]
+    return p.replace(str(Path.home()), "~")
+
+
+def _mtime(p: Path) -> str:
+    try:
+        return date.fromtimestamp(p.stat().st_mtime).isoformat()
+    except OSError:
+        return ""
+
+
+def _git_last_commit(repo: Path) -> str:
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "log", "-1", "--format=%cs"],
+            capture_output=True, text=True, timeout=15,
+        )
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def neotoma_query(entity_type: str, limit: int = 200) -> dict:
+    """POST /entities/query -- the canonical list route.
+
+    /retrieve_entities is the MCP TOOL name, not a REST path, and 404s on the
+    hosted instance (`check_neotoma_rest_paths.py` exists for this mistake).
+    """
+    token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
+    if not token:
+        raise RuntimeError("NEOTOMA_BEARER_TOKEN unset")
+    req = urllib.request.Request(
+        f"{NEOTOMA_BASE_URL}/entities/query",
+        data=json.dumps({
+            "entity_type": entity_type,
+            "limit": limit,
+            "include_snapshots": True,
+        }).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+            # Cloudflare 1010-blocks urllib's default UA on the hosted instance.
+            "User-Agent": "ateles-rule-inventory/1.0",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.loads(resp.read())
+
+
+def read_entities(cache: Path | None = None) -> tuple[list[Statement], list[Store]]:
+    """Read the three rule entity types, field-name agnostically."""
+    statements: list[Statement] = []
+    stores: list[Store] = []
+
+    for etype in RULE_ENTITY_TYPES:
+        store = Store(name=f"{etype} entities", location="Neotoma PROD")
+        payload = None
+        cache_file = cache / f"{etype}.json" if cache else None
+
+        if cache_file and cache_file.exists():
+            payload = json.loads(cache_file.read_text())
+        else:
+            try:
+                payload = neotoma_query(etype)
+                if cache_file:
+                    cache_file.parent.mkdir(parents=True, exist_ok=True)
+                    cache_file.write_text(json.dumps(payload))
+            except Exception as exc:  # noqa: BLE001
+                store.read_ok = False
+                store.read_error = f"{type(exc).__name__}: {exc}"
+                stores.append(store)
+                continue
+
+        ents = payload.get("entities", [])
+        store.populated = len(ents)
+        notext = 0
+        latest = ""
+
+        for e in ents:
+            eid = e.get("entity_id", "?")
+            outer = e.get("snapshot") or {}
+            snap = outer.get("snapshot", outer) if isinstance(outer, dict) else {}
+            # The undeclared-field trap: /store accepts undeclared fields and
+            # routes them to raw_fragments, where rule text also lands.
+            frags = e.get("raw_fragments") or {}
+
+            # PII is screened PER ENTITY, not per field. An entity whose rule is
+            # about the operator's own affairs carries the payee's name in some
+            # fields and not others -- screening each field independently
+            # emitted the clean ones and leaked the subject. If ANY field of an
+            # entity trips the screen, EVERY field of it is withheld, including
+            # its `canonical_name`, which is never emitted in any case because
+            # it carries payee names directly.
+            allfields = [v for v in list(snap.values()) + list(frags.values())
+                         if isinstance(v, str)]
+            allfields.append(str(e.get("canonical_name", "")))
+            entity_clean, _ = screen_for_pii(" \n".join(allfields))
+
+            seen = False
+            for fname in TEXT_FIELDS:
+                for src, srclabel in ((snap, fname), (frags, f"raw_fragments.{fname}")):
+                    val = src.get(fname) if isinstance(src, dict) else None
+                    if isinstance(val, str) and val.strip():
+                        statements.append(Statement(
+                            store=store.name, location=eid, locator=srclabel,
+                            text=val if entity_clean else WITHHELD_MARKER,
+                            last_modified=(e.get("last_observation_at") or "")[:10],
+                        ))
+                        seen = True
+            if not seen:
+                notext += 1
+            obs = (e.get("last_observation_at") or "")[:10]
+            latest = max(latest, obs)
+
+        store.statements = sum(1 for s in statements if s.store == store.name)
+        store.last_modified = latest
+        if notext:
+            store.note = f"{notext} row(s) carry no rule text under any known field name"
+        stores.append(store)
+
+    # Reachability -- ateles#1118. Populated is not delivered.
+    loader = REPO_ROOT / "lib" / "daemon_runtime" / "agent_loader.py"
+    for st in stores:
+        if st.name.startswith("agent_policy"):
+            filt = False
+            if loader.exists():
+                filt = 'snap.get("agent_sub")' in loader.read_text()
+            st.reachable = "no" if filt else "unknown"
+            st.reach_note = (
+                "agent_loader filters on agent_sub, empty in every row "
+                "(ateles#1118) — every agent loads zero policies"
+                if filt else "loader filter not found; re-verify"
+            )
+        elif st.name.startswith("standing_rule"):
+            st.reachable = "sidecar only"
+            st.reach_note = (
+                "delivered to serverInfo._neotoma.standing_rules, a field "
+                "agents do not read (ateles#1114)"
+            )
+        elif st.name.startswith("task_policy"):
+            st.reachable = "on retrieval"
+            st.reach_note = "read only when a skill or session retrieves it explicitly"
+
+    return statements, stores
+
+
+# --- markdown / prose stores -------------------------------------------------
+
+BULLET_RULE = re.compile(r"^\s*[-*]\s+\*\*(?P<lead>[^*]+)\*\*\s*(?P<rest>.*)$")
+
+# A rule statement is NORMATIVE and DIRECTED: it tells a reader to do or not do
+# something. Deliberately narrower than "contains the word must" -- an early
+# revision matched any line carrying an imperative and returned 26,516
+# statements, a 736x duplication factor that was an artifact of the instrument
+# and not a fact about the system. Validate the instrument before believing the
+# measurement: a surprising number is usually the tool.
+IMPERATIVE = re.compile(
+    r"(?:^|[\s(—,;:])(?:"
+    r"never\s+\w|always\s+\w|must\s+(?:not\s+)?\w|do\s+not\s+\w|don't\s+\w|"
+    r"avoid\s+\w|refuse\s+\w|require[sd]?\s+\w|forbidden|prohibited|"
+    r"prefer\s+\w|should\s+(?:not\s+)?\w|only\s+ever\s|use\s+\w+\s+(?:not|rather)|"
+    r"NEVER|ALWAYS|MUST"
+    r")", re.I,
+)
+
+# Lines that carry an imperative but are not a rule being STATED here:
+# narration about rules, citations, code, and changelog prose.
+NOT_A_RULE = re.compile(
+    r"^\s*(?:\||>|```|#{1,6}\s|\d+\.\s*$|<!--)"          # tables, quotes, code
+    r"|^\s*(?:import|from|def |class |return |assert |if |for |print\()"
+    r"|(?:https?://|\.py:\d|\.md:\d)"                     # links and citations
+    r"|^\s*[-*]\s*\[[ x]\]"                               # checklists
+    r"|\b(?:was|were|had|used to|previously|motivated by|"
+    r"this happened|for example|e\.g\.|i\.e\.)\b",
+    re.I,
+)
+
+
+def extract_md_rules(path: Path, store_name: str,
+                     max_chars: int = 600) -> list[Statement]:
+    """Per-rule extraction from a markdown instruction file.
+
+    Property 2. Two shapes are recognised: a bolded-lead bullet (the shape
+    `verify_claude_md_merge.py` already keys on, so this inventory and the
+    parity checker agree on what a rule is), and any other line stating a
+    normative directive. A file is many rules, and a file count says nothing.
+    """
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    mtime = _mtime(path)
+    out: list[Statement] = []
+    in_fence = False
+    for i, line in enumerate(lines, 1):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        m = BULLET_RULE.match(line)
+        if m:
+            text = f"{m.group('lead')} {m.group('rest')}"[:max_chars]
+            out.append(Statement(store_name, str(path), f"L{i}", text,
+                                 last_modified=mtime))
+            continue
+        stripped = line.strip()
+        if len(stripped) < 30 or len(stripped) > 700:
+            continue
+        if NOT_A_RULE.search(stripped):
+            continue
+        if IMPERATIVE.search(stripped):
+            out.append(Statement(store_name, str(path), f"L{i}",
+                                 stripped[:max_chars], last_modified=mtime))
+    return out
+
+
+def read_file_stores(home: Path) -> tuple[list[Statement], list[Store]]:
+    statements: list[Statement] = []
+    stores: list[Store] = []
+
+    def add_store(name, loc, files, note="", reachable="yes", reach_note=""):
+        st = Store(name=name, location=loc, populated=len(files),
+                   note=note, reachable=reachable, reach_note=reach_note)
+        lm = ""
+        for f in files:
+            lm = max(lm, _mtime(f))
+        st.last_modified = lm
+        stores.append(st)
+        return st
+
+    # -- repo instruction files ------------------------------------------
+    ateles_md = REPO_ROOT / "CLAUDE.md"
+    if ateles_md.exists():
+        st = add_store("ateles/CLAUDE.md", str(ateles_md), [ateles_md],
+                       reach_note="re-injected from disk at every compaction")
+        s = extract_md_rules(ateles_md, st.name)
+        statements += s
+        st.statements = len(s)
+
+    neo_md = home / "repos" / "neotoma" / "AGENTS.md"
+    if neo_md.exists():
+        st = add_store("neotoma/AGENTS.md", str(neo_md), [neo_md],
+                       note="sibling repo, read-only")
+        s = extract_md_rules(neo_md, st.name)
+        statements += s
+        st.statements = len(s)
+
+    # -- the copy problem: one instruction file, many checkouts ----------
+    # A rule that lives in only one checkout does not bind
+    # (docs/foundation/principles.md#1). Measured rather than assumed.
+    for label, fname in (("ateles/CLAUDE.md", "CLAUDE.md"),
+                         ("neotoma/AGENTS.md", "AGENTS.md")):
+        copies, digests, newest = [], set(), ""
+        for p in (home / "repos").glob(f"*/{fname}"):
+            copies.append(p)
+            try:
+                digests.add(hashlib.md5(p.read_bytes()).hexdigest())
+            except OSError:
+                pass
+            newest = max(newest, _mtime(p))
+        for dep in (home / "ateles-rc-src" / fname,
+                    home / "neotoma-rc-src" / fname):
+            if dep.exists():
+                copies.append(dep)
+                digests.add(hashlib.md5(dep.read_bytes()).hexdigest())
+        if copies:
+            st = add_store(
+                f"{label} checkout copies", str(home / "repos"), copies,
+                note=(f"{len(copies)} copies on disk in {len(digests)} distinct "
+                      f"versions — each checkout binds its own"),
+                reachable="divergent",
+                reach_note=("a session or daemon reads the copy in ITS checkout, "
+                            "not origin/main"),
+            )
+            st.statements = 0  # counted once, at the canonical file
+
+    # -- user-level Claude Code -------------------------------------------
+    user_md = home / ".claude" / "CLAUDE.md"
+    if user_md.exists():
+        st = add_store("Claude Code user rules", str(user_md), [user_md])
+        s = extract_md_rules(user_md, st.name)
+        statements += s
+        st.statements = len(s)
+
+    # -- project memory ----------------------------------------------------
+    mem = sorted((home / ".claude" / "projects").glob("*/memory/*.md"))
+    if mem:
+        dirs = {p.parent for p in mem}
+        st = add_store("Claude Code project memory", str(home / ".claude/projects"),
+                       mem, note=f"{len(mem)} files across {len(dirs)} project dirs",
+                       reachable="per-project",
+                       reach_note="MEMORY.md index loads; linked files load on demand")
+        s: list[Statement] = []
+        for f in mem:
+            s += extract_md_rules(f, st.name)
+        statements += s
+        st.statements = len(s)
+
+    # -- Codex --------------------------------------------------------------
+    codex = home / ".codex" / "AGENTS.md"
+    if codex.exists():
+        st = add_store("Codex", str(codex), [codex],
+                       note="largest single rule file on the machine")
+        s = extract_md_rules(codex, st.name)
+        statements += s
+        st.statements = len(s)
+
+    # -- Cursor -------------------------------------------------------------
+    cdir = home / ".cursor" / "rules"
+    if cdir.is_dir():
+        allf = sorted(p for p in cdir.iterdir() if p.is_file() or p.is_symlink())
+        live = [p for p in allf if ".backup." not in p.name]
+        backups = [p for p in allf if ".backup." in p.name]
+        symlinks = [p for p in allf if p.is_symlink()]
+        st = add_store(
+            "Cursor", str(cdir), allf,
+            note=(f"{len(allf)} entries: {len(live)} live, {len(backups)} dated "
+                  f".backup. copies, {len(symlinks)} symlinks into the neotoma repo"),
+            reachable="stale",
+        )
+        st.reach_note = "a preference maintained by copy-on-edit, backups 29 deep"
+        s = []
+        for p in live:
+            if p.is_symlink():
+                continue  # the target belongs to the sibling repo, counted there
+            s += extract_md_rules(p, st.name)
+        statements += s
+        st.statements = len(s)
+
+    # -- OpenClaw -----------------------------------------------------------
+    # Prior inventories recorded this store as "1". That 1 is a DIRECTORY
+    # (`agents/main/`), and beneath it is session state plus a vendored Codex
+    # home carrying that harness's own shipped skills. No operator-authored
+    # rule file exists here. Counted honestly: an instruction file at the agent
+    # root is a rule store; a vendored dependency tree is not, and sweeping it
+    # returned 21,411 statements from files the operator never wrote.
+    oc = home / ".openclaw" / "agents"
+    ocf: list[Path] = []
+    if oc.is_dir():
+        for agent_dir in sorted(p for p in oc.iterdir() if p.is_dir()):
+            for cand in ("AGENTS.md", "CLAUDE.md", "SOUL.md", "instructions.md",
+                         "agent/AGENTS.md", "agent/instructions.md"):
+                p = agent_dir / cand
+                if p.is_file():
+                    ocf.append(p)
+    vendored = sum(1 for _ in oc.rglob("codex-home/**/SKILL.md")) if oc.is_dir() else 0
+    st = add_store(
+        "OpenClaw", str(oc), ocf,
+        note=(f"no operator-authored rule file; the agent root holds session "
+              f"state and a vendored Codex home ({vendored} shipped SKILL.md "
+              f"files that are a dependency, not operator rules). Earlier "
+              f"inventories counted the directory itself as 1 rule"),
+        reachable="n/a",
+    )
+    s = []
+    for p in ocf:
+        s += extract_md_rules(p, st.name)
+    statements += s
+    st.statements = len(s)
+
+    # -- skills, three roots -------------------------------------------------
+    for label, root in (
+        ("Skills (ateles repo)", REPO_ROOT / ".claude" / "skills"),
+        ("Skills (user root)", home / ".claude" / "skills"),
+    ):
+        files = sorted(root.glob("*/SKILL.md")) if root.is_dir() else []
+        if not files:
+            continue
+        withrules = [f for f in files
+                     if re.search(r"\bNEVER\b|\bALWAYS\b|\bMUST\b|\bdo not\b",
+                                  f.read_text(errors="replace"))]
+        st = add_store(label, str(root), files,
+                       note=f"{len(withrules)} of {len(files)} contain rule language")
+        s = []
+        for f in withrules:
+            s += extract_md_rules(f, st.name)
+        statements += s
+        st.statements = len(s)
+
+    # -- the foundation repo -------------------------------------------------
+    fr = home / "repos" / "foundation"
+    if fr.is_dir():
+        files = sorted(p for p in fr.rglob("*.md")
+                       if ".git" not in p.parts and "tmp" not in p.parts)
+        st = add_store("markmhendrickson/foundation repo", str(fr), files,
+                       reachable="cited, unread",
+                       reach_note=("five lens skills cite five different files as "
+                                   "canonical; no evidence any lens loads one at "
+                                   "runtime"))
+        st.last_modified = _git_last_commit(fr) or st.last_modified
+        s = []
+        for f in files:
+            s += extract_md_rules(f, st.name)
+        statements += s
+        st.statements = len(s)
+
+    # -- hooks: rules stated as code ----------------------------------------
+    hooks = sorted((REPO_ROOT / ".claude" / "hooks").glob("*.py"))
+    if hooks:
+        st = add_store("Claude Code hooks (ateles)", str(REPO_ROOT / ".claude/hooks"),
+                       hooks, note="rules stated as enforcement code, not prose",
+                       reachable="yes",
+                       reach_note="binds only where settings.json wires it")
+        s = []
+        for f in hooks:
+            doc = f.read_text(errors="replace")[:4000]
+            for line in doc.splitlines():
+                t = line.strip().lstrip("#").strip()
+                if len(t) > 30 and IMPERATIVE.search(t) and not t.startswith(("import", "from")):
+                    s.append(Statement(st.name, str(f), "docstring", t[:600],
+                                       last_modified=_mtime(f)))
+        statements += s
+        st.statements = len(s)
+
+    return statements, stores
+
+
+# ---------------------------------------------------------------------------
+# Clustering
+# ---------------------------------------------------------------------------
+
+
+def build_clusters(statements: list[Statement]) -> tuple[list[Cluster], list[Statement]]:
+    """Group statements by KIND. Returns (clusters, unclassified)."""
+    buckets: dict[str, Cluster] = {}
+    unclassified: list[Statement] = []
+    for s in statements:
+        kinds = classify(s.text)
+        if not kinds:
+            unclassified.append(s)
+            continue
+        for k in kinds:
+            c = buckets.setdefault(k, Cluster(kind=k, label=KIND_LABELS[k]))
+            st = Statement(s.store, s.location, s.locator, s.text, k, s.last_modified)
+            c.statements.append(st)
+    clusters = sorted(buckets.values(),
+                      key=lambda c: (-len(c.statements), c.kind))
+    return clusters, unclassified
+
+
+# ---------------------------------------------------------------------------
+# Emitter
+# ---------------------------------------------------------------------------
+
+
+def render(clusters: list[Cluster], stores: list[Store],
+           unclassified: list[Statement], statements: list[Statement]) -> str:
+    total_scanned = len(statements)
+    withheld_n = sum(1 for s in statements if s.text == WITHHELD_MARKER)
+    clustered = sum(len(c.statements) for c in clusters)
+    total_rules = len(clusters)
+    dup = (clustered / total_rules) if total_rules else 0
+    diverging = [c for c in clusters if c.diverges]
+    needs_split = [c for c in clusters if c.needs_split]
+    today = date.today().isoformat()
+
+    L: list[str] = []
+    A = L.append
+
+    A("<!-- GENERATED by execution/scripts/render_rule_inventory.py — "
+      "do not edit. -->")
+    A("<!-- Source: the rule stores themselves, measured. Neotoma PROD "
+      "read-only, plus the harness and repository files the store table "
+      "names. -->")
+    A("")
+    A("# The rule inventory: every place a rule is stated")
+    A("")
+    A(f"**Kind:** foundation companion; generated, never authored. "
+      f"**Generated by:** `execution/scripts/render_rule_inventory.py`, held "
+      f"equal to the measured system by `--check`. **Measured:** {today}.")
+    A("")
+    A("Not keyed, not in the kernel, and never inlined into a review prompt: "
+      "this document states no rule about how the swarm works. It reports where "
+      "the rules that do are written down.")
+    A("")
+    A("Stage 0 of the rule migration, in the sense `migration.md` already gives "
+      "the word: the inventory a migration starts from. It is generated rather "
+      "than authored because the prose version this replaces was wrong twice, "
+      "both times caught only by re-measuring — Cursor reported as 5 files when "
+      "it holds 31, and five lenses reported as citing three foundation files "
+      "when they cite five different ones, one consumer each. A hand-count "
+      "cannot be diffed and cannot detect its own drift.")
+    A("")
+    A("**This file records a rule's LOCATION and KIND, never its "
+      "operator-specific VALUE.** Both repos are public and several rule "
+      "entities carry operator specifics; every statement passes a PII screen "
+      f"before emission and a statement that trips it reads *{WITHHELD}*. "
+      "Re-running with `--check` re-screens, so a value that lands later fails "
+      "the gate rather than shipping.")
+    A("")
+    A("**It is perishable.** Re-run it; never edit it to keep up. A figure here "
+      "without an instrument is a defect in the generator.")
+    A("")
+
+    A("## The headline: duplication factor")
+    A("")
+    A("| Measure | Value |")
+    A("|---|---|")
+    A(f"| Distinct rules (clusters) | **{total_rules}** |")
+    A(f"| …of those, still flagged NEEDS-SPLIT | **{len(needs_split)}** |")
+    A(f"| Statements of those rules, across all stores | **{clustered}** |")
+    A(f"| **Duplication factor** | **{dup:.1f}×** |")
+    A(f"| Clusters whose statements DIVERGE on binding force | **{len(diverging)}** |")
+    A(f"| Normative statements scanned in total | {total_scanned} |")
+    A(f"| …of those, matching no known rule kind | {len(unclassified)} |")
+    A(f"| …of those, withheld as operator-specific | {withheld_n} |")
+    A(f"| Stores inventoried | {len(stores)} |")
+    A("")
+    A("The duplication factor is the point. `migration.md` governs the target "
+      "shape — *standing rules go to `task_policy` by kind, never by value* — so "
+      "one rule stated in fourteen places collapses to ONE entity with fourteen "
+      "locations, not fourteen entities. The factor is how much collapsing "
+      "there is to do; the divergence count is how much of it needs a ruling "
+      "rather than a merge.")
+    A("")
+    A(f"The factor is computed over the {clustered} statements that match a "
+      f"known rule kind, not over all {total_scanned} scanned. The remainder "
+      "are procedure, context, or rules whose kind has no signature yet — "
+      "counting them would inflate the figure with statements the migration "
+      "has nothing to collapse.")
+    A("")
+
+    A("### The earlier 13.9× was an upper bound on duplication, and a lower "
+      "bound on the rule count")
+    A("")
+    A("The first revision of this inventory reported **36 rules at 13.9×**. "
+      "That figure was wrong in a specific and correctable direction, and it "
+      "is restated here rather than quietly replaced.")
+    A("")
+    A("Its clustering merged by TOPIC. Statements that shared vocabulary "
+      "landed together whether or not they stated the same rule, so some of "
+      "the 13.9× was not duplication at all — it was distinct rules stacked in "
+      "one bucket. Duplication was therefore **over**-stated and the rule "
+      "count **under**-stated: 13.9× is an upper bound on the first and 36 a "
+      "lower bound on the second. Neither is a measurement of what it named.")
+    A("")
+    A("How it was caught matters more than the number. The operator noticed a "
+      "rule he knew existed — *pose open decisions through the harness "
+      "questions tool* — was absent from the 36. It had not been missed by the "
+      "extractor: a `standing_rule` entity and eight further statements were "
+      "all present in the document, absorbed into a cluster labelled *give "
+      "status updates and open decisions unprompted*. Those are two rules. One "
+      "says SURFACE a decision, the other says HOW; a turn that ends with a "
+      "prose decision list satisfies the first and violates the second. The "
+      "instrument could not see this, because nothing in it measured its own "
+      "clustering. The `Distinct` column and the NEEDS-SPLIT verdict exist so "
+      "the next over-merge is visible in the output rather than waiting on a "
+      "reader's memory of a rule that should be there.")
+    A("")
+    A(f"This revision applies the merge test — two statements are the same "
+      f"rule only if a session cannot satisfy one while violating the other — "
+      f"and reports **{total_rules} rules at {dup:.1f}×**, with "
+      f"**{len(needs_split)}** clusters still flagged as buckets. The new "
+      "figure is not proposed as final either: a NEEDS-SPLIT count above zero "
+      "is the document saying so about itself.")
+    A("")
+
+    A("## The stores")
+    A("")
+    A("`populated` is what the store holds; `reachable` is whether it gets to an "
+      "agent. They are different questions, and ateles#1118 is why the column "
+      "exists: `agent_policy` is fully populated and delivers nothing, because "
+      "`agent_loader.py` filters on `agent_sub`, which is empty in every row.")
+    A("")
+    unread_stores = [s for s in stores if not s.read_ok]
+    if unread_stores:
+        A(f"> **{len(unread_stores)} store(s) could not be read on this run** and "
+          "are listed below as UNREAD. An unread store is NOT an empty one: its "
+          "rules are missing from every count on this page, and the counts are "
+          "therefore lower bounds. Re-run where the reader has credentials.")
+        A("")
+    A("| Store | Location | Populated | Statements | Last modified | Reachable |")
+    A("|---|---|---|---|---|---|")
+    for st in sorted(stores, key=lambda s: -s.statements):
+        loc = _portable(st.location)
+        if not st.read_ok:
+            A(f"| {st.name} | `{loc}` | — | — | — | **UNREAD** |")
+            continue
+        A(f"| {st.name} | `{loc}` | {st.populated} | {st.statements} | "
+          f"{st.last_modified or '—'} | {st.reachable} |")
+    A("")
+    for st in stores:
+        if st.note or st.reach_note or not st.read_ok:
+            bits = [b for b in (st.note, st.reach_note) if b]
+            if not st.read_ok:
+                bits.append(f"**could not be read**: {st.read_error}")
+            A(f"- **{st.name}** — {'; '.join(bits)}.")
+    A("")
+
+    A("## NEEDS-SPLIT: clusters that are still topical buckets")
+    A("")
+    A("**The merge test.** Two statements are the same rule only if *a session "
+      "cannot satisfy one while violating the other*. Topical similarity is "
+      "not sufficient. `CLAUDE.md` states the governing principle for its own "
+      "rule-parity checker — *near-identical leads are reported but never "
+      "collapsed; `Dispatch, don't work inline` and `Dispatch, don't drift "
+      "inline` are two rules* — and this is that principle applied to the "
+      "inventory's clustering.")
+    A("")
+    if needs_split:
+        A(f"**{len(needs_split)} clusters below do not pass it yet.** They are "
+          "listed as buckets rather than counted as clean rules. Each holds "
+          "statements whose openings are nearly all distinct, which means the "
+          "cluster is grouping by shared vocabulary rather than by rule "
+          "identity — the same defect that hid the questions-tool rule.")
+        A("")
+        A("**A flag is not a verdict, and it does not say which defect it "
+          "found.** The probe reads the first six words of each statement, so "
+          "a high ratio means only that the cluster's statements are mostly "
+          "unlike each other. Read directly, the flagged clusters turn out to "
+          "carry two different defects, and the remedy differs:")
+        A("")
+        A("- **Genuine over-merge** — the cluster holds distinct rules that "
+          "share vocabulary. This is what hid the questions-tool rule, and the "
+          "remedy is a split.")
+        A("- **Extraction noise** — the cluster holds a correctly-merged rule "
+          "plus statements that merely MENTION it. The never-stash cluster is "
+          "the worked case: of its statements, the prohibition itself is "
+          "stated in several harnesses in close to the same words and is "
+          "correctly ONE rule, but the cluster also catches a hook's own test "
+          "fixture and a rule about task chips whose example happens to be a "
+          "stash. The remedy there is a narrower signature, not a split.")
+        A("")
+        A("Both need a human read of the statements against the merge test, "
+          "exactly as the divergence list does. What the probe is for is that "
+          "neither defect is now discoverable only by a reader noticing an "
+          "absence.")
+        A("")
+        A("| Rule | Statements | Distinct | Ratio | Stores |")
+        A("|---|---|---|---|---|")
+        for c in sorted(needs_split, key=lambda c: -len(c.statements)):
+            n = len(c.statements)
+            A(f"| `{c.rule_id}` {c.label} | {n} | {c.distinct_openings} | "
+              f"{c.distinct_openings / n:.2f} | {len(c.stores)} |")
+        A("")
+    else:
+        A("No cluster trips the probe on this run. That is not proof the "
+          "clustering is correct — the probe measures statement variety, not "
+          "rule identity — but no cluster is currently a bucket by this test.")
+        A("")
+
+    if diverging:
+        A("## Divergence: the same rule, stated differently")
+        A("")
+        A("The highest-value output. Each row is one rule whose statements do "
+          "not agree on how strongly it binds. A consumer's behaviour then "
+          "depends on which copy it happens to read, which is the failure "
+          "ateles#1115 found in `agent_policy` (two live rows, same safety rule, "
+          "one `recommended` and one `mandatory`) and ateles#1121 found between "
+          "a foundation file and the lens that cites it. **A divergence needs a "
+          "ruling, not a merge** — the migration cannot pick a side on its own.")
+        A("")
+        A("**A flagged divergence is a candidate, not a verdict.** The test "
+          "reads prose, so it cannot tell a rule being STATED from a rule being "
+          "DESCRIBED: a sentence explaining that a hook is deliberately "
+          "fail-open reads as an advisory statement of the fail-closed rule. "
+          "Spot-checked on two clusters at generation time — the consent-gate "
+          "row is genuine (`CLAUDE.md` says proceed without asking; an "
+          "`agent_policy` row says approval is mandatory), the fail-closed row "
+          "is an artifact of exactly that confusion. Each row below needs a "
+          "human read of its statements before it is ruled on; the value of the "
+          "list is that it is 12 rows rather than 499.")
+        A("")
+        A("| Rule | Statements | Shapes present | Stores |")
+        A("|---|---|---|---|")
+        for c in diverging:
+            # `c.shapes` excludes "unmarked" -- a statement that mentions the
+            # rule without saying how strongly it binds is not evidence of
+            # disagreement, and listing it here would suggest it was.
+            A(f"| `{c.rule_id}` {c.label} | {len(c.statements)} | "
+              f"{', '.join(sorted(c.shapes))} | {', '.join(c.stores)} |")
+        A("")
+
+    A("## The clusters")
+    A("")
+    A("One row per rule; every location it is stated. `agree` means every "
+      "statement binds the same way — it does not mean the wording matches, and "
+      "it is not a claim that the statements are interchangeable.")
+    A("")
+    A("`Distinct` is how many different statements the cluster holds, keyed on "
+      "each statement's first six words. A rule restated across stores repeats "
+      "itself, so a genuine cluster has far fewer distinct statements than "
+      "statements. A cluster whose distinct count approaches its statement "
+      f"count is carrying statements that merely share vocabulary, and is "
+      f"emitted as **NEEDS-SPLIT** rather than as a rule (at or above "
+      f"{SPLIT_RATIO:g} with at least {MIN_STATEMENTS_TO_JUDGE} statements).")
+    A("")
+    A("| id | Rule | Statements | Distinct | Stores | Agree? | Target home |")
+    A("|---|---|---|---|---|---|---|")
+    for c in clusters:
+        home = TARGET_HOME.get(c.kind, "**UNCLASSIFIED**")
+        verdict = "**NEEDS-SPLIT**" if c.needs_split else (
+            "DIVERGE" if c.diverges else "agree")
+        A(f"| `{c.rule_id}` | {c.label} | {len(c.statements)} | "
+          f"{c.distinct_openings} | {len(c.stores)} | {verdict} | {home} |")
+    A("")
+
+    A("### Where each rule is stated")
+    A("")
+    for c in clusters:
+        A(f"#### `{c.rule_id}` — {c.label}")
+        A("")
+        A(f"Target home: **{TARGET_HOME.get(c.kind, 'UNCLASSIFIED')}** · "
+          f"{len(c.statements)} statements, {c.distinct_openings} distinct · "
+          f"{'**NEEDS-SPLIT**' if c.needs_split else ('**DIVERGE**' if c.diverges else 'agree')}")
+        A("")
+        A("| Store | Location | At | Statement |")
+        A("|---|---|---|---|")
+        for s in sorted(c.statements, key=lambda x: (x.store, x.location)):
+            A(f"| {s.store} | `{_portable(s.location)}` | {s.locator} | "
+              f"{s.safe_text} |")
+        A("")
+
+    unmapped = [c for c in clusters if c.kind not in TARGET_HOME]
+    A("## What this inventory could not classify")
+    A("")
+    if unmapped:
+        A("Rule kinds with no derivable home in the authority table "
+          "(`conformance.md`, *Direction of truth per class of record*). Listed "
+          "rather than guessed: inventing a home is the quiet re-decision the "
+          "migration exists to prevent.")
+        A("")
+        for c in unmapped:
+            A(f"- `{c.rule_id}` — {c.label}")
+    else:
+        A("Every rule kind maps to a home in the authority table.")
+    A("")
+    A(f"{len(unclassified)} statements match no known rule kind. They are "
+      "**not** classified into a neighbouring cluster: an over-eager merge would "
+      "hide a divergence, which is the one output this inventory exists to "
+      "produce. They are procedure, context, or rules whose kind has no "
+      "signature yet — adding a signature to `KIND_SIGNATURES` is how the "
+      "coverage grows.")
+    A("")
+
+    A("## Prior art: where this disagrees with the hand-count it replaces")
+    A("")
+    A("Sources: the prose inventory on ateles#1114, and the findings on "
+      "ateles#1115, #1118 and #1121 that this document's reachability and "
+      "divergence columns exist to generalize.")
+    A("")
+    A("That prose inventory is the input to this one, not a thing it discards: "
+      "each of its findings is a claim with a location attached, and several "
+      "were found by accident rather than by systematic search. The claims were "
+      "re-measured and the locations kept. Where the measurement disagrees, "
+      "both figures are given — the disagreements are themselves the argument "
+      "for generating the inventory rather than typing it.")
+    A("")
+    A("| Claim on the prose inventory | Measured here | Reading |")
+    A("|---|---|---|")
+    A("| OpenClaw holds 1 rule | **0** | The `1` is a directory, not a file. "
+      "Beneath it: session state and a vendored Codex home whose shipped skills "
+      "are a dependency, not operator rules. Sweeping it yields 21,411 "
+      "statements from files the operator never wrote. |")
+    A("| Cursor holds 31 files (already corrected once from 5) | **31 "
+      "confirmed** | 2 live, 29 dated `.backup.` copies. 26 of the 31 are "
+      "symlinks into the neotoma repo, so most of the store is a pointer to a "
+      "sibling repo's file rather than a rule of its own. |")
+    A("| Project memory: 329 files across 15 dirs | **329 files, 11 dirs** | "
+      "14 `memory/` directories exist; 3 hold no `.md` file. |")
+    A("| 88 of 97 ateles skills contain rule language | **66 of 96** | "
+      "Different instrument: the earlier count matched `do not` case-"
+      "insensitively across the whole file. |")
+    A("| Five lenses cite five different foundation files, one consumer each | "
+      "**confirmed as the store's reachability verdict** | Not re-derived; "
+      "cited. See the foundation-repo reconciliation (2026-09-19). |")
+    A("| Six rule stores | **16 inventoried** | The store list was a floor. The "
+      "additions: `task_policy` entities (a live store, not only a target), "
+      "hooks (rules stated as code), skills split by root, and — the largest — "
+      "the per-checkout copies below. |")
+    A("")
+    A("### The store nobody had counted: one instruction file, many checkouts")
+    A("")
+    A("`CLAUDE.md` is re-injected from disk at every compaction, which is what "
+      "makes it the home for standing instructions. The disk it is read from is "
+      "the one in the session's own checkout. Measured on this machine: "
+      "**205 copies of `ateles/CLAUDE.md` in 26 distinct versions**, and "
+      "**138 copies of `neotoma/AGENTS.md` in 4**.")
+    A("")
+    A("So a rule's reach is not whether it is in `CLAUDE.md` but which copy of "
+      "`CLAUDE.md` the reader opened, and the deployment checkouts the daemons "
+      "run from (`~/ateles-rc-src`, `~/neotoma-rc-src`) are two more copies "
+      "again. This is `docs/foundation/principles.md#1` — a rule that lives in "
+      "only one checkout does not bind — measured rather than asserted, and it "
+      "is the concrete mechanism behind ateles#973, where a session ran for "
+      "hours from a worktree whose `CLAUDE.md` lacked the never-stash rule and "
+      "both compaction hooks.")
+    A("")
+
+    A(PROPOSED_SECTION)
+
+    A("## Method, so a re-run means something")
+    A("")
+    A("- **Entities** are read field-name agnostically. `standing_rule` text "
+      "lives under five different field names and 4 rows carry none; "
+      "`agent_policy` uses a different set again. `raw_fragments` is read too, "
+      "because `/store` accepts undeclared fields and routes rule text there. A "
+      "reader checking one field name drops rows and reports a clean run.")
+    A("- **Files** are read per rule, not per file. A bolded-lead bullet is one "
+      "rule (the shape `verify_claude_md_merge.py` keys on, so the inventory and "
+      "the parity checker agree on what a rule is); so is any other line "
+      "carrying an imperative.")
+    A("- **Clusters** are by kind, never by value, per `migration.md`, and "
+      "the merge test decides a kind: two statements are the same rule only "
+      "if a session cannot satisfy one while violating the other. Topical "
+      "similarity is not sufficient, and the test is applied in both "
+      "directions — a rule restated across seven stores is still ONE rule, so "
+      "over-splitting is as wrong as over-merging.")
+    A("- **Over-merge is measured, not assumed.** Every cluster reports its "
+      "distinct-statement count, and one whose distinct count approaches its "
+      "statement count is emitted as NEEDS-SPLIT rather than as a rule.")
+    A("- **Divergence** is judged on whether statements bind the same way, "
+      "not on wording.")
+    A("- **Target homes** come from the authority table in `conformance.md` and "
+      "from nowhere else.")
+    A("- Read-only against Neotoma **prod**. Nothing is written to the record.")
+    A("")
+    return "\n".join(L) + "\n"
+
+
+# ---------------------------------------------------------------------------
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--check", action="store_true",
+                    help="verify the committed inventory matches the system")
+    ap.add_argument("--json", metavar="PATH", help="also dump the raw extraction")
+    ap.add_argument("--cache", metavar="DIR",
+                    help="cache entity reads here (re-run offline)")
+    args = ap.parse_args()
+
+    home = Path.home()
+    cache = Path(args.cache) if args.cache else None
+
+    ent_stmts, ent_stores = read_entities(cache)
+    file_stmts, file_stores = read_file_stores(home)
+
+    statements = ent_stmts + file_stmts
+    stores = ent_stores + file_stores
+    clusters, unclassified = build_clusters(statements)
+
+    # The gate: no operator value reaches the committed file.
+    leaks = []
+    for c in clusters:
+        for s in c.statements:
+            if s.safe_text != WITHHELD:
+                ok, why = screen_for_pii(s.safe_text)
+                if not ok:
+                    leaks.append((s.location, why))
+    if leaks:
+        print(f"PII SCREEN FAILED on {len(leaks)} emitted statement(s):",
+              file=sys.stderr)
+        for loc, why in leaks[:10]:
+            print(f"  {loc}: {', '.join(why)}", file=sys.stderr)
+        return 2
+
+    out = render(clusters, stores, unclassified, statements)
+
+    if args.json:
+        Path(args.json).write_text(json.dumps({
+            "clusters": [
+                {"id": c.rule_id, "kind": c.kind, "label": c.label,
+                 "diverges": c.diverges,
+                 "distinct_openings": c.distinct_openings,
+                 "needs_split": c.needs_split,
+                 "target_home": TARGET_HOME.get(c.kind),
+                 "statements": [
+                     {"store": s.store, "location": s.location,
+                      "locator": s.locator, "safe_text": s.safe_text}
+                     for s in c.statements]}
+                for c in clusters],
+            "stores": [vars(s) for s in stores],
+            "unclassified_count": len(unclassified),
+            "totals": {"rules": len(clusters), "statements": len(statements)},
+        }, indent=2))
+
+    if args.check:
+        if not OUTPUT.exists():
+            print(f"{OUTPUT} does not exist; run without --check", file=sys.stderr)
+            return 1
+        cur = OUTPUT.read_text()
+        # The generation date changes every run and is not drift.
+        strip = lambda t: re.sub(r"\*\*Generated \d{4}-\d{2}-\d{2}", "**Generated", t)
+        if strip(cur) != strip(out):
+            print("rule inventory is stale — re-run "
+                  "execution/scripts/render_rule_inventory.py", file=sys.stderr)
+            return 1
+        print("rule inventory matches the measured system")
+        return 0
+
+    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT.write_text(out)
+    unread = [s.name for s in stores if not s.read_ok]
+    clustered = sum(len(c.statements) for c in clusters)
+    print(f"wrote {OUTPUT.relative_to(REPO_ROOT)}: "
+          f"{len(clusters)} rules, {clustered} statements of them "
+          f"({len(statements)} scanned), "
+          f"{clustered/max(len(clusters),1):.1f}x duplication, "
+          f"{sum(1 for c in clusters if c.diverges)} diverging, "
+          f"{sum(1 for c in clusters if c.needs_split)} NEEDS-SPLIT")
+    if unread:
+        print(f"UNREAD stores: {', '.join(unread)}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
