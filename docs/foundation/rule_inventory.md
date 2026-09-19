@@ -17,24 +17,33 @@ Stage 0 of the rule migration, in the sense `migration.md` already gives the wor
 
 | Measure | Value |
 |---|---|
-| Distinct rules (clusters) | **36** |
-| Statements of those rules, across all stores | **499** |
-| **Duplication factor** | **13.9×** |
-| Clusters whose statements DIVERGE on binding force | **12** |
-| Normative statements scanned in total | 4393 |
-| …of those, matching no known rule kind | 3951 |
-| …of those, withheld as operator-specific | 33 |
+| Distinct rules (clusters) | **52** |
+| …of those, still flagged NEEDS-SPLIT | **14** |
+| Statements of those rules, across all stores | **533** |
+| **Duplication factor** | **10.2×** |
+| Clusters whose statements DIVERGE on binding force | **15** |
+| Normative statements scanned in total | 4415 |
+| …of those, matching no known rule kind | 3950 |
+| …of those, withheld as operator-specific | 35 |
 | Stores inventoried | 16 |
 
 The duplication factor is the point. `migration.md` governs the target shape — *standing rules go to `task_policy` by kind, never by value* — so one rule stated in fourteen places collapses to ONE entity with fourteen locations, not fourteen entities. The factor is how much collapsing there is to do; the divergence count is how much of it needs a ruling rather than a merge.
 
-The factor is computed over the 499 statements that match a known rule kind, not over all 4393 scanned. The remainder are procedure, context, or rules whose kind has no signature yet — counting them would inflate the figure with statements the migration has nothing to collapse.
+The factor is computed over the 533 statements that match a known rule kind, not over all 4415 scanned. The remainder are procedure, context, or rules whose kind has no signature yet — counting them would inflate the figure with statements the migration has nothing to collapse.
+
+### The earlier 13.9× was an upper bound on duplication, and a lower bound on the rule count
+
+The first revision of this inventory reported **36 rules at 13.9×**. That figure was wrong in a specific and correctable direction, and it is restated here rather than quietly replaced.
+
+Its clustering merged by TOPIC. Statements that shared vocabulary landed together whether or not they stated the same rule, so some of the 13.9× was not duplication at all — it was distinct rules stacked in one bucket. Duplication was therefore **over**-stated and the rule count **under**-stated: 13.9× is an upper bound on the first and 36 a lower bound on the second. Neither is a measurement of what it named.
+
+How it was caught matters more than the number. The operator noticed a rule he knew existed — *pose open decisions through the harness questions tool* — was absent from the 36. It had not been missed by the extractor: a `standing_rule` entity and eight further statements were all present in the document, absorbed into a cluster labelled *give status updates and open decisions unprompted*. Those are two rules. One says SURFACE a decision, the other says HOW; a turn that ends with a prose decision list satisfies the first and violates the second. The instrument could not see this, because nothing in it measured its own clustering. The `Distinct` column and the NEEDS-SPLIT verdict exist so the next over-merge is visible in the output rather than waiting on a reader's memory of a rule that should be there.
+
+This revision applies the merge test — two statements are the same rule only if a session cannot satisfy one while violating the other — and reports **52 rules at 10.2×**, with **14** clusters still flagged as buckets. The new figure is not proposed as final either: a NEEDS-SPLIT count above zero is the document saying so about itself.
 
 ## The stores
 
 `populated` is what the store holds; `reachable` is whether it gets to an agent. They are different questions, and ateles#1118 is why the column exists: `agent_policy` is fully populated and delivers nothing, because `agent_loader.py` filters on `agent_sub`, which is empty in every row.
-
-> **1 store(s) could not be read on this run** and are listed below as UNREAD. An unread store is NOT an empty one: its rules are missing from every count on this page, and the counts are therefore lower bounds. Re-run where the reader has credentials.
 
 | Store | Location | Populated | Statements | Last modified | Reachable |
 |---|---|---|---|---|---|
@@ -48,16 +57,16 @@ The factor is computed over the 499 statements that match a known rule kind, not
 | agent_policy entities | `Neotoma PROD` | 25 | 51 | 2026-09-18 | no |
 | Claude Code hooks (ateles) | `.claude/hooks` | 18 | 48 | 2026-09-19 | yes |
 | neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | 1 | 30 | 2026-09-13 | yes |
+| task_policy entities | `Neotoma PROD` | 20 | 22 | 2026-09-09 | on retrieval |
 | Claude Code user rules | `~/.claude/CLAUDE.md` | 1 | 7 | 2026-07-16 | yes |
 | Cursor | `~/.cursor/rules` | 31 | 2 | 2026-09-13 | stale |
-| task_policy entities | `Neotoma PROD` | — | — | — | **UNREAD** |
 | ateles/CLAUDE.md checkout copies | `~/repos` | 205 | 0 | 2026-09-18 | divergent |
 | neotoma/AGENTS.md checkout copies | `~/repos` | 138 | 0 | 2026-09-18 | divergent |
 | OpenClaw | `~/.openclaw/agents` | 0 | 0 | — | n/a |
 
 - **standing_rule entities** — delivered to serverInfo._neotoma.standing_rules, a field agents do not read (ateles#1114).
 - **agent_policy entities** — agent_loader filters on agent_sub, empty in every row (ateles#1118) — every agent loads zero policies.
-- **task_policy entities** — read only when a skill or session retrieves it explicitly; **could not be read**: RuntimeError: NEOTOMA_BEARER_TOKEN unset.
+- **task_policy entities** — read only when a skill or session retrieves it explicitly.
 - **ateles/CLAUDE.md** — re-injected from disk at every compaction.
 - **neotoma/AGENTS.md** — sibling repo, read-only.
 - **ateles/CLAUDE.md checkout copies** — 205 copies on disk in 26 distinct versions — each checkout binds its own; a session or daemon reads the copy in ITS checkout, not origin/main.
@@ -71,6 +80,36 @@ The factor is computed over the 499 statements that match a known rule kind, not
 - **markmhendrickson/foundation repo** — five lens skills cite five different files as canonical; no evidence any lens loads one at runtime.
 - **Claude Code hooks (ateles)** — rules stated as enforcement code, not prose; binds only where settings.json wires it.
 
+## NEEDS-SPLIT: clusters that are still topical buckets
+
+**The merge test.** Two statements are the same rule only if *a session cannot satisfy one while violating the other*. Topical similarity is not sufficient. `CLAUDE.md` states the governing principle for its own rule-parity checker — *near-identical leads are reported but never collapsed; `Dispatch, don't work inline` and `Dispatch, don't drift inline` are two rules* — and this is that principle applied to the inventory's clustering.
+
+**14 clusters below do not pass it yet.** They are listed as buckets rather than counted as clean rules. Each holds statements whose openings are nearly all distinct, which means the cluster is grouping by shared vocabulary rather than by rule identity — the same defect that hid the questions-tool rule.
+
+**A flag is not a verdict, and it does not say which defect it found.** The probe reads the first six words of each statement, so a high ratio means only that the cluster's statements are mostly unlike each other. Read directly, the flagged clusters turn out to carry two different defects, and the remedy differs:
+
+- **Genuine over-merge** — the cluster holds distinct rules that share vocabulary. This is what hid the questions-tool rule, and the remedy is a split.
+- **Extraction noise** — the cluster holds a correctly-merged rule plus statements that merely MENTION it. The never-stash cluster is the worked case: of its statements, the prohibition itself is stated in several harnesses in close to the same words and is correctly ONE rule, but the cluster also catches a hook's own test fixture and a rule about task chips whose example happens to be a stash. The remedy there is a narrower signature, not a split.
+
+Both need a human read of the statements against the merge test, exactly as the divergence list does. What the probe is for is that neither defect is now discoverable only by a reader noticing an absence.
+
+| Rule | Statements | Distinct | Ratio | Stores |
+|---|---|---|---|---|
+| `R-a900b4` Durable memory belongs in Neotoma, not harness files | 52 | 49 | 0.94 | 6 |
+| `R-fba8d4` Irreversible or outward-facing actions need per-action operator approval | 36 | 35 | 0.97 | 7 |
+| `R-78a082` Echo the operator's input, cleaned up, each reply | 24 | 22 | 0.92 | 6 |
+| `R-f3271c` Both repos are public; scrub PII before committing | 19 | 17 | 0.89 | 5 |
+| `R-fcd5a0` Dispatch work to the owning agent; file it as you recommend it | 18 | 17 | 0.94 | 7 |
+| `R-f5e0b9` Always use the Neotoma prod instance, never dev | 15 | 14 | 0.93 | 6 |
+| `R-ae9bca` Durable work goes to a dispatched agent, never a harness task chip | 14 | 12 | 0.86 | 4 |
+| `R-606489` Minimize personal data at capture; purpose-bind it | 14 | 13 | 0.93 | 8 |
+| `R-f08cfb` Classify an action's blast radius before acting on it | 11 | 10 | 0.91 | 5 |
+| `R-4b8ce8` Never use git stash; WIP-commit instead | 10 | 9 | 0.90 | 5 |
+| `R-fab4cd` Pose open decisions through the harness questions tool, not inline prose | 9 | 9 | 1.00 | 3 |
+| `R-f31026` Gmail sends and draft-updates need per-message approval | 9 | 9 | 1.00 | 6 |
+| `R-acf4ff` Never invent facts about the operator's life, tools, or past | 8 | 8 | 1.00 | 3 |
+| `R-12d4a8` Restart affected daemons after a merge, then verify | 8 | 7 | 0.88 | 6 |
+
 ## Divergence: the same rule, stated differently
 
 The highest-value output. Each row is one rule whose statements do not agree on how strongly it binds. A consumer's behaviour then depends on which copy it happens to read, which is the failure ateles#1115 found in `agent_policy` (two live rows, same safety rule, one `recommended` and one `mandatory`) and ateles#1121 found between a foundation file and the lens that cites it. **A divergence needs a ruling, not a merge** — the migration cannot pick a side on its own.
@@ -79,127 +118,88 @@ The highest-value output. Each row is one rule whose statements do not agree on 
 
 | Rule | Statements | Shapes present | Stores |
 |---|---|---|---|
-| `R-b07f8a` One worktree per agent; never mutate a shared clone | 53 | advisory, mandatory, prohibitive/binding | Claude Code hooks (ateles), Claude Code project memory, Codex, Skills (ateles repo), Skills (user root), ateles/CLAUDE.md, markmhendrickson/foundation repo |
-| `R-a900b4` Durable memory belongs in Neotoma, not harness files | 46 | advisory, mandatory, prohibitive/binding | Claude Code project memory, Skills (ateles repo), Skills (user root), agent_policy entities, standing_rule entities |
-| `R-6fde97` Never invent facts, quotes, emotion, or reactions | 45 | advisory, mandatory, prohibitive/binding | Claude Code project memory, Codex, Skills (ateles repo), Skills (user root), ateles/CLAUDE.md |
-| `R-fba8d4` Irreversible or outward-facing actions need approval | 36 | advisory, mandatory, prohibitive/binding | Claude Code project memory, Codex, Skills (ateles repo), Skills (user root), agent_policy entities, ateles/CLAUDE.md, standing_rule entities |
-| `R-2fd7bd` Use the gws CLI for Google Workspace, not the MCP | 25 | advisory, mandatory, prohibitive/binding | Claude Code project memory, Claude Code user rules, Codex, Skills (ateles repo), Skills (user root), ateles/CLAUDE.md, standing_rule entities |
+| `R-a900b4` Durable memory belongs in Neotoma, not harness files | 52 | advisory, mandatory, prohibitive/binding | Claude Code project memory, Skills (ateles repo), Skills (user root), agent_policy entities, standing_rule entities, task_policy entities |
+| `R-fba8d4` Irreversible or outward-facing actions need per-action operator approval | 36 | advisory, mandatory, prohibitive/binding | Claude Code project memory, Codex, Skills (ateles repo), Skills (user root), agent_policy entities, ateles/CLAUDE.md, standing_rule entities |
+| `R-2fd7bd` Use the gws CLI for Google Workspace, not the MCP | 26 | advisory, mandatory, prohibitive/binding | Claude Code project memory, Claude Code user rules, Codex, Skills (ateles repo), Skills (user root), ateles/CLAUDE.md, standing_rule entities, task_policy entities |
+| `R-3be8e6` Some actions stay the operator's absolutely; hand them back with the command | 26 | advisory, mandatory, prohibitive/binding | Claude Code hooks (ateles), Claude Code project memory, Codex, Skills (ateles repo), Skills (user root), agent_policy entities, ateles/CLAUDE.md, standing_rule entities |
 | `R-78a082` Echo the operator's input, cleaned up, each reply | 24 | advisory, mandatory, prohibitive/binding | Claude Code project memory, Codex, Skills (ateles repo), Skills (user root), ateles/CLAUDE.md, standing_rule entities |
-| `R-fcd5a0` Dispatch work to the owning agent; do not work inline | 18 | advisory, mandatory, prohibitive/binding | Claude Code hooks (ateles), Claude Code project memory, Codex, Skills (ateles repo), Skills (user root), ateles/CLAUDE.md |
+| `R-fcd5a0` Dispatch work to the owning agent; file it as you recommend it | 18 | advisory, mandatory, prohibitive/binding | Claude Code hooks (ateles), Claude Code project memory, Codex, Skills (ateles repo), Skills (user root), ateles/CLAUDE.md, task_policy entities |
 | `R-228b8c` Absent or malformed safety values take the restrictive branch | 16 | advisory, mandatory, prohibitive/binding | Claude Code hooks (ateles), Claude Code project memory, Codex, Skills (ateles repo), Skills (user root), ateles/CLAUDE.md, neotoma/AGENTS.md |
-| `R-4b8ce8` Never use git stash; WIP-commit instead | 14 | advisory, prohibitive/binding | Claude Code hooks (ateles), Claude Code project memory, Codex, Skills (user root), ateles/CLAUDE.md |
-| `R-0cc9d7` Give status updates and open decisions unprompted | 11 | advisory, mandatory, prohibitive/binding | Claude Code project memory, Codex, Skills (user root), ateles/CLAUDE.md, standing_rule entities |
-| `R-680852` Read a write back; a success code is not a landed write | 11 | advisory, prohibitive/binding | Claude Code project memory, Codex, Skills (user root), agent_policy entities, ateles/CLAUDE.md, neotoma/AGENTS.md |
+| `R-ae9bca` Durable work goes to a dispatched agent, never a harness task chip | 14 | advisory, prohibitive/binding | Claude Code project memory, Codex, Skills (user root), ateles/CLAUDE.md |
+| `R-680852` Read a write back; a success code is not a landed write | 12 | advisory, prohibitive/binding | Claude Code project memory, Codex, Skills (user root), agent_policy entities, ateles/CLAUDE.md, neotoma/AGENTS.md, task_policy entities |
+| `R-9993c8` One worktree, one agent; never point two at the same tree | 7 | advisory, prohibitive/binding | Claude Code project memory, Codex, ateles/CLAUDE.md, markmhendrickson/foundation repo |
+| `R-fa2cbe` Never assert what the operator feels, thinks, or said without evidence | 6 | advisory, prohibitive/binding | Claude Code project memory, Skills (ateles repo) |
+| `R-0cc9d7` Give status updates unprompted, per workstream | 6 | advisory, prohibitive/binding | Claude Code project memory, Codex, Skills (user root), ateles/CLAUDE.md |
+| `R-713e5d` Store the full body, not a path or a summary standing in for it | 5 | advisory, mandatory | Claude Code project memory, Skills (ateles repo) |
+| `R-1bf77f` Recover a stash by apply-with-SHA, never pop a shared stack | 4 | advisory, prohibitive/binding | Claude Code project memory |
 | `R-c6d782` Merge by squash | 3 | advisory, prohibitive/binding | Claude Code project memory |
 
 ## The clusters
 
 One row per rule; every location it is stated. `agree` means every statement binds the same way — it does not mean the wording matches, and it is not a claim that the statements are interchangeable.
 
-| id | Rule | Statements | Stores | Agree? | Target home |
-|---|---|---|---|---|---|
-| `R-b07f8a` | One worktree per agent; never mutate a shared clone | 53 | 7 | DIVERGE | agent_policy |
-| `R-a900b4` | Durable memory belongs in Neotoma, not harness files | 46 | 5 | DIVERGE | agent_policy |
-| `R-6fde97` | Never invent facts, quotes, emotion, or reactions | 45 | 5 | DIVERGE | task_policy |
-| `R-fba8d4` | Irreversible or outward-facing actions need approval | 36 | 7 | DIVERGE | docs/foundation/ |
-| `R-29fd38` | Operator-specific config comes from entities, not code | 28 | 3 | agree | agent_policy |
-| `R-2fd7bd` | Use the gws CLI for Google Workspace, not the MCP | 25 | 7 | DIVERGE | agent_policy |
-| `R-78a082` | Echo the operator's input, cleaned up, each reply | 24 | 6 | DIVERGE | task_policy |
-| `R-f3271c` | Both repos are public; scrub PII before committing | 19 | 5 | agree | agent_policy |
-| `R-fcd5a0` | Dispatch work to the owning agent; do not work inline | 18 | 6 | DIVERGE | agent_policy |
-| `R-228b8c` | Absent or malformed safety values take the restrictive branch | 16 | 7 | DIVERGE | docs/foundation/ |
-| `R-f5e0b9` | Always use the Neotoma prod instance, never dev | 15 | 6 | agree | agent_policy |
-| `R-4b8ce8` | Never use git stash; WIP-commit instead | 14 | 5 | DIVERGE | agent_policy |
-| `R-606489` | Minimize personal data at capture; purpose-bind it | 13 | 7 | agree | docs/foundation/ |
-| `R-f0b574` | Re-read and merge a plan field before correcting it | 12 | 4 | agree | agent_policy |
-| `R-ebd526` | Persist every conversation turn to Neotoma | 11 | 5 | agree | agent_policy |
-| `R-0cc9d7` | Give status updates and open decisions unprompted | 11 | 5 | DIVERGE | task_policy |
-| `R-680852` | Read a write back; a success code is not a landed write | 11 | 6 | DIVERGE | agent_policy |
-| `R-ce6455` | Daemons run dedicated checkouts that must be fresh | 8 | 4 | agree | agent_policy |
-| `R-f31026` | Gmail sends and draft-updates need per-message approval | 8 | 5 | agree | agent_policy |
-| `R-d99bae` | A renamed agent leaves no stale reference | 8 | 3 | agree | agent_policy |
-| `R-12d4a8` | Restart affected daemons after a merge, then verify | 8 | 6 | agree | CLAUDE.md |
-| `R-765e54` | Extend the mechanism that exists; do not build a parallel one | 8 | 5 | agree | agent_policy |
-| `R-8d5e55` | Verify against the system of record before asserting | 8 | 5 | agree | agent_policy |
-| `R-c14682` | Never hardcode secrets or credentials | 7 | 4 | agree | agent_policy |
-| `R-71cf59` | Commit and PR titles follow the live title convention | 6 | 3 | agree | agent_policy |
-| `R-bdb72b` | Never mark work done citing an unverifiable artifact | 6 | 4 | agree | agent_policy |
-| `R-580da5` | Tests follow this repo's naming and placement convention | 6 | 3 | agree | agent_policy |
-| `R-f398b5` | Act on your recommendation; ask only at a real fork | 5 | 3 | agree | task_policy |
-| `R-86601c` | Recurring obligations roll their date; never complete | 5 | 5 | agree | task_policy |
-| `R-258f23` | A test that cannot fail on its subject is decoration | 5 | 5 | agree | agent_policy |
-| `R-57ff60` | Do not merge while a live blocking review stands | 4 | 4 | agree | docs/foundation/ |
-| `R-fb4dbc` | Agent prompts are public and carry no operator data | 3 | 3 | agree | agent_policy |
-| `R-c6d782` | Merge by squash | 3 | 1 | DIVERGE | agent_policy |
-| `R-d2c4bb` | Never bypass the pre-commit hook with --no-verify | 2 | 2 | agree | agent_policy |
-| `R-b5f10c` | Pass PR and comment bodies by file, never inline | 1 | 1 | agree | agent_policy |
-| `R-765925` | Verify the GitHub identity before any write | 1 | 1 | agree | agent_policy |
+`Distinct` is how many different statements the cluster holds, keyed on each statement's first six words. A rule restated across stores repeats itself, so a genuine cluster has far fewer distinct statements than statements. A cluster whose distinct count approaches its statement count is carrying statements that merely share vocabulary, and is emitted as **NEEDS-SPLIT** rather than as a rule (at or above 0.85 with at least 8 statements).
+
+| id | Rule | Statements | Distinct | Stores | Agree? | Target home |
+|---|---|---|---|---|---|---|
+| `R-a900b4` | Durable memory belongs in Neotoma, not harness files | 52 | 49 | 6 | **NEEDS-SPLIT** | agent_policy |
+| `R-fba8d4` | Irreversible or outward-facing actions need per-action operator approval | 36 | 35 | 7 | **NEEDS-SPLIT** | docs/foundation/ |
+| `R-29fd38` | Operator-specific config comes from entities, not code | 28 | 7 | 3 | agree | agent_policy |
+| `R-2fd7bd` | Use the gws CLI for Google Workspace, not the MCP | 26 | 22 | 8 | DIVERGE | agent_policy |
+| `R-3be8e6` | Some actions stay the operator's absolutely; hand them back with the command | 26 | 22 | 8 | DIVERGE | docs/foundation/ |
+| `R-78a082` | Echo the operator's input, cleaned up, each reply | 24 | 22 | 6 | **NEEDS-SPLIT** | task_policy |
+| `R-f3271c` | Both repos are public; scrub PII before committing | 19 | 17 | 5 | **NEEDS-SPLIT** | agent_policy |
+| `R-fcd5a0` | Dispatch work to the owning agent; file it as you recommend it | 18 | 17 | 7 | **NEEDS-SPLIT** | agent_policy |
+| `R-228b8c` | Absent or malformed safety values take the restrictive branch | 16 | 13 | 7 | DIVERGE | docs/foundation/ |
+| `R-f5e0b9` | Always use the Neotoma prod instance, never dev | 15 | 14 | 6 | **NEEDS-SPLIT** | agent_policy |
+| `R-ae9bca` | Durable work goes to a dispatched agent, never a harness task chip | 14 | 12 | 4 | **NEEDS-SPLIT** | agent_policy |
+| `R-606489` | Minimize personal data at capture; purpose-bind it | 14 | 13 | 8 | **NEEDS-SPLIT** | docs/foundation/ |
+| `R-36cf5c` | Never mutate a sibling repo's shared main clone; add a worktree first | 14 | 11 | 5 | agree | agent_policy |
+| `R-ebd526` | Persist every conversation turn to Neotoma | 13 | 11 | 6 | agree | agent_policy |
+| `R-f0b574` | Re-read and merge a plan field before correcting it | 12 | 9 | 4 | agree | agent_policy |
+| `R-680852` | Read a write back; a success code is not a landed write | 12 | 10 | 7 | DIVERGE | agent_policy |
+| `R-f08cfb` | Classify an action's blast radius before acting on it | 11 | 10 | 5 | **NEEDS-SPLIT** | docs/foundation/ |
+| `R-4b8ce8` | Never use git stash; WIP-commit instead | 10 | 9 | 5 | **NEEDS-SPLIT** | agent_policy |
+| `R-fab4cd` | Pose open decisions through the harness questions tool, not inline prose | 9 | 9 | 3 | **NEEDS-SPLIT** | task_policy |
+| `R-f31026` | Gmail sends and draft-updates need per-message approval | 9 | 9 | 6 | **NEEDS-SPLIT** | agent_policy |
+| `R-ce6455` | Daemons run dedicated checkouts that must be fresh | 8 | 6 | 4 | agree | agent_policy |
+| `R-acf4ff` | Never invent facts about the operator's life, tools, or past | 8 | 8 | 3 | **NEEDS-SPLIT** | task_policy |
+| `R-d99bae` | A renamed agent leaves no stale reference | 8 | 5 | 3 | agree | agent_policy |
+| `R-12d4a8` | Restart affected daemons after a merge, then verify | 8 | 7 | 6 | **NEEDS-SPLIT** | CLAUDE.md |
+| `R-765e54` | Extend the mechanism that exists; do not build a parallel one | 8 | 6 | 5 | agree | agent_policy |
+| `R-c14682` | Never hardcode secrets or credentials | 7 | 6 | 4 | agree | agent_policy |
+| `R-9993c8` | One worktree, one agent; never point two at the same tree | 7 | 6 | 4 | DIVERGE | agent_policy |
+| `R-71cf59` | Commit and PR titles follow the live title convention | 6 | 5 | 3 | agree | agent_policy |
+| `R-bdb72b` | Never mark work done citing an unverifiable artifact | 6 | 5 | 4 | agree | agent_policy |
+| `R-fa2cbe` | Never assert what the operator feels, thinks, or said without evidence | 6 | 6 | 2 | DIVERGE | task_policy |
+| `R-86601c` | Recurring obligations roll their date; never complete | 6 | 5 | 6 | agree | task_policy |
+| `R-0cc9d7` | Give status updates unprompted, per workstream | 6 | 5 | 4 | DIVERGE | task_policy |
+| `R-580da5` | Tests follow this repo's naming and placement convention | 6 | 6 | 3 | agree | agent_policy |
+| `R-258f23` | A test that cannot fail on its subject is decoration | 6 | 4 | 6 | agree | agent_policy |
+| `R-f398b5` | Act on your recommendation; ask only at a real fork | 5 | 4 | 3 | agree | task_policy |
+| `R-713e5d` | Store the full body, not a path or a summary standing in for it | 5 | 5 | 2 | DIVERGE | agent_policy |
+| `R-8d5e55` | Verify against the live system of record before asserting | 5 | 4 | 4 | agree | agent_policy |
+| `R-eecfc1` | End every turn with the decisions that need the operator | 4 | 3 | 4 | agree | task_policy |
+| `R-d26566` | Do not drift into an agent's work one step at a time | 4 | 3 | 3 | agree | agent_policy |
+| `R-1bf77f` | Recover a stash by apply-with-SHA, never pop a shared stack | 4 | 4 | 1 | DIVERGE | agent_policy |
+| `R-ffe65b` | Never fabricate a finding or a conclusion to appear useful | 4 | 4 | 1 | agree | task_policy |
+| `R-4038a8` | Never invent a quote; every quote traces to its source | 4 | 4 | 1 | agree | task_policy |
+| `R-57ff60` | Do not merge while a live blocking review stands | 4 | 4 | 4 | agree | docs/foundation/ |
+| `R-18616b` | Validate the instrument before believing a measurement; a surprising zero is the tool | 4 | 2 | 4 | agree | agent_policy |
+| `R-fb4dbc` | Agent prompts are public and carry no operator data | 3 | 2 | 3 | agree | agent_policy |
+| `R-03c4c7` | Never invent praise or a judgement of someone else's work | 3 | 3 | 2 | agree | task_policy |
+| `R-c6d782` | Merge by squash | 3 | 3 | 1 | DIVERGE | agent_policy |
+| `R-4706ff` | Never predict or assert a third party's reaction | 2 | 2 | 2 | agree | task_policy |
+| `R-d2c4bb` | Never bypass the pre-commit hook with --no-verify | 2 | 1 | 2 | agree | agent_policy |
+| `R-b5f10c` | Pass PR and comment bodies by file, never inline | 1 | 1 | 1 | agree | agent_policy |
+| `R-e0f7e8` | Store artifacts as the work happens, not at session end | 1 | 1 | 1 | agree | agent_policy |
+| `R-765925` | Verify the GitHub identity before any write | 1 | 1 | 1 | agree | agent_policy |
 
 ### Where each rule is stated
 
-#### `R-b07f8a` — One worktree per agent; never mutate a shared clone
-
-Target home: **agent_policy** · 53 statements · **DIVERGE**
-
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code hooks (ateles) | `.claude/hooks/git_stash_guard.py` | docstring | session never touched. Worktrees isolate files; they do NOT isolate the stash. |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/MEMORY.md` | L35 | - dispatch, don't drift inline(feedbackdispatchdontdriftintoinlinework.md) · one worktree, one… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_branch_off_fresh_main.md` | L10 | When starting a NEW independent change (a hook, a fix, a small feature) in a shared worktree, ALWAYS branch off… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_commit_early_never_work_in_tmp.md` | L10 | Create worktrees under ~/repos/<repo>-wt-<slug>, never /tmp or /private/tmp. Commit the moment a change typechecks —… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_dispatch_agents_never_task_chips.md` | L17 | How to apply: when a session identifies durable work, launch it with the Agent tool AND create the paired Neotoma task… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_one_worktree_one_agent.md` | L11 | Dispatch at most one agent per worktree at a time. If follow-up work is needed on a branch an agent is already in,… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_one_worktree_one_agent.md` | L15 | How to apply: before dispatching into an existing worktree, check whether an agent is already live in it. If the new… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/project_daemon_deployment_fragility.md` | L16 | How to apply: When a daemon "isn't running" or surfaces nothing: (a) check what branch the shared checkout is on and… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/project_markmhendrickson_website_ops.md` | L14 | generatecache.py without a Neotoma export used to gut the caches (78 posts → 2, links/timeline → 0). Guarded since… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/reference_bottega8_deploys_from_feature_branch.md` | L28 | No persistent deploy directory — /private/tmp/ worktrees get wiped; create one on demand. |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/reference_bottega8_deploys_from_feature_branch.md` | L31 | Canonical source is now Neotoma, not this memory. The full binding (app, domain, region, branch, build args, deploy… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/reference_sibling_repo_worktree_guard.md` | L3 | description: "A PreToolUse hook in ateles (.claude/hooks/siblingrepoworktreeguard.py) now HARD-BLOCKS mutating a… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-neotoma/memory/neotoma_prod_served_from_worktree.md` | L3 | description: "Prod neotoma.markmhendrickson.com is served from a dedicated main-pinned worktree, not the dev checkout… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-neotoma/memory/neotoma_prod_served_from_worktree.md` | L16 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-neotoma/memory/neotoma_worktree_test_gotchas.md` | L12 | 1. Pre-existing contract-test failures are environmental, not regressions. Worktrees do not have a compiled dist/… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-neotoma/memory/neotoma_worktree_test_gotchas.md` | L14 | Do NOT use git stash to A/B-confirm in a .claude/worktrees/<name> worktree. These worktrees share the main repo's… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-neotoma/memory/pr_resume_check_merge_state.md` | L17 | - Commit and push early/often so an ephemeral-worktree wipe never loses work. |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-neotoma/memory/project_release_automation.md` | L16 | How to apply: Don't build or suggest fully-autonomous Neotoma publishing. The publish step uses an npm granular… |
-| Codex | `~/.codex/AGENTS.md` | L42 | NEVER git stash in any form — the stash stack is shared across worktrees and other sessions pop it. Use a WIP commit.… |
-| Codex | `~/.codex/AGENTS.md` | L43 | One worktree, one agent. Never point two agents at the same worktree: the second's uncommitted work reads to the first… |
-| Codex | `~/.codex/AGENTS.md` | L44 | Verify before asserting. Check the live system of record, not a cached copy or a local checkout — a stale worktree… |
-| Codex | `~/.codex/AGENTS.md` | L72 | Restart daemons as needed, without asking. Standing authorization, 2026-09-11. A merged fix reaches nothing until the… |
-| Codex | `~/.codex/AGENTS.md` | L112 | Strip PII before filing issues — scrub usernames, worktree names, and platform names; use visibility: private for… |
-| Codex | `~/.codex/AGENTS.md` | L118 | Daemons run dedicated checkouts, never the shared main clones where |
-| Codex | `~/.codex/AGENTS.md` | L126 | Never write into a sibling repo's shared main clone. Create a dedicated |
-| Skills (ateles repo) | `.claude/skills/learn/SKILL.md` | L46 | Relevant local MCP source repo when the issue is MCP-instruction behavior (for example Neotoma instruction text in… |
-| Skills (ateles repo) | `.claude/skills/report-error/SKILL.md` | L28 | - Must be a sibling repository (shares same parent directory) |
-| Skills (ateles repo) | `.claude/skills/report/SKILL.md` | L27 | - Must be a sibling repository (shares same parent directory) |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L73 | worktree, a project instruction file naming a default plan. Treat these as candidates, never |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L275 | Never write to a shared main clone (the checkout sessions share, e.g. ~/repos/<repo>) or to a |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L279 | Never use git stash, in any form. The stash stack is shared across worktrees; another session |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L400 | - MUST NOT write to a shared main clone or a daemon's deployment checkout; MUST use a linked worktree. |
-| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L112 | Dependent on live session state — uncommitted edits, a running process, a worktree, a finding not yet written down… |
-| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L266 | - MUST report on the whole LINEAGE, every run — every .jsonl in the chain, across every worktree it touched, not the… |
-| Skills (user root) | `~/.claude/skills/email-mechanics/SKILL.md` | L425 | and do not survive session or worktree resets. Recreate from the verified draft text or |
-| Skills (user root) | `~/.claude/skills/review-sessions/SKILL.md` | L32 | title is a curated topic label. Operator-set titles like bottega8: neotoma: edges / company data classify far better… |
-| Skills (user root) | `~/.claude/skills/review-sessions/SKILL.md` | L34 | cwd/branch map a session to its worktree without inferring from the transcript path. |
-| Skills (user root) | `~/.claude/skills/review-sessions/SKILL.md` | L85 | Worktree names lie. A worktree or project dir named for topic X may contain none of it (branched for one purpose, used… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L52 | scripts/verifyclaudemdmerge.py — compares CLAUDE.md rule-by-rule between revisions. It keys on the bolded lead of each… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L79 | One worktree, one agent. Never point two agents at the same worktree: the second's uncommitted work reads to the first… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L80 | NEVER git stash in any form — the stash stack is shared across worktrees and other sessions pop it. Use a WIP commit.… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L82 | Verify before asserting. Check the live system of record, not a cached copy or a local checkout — a stale worktree… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L106 | Restart daemons as needed, without asking. Standing authorization, 2026-09-11, replacing the earlier rule that held… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L133 | siblingrepoworktreeguard.py (PreToolUse: Edit|Write|NotebookEdit|Bash) — a distinct concern from the session-integrity… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L153 | Daemons run dedicated checkouts, never the shared main clone where interactive sessions work: |
-| ateles/CLAUDE.md | `CLAUDE.md` | L185 | Strip PII before filing issues — scrub usernames, worktree names, platform names; use visibility: private for… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L284 | Post-checkout hook in worktrees — added  -d ".git"  guard before touch .git/hooks/.hooks-installed in… |
-| markmhendrickson/foundation repo | `~/repos/foundation/.cursor/commands/final_review.md` | L73 | If using worktrees (from config), clean up worktree: |
-| markmhendrickson/foundation repo | `~/repos/foundation/agent_instructions/README.md` | L157 | When to Use: Always enable if using git worktrees. Customize envfilepriority based on your env file naming. |
-| markmhendrickson/foundation repo | `~/repos/foundation/agent_instructions/cursor_commands/final_review.md` | L73 | If using worktrees (from config), clean up worktree: |
-| markmhendrickson/foundation repo | `~/repos/foundation/development/workflow.md` | L100 | Each feature should be developed in its own worktree for isolation and parallel development: |
-| markmhendrickson/foundation repo | `~/repos/foundation/development/workflow.md` | L135 | Clean Context Switching: Each worktree is independent |
-| markmhendrickson/foundation repo | `~/repos/foundation/development/workflow.md` | L481 | 3. Use worktrees for isolation: When configured, each feature should have its own worktree |
-
 #### `R-a900b4` — Durable memory belongs in Neotoma, not harness files
 
-Target home: **agent_policy** · 46 statements · **DIVERGE**
+Target home: **agent_policy** · 52 statements, 49 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -249,62 +249,16 @@ Target home: **agent_policy** · 46 statements · **DIVERGE**
 | standing_rule entities | `ent_2aaad867887e5b979ed1d2e1` | rule_text | Store user memory in Neotoma by default. Save contacts, people, birthdays, events, preferences, decisions, and other… |
 | standing_rule entities | `ent_7115d236ed0da6fa27d54898` | rule | Durable capture goes beyond dual agentmessage rows. Neotoma should hold navigable transcript + distilled analysis.… |
 | standing_rule entities | `ent_8e7f8acf32381b19e4759075` | instruction | store-neotoma skill must include (unless explicitly excluded in Phase 0 revision): (1) Transcript digest — ordered… |
+| task_policy entities | `ent_2ad0677fe23c0c1878ae43e8` | rule | Any Neotoma capability exposed through more than one surface MUST ship with a test on EACH exposed surface asserting… |
+| task_policy entities | `ent_4a1c0dd7a06727279c8f1edc` | rule | Store operator preferences, feedback, and behavior rules as Neotoma entities owned by the appropriate Ateles agent… |
+| task_policy entities | `ent_b23b09f85e370f87328cabea` | rule | Every session stores every turn as a user + assistant conversationmessage pair, PARTOF the conversation, with REFERSTO… |
+| task_policy entities | `ent_b23b09f85e370f87328cabea` | raw_fragments.policy_text | Every session stores every turn as a user + assistant conversationmessage pair, PARTOF the conversation, with REFERSTO… |
+| task_policy entities | `ent_cc6d596c73d5ebedd790b27f` | rule |  WhatsApp chats shared by operator are always captured to Neotoma Whenever the operator shares a WhatsApp chat in any… |
+| task_policy entities | `ent_cc6d596c73d5ebedd790b27f` | raw_fragments.policy | Whenever the operator shares a WhatsApp chat in any form — screenshot, pasted excerpt, export, or just naming a… |
 
-#### `R-6fde97` — Never invent facts, quotes, emotion, or reactions
+#### `R-fba8d4` — Irreversible or outward-facing actions need per-action operator approval
 
-Target home: **task_policy** · 45 statements · **DIVERGE**
-
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/MEMORY.md` | L74 | - Never invent: facts(feedbacknoinventedfacts.md); emotion(feedbacknofabricatedoperatoremotion.md); internal… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_never_attribute_unverified_operator_speech.md` | L12 | Mark caught three of these in one letter to counsel: a fabricated admission he'd never |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_no_ai_generic_patterns.md` | L10 | When drafting any human-facing written content (social posts, replies, outreach, copy), strip AI-generic patterns —… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_no_fabricated_operator_emotion.md` | L12 | Why: Operator correction 2026-07-01, on a Sturnus-drafted reply to Jeroen that opened "Your verification made my day,… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_no_fabricated_operator_emotion.md` | L14 | Also corrected 2026-07-09, on a reply to Nick's test-report: "Your last point is the one that stuck with me: …" — Mark… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_no_fabricated_operator_internal_state.md` | L15 | Why: This is the self-directed twin of feedbacknoinventedpraiseoftheirwork and feedbacknofabricatedoperatoremotion.… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_no_invented_facts.md` | L10 | Never invent or assume facts — about the operator's life, tools, habits, or past events — to make copy read warmer or… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/project_relationship_projection_system.md` | L16 | Q&A is a first-class hub section (locked 2026-06-17). A new qaentry type (fields: question, answer, status:… |
-| Codex | `~/.codex/AGENTS.md` | L57 | Summarize what the operator said at the top of each reply, cleaned up. Most operator input arrives as live voice… |
-| Skills (ateles repo) | `.claude/skills/analyze-meeting/SKILL.md` | L83 | Read the full transcript. Extract the following with verbatim quotes from the transcript where possible (never invent… |
-| Skills (ateles repo) | `.claude/skills/analyze-meeting/SKILL.md` | L170 | Tone matches the meeting tone: warm and direct, no corporate filler. Never invent commitments. Frame tentative items… |
-| Skills (ateles repo) | `.claude/skills/analyze-meeting/SKILL.md` | L389 | No invented commitments. Every action item, decision, and quote MUST trace to specific transcript text. Paraphrase is… |
-| Skills (ateles repo) | `.claude/skills/analyze-neotoma-feedback/SKILL.md` | L111 | Verbatim source : exact quote from the feedback (required) — never invent or smooth out. |
-| Skills (ateles repo) | `.claude/skills/analyze-neotoma-feedback/SKILL.md` | L371 | No invented quotes — in the report or in stored entity fields. Every quote block in the markdown report AND every… |
-| Skills (ateles repo) | `.claude/skills/analyze-neotoma-feedback/SKILL.md` | L410 | Never invent quotes. Every quote carries the source entityid. If the snapshot only has a paraphrase, label it… |
-| Skills (ateles repo) | `.claude/skills/analyze/SKILL.md` | L146 | No invented findings. Every analysisfinding traces to specific evidence — a verbatim quote from the source, an… |
-| Skills (ateles repo) | `.claude/skills/aquila/SKILL.md` | L7 | description: "Cofounder & strategic adversary of the Ateles swarm. Dual-mode: a scheduled monthly cofounder report (T3… |
-| Skills (ateles repo) | `.claude/skills/aquila/SKILL.md` | L79 | Speculation is labeled. When you reason past the evidence, mark it. A grounded "I don't know, and here is why that… |
-| Skills (ateles repo) | `.claude/skills/corvus/SKILL.md` | L25 | Divergence duty : if a requested piece cannot be written without unverifiable claims or contradicting the product's… |
-| Skills (ateles repo) | `.claude/skills/corvus/SKILL.md` | L74 | 1. No unverifiable superlatives or claimed judgments. Never write "the clearest/best/sharpest writeup I've seen," "one… |
-| Skills (ateles repo) | `.claude/skills/cotinga/SKILL.md` | L74 | 1. Participant research — For each attendee: role, background, recent public activity, prior interactions (from Step… |
-| Skills (ateles repo) | `.claude/skills/email-triage-auto/SKILL.md` | L75 | - Fabricate a reply for a decision that's the operator's — flag it, don't draft it. |
-| Skills (ateles repo) | `.claude/skills/falco/SKILL.md` | L80 | - Do not fabricate a finding to appear useful. An honest, specific "I enumerated these sinks and these encodings; all… |
-| Skills (ateles repo) | `.claude/skills/hirundo/SKILL.md` | L90 | When you cannot get the full body: proceed only on what you verifiably read; mark every claim that depends on unread… |
-| Skills (ateles repo) | `.claude/skills/hirundo/SKILL.md` | L121 | No invented findings — every finding traces to a verbatim quote, observed code/doc pattern, or measured metric. |
-| Skills (ateles repo) | `.claude/skills/hirundo/SKILL.md` | L167 | Never analyze unread content — resolve via the source-access ladder; mark unread-dependent claims confidence: low;… |
-| Skills (ateles repo) | `.claude/skills/neotoma-learn/SKILL.md` | L86 | - Retrieved context grounding: when retrieval returned relevant results, the assistant's answer should have used them… |
-| Skills (ateles repo) | `.claude/skills/nucifraga/SKILL.md` | L29 | Never fabricate operator emotion. Do not assert what the operator feels, in digests, drafts, or anywhere else, without… |
-| Skills (ateles repo) | `.claude/skills/nucifraga/SKILL.md` | L39 | Missing-entity fallback: if a rung is missing — no fragment store provisioned, no locale profile, no voice guide —… |
-| Skills (ateles repo) | `.claude/skills/picus/SKILL.md` | L61 | - Ground every figure in a Neotoma entity or a preparer document; never invent amounts. Cite source per line item. |
-| Skills (ateles repo) | `.claude/skills/ploceus/SKILL.md` | L33 | Missing-entity fallback: if any rung is missing (no roster, no ledger row for the anchor, unresolvable strategy… |
-| Skills (ateles repo) | `.claude/skills/record_meeting/SKILL.md` | L115 | When reporting stop in chat: Always include (1) the audio WAV path, (2) the Neotoma transcription entity ID, (3) the… |
-| Skills (ateles repo) | `.claude/skills/stream-transcript/SKILL.md` | L448 | Never assert a transcript exists without verifying, and never fabricate an |
-| Skills (ateles repo) | `.claude/skills/vanellus/SKILL.md` | L44 | Identity. The review is attributed to you (the vanellus reviewer identity), not to a generic github-actionsbot. Until… |
-| Skills (user root) | `~/.claude/skills/define-category/SKILL.md` | L200 | and put the seven fields in the body. Never invent fields on a registered |
-| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L215 | 2. Install and configure everything that does not require a human — add the MCP server entry, write the config,… |
-| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L286 | - MUST distinguish items the agent can move from items requiring an operator decision, human sign-off, or an external… |
-| Skills (user root) | `~/.claude/skills/email-triage-auto/SKILL.md` | L177 | Fabricate a reply for a decision that's the operator's — flag it, don't draft it. |
-| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L42 | Fallback instructions — what the agent does when blocked or failing: how to degrade safely, what to surface, never… |
-| Skills (user root) | `~/.claude/skills/report-tasks/SKILL.md` | L66 | Missing fields are tolerated (they render blank), but do not fabricate values — a blank readiness cell is honest; an… |
-| Skills (user root) | `~/.claude/skills/review-sessions/SKILL.md` | L170 | Evidence locators must be RESOLVABLE : PR/issue number with repo, Neotoma entity id, Gmail message or draft id, file… |
-| Skills (user root) | `~/.claude/skills/where/SKILL.md` | L325 | that the link is local-only. Never invent a hostname, and never write a client-identifying host |
-| ateles/CLAUDE.md | `CLAUDE.md` | L72 | Summarize what the operator said at the top of each reply, cleaned up. Most operator input arrives as live voice… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L204 | A test that cannot fail on the thing it watches is decoration. Enforcement: Nothing, not mechanizable (belongs in… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L208 | Extend the mechanism that already generalizes; do not build a parallel one. Enforcement: Manual until… |
-
-#### `R-fba8d4` — Irreversible or outward-facing actions need approval
-
-Target home: **docs/foundation/** · 36 statements · **DIVERGE**
+Target home: **docs/foundation/** · 36 statements, 35 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -347,7 +301,7 @@ Target home: **docs/foundation/** · 36 statements · **DIVERGE**
 
 #### `R-29fd38` — Operator-specific config comes from entities, not code
 
-Target home: **agent_policy** · 28 statements · agree
+Target home: **agent_policy** · 28 statements, 7 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -382,7 +336,7 @@ Target home: **agent_policy** · 28 statements · agree
 
 #### `R-2fd7bd` — Use the gws CLI for Google Workspace, not the MCP
 
-Target home: **agent_policy** · 25 statements · **DIVERGE**
+Target home: **agent_policy** · 26 statements, 22 distinct · **DIVERGE**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -411,10 +365,44 @@ Target home: **agent_policy** · 25 statements · **DIVERGE**
 | ateles/CLAUDE.md | `CLAUDE.md` | L184 | Gmail : always use gws gmail ... commands, not the Gmail MCP server. |
 | standing_rule entities | `ent_ac9af6ed6097faaa22f84020` | instruction | Always use the gws CLI for Gmail operations (reading emails, downloading attachments, etc.), not the Gmail MCP server… |
 | standing_rule entities | `ent_ac9af6ed6097faaa22f84020` | summary | Always use the gws CLI for Gmail operations, not the Gmail MCP server. |
+| task_policy entities | `ent_1681816e1e6536424eef480f` | rule | When replacing/updating a draft by creating a new one, immediately discard the old version. Never leave two drafts in… |
+
+#### `R-3be8e6` — Some actions stay the operator's absolutely; hand them back with the command
+
+Target home: **docs/foundation/** · 26 statements, 22 distinct · **DIVERGE**
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Claude Code hooks (ateles) | `.claude/hooks/decision_shape_gate.py` | docstring | 3. AN OPERATOR-ONLY ACTION WITH NO COMMAND. The turn says the operator must |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_give_exact_command_for_operator_only_ops.md` | L3 | description: "When an action is operator-only, always hand over the exact runnable command — never just describe what… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_monitor_after_handing_over_operator_command.md` | L3 | description: "After giving an operator-only command, start a background watcher for its effect and continue… |
+| Codex | `~/.codex/AGENTS.md` | L46 | Merge stays gated; product releases, credentials, sends, and grants keep their existing gates. Do not merge where a… |
+| Codex | `~/.codex/AGENTS.md` | L62 | Escalate choices by material operator outcome. Ask the operator only when plausible options would materially change… |
+| Codex | `~/.codex/AGENTS.md` | L64 | A decision handed to the operator carries three things and nothing else : the choice stated as options with what each… |
+| Codex | `~/.codex/AGENTS.md` | L65 | For an operator-only action, give the exact command and what to verify after. Operator-only means the operator runs… |
+| Codex | `~/.codex/AGENTS.md` | L74 | Re-request review yourself whenever monitoring shows it is warranted — do not wait to be asked. Standing… |
+| Codex | `~/.codex/AGENTS.md` | L75 | Comment /confirm-gates-clear yourself when a PR is blocked only by swarm MECHANICS, never when it is blocked by… |
+| Skills (ateles repo) | `.claude/skills/columba/SKILL.md` | L16 | You are Columba, the constitution keeper in the Ateles swarm. Your genus is the dove (Columba livia) — grounding,… |
+| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L284 | Credential values are operator-only. Never read, write, echo, or enter one. Prepare the step |
+| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L35 | No consent gate — nothing in the task's execution path touches the OPERATOR-ONLY category below. Check the full path,… |
+| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L78 | The consent gate is upstream of all of this and unchanged: an OPERATOR-ONLY task never reaches the assignment gate,… |
+| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L92 | When in doubt between grades, choose the more conservative one — NEEDS-CONTEXT over EXECUTABLE-NOW, OPERATOR-ONLY over… |
+| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L93 | Never let context completeness argue past a consent gate. The OPERATOR-ONLY test runs first and is absolute. |
+| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L102 | - MUST run the consent-gate (OPERATOR-ONLY) test before the completeness test; consent-gated tasks are never… |
+| Skills (user root) | `~/.claude/skills/rendered-pages/SKILL.md` | L445 | Internal recaps — the operator-only page the meeting pipeline always builds — go on the |
+| agent_policy entities | `ent_5456a8a2224d8211ef33749c` | body | A session that hands work to the Ateles swarm stays responsible for it until it MERGES and RELEASES. Do not treat… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L104 | A decision handed to the operator carries three things and nothing else : the choice stated as options with what each… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L105 | For an operator-only action, give the exact command and what to verify after. Operator-only means the operator runs… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L106 | Restart daemons as needed, without asking. Standing authorization, 2026-09-11, replacing the earlier rule that held… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L107 | Merge stays gated, and two classes stay Mark's absolutely. Do not merge where a live blocking review stands — live… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L109 | Re-request review yourself whenever monitoring shows it is warranted — do not wait to be asked. Standing… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L124 | Comment /confirm-gates-clear yourself when a PR is blocked only by swarm MECHANICS, never when it is blocked by… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L129 | decisionshapegate.py (Stop) — checks the closing section of a finished turn against three of the standing session… |
+| standing_rule entities | `ent_d22565e6723bd2a38385ac81` | instruction | Ask the operator only when plausible options would materially change their goals, risk, cost, external commitments,… |
 
 #### `R-78a082` — Echo the operator's input, cleaned up, each reply
 
-Target home: **task_policy** · 24 statements · **DIVERGE**
+Target home: **task_policy** · 24 statements, 22 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -445,7 +433,7 @@ Target home: **task_policy** · 24 statements · **DIVERGE**
 
 #### `R-f3271c` — Both repos are public; scrub PII before committing
 
-Target home: **agent_policy** · 19 statements · agree
+Target home: **agent_policy** · 19 statements, 17 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -469,20 +457,18 @@ Target home: **agent_policy** · 19 statements · agree
 | ateles/CLAUDE.md | `CLAUDE.md` | L174 | operator-specific, value withheld |
 | ateles/CLAUDE.md | `CLAUDE.md` | L185 | Strip PII before filing issues — scrub usernames, worktree names, platform names; use visibility: private for… |
 
-#### `R-fcd5a0` — Dispatch work to the owning agent; do not work inline
+#### `R-fcd5a0` — Dispatch work to the owning agent; file it as you recommend it
 
-Target home: **agent_policy** · 18 statements · **DIVERGE**
+Target home: **agent_policy** · 18 statements, 17 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
 | Claude Code hooks (ateles) | `.claude/hooks/reinject_working_method.py` | docstring | say" had to be restated twice and "dispatch, don't work inline" four times, |
 | Claude Code hooks (ateles) | `.claude/hooks/reinject_working_method.py` | docstring | 1. DISPATCH, DON'T WORK INLINE. Create a Neotoma task entity and let an \ |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/MEMORY.md` | L35 | - dispatch, don't drift inline(feedbackdispatchdontdriftintoinlinework.md) · one worktree, one… |
 | Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_agents_stall_on_monitors_instead_of_finishing.md` | L26 | not. And: you are the worker — do not delegate. |
 | Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_monitor_actively_dont_wait_to_be_asked.md` | L13 | Why: offering to monitor puts the tracking burden on the operator, which is exactly backwards: they delegated the work… |
 | Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_worker_agents_delegate_instead_of_implementing.md` | L12 | An explicit mid-flight instruction ("implement it YOURSELF, do not delegate") |
 | Codex | `~/.codex/AGENTS.md` | L55 | Dispatch, don't work inline. Create a Neotoma task entity and let an agent claim it; use a subagent only where no… |
-| Codex | `~/.codex/AGENTS.md` | L56 | Dispatch, don't drift inline. Work that belongs to an agent goes to an agent. The failure is drift — one small step at… |
 | Skills (ateles repo) | `.claude/skills/analyze-neotoma-feedback/SKILL.md` | L37 | URL (starts with http:// or https://) — delegate to user-web-scraper MCP as in the analyze skill. Handles ChatGPT… |
 | Skills (ateles repo) | `.claude/skills/lanius/SKILL.md` | L43 | Gate state must be grounded in an artifact. Report a gate as signedoff/waived only when the issue entity's live… |
 | Skills (ateles repo) | `.claude/skills/ploceus/SKILL.md` | L76 | You are the sole appender of raw evidence-ledger rows: hours, gates, captures, and customer outcomes recorded… |
@@ -490,13 +476,15 @@ Target home: **agent_policy** · 18 statements · **DIVERGE**
 | Skills (user root) | `~/.claude/skills/end/SKILL.md` | L117 | Skill update or new skill — when the workflow is multi-step and reusable (creation delegated to /learn / skill-creator). |
 | Skills (user root) | `~/.claude/skills/end/SKILL.md` | L215 | store-neotoma — full chat-transcript persistence. /end delegates to it when the conversation is not yet fully… |
 | ateles/CLAUDE.md | `CLAUDE.md` | L63 | "Dispatch, don't work inline" governs WHAT to dispatch into: a Neotoma task |
-| ateles/CLAUDE.md | `CLAUDE.md` | L64 | entity, never a harness chip. "Dispatch, don't drift inline" governs the |
 | ateles/CLAUDE.md | `CLAUDE.md` | L70 | Dispatch, don't work inline. Create a Neotoma task entity and let an agent claim it; use a subagent only where no… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L71 | Dispatch, don't drift inline. Work that belongs to an agent goes to an agent. The failure is drift — one small step at… |
+| task_policy entities | `ent_662b57b0a32d4a854c2183e9` | rule | Default to dispatch, not inline execution. When a task belongs to a swarm agent by role, route it to that agent… |
+| task_policy entities | `ent_9a556f58c444068b1409e60d` | rule | A task is dispatch-eligible only when it clears the context-readiness bar: (1) OUTCOME — the intended result is… |
+| task_policy entities | `ent_af149de1fa4666805a0bcdc8` | rule | For in-session work that calls for a swarm agent's role, default to the HYBRID pattern: spawn a Claude Agent-tool… |
+| task_policy entities | `ent_ea7255149ebf140f5b8b501a` | rule | Whenever an email is pulled from the mailbox — any pull, whether a single message, an inbox sweep, a thread fetch, or… |
 
 #### `R-228b8c` — Absent or malformed safety values take the restrictive branch
 
-Target home: **docs/foundation/** · 16 statements · **DIVERGE**
+Target home: **docs/foundation/** · 16 statements, 13 distinct · **DIVERGE**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -519,7 +507,7 @@ Target home: **docs/foundation/** · 16 statements · **DIVERGE**
 
 #### `R-f5e0b9` — Always use the Neotoma prod instance, never dev
 
-Target home: **agent_policy** · 15 statements · agree
+Target home: **agent_policy** · 15 statements, 14 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -539,30 +527,30 @@ Target home: **agent_policy** · 15 statements · agree
 | ateles/CLAUDE.md | `CLAUDE.md` | L182 | Always use Neotoma prod (mcpmcpsrvneotoma), never the dev instance. |
 | standing_rule entities | `ent_0bb931a69f16cbbe8d8ef851` | summary | Always use Neotoma prod (mcpmcpsrvneotoma), never the dev instance by default. |
 
-#### `R-4b8ce8` — Never use git stash; WIP-commit instead
+#### `R-ae9bca` — Durable work goes to a dispatched agent, never a harness task chip
 
-Target home: **agent_policy** · 14 statements · **DIVERGE**
+Target home: **agent_policy** · 14 statements, 12 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code hooks (ateles) | `.claude/hooks/test_git_stash_guard.py` | docstring | S = "st" + "ash"  avoid a literal git stash token in this file's own text |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/MEMORY.md` | L32 | - File the issue, await its spec, then PR(feedbackfileissueandawaitspecbeforepr.md) · Stash recovery: apply by SHA,… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_dispatch_agents_never_task_chips.md` | L17 | How to apply: when a session identifies durable work, launch it with the Agent tool AND create the paired Neotoma task… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_no_staging_write_on_replace_fields.md` | L26 | git stash lesson: an instruction that names a forbidden action is weaker |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/reference_stash_recovery_apply_not_pop.md` | L3 | description: When an agent breaks the no-stash rule, recover with git stash apply <sha> then drop that entry by tag —… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/reference_stash_recovery_apply_not_pop.md` | L21 | 1. git stash push -u -m "<unique-tag>" — never bare git stash. |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/reference_stash_recovery_apply_not_pop.md` | L26 | 5. Verify the stack afterwards: git stash list should still show every |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-neotoma/memory/neotoma_worktree_test_gotchas.md` | L14 | Do NOT use git stash to A/B-confirm in a .claude/worktrees/<name> worktree. These worktrees share the main repo's… |
-| Codex | `~/.codex/AGENTS.md` | L29 | git stash is not blocked here. Never run it in any form. |
-| Codex | `~/.codex/AGENTS.md` | L42 | NEVER git stash in any form — the stash stack is shared across worktrees and other sessions pop it. Use a WIP commit.… |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L279 | Never use git stash, in any form. The stash stack is shared across worktrees; another session |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L401 | - MUST NOT use git stash, --delete-branch on merge, or merge past a blocking verdict. |
-| ateles/CLAUDE.md | `CLAUDE.md` | L52 | scripts/verifyclaudemdmerge.py — compares CLAUDE.md rule-by-rule between revisions. It keys on the bolded lead of each… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L80 | NEVER git stash in any form — the stash stack is shared across worktrees and other sessions pop it. Use a WIP commit.… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/MEMORY.md` | L36 | - Dispatch agents, never task chips(feedbackdispatchagentsnevertaskchips.md) |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_dispatch_agents_never_task_chips.md` | L3 | description: "Durable work goes to a dispatched agent, never a harness task chip — a chip makes Mark the dispatcher" |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_dispatch_agents_never_task_chips.md` | L11 | Dispatch durable work to an agent (the Agent tool, or a Neotoma task an agent claims). Never park it in a harness task… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_worker_agents_delegate_instead_of_implementing.md` | L30 | Prefer a task CHIP over a subagent for implementation work: a chip starts a real |
+| Codex | `~/.codex/AGENTS.md` | L55 | Dispatch, don't work inline. Create a Neotoma task entity and let an agent claim it; use a subagent only where no… |
+| Codex | `~/.codex/AGENTS.md` | L56 | Dispatch, don't drift inline. Work that belongs to an agent goes to an agent. The failure is drift — one small step at… |
+| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L3 | description: Mid-session status report. Summarizes what's been achieved so far this session, what work remains, and… |
+| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L70 | Then decide which recommendations this session should keep and which it should hand off. Ranking says what matters… |
+| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L113 | Operator-gated — a decision, sign-off, or answer to a blocking question. These belong at the top of the numbered list… |
+| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L280 | - MUST classify each recommendation KEEP HERE or SPIN OUT against this session's stated centre of gravity, and MUST… |
+| Skills (user root) | `~/.claude/skills/where/SKILL.md` | L379 | Spin-out task chips (spawntask, KEEP-HERE/SPIN-OUT classification). Dropped: scoping a |
+| ateles/CLAUDE.md | `CLAUDE.md` | L64 | entity, never a harness chip. "Dispatch, don't drift inline" governs the |
+| ateles/CLAUDE.md | `CLAUDE.md` | L70 | Dispatch, don't work inline. Create a Neotoma task entity and let an agent claim it; use a subagent only where no… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L71 | Dispatch, don't drift inline. Work that belongs to an agent goes to an agent. The failure is drift — one small step at… |
 
 #### `R-606489` — Minimize personal data at capture; purpose-bind it
 
-Target home: **docs/foundation/** · 13 statements · agree
+Target home: **docs/foundation/** · 14 statements, 13 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -579,10 +567,52 @@ Target home: **docs/foundation/** · 13 statements · agree
 | agent_policy entities | `ent_b9d18c4ba66bf9979b9c04f8` | description | Agents MUST NOT apply GDPR/RGPD data-minimization, redaction, or sensitive-detail summarization to the operator's… |
 | ateles/CLAUDE.md | `CLAUDE.md` | L217 | Minimize at capture. When storing a person from a transcript or meeting, retain what serves the relationship (role,… |
 | standing_rule entities | `ent_0bb931a69f16cbbe8d8ef851` | instruction | Always use the prod Neotoma MCP tools (mcpmcpsrvneotoma) for all retrieve, store, and relationship operations. Do not… |
+| task_policy entities | `ent_cc6d596c73d5ebedd790b27f` | rule |  WhatsApp chats shared by operator are always captured to Neotoma Whenever the operator shares a WhatsApp chat in any… |
+
+#### `R-36cf5c` — Never mutate a sibling repo's shared main clone; add a worktree first
+
+Target home: **agent_policy** · 14 statements, 11 distinct · agree
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/reference_bottega8_deploys_from_feature_branch.md` | L31 | Canonical source is now Neotoma, not this memory. The full binding (app, domain, region, branch, build args, deploy… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/reference_sibling_repo_worktree_guard.md` | L3 | description: "A PreToolUse hook in ateles (.claude/hooks/siblingrepoworktreeguard.py) now HARD-BLOCKS mutating a… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/reference_sibling_repo_worktree_guard.md` | L13 | So the required workflow for any sibling-repo change is: |
+| Codex | `~/.codex/AGENTS.md` | L72 | Restart daemons as needed, without asking. Standing authorization, 2026-09-11. A merged fix reaches nothing until the… |
+| Codex | `~/.codex/AGENTS.md` | L118 | Daemons run dedicated checkouts, never the shared main clones where |
+| Codex | `~/.codex/AGENTS.md` | L126 | Never write into a sibling repo's shared main clone. Create a dedicated |
+| Skills (ateles repo) | `.claude/skills/learn/SKILL.md` | L46 | Relevant local MCP source repo when the issue is MCP-instruction behavior (for example Neotoma instruction text in… |
+| Skills (ateles repo) | `.claude/skills/report-error/SKILL.md` | L28 | - Must be a sibling repository (shares same parent directory) |
+| Skills (ateles repo) | `.claude/skills/report/SKILL.md` | L27 | - Must be a sibling repository (shares same parent directory) |
+| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L275 | Never write to a shared main clone (the checkout sessions share, e.g. ~/repos/<repo>) or to a |
+| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L400 | - MUST NOT write to a shared main clone or a daemon's deployment checkout; MUST use a linked worktree. |
+| ateles/CLAUDE.md | `CLAUDE.md` | L106 | Restart daemons as needed, without asking. Standing authorization, 2026-09-11, replacing the earlier rule that held… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L133 | siblingrepoworktreeguard.py (PreToolUse: Edit|Write|NotebookEdit|Bash) — a distinct concern from the session-integrity… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L153 | Daemons run dedicated checkouts, never the shared main clone where interactive sessions work: |
+
+#### `R-ebd526` — Persist every conversation turn to Neotoma
+
+Target home: **agent_policy** · 13 statements, 11 distinct · agree
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_always_persist_turn_by_turn.md` | L3 | description: "Always store every turn as user+assistant conversationmessage rows — never substitute a… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_neotoma_prod.md` | L11 | How to apply: On every turn, reach for mcpmcpsrvneotomaretrieveentitybyidentifier, mcpmcpsrvneotomastore, etc. — never… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-neotoma/memory/feedback_neotoma_store.md` | L7 | Always complete the Neotoma store protocol every turn, including for analysis, evaluation, and exploratory… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-neotoma/memory/feedback_neotoma_store.md` | L11 | How to apply: Before closing every turn, store the user message, assistant reply, and any extracted entities. Wire… |
+| Codex | `~/.codex/AGENTS.md` | L63 | End every turn with the decisions that need Mark , with enough context to decide: the options, what each implies, what… |
+| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L210 | Both /end and store-neotoma MUST emit a succinct affected-records list in the Neotoma-MCP turn-report style — the same… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L41 | userpromptsubmit.py (UserPromptSubmit) — lightweight per-turn counter. Exits 0. |
+| ateles/CLAUDE.md | `CLAUDE.md` | L76 | End every turn with the decisions that need Mark , with enough context to decide: the options, what each implies, what… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L95 | PreCompact cannot do this — its stdout goes to the debug log, never into context. UserPromptSubmit does inject, but… |
+| standing_rule entities | `ent_0bb931a69f16cbbe8d8ef851` | instruction | Always use the prod Neotoma MCP tools (mcpmcpsrvneotoma) for all retrieve, store, and relationship operations. Do not… |
+| standing_rule entities | `ent_8e7f8acf32381b19e4759075` | instruction | store-neotoma skill must include (unless explicitly excluded in Phase 0 revision): (1) Transcript digest — ordered… |
+| task_policy entities | `ent_b23b09f85e370f87328cabea` | rule | Every session stores every turn as a user + assistant conversationmessage pair, PARTOF the conversation, with REFERSTO… |
+| task_policy entities | `ent_b23b09f85e370f87328cabea` | raw_fragments.policy_text | Every session stores every turn as a user + assistant conversationmessage pair, PARTOF the conversation, with REFERSTO… |
 
 #### `R-f0b574` — Re-read and merge a plan field before correcting it
 
-Target home: **agent_policy** · 12 statements · agree
+Target home: **agent_policy** · 12 statements, 9 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -599,45 +629,9 @@ Target home: **agent_policy** · 12 statements · agree
 | Skills (user root) | `~/.claude/skills/verify-work/SKILL.md` | L55 | Write mechanics — re-read and merge, always. Apply updates via mcpmcpsrvneotomacorrect. correct replaces the ENTIRE… |
 | ateles/CLAUDE.md | `CLAUDE.md` | L22 | Before correcting decisions or todos, RE-READ the current field and MERGE. correct replaces the entire field, so add… |
 
-#### `R-ebd526` — Persist every conversation turn to Neotoma
-
-Target home: **agent_policy** · 11 statements · agree
-
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_always_persist_turn_by_turn.md` | L3 | description: "Always store every turn as user+assistant conversationmessage rows — never substitute a… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_neotoma_prod.md` | L11 | How to apply: On every turn, reach for mcpmcpsrvneotomaretrieveentitybyidentifier, mcpmcpsrvneotomastore, etc. — never… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-neotoma/memory/feedback_neotoma_store.md` | L7 | Always complete the Neotoma store protocol every turn, including for analysis, evaluation, and exploratory… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-neotoma/memory/feedback_neotoma_store.md` | L11 | How to apply: Before closing every turn, store the user message, assistant reply, and any extracted entities. Wire… |
-| Codex | `~/.codex/AGENTS.md` | L63 | End every turn with the decisions that need Mark , with enough context to decide: the options, what each implies, what… |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L210 | Both /end and store-neotoma MUST emit a succinct affected-records list in the Neotoma-MCP turn-report style — the same… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L41 | userpromptsubmit.py (UserPromptSubmit) — lightweight per-turn counter. Exits 0. |
-| ateles/CLAUDE.md | `CLAUDE.md` | L76 | End every turn with the decisions that need Mark , with enough context to decide: the options, what each implies, what… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L95 | PreCompact cannot do this — its stdout goes to the debug log, never into context. UserPromptSubmit does inject, but… |
-| standing_rule entities | `ent_0bb931a69f16cbbe8d8ef851` | instruction | Always use the prod Neotoma MCP tools (mcpmcpsrvneotoma) for all retrieve, store, and relationship operations. Do not… |
-| standing_rule entities | `ent_8e7f8acf32381b19e4759075` | instruction | store-neotoma skill must include (unless explicitly excluded in Phase 0 revision): (1) Transcript digest — ordered… |
-
-#### `R-0cc9d7` — Give status updates and open decisions unprompted
-
-Target home: **task_policy** · 11 statements · **DIVERGE**
-
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_hirundo_analysis_handoff_routing.md` | L13 | Fork B — person / 1:1 outreach → Sturnus (relationship/CRM agent, entb373b3d9af9082c559e954a8). Whenever the target… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_plan_entities_use_body_field.md` | L11 | When creating or updating a Neotoma plan entity, always populate the body field with the full prose narrative (why the… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_status_update_excludes_backward_corrections.md` | L11 | In a project status update to a client, include only what changes what the reader does next. A correction to something… |
-| Codex | `~/.codex/AGENTS.md` | L58 | Give status updates unprompted — what moved, what is blocked, and one recommended next step per workstream, so the… |
-| Codex | `~/.codex/AGENTS.md` | L63 | End every turn with the decisions that need Mark , with enough context to decide: the options, what each implies, what… |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L242 | - Give status unprompted. Do not wait to be asked where things stand. |
-| Skills (user root) | `~/.claude/skills/reconcile-tasks/SKILL.md` | L45 | When two EXISTING tasks are found to duplicate each other during the sweep: keep the better-specified one (more… |
-| Skills (user root) | `~/.claude/skills/verify-work/SKILL.md` | L111 | The cost of this error is asymmetric and lands outside the system: a false negative leaves a reply late, while a false… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L73 | Give status updates unprompted — what moved, what is blocked, and one recommended next step per workstream, so the… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L76 | End every turn with the decisions that need Mark , with enough context to decide: the options, what each implies, what… |
-| standing_rule entities | `ent_fadc560850b8114b0ab61f80` | rule_text | Pose every open decision through the harness questions tool (AskUserQuestion): one call, N labeled options, each with… |
-
 #### `R-680852` — Read a write back; a success code is not a landed write
 
-Target home: **agent_policy** · 11 statements · **DIVERGE**
+Target home: **agent_policy** · 12 statements, 10 distinct · **DIVERGE**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -652,10 +646,78 @@ Target home: **agent_policy** · 11 statements · **DIVERGE**
 | agent_policy entities | `ent_06550fd3f9956dab85dadc2e` | rule | To CREATE a renderedpage: publishrenderedpage with inline {title, htmlbody, customcss} and NO entityid. To UPDATE an… |
 | ateles/CLAUDE.md | `CLAUDE.md` | L200 | A write that reports success has not necessarily happened. Read it back. Enforcement: Partial… |
 | neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L51 | A write that reports success has not necessarily happened — read it back. /store accepts undeclared fields and routes… |
+| task_policy entities | `ent_12a20048bb8ba28b3ab0fd30` | rule | Sending an email is a non-idempotent, non-recallable external action. NEVER blindly re-run a send command. (1) Capture… |
+
+#### `R-f08cfb` — Classify an action's blast radius before acting on it
+
+Target home: **docs/foundation/** · 11 statements, 10 distinct · **NEEDS-SPLIT**
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Codex | `~/.codex/AGENTS.md` | L157 | Fail closed on the field that carries the safety meaning. When a value is absent, unrecognized, or malformed, the… |
+| Skills (ateles repo) | `.claude/skills/cicada/SKILL.md` | L125 | 4. Apply the gate (default executionpolicy entdfce6edecefe3eb7fc9e0337): high-confidence + low-blast → execute;… |
+| Skills (ateles repo) | `.claude/skills/corvus/SKILL.md` | L197 | Drafting / adapting content = low blast radius. Flesh out from the source long-form, brand voice (brandvoice +… |
+| Skills (ateles repo) | `.claude/skills/corvus/SKILL.md` | L198 | Posting to any platform = high blast radius. This is ALWAYS operator-approved regardless of confidence — present the… |
+| Skills (ateles repo) | `.claude/skills/vanellus/SKILL.md` | L152 | 2. File a report, don't edit workflows. Editing .github/workflows/, branch protection, or CI config is a reviewed code… |
+| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L119 | executionpolicy entity (swarm governance layer) — when a whole plan's worth of work needs autonomy calibration:… |
+| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L41 | Blocking checkpoints — the points where execution must pause for operator resolution, with what gets presented at each… |
+| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L108 | - MUST NOT dispatch any task, except to a dispatchable role at LOW blast radius: assignedto may be set only when the… |
+| agent_policy entities | `ent_00fae21cb9a74370c2fdd66d` | description | Autonomous Execution Constraints and Safety. Low-Risk Operations: Generate unit tests, add type annotations, fix… |
+| agent_policy entities | `ent_7dbf4c7835c282fc1ffd8832` | description | Autonomous Execution Constraints and Safety (mandatory version). Low-Risk Operations and High-Risk Operations defined.… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L206 | Fail closed on the field that carries the safety meaning. Enforcement: Nothing (manual; <issue> fixes one instance,… |
+
+#### `R-4b8ce8` — Never use git stash; WIP-commit instead
+
+Target home: **agent_policy** · 10 statements, 9 distinct · **NEEDS-SPLIT**
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Claude Code hooks (ateles) | `.claude/hooks/test_git_stash_guard.py` | docstring | S = "st" + "ash"  avoid a literal git stash token in this file's own text |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_dispatch_agents_never_task_chips.md` | L17 | How to apply: when a session identifies durable work, launch it with the Agent tool AND create the paired Neotoma task… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_no_staging_write_on_replace_fields.md` | L26 | git stash lesson: an instruction that names a forbidden action is weaker |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-neotoma/memory/neotoma_worktree_test_gotchas.md` | L14 | Do NOT use git stash to A/B-confirm in a .claude/worktrees/<name> worktree. These worktrees share the main repo's… |
+| Codex | `~/.codex/AGENTS.md` | L29 | git stash is not blocked here. Never run it in any form. |
+| Codex | `~/.codex/AGENTS.md` | L42 | NEVER git stash in any form — the stash stack is shared across worktrees and other sessions pop it. Use a WIP commit.… |
+| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L279 | Never use git stash, in any form. The stash stack is shared across worktrees; another session |
+| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L401 | - MUST NOT use git stash, --delete-branch on merge, or merge past a blocking verdict. |
+| ateles/CLAUDE.md | `CLAUDE.md` | L52 | scripts/verifyclaudemdmerge.py — compares CLAUDE.md rule-by-rule between revisions. It keys on the bolded lead of each… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L80 | NEVER git stash in any form — the stash stack is shared across worktrees and other sessions pop it. Use a WIP commit.… |
+
+#### `R-fab4cd` — Pose open decisions through the harness questions tool, not inline prose
+
+Target home: **task_policy** · 9 statements, 9 distinct · **NEEDS-SPLIT**
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-ateles/memory/MEMORY.md` | L32 | - Don't ask the operator implementer decisions(dont-ask-operator-implementer-decisions.md) — AskUserQuestion is for… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-ateles/memory/dont-ask-operator-implementer-decisions.md` | L3 | description: "Never use AskUserQuestion for a decision the implementer should make from the code, and never recommend… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-ateles/memory/proceed-without-asking-on-clear-recommendation.md` | L15 | How to apply: Reserve questions (incl. dont-ask-operator-implementer-decisions / AskUserQuestion) for genuine forks… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_always_pose_decisions_via_questions_tool.md` | L3 | description: Every decision for Mark goes through AskUserQuestion with full context, never prose at the end of a turn |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_always_pose_decisions_via_questions_tool.md` | L8 | Every decision that needs Mark's answer goes through the harness questions tool (AskUserQuestion), never as a prose… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_always_pose_decisions_via_questions_tool.md` | L12 | How to apply: When a turn produces one or more decisions for Mark, batch them into a single AskUserQuestion call (up… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_ask_via_harness_tooling_not_inline.md` | L3 | description: Pose decisions to Mark via AskUserQuestion, never as inline prose questions at the end of a turn |
+| Skills (user root) | `~/.claude/skills/reconcile-planning/SKILL.md` | L549 | When unattended is set, do not call the questions tool. File each decision as a |
+| standing_rule entities | `ent_fadc560850b8114b0ab61f80` | rule_text | Pose every open decision through the harness questions tool (AskUserQuestion): one call, N labeled options, each with… |
+
+#### `R-f31026` — Gmail sends and draft-updates need per-message approval
+
+Target home: **agent_policy** · 9 statements, 9 distinct · **NEEDS-SPLIT**
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_gws_draft_update_can_send.md` | L3 | description: "A gws drafts update on an existing draft can flip it to SENT; re-verify labelIds after EVERY draft write… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_gws_draft_update_can_send.md` | L25 | Prefer messages send over draft-then-update when the operator has approved a send. Reserve drafts for genuine staging,… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/reference_gws_gmail_draft_delete_send_params.md` | L17 | Verified 2026-07-09 (Nick joint-series reply). Because gws draft-update can SEND (feedbackgwsdraftupdatecansend.md),… |
+| Codex | `~/.codex/AGENTS.md` | L30 | A Gmail send is not gated here. No gws gmail ... drafts update, |
+| Skills (ateles repo) | `.claude/skills/email-triage-auto/SKILL.md` | L20 | - NEVER send an email. Only ever create Gmail drafts (createdraft). A draft is inert until the operator opens Gmail… |
+| Skills (user root) | `~/.claude/skills/email-triage-auto/SKILL.md` | L24 | NEVER send an email. Only ever create Gmail drafts (createdraft). A draft is inert until |
+| Skills (user root) | `~/.claude/skills/groom-leads-graph/SKILL.md` | L125 | contributor to update, draft (never send) a status email focused on what it means |
+| ateles/CLAUDE.md | `CLAUDE.md` | L168 | gmailsendgate.py (PreToolUse: Bash) — blocks Gmail operations that can deliver mail without a per-message operator… |
+| task_policy entities | `ent_ea7255149ebf140f5b8b501a` | rule | Whenever an email is pulled from the mailbox — any pull, whether a single message, an inbox sweep, a thread fetch, or… |
 
 #### `R-ce6455` — Daemons run dedicated checkouts that must be fresh
 
-Target home: **agent_policy** · 8 statements · agree
+Target home: **agent_policy** · 8 statements, 6 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -668,24 +730,24 @@ Target home: **agent_policy** · 8 statements · agree
 | ateles/CLAUDE.md | `CLAUDE.md` | L147 | Two deliberate non-verdicts: a failed fetch reports unknown, not drift (offline must not look identical to unpushed… |
 | ateles/CLAUDE.md | `CLAUDE.md` | L153 | Daemons run dedicated checkouts, never the shared main clone where interactive sessions work: |
 
-#### `R-f31026` — Gmail sends and draft-updates need per-message approval
+#### `R-acf4ff` — Never invent facts about the operator's life, tools, or past
 
-Target home: **agent_policy** · 8 statements · agree
+Target home: **task_policy** · 8 statements, 8 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_gws_draft_update_can_send.md` | L3 | description: "A gws drafts update on an existing draft can flip it to SENT; re-verify labelIds after EVERY draft write… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_gws_draft_update_can_send.md` | L25 | Prefer messages send over draft-then-update when the operator has approved a send. Reserve drafts for genuine staging,… |
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/reference_gws_gmail_draft_delete_send_params.md` | L17 | Verified 2026-07-09 (Nick joint-series reply). Because gws draft-update can SEND (feedbackgwsdraftupdatecansend.md),… |
-| Codex | `~/.codex/AGENTS.md` | L30 | A Gmail send is not gated here. No gws gmail ... drafts update, |
-| Skills (ateles repo) | `.claude/skills/email-triage-auto/SKILL.md` | L20 | - NEVER send an email. Only ever create Gmail drafts (createdraft). A draft is inert until the operator opens Gmail… |
-| Skills (user root) | `~/.claude/skills/email-triage-auto/SKILL.md` | L24 | NEVER send an email. Only ever create Gmail drafts (createdraft). A draft is inert until |
-| Skills (user root) | `~/.claude/skills/groom-leads-graph/SKILL.md` | L125 | contributor to update, draft (never send) a status email focused on what it means |
-| ateles/CLAUDE.md | `CLAUDE.md` | L168 | gmailsendgate.py (PreToolUse: Bash) — blocks Gmail operations that can deliver mail without a per-message operator… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/MEMORY.md` | L74 | - Never invent: facts(feedbacknoinventedfacts.md); emotion(feedbacknofabricatedoperatoremotion.md); internal… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_no_invented_facts.md` | L10 | Never invent or assume facts — about the operator's life, tools, habits, or past events — to make copy read warmer or… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_self_citation_verify_before_linking.md` | L12 | Read the post and confirm it actually makes the claim you're attributing to it. Mis-citing your own work is a… |
+| Skills (ateles repo) | `.claude/skills/picus/SKILL.md` | L61 | - Ground every figure in a Neotoma entity or a preparer document; never invent amounts. Cite source per line item. |
+| Skills (user root) | `~/.claude/skills/define-category/SKILL.md` | L200 | and put the seven fields in the body. Never invent fields on a registered |
+| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L215 | 2. Install and configure everything that does not require a human — add the MCP server entry, write the config,… |
+| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L286 | - MUST distinguish items the agent can move from items requiring an operator decision, human sign-off, or an external… |
+| Skills (user root) | `~/.claude/skills/where/SKILL.md` | L325 | that the link is local-only. Never invent a hostname, and never write a client-identifying host |
 
 #### `R-d99bae` — A renamed agent leaves no stale reference
 
-Target home: **agent_policy** · 8 statements · agree
+Target home: **agent_policy** · 8 statements, 5 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -700,7 +762,7 @@ Target home: **agent_policy** · 8 statements · agree
 
 #### `R-12d4a8` — Restart affected daemons after a merge, then verify
 
-Target home: **CLAUDE.md** · 8 statements · agree
+Target home: **CLAUDE.md** · 8 statements, 7 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -715,7 +777,7 @@ Target home: **CLAUDE.md** · 8 statements · agree
 
 #### `R-765e54` — Extend the mechanism that exists; do not build a parallel one
 
-Target home: **agent_policy** · 8 statements · agree
+Target home: **agent_policy** · 8 statements, 6 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -728,24 +790,9 @@ Target home: **agent_policy** · 8 statements · agree
 | ateles/CLAUDE.md | `CLAUDE.md` | L208 | Extend the mechanism that already generalizes; do not build a parallel one. Enforcement: Manual until… |
 | neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L55 | Extend the mechanism that already generalizes; do not build a parallel one. Search the code for the existing path… |
 
-#### `R-8d5e55` — Verify against the system of record before asserting
-
-Target home: **agent_policy** · 8 statements · agree
-
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-ateles/memory/MEMORY.md` | L23 | - Verify before asserting tool limits(verify-before-asserting-tool-limits.md) — read the schema / try the call before… |
-| Codex | `~/.codex/AGENTS.md` | L44 | Verify before asserting. Check the live system of record, not a cached copy or a local checkout — a stale worktree… |
-| Codex | `~/.codex/AGENTS.md` | L155 | Validate the instrument before believing the measurement. A zero, an empty result, or a silent pass is a claim about… |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L152 | 4. Never leak on the shared face. Do not link secret gists, internal/localhost URLs, or private entities on a shared… |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L237 | - MUST NOT leak on a shared hub face: no secret-gist / internal / localhost links, no visibility: private entities or… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L82 | Verify before asserting. Check the live system of record, not a cached copy or a local checkout — a stale worktree… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L202 | Validate the instrument before believing the measurement. Enforcement: Nothing (manual). A zero, an empty result, or a… |
-| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L52 | Validate the instrument before believing the measurement. A zero or an empty result is a claim about the query before… |
-
 #### `R-c14682` — Never hardcode secrets or credentials
 
-Target home: **agent_policy** · 7 statements · agree
+Target home: **agent_policy** · 7 statements, 6 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -757,9 +804,23 @@ Target home: **agent_policy** · 7 statements · agree
 | markmhendrickson/foundation repo | `~/repos/foundation/README.md` | L18 | Tooling - Secrets management, environment management, agent setup (optional) |
 | markmhendrickson/foundation repo | `~/repos/foundation/security/credential_management.md` | L141 | Use CI/CD secrets management - GitHub Secrets, GitLab CI/CD variables, etc. |
 
+#### `R-9993c8` — One worktree, one agent; never point two at the same tree
+
+Target home: **agent_policy** · 7 statements, 6 distinct · **DIVERGE**
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/MEMORY.md` | L35 | - dispatch, don't drift inline(feedbackdispatchdontdriftintoinlinework.md) · one worktree, one… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_dispatch_agents_never_task_chips.md` | L17 | How to apply: when a session identifies durable work, launch it with the Agent tool AND create the paired Neotoma task… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_one_worktree_one_agent.md` | L11 | Dispatch at most one agent per worktree at a time. If follow-up work is needed on a branch an agent is already in,… |
+| Codex | `~/.codex/AGENTS.md` | L43 | One worktree, one agent. Never point two agents at the same worktree: the second's uncommitted work reads to the first… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L79 | One worktree, one agent. Never point two agents at the same worktree: the second's uncommitted work reads to the first… |
+| markmhendrickson/foundation repo | `~/repos/foundation/development/workflow.md` | L100 | Each feature should be developed in its own worktree for isolation and parallel development: |
+| markmhendrickson/foundation repo | `~/repos/foundation/development/workflow.md` | L481 | 3. Use worktrees for isolation: When configured, each feature should have its own worktree |
+
 #### `R-71cf59` — Commit and PR titles follow the live title convention
 
-Target home: **agent_policy** · 6 statements · agree
+Target home: **agent_policy** · 6 statements, 5 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -772,7 +833,7 @@ Target home: **agent_policy** · 6 statements · agree
 
 #### `R-bdb72b` — Never mark work done citing an unverifiable artifact
 
-Target home: **agent_policy** · 6 statements · agree
+Target home: **agent_policy** · 6 statements, 5 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -783,9 +844,48 @@ Target home: **agent_policy** · 6 statements · agree
 | Skills (user root) | `~/.claude/skills/reconcile-tasks/SKILL.md` | L96 | Never mark a task done citing an artifact that does not resolve. Verify the artifact exists first — git cat-file /… |
 | ateles/CLAUDE.md | `CLAUDE.md` | L24 | Never mark a task or todo done while citing a commit, branch, file, or PR that does not resolve. Verify the artifact… |
 
+#### `R-fa2cbe` — Never assert what the operator feels, thinks, or said without evidence
+
+Target home: **task_policy** · 6 statements, 6 distinct · **DIVERGE**
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/MEMORY.md` | L74 | - Never invent: facts(feedbacknoinventedfacts.md); emotion(feedbacknofabricatedoperatoremotion.md); internal… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_never_attribute_unverified_operator_speech.md` | L12 | Mark caught three of these in one letter to counsel: a fabricated admission he'd never |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_no_fabricated_operator_emotion.md` | L12 | Why: Operator correction 2026-07-01, on a Sturnus-drafted reply to Jeroen that opened "Your verification made my day,… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_no_fabricated_operator_internal_state.md` | L15 | Why: This is the self-directed twin of feedbacknoinventedpraiseoftheirwork and feedbacknofabricatedoperatoremotion.… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_summary_entity_is_not_a_source.md` | L13 | Why: derived summaries compress and lose the qualifiers that make a fact true — which project, what relationship,… |
+| Skills (ateles repo) | `.claude/skills/nucifraga/SKILL.md` | L29 | Never fabricate operator emotion. Do not assert what the operator feels, in digests, drafts, or anywhere else, without… |
+
+#### `R-86601c` — Recurring obligations roll their date; never complete
+
+Target home: **task_policy** · 6 statements, 5 distinct · agree
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_payment_attendance_gate.md` | L17 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L114 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/monedula/SKILL.md` | L45 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/reconcile-tasks/SKILL.md` | L90 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L181 | operator-specific, value withheld |
+| task_policy entities | `ent_cca03c6fc579fe4fc8e8ac9c` | rule | Tasks of the listed kinds are NEVER marked completed; only roll their duedate forward. |
+
+#### `R-0cc9d7` — Give status updates unprompted, per workstream
+
+Target home: **task_policy** · 6 statements, 5 distinct · **DIVERGE**
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_hirundo_analysis_handoff_routing.md` | L13 | Fork B — person / 1:1 outreach → Sturnus (relationship/CRM agent, entb373b3d9af9082c559e954a8). Whenever the target… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_status_update_excludes_backward_corrections.md` | L11 | In a project status update to a client, include only what changes what the reader does next. A correction to something… |
+| Codex | `~/.codex/AGENTS.md` | L58 | Give status updates unprompted — what moved, what is blocked, and one recommended next step per workstream, so the… |
+| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L242 | - Give status unprompted. Do not wait to be asked where things stand. |
+| Skills (user root) | `~/.claude/skills/reconcile-tasks/SKILL.md` | L45 | When two EXISTING tasks are found to duplicate each other during the sweep: keep the better-specified one (more… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L73 | Give status updates unprompted — what moved, what is blocked, and one recommended next step per workstream, so the… |
+
 #### `R-580da5` — Tests follow this repo's naming and placement convention
 
-Target home: **agent_policy** · 6 statements · agree
+Target home: **agent_policy** · 6 statements, 6 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -796,9 +896,22 @@ Target home: **agent_policy** · 6 statements · agree
 | markmhendrickson/foundation repo | `~/repos/foundation/conventions/code_conventions.md` | L343 | Format: {sourcefile}.test.ts alongside source |
 | markmhendrickson/foundation repo | `~/repos/foundation/conventions/code_conventions.md` | L344 | Examples: userservice.test.ts, validation.test.ts |
 
+#### `R-258f23` — A test that cannot fail on its subject is decoration
+
+Target home: **agent_policy** · 6 statements, 4 distinct · agree
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-bottega8-neotoma-app/memory/a-check-that-cannot-fail-proves-nothing.md` | L3 | description: "Before trusting a verification, ask what result would have disproved the claim — and never report… |
+| Codex | `~/.codex/AGENTS.md` | L156 | A test that cannot fail on the thing it watches is decoration. Before trusting a test as coverage, revert the fix and… |
+| Skills (ateles repo) | `.claude/skills/corvus/SKILL.md` | L77 | 4. No triadic/parallelism filler. Avoid the reflexive rule-of-three ("faster, cheaper, better"), "it's not just X,… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L204 | A test that cannot fail on the thing it watches is decoration. Enforcement: Nothing, not mechanizable (belongs in… |
+| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L53 | A test that cannot fail on the thing it watches is decoration. Before trusting a test as coverage, revert the fix and… |
+| task_policy entities | `ent_3c83d2c570d8c79e2865b988` | rule | Before opening any Neotoma PR, regenerate every generated/derived file whose SOURCE you touched, and commit the… |
+
 #### `R-f398b5` — Act on your recommendation; ask only at a real fork
 
-Target home: **task_policy** · 5 statements · agree
+Target home: **task_policy** · 5 statements, 4 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -808,33 +921,88 @@ Target home: **task_policy** · 5 statements · agree
 | Codex | `~/.codex/AGENTS.md` | L61 | Proceed with your recommendation — don't ask. When you have a recommended course of action, take it and report what… |
 | ateles/CLAUDE.md | `CLAUDE.md` | L75 | Proceed with your recommendation — don't ask. When you have a recommended course of action, take it and report what… |
 
-#### `R-86601c` — Recurring obligations roll their date; never complete
+#### `R-713e5d` — Store the full body, not a path or a summary standing in for it
 
-Target home: **task_policy** · 5 statements · agree
-
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_payment_attendance_gate.md` | L17 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L114 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/monedula/SKILL.md` | L45 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/reconcile-tasks/SKILL.md` | L90 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L181 | operator-specific, value withheld |
-
-#### `R-258f23` — A test that cannot fail on its subject is decoration
-
-Target home: **agent_policy** · 5 statements · agree
+Target home: **agent_policy** · 5 statements, 5 distinct · **DIVERGE**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-bottega8-neotoma-app/memory/a-check-that-cannot-fail-proves-nothing.md` | L3 | description: "Before trusting a verification, ask what result would have disproved the claim — and never report… |
-| Codex | `~/.codex/AGENTS.md` | L156 | A test that cannot fail on the thing it watches is decoration. Before trusting a test as coverage, revert the fix and… |
-| Skills (ateles repo) | `.claude/skills/corvus/SKILL.md` | L77 | 4. No triadic/parallelism filler. Avoid the reflexive rule-of-three ("faster, cheaper, better"), "it's not just X,… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L204 | A test that cannot fail on the thing it watches is decoration. Enforcement: Nothing, not mechanizable (belongs in… |
-| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L53 | A test that cannot fail on the thing it watches is decoration. Before trusting a test as coverage, revert the fix and… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/MEMORY.md` | L62 | - Plan entities always use the body field(feedbackplanentitiesusebodyfield.md) for the full narrative, not only… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_plan_entities_use_body_field.md` | L11 | When creating or updating a Neotoma plan entity, always populate the body field with the full prose narrative (why the… |
+| Skills (ateles repo) | `.claude/skills/corvus/SKILL.md` | L120 | Long-form platform — articles (long-form home). The configured long-form publisher (vendorbinding capability… |
+| Skills (ateles repo) | `.claude/skills/hirundo/SKILL.md` | L141 | Reuse types: analysis (overall, one per invocation; kind; full markdown in body), analysisfinding (one per finding,… |
+| Skills (ateles repo) | `.claude/skills/hirundo/SKILL.md` | L166 | Persistence is non-optional — Step P every invocation; full markdown in analysis.body (canonical). Fail loudly if… |
+
+#### `R-8d5e55` — Verify against the live system of record before asserting
+
+Target home: **agent_policy** · 5 statements, 4 distinct · agree
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-ateles/memory/MEMORY.md` | L23 | - Verify before asserting tool limits(verify-before-asserting-tool-limits.md) — read the schema / try the call before… |
+| Codex | `~/.codex/AGENTS.md` | L44 | Verify before asserting. Check the live system of record, not a cached copy or a local checkout — a stale worktree… |
+| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L152 | 4. Never leak on the shared face. Do not link secret gists, internal/localhost URLs, or private entities on a shared… |
+| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L237 | - MUST NOT leak on a shared hub face: no secret-gist / internal / localhost links, no visibility: private entities or… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L82 | Verify before asserting. Check the live system of record, not a cached copy or a local checkout — a stale worktree… |
+
+#### `R-eecfc1` — End every turn with the decisions that need the operator
+
+Target home: **task_policy** · 4 statements, 3 distinct · agree
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Claude Code hooks (ateles) | `.claude/hooks/decision_shape_gate.py` | docstring | recommendation. CLAUDE.md: never re-raise one by name alone. |
+| Codex | `~/.codex/AGENTS.md` | L63 | End every turn with the decisions that need Mark , with enough context to decide: the options, what each implies, what… |
+| Skills (user root) | `~/.claude/skills/plan-status/SKILL.md` | L222 | what is already settled, and a recommendation. Never re-raise a decision by name alone. Carry |
+| ateles/CLAUDE.md | `CLAUDE.md` | L76 | End every turn with the decisions that need Mark , with enough context to decide: the options, what each implies, what… |
+
+#### `R-d26566` — Do not drift into an agent's work one step at a time
+
+Target home: **agent_policy** · 4 statements, 3 distinct · agree
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/MEMORY.md` | L35 | - dispatch, don't drift inline(feedbackdispatchdontdriftintoinlinework.md) · one worktree, one… |
+| Codex | `~/.codex/AGENTS.md` | L56 | Dispatch, don't drift inline. Work that belongs to an agent goes to an agent. The failure is drift — one small step at… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L64 | entity, never a harness chip. "Dispatch, don't drift inline" governs the |
+| ateles/CLAUDE.md | `CLAUDE.md` | L71 | Dispatch, don't drift inline. Work that belongs to an agent goes to an agent. The failure is drift — one small step at… |
+
+#### `R-1bf77f` — Recover a stash by apply-with-SHA, never pop a shared stack
+
+Target home: **agent_policy** · 4 statements, 4 distinct · **DIVERGE**
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/MEMORY.md` | L32 | - File the issue, await its spec, then PR(feedbackfileissueandawaitspecbeforepr.md) · Stash recovery: apply by SHA,… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/reference_stash_recovery_apply_not_pop.md` | L3 | description: When an agent breaks the no-stash rule, recover with git stash apply <sha> then drop that entry by tag —… |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/reference_stash_recovery_apply_not_pop.md` | L21 | 1. git stash push -u -m "<unique-tag>" — never bare git stash. |
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/reference_stash_recovery_apply_not_pop.md` | L26 | 5. Verify the stack afterwards: git stash list should still show every |
+
+#### `R-ffe65b` — Never fabricate a finding or a conclusion to appear useful
+
+Target home: **task_policy** · 4 statements, 4 distinct · agree
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Skills (ateles repo) | `.claude/skills/analyze/SKILL.md` | L146 | No invented findings. Every analysisfinding traces to specific evidence — a verbatim quote from the source, an… |
+| Skills (ateles repo) | `.claude/skills/aquila/SKILL.md` | L79 | Speculation is labeled. When you reason past the evidence, mark it. A grounded "I don't know, and here is why that… |
+| Skills (ateles repo) | `.claude/skills/falco/SKILL.md` | L80 | - Do not fabricate a finding to appear useful. An honest, specific "I enumerated these sinks and these encodings; all… |
+| Skills (ateles repo) | `.claude/skills/hirundo/SKILL.md` | L121 | No invented findings — every finding traces to a verbatim quote, observed code/doc pattern, or measured metric. |
+
+#### `R-4038a8` — Never invent a quote; every quote traces to its source
+
+Target home: **task_policy** · 4 statements, 4 distinct · agree
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Skills (ateles repo) | `.claude/skills/analyze-meeting/SKILL.md` | L83 | Read the full transcript. Extract the following with verbatim quotes from the transcript where possible (never invent… |
+| Skills (ateles repo) | `.claude/skills/analyze-neotoma-feedback/SKILL.md` | L90 | 4. Pull verbatim quotes from the source. Never paraphrase into quote syntax — paraphrased content must be labeled as… |
+| Skills (ateles repo) | `.claude/skills/analyze-neotoma-feedback/SKILL.md` | L371 | No invented quotes — in the report or in stored entity fields. Every quote block in the markdown report AND every… |
+| Skills (ateles repo) | `.claude/skills/analyze-neotoma-feedback/SKILL.md` | L410 | Never invent quotes. Every quote carries the source entityid. If the snapshot only has a paraphrase, label it… |
 
 #### `R-57ff60` — Do not merge while a live blocking review stands
 
-Target home: **docs/foundation/** · 4 statements · agree
+Target home: **docs/foundation/** · 4 statements, 4 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -843,9 +1011,20 @@ Target home: **docs/foundation/** · 4 statements · agree
 | ateles/CLAUDE.md | `CLAUDE.md` | L107 | Merge stays gated, and two classes stay Mark's absolutely. Do not merge where a live blocking review stands — live… |
 | standing_rule entities | `ent_d22565e6723bd2a38385ac81` | instruction | Ask the operator only when plausible options would materially change their goals, risk, cost, external commitments,… |
 
+#### `R-18616b` — Validate the instrument before believing a measurement; a surprising zero is the tool
+
+Target home: **agent_policy** · 4 statements, 2 distinct · agree
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Codex | `~/.codex/AGENTS.md` | L155 | Validate the instrument before believing the measurement. A zero, an empty result, or a silent pass is a claim about… |
+| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L289 | Verify the instrument before believing the measurement. A false zero from querying the wrong |
+| ateles/CLAUDE.md | `CLAUDE.md` | L202 | Validate the instrument before believing the measurement. Enforcement: Nothing (manual). A zero, an empty result, or a… |
+| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L52 | Validate the instrument before believing the measurement. A zero or an empty result is a claim about the query before… |
+
 #### `R-fb4dbc` — Agent prompts are public and carry no operator data
 
-Target home: **agent_policy** · 3 statements · agree
+Target home: **agent_policy** · 3 statements, 2 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -853,9 +1032,19 @@ Target home: **agent_policy** · 3 statements · agree
 | Skills (ateles repo) | `.claude/skills/aquila/SKILL.md` | L78 | PII-free prompt; operator-specific data at runtime. This definition is public. Every operator-specific fact comes from… |
 | ateles/CLAUDE.md | `CLAUDE.md` | L174 | operator-specific, value withheld |
 
+#### `R-03c4c7` — Never invent praise or a judgement of someone else's work
+
+Target home: **task_policy** · 3 statements, 3 distinct · agree
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Skills (ateles repo) | `.claude/skills/corvus/SKILL.md` | L74 | 1. No unverifiable superlatives or claimed judgments. Never write "the clearest/best/sharpest writeup I've seen," "one… |
+| Skills (user root) | `~/.claude/skills/correspondence-voice/SKILL.md` | L65 | Other forbidden constructions to self-check: unverifiable superlatives and flattery the |
+| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L130 | Voice deltas (apply to prose and to the copy on a page): lexical (words/phrases the operator removes — hype, filler,… |
+
 #### `R-c6d782` — Merge by squash
 
-Target home: **agent_policy** · 3 statements · **DIVERGE**
+Target home: **agent_policy** · 3 statements, 3 distinct · **DIVERGE**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -863,9 +1052,18 @@ Target home: **agent_policy** · 3 statements · **DIVERGE**
 | Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/reference_squash_merge_drops_commits_pushed_after.md` | L17 | After ANY merge, verify origin/main contains every commit you meant to land — git fetch origin main, then grep the… |
 | Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/reference_squash_merge_hides_supersession_from_topology.md` | L32 | How to apply: never bulk-close ancestors of a squash merge on topology alone — |
 
+#### `R-4706ff` — Never predict or assert a third party's reaction
+
+Target home: **task_policy** · 2 statements, 2 distinct · agree
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_never_assert_a_remediation_you_have_not_tested.md` | L23 | but I haven't verified how it renders for the recipient." Never predict a third party's |
+| Skills (ateles repo) | `.claude/skills/analyze-meeting/SKILL.md` | L389 | No invented commitments. Every action item, decision, and quote MUST trace to specific transcript text. Paraphrase is… |
+
 #### `R-d2c4bb` — Never bypass the pre-commit hook with --no-verify
 
-Target home: **agent_policy** · 2 statements · agree
+Target home: **agent_policy** · 2 statements, 1 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -874,15 +1072,23 @@ Target home: **agent_policy** · 2 statements · agree
 
 #### `R-b5f10c` — Pass PR and comment bodies by file, never inline
 
-Target home: **agent_policy** · 1 statements · agree
+Target home: **agent_policy** · 1 statements, 1 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
 | Claude Code project memory | `~/.claude/projects/-Users-markmhendrickson-repos-ateles/memory/feedback_dispatch_agents_never_task_chips.md` | L17 | How to apply: when a session identifies durable work, launch it with the Agent tool AND create the paired Neotoma task… |
 
+#### `R-e0f7e8` — Store artifacts as the work happens, not at session end
+
+Target home: **agent_policy** · 1 statements, 1 distinct · agree
+
+| Store | Location | At | Statement |
+|---|---|---|---|
+| ateles/CLAUDE.md | `CLAUDE.md` | L30 | Do not wait until end of session. Apply corrections in the same turn as the work, after the work completes. |
+
 #### `R-765925` — Verify the GitHub identity before any write
 
-Target home: **agent_policy** · 1 statements · agree
+Target home: **agent_policy** · 1 statements, 1 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
@@ -892,7 +1098,7 @@ Target home: **agent_policy** · 1 statements · agree
 
 Every rule kind maps to a home in the authority table.
 
-3951 statements match no known rule kind. They are **not** classified into a neighbouring cluster: an over-eager merge would hide a divergence, which is the one output this inventory exists to produce. They are procedure, context, or rules whose kind has no signature yet — adding a signature to `KIND_SIGNATURES` is how the coverage grows.
+3950 statements match no known rule kind. They are **not** classified into a neighbouring cluster: an over-eager merge would hide a divergence, which is the one output this inventory exists to produce. They are procedure, context, or rules whose kind has no signature yet — adding a signature to `KIND_SIGNATURES` is how the coverage grows.
 
 ## Prior art: where this disagrees with the hand-count it replaces
 
@@ -919,7 +1125,9 @@ So a rule's reach is not whether it is in `CLAUDE.md` but which copy of `CLAUDE.
 
 - **Entities** are read field-name agnostically. `standing_rule` text lives under five different field names and 4 rows carry none; `agent_policy` uses a different set again. `raw_fragments` is read too, because `/store` accepts undeclared fields and routes rule text there. A reader checking one field name drops rows and reports a clean run.
 - **Files** are read per rule, not per file. A bolded-lead bullet is one rule (the shape `verify_claude_md_merge.py` keys on, so the inventory and the parity checker agree on what a rule is); so is any other line carrying an imperative.
-- **Clusters** are by kind, never by value, per `migration.md`. Divergence is judged on whether statements bind the same way, not on wording.
+- **Clusters** are by kind, never by value, per `migration.md`, and the merge test decides a kind: two statements are the same rule only if a session cannot satisfy one while violating the other. Topical similarity is not sufficient, and the test is applied in both directions — a rule restated across seven stores is still ONE rule, so over-splitting is as wrong as over-merging.
+- **Over-merge is measured, not assumed.** Every cluster reports its distinct-statement count, and one whose distinct count approaches its statement count is emitted as NEEDS-SPLIT rather than as a rule.
+- **Divergence** is judged on whether statements bind the same way, not on wording.
 - **Target homes** come from the authority table in `conformance.md` and from nowhere else.
 - Read-only against Neotoma **prod**. Nothing is written to the record.
 

@@ -39,6 +39,16 @@ The four properties the inventory has to have
    five rules. Clustering is by kind signature, and the cluster reports every
    location plus whether the statements AGREE or DIVERGE.
 
+   A kind is decided by the MERGE TEST: two statements are the same rule only
+   if a session cannot satisfy one while violating the other. The first
+   revision clustered by TOPIC instead, which merged distinct rules -- the
+   harness-questions-tool rule vanished into a status-update cluster and the
+   absence was caught by the operator, not by the instrument. So every cluster
+   now reports its distinct-statement count and one that is a topical bucket
+   is emitted as NEEDS-SPLIT rather than counted as a rule. The test binds in
+   both directions: over-splitting inflates the rule count and understates the
+   duplication the migration exists to collapse, and is equally wrong.
+
 PII posture -- read this before changing the emitter
 ----------------------------------------------------
 Both repos are PUBLIC and at least five rule entities carry operator specifics
@@ -254,6 +264,28 @@ class Store:
     read_error: str = ""
 
 
+# Thresholds for the NEEDS-SPLIT probe.
+#
+# At 0.85/8 the probe fires on every cluster the operator's own reading found
+# over-merged. It is deliberately tuned to over-report rather than under-
+# report: a false flag costs one human read of a cluster, a missed one is the
+# failure this probe exists to prevent, and it is invisible.
+#
+# What the probe measures is statement VARIETY, which is a proxy for rule
+# identity and not the thing itself. Two consequences, both observed in the
+# corpus rather than supposed: a cluster can be flagged because it genuinely
+# holds several rules (the questions-tool case), or because a correctly-merged
+# rule has collected statements that merely mention it (the never-stash case,
+# which catches a hook's own test fixture). The probe cannot tell these apart
+# -- it reports the cluster, a human reads it, and the remedy is a split in
+# the first case and a narrower signature in the second.
+#
+# MIN_STATEMENTS_TO_JUDGE exists because the ratio is meaningless in the small
+# tail: two statements worded differently sit at 1.0, which is ordinary.
+SPLIT_RATIO = 0.85
+MIN_STATEMENTS_TO_JUDGE = 8
+
+
 @dataclass
 class Cluster:
     """One RULE. Possibly stated in many places, possibly divergently."""
@@ -270,6 +302,44 @@ class Cluster:
     @property
     def stores(self) -> list[str]:
         return sorted({s.store for s in self.statements})
+
+    @property
+    def distinct_openings(self) -> int:
+        """How many DIFFERENT statements this cluster holds.
+
+        The over-merge probe. A rule restated across stores repeats itself --
+        never-stash is stated in five harnesses in close to the same words --
+        so a genuine cluster has far fewer distinct openings than statements.
+        A cluster whose distinct count approaches its statement count is
+        holding statements that merely share vocabulary: a topical bucket.
+
+        Six words, because that is enough to separate "never invent quotes"
+        from "never invent commitments" while still collapsing the same rule
+        quoted with different leading whitespace or list markers.
+        """
+        return len({" ".join(s.text.lower().split()[:6])
+                    for s in self.statements})
+
+    @property
+    def needs_split(self) -> bool:
+        """True when the cluster is a topical bucket rather than a rule.
+
+        Emitted as NEEDS-SPLIT rather than as a rule, so over-merge is visible
+        in the OUTPUT. The first revision of this inventory merged the
+        harness-questions-tool rule into a status-update cluster, and the
+        absence was caught by the operator noticing a rule he knew existed was
+        missing -- not by the instrument. An inventory whose only over-merge
+        detector is a reader's memory is not measuring its own clustering.
+
+        The threshold is a FLAG, not a verdict, and the document says so. Two
+        checks, because the ratio alone misreads both tails: a 2-statement
+        cluster is at ratio 1.0 whenever the two are worded differently, which
+        is ordinary, and a large cluster can be a genuine bucket at 0.85. So a
+        cluster must be both large enough to judge and near-unique to trip it.
+        """
+        n = len(self.statements)
+        return n >= MIN_STATEMENTS_TO_JUDGE and (
+            self.distinct_openings / n >= SPLIT_RATIO)
 
     @property
     def shapes(self) -> set[str]:
@@ -324,22 +394,89 @@ def _normative_shape(text: str) -> str:
 # Rule KINDS -- the deduplication axis
 # ---------------------------------------------------------------------------
 #
-# A kind is what the rule is ABOUT, not what it says. Two statements share a
-# kind when a reader would call them the same rule. This is the "by kind, never
-# by value" constraint made mechanical: the signature decides the cluster, and
-# the cluster carries every location plus the agree/diverge verdict.
+# THE MERGE TEST
+# --------------
+# Two statements are the SAME RULE only if **a session cannot satisfy one while
+# violating the other**. Topical similarity is not sufficient and never has
+# been. If a session can obey one statement and break the other in the same
+# turn, they are two rules however alike they read.
 #
-# Deliberately conservative. A statement matching no signature lands in its own
-# singleton cluster rather than being forced into a neighbour -- an over-eager
-# merge would hide a divergence, which is the one output this inventory exists
-# to produce.
+# `CLAUDE.md` already carries the governing principle, in the rule-parity
+# checker's own terms: "Near-identical leads are reported but never collapsed
+# -- `Dispatch, don't work inline` and `Dispatch, don't drift inline` are two
+# rules." The merge test is that principle made mechanical for this inventory.
+#
+# Worked: "give status updates unprompted" and "pose every open decision
+# through the harness questions tool" are both about surfacing things to the
+# operator. A session that ends its turn with a prose decision list has
+# satisfied the first and violated the second. Two rules. The first revision of
+# this table merged them, and the absence was noticed by the operator rather
+# than by the instrument -- which is why the NEEDS-SPLIT probe below exists.
+#
+# The converse failure is equally wrong. A rule genuinely restated across seven
+# stores is ONE rule with seven statements, not seven rules: never-stash is
+# stated in five harnesses in five wordings and a session cannot obey any one
+# of them while breaking another. Splitting that would inflate the rule count
+# and understate the duplication the migration exists to collapse. The test is
+# satisfy/violate, applied honestly in BOTH directions.
+#
+# A kind is what the rule is ABOUT, not what it says. This is the "by kind,
+# never by value" constraint made mechanical: the signature decides the
+# cluster, and the cluster carries every location plus the agree/diverge
+# verdict.
+#
+# ORDER IS SIGNIFICANT. `classify()` assigns a statement to EVERY kind it
+# matches, so a broad signature sitting beside a narrow one silently absorbs
+# the narrow rule's statements into both. Where two kinds overlap by
+# vocabulary, the narrow one carries a negative lookahead or a distinguishing
+# token rather than relying on position -- position alone is not a mechanism.
+#
+# Deliberately conservative. A statement matching no signature lands in the
+# unclassified pile rather than being forced into a neighbour -- an over-eager
+# merge hides a divergence, which is the one output this inventory exists to
+# produce.
 
 KIND_SIGNATURES: tuple[tuple[str, str, str], ...] = (
     # (kind key, human label, regex over lowercased text)
+    # The prohibition and the recovery procedure are two rules. A session that
+    # never stashes cannot violate the recovery rule, and a session recovering
+    # another agent's stash has already had the prohibition broken for it. The
+    # recovery signature is listed FIRST and the prohibition excludes it, so
+    # `apply <sha>, never pop` does not also count as a statement of never-stash.
+    ("git_stash_recovery", "Recover a stash by apply-with-SHA, never pop a shared stack",
+     r"stash (?:apply|list|push)|never.{0,10}\bpop\b|apply by sha|"
+     r"stash recovery|drop that entry"),
+    # The prohibition excludes statements that are really about the recovery
+    # PROCEDURE, and the exclusion is applied to the whole statement -- a
+    # lookahead at the match position is not enough, since a statement reading
+    # "`git stash push -u -m` — never bare `git stash`" carries the recovery
+    # verb before the prohibition token.
+    #
+    # It keys on the recovery COMMANDS, never on the bare word "pop". The
+    # canonical statement of this rule is "NEVER `git stash` in any form — the
+    # stash stack is shared across worktrees and other sessions pop it", so a
+    # bare-`pop` exclusion drops the rule's own primary statement in two
+    # harnesses and keeps only its restatements. A rule whose signature
+    # excludes its own canonical wording is worse than an over-merge: the
+    # over-merge is at least visible in a count.
     ("git_never_stash", "Never use git stash; WIP-commit instead",
-     r"git stash|never stash|\bstash\b.{0,40}(forbidden|never|guard)"),
-    ("worktree_isolation", "One worktree per agent; never mutate a shared clone",
-     r"worktree|shared (main )?clone|one agent.{0,20}one worktree|sibling repo"),
+     r"^(?!.*(?:stash (?:apply|list|push)|\bpop\b (?:that|the) (?:entry|stash)|"
+     r"apply by sha|never.{0,5}\bpop\b))"
+     r".*(?:git stash|never stash|\bstash\b.{0,40}(?:forbidden|never|guard))"),
+    # SPLIT from one "worktree" kind that matched the bare word and so swept in
+    # every rule that merely mentions a worktree. Two rules, plus the recovery
+    # rule the never-stash kind was also absorbing. A session can give each
+    # agent its own worktree (satisfying the first) and still commit into a
+    # sibling repo's shared clone (violating the second): they have separate
+    # enforcement -- `one worktree, one agent` is prose, the sibling-repo guard
+    # is a PreToolUse hook.
+    ("worktree_one_per_agent", "One worktree, one agent; never point two at the same tree",
+     r"one worktree.{0,15}one agent|one agent.{0,20}one worktree|"
+     r"two agents.{0,30}same worktree|its own worktree"),
+    ("shared_clone_no_mutation",
+     "Never mutate a sibling repo's shared main clone; add a worktree first",
+     r"shared (?:main )?clone|sibling.?repo|sibling_repo_worktree_guard|"
+     r"git worktree add|main clone"),
     ("neotoma_prod_only", "Always use the Neotoma prod instance, never dev",
      r"neotoma prod|prod.{0,20}never.{0,15}dev|mcpsrv_neotoma.{0,30}always"),
     ("gws_over_gmail_mcp", "Use the gws CLI for Google Workspace, not the MCP",
@@ -352,30 +489,84 @@ KIND_SIGNATURES: tuple[tuple[str, str, str], ...] = (
     ("verify_write_landed", "Read a write back; a success code is not a landed write",
      r"read it back|write that reports success|verify.{0,25}(write|landed)|"
      r"not treat a 2xx|success.{0,15}is not"),
-    ("verify_before_asserting", "Verify against the system of record before asserting",
-     r"verify before|check the live system|verified only when you just checked|"
-     r"validate the instrument|before asserting"),
+    # SPLIT. "Verify the claim against the system of record" and "validate the
+    # instrument before believing what it returned" are separately stated in
+    # both `CLAUDE.md` and `neotoma/AGENTS.md`, and are separately violable: a
+    # session that queries the live system of record and believes a false zero
+    # has satisfied the first and violated the second. That is the shape of the
+    # three independent false zeros `CLAUDE.md` records on one day.
+    ("verify_before_asserting", "Verify against the live system of record before asserting",
+     r"verify before assert|check the live system|"
+     r"verified only when you just checked|before asserting"),
+    ("validate_the_instrument",
+     "Validate the instrument before believing a measurement; a surprising zero is the tool",
+     r"validate the instrument|surprising (?:number|zero)|"
+     r"claim about (?:your tooling|the query)|false zero|"
+     r"prove the instrument"),
     ("fail_closed", "Absent or malformed safety values take the restrictive branch",
      r"fail clos|fail-clos|restrictive branch|fail open|fail-open"),
-    ("dispatch_not_inline", "Dispatch work to the owning agent; do not work inline",
-     r"dispatch, don't|dispatch.{0,25}not inline|inline execution|"
+    # SPLIT because `CLAUDE.md` names these as two rules by its own parity
+    # rule: "`Dispatch, don't work inline` and `Dispatch, don't drift inline`
+    # are two rules." The first is about where work is FILED at the moment it
+    # is recommended; the second is about a session that files correctly and
+    # then does the work anyway, one small step at a time. A session violates
+    # the second precisely by satisfying the first and then not stopping.
+    ("dispatch_not_inline", "Dispatch work to the owning agent; file it as you recommend it",
+     r"dispatch, don't work|dispatch.{0,25}not inline|inline execution|"
      r"owning agent|orchestrat.{0,20}not.{0,15}workhorse|delegate"),
+    ("dispatch_no_drift", "Do not drift into an agent's work one step at a time",
+     r"dispatch, don't drift|drift inline|"
+     r"one small step at a time|agent's whole job itself"),
+    ("durable_work_not_task_chip",
+     "Durable work goes to a dispatched agent, never a harness task chip",
+     r"task chip|spawn_task|never.{0,20}chip|chip is not an entity|"
+     r"unclaimable and invisible"),
     ("no_merge_over_objection", "Do not merge while a live blocking review stands",
      r"blocking review|do not merge|merge.{0,20}gated|required approval"),
     ("no_verify_bypass", "Never bypass the pre-commit hook with --no-verify",
      r"--no-verify|no-verify|skip_tests"),
-    ("consent_gate_external", "Irreversible or outward-facing actions need approval",
+    # SPLIT from one "irreversible actions need approval" kind. Three rules
+    # that pull against each other and so must be counted separately -- the
+    # whole point of the consent boundary is WHERE it falls, and a single
+    # cluster made the boundary invisible. A session can correctly proceed
+    # without asking on a reversible action (satisfying the second) while
+    # sending mail without approval (violating the first); the third bounds
+    # which actions never pass to an agent at all.
+    ("consent_gate_external",
+     "Irreversible or outward-facing actions need per-action operator approval",
      r"consent gate|operator approval|irreversible|outward-facing|"
      r"never.{0,20}without.{0,20}approval|confirm with"),
+    ("operator_only_actions",
+     "Some actions stay the operator's absolutely; hand them back with the command",
+     r"operator[- ]only|stay(?:s)? mark's|remain the operator's|"
+     r"credential rotation|hand back.{0,25}operator|exact command"),
+    ("blast_radius_classification",
+     "Classify an action's blast radius before acting on it",
+     r"blast[- ]radius|low_blast|high_blast|"
+     r"(?:low|high)-risk operations|autonomy calibration"),
     ("secrets_never_hardcoded", "Never hardcode secrets or credentials",
      r"hardcode.{0,20}(secret|credential|token|iban)|never commit.{0,20}secret|"
      r"secrets? (management|from env)"),
     ("config_from_entity", "Operator-specific config comes from entities, not code",
      r"config-source|hardcoded config|operator-specific config|"
      r"context entit|from env|portable|fork test"),
+    # SPLIT from one "durable memory in Neotoma" kind. Storing an artifact in
+    # Neotoma, storing it PROACTIVELY rather than when asked, and storing the
+    # full body rather than a path or a summary are three rules a session can
+    # satisfy and violate independently: a session that stores a `task` with a
+    # file path in it has stored to Neotoma and still lost the content.
     ("store_in_neotoma", "Durable memory belongs in Neotoma, not harness files",
      r"neotoma first|durable memory|store.{0,25}neotoma|"
      r"memory file|not.{0,15}markdown file"),
+    ("store_proactively", "Store artifacts as the work happens, not at session end",
+     r"proactive(?:ly)? stor|store.{0,20}proactiv|"
+     r"do not wait until end of session|same turn as the work|"
+     r"store artifacts as"),
+    ("store_body_not_pointer",
+     "Store the full body, not a path or a summary standing in for it",
+     r"a path field is not storage|full markdown in|"
+     r"body.{0,25}full (?:prose )?narrative|populate the.{0,15}body|"
+     r"summary entity is not a source"),
     ("persist_every_turn", "Persist every conversation turn to Neotoma",
      r"turn-by-turn|every turn|conversation_message|per-turn"),
     ("plan_merge_before_correct", "Re-read and merge a plan field before correcting it",
@@ -398,9 +589,22 @@ KIND_SIGNATURES: tuple[tuple[str, str, str], ...] = (
      r"prior art|already exists|parallel (mechanism|one)|reuse the existing"),
     ("summarize_operator_input", "Echo the operator's input, cleaned up, each reply",
      r"summarize what the operator|transcrib|cleaned up|relay.{0,20}speech"),
-    ("status_update_unprompted", "Give status updates and open decisions unprompted",
-     r"status update|unprompted|end every turn|open decision|"
-     r"decisions that need"),
+    # SPLIT from a single "status updates and open decisions" kind. Three
+    # rules, not one: a turn can carry a status update and no decision list, a
+    # decision list posed as prose rather than through the questions tool, or a
+    # decision list that names a carried decision without restating it. Each is
+    # separately violable, and the questions-tool rule -- a live standing_rule
+    # entity -- was invisible while the three shared a bucket.
+    ("status_update_unprompted", "Give status updates unprompted, per workstream",
+     r"status update|give status|updates? unprompted|"
+     r"what moved.{0,30}what is blocked"),
+    ("decisions_end_every_turn", "End every turn with the decisions that need the operator",
+     r"end every turn|decisions that need|carry every open decision|"
+     r"re-?raise.{0,25}by name|repeat(?:ing)? (?:them|pending) (?:each|every) turn"),
+    ("decisions_via_questions_tool",
+     "Pose open decisions through the harness questions tool, not inline prose",
+     r"askuserquestion|questions tool|harness question|"
+     r"pose.{0,30}decision.{0,30}(tool|call)|labeled options"),
     ("proceed_with_recommendation", "Act on your recommendation; ask only at a real fork",
      r"proceed with your recommendation|don't ask|auto-proceed|"
      r"genuine fork|take it and report"),
@@ -411,8 +615,35 @@ KIND_SIGNATURES: tuple[tuple[str, str, str], ...] = (
      r"unset GH_TOKEN"),
     ("recurring_never_done", "Recurring obligations roll their date; never complete",
      r"never.{0,20}mark.{0,25}complet|roll.{0,20}due_date|recurring obligation"),
-    ("no_invented_content", "Never invent facts, quotes, emotion, or reactions",
-     r"never invent|no invented|fabricat|hallucinat|verify every quote"),
+    # SPLIT from one "never invent facts, quotes, emotion, or reactions" kind.
+    # The memory corpus states these separately and they are separately
+    # violable: a draft can be scrupulous about quotes and still assert what
+    # the operator felt; a report can invent no emotion and still fabricate a
+    # finding. Each has its own correction history. The single kind held 45
+    # statements at 44 distinct openings -- a topical bucket, not a rule.
+    ("no_invented_facts", "Never invent facts about the operator's life, tools, or past",
+     r"never invent or assume facts|no invented facts|invent.{0,30}\bfacts\b|"
+     r"never invent.{0,25}(amounts?|fields?|credential|hostname|next step)"),
+    ("no_invented_quotes", "Never invent a quote; every quote traces to its source",
+     r"never invent quotes?|no invented quotes?|verify every quote|"
+     r"invent.{0,20}quotes?|verbatim quote.{0,40}never"),
+    ("no_fabricated_operator_state",
+     "Never assert what the operator feels, thinks, or said without evidence",
+     r"fabricate operator emotion|operator (?:emotion|internal state)|"
+     r"never assert what the operator|unverified.{0,20}speech|"
+     r"fabricated.{0,20}(emotion|admission)|never said he"),
+    ("no_invented_findings",
+     "Never fabricate a finding or a conclusion to appear useful",
+     r"no invented findings|fabricate a finding|invent.{0,20}findings?|"
+     r"speculation is labeled|confident fabrication"),
+    ("no_invented_praise",
+     "Never invent praise or a judgement of someone else's work",
+     r"invented praise|unverifiable superlative|claimed judgments|"
+     r"praise of their work|masterclass in"),
+    ("no_predicted_third_party_reaction",
+     "Never predict or assert a third party's reaction",
+     r"third.?part(?:y|ies)'? reaction|predict a third|"
+     r"never predict.{0,25}reaction|put words in a participant"),
     ("pii_minimization", "Minimize personal data at capture; purpose-bind it",
      r"rgpd|gdpr|minimi[sz]e at capture|legitimate interest|art\. ?9|"
      r"personal data"),
@@ -491,6 +722,24 @@ TARGET_HOME: dict[str, str] = {
     "squash_merge": "agent_policy",
     "conventional_commits": "agent_policy",
     "test_colocation": "agent_policy",
+    "git_stash_recovery": "agent_policy",
+    "worktree_one_per_agent": "agent_policy",
+    "shared_clone_no_mutation": "agent_policy",
+    "decisions_end_every_turn": "task_policy",
+    "decisions_via_questions_tool": "task_policy",
+    "no_invented_facts": "task_policy",
+    "no_invented_quotes": "task_policy",
+    "no_fabricated_operator_state": "task_policy",
+    "no_invented_findings": "task_policy",
+    "no_invented_praise": "task_policy",
+    "no_predicted_third_party_reaction": "task_policy",
+    "store_proactively": "agent_policy",
+    "store_body_not_pointer": "agent_policy",
+    "operator_only_actions": "docs/foundation/",
+    "blast_radius_classification": "docs/foundation/",
+    "dispatch_no_drift": "agent_policy",
+    "durable_work_not_task_chip": "agent_policy",
+    "validate_the_instrument": "agent_policy",
 }
 
 
@@ -966,6 +1215,7 @@ def render(clusters: list[Cluster], stores: list[Store],
     total_rules = len(clusters)
     dup = (clustered / total_rules) if total_rules else 0
     diverging = [c for c in clusters if c.diverges]
+    needs_split = [c for c in clusters if c.needs_split]
     today = date.today().isoformat()
 
     L: list[str] = []
@@ -1011,6 +1261,7 @@ def render(clusters: list[Cluster], stores: list[Store],
     A("| Measure | Value |")
     A("|---|---|")
     A(f"| Distinct rules (clusters) | **{total_rules}** |")
+    A(f"| …of those, still flagged NEEDS-SPLIT | **{len(needs_split)}** |")
     A(f"| Statements of those rules, across all stores | **{clustered}** |")
     A(f"| **Duplication factor** | **{dup:.1f}×** |")
     A(f"| Clusters whose statements DIVERGE on binding force | **{len(diverging)}** |")
@@ -1031,6 +1282,41 @@ def render(clusters: list[Cluster], stores: list[Store],
       "are procedure, context, or rules whose kind has no signature yet — "
       "counting them would inflate the figure with statements the migration "
       "has nothing to collapse.")
+    A("")
+
+    A("### The earlier 13.9× was an upper bound on duplication, and a lower "
+      "bound on the rule count")
+    A("")
+    A("The first revision of this inventory reported **36 rules at 13.9×**. "
+      "That figure was wrong in a specific and correctable direction, and it "
+      "is restated here rather than quietly replaced.")
+    A("")
+    A("Its clustering merged by TOPIC. Statements that shared vocabulary "
+      "landed together whether or not they stated the same rule, so some of "
+      "the 13.9× was not duplication at all — it was distinct rules stacked in "
+      "one bucket. Duplication was therefore **over**-stated and the rule "
+      "count **under**-stated: 13.9× is an upper bound on the first and 36 a "
+      "lower bound on the second. Neither is a measurement of what it named.")
+    A("")
+    A("How it was caught matters more than the number. The operator noticed a "
+      "rule he knew existed — *pose open decisions through the harness "
+      "questions tool* — was absent from the 36. It had not been missed by the "
+      "extractor: a `standing_rule` entity and eight further statements were "
+      "all present in the document, absorbed into a cluster labelled *give "
+      "status updates and open decisions unprompted*. Those are two rules. One "
+      "says SURFACE a decision, the other says HOW; a turn that ends with a "
+      "prose decision list satisfies the first and violates the second. The "
+      "instrument could not see this, because nothing in it measured its own "
+      "clustering. The `Distinct` column and the NEEDS-SPLIT verdict exist so "
+      "the next over-merge is visible in the output rather than waiting on a "
+      "reader's memory of a rule that should be there.")
+    A("")
+    A(f"This revision applies the merge test — two statements are the same "
+      f"rule only if a session cannot satisfy one while violating the other — "
+      f"and reports **{total_rules} rules at {dup:.1f}×**, with "
+      f"**{len(needs_split)}** clusters still flagged as buckets. The new "
+      "figure is not proposed as final either: a NEEDS-SPLIT count above zero "
+      "is the document saying so about itself.")
     A("")
 
     A("## The stores")
@@ -1064,6 +1350,58 @@ def render(clusters: list[Cluster], stores: list[Store],
                 bits.append(f"**could not be read**: {st.read_error}")
             A(f"- **{st.name}** — {'; '.join(bits)}.")
     A("")
+
+    A("## NEEDS-SPLIT: clusters that are still topical buckets")
+    A("")
+    A("**The merge test.** Two statements are the same rule only if *a session "
+      "cannot satisfy one while violating the other*. Topical similarity is "
+      "not sufficient. `CLAUDE.md` states the governing principle for its own "
+      "rule-parity checker — *near-identical leads are reported but never "
+      "collapsed; `Dispatch, don't work inline` and `Dispatch, don't drift "
+      "inline` are two rules* — and this is that principle applied to the "
+      "inventory's clustering.")
+    A("")
+    if needs_split:
+        A(f"**{len(needs_split)} clusters below do not pass it yet.** They are "
+          "listed as buckets rather than counted as clean rules. Each holds "
+          "statements whose openings are nearly all distinct, which means the "
+          "cluster is grouping by shared vocabulary rather than by rule "
+          "identity — the same defect that hid the questions-tool rule.")
+        A("")
+        A("**A flag is not a verdict, and it does not say which defect it "
+          "found.** The probe reads the first six words of each statement, so "
+          "a high ratio means only that the cluster's statements are mostly "
+          "unlike each other. Read directly, the flagged clusters turn out to "
+          "carry two different defects, and the remedy differs:")
+        A("")
+        A("- **Genuine over-merge** — the cluster holds distinct rules that "
+          "share vocabulary. This is what hid the questions-tool rule, and the "
+          "remedy is a split.")
+        A("- **Extraction noise** — the cluster holds a correctly-merged rule "
+          "plus statements that merely MENTION it. The never-stash cluster is "
+          "the worked case: of its statements, the prohibition itself is "
+          "stated in several harnesses in close to the same words and is "
+          "correctly ONE rule, but the cluster also catches a hook's own test "
+          "fixture and a rule about task chips whose example happens to be a "
+          "stash. The remedy there is a narrower signature, not a split.")
+        A("")
+        A("Both need a human read of the statements against the merge test, "
+          "exactly as the divergence list does. What the probe is for is that "
+          "neither defect is now discoverable only by a reader noticing an "
+          "absence.")
+        A("")
+        A("| Rule | Statements | Distinct | Ratio | Stores |")
+        A("|---|---|---|---|---|")
+        for c in sorted(needs_split, key=lambda c: -len(c.statements)):
+            n = len(c.statements)
+            A(f"| `{c.rule_id}` {c.label} | {n} | {c.distinct_openings} | "
+              f"{c.distinct_openings / n:.2f} | {len(c.stores)} |")
+        A("")
+    else:
+        A("No cluster trips the probe on this run. That is not proof the "
+          "clustering is correct — the probe measures statement variety, not "
+          "rule identity — but no cluster is currently a bucket by this test.")
+        A("")
 
     if diverging:
         A("## Divergence: the same rule, stated differently")
@@ -1103,12 +1441,22 @@ def render(clusters: list[Cluster], stores: list[Store],
       "statement binds the same way — it does not mean the wording matches, and "
       "it is not a claim that the statements are interchangeable.")
     A("")
-    A("| id | Rule | Statements | Stores | Agree? | Target home |")
-    A("|---|---|---|---|---|---|")
+    A("`Distinct` is how many different statements the cluster holds, keyed on "
+      "each statement's first six words. A rule restated across stores repeats "
+      "itself, so a genuine cluster has far fewer distinct statements than "
+      "statements. A cluster whose distinct count approaches its statement "
+      f"count is carrying statements that merely share vocabulary, and is "
+      f"emitted as **NEEDS-SPLIT** rather than as a rule (at or above "
+      f"{SPLIT_RATIO:g} with at least {MIN_STATEMENTS_TO_JUDGE} statements).")
+    A("")
+    A("| id | Rule | Statements | Distinct | Stores | Agree? | Target home |")
+    A("|---|---|---|---|---|---|---|")
     for c in clusters:
         home = TARGET_HOME.get(c.kind, "**UNCLASSIFIED**")
+        verdict = "**NEEDS-SPLIT**" if c.needs_split else (
+            "DIVERGE" if c.diverges else "agree")
         A(f"| `{c.rule_id}` | {c.label} | {len(c.statements)} | "
-          f"{len(c.stores)} | {'DIVERGE' if c.diverges else 'agree'} | {home} |")
+          f"{c.distinct_openings} | {len(c.stores)} | {verdict} | {home} |")
     A("")
 
     A("### Where each rule is stated")
@@ -1117,8 +1465,8 @@ def render(clusters: list[Cluster], stores: list[Store],
         A(f"#### `{c.rule_id}` — {c.label}")
         A("")
         A(f"Target home: **{TARGET_HOME.get(c.kind, 'UNCLASSIFIED')}** · "
-          f"{len(c.statements)} statements · "
-          f"{'**DIVERGE**' if c.diverges else 'agree'}")
+          f"{len(c.statements)} statements, {c.distinct_openings} distinct · "
+          f"{'**NEEDS-SPLIT**' if c.needs_split else ('**DIVERGE**' if c.diverges else 'agree')}")
         A("")
         A("| Store | Location | At | Statement |")
         A("|---|---|---|---|")
@@ -1214,9 +1562,17 @@ def render(clusters: list[Cluster], stores: list[Store],
       "rule (the shape `verify_claude_md_merge.py` keys on, so the inventory and "
       "the parity checker agree on what a rule is); so is any other line "
       "carrying an imperative.")
-    A("- **Clusters** are by kind, never by value, per `migration.md`. "
-      "Divergence is judged on whether statements bind the same way, not on "
-      "wording.")
+    A("- **Clusters** are by kind, never by value, per `migration.md`, and "
+      "the merge test decides a kind: two statements are the same rule only "
+      "if a session cannot satisfy one while violating the other. Topical "
+      "similarity is not sufficient, and the test is applied in both "
+      "directions — a rule restated across seven stores is still ONE rule, so "
+      "over-splitting is as wrong as over-merging.")
+    A("- **Over-merge is measured, not assumed.** Every cluster reports its "
+      "distinct-statement count, and one whose distinct count approaches its "
+      "statement count is emitted as NEEDS-SPLIT rather than as a rule.")
+    A("- **Divergence** is judged on whether statements bind the same way, "
+      "not on wording.")
     A("- **Target homes** come from the authority table in `conformance.md` and "
       "from nowhere else.")
     A("- Read-only against Neotoma **prod**. Nothing is written to the record.")
@@ -1268,6 +1624,8 @@ def main() -> int:
             "clusters": [
                 {"id": c.rule_id, "kind": c.kind, "label": c.label,
                  "diverges": c.diverges,
+                 "distinct_openings": c.distinct_openings,
+                 "needs_split": c.needs_split,
                  "target_home": TARGET_HOME.get(c.kind),
                  "statements": [
                      {"store": s.store, "location": s.location,
@@ -1301,7 +1659,8 @@ def main() -> int:
           f"{len(clusters)} rules, {clustered} statements of them "
           f"({len(statements)} scanned), "
           f"{clustered/max(len(clusters),1):.1f}x duplication, "
-          f"{sum(1 for c in clusters if c.diverges)} diverging")
+          f"{sum(1 for c in clusters if c.diverges)} diverging, "
+          f"{sum(1 for c in clusters if c.needs_split)} NEEDS-SPLIT")
     if unread:
         print(f"UNREAD stores: {', '.join(unread)}", file=sys.stderr)
     return 0
