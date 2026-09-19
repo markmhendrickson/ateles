@@ -191,6 +191,19 @@ class Snapshot:
 
 
 def _run(cmd: list[str], timeout: float) -> str:
+    """Run a collector command and return its combined output, unredacted.
+
+    Deliberately unfiltered: these are forensic captures where truncating the
+    evidence defeats the purpose, and no current collector passes a secret in or
+    reads one out (see the module-presence probe below, which walks the
+    filesystem rather than dumping env for exactly this reason).
+
+    That invariant is a property of the COLLECTORS, not of this function. The
+    return value is persisted to a snapshot on disk, so a collector that shells
+    anything env-adjacent — `flyctl secrets`, `env`, `printenv`, a config dump —
+    writes those values straight into it. Withhold output wholesale in the
+    collector before adding one; do not assume this layer filters anything.
+    """
     proc = subprocess.run(
         cmd, capture_output=True, text=True, timeout=timeout, check=False
     )
