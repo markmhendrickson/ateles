@@ -44,9 +44,9 @@ creating silence, and the silence was worse. So:
 
 PERSISTENCE
 -----------
-The ledger is written to disk (`APIS_UNROUTABLE_LEDGER`, default
-`~/.local/state/ateles/apis_unroutable.json`) and reloaded at startup, so a
-daemon restart does not re-page the operator about the whole standing backlog.
+State lives in ONE Neotoma `apis_unroutable_ledger` entity (see
+`unroutable_store.py`), reloaded at startup so a daemon restart does not re-page
+the operator about the whole standing backlog.
 
 This is load-bearing, not incidental. ateles#636 shipped a digest queue that
 looked like it recorded state and had **zero non-test callers of
@@ -55,9 +55,28 @@ set would have reproduced exactly that: Apis restarts often, and every restart
 would have re-escalated all ~35 tasks. `test_unroutable_ledger.py` asserts
 across a simulated restart for that reason.
 
-Writes are atomic (tmp file + `os.replace`) and every I/O path is fail-OPEN: a
-corrupt or unwritable ledger degrades to "escalate anyway" (noisy but visible)
-rather than crashing the dispatcher or silently swallowing pages.
+It used to be a JSON file on local disk, and the move is not cosmetic — that
+file produced two coordination bugs in its first week. Two writers (`apis.py`
+for unroutable tasks, `skill_runner.py` for undefined roles) each held their own
+instance and each `save()` wrote its whole stale view back, silently dropping
+the other's records; the merge-on-write fix for that could not express a DELETE,
+so `clear_unreadable` never persisted until per-field tombstones were added. A
+filesystem has no concurrency primitives, so every writer had to reimplement
+them. Neotoma resolves identity server-side and appends observations, so two
+writers touching one row is the ordinary case rather than a race.
+
+READ FAILURES FAIL CLOSED; WRITE FAILURES FAIL OPEN
+---------------------------------------------------
+Asymmetric on purpose. A ledger that cannot be READ must never be treated as an
+empty one: every standing unroutable task would look new and the whole backlog
+would re-page at once — the 131-page flood this module exists to prevent, caused
+by the thing meant to prevent it. So `LedgerUnavailable` propagates and the
+caller holds the notification. Suppressing a page is recoverable (the task is
+still unrouted and is seen next cycle); duplicating one is not.
+
+A failed WRITE is the opposite: it costs at most one duplicate page after a
+restart, which must not be traded for a dead dispatcher. Those degrade to a log
+line, as they always did.
 
 FINGERPRINTING
 --------------
@@ -74,9 +93,11 @@ the operator N times for one underlying fact. `note_undefined_role` dedups on
 the role name so that condition escalates once per role.
 
 Environment:
-  APIS_UNROUTABLE_LEDGER            Ledger path (default ~/.local/state/ateles/…).
   APIS_UNROUTABLE_WINDOW_SECONDS    Aggregation window (default 300).
   APIS_UNROUTABLE_REASSERT_SECONDS  Re-assert a still-unroutable task (default 86400).
+  APIS_UNROUTABLE_LEDGER            Legacy disk ledger. Read ONCE at startup to
+                                    migrate prior state into Neotoma; never
+                                    written. See `_migrate_from_disk`.
 """
 
 from __future__ import annotations
@@ -84,10 +105,15 @@ from __future__ import annotations
 import json
 import logging
 import os
-import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from unroutable_store import (
+    FIELDS,
+    LedgerUnavailable,
+    NeotomaLedgerStore,
+)
 
 log = logging.getLogger("apis.unroutable")
 
@@ -106,15 +132,18 @@ _SHARED: "UnroutableLedger | None" = None
 def shared_ledger() -> "UnroutableLedger":
     """The ONE ledger instance for this process.
 
-    Both writers — apis.dispatch_task (unroutable tasks) and
-    skill_runner (undefined roles) — must go through this. They previously each
-    built their own `UnroutableLedger()` on the same default file, and since
-    `save()` serializes tasks + roles + unreadable together from one instance's
-    memory while `load()` runs once behind a `_loaded` latch, each save wrote
-    back its own stale view and silently dropped the other's records. That is
-    precisely the "stale in-memory copy deletes another writer's entries" hazard,
-    and it reintroduced the ateles#636 failure this module exists to prevent:
-    a dropped task is re-escalated on the next restart.
+    Both writers — apis.dispatch_task (unroutable tasks) and skill_runner
+    (undefined roles) — go through this. Sharing is no longer load-bearing for
+    correctness the way it was on disk, where each instance's `save()` wrote all
+    three fields back from its own stale view and silently dropped the other
+    writer's records (measured: 2 of 4 roles and 1 of 2 unreadable records lost
+    in ~11 minutes). Writes are now per-field and identity resolves server-side,
+    so a second instance would converge on the same row rather than clobber it.
+
+    It stays a singleton anyway, for two reasons that still hold: the aggregation
+    buffers (`_pending`, `_suppressed`) are per-process and splitting them would
+    split one report into two, and one shared read cache means a dispatch cycle
+    does no Neotoma I/O at all in the steady state.
     """
     global _SHARED
     if _SHARED is None:
@@ -122,7 +151,8 @@ def shared_ledger() -> "UnroutableLedger":
     return _SHARED
 
 
-def _default_ledger_path() -> Path:
+def _legacy_ledger_path() -> Path:
+    """The pre-Neotoma disk ledger. Read once for migration, never written."""
     return Path(
         os.environ.get(
             "APIS_UNROUTABLE_LEDGER",
@@ -185,14 +215,19 @@ class _Pending:
 
 @dataclass
 class UnroutableLedger:
-    """Disk-backed dedup + aggregation for no-owner escalations.
+    """Neotoma-backed dedup + aggregation for no-owner escalations.
+
+    Persists through a `NeotomaLedgerStore` (the default). Decision logic —
+    dedup, bounded re-assertion, aggregation — is unchanged; only the store
+    moved off disk. `APIS_UNROUTABLE_LEDGER` is legacy migration input only
+    (`_migrate_from_disk`); it is never written and is not the live backend.
 
     Call `note(...)` for every unroutable task; it returns True when the task is
     newly escalatable. Call `drain(...)` to get the aggregated message for the
     tasks accumulated so far, or None when there is nothing new to say.
     """
 
-    path: Path = field(default_factory=_default_ledger_path)
+    store: NeotomaLedgerStore = field(default_factory=NeotomaLedgerStore)
     window_seconds: int = WINDOW_SECONDS
     reassert_seconds: int = REASSERT_SECONDS
 
@@ -209,125 +244,133 @@ class UnroutableLedger:
     # entity_id -> {"n": attempts, "reported": ts}
     _unreadable: dict[str, dict] = field(default_factory=dict)
     _pending_unreadable: set = field(default_factory=set)
-    # field name -> keys this instance deliberately deleted. Consulted by the
-    # merge so a delete is not undone by unioning the prior file back in.
-    _tombstones: dict = field(default_factory=dict)
+    # NB: the disk version needed per-field TOMBSTONES here, because merge-on-write
+    # unioned the prior file back in and a union cannot express a delete, so
+    # `clear_unreadable` never persisted. Neotoma writes the whole map as one
+    # observation, so a removed key is simply absent from the next write — the
+    # delete is representable and the tombstone machinery is gone.
     _last_unread_emit: float = 0.0
     _loaded: bool = False
 
     def __post_init__(self) -> None:
-        # Coerce a str path to Path. Without this, `UnroutableLedger(path="…")`
-        # fails every save with `'str' object has no attribute 'parent'` — and
-        # because saves are fail-open, it does so QUIETLY: the ledger looks like
-        # it is persisting and keeps nothing, so every restart re-pages the whole
-        # backlog. Exactly the ateles#636 shape this module exists to avoid.
-        if not isinstance(self.path, Path):
-            self.path = Path(self.path).expanduser()
+        # Accept a str/Path in the `store` slot so a caller that still passes a
+        # filesystem path gets a loud, immediate error rather than a ledger that
+        # appears to persist and keeps nothing. The disk version failed exactly
+        # that way once already: `UnroutableLedger(path="...")` broke every save
+        # with `'str' object has no attribute 'parent'`, fail-open swallowed it,
+        # and every restart re-paged the whole backlog.
+        if not isinstance(self.store, NeotomaLedgerStore):
+            raise TypeError(
+                "UnroutableLedger.store must be a NeotomaLedgerStore; the ledger "
+                f"is no longer disk-backed (got {type(self.store).__name__!r}). "
+                "Pass NeotomaLedgerStore(...) — a path here would silently "
+                "persist nothing."
+            )
 
-    # ── persistence (fail-open) ────────────────────────────────────────────
+    # ── persistence ────────────────────────────────────────────────────────
 
     def load(self) -> None:
-        """Read the ledger from disk. A missing or corrupt file is not an error:
-        the daemon starts with an empty ledger and escalates — noisy but
-        visible, which is the correct direction to fail."""
+        """Hydrate from Neotoma.
+
+        Raises `LedgerUnavailable` when the read failed. It is NOT caught here:
+        an unreadable ledger must not be spelled the same way as an empty one,
+        because "empty" means every standing unroutable task is new and the whole
+        backlog re-pages at once. `note`/`note_undefined_role`/`note_unreadable`
+        let it propagate and their callers hold the notification.
+        """
+        state = self.store.load()
+        self._seen = {
+            k: v
+            for k, v in (state.get("tasks") or {}).items()
+            if isinstance(v, dict) and "fp" in v
+        }
+        self._roles = {
+            k: float(v)
+            for k, v in (state.get("roles") or {}).items()
+            if isinstance(v, (int, float))
+        }
+        self._unreadable = {
+            k: v
+            for k, v in (state.get("unreadable") or {}).items()
+            if isinstance(v, dict)
+        }
         self._loaded = True
+        self._migrate_from_disk()
+
+    def _migrate_from_disk(self) -> None:
+        """Carry pre-Neotoma disk state in, once.
+
+        A record left behind on disk is not a cosmetic loss: every dropped entry
+        is one re-page of a task the operator has already seen. So the legacy
+        file is read and unioned in — Neotoma WINS on every key it already has,
+        because it is the newer decision, and disk only fills gaps.
+
+        Deliberately additive and idempotent: after the first migration Neotoma
+        holds every key the file did, so re-running unions nothing new. The file
+        is never written or deleted — it stays as a manual fallback, and a stale
+        copy cannot resurrect state that Neotoma has since changed.
+        """
+        path = _legacy_ledger_path()
         try:
-            raw = json.loads(self.path.read_text())
+            raw = json.loads(path.read_text())
         except FileNotFoundError:
             return
-        except Exception as exc:  # noqa: BLE001 — corrupt ledger must not crash boot
+        except Exception as exc:  # noqa: BLE001 — a corrupt legacy file is not fatal
             log.warning(
-                "[unroutable] ledger unreadable at %s (%s) — starting empty; "
-                "the standing backlog will be re-escalated once",
-                self.path, exc,
+                "[unroutable] legacy ledger at %s is unreadable (%s) — skipping "
+                "migration; anything only recorded there will re-escalate once",
+                path, exc,
             )
             return
         if not isinstance(raw, dict):
             return
-        seen = raw.get("tasks")
-        if isinstance(seen, dict):
-            self._seen = {
-                k: v for k, v in seen.items() if isinstance(v, dict) and "fp" in v
-            }
-        unreadable = raw.get("unreadable")
-        if isinstance(unreadable, dict):
-            self._unreadable = {
-                k: v for k, v in unreadable.items() if isinstance(v, dict)
-            }
-        roles = raw.get("roles")
-        if isinstance(roles, dict):
-            self._roles = {
-                k: float(v) for k, v in roles.items() if isinstance(v, (int, float))
-            }
-        log.info(
-            "[unroutable] ledger loaded from %s: %s task(s), %s role(s) already "
-            "escalated — these will not be re-paged",
-            self.path, len(self._seen), len(self._roles),
-        )
 
-    def save(self) -> None:
-        """Atomically persist. Never raises: losing the ledger costs duplicate
-        pages after a restart, which must not be traded for a dead dispatcher."""
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            # MERGE ON WRITE. `shared_ledger()` is the intended single owner, but
-            # this file is written by two logically distinct writers (unroutable
-            # tasks and undefined roles), and a whole-file overwrite from one
-            # instance's memory silently deletes whatever the other recorded. So
-            # never write a field this instance has not touched: re-read and
-            # union first. Belt-and-braces against a future caller constructing
-            # its own instance — the failure mode is invisible data loss that
-            # only shows up as a re-page after the next restart.
-            tasks, roles, unreadable = dict(self._seen), dict(self._roles), dict(self._unreadable)
-            try:
-                prior = json.loads(self.path.read_text())
-            except (FileNotFoundError, ValueError, OSError):
-                prior = {}
-            if isinstance(prior, dict):
-                for key, mine in (
-                    ("tasks", tasks), ("roles", roles), ("unreadable", unreadable)
-                ):
-                    theirs = prior.get(key)
-                    if isinstance(theirs, dict):
-                        # Ours wins on conflict (it is the newer decision);
-                        # theirs survives for every key we know nothing about —
-                        # EXCEPT one we deliberately deleted. A blind union
-                        # cannot express a deletion, so re-adding a cleared key
-                        # would resurrect it forever: `_unreadable` is the only
-                        # field with a delete path (`clear_unreadable`), and
-                        # without the tombstone check that clear never persists,
-                        # leaking entries for the daemon's whole lifetime and
-                        # reloading a stale streak that reports on the first
-                        # blip after a restart — precisely what clearing exists
-                        # to prevent.
-                        for k, v in theirs.items():
-                            if k in self._tombstones.get(key, ()):
-                                continue
-                            mine.setdefault(k, v)
-            payload = json.dumps(
-                {
-                    "version": 1,
-                    "tasks": tasks,
-                    "roles": roles,
-                    "unreadable": unreadable,
-                },
-                sort_keys=True,
+        migrated = {f: 0 for f in FIELDS}
+        for key, mine, valid in (
+            ("tasks", self._seen, lambda v: isinstance(v, dict) and "fp" in v),
+            ("roles", self._roles, lambda v: isinstance(v, (int, float))),
+            ("unreadable", self._unreadable, lambda v: isinstance(v, dict)),
+        ):
+            theirs = raw.get(key)
+            if not isinstance(theirs, dict):
+                continue
+            for k, v in theirs.items():
+                if k in mine or not valid(v):
+                    continue
+                mine[k] = float(v) if key == "roles" else v
+                migrated[key] += 1
+
+        if any(migrated.values()):
+            log.info(
+                "[unroutable] migrated legacy disk ledger %s into Neotoma: "
+                "%d task(s), %d role(s), %d unreadable — these will not be re-paged",
+                path, migrated["tasks"], migrated["roles"], migrated["unreadable"],
             )
-            fd, tmp = tempfile.mkstemp(
-                dir=str(self.path.parent), prefix=".apis_unroutable.", suffix=".tmp"
-            )
-            try:
-                with os.fdopen(fd, "w") as fh:
-                    fh.write(payload)
-                os.replace(tmp, self.path)
-            except BaseException:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                raise
-        except Exception as exc:  # noqa: BLE001
-            log.warning("[unroutable] could not persist ledger to %s: %s", self.path, exc)
+            for key, value in (
+                ("tasks", self._seen),
+                ("roles", self._roles),
+                ("unreadable", self._unreadable),
+            ):
+                if migrated[key]:
+                    self.store.save_field(key, value)
+
+    def _ensure_loaded(self) -> None:
+        if not self._loaded:
+            self.load()
+
+    def save(self, *fields: str) -> None:
+        """Persist the named state maps (all three when unspecified).
+
+        Never raises: a write that cannot land costs at most a duplicate page
+        after a restart, which must not be traded for a dead dispatcher.
+        """
+        payload = {
+            "tasks": self._seen,
+            "roles": self._roles,
+            "unreadable": self._unreadable,
+        }
+        for name in (fields or FIELDS):
+            self.store.save_field(name, payload[name])
 
     # ── decision logic (unit-tested, no I/O) ───────────────────────────────
 
@@ -356,8 +399,7 @@ class UnroutableLedger:
         A True return does NOT send anything — it stages the task for the next
         `drain()`, so a burst becomes one aggregated report.
         """
-        if not self._loaded:
-            self.load()
+        self._ensure_loaded()
         now = time.time() if now is None else now
         fp = fingerprint(tags, assigned_to)
         escalate, reason = self.should_escalate(entity_id, fp, now)
@@ -389,7 +431,7 @@ class UnroutableLedger:
             "aggregated report: %r",
             entity_id, reason, (title or "(untitled)")[:60],
         )
-        self.save()
+        self.save("tasks")
         return True
 
     def note_undefined_role(self, role: str, now: float | None = None) -> bool:
@@ -398,15 +440,14 @@ class UnroutableLedger:
         Deduped on the ROLE, not the task: ten tasks that would route to an
         undefined role are one fact about that role, not ten pages.
         """
-        if not self._loaded:
-            self.load()
+        self._ensure_loaded()
         now = time.time() if now is None else now
         last = self._roles.get(role)
         if last is not None and self.reassert_seconds and (now - last) < self.reassert_seconds:
             log.debug("[unroutable] role %r already reported undefined", role)
             return False
         self._roles[role] = now
-        self.save()
+        self.save("roles")
         log.info("[unroutable] role %r has no agent_definition — escalating once", role)
         return True
 
@@ -425,12 +466,8 @@ class UnroutableLedger:
         Reported only after UNREADABLE_ATTEMPTS failures, so a single transient
         502 stays quiet while a task that is persistently unreadable surfaces.
         """
-        if not self._loaded:
-            self.load()
+        self._ensure_loaded()
         now = time.time() if now is None else now
-        # A new failure after a clear starts a fresh streak: lift the tombstone
-        # so this record is written rather than treated as still-deleted.
-        self._tombstones.get("unreadable", set()).discard(entity_id)
         rec = self._unreadable.setdefault(entity_id, {"n": 0, "reported": 0.0})
         rec["n"] = int(rec.get("n") or 0) + 1
         if rec["n"] < UNREADABLE_ATTEMPTS:
@@ -440,7 +477,7 @@ class UnroutableLedger:
             return False
         rec["reported"] = now
         self._pending_unreadable.add(entity_id)
-        self.save()
+        self.save("unreadable")
         log.warning(
             "[unroutable] task %s unreadable after %s attempts — reporting",
             entity_id, rec["n"],
@@ -450,13 +487,27 @@ class UnroutableLedger:
     def clear_unreadable(self, entity_id: str) -> None:
         """Forget a task that became readable again.
 
-        Records a tombstone so `save()`'s merge does not resurrect the entry
-        from the copy already on disk — without it the clear never persists.
+        The whole map is rewritten, so the removed key is simply absent from the
+        next observation. On disk this needed a tombstone: merge-on-write unioned
+        the prior file back in, a union cannot express a delete, and the clear
+        never persisted — the stale streak reloaded on restart and reported on
+        the first later blip, which is what clearing exists to prevent.
+
+        Called on every readable snapshot, so it must not pay for a load when
+        there is nothing to forget: the in-memory check comes first and an
+        unloaded ledger with no record short-circuits.
         """
+        if not self._loaded:
+            try:
+                self.load()
+            except LedgerUnavailable:
+                # Forgetting is not urgent and there is nothing to page about.
+                # The streak stays as it is and the next readable snapshot
+                # clears it.
+                return
         if self._unreadable.pop(entity_id, None) is not None:
             self._pending_unreadable.discard(entity_id)
-            self._tombstones.setdefault("unreadable", set()).add(entity_id)
-            self.save()
+            self.save("unreadable")
 
     def drain_unreadable(self, now: float | None = None, force: bool = False) -> str | None:
         """Aggregated report for tasks whose snapshot cannot be read.

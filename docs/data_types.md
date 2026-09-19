@@ -205,6 +205,33 @@ Periodic self-evaluation by a strategic agent against its `agent_strategy`. Fiel
 
 ---
 
+## Daemon runtime schemas
+
+### `apis_unroutable_ledger`
+**Schema ID**: `259e1695-b7e3-45fd-aa88-f9f133be689e` · **v1.0**
+
+Singleton row holding Apis no-owner escalation dedup state (tasks / roles /
+unreadable maps). Owned by `execution/daemons/apis/unroutable_store.py`;
+provisioned via `ateles.provision.CONTEXT_SCHEMAS`. Identity is `ledger_key`
+only — `daemon` and the per-field maps are not part of identity, so partial
+first-writes (one field per `save_field`) converge on one row.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `ledger_key` | string | ✓ | Singleton key (default `apis-unroutable`) |
+| `daemon` | string | | Owning daemon (`apis`) |
+| `tasks` | object | | `entity_id -> {fp, last_escalated, count}` |
+| `roles` | object | | `role -> last escalation epoch` |
+| `unreadable` | object | | `entity_id -> {n, reported}` |
+| `schema_note` | string | | Human note |
+
+**canonical_name_fields**: `[ledger_key]`
+
+In-repo artifact: `unroutable_store.SCHEMA_DEFINITION` (must stay aligned with
+this table and with prod registration).
+
+---
+
 ## Payment schemas
 
 ### `payment_profile`
