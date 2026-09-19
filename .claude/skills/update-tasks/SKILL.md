@@ -51,7 +51,9 @@ mcp__mcpsrv_neotoma__store(
     "status": "pending",  // or "in_progress" if actively being worked
     "priority": "<see priority mapping below>",
     "phase": "<plan phase number as string>",
-    "tags": ["ateles", "phase-N", "<daemon-name-if-relevant>"]
+    "tags": ["ateles", "phase-N", "<daemon-name-if-relevant>"],
+    "action_type": "<see action_types.md — e.g. compute_only_analysis or open_or_merge_pr>",
+    "confidence": 0.9  // 0..1 per confidence_rubric; omit only when checkpoint is intended
   }],
   relationships=[{
     "relationship_type": "PART_OF",
@@ -65,6 +67,17 @@ mcp__mcpsrv_neotoma__store(
 - Phase 2 blocker items → `"blocker"`
 - Phase 2 non-blocker / Phase 3 items → `"p1"` or `"p2"`
 - Phase 4+ items → `"p2"` or `"p3"`
+
+**Execution gate fields (`action_type`, `confidence`):**
+
+Every task must set both so Apis classifies blast radius from the task, not the
+assigned agent. Vocabulary: `execution/daemons/apis/action_types.md`.
+
+- Read-only analysis, spec authoring, review without PR →
+  `action_type: "compute_only_analysis"`, `confidence: 0.9` (or scored per rubric)
+- Implementation opening a PR → `action_type: "open_or_merge_pr"`, `confidence: 0.0`
+  (high-blast; checkpoint expected)
+- Payment / publish / external send → matching high-blast type from the doc
 
 ### Step 4: Update completed tasks
 
