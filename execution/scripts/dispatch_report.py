@@ -44,6 +44,14 @@ from email.message import EmailMessage
 from email.utils import formatdate
 from pathlib import Path
 
+# This script is run directly (not as a package module), so put the repo root on
+# sys.path before importing the shared email kill-switch.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from lib.notify.email_gate import email_enabled, record_suppressed  # noqa: E402
+
 # Email-safe, self-contained styling. Inline-friendly, no external assets, no JS
 # (CSP-safe so the identical body also renders as a published rendered_page).
 PAGE_CSS = """
@@ -246,6 +254,22 @@ def deliver(eml_path: Path, to_addr: str, subject: str) -> int:
     {subject}. Example: 'gws gmail send --raw {eml} --to {to}'. We never guess a
     gws subcommand — if unset, the .eml is left in place and the operator/agent
     runs the send step explicitly (gws-gmail rule)."""
+    # Global kill-switch (ateles#645). The rendered .eml is preserved on disk and
+    # the suppression recorded, so nothing is lost — the report is simply not
+    # mailed while the swarm is muted.
+    if not email_enabled():
+        record_suppressed(
+            channel="dispatch_report", subject=subject,
+            body=f"rendered email preserved at {eml_path}", to=to_addr,
+            meta={"eml_path": str(eml_path)},
+        )
+        print(
+            f"[dispatch_report] outbound email disabled "
+            f"(ATELES_NOTIFY_EMAIL_ENABLED=0). Report preserved at {eml_path}.",
+            file=sys.stderr,
+        )
+        return 0  # fail-safe: artifact preserved, not an error
+
     tmpl = os.environ.get("ATELES_GMAIL_SEND_CMD", "").strip()
     if not tmpl:
         print(

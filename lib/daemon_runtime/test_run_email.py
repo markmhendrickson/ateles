@@ -60,6 +60,8 @@ def test_send_builds_but_skips_without_send_cmd(monkeypatch):
 
 
 def test_send_invokes_template(monkeypatch):
+    # Pin the kill-switch open — this asserts a send HAPPENS (see #645).
+    monkeypatch.delenv("ATELES_NOTIFY_EMAIL_ENABLED", raising=False)
     calls = {}
 
     def fake_run(cmd, shell=False, capture_output=False, text=False, timeout=None):
@@ -80,3 +82,57 @@ def test_send_invokes_template(monkeypatch):
     )
     assert ok is True
     assert "gws gmail send --raw" in calls["cmd"] and "--to op@d.test" in calls["cmd"]
+
+
+# ── global outbound-email kill-switch (ateles#645) ───────────────────────────
+
+
+def test_send_suppressed_by_kill_switch(monkeypatch, tmp_path):
+    """ATELES_NOTIFY_EMAIL_ENABLED=0 stops run-thread mail before the wire, and
+    records it so a withheld run update is still recoverable."""
+    import json
+
+    sink = tmp_path / "suppressed.jsonl"
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@d.test")
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@d.test")
+    monkeypatch.setenv("ATELES_GMAIL_SEND_CMD", "gws gmail send --raw {eml} --to {to}")
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL_ENABLED", "0")
+    monkeypatch.setenv("ATELES_SUPPRESSED_EMAIL_LOG", str(sink))
+
+    def boom(*a, **k):  # pragma: no cover - must never run
+        raise AssertionError("run email sent despite kill-switch")
+
+    monkeypatch.setattr(re_mod.subprocess, "run", boom)
+    assert re_mod.send_run_email(
+        task_id="ent_abc", run_key="r", stage="kickoff", title="t", body="the body"
+    ) is False
+
+    entry = json.loads(sink.read_text().strip())
+    assert entry["channel"] == "run_email"
+    assert entry["body"] == "the body"
+    assert entry["meta"]["task_id"] == "ent_abc"
+    assert entry["meta"]["stage"] == "kickoff"
+
+
+def test_send_unaffected_when_switch_absent(monkeypatch):
+    """Default-open: removing the flag restores normal delivery."""
+    monkeypatch.delenv("ATELES_NOTIFY_EMAIL_ENABLED", raising=False)
+    calls = {}
+
+    def fake_run(cmd, shell=False, capture_output=False, text=False, timeout=None):
+        calls["cmd"] = cmd
+
+        class _P:
+            returncode = 0
+            stderr = ""
+
+        return _P()
+
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@d.test")
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@d.test")
+    monkeypatch.setenv("ATELES_GMAIL_SEND_CMD", "gws gmail send --raw {eml} --to {to}")
+    monkeypatch.setattr(re_mod.subprocess, "run", fake_run)
+    assert re_mod.send_run_email(
+        task_id="ent_abc", run_key="r", stage="kickoff", title="t", body="b"
+    ) is True
+    assert "gws gmail send --raw" in calls["cmd"]
