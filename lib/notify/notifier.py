@@ -296,7 +296,14 @@ class Notifier:
         # to deliver. Recording only after a successful _deliver() would let
         # a held OPERATOR_DECISION/WARN re-queue on every tick while it sits
         # in the digest, reproducing the same storm this exists to stop.
-        if dedupe_key:
+        #
+        # INFO is the one exception, and it is not a hedge: INFO is dropped
+        # unconditionally below — never delivered, never held, never queued.
+        # Marking the key for an INFO send would suppress every later send of
+        # that condition, including a BLOCKER, on the strength of a report the
+        # operator never received. No current caller pairs dedupe_key with
+        # INFO; this keeps that from becoming a silent footgun.
+        if dedupe_key and prio != Priority.INFO:
             self._mark_dedupe_notified(dedupe_key)
 
         # Drain any prior held actionable notices before handling this send.

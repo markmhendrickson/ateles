@@ -515,6 +515,26 @@ def test_clear_dedupe_lets_a_genuine_recurrence_notify_again(tmp_path):
     ]
 
 
+def test_info_send_does_not_consume_the_dedupe_key(tmp_path):
+    """INFO is dropped unconditionally, so it must not mark the key as reported.
+
+    Marking on an INFO send would suppress every later send of that condition —
+    including a BLOCKER — on the strength of a report the operator never got.
+    """
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    key = "monedula:consent_channel_failed"
+
+    info = n.send("consent channel failed", Priority.INFO, handler="monedula", dedupe_key=key)
+    blocker = n.send("consent channel failed", Priority.BLOCKER, handler="monedula", dedupe_key=key)
+    repeat = n.send("consent channel failed", Priority.BLOCKER, handler="monedula", dedupe_key=key)
+
+    assert info is False, "INFO is never delivered"
+    assert blocker is True, "the BLOCKER must still get through after an INFO send"
+    assert repeat is False, "dedupe still holds once the condition has actually been reported"
+    assert sent == ["[monedula] consent channel failed"]
+
+
 def test_distinct_dedupe_keys_do_not_suppress_each_other(tmp_path):
     sent = []
     n = _notifier(tmp_path, NO_SILENCE, sent)
