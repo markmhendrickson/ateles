@@ -1189,13 +1189,10 @@ def main() -> bool:
             # become an inbox item (ateles#1127).
             email_eligible=False,
         )
-        try:
-            telegram_send(
-                "🔴 Monedula: consent channel failed — payments blocked, "
-                "not declined. Escalated."
-            )
-        except Exception:
-            pass
+        # Do NOT also call telegram_send here. `_notify(..., email_eligible=False)`
+        # already routes BLOCKER to Telegram via Apprise; a parallel telegram_send
+        # double-fires on the first tick and bypasses the dedupe journal on every
+        # later tick while the condition stays open (ateles#1128 / Falco).
         # A channel failure is a run that could not even ask, distinct from
         # both "nothing to do" and a stranding — but it must exit non-zero
         # for the same reason strandings do: silent 0 is how this stayed
