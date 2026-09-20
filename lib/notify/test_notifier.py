@@ -233,7 +233,11 @@ def test_from_neotoma_unset_topic_env_falls_back_to_default(monkeypatch):
 def _notifier(tmp_path, rubric, sent):
     n = Notifier(rubric=rubric)
     n._digest_path = tmp_path / "digest.json"
-    n._deliver = lambda m, force=False: (sent.append(m), True)[1]
+    n._dedupe_path = tmp_path / "dedupe.json"
+    n._deliver = lambda m, force=False, email_eligible=True: (
+        sent.append(m),
+        True,
+    )[1]
     return n
 
 
@@ -445,3 +449,157 @@ def test_hidden_queue_does_not_grow_from_info_then_self_flush(tmp_path):
     assert any("real blocker" in m for m in sent)
     assert all("noise" not in m for m in sent)
     assert all("📋 Digest" not in m for m in sent)
+
+
+# ── Repeat-condition dedupe journal (ateles#1127) ────────────────────────────
+#
+# Monedula's consent-channel-timeout alert sent 299 times over ~4 days at the
+# launchd poll cadence (~17 min), one per tick, because nothing remembered it
+# had already told the operator about the still-open condition. Same shape as
+# ateles#1083 (22,878 retries of one deterministic Tyto error), generalized
+# into the shared notifier so every daemon routing through Notifier gets it.
+
+
+def test_dedupe_key_suppresses_repeat_sends_for_the_same_open_condition(tmp_path):
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    first = n.send(
+        "consent channel failed", Priority.BLOCKER, handler="monedula",
+        dedupe_key="monedula:consent_channel_failed",
+    )
+    second = n.send(
+        "consent channel failed", Priority.BLOCKER, handler="monedula",
+        dedupe_key="monedula:consent_channel_failed",
+    )
+    third = n.send(
+        "consent channel failed", Priority.BLOCKER, handler="monedula",
+        dedupe_key="monedula:consent_channel_failed",
+    )
+    assert first is True
+    assert second is False
+    assert third is False
+    assert sent == ["[monedula] consent channel failed"]
+
+
+def test_dedupe_key_journal_survives_a_new_notifier_instance(tmp_path):
+    """A restarted daemon must not re-notify a condition it already reported."""
+    sent = []
+    n1 = _notifier(tmp_path, NO_SILENCE, sent)
+    n1.send(
+        "consent channel failed", Priority.BLOCKER, handler="monedula",
+        dedupe_key="monedula:consent_channel_failed",
+    )
+    n2 = _notifier(tmp_path, NO_SILENCE, sent)  # fresh instance, same journal path
+    again = n2.send(
+        "consent channel failed", Priority.BLOCKER, handler="monedula",
+        dedupe_key="monedula:consent_channel_failed",
+    )
+    assert again is False
+    assert sent == ["[monedula] consent channel failed"]
+
+
+def test_clear_dedupe_lets_a_genuine_recurrence_notify_again(tmp_path):
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    key = "monedula:consent_channel_failed"
+    n.send("consent channel failed", Priority.BLOCKER, handler="monedula", dedupe_key=key)
+    n.send("consent channel failed", Priority.BLOCKER, handler="monedula", dedupe_key=key)
+    n.clear_dedupe(key)  # condition resolved (a real reply arrived)
+    third = n.send(
+        "consent channel failed", Priority.BLOCKER, handler="monedula", dedupe_key=key
+    )
+    assert third is True
+    assert sent == [
+        "[monedula] consent channel failed",
+        "[monedula] consent channel failed",
+    ]
+
+
+def test_distinct_dedupe_keys_do_not_suppress_each_other(tmp_path):
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    a = n.send("A failed", Priority.BLOCKER, handler="monedula", dedupe_key="cond:a")
+    b = n.send("B failed", Priority.BLOCKER, handler="monedula", dedupe_key="cond:b")
+    assert a is True
+    assert b is True
+    assert len(sent) == 2
+
+
+def test_send_without_dedupe_key_is_unchanged_and_always_delivers(tmp_path):
+    """No key → no journal interaction, no suppression — pre-existing behaviour."""
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    for _ in range(3):
+        ok = n.send("routine blocker", Priority.BLOCKER, handler="apis")
+        assert ok is True
+    assert len(sent) == 3
+    assert not n._dedupe_path.exists()
+
+
+def test_unreadable_dedupe_journal_does_not_crash_send(tmp_path):
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    n._dedupe_path.write_text("not json")
+    ok = n.send(
+        "consent channel failed", Priority.BLOCKER, handler="monedula",
+        dedupe_key="monedula:consent_channel_failed",
+    )
+    assert ok is True  # treated as empty journal, not a crash
+
+
+def test_clear_dedupe_on_a_key_never_seen_does_not_raise(tmp_path):
+    n = Notifier(rubric=NO_SILENCE)
+    n._dedupe_path = tmp_path / "dedupe.json"
+    n.clear_dedupe("never-sent-key")  # must not raise
+
+
+# ── email_eligible gate — actionability, not severity (ateles#1127) ─────────
+#
+# The consent-channel-timeout body says "See escalation" — there is nothing
+# the operator can decide or do from the email itself. email_eligible=False
+# keeps the alert on Telegram/Apprise but stops it from becoming an inbox
+# item he has no way to resolve by reading it.
+
+
+def test_email_eligible_false_skips_email_but_still_delivers_telegram(monkeypatch):
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+    n = Notifier(rubric=NO_SILENCE)
+    n._email_primary = True
+    n._operator_email = "op@test"
+    n._notify_to = "op@test"
+    email_calls = []
+    monkeypatch.setattr(
+        n, "_deliver_email", lambda m: (email_calls.append(m), True)[1]
+    )
+    n._apprise = None  # "would send" (logged) path stands in for Telegram here
+    ok = n.send(
+        "consent channel failed — see escalation",
+        priority=Priority.BLOCKER,
+        handler="monedula",
+        email_eligible=False,
+    )
+    assert email_calls == []  # email transport was never tried
+    assert ok is False  # no apprise configured in this test — logged, not sent
+    # Contrast: the same send WITH email_eligible=True (default) does try email.
+    ok2 = n.send(
+        "consent channel failed — see escalation",
+        priority=Priority.BLOCKER,
+        handler="monedula",
+    )
+    assert email_calls == ["[monedula] consent channel failed — see escalation"]
+    assert ok2 is True
+
+
+def test_email_eligible_default_true_is_unchanged_behaviour(monkeypatch):
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+    n = Notifier(rubric=NO_SILENCE)
+    n._email_primary = True
+    n._operator_email = "op@test"
+    n._notify_to = "op@test"
+    email_calls = []
+    monkeypatch.setattr(
+        n, "_deliver_email", lambda m: (email_calls.append(m), True)[1]
+    )
+    ok = n.send("routine blocker", priority=Priority.BLOCKER, handler="apis")
+    assert ok is True
+    assert email_calls == ["[apis] routine blocker"]

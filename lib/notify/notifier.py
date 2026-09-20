@@ -15,6 +15,12 @@ Priority levels:
     warn              — send now outside silence; held across silence
     info              — logged only (no digest, no queue)
 
+Repeat-condition dedupe (ateles#1127): pass ``dedupe_key`` to ``send()`` for
+any alert a daemon re-checks on a poll loop. The first send for a key
+delivers; every later send for the same key is suppressed until the caller
+calls ``clear_dedupe(key)`` once the condition resolves. Without a key, every
+call is delivered independently, same as before.
+
 All times are in the rubric's configured timezone (default: Europe/Madrid).
 """
 
@@ -160,6 +166,26 @@ class Notifier:
             os.environ.get("ATELES_DIGEST_QUEUE_PATH", "").strip()
             or Path(tempfile.gettempdir()) / "ateles-notify-digest.json"
         )
+        # Repeat-condition dedupe journal (ateles#1127).
+        #
+        # A deterministic condition a daemon re-checks on every tick (a
+        # consent-channel timeout still open, a gate still failing) used to
+        # notify on every tick with no memory of having already said so.
+        # Monedula's consent-channel-timeout alert fired 299 times over four
+        # days at the launchd poll cadence (~17 min) — the same shape as
+        # ateles#1083 (22,878 retries of one deterministic Tyto error), just
+        # on the email channel instead of Telegram. Tyto's fix journaled
+        # per-file permanent failures inside its own retry state; this is the
+        # generalization into the shared notifier so every daemon that routes
+        # through Notifier gets it for free, keyed by a caller-supplied
+        # ``dedupe_key`` rather than a file path. A key notifies once, then is
+        # suppressed until the caller calls ``clear_dedupe(key)`` when the
+        # condition resolves — never on a timer, so a genuinely still-open
+        # blocker is not rediscovered just because a day passed.
+        self._dedupe_path = Path(
+            os.environ.get("ATELES_DEDUPE_JOURNAL_PATH", "").strip()
+            or Path(tempfile.gettempdir()) / "ateles-notify-dedupe.json"
+        )
         # Tyto can complete independent recording watchers on worker threads.
         # Serialize the whole notification path: the persisted held queue is
         # a read-modify-write transaction, and delivery clients are shared too.
@@ -207,14 +233,39 @@ class Notifier:
         priority: Priority | str = Priority.INFO,
         handler: str = "",
         bypass_silence: bool = False,
+        dedupe_key: str | None = None,
+        email_eligible: bool = True,
     ) -> bool:
         """
         Route a notification by priority.
 
-        Returns True if sent immediately, False if held, dropped, or undelivered.
+        ``dedupe_key``, when given, identifies the *condition* being reported
+        rather than this particular send. The first send for a key delivers
+        normally; every later send for the same key while it is still open is
+        suppressed (logged only) until the caller calls ``clear_dedupe(key)``
+        once the condition resolves. Use a stable key derived from what is
+        actually wrong (e.g. ``"monedula:consent_channel_failed"``), not from
+        data that varies per tick (a timestamp, a retry count) — a key that
+        changes every send defeats the dedupe entirely.
+
+        ``email_eligible`` (default True, unchanged behaviour) gates the
+        email transport specifically, not delivery as a whole. Set it False
+        for a notification the operator cannot act on from the message body
+        alone — it still reaches Telegram/Apprise (and any durable record the
+        caller separately writes, e.g. an escalation entity), it just never
+        becomes an inbox item he has no way to resolve by reading it
+        (ateles#1127). Something that halts payments or release and needs a
+        human decision should stay ``email_eligible=True`` with what he needs
+        to decide written into the body — this flag is for "something
+        happened, go look elsewhere", not for genuine blockers.
+
+        Returns True if sent immediately, False if held, dropped, suppressed
+        as a duplicate, or undelivered.
         """
         with self._notification_lock:
-            return self._send_locked(message, priority, handler, bypass_silence)
+            return self._send_locked(
+                message, priority, handler, bypass_silence, dedupe_key, email_eligible
+            )
 
     def _send_locked(
         self,
@@ -222,24 +273,45 @@ class Notifier:
         priority: Priority | str,
         handler: str,
         bypass_silence: bool,
+        dedupe_key: str | None = None,
+        email_eligible: bool = True,
     ) -> bool:
         prio = Priority(priority) if isinstance(priority, str) else priority
         tag = f"[{handler}] " if handler else ""
         full_message = f"{tag}{message}"
+
+        if dedupe_key and self._is_duplicate(dedupe_key):
+            log.info(
+                "[notify] suppressing repeat notification for open condition "
+                "%r (call clear_dedupe() once it resolves): %r",
+                dedupe_key,
+                full_message[:200],
+            )
+            return False
+
+        # Record the key as reported BEFORE routing, not after. The dedupe
+        # contract is "have I already told the operator about this open
+        # condition", which is true the moment this call is let through —
+        # regardless of whether the priority ends up held, queued, or fails
+        # to deliver. Recording only after a successful _deliver() would let
+        # a held OPERATOR_DECISION/WARN re-queue on every tick while it sits
+        # in the digest, reproducing the same storm this exists to stop.
+        if dedupe_key:
+            self._mark_dedupe_notified(dedupe_key)
 
         # Drain any prior held actionable notices before handling this send.
         self._maybe_flush_digest()
 
         if prio == Priority.CRITICAL:
             # Critical always fires immediately, even in silence window
-            return self._deliver(full_message, force=True)
+            return self._deliver(full_message, force=True, email_eligible=email_eligible)
 
         if prio == Priority.BLOCKER:
             if self._in_silence_window() and not bypass_silence:
                 log.info(
                     "[notify] Blocker in silence window — delivering anyway (blocker policy)"
                 )
-            return self._deliver(full_message, force=True)
+            return self._deliver(full_message, force=True, email_eligible=email_eligible)
 
         if prio == Priority.OPERATOR_DECISION:
             if self._in_silence_window() and not bypass_silence:
@@ -248,13 +320,17 @@ class Notifier:
                 )
                 self._queue_digest(f"⚠️ {full_message}")
                 return False
-            return self._deliver(f"⚠️ {full_message}", force=False)
+            return self._deliver(
+                f"⚠️ {full_message}", force=False, email_eligible=email_eligible
+            )
 
         if prio == Priority.WARN:
             if self._in_silence_window() and not bypass_silence:
                 self._queue_digest(f"⚠ {full_message}")
                 return False
-            return self._deliver(f"⚠ {full_message}", force=False)
+            return self._deliver(
+                f"⚠ {full_message}", force=False, email_eligible=email_eligible
+            )
 
         # INFO — never email, never queue, never flush later as a digest.
         log.debug("[notify] Dropping routine INFO (no digest): %r", full_message)
@@ -414,6 +490,97 @@ class Notifier:
                 continue
         return False
 
+    # ── Repeat-condition dedupe journal (ateles#1127) ─────────────────────────
+
+    @property
+    def _dedupe_journal(self) -> dict[str, Any]:
+        """Read the persisted dedupe journal. Fail-open: unreadable => empty.
+
+        Shape: ``{key: {"notified_at": iso8601, "handler": str}}``. A key
+        present here has already been reported and is suppressed on every
+        later ``send(dedupe_key=key)`` until ``clear_dedupe(key)`` removes it.
+        """
+        with self._notification_lock:
+            try:
+                raw = json.loads(self._dedupe_path.read_text())
+                return raw if isinstance(raw, dict) else {}
+            except FileNotFoundError:
+                return {}
+            except Exception as exc:  # noqa: BLE001 — never crash a notification
+                log.warning(
+                    "[notify] dedupe journal unreadable (%s) — treating as empty",
+                    exc,
+                )
+                return {}
+
+    def _persist_dedupe_journal(self, journal: dict[str, Any]) -> None:
+        """Atomically rewrite the dedupe journal. Caller must hold the lock."""
+        try:
+            self._dedupe_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._dedupe_path.with_suffix(".tmp")
+            if journal:
+                tmp.write_text(json.dumps(journal))
+                tmp.replace(self._dedupe_path)
+            else:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    self._dedupe_path.unlink(missing_ok=True)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "[notify] could not clear empty dedupe journal: %s", exc
+                    )
+        except Exception as exc:  # noqa: BLE001
+            # Fail open toward SENDING rather than silently losing an alert:
+            # if the journal can't be written, the key is simply not recorded
+            # and the next tick will (harmlessly) re-notify. That is the
+            # pre-existing behaviour, not a new failure mode.
+            log.error("[notify] could not persist dedupe journal (%s)", exc)
+
+    def _is_duplicate(self, key: str) -> bool:
+        with self._notification_lock:
+            return key in self._dedupe_journal
+
+    def _mark_dedupe_notified(self, key: str, handler: str = "") -> None:
+        """Record that ``key`` has been reported. Never raises."""
+        with self._notification_lock:
+            try:
+                journal = self._dedupe_journal
+                if key not in journal:
+                    journal[key] = {
+                        "notified_at": self._now_local().isoformat(),
+                        "handler": handler,
+                    }
+                    self._persist_dedupe_journal(journal)
+            except Exception as exc:  # noqa: BLE001
+                log.error(
+                    "[notify] could not record dedupe key %r (%s) — condition "
+                    "may re-notify on the next tick",
+                    key,
+                    exc,
+                )
+
+    def clear_dedupe(self, key: str) -> None:
+        """Clear a dedupe key once its condition has resolved.
+
+        Call this the moment the underlying condition is no longer true (a
+        consent-channel reply arrives, a gate starts passing again) so a
+        genuine recurrence — the condition clearing and then coming back — is
+        reported again rather than staying suppressed forever. Never raises.
+        """
+        with self._notification_lock:
+            try:
+                journal = self._dedupe_journal
+                if key in journal:
+                    del journal[key]
+                    self._persist_dedupe_journal(journal)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "[notify] could not clear dedupe key %r (%s)", key, exc
+                )
+
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _deliver_email(self, message: str) -> bool:
@@ -449,7 +616,9 @@ class Notifier:
             log.warning("[notify] email send error: %s", exc)
             return False
 
-    def _deliver(self, message: str, force: bool = False) -> bool:
+    def _deliver(
+        self, message: str, force: bool = False, email_eligible: bool = True
+    ) -> bool:
         # Hard stop: never deliver a bulk digest payload on any channel.
         first = (message.strip().splitlines() or [""])[0]
         if first.startswith("📋 Digest") or message.lstrip().startswith("📋 Digest"):
@@ -459,8 +628,12 @@ class Notifier:
             )
             return False
         # E6: try email first when it's the configured primary transport; only
-        # fall through to Telegram (break-glass) if email delivery fails.
-        if self._email_primary:
+        # fall through to Telegram (break-glass) if email delivery fails. A
+        # caller that marked this send email_eligible=False skips straight to
+        # Telegram — the notification still reaches the operator, it just
+        # never becomes an inbox item he has no way to act on by reading it
+        # (ateles#1127).
+        if self._email_primary and email_eligible:
             if self._deliver_email(message):
                 return True
             log.warning("[notify] email delivery failed — falling back to Telegram")
