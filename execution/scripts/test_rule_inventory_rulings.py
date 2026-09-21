@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 import render_rule_inventory as inventory
 
@@ -466,6 +467,102 @@ class RuleInventoryRulingsTest(unittest.TestCase):
             with self.subTest(secret=secret):
                 self.assertNotIn(secret, public)
         self.assertIn("Canonical repository instruction roots", public)
+
+    def test_relative_canonical_repository_root_fails_closed(self) -> None:
+        statements, store = inventory.read_canonical_repository_instruction_roots(
+            "relative/repository"
+        )
+
+        self.assertEqual(statements, [])
+        self.assertFalse(store.read_ok)
+        self.assertIn("not absolute", store.read_error)
+
+    def test_symlinked_canonical_repository_root_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            primary = base / "primary"
+            subprocess.run(["git", "init", "--quiet", str(primary)], check=True)
+            configured = base / "configured-root"
+            configured.symlink_to(primary, target_is_directory=True)
+
+            statements, store = inventory.read_canonical_repository_instruction_roots(
+                str(configured)
+            )
+
+        self.assertEqual(statements, [])
+        self.assertFalse(store.read_ok)
+        self.assertIn("unavailable", store.read_error)
+
+    def test_repository_instruction_symlink_escape_fails_closed_without_leaking(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            configured = base / "configured-root"
+            subprocess.run(["git", "init", "--quiet", str(configured)], check=True)
+            outside = base / "ClientCodename-ent_private_123.md"
+            outside.write_text("Never expose this private instruction value.\n")
+            configured.joinpath("AGENTS.md").symlink_to(outside)
+
+            statements, store = inventory.read_canonical_repository_instruction_roots(
+                str(configured)
+            )
+
+        self.assertEqual(statements, [])
+        self.assertFalse(store.read_ok)
+        self.assertIn("leaves its canonical root", store.read_error)
+        public = json.dumps(inventory.public_payload([], [store], [], []))
+        for secret in (str(outside), "ClientCodename", "ent_private_123"):
+            with self.subTest(secret=secret):
+                self.assertNotIn(secret, public)
+
+    def test_malformed_canonical_repository_root_fails_closed_without_leaking(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            configured = Path(tmpdir) / "ClientCodename-ent_private_123"
+            subprocess.run(["git", "init", "--quiet", str(configured)], check=True)
+            configured.joinpath("CLAUDE.md").write_text(
+                "Never expose this private instruction value.\n"
+            )
+            malformed = str(configured) + "\x00"
+
+            statements, store = (
+                inventory.read_canonical_repository_instruction_roots(malformed)
+            )
+
+        self.assertEqual(statements, [])
+        self.assertFalse(store.read_ok)
+        public = json.dumps(inventory.public_payload([], [store], [], []))
+        self.assertNotIn("ClientCodename", public)
+        self.assertNotIn("ent_private_123", public)
+
+    def test_unreadable_repository_instruction_fails_closed_without_leaking(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            configured = Path(tmpdir) / "configured-root"
+            subprocess.run(["git", "init", "--quiet", str(configured)], check=True)
+            instruction = configured / "CLAUDE.md"
+            instruction.write_text("Never expose ClientCodename private value.\n")
+
+            with mock.patch.object(
+                Path,
+                "read_bytes",
+                autospec=True,
+                side_effect=PermissionError("ClientCodename unreadable"),
+            ):
+                statements, store = (
+                    inventory.read_canonical_repository_instruction_roots(
+                        str(configured)
+                    )
+                )
+
+        self.assertEqual(statements, [])
+        self.assertFalse(store.read_ok)
+        self.assertIn("PermissionError", store.read_error)
+        public = json.dumps(inventory.public_payload([], [store], [], []))
+        self.assertNotIn("ClientCodename", public)
 
     def test_external_symlinked_git_directory_is_not_a_primary_clone(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
