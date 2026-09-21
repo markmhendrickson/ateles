@@ -673,6 +673,9 @@ def test_checkpoint_stamp_requires_materialized_readback(monkeypatch):
         def raise_for_status(self):
             return None
 
+        def json(self):
+            return {"success": True, "snapshot": {"resolved_dispatched": True}}
+
     monkeypatch.setattr(gating_module.httpx, "post", lambda *args, **kwargs: _Response())
     monkeypatch.setattr(
         gating_module,
@@ -680,6 +683,33 @@ def test_checkpoint_stamp_requires_materialized_readback(monkeypatch):
         lambda entity_id: {
             "entity_type": "checkpoint_" + "brief",
             "snapshot": {"resolved_dispatched": False},
+        },
+    )
+
+    assert stamp_checkpoint_dispatched("ent_cp", handler="apis") is False
+
+
+def test_checkpoint_stamp_duplicate_caller_does_not_own_claim(monkeypatch):
+    """A duplicate idempotency response must not authorize a second consumer."""
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    class _DuplicateResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            # Neotoma returns snapshot=null on the 23505/idempotent replay path.
+            return {"success": True, "snapshot": None}
+
+    monkeypatch.setattr(
+        gating_module.httpx, "post", lambda *args, **kwargs: _DuplicateResponse()
+    )
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": "checkpoint_" + "brief",
+            "snapshot": {"resolved_dispatched": True},
         },
     )
 

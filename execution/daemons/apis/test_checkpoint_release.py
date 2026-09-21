@@ -120,6 +120,12 @@ def release_store(monkeypatch):
             return None
         return record["snapshot"]
 
+    def fetch_checkpoint(checkpoint_entity_id):
+        record = records.get(checkpoint_entity_id)
+        if record is None or record["entity_type"] != CHECKPOINT_TYPE:
+            return None
+        return record["snapshot"]
+
     def set_status(task_entity_id, status, *, reason=None, **kwargs):
         value = status.value if hasattr(status, "value") else str(status)
         records[task_entity_id]["snapshot"]["status"] = value
@@ -134,6 +140,7 @@ def release_store(monkeypatch):
     monkeypatch.setattr(server, "_get", get)
     monkeypatch.setattr(server, "_correct", correct)
     monkeypatch.setattr(apis, "fetch_task_snapshot", fetch_task)
+    monkeypatch.setattr(apis, "fetch_checkpoint_snapshot", fetch_checkpoint)
     monkeypatch.setattr(apis, "set_task_status", set_status)
     monkeypatch.setattr(apis, "stamp_checkpoint_dispatched", stamp)
     monkeypatch.setattr(apis, "DRY_RUN", True)
@@ -186,6 +193,31 @@ async def test_approve_releases_task_and_marks_brief_consumed(
     await apis.handle_checkpoint_brief(
         brief_id, records[brief_id]["snapshot"], _Notifier()
     )
+    assert len(dispatches) == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_sse_snapshot_cannot_dispatch_after_inline_consumer(
+    monkeypatch, release_store
+):
+    records, brief_id, _task_id = release_store
+    stale_approved_snapshot = {
+        **records[brief_id]["snapshot"],
+        "status": "approved",
+        "resolved_dispatched": False,
+    }
+    original_dispatch = apis.dispatch_task
+    dispatches: list[str] = []
+
+    async def spy_dispatch(entity_id, *args, **kwargs):
+        dispatches.append(entity_id)
+        await original_dispatch(entity_id, *args, **kwargs)
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    await _resolve(brief_id, "approve")
+    await apis.handle_checkpoint_brief(brief_id, stale_approved_snapshot, _Notifier())
+
     assert len(dispatches) == 1
 
 

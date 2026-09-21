@@ -697,6 +697,22 @@ def fetch_task_snapshot(task_entity_id: str) -> dict | None:
     return _snapshot_of(data)
 
 
+def fetch_checkpoint_snapshot(checkpoint_entity_id: str) -> dict | None:
+    """Fetch a checkpoint brief from the record, rejecting ambiguous types."""
+    data = _fetch_entity(checkpoint_entity_id)
+    if data is None:
+        return None
+    entity_type = str(data.get("entity_type") or data.get("type") or "").strip().lower()
+    if entity_type != "checkpoint_" + "brief":
+        log.warning(
+            "[gating] entity %s is type %r, not a checkpoint brief",
+            checkpoint_entity_id,
+            entity_type or "unknown",
+        )
+        return None
+    return _snapshot_of(data)
+
+
 def checkpoint_already_dispatched(snapshot: dict) -> bool:
     """
     True if this checkpoint_brief has already been acted on by the dispatcher
@@ -732,6 +748,16 @@ def stamp_checkpoint_dispatched(checkpoint_entity_id: str, *, handler: str) -> b
             timeout=15,
         )
         resp.raise_for_status()
+        response_body = resp.json()
+        if not isinstance(response_body, dict) or response_body.get("snapshot") is None:
+            # Neotoma's idempotent duplicate path returns snapshot=null. The
+            # field may read true because another consumer won, but this caller
+            # did not acquire the claim and therefore must not dispatch.
+            log.info(
+                "[gating] checkpoint %s stamp was an idempotent replay — claim not acquired",
+                checkpoint_entity_id,
+            )
+            return False
         # A successful correction response is not proof that the field landed:
         # Neotoma can accept a write that does not materialize on the entity.
         # Read the brief itself back before treating the stamp as a replay claim.

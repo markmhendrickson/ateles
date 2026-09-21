@@ -183,6 +183,7 @@ from lib.daemon_runtime import (  # noqa: E402
 )
 from lib.daemon_runtime.gating import (  # noqa: E402
     checkpoint_already_dispatched,
+    fetch_checkpoint_snapshot,
     fetch_task_snapshot,
     mark_task_declined,
     read_checkpoint_resolution,
@@ -993,6 +994,19 @@ async def handle_checkpoint_brief(
     Re-dispatch is also safe because the task skill owns its own idempotency, but
     the stamp avoids spawning the work twice on SSE redelivery.
     """
+    # SSE carries the snapshot from the status correction event. The inline MCP
+    # consumer may already have stamped and dispatched after that event was
+    # emitted, so the event snapshot is stale by construction. Refresh before
+    # the replay guard; failure is unknown and therefore holds.
+    current_snapshot = fetch_checkpoint_snapshot(entity_id)
+    if current_snapshot is None:
+        log.warning(
+            f"[{DAEMON_NAME}] checkpoint_brief {entity_id} could not be refreshed "
+            "— not acting on a potentially stale resolution"
+        )
+        return False
+    snapshot = current_snapshot
+
     resolution = read_checkpoint_resolution(snapshot)
     if resolution is None:
         log.info(
