@@ -1,0 +1,27 @@
+{
+  "_source": {
+    "path": "docs/positioning/neotoma/icp-durable-candidate-b.md",
+    "entity_id": "ent_825474455c25f9ea0783ebc6"
+  },
+  "layout": "proof_cards",
+  "eyebrow": "A practical fit",
+  "headline": "For operators whose agents share consequential state.",
+  "lede": "Neotoma fits when continuity crosses tools and sessions, but building custom state infrastructure would be a distraction.",
+  "items": [
+    {
+      "label": "Good fit",
+      "title": "Several agents touch the same work",
+      "body": "You already run more than one AI tool and need them to act on the same current facts and decisions."
+    },
+    {
+      "label": "Good fit",
+      "title": "You want to own the record",
+      "body": "Local control, inspectable history, and portable data matter more than a black-box memory feature."
+    },
+    {
+      "label": "Not the job",
+      "title": "You only need better recall inside one chat",
+      "body": "If retrieving a previous sentence solves the problem, a lighter memory tool is the better choice."
+    }
+  ]
+}

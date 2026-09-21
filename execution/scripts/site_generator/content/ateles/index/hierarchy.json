@@ -1,8 +1,0 @@
-{
-  "layout": "hierarchy",
-  "eyebrow": "Priorities travel with the task",
-  "headline": "Every action can read the reason above it.",
-  "lede": "A swarm should not allocate attention from whichever session is loudest. Work ascends through the planning records that explain why it matters, while execution state is derived below the task.",
-  "levels": ["Mission", "Strategy", "Project", "Plan", "Task"],
-  "source_note": "Illustrative planning ascent. The portable mechanism and instance-defined level names are specified in docs/foundation/planning_model.md."
-}

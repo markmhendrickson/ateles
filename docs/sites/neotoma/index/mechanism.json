@@ -1,0 +1,14 @@
+{
+  "layout": "capabilities",
+  "eyebrow": "Robust epistemological design",
+  "headline": "Knowledge your agents can rely on—not merely recall.",
+  "lede": "A record earns trust by making writes, corrections, disagreement, and time explicit. Neotoma turns each of those into something agents can query instead of a convention they must remember to follow.",
+  "items": [
+    {"label": "RECORD", "title": "Facts gain a durable home", "body": "Important state lives outside any one prompt, thread, or model context.", "terms": "Named source · recorded time"},
+    {"label": "CORRECT", "title": "Corrections replace without erasing", "body": "The current value changes while the earlier version and its source remain available.", "terms": "Earlier version · current version"},
+    {"label": "DISAGREE", "title": "Conflicts stay visible", "body": "Competing claims keep their sources instead of collapsing into whichever sentence was written last.", "terms": "Two sources · review pending"},
+    {"label": "REFRESH", "title": "Changing sources can be reread", "body": "The record shows what was current at the time and what changed later.", "terms": "Then · now · changed by"}
+  ],
+  "correction": {"old": "Approved", "current": "Replaced", "note": "The current state changes without deleting the earlier claim."},
+  "status_note": "Neotoma is open source and local-first. The repository shows the current install path and implementation status."
+}

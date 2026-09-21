@@ -1,0 +1,27 @@
+{
+  "_source": {
+    "path": "docs/positioning/neotoma/chronic-acute-pain.md",
+    "entity_id": "ent_e5aff92972fdfbc4f508a7ba"
+  },
+  "layout": "proof_cards",
+  "eyebrow": "Where continuity breaks",
+  "headline": "A useful answer is not yet a trustworthy record.",
+  "lede": "Long-running work fails when important state has no durable place to be written, corrected, or reconciled.",
+  "items": [
+    {
+      "label": "Write",
+      "title": "A fact never becomes shared state",
+      "body": "One agent learns something important, but the next tool or session has no authoritative place to read it."
+    },
+    {
+      "label": "Correct",
+      "title": "The old answer keeps returning",
+      "body": "A correction fixes one conversation while another agent continues to act on the value it already had."
+    },
+    {
+      "label": "Reconcile",
+      "title": "Conflicting sources disappear into one sentence",
+      "body": "When two sources disagree, ordinary memory hides the conflict instead of preserving what each source said."
+    }
+  ]
+}

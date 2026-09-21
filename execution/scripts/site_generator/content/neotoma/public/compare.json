@@ -1,0 +1,17 @@
+{
+  "_source": {
+    "path": "docs/positioning/neotoma/incumbent.md",
+    "entity_id": "ent_9e105035543fed11658a3fcb"
+  },
+  "layout": "comparison",
+  "eyebrow": "Compare the boundary",
+  "headline": "Recall brings text back. A record establishes what is current.",
+  "lede": "Use the lightest tool that satisfies the work. Neotoma matters when source, correction, disagreement, and time must remain inspectable.",
+  "columns": ["Approach", "What it does well", "Where the record breaks"],
+  "rows": [
+    ["Prompt files and notes", "Simple, readable, easy to start", "Updates are manual and competing claims collapse into prose"],
+    ["Platform memory", "Convenient recall inside one product", "The current value, its source, and its correction history are not independently governed"],
+    ["Retrieval-first memory", "Finds relevant prior text quickly", "Relevance does not decide which source controls a fact"],
+    ["Neotoma", "Keeps current state with source and history", "Requires a local service and deliberate writes" ]
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "_source": {"path": "README.md"},
+  "layout": "proof_cards",
+  "eyebrow": "The direction",
+  "headline": "A durable organization for humans and agents.",
+  "lede": "Ateles is built toward shared initiative under explicit authority, with each action attributable and each decision reconstructable.",
+  "items": [
+    {"label": "Available now", "title": "One operator, several agent roles", "body": "The reference system coordinates a single operator's agents through shared state, declared responsibilities, and guarded actions."},
+    {"label": "Designed next", "title": "Several accountable people", "body": "The same model extends to distinct human principals, delegated approval, and shared responsibility."},
+    {"label": "Long-term promise", "title": "An organization that keeps moving", "body": "Work advances toward shared priorities and returns only the decisions that truly need human judgement."}
+  ]
+}

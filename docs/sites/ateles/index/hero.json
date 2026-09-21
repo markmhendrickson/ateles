@@ -1,12 +1,14 @@
 {
-  "layout": "seal_hero",
-  "category": "The distributed-authority operating layer for governed initiative",
+  "layout": "network_hero",
+  "category": "The operating system for agent organizations",
   "headline": "Delegate outcomes, not every next step.",
   "body": "Ateles gives role-specific agents an organization to work within: named relationships, explicit authority, high-level context, coordinated execution, and checkpoints only when a decision genuinely needs you. That is robust organizational design for agents.",
   "primary_cta": {"label": "Read the design", "href": "/design/"},
   "secondary_cta": {"label": "Compare approaches", "href": "/compare/"},
+  "concept_film_brief": "content/ateles/index/concept-film.json",
   "footnote": "Open source · single-operator reference implementation today · multi-operator design ahead",
-  "scope": "grant · principal · domain · action · time",
+  "scope": "one swarm · distinct roles · shared mission",
+  "roles": ["Operator", "Research", "Build", "Review", "Operate"],
   "grants": [
     {"label": "research and propose", "state": "GRANTED"},
     {"label": "publish externally", "state": "CHECKPOINT"},

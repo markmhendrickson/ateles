@@ -1,39 +1,48 @@
 {
   "_observation_ids": {
-    "anti_patterns": "b94eb877-e86f-4167-3477-00bd1817342f",
+    "anti_patterns": "1d9c66de-7ccf-148f-d50d-e211cd1929c0",
     "border_radius": "b94eb877-e86f-4167-3477-00bd1817342f",
-    "color_palette": "b94eb877-e86f-4167-3477-00bd1817342f",
-    "design_system_name": "b94eb877-e86f-4167-3477-00bd1817342f",
-    "positioning_principles": "b94eb877-e86f-4167-3477-00bd1817342f",
-    "scope": "b94eb877-e86f-4167-3477-00bd1817342f",
+    "color_palette": "f576c952-4444-48ba-57ed-9b6fc77bbe86",
+    "design_system_name": "5be50f72-dd0c-fa69-d02c-bbc98f6982dc",
+    "positioning_principles": "957fbf0c-7eb1-2c81-6260-3b2e00909d38",
+    "scope": "60aa8ef1-e29b-fb16-60e2-adaf4b70115a",
     "spacing_system": "b94eb877-e86f-4167-3477-00bd1817342f",
-    "type_scale": "b94eb877-e86f-4167-3477-00bd1817342f"
+    "type_scale": "30ea4d91-18e3-6bd8-61e8-a26ac4ac7005"
   },
   "_source": {
     "entity_id": "ent_9158c8b39e0f437fdb2a86de",
     "entity_type": "design_system",
-    "fetched_at": "2026-09-21T14:13:48+00:00",
+    "fetched_at": "2026-09-21T15:42:13+00:00",
     "product": "ateles"
   },
   "identity": {
     "anti_patterns": [
-      "Do not let the grant seal become a decorative bullet \u2014 it must appear only beside an actual claim about a specific grant/approval/checkpoint, never as generic visual punctuation, or it loses its argument that authority is bounded and deliberate.",
-      "Do not spread --grant/--revoked as general accents \u2014 reserved exclusively for showing an active vs. revoked/expired authorization state.",
-      "Do not diverge the shared structural tokens from Neotoma's \u2014 see Neotoma identity's matching anti-pattern.",
-      "Do not reuse the Neotoma app/Inspector's warm cream/terracotta palette \u2014 this identity's deepened wax-seal red-brown (#8a3b1f) is deliberately distinct from both the inspector's terracotta and from the current live page's lighter amber (#9a5b14), per ruled decision public_pages_do_not_reuse_inspector_palette (plan ent_98ef9d45f8a6896fed408f8f)."
+      "Do not use the seal as Ateles's logo, hero object, or primary metaphor. It is only a secondary state marker for a concrete authorization, commitment, approval, or completed checkpoint.",
+      "Do not literalize \u201cswarm\u201d with monkeys, spiders, insects, hives, honeycombs, or mascot clusters. Show a living collective through abstract named roles and relationships.",
+      "Do not render an anonymous neural-network mesh. Every visible node or path must communicate an organizational role, relationship, handoff, priority, or intervention state.",
+      "Never expose internal record IDs, entity types, field or decision keys, code-call names, repository filenames, phase bookkeeping, agent instructions, or bracketed internal scope notation on a public page.",
+      "Do not paste research analysis, source citations, or implementation-review notes into public prose. Preserve evidence in linked source artifacts and translate it into concise reader-facing claims.",
+      "Do not let motion carry organizational meaning that disappears under reduced-motion preferences; the static graph must remain legible and complete.",
+      "Do not spread authorization or withdrawal colors as general accents; reserve them for active versus withdrawn, expired, or paused authority.",
+      "Do not diverge shared structural tokens from Neotoma without a product reason; the products remain siblings through spacing, restraint, and hierarchy.",
+      "Do not reuse the Neotoma app or Inspector palette. Ateles keeps its warm paper and ink system with a rust coordination accent."
     ],
     "border_radius": {
       "note": "KEPT VERBATIM: 10px cards/panels, 8px buttons, 999px toggle pill."
     },
-    "design_system_name": "Ateles visual identity \u2014 the seal",
+    "design_system_name": "Ateles visual identity \u2014 the swarm",
     "positioning_principles": [
-      "Authority properties get visual devices, not prose: declared/scoped/approved/attributed-to-a-principal map to specific moves (grant seal = declared+scoped; quorum diagram = approved; bracketed scope micro-format = attributed) rather than being asserted in copy alone.",
-      "Grant seal (signature move): a single small bounded inline-SVG mark (circular, quoted attributes) placed next to any claim about a specific grant, approval, or checkpoint \u2014 never diffused as a background wash. Visual argument for 'declared and scoped' as opposed to 'implicit and diffuse'; deliberately the opposite device from Neotoma's continuous provenance rail (authority is granted discretely, not accumulated).",
-      "Quorum diagram (signature move): one instance renders an actual small SVG diagram \u2014 3 circles, 2 filled --grant green + 1 outlined \u2014 captioned with the real mechanism name ('quorum: 2 of 3 distinct principals'), showing an approval threshold rather than describing it in prose.",
-      "Iconography: seal glyph, a 'scope boundary' bracket motif, and a two-vertical-bar checkpoint/gate glyph replace the single generic Feather-style line icon currently shared visually with Neotoma.",
-      "Color as seal, not wash: accent is a bounded, deliberately deepened terracotta-red used sparingly per authorized act, never as a diffuse hero gradient or background fill."
+      "Organizational properties become visual stories rather than implementation prose: named roles are nodes; relationships are labeled connections; coordinated execution is a visible handoff path; priority context is a mission-to-task chain; intervention points are explicit checkpoints.",
+      "Swarm (primary symbol): an abstract constellation of distinct, semi-autonomous roles coordinating around shared work and mission. A compact swarm mark uses several differentiated nodes and one or two directional paths so it remains recognizable at logo and navigation size; the homepage expands the same grammar into a richer role, relationship, and handoff network.",
+      "The swarm names Ateles-specific collective behavior; the organization is the product promise. The visual must feel coordinated and adaptive, while authority, governance, and accountability provide the structure that makes the collective trustworthy.",
+      "Relationship before authority marker: the swarm network carries the brand recognition. A small seal may appear only beside a concrete authorization, commitment, approval, or completed checkpoint; it annotates state and never becomes the logo or hero object.",
+      "Public labels use ordinary organizational language: role, responsibility, scope, handoff, current priority, needs review, approved, and paused. Never display internal IDs, entity types, decision keys, repository filenames, code-call names, phase bookkeeping, or unexplained product vocabulary.",
+      "Coordination rhythm: connecting rules, orbit-like spacing, differentiated nodes, and restrained motion show work passing between accountable roles. The static graph remains complete when motion is reduced.",
+      "Approval and escalation appear as structural proof: distinct people or roles show who must agree; a stopped path shows where work waits; an escalation path returns a consequential decision to the operator. Phrase thresholds in plain language, such as \u201ctwo of three approve\u201d.",
+      "Color is semantic: rust traces active relationships and handoffs; green marks an active authorization; withdrawn or paused states stay visually separate. Avoid ambient seal washes and generic SaaS gradients.",
+      "Hero concept film: a silent 6\u201310 second cinematic loop may expand the swarm mark into differentiated roles, shared purpose, visible handoffs, one bounded checkpoint, and resumed coordinated work. Copy remains in a separate split-hero column. The code-native organization network is the poster and reduced-motion fallback and remains the load-bearing visual. No literal creatures, robots, hives, honeycomb, or anonymous neural mesh."
     ],
-    "scope": "Ateles product pages only (distinct from the shared structural design_system ent_72e01f1008653b601be1a956, which this entity does NOT replace or overwrite). A DESIGNED, not-yet-applied identity: derives its signature devices from Ateles's category as 'the distributed-authority operating layer for governed initiative' \u2014 declared, scoped, approved, attributed-to-a-principal \u2014 rather than from a generic dev-tool palette. Siblings with, not twins of, the Neotoma identity (ent to be linked): shares the existing structural system but diverges in accent palette, the JOB assigned to the monospace type family, and one signature move (a bounded 'grant seal' mark used sparingly per authorized act) that is the deliberate visual OPPOSITE of Neotoma's continuous provenance rail \u2014 authority is granted discretely, not accumulated continuously.",
+    "scope": "Ateles product pages only (distinct from the shared structural design system, which this identity does not replace). The primary symbol is a swarm: many distinct, semi-autonomous human and agent roles coordinating around shared work and mission. Render it as an abstract, differentiated node-and-path mark that remains recognizable in the navigation and expands into a richer organization network in the hero. Never use literal insects, monkeys, spiders, hives, honeycomb, or an anonymous neural-network mesh. The organization is the public product promise; authority and governance are the structure that makes coordinated action legitimate. The authorization seal is secondary: a compact state marker applied only to a specific grant, commitment, approval, or completed checkpoint. Ateles remains a sibling, not a twin, of Neotoma: shared spacing and restraint, different symbolic grammar.",
     "spacing_system": {
       "note": "KEPT VERBATIM from the shared design_system ent_72e01f1008653b601be1a956 \u2014 same rationale as the Neotoma identity: shared skeleton, divergent skin."
     }
@@ -68,13 +77,13 @@
         "paper_2": "#efe9dd",
         "revoked": "#9c4a3a"
       },
-      "rationale": "Seal/stamp metaphor, not a diffuse SaaS accent wash: an authority system's oldest visual analogue is a mark that says 'this was authorized' \u2014 bounded and applied deliberately, never ambient. Terracotta retained as seed hue from the current live palette (evolutionary) but deepened/more saturated (#8a3b1f vs current #9a5b14) to read as a wax-seal red-brown rather than 'friendly SaaS orange'. 'grant' and 'revoked' are NEW semantic color roles mapped to the product's own real vocabulary (blast_radius_for(), low/high_blast_action_types) \u2014 reserved exclusively for an active vs. revoked/expired grant state.",
+      "rationale": "Swarm coordination, not wax-seal brand theater: the warm paper and ink base makes the system feel inhabited and legible, while rust traces relationships, handoffs, and directed motion among differentiated roles. Green remains semantic and reserved for active authorization; revoked remains reserved for withdrawn or expired authority. A small seal survives only as a secondary state marker attached to an authorization, commitment, or completed checkpoint\u2014not as the product symbol or ambient palette rationale.",
       "wcag_aa_verified_2026_09_21": {
         "accent_on_paper_dark": "7.14:1",
         "accent_on_paper_light": "7.02:1",
         "ink_on_paper_dark": "15.94:1",
         "ink_on_paper_light": "16.22:1",
-        "method": "relative-luminance WCAG contrast formula computed directly (python), all 8 pairs exceed 4.5:1 AA-normal-text threshold with margin; the deepened accent gains contrast headroom as a side effect of the seal rationale, not as a separate fix",
+        "method": "relative-luminance WCAG contrast formula computed directly; all eight pairs exceed the 4.5:1 AA normal-text threshold",
         "muted_on_paper_dark": "8.00:1",
         "muted_on_paper_light": "5.46:1",
         "on_accent_on_accent_dark_button_text": "7.14:1",
@@ -84,9 +93,9 @@
     "type_scale": {
       "body_font_family": "'Source Sans 3', system-ui, -apple-system, 'Segoe UI', sans-serif",
       "code_font_family": "'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace",
-      "google_fonts_licence": "All three (Space Grotesk, Source Sans 3, IBM Plex Mono) are free, open-license Google Fonts already loaded via @import on the live page \u2014 no cost, no licensing action needed.",
+      "google_fonts_licence": "All three (Space Grotesk, Source Sans 3, IBM Plex Mono) are free, open-license Google Fonts already loaded via the current font mechanism; no licensing action is needed.",
       "heading_font_family": "'Space Grotesk', system-ui, sans-serif",
-      "rationale": "Family kept deliberately: research fetched 2026-09-21 (typewolf.com/space-grotesk, madegooddesigns.com/space-grotesk-font) found Space Grotesk's real-world brand associations (NordVPN, Lemonade, Miro) are generic 'forward-looking tech', not authority-specific \u2014 a NEGATIVE finding that ruled out chasing a 'more authoritative' type family (none of the researched alternatives specifically signal governance either) and instead justified changing the type's JOB. IBM Plex Mono is elevated from generic code font to carrying a compact bracketed scope micro-format next to every grant/role/checkpoint mention \u2014 e.g. '[blast:low \u00b7 expires:30d]', '[quorum:2/3]' \u2014 using real vocabulary from the product's own code, not invented labels."
+      "rationale": "Family kept deliberately: research checked 2026-09-21 (typewolf.com/space-grotesk and madegooddesigns.com/space-grotesk-font) found Space Grotesk broadly signals forward-looking technology rather than authority by itself. The identity therefore comes from the living organization visual, not from inventing a more authoritative typeface. IBM Plex Mono is reserved for short, plain-language role, scope, handoff, priority, and status labels. It must not carry internal bracketed scope formats, IDs, decision keys, code vocabulary, or phase bookkeeping."
     }
   }
 }
