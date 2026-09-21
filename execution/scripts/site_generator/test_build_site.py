@@ -353,6 +353,61 @@ def test_concept_film_local_assets_are_validated_rendered_and_copied(tmp_repo):
     assert build_site.check("testproduct", out_dir) == 0
 
 
+def test_disabled_concept_film_never_emits_hero_media():
+    html = tpl._concept_film(
+        '<div class="semantic-poster">Poster</div>',
+        {
+            "concept_film": {
+                "duration_seconds": 8,
+                "asset": {
+                    "enabled_in_hero": False,
+                    "video_src": "/assets/testproduct/hero.webm",
+                    "fallback_src": "/assets/testproduct/hero.mp4",
+                    "poster_src": "/assets/testproduct/hero.avif",
+                },
+            }
+        },
+        "Static semantic poster",
+    )
+
+    assert 'data-concept-film-active="false"' in html
+    assert "<video" not in html
+    assert "hero.webm" not in html
+    assert "hero.mp4" not in html
+    assert "hero.avif" not in html
+
+
+def test_disabled_concept_film_rejects_nonlocal_sources(tmp_repo):
+    _, gen_dir = tmp_repo
+    brief = gen_dir / "content" / "testproduct" / "concept-film.json"
+    brief.write_text(
+        json.dumps(
+            {
+                "duration_seconds": 8,
+                "playback": {
+                    "muted": True,
+                    "autoplay": True,
+                    "playsinline": True,
+                    "loop": True,
+                    "reduced_motion": "static_poster",
+                },
+                "performance": {"max_bytes": 1_800_000},
+                "asset": {
+                    "enabled_in_hero": False,
+                    "fallback_src": "HTTPS://example.invalid/film.mp4",
+                },
+            }
+        )
+    )
+    data = {"concept_film_brief": "content/testproduct/concept-film.json"}
+
+    blocker = build_site._attach_concept_film(data)
+
+    assert blocker is not None
+    assert "invalid fallback_src" in blocker
+    assert "concept_film" not in data
+
+
 def test_concept_film_brief_rejects_out_of_range_duration(tmp_repo):
     repo_root, gen_dir = tmp_repo
     brief = gen_dir / "content" / "testproduct" / "concept-film.json"
