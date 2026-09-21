@@ -3,107 +3,143 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import render_rule_inventory as inventory
 
+EXPECTED_PROPOSAL_RULINGS = {
+    "P1": (
+        "A retraction posted as a COMMENT does not clear an APPROVED review; "
+        "the approval stands until it is formally dismissed",
+        "ACCEPTED",
+        "`docs/foundation/github.md`",
+        "Code-host review semantics belong in the code-host mapping.",
+    ),
+    "P2": (
+        "A prose-matching guard fires on text that names its own rule, so a "
+        "document describing a rule trips the gate that enforces it",
+        "ACCEPTED",
+        "`agent_policy`",
+        "A generic rule for authors and reviewers of guards.",
+    ),
+    "P3": (
+        "Durable work goes to a dispatched agent, never a harness task chip — "
+        "a chip is not an entity, so it is unclaimable and invisible to the swarm",
+        "DUPLICATE",
+        "`agent_policy` (`R-ae9bca`)",
+        "Already captured by the dispatch rule; create no second rule.",
+    ),
+    "P4": (
+        "Monitoring does not end at merge: carry a change through release and "
+        "deployment until it is confirmed live on every instance that needs it",
+        "ACCEPTED",
+        "`agent_policy`",
+        "PR shepherding behaviour; workflow declarations still own their step lists.",
+    ),
+    "P5": (
+        "Request operator review only when technical gates are clear and "
+        "operator approval is the sole remaining gate",
+        "ACCEPTED",
+        "`agent_policy`",
+        "Narrowed by the operator; an earlier request would misstate readiness.",
+    ),
+    "P6": (
+        "Stage a reply at the END of its thread, having first checked the "
+        "external system for the thread's latest message",
+        "ACCEPTED",
+        "`docs/foundation/gmail.md`",
+        "This is the mail adapter's per-thread operation, not a general preference.",
+    ),
+    "P7": (
+        "On resuming an interrupted watcher, import everything that arrived "
+        "during the gap — not only what arrives afterward",
+        "ACCEPTED",
+        "`docs/foundation/adapters.md`",
+        "A watcher resumption invariant shared across import adapters.",
+    ),
+    "P8": (
+        "Check durable storage for an already-imported source before importing it again",
+        "ACCEPTED",
+        "`docs/foundation/adapters.md`",
+        "A source-dedup invariant shared across import adapters.",
+    ),
+    "P9": (
+        "Produce an internal recap for the operator covering the work done, "
+        "distinct from any outward-facing recap",
+        "ACCEPTED",
+        "`task_policy`",
+        "The recap presentation is an operator preference, not public prompt text.",
+    ),
+    "P10": (
+        "Avoid a named stylistic tell in generated prose because it reads as machine-written",
+        "QUARANTINED",
+        "none",
+        "No rule is created until the exact stylistic tell and scope are supplied.",
+    ),
+}
+
+EXPECTED_GENERALIZATION_RULINGS = {
+    "G1": (
+        "Never interpolate untrusted or code-bearing text into a shell command; "
+        "write it to a file and pass the path",
+        "ACCEPTED",
+        "`agent_policy`",
+        "Keep the concrete `--body-file` rule beside the general shell-injection rule.",
+    ),
+    "G2": (
+        "Any deployment step is unverified until read back from the thing that now runs",
+        "DUPLICATE",
+        "`agent_policy` (`R-680852`)",
+        "Fold into the existing read-back rule; preserve the concrete daemon sequence.",
+    ),
+    "G3": (
+        "Any outward, irreversible action needs per-action approval, and approval "
+        "never carries forward",
+        "DUPLICATE",
+        "foundation consent rule (`R-fba8d`)",
+        "Already captured; preserve the concrete Gmail gate and its tests.",
+    ),
+}
+
 
 class RuleInventoryRulingsTest(unittest.TestCase):
-    def test_operator_rulings_are_complete_and_exact(self) -> None:
-        expected = {
-            "P1": (
-                "ACCEPTED",
-                "`docs/foundation/github.md`",
-                "Code-host review semantics belong in the code-host mapping.",
-            ),
-            "P2": (
-                "ACCEPTED",
-                "`agent_policy`",
-                "A generic rule for authors and reviewers of guards.",
-            ),
-            "P3": (
-                "DUPLICATE",
-                "`agent_policy` (`R-ae9bca`)",
-                "Already captured by the dispatch rule; create no second rule.",
-            ),
-            "P4": (
-                "ACCEPTED",
-                "`agent_policy`",
-                "PR shepherding behaviour; workflow declarations still own their "
-                "step lists.",
-            ),
-            "P5": (
-                "ACCEPTED",
-                "`agent_policy`",
-                "Narrowed by the operator; an earlier request would misstate "
-                "readiness.",
-            ),
-            "P6": (
-                "ACCEPTED",
-                "`docs/foundation/gmail.md`",
-                "This is the mail adapter's per-thread operation, not a general "
-                "preference.",
-            ),
-            "P7": (
-                "ACCEPTED",
-                "`docs/foundation/adapters.md`",
-                "A watcher resumption invariant shared across import adapters.",
-            ),
-            "P8": (
-                "ACCEPTED",
-                "`docs/foundation/adapters.md`",
-                "A source-dedup invariant shared across import adapters.",
-            ),
-            "P9": (
-                "ACCEPTED",
-                "`task_policy`",
-                "The recap presentation is an operator preference, not public "
-                "prompt text.",
-            ),
-            "P10": (
-                "QUARANTINED",
-                "none",
-                "No rule is created until the exact stylistic tell and scope are "
-                "supplied.",
-            ),
-        }
-        actual = {
-            key: (ruling.status, ruling.home, ruling.note)
-            for key, ruling in inventory.PROPOSAL_RULINGS.items()
-        }
-        self.assertEqual(actual, expected)
+    def assert_rulings_exact(
+        self,
+        actual: dict[str, inventory.RuleRuling],
+        expected: dict[str, tuple[str, str, str, str]],
+    ) -> None:
         self.assertEqual(
-            inventory.PROPOSAL_RULINGS["P5"].rule,
-            "Request operator review only when technical gates are clear and "
-            "operator approval is the sole remaining gate",
+            {
+                key: (ruling.rule, ruling.status, ruling.home, ruling.note)
+                for key, ruling in actual.items()
+            },
+            expected,
         )
 
+    def test_operator_rulings_are_complete_and_exact(self) -> None:
+        self.assert_rulings_exact(inventory.PROPOSAL_RULINGS, EXPECTED_PROPOSAL_RULINGS)
+
     def test_generalization_dispositions_preserve_specific_rules(self) -> None:
-        expected = {
-            "G1": (
-                "ACCEPTED",
-                "`agent_policy`",
-                "Keep the concrete `--body-file` rule beside the general "
-                "shell-injection rule.",
-            ),
-            "G2": (
-                "DUPLICATE",
-                "`agent_policy` (`R-680852`)",
-                "Fold into the existing read-back rule; preserve the concrete "
-                "daemon sequence.",
-            ),
-            "G3": (
-                "DUPLICATE",
-                "foundation consent rule (`R-fba8d`)",
-                "Already captured; preserve the concrete Gmail gate and its tests.",
-            ),
-        }
-        actual = {
-            key: (ruling.status, ruling.home, ruling.note)
-            for key, ruling in inventory.GENERALIZATION_RULINGS.items()
-        }
-        self.assertEqual(actual, expected)
+        self.assert_rulings_exact(
+            inventory.GENERALIZATION_RULINGS, EXPECTED_GENERALIZATION_RULINGS
+        )
         self.assertIn("--body-file", inventory.GENERALIZATION_RULINGS["G1"].note)
+
+    def test_exact_ruling_guard_rejects_each_governed_field_mutation(self) -> None:
+        for field in ("rule", "status", "home", "note"):
+            with self.subTest(ruling="P8", field=field):
+                mutated = dict(inventory.PROPOSAL_RULINGS)
+                mutated["P8"] = replace(
+                    mutated["P8"], **{field: getattr(mutated["P8"], field) + " MUTANT"}
+                )
+                with self.assertRaises(AssertionError):
+                    self.assert_rulings_exact(mutated, EXPECTED_PROPOSAL_RULINGS)
+
+        mutated = dict(inventory.GENERALIZATION_RULINGS)
+        mutated["G2"] = replace(mutated["G2"], rule=mutated["G2"].rule + " MUTANT")
+        with self.assertRaises(AssertionError):
+            self.assert_rulings_exact(mutated, EXPECTED_GENERALIZATION_RULINGS)
 
     def test_every_target_home_names_a_live_rule_kind(self) -> None:
         self.assertEqual(set(inventory.TARGET_HOME), set(inventory.KIND_LABELS))
