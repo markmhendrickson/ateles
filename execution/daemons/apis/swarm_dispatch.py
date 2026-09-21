@@ -301,6 +301,15 @@ _OPERATOR_LOGIN = os.environ.get("APIS_OPERATOR_LOGIN", "markmhendrickson")
 #
 # Comma-separated; the operator login is always included.  Empty or unset
 # leaves behaviour exactly as before (operator only).
+#
+# NOTE the principal this can usefully name.  Guard 0 (`_is_bot_author`)
+# short-circuits BEFORE this guard, and `_BOT_EXACT_LOGINS` contains
+# `ateles-agent` and `neotoma-agent`, so naming either here has NO effect --
+# the comment is dropped as a self-trigger before the command guard is
+# reached.  That ordering is deliberate (neotoma#1686) and is not weakened
+# here: a bot carve-out for commands would reopen the self-trigger loop the
+# guard exists to close.  A command principal must therefore be a non-bot
+# login with repo access.
 _COMMAND_LOGINS: frozenset[str] = frozenset(
     {_OPERATOR_LOGIN.lower()}
     | {

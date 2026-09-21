@@ -127,3 +127,66 @@ def test_the_agent_identity_is_also_caught_as_a_bot(monkeypatch):
     sd = _reload(monkeypatch, APIS_COMMAND_LOGINS="ateles-agent")
     assert sd._is_bot_author("ateles-agent")
     assert "ateles-agent" in sd._COMMAND_LOGINS
+
+
+@pytest.mark.asyncio
+async def test_a_named_non_bot_login_actually_reaches_the_command(monkeypatch):
+    """Planted positive: the fix must be REACHABLE by the principal it names.
+
+    qa's blocking finding on PR #1131 was that nothing proved the widening
+    could ever fire. Guard 0 (`_is_bot_author`) short-circuits before the
+    command guard, so naming a bot login in APIS_COMMAND_LOGINS has no effect
+    at all — the documented enablement could not exercise the fix it enabled.
+
+    This drives `_handle_issue_comment` end to end and asserts the command
+    handler is REACHED for a named non-bot login. It goes red if Guard 0 is
+    ever widened to swallow the command principal, or if the command guard
+    stops consulting `_COMMAND_LOGINS`.
+    """
+    sd = _reload(monkeypatch, APIS_COMMAND_LOGINS="castor-agent")
+    assert not sd._is_bot_author("castor-agent"), (
+        "this test is meaningless if its principal is caught by Guard 0"
+    )
+
+    dispatcher = sd.SwarmDispatcher.__new__(sd.SwarmDispatcher)
+    reached: list[str] = []
+
+    async def _spy(*a, **k):
+        reached.append("swarm_run")
+
+    assert hasattr(sd.SwarmDispatcher, "_handle_swarm_run")
+    monkeypatch.setattr(sd.SwarmDispatcher, "_handle_swarm_run", _spy, raising=True)
+
+    trigger = sd.SwarmTrigger(
+        kind="issue_comment",
+        repository="markmhendrickson/ateles",
+        number=1,
+        title="t",
+        body="",
+        author="castor-agent",
+        html_url="https://github.com/markmhendrickson/ateles/issues/1",
+        delivery_id="test-delivery",
+        action="created",
+        comment_id=1,
+        comment_author="castor-agent",
+        comment_body="/swarm-run",
+    )
+
+    await dispatcher._handle_issue_comment(trigger)
+
+    assert reached == ["swarm_run"], (
+        "a login named in APIS_COMMAND_LOGINS must reach the command handler; "
+        f"reached {reached}"
+    )
+
+
+def test_a_bot_login_named_here_is_still_dropped_by_guard_0(monkeypatch):
+    """The converse, asserted so the carve-out is never added by accident.
+
+    Naming `ateles-agent` changes nothing: Guard 0 drops it first. This is
+    the self-trigger defence (neotoma#1686) and widening it for commands
+    would reopen the loop it closes.
+    """
+    sd = _reload(monkeypatch, APIS_COMMAND_LOGINS="ateles-agent")
+    assert "ateles-agent" in sd._COMMAND_LOGINS  # admitted by THIS guard
+    assert sd._is_bot_author("ateles-agent")  # and dropped by the earlier one
