@@ -54,6 +54,9 @@ import sync_skills  # noqa: E402
 
 ENTITY_ID = "ent_0a0a481fb03a8fd9ea292bcb"
 
+ROUTING_SECTION_START = "Positioning work surfaces two different kinds of finding"
+ROUTING_SECTION_END = "\n\n## Scope rules"
+
 
 def _skill(**overrides) -> dict:
     """A fixture `skill` entity in the shape fetch_skills() produces."""
@@ -91,6 +94,31 @@ def _mirror(description: str, *, triggers: list[str] | None = None) -> str:
         "# build-landing-page\n"
         "\n"
         "Stage 1 — Template.\n"
+    )
+
+
+def _routing_section(path: Path) -> str:
+    """Return the intentionally duplicated routing contract, sans sibling pointer."""
+    text = path.read_text()
+    start = text.index(ROUTING_SECTION_START)
+    end = text.index(ROUTING_SECTION_END, start)
+    return text[start:end]
+
+
+def test_product_finding_routing_contract_stays_in_sync() -> None:
+    """Independently loaded skills must not silently diverge on filing behavior.
+
+    Removing a numbered step from either mirror makes this fail.  The leading
+    sibling-pointer paragraph is intentionally excluded because its entity id
+    differs in each skill.
+    """
+    skills_dir = _REPO_ROOT / ".claude" / "skills"
+    frame = _routing_section(skills_dir / "frame-product-argument" / "SKILL.md")
+    build = _routing_section(skills_dir / "build-landing-page" / "SKILL.md")
+
+    assert frame == build, (
+        "the duplicated product-finding routing contract diverged; correct both "
+        "canonical skill entities, read them back, then regenerate both mirrors"
     )
 
 
