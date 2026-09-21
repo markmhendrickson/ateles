@@ -168,7 +168,8 @@ fi
 # run teaches the reader to ignore it.
 if [ -n "${NEOTOMA_BEARER_TOKEN:-}" ]; then
   echo "  - Checking rule inventory is in sync with the measured system..."
-  python3 execution/scripts/render_rule_inventory.py --check || ERRORS=$((ERRORS + 1))
+  python3 execution/scripts/render_rule_inventory.py \
+    --check --require-complete-measurement || ERRORS=$((ERRORS + 1))
 else
   echo "  - Skipping rule inventory (no NEOTOMA_BEARER_TOKEN to read the stores)"
 fi

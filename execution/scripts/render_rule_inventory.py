@@ -74,6 +74,8 @@ Usage:
     python3 execution/scripts/render_rule_inventory.py            # write
     python3 execution/scripts/render_rule_inventory.py --check    # verify
     python3 execution/scripts/render_rule_inventory.py --json OUT # public dump
+    python3 execution/scripts/render_rule_inventory.py --check \
+        --private-diagnostics /tmp/rule-inventory-locators.json
 """
 
 from __future__ import annotations
@@ -266,6 +268,11 @@ class Store:
     note: str = ""
     read_ok: bool = True
     read_error: str = ""
+    # Safe aggregate measurements used by generated narrative. They remain
+    # numbers rather than prose so the emitter cannot accidentally publish a
+    # path, name, or other identifier embedded in an internal note.
+    distinct_versions: int | None = None
+    rule_bearing_files: int | None = None
 
 
 # Thresholds for the NEEDS-SPLIT probe.
@@ -690,7 +697,6 @@ def classify(text: str) -> list[str]:
 
 TARGET_HOME: dict[str, str] = {
     "git_never_stash": "agent_policy",
-    "worktree_isolation": "agent_policy",
     "neotoma_prod_only": "agent_policy",
     "gws_over_gmail_mcp": "agent_policy",
     "gmail_send_gate": "agent_policy",
@@ -720,7 +726,6 @@ TARGET_HOME: dict[str, str] = {
     "pr_body_from_file": "agent_policy",
     "verify_gh_identity": "agent_policy",
     "recurring_never_done": "task_policy",
-    "no_invented_content": "task_policy",
     "pii_minimization": "docs/foundation/",
     "no_untested_remediation": "agent_policy",
     "squash_merge": "agent_policy",
@@ -1047,6 +1052,12 @@ PUBLIC_REACHABILITY = frozenset({
     "on retrieval",
 })
 
+# Full equality is meaningful only on the canonical measurement host, where
+# every store kind this stage-0 inventory covers is available. GitHub-hosted
+# runners do not have the user-level harness stores; a merge gate running there
+# must say so and fail, not compare a partial measurement to the committed file.
+REQUIRED_MEASUREMENT_STORES = PUBLIC_STORE_NAMES
+
 
 def public_store_name(name: str) -> str:
     """Return a public store-kind label, failing closed for unknown input."""
@@ -1169,6 +1180,72 @@ def public_payload(
         "unclassified_count": len(unclassified),
         "totals": {"rules": len(clusters), "statements": len(statements)},
     }
+
+
+def private_diagnostics_payload(clusters: list[Cluster]) -> dict:
+    """Return private source locators without copying any statement value.
+
+    The public artifact deliberately collapses file names and entity ids. This
+    payload is the non-committable bridge for a human resolving NEEDS-SPLIT or
+    divergence: it says which private source to open, but the source itself is
+    still the only place the rule value can be read.
+    """
+    return {
+        "warning": (
+            "PRIVATE LOCATORS: contains local paths and entity ids; do not commit. "
+            "Statement values are intentionally absent."
+        ),
+        "clusters": [
+            {
+                "id": public_rule_id(cluster),
+                "kind": public_kind(cluster.kind),
+                "needs_split": cluster.needs_split,
+                "diverges": cluster.diverges,
+                "sources": [
+                    {
+                        "store": statement.store,
+                        "location": statement.location,
+                        "locator": statement.locator,
+                    }
+                    for statement in cluster.statements
+                ],
+            }
+            for cluster in clusters
+            if cluster.needs_split or cluster.diverges
+        ],
+    }
+
+
+def write_private_diagnostics(path: str | Path, clusters: list[Cluster]) -> None:
+    """Write mode-0600 private locators, refusing every in-repository path."""
+    target = Path(path).expanduser().resolve()
+    if target == REPO_ROOT or REPO_ROOT in target.parents:
+        raise ValueError(
+            "private diagnostics path must be outside the repository; "
+            "use a temporary or other non-versioned directory"
+        )
+    payload = json.dumps(private_diagnostics_payload(clusters), indent=2) + "\n"
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(payload)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def measurement_readiness(stores: list[Store]) -> tuple[list[str], list[str]]:
+    """Return safe public store-kind names missing or unread for full equality."""
+    present = {public_store_name(store.name) for store in stores}
+    missing = sorted(REQUIRED_MEASUREMENT_STORES - present)
+    unread = sorted({
+        public_store_name(store.name)
+        for store in stores
+        if not store.read_ok
+    })
+    return missing, unread
 
 
 def _mtime(p: Path) -> str:
@@ -1443,6 +1520,7 @@ def read_file_stores(home: Path) -> tuple[list[Statement], list[Store]]:
                 reach_note=("a session or daemon reads the copy in ITS checkout, "
                             "not origin/main"),
             )
+            st.distinct_versions = len(digests)
             st.statements = 0  # counted once, at the canonical file
 
     # -- user-level Claude Code -------------------------------------------
@@ -1542,6 +1620,7 @@ def read_file_stores(home: Path) -> tuple[list[Statement], list[Store]]:
                                   f.read_text(errors="replace"))]
         st = add_store(label, str(root), files,
                        note=f"{len(withrules)} of {len(files)} contain rule language")
+        st.rule_bearing_files = len(withrules)
         s = []
         for f in withrules:
             s += extract_md_rules(f, st.name)
@@ -1623,6 +1702,7 @@ def render(clusters: list[Cluster], stores: list[Store],
     dup = (clustered / total_rules) if total_rules else 0
     diverging = [c for c in clusters if c.diverges]
     needs_split = [c for c in clusters if c.needs_split]
+    stores_by_name = {store.name: store for store in stores}
     today = date.today().isoformat()
 
     L: list[str] = []
@@ -1647,9 +1727,8 @@ def render(clusters: list[Cluster], stores: list[Store],
     A("Stage 0 of the rule migration, in the sense `migration.md` already gives "
       "the word: the inventory a migration starts from. It is generated rather "
       "than authored because the prose version this replaces was wrong twice, "
-      "both times caught only by re-measuring — Cursor reported as 5 files when "
-      "it holds 31, and five lenses reported as citing three foundation files "
-      "when they cite five different ones, one consumer each. A hand-count "
+      "both times caught only by re-measuring — a harness-file count changed on "
+      "rerun, and lens-to-source citations had been miscounted. A hand-count "
       "cannot be diffed and cannot detect its own drift.")
     A("")
     A("**This file records a rule's LOCATION and KIND, never its VALUE.** "
@@ -1659,6 +1738,16 @@ def render(clusters: list[Cluster], stores: list[Store],
       "unknown metadata fails closed to a generic label. This structural "
       "projection is the gate because a pattern screen cannot recognize every "
       "proper noun or private identifier.")
+    A("")
+    A("**Public empty state and private recovery path.** The public statement "
+      "bodies are deliberately absent, and public locations show "
+      "store-kind granularity rather than a private filename or entity id. To "
+      "resolve a NEEDS-SPLIT or divergence candidate, generate a mode-0600 "
+      "private locator map outside the repository, then open the named source "
+      "directly: `python3 execution/scripts/render_rule_inventory.py "
+      "--check --private-diagnostics /tmp/rule-inventory-locators.json`. The "
+      "command refuses a target inside the repository and the diagnostic still "
+      "contains no statement values.")
     A("")
     A("**It is perishable.** Re-run it; never edit it to keep up. A figure here "
       "without an instrument is a defect in the generator.")
@@ -1788,10 +1877,12 @@ def render(clusters: list[Cluster], stores: list[Store],
           "fixture and a rule about task chips whose example happens to be a "
           "stash. The remedy there is a narrower signature, not a split.")
         A("")
-        A("Both need a human read of the statements against the merge test, "
-          "exactly as the divergence list does. What the probe is for is that "
-          "neither defect is now discoverable only by a reader noticing an "
-          "absence.")
+        A("Both need a human read of their private sources against the merge "
+          "test, exactly as the divergence list does. The public artifact does "
+          "not contain those statement bodies; use the `--private-diagnostics` "
+          "locator map described above, then read the named source. What the "
+          "probe is for is that neither defect is now discoverable only by a "
+          "reader noticing an absence.")
         A("")
         A("| Rule | Statements | Distinct | Ratio | Stores |")
         A("|---|---|---|---|---|")
@@ -1828,8 +1919,10 @@ def render(clusters: list[Cluster], stores: list[Store],
           "row is genuine (`CLAUDE.md` says proceed without asking; an "
           "`agent_policy` row says approval is mandatory), the fail-closed row "
           "is an artifact of exactly that confusion. Each row below needs a "
-          "human read of its statements before it is ruled on; the value of the "
-          "list is that it is 12 rows rather than 499.")
+          "human read of its private sources before it is ruled on; use the "
+          "`--private-diagnostics` locator map rather than looking for bodies in "
+          f"this public file. The value of the list is that it is "
+          f"{len(diverging)} rows rather than {clustered}.")
         A("")
         A("| Rule | Statements | Shapes present | Stores |")
         A("|---|---|---|---|")
@@ -1870,7 +1963,11 @@ def render(clusters: list[Cluster], stores: list[Store],
           f"{len(public_cluster_stores(c))} | {verdict} | {home} |")
     A("")
 
-    A("### Where each rule is stated")
+    A("### Public store-kind locations for each rule")
+    A("")
+    A("Statement values are deliberately absent. Locations below are public "
+      "store-kind shapes, not navigable private paths; generate the private "
+      "locator map described above when a source-level read is required.")
     A("")
     for c in clusters:
         A(f"#### `{public_rule_id(c)}` — "
@@ -1880,12 +1977,12 @@ def render(clusters: list[Cluster], stores: list[Store],
           f"{len(c.statements)} statements, {c.distinct_openings} distinct · "
           f"{'**NEEDS-SPLIT**' if c.needs_split else ('**DIVERGE**' if c.diverges else 'agree')}")
         A("")
-        A("| Store | Location | At | Statement |")
-        A("|---|---|---|---|")
+        A("| Store | Public location shape | At |")
+        A("|---|---|---|")
         for s in sorted(c.statements, key=lambda x: (x.store, x.location)):
             A(f"| {public_store_name(s.store)} | "
               f"`{public_statement_location(s.store, s.location)}` | "
-              f"{public_locator(s.locator)} | {s.safe_text} |")
+              f"{public_locator(s.locator)} |")
         A("")
 
     unmapped = [c for c in clusters if c.kind not in TARGET_HOME]
@@ -1924,36 +2021,87 @@ def render(clusters: list[Cluster], stores: list[Store],
       "both figures are given — the disagreements are themselves the argument "
       "for generating the inventory rather than typing it.")
     A("")
+    openclaw_store = stores_by_name.get("OpenClaw")
+    cursor_store = stores_by_name.get("Cursor")
+    project_memory_store = stores_by_name.get("Claude Code project memory")
+    repo_skills_store = stores_by_name.get("Skills (ateles repo)")
+    openclaw_rules = (
+        str(openclaw_store.statements) if openclaw_store else "not present on this run"
+    )
+    cursor_files = (
+        str(cursor_store.populated) if cursor_store else "not present on this run"
+    )
+    project_memory_files = (
+        str(project_memory_store.populated)
+        if project_memory_store
+        else "not present on this run"
+    )
+    if repo_skills_store and repo_skills_store.rule_bearing_files is not None:
+        repo_skill_measurement = (
+            f"{repo_skills_store.rule_bearing_files} of "
+            f"{repo_skills_store.populated}"
+        )
+    else:
+        repo_skill_measurement = "not present on this run"
     A("| Claim on the prose inventory | Measured here | Reading |")
     A("|---|---|---|")
-    A("| OpenClaw holds 1 rule | **0** | The `1` is a directory, not a file. "
+    A(f"| OpenClaw holds 1 rule | **{openclaw_rules}** | The `1` is a "
+      "directory, not a file. "
       "Beneath it: session state and a vendored Codex home whose shipped skills "
       "are a dependency, not operator rules. Sweeping it yields 21,411 "
       "statements from files the operator never wrote. |")
-    A("| Cursor holds 31 files (already corrected once from 5) | **31 "
-      "confirmed** | 2 live, 29 dated `.backup.` copies. 26 of the 31 are "
-      "symlinks into the neotoma repo, so most of the store is a pointer to a "
-      "sibling repo's file rather than a rule of its own. |")
-    A("| Project memory: 329 files across 15 dirs | **329 files, 11 dirs** | "
-      "14 `memory/` directories exist; 3 hold no `.md` file. |")
-    A("| 88 of 97 ateles skills contain rule language | **66 of 96** | "
+    A(f"| Cursor holds 31 files (already corrected once from 5) | "
+      f"**{cursor_files} files** | The current total is the measured store row "
+      "above; live/backup/symlink composition remains internal diagnostic "
+      "metadata rather than public path detail. |")
+    A(f"| Project memory: 329 files across 15 dirs | "
+      f"**{project_memory_files} files** | The current file total is derived "
+      "from the measured store; private project-directory names are not "
+      "emitted. |")
+    A(f"| 88 of 97 ateles skills contain rule language | "
+      f"**{repo_skill_measurement}** | "
       "Different instrument: the earlier count matched `do not` case-"
       "insensitively across the whole file. |")
     A("| Five lenses cite five different foundation files, one consumer each | "
       "**confirmed as the store's reachability verdict** | Not re-derived; "
       "cited. See the foundation-repo reconciliation (2026-09-19). |")
-    A("| Six rule stores | **16 inventoried** | The store list was a floor. The "
+    A(f"| Six rule stores | **{len(stores)} inventoried** | The store list was "
+      "a floor. The "
       "additions: `task_policy` entities (a live store, not only a target), "
       "hooks (rules stated as code), skills split by root, and — the largest — "
       "the per-checkout copies below. |")
     A("")
     A("### The store nobody had counted: one instruction file, many checkouts")
     A("")
+    ateles_copies = stores_by_name.get("ateles/CLAUDE.md checkout copies")
+    neotoma_copies = stores_by_name.get("neotoma/AGENTS.md checkout copies")
+    if ateles_copies and neotoma_copies:
+        ateles_versions = ateles_copies.distinct_versions or 0
+        neotoma_versions = neotoma_copies.distinct_versions or 0
+        copy_measurement = (
+            f"**{ateles_copies.populated} copies of `ateles/CLAUDE.md` in "
+            f"{ateles_versions} distinct versions**, and "
+            f"**{neotoma_copies.populated} copies of `neotoma/AGENTS.md` in "
+            f"{neotoma_versions} distinct versions**."
+        )
+    else:
+        missing_copy_stores = [
+            name
+            for name, store in (
+                ("ateles instruction copies", ateles_copies),
+                ("neotoma instruction copies", neotoma_copies),
+            )
+            if store is None
+        ]
+        copy_measurement = (
+            "copy measurement unavailable on this run: "
+            + ", ".join(missing_copy_stores)
+            + "."
+        )
     A("`CLAUDE.md` is re-injected from disk at every compaction, which is what "
       "makes it the home for standing instructions. The disk it is read from is "
       "the one in the session's own checkout. Measured on this machine: "
-      "**205 copies of `ateles/CLAUDE.md` in 26 distinct versions**, and "
-      "**138 copies of `neotoma/AGENTS.md` in 4**.")
+      f"{copy_measurement}")
     A("")
     A("So a rule's reach is not whether it is in `CLAUDE.md` but which copy of "
       "`CLAUDE.md` the reader opened, and the deployment checkouts the daemons "
@@ -2008,6 +2156,22 @@ def main() -> int:
         metavar="PATH",
         help="also dump the public-safe extraction metadata",
     )
+    ap.add_argument(
+        "--private-diagnostics",
+        metavar="PATH",
+        help=(
+            "write private source locators (never values) outside the repository "
+            "for NEEDS-SPLIT/divergence diagnosis"
+        ),
+    )
+    ap.add_argument(
+        "--require-complete-measurement",
+        action="store_true",
+        help=(
+            "fail before comparison when any canonical store kind is missing or "
+            "unread; required by the merge-gating workflow"
+        ),
+    )
     ap.add_argument("--cache", metavar="DIR",
                     help="cache entity reads here (re-run offline)")
     args = ap.parse_args()
@@ -2021,6 +2185,21 @@ def main() -> int:
     statements = ent_stmts + file_stmts
     stores = ent_stores + file_stores
     clusters, unclassified = build_clusters(statements)
+
+    if args.require_complete_measurement:
+        missing, unread = measurement_readiness(stores)
+        if missing or unread:
+            details = []
+            if missing:
+                details.append("missing store kinds: " + ", ".join(missing))
+            if unread:
+                details.append("unread store kinds: " + ", ".join(unread))
+            print(
+                "rule inventory equality unavailable: full measurement is "
+                "incomplete; " + "; ".join(details),
+                file=sys.stderr,
+            )
+            return 3
 
     out = render(clusters, stores, unclassified, statements)
 
@@ -2041,6 +2220,18 @@ def main() -> int:
                 public_payload(clusters, stores, unclassified, statements),
                 indent=2,
             )
+        )
+
+    if args.private_diagnostics:
+        try:
+            write_private_diagnostics(args.private_diagnostics, clusters)
+        except (OSError, ValueError) as exc:
+            print(f"PRIVATE DIAGNOSTIC WRITE FAILED: {exc}", file=sys.stderr)
+            return 2
+        print(
+            "wrote private locator diagnostics outside the repository "
+            f"(statement values absent): {Path(args.private_diagnostics).expanduser()}",
+            file=sys.stderr,
         )
 
     if args.check:

@@ -38,10 +38,12 @@ on:
       - "execution/scripts/link_vocabulary_terms.py"
       - "execution/scripts/render_reading_projection.py"
       - "execution/scripts/render_decision_state.py"
+      - "execution/scripts/render_rule_inventory.py"
       - "execution/scripts/check_plan_decision_citations.py"
       - "execution/scripts/test_decision_state.py"
       - "execution/scripts/test_check_foundation_*.py"
       - "execution/scripts/test_foundation_mechanical_checks_ci.py"
+      - "execution/scripts/test_rule_inventory_rulings.py"
       - "docs/foundation/decision_state.md"
       - "execution/daemons/apis/test_foundation*.py"
       - ".github/workflows/foundation-checks.yml"
@@ -89,6 +91,27 @@ jobs:
             echo "::error::docs/foundation/ is absent on this branch, but the path filter matched it."
             exit 1
           fi
+
+      # Rule inventory: unlike the repo-only corpus checkers, this measures
+      # live Neotoma plus user-level harness stores on the canonical
+      # measurement host. A GitHub-hosted runner cannot silently substitute its
+      # empty home directory: --require-complete-measurement names every safe
+      # public store kind it cannot read and exits 3. This step is intentionally
+      # blocking until the canonical runner tracked by the linked Neotoma task
+      # is provisioned; weakening or skipping it would turn equality back into
+      # a local-only claim.
+      - name: Rule inventory — full measured output matches (canonical runner required)
+        if: always() && steps.corpus.outputs.present == 'true'
+        env:
+          NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}
+        run: |
+          f=execution/scripts/render_rule_inventory.py
+          [ -f "$f" ] || { echo "::error::$f is absent; full inventory equality cannot run"; exit 1; }
+          if [ -z "${NEOTOMA_BEARER_TOKEN:-}" ]; then
+            echo "::error::rule inventory equality unavailable: NEOTOMA_BEARER_TOKEN is missing; the readiness check will name the unread entity store kinds"
+          fi
+          echo "The canonical measurement runner must expose every required store kind; this hosted runner is expected to fail closed until that runner is provisioned."
+          python3 "$f" --check --require-complete-measurement
 
       # Anchors: any link or backticked citation naming a file or heading in
       # docs/foundation/ that does not exist.

@@ -7,9 +7,11 @@
 
 Not keyed, not in the kernel, and never inlined into a review prompt: this document states no rule about how the swarm works. It reports where the rules that do are written down.
 
-Stage 0 of the rule migration, in the sense `migration.md` already gives the word: the inventory a migration starts from. It is generated rather than authored because the prose version this replaces was wrong twice, both times caught only by re-measuring — Cursor reported as 5 files when it holds 31, and five lenses reported as citing three foundation files when they cite five different ones, one consumer each. A hand-count cannot be diffed and cannot detect its own drift.
+Stage 0 of the rule migration, in the sense `migration.md` already gives the word: the inventory a migration starts from. It is generated rather than authored because the prose version this replaces was wrong twice, both times caught only by re-measuring — a harness-file count changed on rerun, and lens-to-source citations had been miscounted. A hand-count cannot be diffed and cannot detect its own drift.
 
 **This file records a rule's LOCATION and KIND, never its VALUE.** Both repos are public, so every statement value is replaced with *operator-specific, value withheld*. Store names, paths, locators, dates, labels, and reachability are projected onto a generator-owned public vocabulary; unknown metadata fails closed to a generic label. This structural projection is the gate because a pattern screen cannot recognize every proper noun or private identifier.
+
+**Public empty state and private recovery path.** The public statement bodies are deliberately absent, and public locations show store-kind granularity rather than a private filename or entity id. To resolve a NEEDS-SPLIT or divergence candidate, generate a mode-0600 private locator map outside the repository, then open the named source directly: `python3 execution/scripts/render_rule_inventory.py --check --private-diagnostics /tmp/rule-inventory-locators.json`. The command refuses a target inside the repository and the diagnostic still contains no statement values.
 
 **It is perishable.** Re-run it; never edit it to keep up. A figure here without an instrument is a defect in the generator.
 
@@ -75,7 +77,7 @@ This revision applies the merge test — two statements are the same rule only i
 - **Genuine over-merge** — the cluster holds distinct rules that share vocabulary. This is what hid the questions-tool rule, and the remedy is a split.
 - **Extraction noise** — the cluster holds a correctly-merged rule plus statements that merely MENTION it. The never-stash cluster is the worked case: of its statements, the prohibition itself is stated in several harnesses in close to the same words and is correctly ONE rule, but the cluster also catches a hook's own test fixture and a rule about task chips whose example happens to be a stash. The remedy there is a narrower signature, not a split.
 
-Both need a human read of the statements against the merge test, exactly as the divergence list does. What the probe is for is that neither defect is now discoverable only by a reader noticing an absence.
+Both need a human read of their private sources against the merge test, exactly as the divergence list does. The public artifact does not contain those statement bodies; use the `--private-diagnostics` locator map described above, then read the named source. What the probe is for is that neither defect is now discoverable only by a reader noticing an absence.
 
 | Rule | Statements | Distinct | Ratio | Stores |
 |---|---|---|---|---|
@@ -99,7 +101,7 @@ Both need a human read of the statements against the merge test, exactly as the 
 
 The highest-value output. Each row is one rule whose statements do not agree on how strongly it binds. A consumer's behaviour then depends on which copy it happens to read, which is the failure ateles#1115 found in `agent_policy` (two live rows, same safety rule, one `recommended` and one `mandatory`) and ateles#1121 found between a foundation file and the lens that cites it. **A divergence needs a ruling, not a merge** — the migration cannot pick a side on its own.
 
-**A flagged divergence is a candidate, not a verdict.** The test reads prose, so it cannot tell a rule being STATED from a rule being DESCRIBED: a sentence explaining that a hook is deliberately fail-open reads as an advisory statement of the fail-closed rule. Spot-checked on two clusters at generation time — the consent-gate row is genuine (`CLAUDE.md` says proceed without asking; an `agent_policy` row says approval is mandatory), the fail-closed row is an artifact of exactly that confusion. Each row below needs a human read of its statements before it is ruled on; the value of the list is that it is 12 rows rather than 499.
+**A flagged divergence is a candidate, not a verdict.** The test reads prose, so it cannot tell a rule being STATED from a rule being DESCRIBED: a sentence explaining that a hook is deliberately fail-open reads as an advisory statement of the fail-closed rule. Spot-checked on two clusters at generation time — the consent-gate row is genuine (`CLAUDE.md` says proceed without asking; an `agent_policy` row says approval is mandatory), the fail-closed row is an artifact of exactly that confusion. Each row below needs a human read of its private sources before it is ruled on; use the `--private-diagnostics` locator map rather than looking for bodies in this public file. The value of the list is that it is 15 rows rather than 535.
 
 | Rule | Statements | Shapes present | Stores |
 |---|---|---|---|
@@ -180,906 +182,908 @@ One row per rule; every location it is stated. `agree` means every statement bin
 | `R-e0f7e8` | Store artifacts as the work happens, not at session end | 1 | 1 | 1 | agree | agent_policy |
 | `R-765925` | Verify the GitHub identity before any write | 1 | 1 | 1 | agree | agent_policy |
 
-### Where each rule is stated
+### Public store-kind locations for each rule
+
+Statement values are deliberately absent. Locations below are public store-kind shapes, not navigable private paths; generate the private locator map described above when a source-level read is required.
 
 #### `R-a900b4` — Durable memory belongs in Neotoma, not harness files
 
 Target home: **agent_policy** · 52 statements, 49 distinct · **NEEDS-SPLIT**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L27 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L10 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L14 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L22 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L23 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L2 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L2 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L14 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L7 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L38 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L45 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L15 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L61 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L120 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L128 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L39 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L51 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L19 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L135 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L139 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L21 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L54 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L23 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L26 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L269 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L214 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L420 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L427 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L136 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L192 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L210 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L215 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L226 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L234 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L240 | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | summary | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | description | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | rule | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | description | operator-specific, value withheld |
-| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
-| standing_rule entities | `<entity>` | rule_text | operator-specific, value withheld |
-| standing_rule entities | `<entity>` | rule | operator-specific, value withheld |
-| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
-| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
-| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
-| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
-| task_policy entities | `<entity>` | raw_fragments.policy_text | operator-specific, value withheld |
-| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
-| task_policy entities | `<entity>` | raw_fragments.policy | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L27 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L10 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L14 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L22 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L23 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L2 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L2 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L14 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L7 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L38 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L45 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L15 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L61 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L120 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L128 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L39 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L51 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L19 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L135 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L139 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L21 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L54 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L23 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L26 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L269 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L214 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L420 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L427 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L136 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L192 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L210 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L215 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L226 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L234 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L240 |
+| agent_policy entities | `<entity>` | summary |
+| agent_policy entities | `<entity>` | description |
+| agent_policy entities | `<entity>` | rule |
+| agent_policy entities | `<entity>` | description |
+| standing_rule entities | `<entity>` | instruction |
+| standing_rule entities | `<entity>` | rule_text |
+| standing_rule entities | `<entity>` | rule |
+| standing_rule entities | `<entity>` | instruction |
+| task_policy entities | `<entity>` | rule |
+| task_policy entities | `<entity>` | rule |
+| task_policy entities | `<entity>` | rule |
+| task_policy entities | `<entity>` | raw_fragments.policy_text |
+| task_policy entities | `<entity>` | rule |
+| task_policy entities | `<entity>` | raw_fragments.policy |
 
 #### `R-fba8d4` — Irreversible or outward-facing actions need per-action operator approval
 
 Target home: **docs/foundation/** · 36 statements, 35 distinct · **NEEDS-SPLIT**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L10 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L10 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L29 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L61 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L62 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L76 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L58 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L125 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L82 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L134 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L142 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L223 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L17 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L78 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L23 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L7 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L16 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L209 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L66 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L120 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L137 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L138 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L150 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L35 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L58 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L78 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L93 | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | description | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | body | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | description | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L75 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L168 | operator-specific, value withheld |
-| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
-| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L10 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L10 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L29 |
+| Codex | `~/.codex/AGENTS.md` | L61 |
+| Codex | `~/.codex/AGENTS.md` | L62 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L76 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L58 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L125 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L82 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L134 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L142 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L223 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L17 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L78 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L23 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L7 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L16 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L209 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L66 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L120 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L137 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L138 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L150 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L35 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L58 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L78 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L93 |
+| agent_policy entities | `<entity>` | description |
+| agent_policy entities | `<entity>` | body |
+| agent_policy entities | `<entity>` | description |
+| ateles/CLAUDE.md | `CLAUDE.md` | L75 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L168 |
+| standing_rule entities | `<entity>` | instruction |
+| standing_rule entities | `<entity>` | instruction |
 
 #### `R-29fd38` — Operator-specific config comes from entities, not code
 
 Target home: **agent_policy** · 28 statements, 7 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L45 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L108 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L109 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L20 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L87 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L103 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L391 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L176 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L176 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L45 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L232 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L110 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L36 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L134 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L148 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L48 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L63 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L266 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L80 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L40 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L123 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L109 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L57 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L49 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L63 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L175 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L177 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L178 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Codex | `~/.codex/AGENTS.md` | L45 |
+| Codex | `~/.codex/AGENTS.md` | L108 |
+| Codex | `~/.codex/AGENTS.md` | L109 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L20 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L87 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L103 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L391 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L176 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L176 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L45 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L232 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L110 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L36 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L134 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L148 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L48 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L63 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L266 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L80 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L40 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L123 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L109 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L57 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L49 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L63 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L175 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L177 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L178 |
 
 #### `R-3be8e6` — Some actions stay the operator's absolutely; hand them back with the command
 
 Target home: **docs/foundation/** · 28 statements, 24 distinct · **NEEDS-SPLIT**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L46 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L62 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L64 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L65 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L74 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L75 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L16 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L284 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L35 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L78 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L92 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L93 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L102 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L445 | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | body | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L104 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L105 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L106 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L107 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L109 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L124 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L129 | operator-specific, value withheld |
-| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Codex | `~/.codex/AGENTS.md` | L46 |
+| Codex | `~/.codex/AGENTS.md` | L62 |
+| Codex | `~/.codex/AGENTS.md` | L64 |
+| Codex | `~/.codex/AGENTS.md` | L65 |
+| Codex | `~/.codex/AGENTS.md` | L74 |
+| Codex | `~/.codex/AGENTS.md` | L75 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L16 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L284 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L35 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L78 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L92 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L93 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L102 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L445 |
+| agent_policy entities | `<entity>` | body |
+| ateles/CLAUDE.md | `CLAUDE.md` | L104 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L105 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L106 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L107 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L109 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L124 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L129 |
+| standing_rule entities | `<entity>` | instruction |
 
 #### `R-2fd7bd` — Use the gws CLI for Google Workspace, not the MCP
 
 Target home: **agent_policy** · 26 statements, 22 distinct · **DIVERGE**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L10 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L14 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L7 | operator-specific, value withheld |
-| Claude Code user rules | `~/.claude/CLAUDE.md` | L13 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L30 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L131 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L141 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L142 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L346 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L22 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L124 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L19 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L35 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L42 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L26 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L323 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L423 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L168 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L183 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L184 | operator-specific, value withheld |
-| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
-| standing_rule entities | `<entity>` | summary | operator-specific, value withheld |
-| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L10 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L14 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L7 |
+| Claude Code user rules | `~/.claude/CLAUDE.md` | L13 |
+| Codex | `~/.codex/AGENTS.md` | L30 |
+| Codex | `~/.codex/AGENTS.md` | L131 |
+| Codex | `~/.codex/AGENTS.md` | L141 |
+| Codex | `~/.codex/AGENTS.md` | L142 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L346 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L22 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L124 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L19 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L35 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L42 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L26 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L323 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L423 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L168 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L183 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L184 |
+| standing_rule entities | `<entity>` | instruction |
+| standing_rule entities | `<entity>` | summary |
+| task_policy entities | `<entity>` | rule |
 
 #### `R-78a082` — Echo the operator's input, cleaned up, each reply
 
 Target home: **task_policy** · 24 statements, 22 distinct · **NEEDS-SPLIT**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L19 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L16 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L28 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L57 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L168 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L36 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L19 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L19 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L33 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L94 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L109 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L110 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L118 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L132 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L19 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L177 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L139 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L184 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L72 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L217 | operator-specific, value withheld |
-| standing_rule entities | `<entity>` | rule | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L19 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L16 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L28 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 |
+| Codex | `~/.codex/AGENTS.md` | L57 |
+| Codex | `~/.codex/AGENTS.md` | L168 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L36 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L19 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L19 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L33 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L94 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L109 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L110 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L118 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L132 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L19 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L177 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L139 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L184 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L72 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L217 |
+| standing_rule entities | `<entity>` | rule |
 
 #### `R-f3271c` — Both repos are public; scrub PII before committing
 
 Target home: **agent_policy** · 19 statements, 17 distinct · **NEEDS-SPLIT**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L23 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L19 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L25 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L107 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L111 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L112 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L78 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L149 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L40 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L248 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L282 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L402 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L241 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L66 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L174 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L185 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L23 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L19 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L25 |
+| Codex | `~/.codex/AGENTS.md` | L107 |
+| Codex | `~/.codex/AGENTS.md` | L111 |
+| Codex | `~/.codex/AGENTS.md` | L112 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L78 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L149 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L40 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L248 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L282 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L402 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L241 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L66 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L174 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L185 |
 
 #### `R-fcd5a0` — Dispatch work to the owning agent; file it as you recommend it
 
 Target home: **agent_policy** · 18 statements, 17 distinct · **NEEDS-SPLIT**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
-| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L26 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L55 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L37 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L43 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L76 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L116 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L117 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L215 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L63 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L70 | operator-specific, value withheld |
-| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
-| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
-| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
-| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L26 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 |
+| Codex | `~/.codex/AGENTS.md` | L55 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L37 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L43 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L76 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L116 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L117 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L215 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L63 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L70 |
+| task_policy entities | `<entity>` | rule |
+| task_policy entities | `<entity>` | rule |
+| task_policy entities | `<entity>` | rule |
+| task_policy entities | `<entity>` | rule |
 
 #### `R-228b8c` — Absent or malformed safety values take the restrictive branch
 
 Target home: **docs/foundation/** · 16 statements, 13 distinct · **DIVERGE**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
-| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
-| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
-| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
-| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
-| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
-| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L157 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L106 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L237 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L44 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L206 | operator-specific, value withheld |
-| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L54 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 |
+| Codex | `~/.codex/AGENTS.md` | L157 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L106 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L237 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L44 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L206 |
+| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L54 |
 
 #### `R-f5e0b9` — Always use the Neotoma prod instance, never dev
 
 Target home: **agent_policy** · 15 statements, 14 distinct · **NEEDS-SPLIT**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L92 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L143 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L108 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L23 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L83 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L36 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L27 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L273 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L36 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L120 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L242 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L32 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L182 | operator-specific, value withheld |
-| standing_rule entities | `<entity>` | summary | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Codex | `~/.codex/AGENTS.md` | L92 |
+| Codex | `~/.codex/AGENTS.md` | L143 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L108 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L23 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L83 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L36 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L27 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L273 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L36 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L120 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L242 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L32 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L182 |
+| standing_rule entities | `<entity>` | summary |
 
 #### `R-ae9bca` — Durable work goes to a dispatched agent, never a harness task chip
 
 Target home: **agent_policy** · 14 statements, 12 distinct · **NEEDS-SPLIT**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L37 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L30 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L55 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L56 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L3 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L72 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L115 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L283 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L379 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L64 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L70 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L71 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L37 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L30 |
+| Codex | `~/.codex/AGENTS.md` | L55 |
+| Codex | `~/.codex/AGENTS.md` | L56 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L3 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L72 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L115 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L283 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L379 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L64 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L70 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L71 |
 
 #### `R-606489` — Minimize personal data at capture; purpose-bind it
 
 Target home: **docs/foundation/** · 14 statements, 13 distinct · **NEEDS-SPLIT**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L21 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L25 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L7 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L168 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L104 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L58 | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | rule | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | summary | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | description | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L217 | operator-specific, value withheld |
-| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
-| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L21 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L25 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L7 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 |
+| Codex | `~/.codex/AGENTS.md` | L168 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L104 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L58 |
+| agent_policy entities | `<entity>` | rule |
+| agent_policy entities | `<entity>` | summary |
+| agent_policy entities | `<entity>` | description |
+| ateles/CLAUDE.md | `CLAUDE.md` | L217 |
+| standing_rule entities | `<entity>` | instruction |
+| task_policy entities | `<entity>` | rule |
 
 #### `R-36cf5c` — Never mutate a sibling repo's shared main clone; add a worktree first
 
 Target home: **agent_policy** · 14 statements, 11 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L31 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L72 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L118 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L126 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L46 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L28 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L27 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L275 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L400 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L106 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L133 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L153 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L31 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 |
+| Codex | `~/.codex/AGENTS.md` | L72 |
+| Codex | `~/.codex/AGENTS.md` | L118 |
+| Codex | `~/.codex/AGENTS.md` | L126 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L46 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L28 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L27 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L275 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L400 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L106 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L133 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L153 |
 
 #### `R-ebd526` — Persist every conversation turn to Neotoma
 
 Target home: **agent_policy** · 13 statements, 11 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L7 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L63 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L210 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L41 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L76 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L95 | operator-specific, value withheld |
-| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
-| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
-| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
-| task_policy entities | `<entity>` | raw_fragments.policy_text | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L7 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 |
+| Codex | `~/.codex/AGENTS.md` | L63 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L210 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L41 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L76 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L95 |
+| standing_rule entities | `<entity>` | instruction |
+| standing_rule entities | `<entity>` | instruction |
+| task_policy entities | `<entity>` | rule |
+| task_policy entities | `<entity>` | raw_fragments.policy_text |
 
 #### `R-f0b574` — Re-read and merge a plan field before correcting it
 
 Target home: **agent_policy** · 12 statements, 9 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L94 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L266 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L398 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L68 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L110 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L43 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L95 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L110 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L55 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L22 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Codex | `~/.codex/AGENTS.md` | L94 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L266 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L398 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L68 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L110 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L43 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L95 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L110 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L55 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L22 |
 
 #### `R-680852` — Read a write back; a success code is not a landed write
 
 Target home: **agent_policy** · 12 statements, 10 distinct · **DIVERGE**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L28 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L26 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L30 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L154 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L270 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L329 | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | rule | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L200 | operator-specific, value withheld |
-| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L51 | operator-specific, value withheld |
-| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L28 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L26 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L30 |
+| Codex | `~/.codex/AGENTS.md` | L154 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L270 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L329 |
+| agent_policy entities | `<entity>` | rule |
+| ateles/CLAUDE.md | `CLAUDE.md` | L200 |
+| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L51 |
+| task_policy entities | `<entity>` | rule |
 
 #### `R-f08cfb` — Classify an action's blast radius before acting on it
 
 Target home: **docs/foundation/** · 11 statements, 10 distinct · **NEEDS-SPLIT**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L157 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L125 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L197 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L198 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L152 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L119 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L41 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L108 | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | description | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | description | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L206 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Codex | `~/.codex/AGENTS.md` | L157 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L125 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L197 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L198 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L152 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L119 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L41 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L108 |
+| agent_policy entities | `<entity>` | description |
+| agent_policy entities | `<entity>` | description |
+| ateles/CLAUDE.md | `CLAUDE.md` | L206 |
 
 #### `R-4b8ce8` — Never use git stash; WIP-commit instead
 
 Target home: **agent_policy** · 10 statements, 9 distinct · **NEEDS-SPLIT**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L26 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L14 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L29 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L42 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L279 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L401 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L52 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L80 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L26 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L14 |
+| Codex | `~/.codex/AGENTS.md` | L29 |
+| Codex | `~/.codex/AGENTS.md` | L42 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L279 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L401 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L52 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L80 |
 
 #### `R-fab4cd` — Pose open decisions through the harness questions tool, not inline prose
 
 Target home: **task_policy** · 9 statements, 9 distinct · **NEEDS-SPLIT**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L32 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L8 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L549 | operator-specific, value withheld |
-| standing_rule entities | `<entity>` | rule_text | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L32 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L8 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L549 |
+| standing_rule entities | `<entity>` | rule_text |
 
 #### `R-f31026` — Gmail sends and draft-updates need per-message approval
 
 Target home: **agent_policy** · 9 statements, 9 distinct · **NEEDS-SPLIT**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L25 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L30 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L20 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L24 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L125 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L168 | operator-specific, value withheld |
-| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L25 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 |
+| Codex | `~/.codex/AGENTS.md` | L30 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L20 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L24 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L125 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L168 |
+| task_policy entities | `<entity>` | rule |
 
 #### `R-ce6455` — Daemons run dedicated checkouts that must be fresh
 
 Target home: **agent_policy** · 8 statements, 6 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L14 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L72 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L118 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L400 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L106 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L147 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L153 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L14 |
+| Codex | `~/.codex/AGENTS.md` | L72 |
+| Codex | `~/.codex/AGENTS.md` | L118 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L400 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L106 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L147 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L153 |
 
 #### `R-acf4ff` — Never invent facts about the operator's life, tools, or past
 
 Target home: **task_policy** · 8 statements, 8 distinct · **NEEDS-SPLIT**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L80 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L10 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L61 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L200 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L217 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L289 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L325 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L80 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L10 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L61 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L200 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L217 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L289 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L325 |
 
 #### `R-d99bae` — A renamed agent leaves no stale reference
 
 Target home: **agent_policy** · 8 statements, 5 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L66 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L99 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L110 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L156 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L139 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L28 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L103 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L179 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Codex | `~/.codex/AGENTS.md` | L66 |
+| Codex | `~/.codex/AGENTS.md` | L99 |
+| Codex | `~/.codex/AGENTS.md` | L110 |
+| Codex | `~/.codex/AGENTS.md` | L156 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L139 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L28 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L103 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L179 |
 
 #### `R-12d4a8` — Restart affected daemons after a merge, then verify
 
 Target home: **CLAUDE.md** · 8 statements, 7 distinct · **NEEDS-SPLIT**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L42 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L16 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L72 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L57 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L39 | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | body | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L106 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L42 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L16 |
+| Codex | `~/.codex/AGENTS.md` | L72 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L57 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L39 |
+| agent_policy entities | `<entity>` | body |
+| ateles/CLAUDE.md | `CLAUDE.md` | L106 |
 
 #### `R-765e54` — Extend the mechanism that exists; do not build a parallel one
 
 Target home: **agent_policy** · 8 statements, 6 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L158 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L77 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L79 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L171 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L49 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L131 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L208 | operator-specific, value withheld |
-| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L55 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Codex | `~/.codex/AGENTS.md` | L158 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L77 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L79 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L171 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L49 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L131 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L208 |
+| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L55 |
 
 #### `R-c14682` — Never hardcode secrets or credentials
 
 Target home: **agent_policy** · 7 statements, 6 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L45 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L44 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L62 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L177 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L282 | operator-specific, value withheld |
-| foundation reference repo | `~/repos/<reference>/<file>` | L18 | operator-specific, value withheld |
-| foundation reference repo | `~/repos/<reference>/<file>` | L141 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Codex | `~/.codex/AGENTS.md` | L45 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L44 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L62 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L177 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L282 |
+| foundation reference repo | `~/repos/<reference>/<file>` | L18 |
+| foundation reference repo | `~/repos/<reference>/<file>` | L141 |
 
 #### `R-9993c8` — One worktree, one agent; never point two at the same tree
 
 Target home: **agent_policy** · 7 statements, 6 distinct · **DIVERGE**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L36 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L43 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L79 | operator-specific, value withheld |
-| foundation reference repo | `~/repos/<reference>/<file>` | L100 | operator-specific, value withheld |
-| foundation reference repo | `~/repos/<reference>/<file>` | L481 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L36 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 |
+| Codex | `~/.codex/AGENTS.md` | L43 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L79 |
+| foundation reference repo | `~/repos/<reference>/<file>` | L100 |
+| foundation reference repo | `~/repos/<reference>/<file>` | L481 |
 
 #### `R-71cf59` — Commit and PR titles follow the live title convention
 
 Target home: **agent_policy** · 6 statements, 5 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L514 | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | rule | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | description | operator-specific, value withheld |
-| agent_policy entities | `<entity>` | body | operator-specific, value withheld |
-| foundation reference repo | `~/repos/<reference>/<file>` | L3 | operator-specific, value withheld |
-| foundation reference repo | `~/repos/<reference>/<file>` | L753 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L514 |
+| agent_policy entities | `<entity>` | rule |
+| agent_policy entities | `<entity>` | description |
+| agent_policy entities | `<entity>` | body |
+| foundation reference repo | `~/repos/<reference>/<file>` | L3 |
+| foundation reference repo | `~/repos/<reference>/<file>` | L753 |
 
 #### `R-bdb72b` — Never mark work done citing an unverifiable artifact
 
 Target home: **agent_policy** · 6 statements, 5 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L47 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L94 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L271 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L36 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L96 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L24 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Codex | `~/.codex/AGENTS.md` | L47 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L94 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L271 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L36 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L96 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L24 |
 
 #### `R-fa2cbe` — Never assert what the operator feels, thinks, or said without evidence
 
 Target home: **task_policy** · 6 statements, 6 distinct · **DIVERGE**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L80 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L29 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L80 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L29 |
 
 #### `R-86601c` — Recurring obligations roll their date; never complete
 
 Target home: **task_policy** · 6 statements, 5 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L114 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L45 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L90 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L181 | operator-specific, value withheld |
-| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 |
+| Codex | `~/.codex/AGENTS.md` | L114 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L45 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L90 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L181 |
+| task_policy entities | `<entity>` | rule |
 
 #### `R-0cc9d7` — Give status updates unprompted, per workstream
 
 Target home: **task_policy** · 6 statements, 5 distinct · **DIVERGE**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L58 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L242 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L45 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L73 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 |
+| Codex | `~/.codex/AGENTS.md` | L58 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L242 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L45 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L73 |
 
 #### `R-580da5` — Tests follow this repo's naming and placement convention
 
 Target home: **agent_policy** · 6 statements, 6 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L21 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L43 | operator-specific, value withheld |
-| foundation reference repo | `~/repos/<reference>/<file>` | L343 | operator-specific, value withheld |
-| foundation reference repo | `~/repos/<reference>/<file>` | L344 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L21 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L43 |
+| foundation reference repo | `~/repos/<reference>/<file>` | L343 |
+| foundation reference repo | `~/repos/<reference>/<file>` | L344 |
 
 #### `R-258f23` — A test that cannot fail on its subject is decoration
 
 Target home: **agent_policy** · 6 statements, 4 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L156 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L77 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L204 | operator-specific, value withheld |
-| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L53 | operator-specific, value withheld |
-| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Codex | `~/.codex/AGENTS.md` | L156 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L77 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L204 |
+| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L53 |
+| task_policy entities | `<entity>` | rule |
 
 #### `R-f398b5` — Act on your recommendation; ask only at a real fork
 
 Target home: **task_policy** · 5 statements, 4 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L32 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L61 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L75 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L32 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 |
+| Codex | `~/.codex/AGENTS.md` | L61 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L75 |
 
 #### `R-713e5d` — Store the full body, not a path or a summary standing in for it
 
 Target home: **agent_policy** · 5 statements, 5 distinct · **DIVERGE**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L68 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L120 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L141 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L166 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L68 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L120 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L141 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L166 |
 
 #### `R-8d5e55` — Verify against the live system of record before asserting
 
 Target home: **agent_policy** · 5 statements, 4 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L23 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L44 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L152 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L237 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L82 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L23 |
+| Codex | `~/.codex/AGENTS.md` | L44 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L152 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L237 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L82 |
 
 #### `R-eecfc1` — End every turn with the decisions that need the operator
 
 Target home: **task_policy** · 4 statements, 3 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L63 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L222 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L76 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring |
+| Codex | `~/.codex/AGENTS.md` | L63 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L222 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L76 |
 
 #### `R-d26566` — Do not drift into an agent's work one step at a time
 
 Target home: **agent_policy** · 4 statements, 3 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L36 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L56 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L64 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L71 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L36 |
+| Codex | `~/.codex/AGENTS.md` | L56 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L64 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L71 |
 
 #### `R-1bf77f` — Recover a stash by apply-with-SHA, never pop a shared stack
 
 Target home: **agent_policy** · 4 statements, 4 distinct · **DIVERGE**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L33 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L21 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L26 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L33 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L21 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L26 |
 
 #### `R-ffe65b` — Never fabricate a finding or a conclusion to appear useful
 
 Target home: **task_policy** · 4 statements, 4 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L146 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L79 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L80 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L121 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L146 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L79 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L80 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L121 |
 
 #### `R-4038a8` — Never invent a quote; every quote traces to its source
 
 Target home: **task_policy** · 4 statements, 4 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L83 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L90 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L371 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L410 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L83 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L90 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L371 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L410 |
 
 #### `R-57ff60` — Do not merge while a live blocking review stands
 
 Target home: **docs/foundation/** · 4 statements, 4 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L46 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L32 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L107 | operator-specific, value withheld |
-| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Codex | `~/.codex/AGENTS.md` | L46 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L32 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L107 |
+| standing_rule entities | `<entity>` | instruction |
 
 #### `R-18616b` — Validate the instrument before believing a measurement; a surprising zero is the tool
 
 Target home: **agent_policy** · 4 statements, 2 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L155 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L289 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L202 | operator-specific, value withheld |
-| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L52 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Codex | `~/.codex/AGENTS.md` | L155 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L289 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L202 |
+| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L52 |
 
 #### `R-fb4dbc` — Agent prompts are public and carry no operator data
 
 Target home: **agent_policy** · 3 statements, 2 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L107 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L78 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L174 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Codex | `~/.codex/AGENTS.md` | L107 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L78 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L174 |
 
 #### `R-03c4c7` — Never invent praise or a judgement of someone else's work
 
 Target home: **task_policy** · 3 statements, 3 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L74 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L65 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L130 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L74 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L65 |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L130 |
 
 #### `R-c6d782` — Merge by squash
 
 Target home: **agent_policy** · 3 statements, 3 distinct · **DIVERGE**
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L33 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L32 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L33 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L32 |
 
 #### `R-4706ff` — Never predict or assert a third party's reaction
 
 Target home: **task_policy** · 2 statements, 2 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L23 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L389 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L23 |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L389 |
 
 #### `R-d2c4bb` — Never bypass the pre-commit hook with --no-verify
 
 Target home: **agent_policy** · 2 statements, 1 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L159 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L186 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Codex | `~/.codex/AGENTS.md` | L159 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L186 |
 
 #### `R-b5f10c` — Pass PR and comment bodies by file, never inline
 
 Target home: **agent_policy** · 1 statements, 1 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 |
 
 #### `R-e0f7e8` — Store artifacts as the work happens, not at session end
 
 Target home: **agent_policy** · 1 statements, 1 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| ateles/CLAUDE.md | `CLAUDE.md` | L30 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| ateles/CLAUDE.md | `CLAUDE.md` | L30 |
 
 #### `R-765925` — Verify the GitHub identity before any write
 
 Target home: **agent_policy** · 1 statements, 1 distinct · agree
 
-| Store | Location | At | Statement |
-|---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L30 | operator-specific, value withheld |
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L30 |
 
 ## What this inventory could not classify
 
@@ -1096,15 +1100,15 @@ That prose inventory is the input to this one, not a thing it discards: each of 
 | Claim on the prose inventory | Measured here | Reading |
 |---|---|---|
 | OpenClaw holds 1 rule | **0** | The `1` is a directory, not a file. Beneath it: session state and a vendored Codex home whose shipped skills are a dependency, not operator rules. Sweeping it yields 21,411 statements from files the operator never wrote. |
-| Cursor holds 31 files (already corrected once from 5) | **31 confirmed** | 2 live, 29 dated `.backup.` copies. 26 of the 31 are symlinks into the neotoma repo, so most of the store is a pointer to a sibling repo's file rather than a rule of its own. |
-| Project memory: 329 files across 15 dirs | **329 files, 11 dirs** | 14 `memory/` directories exist; 3 hold no `.md` file. |
+| Cursor holds 31 files (already corrected once from 5) | **31 files** | The current total is the measured store row above; live/backup/symlink composition remains internal diagnostic metadata rather than public path detail. |
+| Project memory: 329 files across 15 dirs | **338 files** | The current file total is derived from the measured store; private project-directory names are not emitted. |
 | 88 of 97 ateles skills contain rule language | **66 of 96** | Different instrument: the earlier count matched `do not` case-insensitively across the whole file. |
 | Five lenses cite five different foundation files, one consumer each | **confirmed as the store's reachability verdict** | Not re-derived; cited. See the foundation-repo reconciliation (2026-09-19). |
 | Six rule stores | **16 inventoried** | The store list was a floor. The additions: `task_policy` entities (a live store, not only a target), hooks (rules stated as code), skills split by root, and — the largest — the per-checkout copies below. |
 
 ### The store nobody had counted: one instruction file, many checkouts
 
-`CLAUDE.md` is re-injected from disk at every compaction, which is what makes it the home for standing instructions. The disk it is read from is the one in the session's own checkout. Measured on this machine: **205 copies of `ateles/CLAUDE.md` in 26 distinct versions**, and **138 copies of `neotoma/AGENTS.md` in 4**.
+`CLAUDE.md` is re-injected from disk at every compaction, which is what makes it the home for standing instructions. The disk it is read from is the one in the session's own checkout. Measured on this machine: **218 copies of `ateles/CLAUDE.md` in 26 distinct versions**, and **143 copies of `neotoma/AGENTS.md` in 4 distinct versions**.
 
 So a rule's reach is not whether it is in `CLAUDE.md` but which copy of `CLAUDE.md` the reader opened, and the deployment checkouts the daemons run from (`~/ateles-rc-src`, `~/neotoma-rc-src`) are two more copies again. This is `docs/foundation/principles.md#1` — a rule that lives in only one checkout does not bind — measured rather than asserted, and it is the concrete mechanism behind ateles#973, where a session ran for hours from a worktree whose `CLAUDE.md` lacked the never-stash rule and both compaction hooks.
 

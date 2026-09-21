@@ -1,19 +1,77 @@
 """Regression tests for the operator rulings embedded in the rule inventory."""
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 import render_rule_inventory as inventory
 
 
 class RuleInventoryRulingsTest(unittest.TestCase):
     def test_operator_rulings_are_complete_and_exact(self) -> None:
-        self.assertEqual(
-            set(inventory.PROPOSAL_RULINGS),
-            {f"P{number}" for number in range(1, 11)},
-        )
-        self.assertEqual(inventory.PROPOSAL_RULINGS["P3"].status, "DUPLICATE")
-        self.assertEqual(inventory.PROPOSAL_RULINGS["P10"].status, "QUARANTINED")
+        expected = {
+            "P1": (
+                "ACCEPTED",
+                "`docs/foundation/github.md`",
+                "Code-host review semantics belong in the code-host mapping.",
+            ),
+            "P2": (
+                "ACCEPTED",
+                "`agent_policy`",
+                "A generic rule for authors and reviewers of guards.",
+            ),
+            "P3": (
+                "DUPLICATE",
+                "`agent_policy` (`R-ae9bca`)",
+                "Already captured by the dispatch rule; create no second rule.",
+            ),
+            "P4": (
+                "ACCEPTED",
+                "`agent_policy`",
+                "PR shepherding behaviour; workflow declarations still own their "
+                "step lists.",
+            ),
+            "P5": (
+                "ACCEPTED",
+                "`agent_policy`",
+                "Narrowed by the operator; an earlier request would misstate "
+                "readiness.",
+            ),
+            "P6": (
+                "ACCEPTED",
+                "`docs/foundation/gmail.md`",
+                "This is the mail adapter's per-thread operation, not a general "
+                "preference.",
+            ),
+            "P7": (
+                "ACCEPTED",
+                "`docs/foundation/adapters.md`",
+                "A watcher resumption invariant shared across import adapters.",
+            ),
+            "P8": (
+                "ACCEPTED",
+                "`docs/foundation/adapters.md`",
+                "A source-dedup invariant shared across import adapters.",
+            ),
+            "P9": (
+                "ACCEPTED",
+                "`task_policy`",
+                "The recap presentation is an operator preference, not public "
+                "prompt text.",
+            ),
+            "P10": (
+                "QUARANTINED",
+                "none",
+                "No rule is created until the exact stylistic tell and scope are "
+                "supplied.",
+            ),
+        }
+        actual = {
+            key: (ruling.status, ruling.home, ruling.note)
+            for key, ruling in inventory.PROPOSAL_RULINGS.items()
+        }
+        self.assertEqual(actual, expected)
         self.assertEqual(
             inventory.PROPOSAL_RULINGS["P5"].rule,
             "Request operator review only when technical gates are clear and "
@@ -21,11 +79,77 @@ class RuleInventoryRulingsTest(unittest.TestCase):
         )
 
     def test_generalization_dispositions_preserve_specific_rules(self) -> None:
-        self.assertEqual(
-            {key: ruling.status for key, ruling in inventory.GENERALIZATION_RULINGS.items()},
-            {"G1": "ACCEPTED", "G2": "DUPLICATE", "G3": "DUPLICATE"},
-        )
+        expected = {
+            "G1": (
+                "ACCEPTED",
+                "`agent_policy`",
+                "Keep the concrete `--body-file` rule beside the general "
+                "shell-injection rule.",
+            ),
+            "G2": (
+                "DUPLICATE",
+                "`agent_policy` (`R-680852`)",
+                "Fold into the existing read-back rule; preserve the concrete "
+                "daemon sequence.",
+            ),
+            "G3": (
+                "DUPLICATE",
+                "foundation consent rule (`R-fba8d`)",
+                "Already captured; preserve the concrete Gmail gate and its tests.",
+            ),
+        }
+        actual = {
+            key: (ruling.status, ruling.home, ruling.note)
+            for key, ruling in inventory.GENERALIZATION_RULINGS.items()
+        }
+        self.assertEqual(actual, expected)
         self.assertIn("--body-file", inventory.GENERALIZATION_RULINGS["G1"].note)
+
+    def test_every_target_home_names_a_live_rule_kind(self) -> None:
+        self.assertEqual(set(inventory.TARGET_HOME), set(inventory.KIND_LABELS))
+
+    def test_questions_tool_rule_is_separate_from_status_updates(self) -> None:
+        self.assertEqual(
+            inventory.classify(
+                "Give status updates unprompted: what moved and what is blocked."
+            ),
+            ["status_update_unprompted"],
+        )
+        self.assertEqual(
+            inventory.classify(
+                "Pose open decisions through the harness questions tool with "
+                "labeled options."
+            ),
+            ["decisions_via_questions_tool"],
+        )
+
+    def test_needs_split_is_bound_at_eight_statement_boundary(self) -> None:
+        def statements(openings: list[str]) -> list[inventory.Statement]:
+            return [
+                inventory.Statement("Codex", "private", f"L{index}", opening)
+                for index, opening in enumerate(openings, 1)
+            ]
+
+        seven_distinct = statements(
+            [f"Always report status variant-{index} before continuing" for index in range(7)]
+        )
+        eight_distinct = statements(
+            [f"Always report status variant-{index} before continuing" for index in range(8)]
+        )
+        eight_same = statements(["Always report the same status opening now"] * 8)
+
+        self.assertFalse(
+            inventory.Cluster("status_update_unprompted", "ignored", seven_distinct)
+            .needs_split
+        )
+        self.assertTrue(
+            inventory.Cluster("status_update_unprompted", "ignored", eight_distinct)
+            .needs_split
+        )
+        self.assertFalse(
+            inventory.Cluster("status_update_unprompted", "ignored", eight_same)
+            .needs_split
+        )
 
     def test_rendered_section_distinguishes_ruling_from_enforcement(self) -> None:
         rendered = inventory.render_rulings_section()
@@ -115,6 +239,118 @@ class RuleInventoryRulingsTest(unittest.TestCase):
         for value in sensitive:
             with self.subTest(value=value):
                 self.assertNotIn(value, rendered)
+
+    def test_public_render_is_honest_about_withheld_statement_bodies(self) -> None:
+        statement = inventory.Statement(
+            store="Codex",
+            location="/private/rules.md",
+            locator="L9",
+            text="Never reveal this private value",
+            kind="git_never_stash",
+        )
+        advisory = inventory.Statement(
+            store=statement.store,
+            location=statement.location,
+            locator="L2",
+            text="Prefer not to reveal this mechanism",
+            kind="git_never_stash",
+        )
+        cluster = inventory.Cluster(
+            kind="git_never_stash",
+            label="ignored",
+            statements=[statement, advisory],
+        )
+        rendered = inventory.render([cluster], [], [], [statement])
+        self.assertNotIn("| Statement |", rendered)
+        self.assertIn("statement bodies are deliberately absent", rendered)
+        self.assertIn("--private-diagnostics", rendered)
+
+    def test_private_diagnostics_expose_locators_but_never_statement_values(self) -> None:
+        statement = inventory.Statement(
+            store="OperatorIdentity/private store",
+            location="/Users/private/ClientCodename/rules.md",
+            locator="client-app-production",
+            text="Never reveal private.example.internal",
+            kind="git_never_stash",
+        )
+        advisory = inventory.Statement(
+            store=statement.store,
+            location=statement.location,
+            locator="L2",
+            text="Prefer not to reveal this mechanism",
+            kind="git_never_stash",
+        )
+        cluster = inventory.Cluster(
+            kind="git_never_stash",
+            label="ignored",
+            statements=[statement, advisory],
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "rule-locators.json"
+            inventory.write_private_diagnostics(target, [cluster])
+            payload = json.loads(target.read_text())
+            serialized = json.dumps(payload)
+            self.assertIn(statement.location, serialized)
+            self.assertIn(statement.locator, serialized)
+            self.assertNotIn(statement.text, serialized)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
+        with self.assertRaises(ValueError):
+            inventory.write_private_diagnostics(
+                inventory.REPO_ROOT / "private-rule-locators.json", [cluster]
+            )
+
+    def test_current_measurements_are_derived_in_narrative(self) -> None:
+        statements = [
+            inventory.Statement(
+                "Codex", "private", "L1", "Never use this mechanism"
+            ),
+            inventory.Statement(
+                "Codex", "private", "L2", "Prefer not to use this mechanism"
+            ),
+        ]
+        cluster = inventory.Cluster("git_never_stash", "ignored", statements)
+        stores = [
+            inventory.Store(
+                "ateles/CLAUDE.md checkout copies",
+                "private",
+                populated=11,
+                distinct_versions=2,
+            ),
+            inventory.Store(
+                "neotoma/AGENTS.md checkout copies",
+                "private",
+                populated=13,
+                distinct_versions=3,
+            ),
+        ]
+        rendered = inventory.render([cluster], stores, [], statements)
+        self.assertIn("1 rows rather than 2", rendered)
+        self.assertIn("11 copies of `ateles/CLAUDE.md` in 2 distinct versions", rendered)
+        self.assertIn("13 copies of `neotoma/AGENTS.md` in 3 distinct versions", rendered)
+
+    def test_merge_gating_workflow_runs_full_inventory_check_fail_closed(self) -> None:
+        workflow = (
+            inventory.REPO_ROOT / ".github/workflows/foundation-checks.yml"
+        ).read_text()
+        self.assertIn('NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}', workflow)
+        self.assertIn("Rule inventory — full measured output matches", workflow)
+        self.assertIn("python3 \"$f\" --check", workflow)
+        self.assertIn("--require-complete-measurement", workflow)
+        self.assertIn("rule inventory equality unavailable: NEOTOMA_BEARER_TOKEN", workflow)
+        self.assertIn("readiness check will name the unread entity store kinds", workflow)
+        self.assertIn("canonical measurement runner must expose every required store kind", workflow)
+        self.assertNotIn("continue-on-error: true\n        run: python3 execution/scripts/render_rule_inventory.py --check", workflow)
+
+    def test_measurement_readiness_names_only_safe_store_kinds(self) -> None:
+        stores = [inventory.Store(name, "private") for name in inventory.PUBLIC_STORE_NAMES]
+        target = next(store for store in stores if store.name == "agent_policy entities")
+        target.read_ok = False
+        target.read_error = "/Users/private ClientCodename token=secret"
+        missing, unread = inventory.measurement_readiness(stores)
+        self.assertEqual(missing, [])
+        self.assertEqual(unread, ["agent_policy entities"])
+        self.assertNotIn("ClientCodename", json.dumps([missing, unread]))
 
     def test_public_store_label_drops_repository_owner_namespace(self) -> None:
         self.assertEqual(
