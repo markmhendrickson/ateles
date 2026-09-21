@@ -77,9 +77,9 @@ with them.
 | action policy | `action_policy` | `low_blast_action_types[]`, `high_blast_action_types[]`; `confidence_threshold`; `recurrence_count`; `always_checkpoint_boundaries[]`; `permission_scope`; `consent_tolerance` per action class (the change to an action's consented figures that may be taken without a new checkpoint; absent reads as zero — `payments.md#tolerance-is-an-action_policy-value-and-its-default-is-zero`); `recoveries` (for every class listed in either tier, the class its recovery is taken under, or `forward_only`, or `none`; a policy write listing a class with no entry is refused — `failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`); `lapse_cap` (the per-task lapse count at which `repeated_lapse` is raised; undeclared raises none — `failure_posture.md#repeated-lapse-raises-a-checkpoint`); `quorum` and `disjoint_roles[]` per action class (the count of awaited principals a resolution needs, and the role pairs on one checkpoint that must resolve to distinct principals; absent, every awaited principal and every named pair — `authority_model.md#the-thresholds-home-is-the-action_policy-per-class`); `metered_resources[]` per action class (the resources a class's actions are counted against a budget term in; absent, none — the permission stays the gate's, and a metered class with no budget term written resolves to `NEVER` — `authority_model.md#budget-is-a-scope-term-that-attenuates`) | — | blast radius for a class (a governance class with no value resolves to `NEVER` — `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`); whether a series has graduated; whether a re-quoted action is within tolerance; whether a checkpoint's resolutions meet the class's structural checks; which resources a class's actions are counted in | — | `operator_only` as a policy value (it is `NEVER` ahead of any policy); a tolerance the design supplies |
 | intake rule | `intake_rule` | `subject_types[]` (entity types; never a work-model record type, a rule naming one refused at the write — decision 36, `work_model.md#whether-an-intake-rule-may-key-on-the-work-models-own-records`); `change_kinds[]` (`created`, `updated`, `corrected`); `predicate` (over the entity's fields after the change); `provenance_predicate` (system, instance, writer); `task_title`, `task_description` (the text the created task carries, naming the entity that fired it); `ceiling`, `window`; `ended_at` (a rule is ended by correction, never deleted) | — (the tasks it created carry provenance naming the rule and the change; no edge) | the tasks a rule created, by provenance; fires and drops per window; whether a rule is live | — | a last-evaluated cursor; a fired count the evaluator maintains; a successor, a workflow, a step, an action class, or an `assigned_to` for the created task (intake's); a batch it opens (the created task's intake batch opens on creation, as every task's does — `work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`) |
 | agent session | `agent_session` | `runner_id`; `host`, `checkout`, `branch`, `head`; `started_at`, `last_seen_at`; on a daemon's session, one observation per declared window carrying the window, the coverage of the polls or deliveries made in it, and the dispositions counted — the write a successful empty poll makes (`adapters.md#what-the-adapter-does-with-every-event`) | `REFERS_TO` → task | active (with the lease); silent (no window observation past the declared window, while the record is reachable — `failure_posture.md#the-rules`, rule 2) | — | a history of runners; the session's transcript or reasoning; a copy of what the step read (`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`) |
-| agent | `agent` | `name`, `prompt_markdown`, `context_entity_types[]`, version | `principal_binding` ← credential, **two edges** where the agent acts in a human's interest and not one: its AAuth edge ends at this `agent` (attribution, A-for-B) and its acts-as edge at the `operator` (the edge decision 48's counting rule reads), told apart by `credential_kind` — see the `principal` row and `#relationships`; `LEASE` → task or batch | — | — | the lease holder as a field on the task |
+| agent | `agent` | `name`, `prompt_markdown`, `context_entity_types[]`, version | **two** `principal_binding` edges where the agent acts in a human's interest: its presented AAuth credential binds to this `agent` (attribution, A-for-B), and this `agent` → the `operator` is its traversal-only acts-as binding (`credential_kind: acts_as`, no presented value). An acts-as edge from an agent to an agent is refused; agent-to-agent authority uses `delegation_edge`. `LEASE` → task or batch | — | — | the lease holder as a field on the task; an acts-as credential presentation; an agent-to-agent acts-as chain |
 | adapter | `agent` (a daemon; `adapters.md`) | `name`; the `system` it adapts | `principal_binding` → principal; provenance on every write it makes (the adapter, the system, the delivery id) | which artifacts it tracks (by `system`) | — | a per-artifact map of satisfied steps; an event log beside the artifact's observations; a workflow it reads |
-| principal | `operator` (human) or `agent` (non-human) | identity only — the type exists to be a principal; the identifier's form is `multi_tenant.md` section 7 | `principal_binding` ← credential (edge-keyed; no credential entity; many-to-one: one edge per credential carrying `credential_kind`, `credential_value`, `credential_issuer`, `expires_at` — e.g. `store_user_id` / host login to the `operator`; AAuth `sub`+`iss` to the `agent` that presented it, the principal that credential identifies. An agent that acts in a human's interest holds a **second** `principal_binding`, its acts-as binding, whose endpoint is the `operator` — the edge decision 48's counting rule names. The two are the same edge type, told apart by `credential_kind`, and both are required: the first attributes the write to the agent (A-for-B), the second makes two agents under one operator one interest); `ownership_grant` ← object; `delegation_edge` → principal | authority chain; whether a write resolves to a principal at all | — | a login string, an address, or a magic value standing in for the principal; a separate credential entity; `operator_profile` (the descriptive record beside the `operator`, carrying no authority edges); locale or preferences on the principal; a stored credit (a read model over attribution — `authority_model.md#credit-is-a-read-model-over-attribution`) |
+| principal | `operator` (human) or `agent` (non-human) | identity only — the type exists to be a principal; the identifier's form is `multi_tenant.md` section 7 | `principal_binding` has two admitted shapes: a presented credential (edge-keyed; no credential entity; one edge per credential carrying `credential_kind`, `credential_value`, `credential_issuer`, `expires_at`) → the principal it identifies; and an `agent` → `operator` acts-as binding carrying only `credential_kind: acts_as`, traversed after credential resolution and never presented. An `operator` may not source an acts-as binding, and an `agent` may not target an `agent` with one; agent-to-agent authority uses `delegation_edge`. `ownership_grant` ← object; `delegation_edge` → principal | authority chain; whether a write resolves to a principal at all; which operator's interest an agent acts in | — | a login string, an address, or a magic value standing in for the principal; a separate credential entity; a presented acts-as credential; an operator-sourced or agent-targeted acts-as edge; `operator_profile` (the descriptive record beside the `operator`, carrying no authority edges); locale or preferences on the principal; a stored credit (a read model over attribution — `authority_model.md#credit-is-a-read-model-over-attribution`) |
 | grant | `agent_grant` | `sub`, `iss`; `capabilities[]` (operation × entity types × repositories, and the tools a principal may invoke — `migration.md#where-a-skills-harness-mechanics-live`; a governance type on the engine's grant alone — `gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits`; the right to propose an initiative as the `task` write capability constrained to the initiative class — `authority_model.md#what-stops-is-a-task-the-owner-seat-confirms-it-through-the-checkpoint-and-proposing-is-a-grant-capability`); `param_constraints` (per-tool parameter constraints; a field allowlist on a write capability — `authority_model.md#grants`; a budget, the bound on a resource a capability may consume, attenuating down a delegation chain — `authority_model.md#budget-is-a-scope-term-that-attenuates`); `expires_at` | — | permit, deny, or indeterminate for one request; what has been consumed against a budget (a read over confirmed actions) | — | a wildcard for a human; a harness preference or a model tier (a `vendor_binding`'s capability slot for the harness); a balance or a consumed amount; a governance type on any grant but the engine's |
 | delegation | relationship `delegation_edge` | `scope` (a subset of the delegator's; a budget among its terms — `authority_model.md#budget-is-a-scope-term-that-attenuates`); `expires_at` | delegator → delegate | authority chain; attenuation | — | a prose note on a task; a stored balance |
 
@@ -104,7 +104,7 @@ with them.
 | `CHECKPOINTS` | checkpoint → action or task | the held subject | the decision queue; what resumes on resolution (the action is taken or refused; the task is re-claimed or closed) |
 | `AWAITS` / `RESOLVED_BY` / `RAISED_BY` | checkpoint → principal | whose decision is needed (a role named by the raiser is resolved to principals through the roster when the checkpoint is raised; the edge never targets a role — `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`); who gave it; who raised it | quorum, separation of duties, the queue's scoping |
 | `REFERS_TO` | task → artifact, or → a record entity it concerns (a finding it was produced from, or a planning record it bears on and is not under, among them); action → artifact, or → the planning record an `amend_<level>` action amends; verdict → artifact, or → a record entity it read, or → `session_digest` (the session that produced it — decision 40, required where the signer is an agent and a digest exists, permitted otherwise); finding → batch (the work it judges); agent session → task | the source concerns, acts on, or was judged on the target | intake's `link` step, which attaches what the task names and nothing on relevance alone (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`); the anchors hydration resolves a step's reads from, grown by the context a step writes back; the task an adapter creates for intake, to the artifact it concerns; an action's target; a verdict's evidence and the read set it judged on, reproducible as of `signed_at`, and the session that produced it, resolved as of the same time; the tasks a finding produced, and the scope each was made at against the finding's own |
-| `principal_binding` | credential (edge-keyed; no credential entity) → principal | binds one presented credential to the principal it identifies; one edge per credential; fields: `credential_kind`, `credential_value`, `credential_issuer`, `expires_at`; an AAuth credential resolves to the `agent` that presented it; the human operator is reached through that agent's separate acts-as `principal_binding`, a second edge of this type whose endpoint is the `operator` (decision 48's counting rule reads that endpoint, so two agents under one operator are one interest); operator credentials resolve directly to the operator | credential-to-principal resolution (match live edges on kind+value[+issuer] → principal endpoint; several live matches valid only when they target the same principal); attribution (the AAuth edge, resolving to the agent, is what records a write as A-for-B rather than as the operator); the agent's acts-as principal, read from the acts-as edge; rotation dual-admit when several live edges with different credential values resolve to the same principal |
+| `principal_binding` | presented credential (edge-keyed; no credential entity) → principal; or `agent` → `operator` for acts-as | A presented-credential edge carries `credential_kind`, `credential_value`, `credential_issuer`, and `expires_at`, one edge per credential; an AAuth credential resolves to the `agent` that presented it, and operator credentials resolve directly to the operator. An acts-as edge carries only `credential_kind: acts_as`; it is traversal-only and non-presentable, from agent to operator exactly. Agent → agent acts-as is refused and uses `delegation_edge` instead; operator-sourced acts-as is refused | credential-to-principal resolution matches only presented-credential edges on kind+value[+issuer] → principal endpoint; attribution comes from the AAuth edge; after an agent resolves, traversal of its acts-as edge yields the operator whose interest decision 48 counts; rotation dual-admit applies only to presented-credential edges |
 | `ownership_grant` | object → principal | named accountability | who is asked when the object needs a decision — the required seat on any checkpoint whose subject concerns the object, and nothing more (`authority_model.md#what-owning-confers-the-required-seat`) |
 | `delegation_edge` | principal → principal | scoped, time-bounded transfer of rights | the authority chain; attenuation (a budget in `scope` narrows down the chain — `authority_model.md#budget-is-a-scope-term-that-attenuates`) |
 
@@ -112,18 +112,22 @@ with them.
 
 ## Whether acyclicity is a property of a relationship type or of the graph
 
-**Open.** Registered in `conformance.md#the-register-of-open-design-decisions`. The design reads acyclicity
-as a **per-type** property and says so twice.
+**Ruled (decision 102, 2026-09-21): acyclicity is a required declaration on every relationship type at
+registration.** A type declares either that its own edges must remain acyclic or that cycles are admitted.
+The registry refuses a type whose declaration is absent, malformed, or unrecognized; absence never means
+unconstrained. For a type declaring acyclicity, the record checks that type's edges before every write and
+refuses the edge that would close a cycle. Registered in
+`conformance.md#the-register-of-open-design-decisions`. The design had already read acyclicity as a
+**per-type** property and said so twice.
 `work_model.md#a-batch-may-depend-on-a-task-it-created` states that the record refuses a `DEPENDS_ON` write
 that would close a cycle among its own edges, that `PART_OF` and `DEPENDS_ON` are "its hierarchical
 relationship types", and that a loop through `ADDRESSED_BY` "is invisible to that per-type check" — which is
 why the writer's own walk is the second check rather than a redundancy.
 `planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward` relies on the same reading to
 bound the ascent, so that the walk upward from any task is a path that ends. Both cite the check as a
-property of the record the design relies on rather than rebuilds. **What neither states, and what this
-decision registers, is whether that per-type reading is the design's requirement or the design's assumption
-about the record it happened to be written against** — and therefore what the check does when a new
-relationship type is registered.
+property of the record the design relies on rather than rebuilds. The ruling makes that reading the
+design's requirement rather than an assumption about one implementation, and makes registration the point
+where a new type must state which branch it takes.
 
 **The seam has been noticed once and closed on a different question.** Contradiction X-15
 (`conformance_suite.md#contradictions-a-state-one-test-requires-and-another-forbids`) put the record's
@@ -157,42 +161,36 @@ hand-kept copies of the same closed set. What this row owes is the requirement, 
 design needs a check to do, and what a conformance row would hold red until it does. The specification that
 implements it belongs to the record's own repository, alongside G25's.
 
-**The candidates.**
+**The candidates and their disposition.**
 
-1. **Per-type, declared at registration.** A registered relationship type declares whether it is acyclic,
+1. **Taken — per-type, declared at registration.** A registered relationship type declares whether it is acyclic,
    and the check runs for the types that declare it. This is what the corpus already reads the record as
    doing, so it makes an assumption into a requirement rather than changing a rule; it keeps the guard where
    `PART_OF` and `DEPENDS_ON` genuinely need it, which is where the two sections above rely on it; and it
    extends type registration rather than standing a second mechanism beside it, which is what invariant 6
-   asks. What it has to say is where the declaration lives — a property of the registered type, which is
-   what `data_model.md#concepts` would then carry a column for — and what a type that declares nothing
-   defaults to, which principle 5 makes the load-bearing half of the answer rather than a detail.
+   asks. The declaration lives on the registered type. A type that declares nothing is refused; this is
+   the load-bearing default principle 5 requires, rather than an implementation detail.
 
-2. **No check; acyclicity is the caller's concern.** The cheapest, and the design does not need it to be
+2. **Rejected — no check; acyclicity is the caller's concern.** The cheapest, and the design does not need it to be
    wrong to reject it: the writer's walk that `work_model.md` already requires for the cross-type case
    would become the whole mechanism, which is a coherent position and is the one the design already takes
    for every loop the per-type check cannot see. What it drops is a guard two sections currently lean on to
    bound a walk, so an answer here has to say what bounds the ascent instead.
 
-3. **Universal, and the design's edges conform.** Rejected on its face if `FOLLOWS` is genuinely a chain,
+3. **Rejected — universal, and the design's edges conform.** Rejected on its face if `FOLLOWS` is genuinely a chain,
    but the row states it rather than assuming it, because the assumption is the thing being tested: the
    design reads `FOLLOWS` as a sequence and has never had to write one that closes, so "conform" may cost
    nothing on the edges the design has and cost on an edge it has not yet named. What this candidate has to
    say is which of the thirteen it constrains and whether any of those constraints is one the design would
    have chosen on its own.
 
-**What any answer has to survive.** Principle 1 is the sharpest, and it bears on the answer twice. A check
-that runs on some write paths and not others is not a control in this design's sense — it reports on the
-paths it covers — so an answer that keeps the check has to say whether making it bind is part of the answer
-or a separate defect, and an answer that removes it has to name what fails when a cycle is written. The
-design's own precedent is that the writer is the enforcement point where the record's per-type check cannot
-see the loop, which is `work_model.md`'s cross-type walk and is the shape decision 56 ruled for governance
-writes: the one writer that holds the grant checks before it writes. Principle 5 governs the default: a
-type whose acyclicity is unstated resolves to the restrictive branch or to the permissive one, and this is
-the field carrying the safety meaning, so the answer states which. And an unbounded walk over a deep graph
-is a cost paid at every write, which makes a declared depth bound a candidate term of any answer rather
-than an implementation detail — with the design's own rule that a bound reached resolves to a refusal and
-never to a permissive default, as `#record-conventions` already requires of a degraded read.
+**Why the ruling binds.** Principle 1 is the sharpest: the check is made at the record's relationship-write
+path for every edge of a type declaring acyclicity, so a caller cannot route around it; where the separate
+cross-type walk is needed, the one writer holding the grant remains its enforcement point. Principle 5
+governs both defaults: an absent declaration is a refused registration, and a cycle check that cannot
+complete refuses the write rather than admitting an edge on an unknown result. A depth bound is an
+implementation parameter of that check, but reaching it has the same refusal outcome and never a
+permissive default, as `#record-conventions` already requires of a degraded read.
 
 **What this does not reach.** Which relationship types the vocabulary holds is G25 and belongs to the
 record's repository; this question is what a check does with the types the vocabulary comes to hold,
@@ -269,6 +267,11 @@ runs through a second type, which stays true whether the per-type check is decla
   first concurrent writer is the one who discovers that. A field with several concurrent writers is
   written through the correction path, which re-reads and merges; a whole-field store clobbers whatever
   landed in between.
+- **A registered relationship type declares whether its own edges are acyclic.** The declaration is
+  required even where it says cycles are admitted; omission, malformed values, and unknown values refuse
+  registration. For a type declaring acyclicity, the record refuses the relationship write that would
+  close a cycle, and an unreadable or bounded-out check refuses rather than admitting on uncertainty
+  (`#whether-acyclicity-is-a-property-of-a-relationship-type-or-of-the-graph`, decision 102).
 - **Schema versions.** Every entity type is registered with a version, and a verdict pins the
   `agent` version it was made under; a write that names a field the registered version does not
   declare is not silently accepted as that field.

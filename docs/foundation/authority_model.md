@@ -342,6 +342,7 @@ the credential form here untouched, since the several-instance case this ruling 
 - Custody by revocability.
 - Rotation is staged, never a flag day.
 - Revocation's reach is every grant that matched the credential, and it is only as fast as the check that reads it.
+- A presented credential resolves to its principal; an agent's acts-as binding is then traversed, never presented, and is agent → operator exactly (decisions 107–109).
 
 An `agent_grant` is matched on the credential (`sub`, `iss`) and lists capabilities as operation × entity
 types × repositories with parameter constraints; a human's grant is bound to a principal and a tenant, never
@@ -572,49 +573,46 @@ One edge per credential, properties on the edge, and no separate credential enti
 | `credential_issuer` | the issuer or namespace that makes the value unique | `iss` | the external system or host namespace; absent only when the kind's namespace is already unique without one |
 | `expires_at` | optional expiry bound read at check time | as the issuer states | as the issuer states |
 
-**What the acts-as edge carries is open (decision 107).** The table above maps the AAuth and the host /
-operator credential. It does not map the **acts-as** edge, and no kind is named for it anywhere: the two
-edges are told apart by `credential_kind`, and only one of the two kinds has a value. Two readings of that
-edge sit unreconciled in this document — the resolver sentence below treats it as matched from a
-presentation ("the acts-as kind yields the operator"), while `data_model.md#relationships` lists the
-agent's acts-as principal as a read *from* the edge, which is a traversal from the agent and no
-presentation at all. The difference is not cosmetic: `Deny (malformed presentation)` below fires on a
-missing `credential_value`, so under the first reading an acts-as edge needs a value and under the second
-it must not be judged by that rule at all. Registered as decision 107 rather than settled here; stage 1
-registers the type and not the kind vocabulary, so the question survives registration.
+**Ruled (decision 107, 2026-09-21): the acts-as edge is traversal-only and non-presentable.** It carries
+`credential_kind: acts_as` as the discriminator decision 101 requires, and carries no
+`credential_value`, `credential_issuer`, or `expires_at`. No caller presents it to a resolver. After a
+presented credential resolves to an agent, the authority read traverses that agent's acts-as edge to its
+operator. The presentation resolver therefore excludes `credential_kind: acts_as`, and the absence of a
+credential value on that edge is its valid shape, never `Deny (malformed presentation)`. A request that
+does present `acts_as` is denied as a non-presentable kind before any edge match. This reconciles the two
+prior readings in favour of the traversal `data_model.md#relationships` already described.
 
 **Endpoint / source.** No credential entity is introduced; the relationship's endpoint is the principal
 reached by the presented credential, with the credential identity carried in those edge fields. For an
 AAuth credential, the binding resolves `credential_value` + `credential_issuer` (`sub` + `iss`) to the
-`agent`; the human operator is then reached through that agent's **separate acts-as** `principal_binding`,
-a second edge of this type whose endpoint is the `operator`. An agent acting in a human's interest
-therefore holds two edges of this type, told apart by `credential_kind`; a resolver takes the endpoint
-of the edge whose kind matches what was presented, so the AAuth kind yields the agent (attribution,
-A-for-B) and the acts-as kind yields the operator (decision 48's counting rule). For an operator
-credential, the binding resolves the credential directly to the `operator`.
+`agent`; the human operator is then reached by traversing that agent's **separate acts-as**
+`principal_binding`, a second edge of this type whose endpoint is the `operator`. An agent acting in a
+human's interest therefore holds two edges of this type: the AAuth kind is presented and yields the agent
+(attribution, A-for-B); the `acts_as` kind is never presented and yields the operator only by traversal
+(decision 48's counting rule). For an operator credential, the presented binding resolves the credential
+directly to the `operator` and no acts-as traversal follows.
 
-**Which endpoints an acts-as edge may take is open (decisions 108 and 109).** Every statement above
-describes the case this design was drawn for — an agent acting in a *human's* interest — and the endpoint
-declared in `data_model.md#relationships` is the generic `principal`, which admits an `agent` as readily as
-an `operator`. Nothing written rejects an agent's acts-as edge to **another agent** (decision 108), and
-decision 48's counting rule reasons about interests without stating a depth, so permitting one turns
-interest resolution into a chain walk with no bound; and nothing written rejects an **operator** holding one
-(decision 109) — "operator credentials resolve directly to the `operator`" says what a presented operator
-credential resolves to, not what edges an `operator` may hold. Both are stated as open rather than ruled
-because the corpus implies no answer to either, and registering the type does not close them: what stage 1
-registers is the edge, not a constraint on its endpoints.
+**Ruled (decisions 108 and 109, 2026-09-21): an acts-as edge is from an `agent` to an `operator`, exactly.**
+An agent-to-agent acts-as write is refused; authority passed between agents is a `delegation_edge`, whose
+scope and expiry already make that transfer explicit and attenuating. An operator-sourced acts-as write is
+also refused: an operator is already the human principal whose independent interest decision 48 counts,
+and collapsing one operator into another would erase that separation. These endpoint constraints remove
+the unbounded interest-resolution walk decision 108 exposed. They are checked when the relationship is
+written, not left to a resolver to discover after a chain has formed.
 
 **Expiry / end.** `expires_at` is a read-time liveness bound, not maintained state. A binding is live when
 the edge is unended and `now < expires_at` when present; retiring a credential writes or ends the edge,
 exactly like other ended relationships. No sweeper is required to flip a status when the clock passes
 (invariant 11).
 
-A check resolving a credential to a principal reads the unended, unexpired `principal_binding` edges whose
+A check resolving a presented credential to a principal reads the unended, unexpired
+presented-credential `principal_binding` edges whose
 `credential_kind`, `credential_value`, and `credential_issuer` (when the kind requires one) match what was
 presented, and takes the principal at the other end. Where several match — which the rotation rule requires
 during the dual-admit window — every one of them resolves to the same principal, because the many-to-one is
 a property of the shape rather than of the read. Grant match and binding resolution use the same comparison:
 AAuth `(sub, iss)` is `credential_value` + `credential_issuer` under `credential_kind` `aauth_sub`.
+It never includes `credential_kind: acts_as`; that kind is traversed only after an agent has resolved.
 
 **Resolver outcomes.** The check returns one of the three values the grant checker already uses
 (`Permit` / `Deny` / `Indeterminate`). Enforcement maps `Indeterminate` to deny; the recorded decision keeps
@@ -628,6 +626,7 @@ principal id and `credential_kind`; they never echo raw `credential_value`.
 | `Deny` (expired-only) | Matching edges exist but all are ended or `now ≥ expires_at` | Distinct from no-binding. Surface expiry/retirement, not "unknown credential". Hint: `[COPY: binding expired or ended — rotate / dual-admit a live edge before presenting]`. |
 | `Indeterminate` (binding source unreadable / partial) | Relationship store unreachable, timed out, or read incomplete | Treat as Deny at the enforcement point (same posture as grant-load `Indeterminate` above). Keep the third value in logs/diagnostics — do not coerce to a plain `Deny` in the recorded decision. Hint: `[COPY: binding source unavailable — retry after record health; do not guess a principal]`. |
 | `Deny` (ambiguous / conflicting) | ≥2 live matching edges target **different** principals | Fail closed; do not pick first edge. Surface conflict with redacted fingerprints / principal ids only. Hint: `[COPY: conflicting principal_binding edges — operator must end the wrong edge(s)]`. |
+| `Deny` (non-presentable kind) | A caller presents `credential_kind: acts_as` | Refuse before edge matching; `acts_as` is a traversal discriminator, not a credential family. Hint: `[COPY: acts_as is not presentable — resolve the agent credential, then traverse its acts-as binding]`. |
 | `Deny` (malformed presentation) | Presented credential missing required key parts (`credential_kind` / `credential_value` / issuer when the kind requires it), or kind unrecognized | Restrictive default (principle 5). Hint: `[COPY: credential presentation malformed or kind unrecognized — fix caller shape]`. |
 
 **Examples.**

@@ -5,7 +5,7 @@
 
 Every rule `planning_model.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`planning_model.md`](../planning_model.md) and are not repeated here (decision 66).
 
-12 rules.
+13 rules.
 
 ## [The hierarchy is edges, and a task has one line upward](../planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward)
 
@@ -42,3 +42,7 @@ Every rule `planning_model.md` owns, one entry each: the rule's own statement fr
 ## [Which levels an instance declares, and what it calls them](../planning_model.md#which-levels-an-instance-declares-and-what-it-calls-them)
 
 - **PM-12** — the rule this heading states *[P (decision 57, ruled; the design reads the mark and never a level by name, so no row goes red under any answer); decision 58 is ruled and tested under PM-9's operator case]*
+
+## [Every planning record belongs to an instance, and swarm-operations planning belongs to the controlling instance](../planning_model.md#every-planning-record-belongs-to-an-instance-and-swarm-operations-planning-belongs-to-the-controlling-instance)
+
+- **PM-13** — (decision 99): every planning record belongs to one instance; swarm-operations planning in a multi-instance deployment is created in its controlling instance; none means refusal, never a global record *[M]*

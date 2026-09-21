@@ -781,6 +781,7 @@ hardest to review afterwards.
 - [Planning records are per instance, and this is a consequence of rules already ruled](#planning-records-are-per-instance-and-this-is-a-consequence-of-rules-already-ruled).
 - [A declared read may name another instance, and three conditions hold it](#a-declared-read-may-name-another-instance-and-three-conditions-hold-it).
 - [What this does not reach: a read is not a write, and the separation still binds](#what-this-does-not-reach-a-read-is-not-a-write-and-the-separation-still-binds).
+- [Every planning record belongs to an instance, and swarm-operations planning belongs to the controlling instance](#every-planning-record-belongs-to-an-instance-and-swarm-operations-planning-belongs-to-the-controlling-instance).
 
 **Ruled in part (decision 98, opened 2026-09-08 by the decisions 81 to 83 pass, ruled the same day).**
 Registered in `conformance.md#the-register-of-open-design-decisions`. The operator raised the question in
@@ -912,17 +913,44 @@ that ground and not on how the bytes arrived. The partition sentence is a statem
 second instance, which would make decision 55's peered read unreachable for the same operator's own two
 instances while leaving it available across accountable parties.
 
-**The third half is split out rather than left open here.** Whether the swarm holding several instances has
+**The third half is split out rather than left open here, and ruled in its own section below.** Whether the swarm holding several instances has
 planning of its **own** — records about its operation belonging to no one instance — is registered as its
 own row in `conformance.md#the-register-of-open-design-decisions` rather than kept as an unruled remainder
 of this one. Two reasons, and the first is precedent: decision 82 and decision 91 each divided a compound
 question rather than half-ruling it, and a row whose subject is partly ruled and partly open is a row whose
 status field cannot be read without reading its prose. The second is that the remaining half does not share
 this one's premises. What is ruled above turns on the ascent, the collision check, and the admission point;
-what remains turns on whether a class of record exists at all that is about the swarm's operation rather
+the separated half turns on whether a class of record exists at all that is about the swarm's operation rather
 than any operator's work — a question decision 91 supplies a *home* for without supplying a tenant, as that
 ruling says of itself. Those are not two answers to one question. Keeping them in one row would make the
 next pass re-read a settled argument to find the open one.
+
+### Every planning record belongs to an instance, and swarm-operations planning belongs to the controlling instance
+
+**Ruled (decision 99, 2026-09-21): every planning record belongs to exactly one instance of the record.**
+There is no tenantless, deployment-global, or swarm-global planning hierarchy beside the instances. Work
+about the swarm's own operation is real planning work, but it is not ownerless: in a deployment naming
+several instances, its planning records live in the **controlling instance** decision 91 already requires
+for that deployment's governance writes. A deployment naming several instances and no controlling one
+fails closed before such a record is created, exactly as decision 91 already rules.
+
+**Why.** A planning record is authored through an `amend_<level>` action and the engine's sole write path.
+Putting one outside every instance would leave that action with no record at which decision 97's admission
+check could run, no ownership seat to resolve, and no first record on the producing task's ascent for the
+collision check above. The controlling instance is not merely a convenient available home: it is the one
+instance the deployment has already designated for writes about its own governance. Reusing it extends
+that rule; a global planning store would be a second governance-write destination beside it.
+
+**Cost accepted.** The same set of instances under two deployments with different controlling instances
+may carry different swarm-operations planning, just as decision 91 already permits their governance writes
+to land in different places. Changing a deployment's controlling instance does not silently move or merge
+old planning records; later work is authored in the newly controlling instance, and any reconciliation is
+work through the ordinary planning workflow. This preserves the rule above that no hierarchy spans two
+instances and the read/write separation decision 98 keeps.
+
+**What would reopen it.** Decision 91 ceasing to place deployment governance writes in one controlling
+instance, or the planning write ceasing to need an instance-local admission and ascent. A desire for one
+dashboard over several instances does not reopen it: that is a declared read, not an ownerless record.
 
 **What would reopen what is ruled.** The per-instance half: decision 76 ceasing to hold, or the ascent
 ceasing to be one edge per record. The cross-instance read: decision 55 being reversed so that a second
