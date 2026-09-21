@@ -1,0 +1,81 @@
+{
+  "product": "ateles",
+  "design_tokens": "design_tokens/ateles.json",
+  "_contract": "One entry per page. Matches the PAGE INVENTORY shape build-landing-page Stage 1 declares on the rendered_page_template.content field (see .claude/skills/build-landing-page/SKILL.md, 'Extending to a site: the page inventory'). Each entry names its rendered_page_template, its content origin (authored | positioning_mirror | page_specific), and the repo-file source(s) build_site.py reads for that origin. The site generator reads ONLY this file plus the files it points at -- never Neotoma at build time.",
+  "pages": [
+    {
+      "slug": "index",
+      "path": "/",
+      "nav_label": "Home",
+      "title": "Ateles — the distributed-authority operating layer for governed initiative",
+      "meta_description": "Ateles makes authority explicit -- who may act, on whose authority, against which state -- so agents can be held to account for real work.",
+      "template": "product_homepage",
+      "template_entity_id": "ent_a7132845b99eb265fc85749e",
+      "primary_cta": {
+        "label": "Read the design",
+        "href": "https://github.com/markmhendrickson/ateles",
+        "scope": "site_wide_primary"
+      },
+      "sections": [
+        {
+          "id": "hero",
+          "origin": "page_specific",
+          "source": "content/ateles/index/hero.json"
+        },
+        {
+          "id": "problem",
+          "origin": "positioning_mirror",
+          "source": "docs/positioning/ateles/chronic-acute-pain.md",
+          "source_entity_id": "ent_2a29bed8dcacd4b1ff20c6f2",
+          "note": "Renders the lead (acute) pain from the projected chronic/acute pain analysis. This section does not re-author the pain framing -- it presents the mirror's own content per build-landing-page Stage 2's 'Where a page's content comes from' rule."
+        },
+        {
+          "id": "what-it-is",
+          "origin": "page_specific",
+          "source": "content/ateles/index/what-it-is.json"
+        },
+        {
+          "id": "fit",
+          "origin": "positioning_mirror",
+          "source": "docs/positioning/ateles/icp-reconciliation.md",
+          "source_entity_id": "ent_fa1f87fbd3b66e491361dae1",
+          "note": "ICP fit + anti-profile rendered from the current reconciled ICP mirror, never a hand-copied snapshot -- this is the exact page the task's motivating incident (the retracted anti-profile line) concerns."
+        },
+        {
+          "id": "boundary",
+          "origin": "positioning_mirror",
+          "source": "docs/positioning/ateles/incumbent-and-competitor-test.md",
+          "source_entity_id": "ent_f8271efcdb842076a5147929"
+        },
+        {
+          "id": "the-other-half",
+          "origin": "page_specific",
+          "source": "content/ateles/index/the-other-half.json"
+        }
+      ]
+    },
+    {
+      "slug": "design",
+      "path": "/design",
+      "nav_label": "Design",
+      "title": "Ateles — the design (repo README)",
+      "meta_description": "The design of record for Ateles, rendered from the repository README.",
+      "template": "reference_doc",
+      "template_entity_id": null,
+      "primary_cta": {
+        "label": "Read the design",
+        "href": "https://github.com/markmhendrickson/ateles",
+        "scope": "page_scoped"
+      },
+      "sections": [
+        {
+          "id": "body",
+          "origin": "authored",
+          "source": "README.md",
+          "link_base": "https://github.com/markmhendrickson/ateles/blob/main/",
+          "note": "Repo-authored reference content. The site RENDERS this file; it is not copied into a specification. This is content-origin kind 1 (authored repo markdown) per build-landing-page Stage 2's content-origin taxonomy."
+        }
+      ]
+    }
+  ]
+}

@@ -28,7 +28,9 @@ import render_positioning_docs as rpd  # noqa: E402
 from neotoma_mirror_lib import observation_ids_block, yaml_scalar  # noqa: E402
 
 POSITIONING_DIR = _REPO_ROOT / "docs" / "positioning"
-OBS_ID_LINE_RE = re.compile(r"^\s+([a-zA-Z0-9_]+):\s+(unknown|[0-9a-f-]{8,})\s*$")
+OBS_ID_LINE_RE = re.compile(
+    r"^\s+([a-zA-Z0-9_]+):\s+(unknown|[0-9a-f-]{8,}(?:,[0-9a-f-]{8,})*)\s*$"
+)
 
 
 class TestObservationIdsBlock:
@@ -61,10 +63,17 @@ class TestYamlScalar:
 
 class TestEvaluatorPiiScrub:
     def test_known_names_are_scrubbed(self) -> None:
-        text = "Rebecca reported an issue; Simon Bergeron agreed."
+        text = (
+            "Rebecca reported an issue; Simon Bergeron agreed; "
+            "Sidney Brown, Jacob Cohen, Brandon/AIBTC, and Mark were named."
+        )
         scrubbed = rpd._scrub_evaluator_pii(text)
         assert "Rebecca" not in scrubbed
         assert "Bergeron" not in scrubbed
+        assert "Sidney" not in scrubbed
+        assert "Jacob" not in scrubbed
+        assert "Brandon" not in scrubbed
+        assert "Mark" not in scrubbed
         assert "an evaluator" in scrubbed
 
     def test_known_entity_ids_are_scrubbed(self) -> None:

@@ -181,9 +181,32 @@ if [ -n "$NEOTOMA_BASE_URL" ]; then
     # unrelated PR in this checkout on day one).
     echo "  - Checking positioning-doc mirrors are in sync with Neotoma (informational)..."
     python3 execution/scripts/render_positioning_docs.py --check || true
+
+    # Design-token mirror (execution/scripts/site_generator/design_tokens/*.json)
+    # must be fresh against the shared design_system Neotoma entity — same
+    # projection contract as the agent-doc mirror above. Informational only:
+    # scripts/lint.sh itself is invoked by no CI workflow (see the site-build
+    # check below and this generator's PR description for what
+    # "informational" means here).
+    echo "  - Checking design-token mirror is in sync with Neotoma (informational)..."
+    python3 execution/scripts/site_generator/render_design_tokens.py --check || true
 else
-    echo "  - Skipping tool_allowlist + agent-doc-mirror + positioning-doc-mirror checks (NEOTOMA_BASE_URL unset)"
+    echo "  - Skipping tool_allowlist + agent-doc-mirror + positioning-doc-mirror + design-token-mirror checks (NEOTOMA_BASE_URL unset)"
 fi
+
+# Site build contract (execution/scripts/site_generator/build_site.py).
+# Build into a fresh temporary tree, then make --check compare the generated
+# bytes against a second in-memory render. This catches missing sources,
+# unsupported content origins, non-deterministic output, and check drift
+# without requiring the generated dist/ tree to be committed.
+echo "  - Building and checking the Ateles static site from repo sources..."
+SITE_BUILD_CHECK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ateles-site-check.XXXXXX")"
+if python3 execution/scripts/site_generator/build_site.py ateles --out "$SITE_BUILD_CHECK_DIR"; then
+    python3 execution/scripts/site_generator/build_site.py ateles --check --out "$SITE_BUILD_CHECK_DIR" || ERRORS=$((ERRORS + 1))
+else
+    ERRORS=$((ERRORS + 1))
+fi
+rm -rf "$SITE_BUILD_CHECK_DIR"
 
 echo ""
 if [ $ERRORS -eq 0 ]; then

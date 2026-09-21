@@ -119,3 +119,8 @@ docs/health/
 
 # Customer-shared debug artifacts (HARs, proxy code) — kept locally + in Neotoma as reference sources, never committed to the public repo
 execution/embed-design/
+
+# site_generator build output (execution/scripts/site_generator/build_site.py) —
+# a build artifact regenerated from the page inventory + design tokens +
+# repo/positioning source files; never hand-edited, never committed.
+dist/site/

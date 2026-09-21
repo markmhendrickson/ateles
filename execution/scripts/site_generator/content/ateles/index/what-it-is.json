@@ -1,0 +1,34 @@
+{
+  "_origin": "page_specific — sourced from rendered_page ent_3855e049f8acf1307117d2aa, section 'An organization of agents you can actually hold to account'.",
+  "eyebrow": "What it is",
+  "headline": "An organization of agents you can actually hold to account.",
+  "lede": "Five properties, each depending on the one before it. Attributed identity makes grants enforceable. Enforceable grants make delegation safe. Safe delegation makes distributed authority possible. And distributed authority is what an organization actually is.",
+  "capabilities": [
+    {
+      "title": "Every agent acts under a named principal",
+      "body": "This is the floor. Without it, everything below is a naming convention.",
+      "terms": "Agent identity · agent-to-principal binding · capability grants · risk-gated actions · operator checkpoints · declared workflows · append-only audit"
+    },
+    {
+      "title": "Ownership and accountability are named, not assumed",
+      "body": "The moment more than one person is involved, who owns this work and who answers for it stop being the same question — both have to be recorded, not understood.",
+      "terms": "Multiple human operators · teams · workflow ownership · named accountability · personal and shared queues · roles"
+    },
+    {
+      "title": "Delegation is a bounded right, not a handed-over credential",
+      "body": "Rights are scoped, expire, can be revoked, and route somewhere sensible when the holder is unreachable. A gate that expires into a pass fails open — the one failure that makes every gate above it decorative.",
+      "terms": "Scoped delegation · approval matrices · escalation · veto · timeouts · substitution · operator absence · risk-tiered checkpoints across principals"
+    },
+    {
+      "title": "Authority is distributed, and its exercise is checked",
+      "body": "Rights scope what a principal may do; quorum and separation of duties structurally check how those rights get exercised, so an outcome depends on more than one interest.",
+      "terms": "Domain ownership · budget and resource rights · initiative, proposal, and reprioritization objects · quorum · separation of duties"
+    },
+    {
+      "title": "The organization itself is queryable",
+      "body": "The end state is not a better memory. It is collective epistemic coherence — humans and agents jointly initiating, delegating, executing, reviewing, approving, and reconciling work under explicit, attributed, capability-scoped authority.",
+      "terms": "Strategy and rubric ownership · authority graph · workflow contracts · governance analytics · organizational audit"
+    }
+  ],
+  "status_note": "It states what Ateles is designed to be. The repository carries what is running today, and it is the authority where the two differ — github.com/markmhendrickson/ateles."
+}
