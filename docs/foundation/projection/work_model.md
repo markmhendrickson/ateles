@@ -45,7 +45,7 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 ## [Intake is every task's first workflow](../work_model.md#intake-is-every-tasks-first-workflow)
 
-- **WM-13** — every workflow-entering task atomically gets one intake batch at creation; an aggregate parent gets none and is not claimable *[M]*
+- **WM-13** — every workflow-entering task atomically gets one intake batch and `ADDRESSED_BY` at creation; an aggregate parent gets neither and is not claimable *[M]*
 - **WM-14** — the same: every workflow-entering child task may take intake's fast path and never skips intake *[M]*
 
 ## [What distinguishes a task being assembled from one intake has not reached](../work_model.md#what-distinguishes-a-task-being-assembled-from-one-intake-has-not-reached)

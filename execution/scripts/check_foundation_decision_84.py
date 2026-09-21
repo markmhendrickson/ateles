@@ -27,6 +27,11 @@ def _line(text: str, pattern: str) -> str:
     return match.group(0) if match else ""
 
 
+def _table_cell(row: str, index: int) -> str:
+    cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+    return cells[index] if index < len(cells) else ""
+
+
 def _section(text: str, start: str, end: str) -> str:
     begin = text.find(start)
     if begin < 0:
@@ -80,6 +85,7 @@ def check(root: Path) -> list[str]:
         row: _line(texts["conformance_suite.md"], rf"^\|\s*{row}\s*\|.*$")
         for row in creation_row_names
     }
+    wm13_requirement = _table_cell(creation_row_map["WM-13"], 1)
     creation_rows = " ".join(creation_row_map.values())
     task_schema = _line(texts["data_model.md"], r"^\|\s*task\s*\|.*$")
     intake_model = _section(
@@ -101,6 +107,11 @@ def check(root: Path) -> list[str]:
         texts["work_model.md"],
         "### How a batch is formed, and what chooses its workflow",
         "### A batch may hold on a condition discovered mid-flight",
+    )
+    batch_opening_clause = _section(
+        batch_formation,
+        "The consequence worth naming has two forms, not one.",
+        "**A successor batch's tasks",
     )
     source_index = _section(
         texts["work_model.md"],
@@ -232,6 +243,11 @@ def check(root: Path) -> list[str]:
             ("admitted atomically at creation",),
         ),
     )
+    problems += _forbid(
+        "intake-workflow-atomic-entry",
+        intake_workflow,
+        ("not admitted atomically", "non-atomically", "admitted later"),
+    )
     problems += _require(
         "aggregate-parent-model",
         parent_model,
@@ -264,7 +280,7 @@ def check(root: Path) -> list[str]:
     )
     problems += _require(
         "batch-opening-model",
-        batch_formation,
+        batch_opening_clause,
         (
             ("intake batch",),
             ("without a predecessor verdict",),
@@ -324,8 +340,19 @@ def check(root: Path) -> list[str]:
     )
     problems += _require(
         "wm-13-atomic-entry",
-        creation_row_map["WM-13"],
-        (("atomically",), ("`addressed_by`",), ("at creation",)),
+        wm13_requirement,
+        (
+            ("workflow-entering",),
+            ("atomically",),
+            ("intake batch",),
+            ("`addressed_by`",),
+            ("at creation",),
+        ),
+    )
+    problems += _forbid(
+        "wm-13-atomic-entry",
+        wm13_requirement,
+        ("not atomically", "non-atomically", "eventually", "after creation"),
     )
     problems += _require(
         "wm-14a",
