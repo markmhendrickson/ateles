@@ -1,9 +1,9 @@
 {
   "_source": {"path": "docs/foundation/status.md"},
   "layout": "comparison",
-  "eyebrow": "What you can rely on",
+  "eyebrow": "Vision and execution status",
   "headline": "The design and the running system are separate claims.",
-  "lede": "The current reference is useful today, while several parts of the organizational promise remain design direction rather than enforced behavior.",
+  "lede": "The current reference is useful today. Shared multi-person authority has nothing built yet and remains design direction rather than enforced behavior.",
   "columns": ["Capability", "Current reference", "Design direction"],
   "rows": [
     ["Agent identity", "Distinct agent identities and attributed writes are in use", "Every action binds the acting role to the person it represents"],
