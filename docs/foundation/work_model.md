@@ -172,8 +172,11 @@ several agents each contributing part of it, the operator's case — and a task 
 which, and so nothing said whether the first was finished enough to be claimed and executed. The ruling
 closes the gap by moving the first case out of "no intake batch" entirely: an assembling task **has** an
 intake batch, opened the moment it is created exactly as `#intake-is-every-tasks-first-workflow` already
-requires of every task, and that batch's `classify` step is claimed and held rather than closed. Only the
-second case — genuinely unrouted, nobody yet looking at it — keeps the no-intake-batch reading.
+requires of every task, and that batch's `classify` step carries a held lease rather than a closing
+verdict. The creation write makes the task, its intake batch, their `ADDRESSED_BY` edge, the `classify`
+lease, and the hold finding readable as one admitted unit; none of those records is readable without the
+others. Only the second case — genuinely unrouted, nobody yet looking at it — keeps the no-intake-batch
+reading.
 
 **The operator's proposal was a `draft` status**, and a status is disfavoured on three independent grounds,
 none of which touch the need itself:
@@ -236,20 +239,24 @@ Four were listed and three are rejected here, each at its strongest before the r
   the batch and lease already carry once the held-batch disposition exists, which is invariant 9's second
   home again.
 
-**What is ruled: a held intake batch.** The task enters intake immediately, exactly as
-`#intake-is-every-tasks-first-workflow` already requires of every task without exception — there is no
-delay to invent, because intake already opens on creation. `classify`, intake's first step, is claimed the
-ordinary way, by whichever principal — the first contributing agent, or the role the roster resolves for
-`pm` — reads the task and finds it not yet fully written: names missing, a contribution another agent is
-mid-way through, a description with pieces not yet supplied. That principal does not close the step, and
-does not fail it. It **holds**, exactly under `#a-batch-may-hold-on-a-condition-discovered-mid-flight`: a
-non-blocking finding is recorded naming the condition (what remains to be written, and by whom, where
-known), no verdict is written, and the lease keeps renewing — by the same step owner re-claiming, or by
-whichever contributing agent next touches the task, the way any held step's lease already renews across
-whoever keeps it alive. No new record, no new relationship type, and no new field on the task: the
-mechanism is the one decision 13 already built, for "a condition discovered mid-flight that a step must
-satisfy before its conclusion can be written," and an incomplete task is exactly that kind of condition,
-discovered by the step owner attempting `classify` rather than declared in a workflow's `applies_when`.
+**What is ruled: a held intake batch, established at the creation boundary.** The task enters intake
+immediately, exactly as `#intake-is-every-tasks-first-workflow` already requires of every task without
+exception. Where the creating principal knows the task is still being assembled, creation is one admitted
+unit: the task, its intake batch and `ADDRESSED_BY` edge, the creating principal's lease on `classify`, and
+a non-blocking finding naming the incomplete parts are written together and read back together. The record
+admits all of that unit or none of it. A reader therefore cannot observe a half-written task during a gap
+before `classify` is claimed; the held lease is present in the first state in which the task itself is
+readable. This atomic visibility boundary is the part the earlier "claimed the ordinary way" wording
+missed: a later ordinary claim would leave exactly the executable interval the ruling exists to close.
+
+The creating principal does not close `classify`, and does not fail it. It **holds**, exactly under
+`#a-batch-may-hold-on-a-condition-discovered-mid-flight`: the finding names what remains to be written and
+by whom where known, no verdict is written, and the lease keeps renewing while assembly continues. A later
+contributor does not take over that lease by touching the task; the ordinary claim rule still permits only
+the holder to renew it. If another principal must take over assembly, the current holder returns or lets
+the lease lapse and the successor claims `classify` before contributing. No new record, no new relationship
+type, and no new field on the task are introduced: the records are the ones decision 13 already built, and
+the extra obligation is only that the task and its initial held intake state become visible together.
 
 **This is not a fourth disposition invented to avoid choosing between the three listed; it is the third one
 named more precisely.** The open section listed "a held intake batch" using
@@ -273,13 +280,14 @@ later workflow, can claim the task while assembly holds it, without any new clau
 predicate: the predicate already refuses a task under a held lease, and an assembling task is exactly that,
 for the ordinary reason a claimed-and-not-yet-closed step already is one.
 
-**What this settles, and what it does not.** Settled: an assembling task has an intake batch from the
-moment it is created, that batch's `classify` step holds rather than closing while the task is incomplete,
-and the task is not claimable for the duration, for the same structural reason any held step is. Not settled,
-and not part of this question: how a contributing agent signals that its portion is done, or how many
-agents' contributions `classify` waits on before resolving the hold — those are a matter of how `classify`
-is executed, which is `workflows.md#intake`'s to state if it ever needs to, not a new mechanism this
-ruling adds.
+**What this settles, and what it does not.** Settled: an assembling task and its held intake state become
+readable atomically; that batch's `classify` step holds rather than closing while the task is incomplete;
+and the task is not claimable in any readable state during assembly, for the same structural reason any
+held step is. A task created without that unit is the genuinely awaiting-intake case and remains claimable.
+Not settled, and not part of this question: how a contributing agent signals that its portion is done, or
+how many agents' contributions `classify` waits on before resolving the hold — those are a matter of how
+`classify` is executed, which is `workflows.md#intake`'s to state if it ever needs to, not a new mechanism
+this ruling adds.
 
 **What would reopen it.** A demonstrated case where the hold's three bounded ends do not fit
 assembly — where an assembling task genuinely needs to sit unresolved past what
