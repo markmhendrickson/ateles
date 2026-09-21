@@ -11,11 +11,17 @@ Stdlib only; registered in ``conformance.md#mechanical-checks-on-this-directory`
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import sys
 from pathlib import Path
 
 FOUNDATION_DIR = Path("docs/foundation")
+
+INTAKE_SECTION_SHA256 = "f20792d9423bc1fe55c933bb5a9060e618aa32c73889ac7b657f91fc9e940d2c"
+BATCH_FORMATION_SECTION_SHA256 = (
+    "1c8854cbd687bb3dfe5edcbff90334be33c879f063b5bbd638a9741ac09d019b"
+)
 
 WM13_REQUIREMENT = (
     "`work_model.md#intake-is-every-tasks-first-workflow`: every "
@@ -259,6 +265,43 @@ def _heading_spans(text: str, heading: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _active_headings(text: str) -> list[tuple[int, str, int, int]]:
+    """Return active ATX headings as level, title, start, and end offsets."""
+
+    active = _active_prose(text)
+    headings: list[tuple[int, str, int, int]] = []
+    offset = 0
+    for line in active.splitlines(keepends=True):
+        match = re.fullmatch(
+            r" {0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+[ \t]*)?",
+            line.rstrip("\r\n"),
+        )
+        if match:
+            headings.append(
+                (len(match.group(1)), match.group(2), offset, offset + len(line))
+            )
+        offset += len(line)
+    return headings
+
+
+def _owning_heading_section(text: str, heading: str) -> str:
+    """Return one heading's active body through the next peer/ancestor heading."""
+
+    headings = _active_headings(text)
+    matches = [
+        (index, entry)
+        for index, entry in enumerate(headings)
+        if entry[1] == heading
+    ]
+    if len(matches) != 1:
+        return ""
+    index, entry = matches[0]
+    following = [candidate for candidate in headings[index + 1 :] if candidate[0] <= entry[0]]
+    if not following:
+        return ""
+    return _active_prose(text)[entry[3] : following[0][2]]
+
+
 def _heading_section(text: str, start: str, end: str) -> str:
     """Return one active Markdown heading section, refusing ambiguity."""
 
@@ -313,6 +356,17 @@ def _require_exact_section(label: str, text: str, expected: str) -> list[str]:
     if _normalize(_without_html_comments(text)) == _normalize(expected):
         return []
     return [f"decision-84-{label} — canonical semantic section changed"]
+
+
+def _require_exact_section_digest(
+    label: str, section: str, expected_sha256: str
+) -> list[str]:
+    if not section:
+        return [f"decision-84-{label} — owning Markdown section is ambiguous"]
+    actual = hashlib.sha256(_normalize(section).encode()).hexdigest()
+    if actual == expected_sha256:
+        return []
+    return [f"decision-84-{label} — canonical owning section changed"]
 
 
 def _require_exact_cell(label: str, cell: str, expected: str) -> list[str]:
@@ -393,6 +447,7 @@ def check(root: Path) -> list[str]:
         "## intake",
         "## feature",
     )
+    intake_workflow_owner = _owning_heading_section(texts["workflows.md"], "intake")
     scenario_f = _heading_section(
         texts["scenarios.md"],
         "## (f) A parent task with children in independent batches",
@@ -402,6 +457,9 @@ def check(root: Path) -> list[str]:
         texts["scenarios.md"],
         "## (j) A task created, routed by intake, and entering its successor",
         "## What the scenarios do not show",
+    )
+    batch_formation_owner = _owning_heading_section(
+        texts["work_model.md"], "How a batch is formed, and what chooses its workflow"
     )
 
     problems: list[str] = []
@@ -494,13 +552,10 @@ def check(root: Path) -> list[str]:
             "task enters intake; batch record opens",
         ),
     )
-    problems += _require_exact_block(
+    problems += _require_exact_section_digest(
         "intake-workflow-atomic-entry",
-        intake_workflow,
-        "**Purpose:**",
-        "| # | Step | Step owner (role) | Required | Parallel / join | Closes on |",
-        INTAKE_SEMANTIC_BLOCK,
-        require_section_start=True,
+        intake_workflow_owner,
+        INTAKE_SECTION_SHA256,
     )
     problems += _require_exact_section(
         "aggregate-parent-model",
@@ -517,12 +572,10 @@ def check(root: Path) -> list[str]:
         _table_cell(wm35, 1),
         WM35_REQUIREMENT,
     )
-    problems += _require_exact_block(
+    problems += _require_exact_section_digest(
         "batch-opening-model",
-        batch_formation,
-        "**A batch comes into existence at one of two moments",
-        "**The workflow is fixed once:",
-        BATCH_FORMATION_SEMANTIC_BLOCK,
+        batch_formation_owner,
+        BATCH_FORMATION_SECTION_SHA256,
     )
     problems += _require(
         "wm-27",

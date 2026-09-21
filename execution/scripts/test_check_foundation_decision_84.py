@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import sys
 from collections.abc import Callable
@@ -78,6 +79,10 @@ def write_corpus(root: Path) -> None:
     fdir = root / "docs" / "foundation"
     fdir.mkdir(parents=True)
     for name, text in CORPUS.items():
+        if name in {"work_model.md", "workflows.md"}:
+            text = (REPO_ROOT / "docs" / "foundation" / name).read_text(
+                encoding="utf-8"
+            )
         (fdir / name).write_text(text, encoding="utf-8")
 
 
@@ -117,6 +122,19 @@ def mutate_real_corpus_text(
     return decision_84.check(tmp_path)
 
 
+def mutate_real_corpus_normalized(
+    tmp_path: Path, name: str, old: str, new: str
+) -> list[str]:
+    def transform(text: str) -> str:
+        pattern = re.compile(r"\s+".join(re.escape(part) for part in old.split()))
+        matches = list(pattern.finditer(text))
+        assert len(matches) == 1
+        match = matches[0]
+        return text[: match.start()] + new + text[match.end() :]
+
+    return mutate_real_corpus_text(tmp_path, name, transform)
+
+
 def test_complete_carry_passes(tmp_path: Path) -> None:
     write_corpus(tmp_path)
     assert decision_84.check(tmp_path) == []
@@ -128,12 +146,14 @@ def test_lease_only_mutant_fails(tmp_path: Path) -> None:
 
 
 def test_creator_ownership_mutant_fails(tmp_path: Path) -> None:
-    problems = mutate(tmp_path, "work_model.md", "creation grants no lease", "creator gets lease")
+    problems = mutate_real_corpus_normalized(
+        tmp_path, "work_model.md", "Creation grants no lease", "creator gets lease"
+    )
     assert any("model" in problem for problem in problems)
 
 
 def test_exact_creator_authority_clause_mutant_fails(tmp_path: Path) -> None:
-    problems = mutate(
+    problems = mutate_real_corpus_normalized(
         tmp_path,
         "work_model.md",
         "The creating principal receives no `classify` lease by being the creator.",
@@ -143,7 +163,7 @@ def test_exact_creator_authority_clause_mutant_fails(tmp_path: Path) -> None:
 
 
 def test_exact_pm_only_claim_clause_mutant_fails(tmp_path: Path) -> None:
-    problems = mutate(
+    problems = mutate_real_corpus_normalized(
         tmp_path,
         "work_model.md",
         "only to a principal that resolves as the declaration's `pm` step owner",
@@ -168,7 +188,7 @@ def test_workflow_assembly_mutant_fails(tmp_path: Path) -> None:
 
 
 def test_ordinary_task_without_intake_batch_at_creation_mutant_fails(tmp_path: Path) -> None:
-    problems = mutate(
+    problems = mutate_real_corpus_normalized(
         tmp_path,
         "workflows.md",
         "every workflow-entering task enters with its intake batch and `ADDRESSED_BY` edge admitted atomically at creation",
@@ -189,7 +209,7 @@ def test_retired_scenario_no_batch_diagram_fails(tmp_path: Path) -> None:
 
 
 def test_aggregate_parent_forced_into_intake_fails(tmp_path: Path) -> None:
-    problems = mutate(
+    problems = mutate_real_corpus_normalized(
         tmp_path,
         "work_model.md",
         "An **aggregate parent task is not claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY` edge** — it is a grouping, and a batch carries tasks that are executed, which an aggregate parent never is.",
@@ -199,7 +219,7 @@ def test_aggregate_parent_forced_into_intake_fails(tmp_path: Path) -> None:
 
 
 def test_intake_atomic_entry_is_scoped_to_intake_workflow(tmp_path: Path) -> None:
-    problems = mutate(
+    problems = mutate_real_corpus_normalized(
         tmp_path,
         "workflows.md",
         "every workflow-entering task enters with its intake batch and `ADDRESSED_BY` edge admitted atomically at creation",
@@ -762,6 +782,43 @@ def test_real_missing_parent_scenario_end_heading_fails(tmp_path: Path) -> None:
         "The operator-only scenario heading is missing.",
     )
     assert any("aggregate-parent-scenario" in problem for problem in problems)
+
+
+def test_real_intake_contradiction_after_table_header_fails(tmp_path: Path) -> None:
+    def transform(text: str) -> str:
+        start = text.index("## intake")
+        marker = "| # | Step | Step owner (role) | Required | Parallel / join | Closes on |"
+        position = text.index(marker, start) + len(marker)
+        contradiction = (
+            "\nDespite the entry rule, a task may be published before its intake "
+            "batch exists."
+        )
+        return text[:position] + contradiction + text[position:]
+
+    problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_real_batch_contradiction_before_block_start_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "work_model.md",
+        "**A batch comes into existence at one of two moments",
+        "Despite the following rule, an intake batch may require a predecessor "
+        "verdict.\n\n**A batch comes into existence at one of two moments",
+    )
+    assert any("batch-opening-model" in problem for problem in problems)
+
+
+def test_real_batch_contradiction_after_block_end_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "work_model.md",
+        "**The workflow is fixed once:",
+        "**The workflow is fixed once:** Despite the preceding rule, an intake "
+        "batch may require a predecessor verdict. **",
+    )
+    assert any("batch-opening-model" in problem for problem in problems)
 
 
 @pytest.mark.parametrize(
