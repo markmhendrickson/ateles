@@ -8,10 +8,9 @@ an HTML string, with no file I/O and no Neotoma awareness, so it can be unit
 tested against fixed inputs (see test_build_site.py).
 
 FULL WEB CAPABILITY: this output is a real static site, not a CSP-sandboxed
-rendered_page. It uses web fonts (Google Fonts, matching what the design
-tokens already specify), and nothing here strips scripts or restricts to
-inline SVG — a future page is free to add a <script> tag. This generator
-just doesn't need one yet for a first proof.
+rendered_page. Nothing here strips external font sources, scripts, or SVG —
+a page can use normal web capabilities when its inventory and template call
+for them. This first proof stays CSS-and-HTML only.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ from . import minimal_markdown as mdlib
 
 
 def _esc(s: str) -> str:
-    return html_mod.escape(s or "", quote=False)
+    return html_mod.escape(s or "", quote=True)
 
 
 def _css_vars(mode_tokens: dict) -> str:
@@ -126,10 +125,11 @@ def build_css(tokens: dict) -> str:
   .eyebrow {{ font-size: .72rem; letter-spacing: .14em; text-transform: uppercase; font-weight: 600; color: var(--accent); margin-bottom: 14px; }}
   .muted {{ color: var(--ink-3); }}
   .small {{ font-size: .89rem; }}
-  header.nav {{ position: sticky; top: 0; z-index: 20; background: var(--paper); border-bottom: 1px solid var(--line); }}
-  .nav-in {{ display: flex; align-items: center; gap: 18px; min-height: 58px; flex-wrap: wrap; padding-block: 10px; }}
-  .brand {{ font-family: {heading_font}; font-weight: {heading_weight}; }}
-  .nav-links {{ display: flex; gap: 16px; margin-left: auto; flex-wrap: wrap; font-size: .92rem; }}
+  header.nav {{ position: sticky; top: 0; z-index: 20; background: var(--paper); background: color-mix(in srgb, var(--paper) 88%, transparent); border-bottom: 1px solid var(--line); backdrop-filter: blur(14px); }}
+  .nav-in {{ width: 100%; display: flex; align-items: center; gap: 18px; min-height: 58px; flex-wrap: nowrap; padding: 10px clamp(20px, 3vw, 48px); }}
+  .brand {{ font-family: {heading_font}; font-weight: {heading_weight}; color: var(--ink); white-space: nowrap; }}
+  .brand:hover {{ text-decoration: none; }}
+  .nav-links {{ display: flex; gap: 16px; margin-left: auto; overflow-x: auto; white-space: nowrap; font-size: .92rem; }}
   .nav-links a {{ color: var(--ink-2); }}
   .hero {{ padding-block: clamp(48px, 10vw, 96px) 48px; }}
   .cta-row {{ display: flex; gap: 12px; flex-wrap: wrap; margin-top: 26px; }}
@@ -153,7 +153,7 @@ def build_css(tokens: dict) -> str:
   footer {{ border-top: 1px solid var(--line); padding-block: 36px 44px; background: var(--paper-2); }}
   footer .cols {{ display: flex; gap: 24px; flex-wrap: wrap; justify-content: space-between; }}
   .flinks {{ display: flex; gap: 16px; flex-wrap: wrap; font-size: .9rem; }}
-  .tw-toggle {{ position: fixed; top: 12px; right: 14px; z-index: 30; display: flex; gap: 2px; background: var(--paper-2); border: 1px solid var(--line); border-radius: 999px; padding: 3px; box-shadow: var(--shadow); }}
+  .tw-toggle {{ flex: 0 0 auto; display: flex; gap: 2px; background: var(--paper-2); border: 1px solid var(--line); border-radius: 999px; padding: 3px; box-shadow: var(--shadow); }}
   .tw-toggle input {{ position: absolute; opacity: 0; width: 1px; height: 1px; }}
   .tw-toggle label {{ display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 24px; padding: 0 8px; border-radius: 999px; font-size: .72rem; font-weight: 600; color: var(--ink-3); cursor: pointer; user-select: none; }}
   body:has(#tw-light:checked) .tw-toggle label[for="tw-light"],
@@ -163,6 +163,20 @@ def build_css(tokens: dict) -> str:
   body:has(#tw-dark:checked) {{ {_css_vars(dark)} color-scheme: dark; }}
   .markdown-body :is(h1,h2,h3) {{ margin-top: 1.4em; }}
   .markdown-body ul {{ padding-left: 20px; color: var(--ink-2); }}
+  .markdown-body ol {{ padding-left: 24px; color: var(--ink-2); }}
+  .markdown-body blockquote {{ margin: 24px 0; padding: 4px 18px; border-left: 3px solid var(--accent); color: var(--ink-2); background: var(--paper-2); }}
+  .markdown-body pre {{ overflow-x: auto; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper-2); }}
+  .markdown-body pre code {{ padding: 0; background: transparent; }}
+  .table-scroll {{ overflow-x: auto; margin: 22px 0; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: .92rem; }}
+  th, td {{ padding: 10px 12px; border: 1px solid var(--line); text-align: left; vertical-align: top; }}
+  th {{ background: var(--paper-2); font-family: {heading_font}; }}
+  @media (max-width: 760px) {{
+    .nav-in {{ gap: 12px; }}
+    .nav-in > .btn {{ display: none; }}
+    .tw-toggle label {{ min-width: 26px; padding-inline: 6px; font-size: 0; }}
+    .tw-toggle label::first-letter {{ font-size: .72rem; }}
+  }}
 """.strip()
 
 
@@ -181,7 +195,7 @@ def _render_section(product: str, page: dict, section_id: str, resolved: dict) -
 
     if origin in ("authored", "positioning_mirror"):
         fm, body = mdlib.strip_frontmatter(resolved["markdown"])
-        body_html = mdlib.to_html(body)
+        body_html = mdlib.to_html(body, link_base=resolved.get("link_base"))
         source_note = (
             f'<p class="small muted">Rendered from '
             f"<code>{_esc(resolved['source_path'])}</code>"
@@ -296,7 +310,11 @@ def _render_page_specific(section_id: str, data: dict) -> str:
 
 
 def render_page(
-    product: str, page: dict, sections: list[tuple[str, dict]], tokens: dict
+    product: str,
+    page: dict,
+    site_pages: list[dict],
+    sections: list[tuple[str, dict]],
+    tokens: dict,
 ) -> str:
     css = build_css(tokens)
     title = page.get("title", product)
@@ -310,6 +328,11 @@ def render_page(
         f'<a class="btn" href="{_esc(primary_cta.get("href", "#"))}">{_esc(primary_cta.get("label", ""))}</a>'
         if primary_cta
         else ""
+    )
+
+    site_nav = "".join(
+        f'<a href="{_esc("/" if p["slug"] == "index" else "/" + p["slug"] + "/")}">{_esc(p.get("nav_label") or ("Home" if p["slug"] == "index" else p["slug"].replace("-", " ").title()))}</a>'
+        for p in site_pages
     )
 
     theme_toggle = """
@@ -332,14 +355,14 @@ def render_page(
 <style>{css}</style>
 </head>
 <body>
-{theme_toggle}
 <header class="nav">
-  <div class="wrap nav-in">
-    <span class="brand">{_esc(product.capitalize())}</span>
+  <div class="nav-in">
+    <a class="brand" href="/">{_esc(product.capitalize())}</a>
     <nav class="nav-links">
-      {"".join(f'<a href="#{_esc(sid)}">{_esc(sid.replace("-", " ").title())}</a>' for sid, _ in sections)}
+      {site_nav}
     </nav>
     {nav_cta}
+    {theme_toggle}
   </div>
 </header>
 {body_sections}

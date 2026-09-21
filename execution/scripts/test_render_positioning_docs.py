@@ -133,6 +133,11 @@ class TestEntityIdScrubFailsClosedByType:
         rpd._ENTITY_TYPE_CACHE[listed] = "analysis"
         assert listed not in rpd._scrub_evaluator_pii(f"see {listed}")
 
+    def test_word_like_name_is_case_sensitive(self) -> None:
+        # "Mark" is scrubbed as a name but the verb "mark" is ordinary prose.
+        out = rpd._scrub_evaluator_pii("Mark said to mark the file")
+        assert "the operator said to mark the file" == out
+
     def test_names_are_matched_case_insensitively(self) -> None:
         # Before: `\bRebecca\b` had no IGNORECASE, so these survived.
         out = rpd._scrub_evaluator_pii("rebecca and LARRY and rEbEcCa")
