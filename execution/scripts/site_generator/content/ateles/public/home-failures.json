@@ -1,0 +1,15 @@
+{
+  "_source": {
+    "path": "docs/positioning/ateles/chronic-acute-pain.md",
+    "entity_id": "ent_2a29bed8dcacd4b1ff20c6f2"
+  },
+  "layout": "proof_cards",
+  "eyebrow": "Where delegation breaks",
+  "headline": "More agents can still leave you doing all the coordination.",
+  "lede": "Without a standing organization, every new session returns planning, routing, and risk decisions to the operator.",
+  "items": [
+    {"label": "Direction", "title": "You narrate every next move", "body": "The agent can execute, but only while you keep the goal, context, and sequence in your own head."},
+    {"label": "Priority", "title": "The loudest session wins", "body": "Work is prioritized by whichever conversation is open, not by the mission and commitments above it."},
+    {"label": "Trust", "title": "You watch because intervention is unclear", "body": "If nobody knows where work should stop for you, delegation turns back into supervision."}
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "concept": "A swarm becomes an organization.",
+  "duration_seconds": 8,
+  "aspect_ratio": "4:3",
+  "resolution": "1440x1080",
+  "format": "silent_loop",
+  "composition": "split_hero_media",
+  "poster_mode": "code_native",
+  "storyboard": [
+    {
+      "time": "0.0–2.0s",
+      "frame": "Distinct autonomous elements enter separately, seeded by the compact Ateles swarm mark."
+    },
+    {
+      "time": "2.0–4.0s",
+      "frame": "They self-organize into differentiated roles around one shared purpose; no element loses its identity."
+    },
+    {
+      "time": "4.0–6.0s",
+      "frame": "Work moves through visible handoffs along declared paths in rust coordination light."
+    },
+    {
+      "time": "6.0–8.0s",
+      "frame": "One path pauses at a bounded green checkpoint, resolves, and rejoins the moving organization before the loop resets."
+    }
+  ],
+  "start_state": "The compact Ateles swarm mark sits centered in a quiet 4:3 field; its distinct nodes begin separating while retaining recognizable mark geometry.",
+  "end_state": "After one bounded checkpoint resolves and coordinated work resumes, the organization contracts along its own declared paths back into the exact compact swarm mark and opening camera position.",
+  "palette": "Warm paper #f7f4ee, deep ink #1c1710, rust coordination #8a3b1f and #a8552d, restrained grant green #4a6741, line #ddd3bf.",
+  "material": "Tactile ceramic or powder-coated role nodes, fine tensioned coordination paths, subtle paper-ground shadows, and a single glasslike checkpoint state. Realistic material response, abstract forms only.",
+  "camera": "Stable three-quarter top-down 4:3 composition with one slow measured push and gentle depth separation; no cuts, orbiting spectacle, handheld motion, or speed ramps.",
+  "art_direction": "Cinematic material and camera treatment with rust coordination and restrained grant green. Abstract differentiated roles only: no insects, monkeys, spiders, robots, hives, honeycomb, or anonymous neural mesh.",
+  "negative_constraints": [
+    "no insects, monkeys, spiders, robots, animals, hives, or honeycomb",
+    "no anonymous neural-network mesh or undifferentiated particle cloud",
+    "no generated text, software UI, people, faces, hands, or avatars",
+    "no central command brain or one dominant node controlling passive nodes",
+    "no decorative ambient motion without a role, handoff, or checkpoint meaning",
+    "no camera cuts, frenetic motion, or glossy science-fiction control-room styling"
+  ],
+  "poster_frame": "The swarm mark expanded into a legible organization: differentiated role nodes, one mission, visible handoffs, and one bounded checkpoint.",
+  "playback": {
+    "muted": true,
+    "autoplay": true,
+    "playsinline": true,
+    "loop": true,
+    "reduced_motion": "static_poster"
+  },
+  "performance": {
+    "max_bytes": 1800000,
+    "preferred_codec": "av1_or_vp9_with_h264_fallback",
+    "preload": "metadata",
+    "no_external_runtime_dependency": true
+  },
+  "asset": {
+    "status": "integrated",
+    "video_src": "/assets/ateles/hero-concept.webm",
+    "fallback_src": "/assets/ateles/hero-concept.mp4",
+    "poster_src": "/assets/ateles/hero-concept.avif",
+    "repository_video_path": "execution/scripts/site_generator/assets/ateles/hero-concept.webm",
+    "repository_fallback_path": "execution/scripts/site_generator/assets/ateles/hero-concept.mp4",
+    "repository_poster_path": "execution/scripts/site_generator/assets/ateles/hero-concept.avif",
+    "public_video_path": "/assets/ateles/hero-concept.webm",
+    "public_fallback_path": "/assets/ateles/hero-concept.mp4",
+    "public_poster_path": "/assets/ateles/hero-concept.avif"
+  }
+}

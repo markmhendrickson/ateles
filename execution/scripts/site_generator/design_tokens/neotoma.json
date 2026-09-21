@@ -1,39 +1,45 @@
 {
   "_observation_ids": {
-    "anti_patterns": "f4f0a201-7785-bf62-4a2b-a8ec811d1cfc",
+    "anti_patterns": "2ad1e882-858d-39cf-b4a7-f5303b7a3110",
     "border_radius": "f4f0a201-7785-bf62-4a2b-a8ec811d1cfc",
     "color_palette": "f4f0a201-7785-bf62-4a2b-a8ec811d1cfc",
     "design_system_name": "f4f0a201-7785-bf62-4a2b-a8ec811d1cfc",
-    "positioning_principles": "f4f0a201-7785-bf62-4a2b-a8ec811d1cfc",
-    "scope": "f4f0a201-7785-bf62-4a2b-a8ec811d1cfc",
+    "positioning_principles": "42efd6ae-24aa-351f-9019-1669c3304678",
+    "scope": "e809b72e-b40a-d82e-5210-5b419901c8b0",
     "spacing_system": "f4f0a201-7785-bf62-4a2b-a8ec811d1cfc",
-    "type_scale": "f4f0a201-7785-bf62-4a2b-a8ec811d1cfc"
+    "type_scale": "48c45b5f-3720-4fb7-225b-7de8cb04ec2b"
   },
   "_source": {
     "entity_id": "ent_746b1d7c717e7780e7943782",
     "entity_type": "design_system",
-    "fetched_at": "2026-09-21T14:13:49+00:00",
+    "fetched_at": "2026-09-21T15:42:14+00:00",
     "product": "neotoma"
   },
   "identity": {
     "anti_patterns": [
-      "Do not let the provenance rail's mono annotations become decorative \u2014 every instance must reference something real and checkable (an actual entity field, a real MCP/CLI call name verified against the codebase), never an invented-sounding technical label. This is the exact failure mode the draft-rendered-page skill warns about ('grep your own page for the thing your instructions point at').",
-      "Do not spread the --correction color as a general accent \u2014 it is reserved exclusively for showing a superseded value, or it stops being legible as a distinct semantic.",
-      "Do not diverge the shared structural tokens (radius, spacing, grid) from Ateles's \u2014 structural divergence plus accent divergence produces two unrelated products, not siblings.",
-      "Do not reuse the Neotoma app/Inspector's warm cream/terracotta palette \u2014 this identity's paper/ink palette is a DIFFERENT warm neutral (green-undertone ink, teal accent) chosen specifically to avoid the inspector's terracotta signature, per ruled decision public_pages_do_not_reuse_inspector_palette (plan ent_98ef9d45f8a6896fed408f8f)."
+      "Never expose internal record IDs, entity types, field or decision keys, code-call names, repository filenames, phase bookkeeping, or agent instructions on a public page.",
+      "Do not paste research analysis, source citations, or implementation-review notes into public prose. Keep detailed evidence in linked source artifacts and translate it into a short reader-facing proof statement.",
+      "Do not turn the provenance rail into developer marginalia. Every visible label must be understandable to a cold external reader without product-internal vocabulary.",
+      "Do not spread the correction color as a general accent; reserve it for a superseded value or correction event.",
+      "Do not rely on animation to communicate source, version, correction, disagreement, or refresh; reduced-motion and static views must remain complete.",
+      "Do not diverge shared structural tokens from Ateles without a product reason; the products remain siblings through spacing, restraint, and hierarchy.",
+      "Do not reuse the Neotoma app or Inspector palette. Public product pages keep their distinct paper, ink, teal, and correction system."
     ],
     "border_radius": {
       "note": "KEPT VERBATIM: 10px cards/panels, 8px buttons, 999px toggle pill \u2014 same as shared design_system."
     },
     "design_system_name": "Neotoma visual identity \u2014 the record",
     "positioning_principles": [
-      "Record properties get visual devices, not prose: versioned/attributed/correctable/replayable each map to a specific move (provenance rail = attributed; visible correction mark = correctable; the rail's dated annotations = versioned/replayable) rather than being asserted in copy alone.",
-      "Provenance rail (signature move): a persistent left-edge marginalia column in JetBrains Mono, 11px, +0.02em tracking, --ink-3 color, annotating major content blocks with a real field/entity/mechanism reference \u2014 e.g. 'retrieve_field_provenance()' beside a corrections claim, 'at_ingested\u2260at' beside a time-travel claim. Pure CSS grid + static text, no JS required; this is the single most load-bearing device, unique to Neotoma.",
-      "Visible correction (signature move): one boundary-table row renders a struck-through prior value beside its current replacement, in the dedicated --correction color, literally showing correction rather than describing correctability.",
-      "Iconography: a small set of inline-SVG 'register marks' (corner-fold tick, corrected-value asterisk-in-circle, attributed-value filled square) replacing the single generic Feather-style line icon currently shared visually with Ateles \u2014 quoted SVG attributes throughout per draft-rendered-page's lesson on unquoted numeric attrs silently dropping shapes.",
-      "Color as paper/ink, not accent-on-white: light mode is warm aged-paper (#f6f3ea) over near-black green-undertone ink, not clinical white \u2014 the physical register metaphor, not a UI theme."
+      "Record properties become visual stories rather than implementation prose: source, version, correction, disagreement, and refresh each receive a distinct, reader-recognizable state.",
+      "Record flow (primary move): show a fact entering from a named source, becoming the current version, being corrected without losing history, and refreshing when its source changes. A timeline or flow diagram should make the sequence understandable before any supporting copy is read.",
+      "Public provenance rail: use plain labels such as \u201cSource\u201d, \u201cRecorded\u201d, \u201cVersion\u201d, \u201cCorrected\u201d, and \u201cReviewed\u201d. The rail may link to deeper evidence, but it never displays internal record IDs, schema names, field keys, code-call names, repo filenames, or unexplained system vocabulary.",
+      "Visible correction: show a concise prior value beside its current replacement, with the superseded value struck through and the current value clearly identified. The story is change with continuity, not a database operation.",
+      "Disagreement remains visible: two sourced claims can coexist until review settles the current view. Present who or what disagrees and the current status in ordinary language.",
+      "Typography supports the record metaphor: editorial headings carry permanence; monospace is reserved for short public labels such as dates, versions, and statuses\u2014not implementation notation.",
+      "Motion may trace a record from source to current state or pulse when a refresh arrives, but the static diagram must retain the full meaning under reduced-motion preferences.",
+      "Hero concept film: a silent 6\u201310 second cinematic loop may show fragmented state streams converging on one durable record, a correction retaining its prior layer, and that correction propagating to dependent paths. Copy remains in a separate split-hero column. The code-native record flow is the poster and reduced-motion fallback and remains the load-bearing visual. No generated text, UI, faces, or generic AI/database imagery."
     ],
-    "scope": "Neotoma product pages only (distinct from the shared structural design_system ent_72e01f1008653b601be1a956, which this entity does NOT replace or overwrite). A DESIGNED, not-yet-applied identity: derives its signature devices from Neotoma's category as 'the system of record for AI agents' \u2014 versioned, attributed, correctable, replayable \u2014 rather than from a generic dev-tool palette. Siblings with, not twins of, the Ateles identity (ent to be linked): shares the existing structural system (10px radius, 1080px maxw, identical spacing scale) but diverges in accent palette, the JOB assigned to the monospace type family, and one signature move (a continuous left-edge 'provenance rail') that has no Ateles equivalent because attribution-over-time is specifically a record property, not an authority property.",
+    "scope": "Neotoma product pages only, distinct from the shared structural design system. The identity is the living record: truth remains understandable as sources arrive, corrections supersede earlier values, disagreement is retained, and freshness changes over time. Public visuals use recognizable source, version, correction, current-state, disagreement, and refresh concepts. Deep provenance stays in linked source and repository artifacts; landing-page surfaces never display internal record IDs, schema names, field names, code-call names, decision keys, or unexplained system vocabulary. Neotoma remains a sibling, not a twin, of Ateles: shared spacing and restraint, different symbolic grammar.",
     "spacing_system": {
       "note": "KEPT VERBATIM from the shared design_system ent_72e01f1008653b601be1a956 \u2014 10px card/panel radius via --radius, --maxw:1080px, identical section/hero padding, .cap grid (10px 1fr/22px gap/28px 0 padding), .btn padding 11px 20px. Deliberate: the brief instructs shared structural skeleton with per-product accent/type/signature divergence, not full structural fork \u2014 diverging the skeleton too would produce two unrelated products rather than siblings."
     }
@@ -84,9 +90,9 @@
     "type_scale": {
       "body_font_family": "Inter, system-ui, -apple-system, 'Segoe UI', sans-serif",
       "code_font_family": "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace",
-      "google_fonts_licence": "All three (Fraunces, Inter, JetBrains Mono) are free, open-license Google Fonts already loaded via @import on the live page \u2014 no cost, no licensing action needed.",
+      "google_fonts_licence": "All three (Fraunces, Inter, JetBrains Mono) are free, open-license Google Fonts already loaded via the current font mechanism; no licensing action is needed.",
       "heading_font_family": "Fraunces, Georgia, 'Times New Roman', serif",
-      "rationale": "Family kept deliberately: research fetched 2026-09-21 (fontsinuse.com/typefaces/171187/jetbrains-mono, designmd.app/library/fraunces-typography) confirms Fraunces' 'actual warmth... ink pressed into good paper' character is already the correct register for permanent record vs. ephemeral chat, and Fraunces+mono is a recognized editorial+technical pairing. What changes is JetBrains Mono's ROLE: elevated from near-unused code font (0 <code> elements on the live page) to the carrier of the provenance rail (signature move) \u2014 every claim gets a small mono-set marginalia annotation (field name, entity_id, or a real mechanism call like retrieve_field_provenance()), distinguishing CONTENT typography from PROVENANCE typography the way an archival document distinguishes body text from marginalia."
+      "rationale": "Family kept deliberately: research checked 2026-09-21 (fontsinuse.com/typefaces/171187/jetbrains-mono and designmd.app/library/fraunces-typography) supports Fraunces as a warm editorial face and JetBrains Mono as a credible technical companion. Their public roles are distinct: Fraunces gives durable statements a sense of permanence; JetBrains Mono carries short, plain-language record labels such as source, date, version, correction, and status. It must not display internal IDs, schema names, field keys, mechanism calls, or repo filenames."
     }
   }
 }

@@ -1,0 +1,15 @@
+{
+  "_source": {
+    "path": "docs/positioning/neotoma/icp-durable-candidate-b.md",
+    "entity_id": "ent_825474455c25f9ea0783ebc6"
+  },
+  "layout": "flow",
+  "eyebrow": "The right first workflow",
+  "headline": "Start where one fact already crosses two tools.",
+  "lede": "A small, consequential handoff proves more than a large import.",
+  "items": [
+    {"label": "01", "title": "Choose one domain", "body": "Pick project state, a decision register, or another bounded area where a wrong value changes the work."},
+    {"label": "02", "title": "Connect two agents", "body": "Use the tools that currently force you to repeat or reconcile the same context by hand."},
+    {"label": "03", "title": "Correct and reread", "body": "Change one value, then verify that both tools see the current version and its history."}
+  ]
+}

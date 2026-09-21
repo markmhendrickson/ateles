@@ -1,9 +1,10 @@
-"""Render source-backed product sites with distinct record/seal identities."""
+"""Render source-backed product sites with distinct record/swarm identities."""
 
 from __future__ import annotations
 
 import html as html_mod
 import re
+from urllib.parse import quote_plus
 
 from . import minimal_markdown as mdlib
 
@@ -82,6 +83,7 @@ main > section {{ padding-block: clamp(64px, 9vw, 112px); }}
 .rule {{ border: 0; border-top: 1px solid var(--line); margin: 0; }}
 h1, h2, h3 {{ font-family: var(--heading); margin: 0; text-wrap: balance; }}
 h1 {{ font-size: {h1_size}; line-height: .98; letter-spacing: -.045em; max-width: 13ch; font-weight: {heading_weight}; }}
+.page-title {{ font-size: clamp(2.7rem, 6vw, 4.8rem); max-width: 18ch; }}
 h2 {{ font-size: {h2_size}; line-height: 1.02; letter-spacing: -.035em; max-width: 18ch; font-weight: {heading_weight}; }}
 h3 {{ font-size: clamp(1.05rem, 2vw, 1.35rem); line-height: 1.2; }}
 p {{ margin: 0 0 1rem; }}
@@ -92,6 +94,7 @@ header.nav {{ position: sticky; top: 0; z-index: 30; border-bottom: 1px solid tr
 header.nav.scrolled {{ background: color-mix(in srgb, var(--paper) 84%, transparent); border-color: var(--line); box-shadow: 0 10px 30px rgba(0,0,0,.05); backdrop-filter: blur(16px) saturate(1.25); }}
 .nav-in {{ width: 100%; min-height: 68px; padding: 10px clamp(18px, 3vw, 52px); display: flex; align-items: center; gap: 24px; flex-wrap: nowrap; }}
 .brand {{ color: var(--ink); font-family: var(--heading); font-weight: {heading_weight}; font-size: 1.16rem; white-space: nowrap; }}
+.brand {{ display: inline-flex; align-items: center; gap: 9px; }}
 .brand:hover {{ text-decoration: none; }}
 .brand small {{ margin-left: 9px; color: var(--ink-3); font-family: var(--mono); font-size: .62rem; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; }}
 .nav-links {{ display: flex; align-items: center; gap: clamp(12px, 2vw, 28px); margin-left: auto; overflow-x: auto; white-space: nowrap; font-size: .9rem; }}
@@ -106,6 +109,7 @@ header.nav.scrolled {{ background: color-mix(in srgb, var(--paper) 84%, transpar
 .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr)); gap: 18px; margin-top: 34px; }}
 .card, .panel {{ border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper-2); padding: clamp(20px, 3vw, 30px); }}
 .card p, .panel p {{ color: var(--ink-2); }} .card .meta {{ color: var(--ink-3); font-family: var(--mono); font-size: .72rem; margin-top: 18px; }}
+.card .card-label {{ margin: 0 0 14px; color: var(--accent); font-family: var(--mono); font-size: .68rem; letter-spacing: .08em; text-transform: uppercase; }}
 .source-section > .source-inner {{ max-width: 900px; }} .source-heading {{ margin-bottom: 28px; }}
 .source-note {{ margin-top: 30px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--ink-3); font-family: var(--mono); font-size: .72rem; overflow-wrap: anywhere; }}
 .markdown-body {{ min-width: 0; overflow-wrap: anywhere; }}
@@ -121,6 +125,18 @@ th, td {{ padding: 11px 13px; border: 1px solid var(--line); text-align: left; v
 .pain-card .pain-kind {{ font-family: var(--mono); color: var(--accent); font-size: .7rem; letter-spacing: .1em; text-transform: uppercase; }}
 .steps {{ display: grid; gap: 1px; margin-top: 34px; border: 1px solid var(--line); background: var(--line); }}
 .step {{ display: grid; grid-template-columns: 88px 1fr; gap: 20px; padding: 24px; background: var(--paper); }} .step-num {{ font-family: var(--mono); color: var(--accent); }}
+.public-flow {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 0; margin-top: 36px; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }}
+.flow-step {{ position: relative; min-height: 210px; padding: 26px; background: var(--paper-2); border-right: 1px solid var(--line); }} .flow-step:last-child {{ border-right: 0; }}
+.flow-label {{ color: var(--accent); font-family: var(--mono); font-size: .68rem; letter-spacing: .08em; }}
+.flow-step:not(:last-child)::after {{ content: "→"; position: absolute; right: -12px; top: 50%; z-index: 2; display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid var(--line); border-radius: 50%; background: var(--paper); color: var(--accent); }}
+.comparison-wrap {{ margin-top: 36px; overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }}
+.comparison-grid {{ min-width: 680px; }} .comparison-row {{ display: grid; grid-template-columns: .8fr 1fr 1.2fr; }}
+.comparison-row > * {{ padding: 16px 18px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }} .comparison-row > *:last-child {{ border-right: 0; }} .comparison-row:last-child > * {{ border-bottom: 0; }}
+.comparison-head {{ background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; }}
+.comparison-body {{ color: var(--ink-2); background: var(--paper-2); }} .comparison-body > :first-child {{ color: var(--ink); font-weight: 700; }}
+.concept-film {{ position: relative; min-width: 0; margin: 0; overflow: hidden; border-radius: var(--radius); }}
+.concept-film-poster {{ position: relative; z-index: 1; }}
+.concept-film-media {{ position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; border: 0; object-fit: cover; background: var(--paper-2); }}
 .status-note, .blocker {{ margin-top: 26px; padding: 16px 18px; border-left: 3px solid var(--accent); background: var(--paper-2); color: var(--ink-2); }}
 .blocker {{ color: var(--revoked, #9c4a3a); border-color: currentColor; font-family: var(--mono); }}
 .tw-toggle {{ display: flex; gap: 2px; flex: 0 0 auto; padding: 3px; border: 1px solid var(--line); border-radius: 999px; background: var(--paper-2); }}
@@ -131,10 +147,10 @@ body:has(#tw-light:checked) {{ {_css_vars(light)} color-scheme: light; }} body:h
 footer {{ border-top: 1px solid var(--line); padding-block: 42px; }} .footer-in {{ display: flex; justify-content: space-between; gap: 30px; flex-wrap: wrap; }}
 .footer-noun {{ max-width: 44ch; color: var(--ink-2); }} .flinks {{ display: flex; gap: 18px; flex-wrap: wrap; font-size: .86rem; }}
 
-/* Neotoma: an editorial record with persistent provenance marginalia. */
+/* Neotoma: an editorial record whose flow stays legible to a cold reader. */
 .product-neotoma .record-hero {{ grid-template-columns: minmax(0, 1.15fr) minmax(300px, .85fr); gap: clamp(38px, 7vw, 96px); }}
 .product-neotoma .record-demo {{ position: relative; border-top: 3px double var(--ink); border-bottom: 1px solid var(--line); padding: 28px 0 12px 68px; }}
-.product-neotoma .record-demo::before {{ content: "PROVENANCE"; position: absolute; left: 0; top: 30px; writing-mode: vertical-rl; transform: rotate(180deg); color: var(--ink-3); font-family: var(--mono); font-size: .62rem; letter-spacing: .14em; }}
+.product-neotoma .record-demo::before {{ content: "RECORD"; position: absolute; left: 0; top: 30px; writing-mode: vertical-rl; transform: rotate(180deg); color: var(--ink-3); font-family: var(--mono); font-size: .62rem; letter-spacing: .14em; }}
 .record-row {{ padding: 18px 0; border-bottom: 1px solid var(--line); }} .record-row:last-child {{ border-bottom: 0; }}
 .record-key {{ font-family: var(--mono); font-size: .7rem; color: var(--ink-3); }} .record-value {{ display: block; margin-top: 5px; font-family: var(--heading); font-size: 1.16rem; }}
 .record-old {{ color: var(--correction, var(--accent)); text-decoration: line-through; text-decoration-thickness: 2px; }} .record-current {{ color: var(--ink); }}
@@ -147,17 +163,38 @@ footer {{ border-top: 1px solid var(--line); padding-block: 42px; }} .footer-in 
 .product-neotoma .capability .meta {{ font-family: var(--mono); color: var(--ink-3); font-size: .7rem; }}
 .product-neotoma .correction-demo {{ margin-top: 34px; padding: 24px; border: 1px solid var(--line); background: var(--paper-2); font-family: var(--mono); }}
 
-/* Ateles: bounded authority, stamped grants, and a visible chain of scope. */
+/* Ateles: a living organization of named roles, relationships, and handoffs. */
 .product-ateles .nav {{ border-top: 4px solid var(--accent); }}
-.product-ateles .seal-hero {{ grid-template-columns: minmax(0, 1.25fr) minmax(300px, .75fr); gap: clamp(42px, 8vw, 110px); }}
-.seal-board {{ border: 1px solid var(--line); border-radius: var(--radius); padding: clamp(24px, 4vw, 42px); background: var(--paper-2); box-shadow: var(--shadow-soft); }}
-.seal-mark {{ width: 116px; color: var(--accent); transform: rotate(-7deg); }} .seal-mark svg {{ display: block; width: 100%; height: auto; }}
-.grant-row {{ display: grid; grid-template-columns: 1fr auto; gap: 20px; padding: 14px 0; border-bottom: 1px solid var(--line); }} .grant-row:last-child {{ border-bottom: 0; }}
-.grant-state {{ color: var(--grant, var(--accent)); font-family: var(--mono); font-size: .7rem; }}
+.swarm-mark {{ width: 25px; height: 25px; color: var(--accent); flex: 0 0 auto; }} .swarm-mark path {{ fill: none; stroke: currentColor; stroke-width: 1.4; }} .swarm-mark circle {{ fill: var(--paper); stroke: currentColor; stroke-width: 1.5; }} .swarm-mark circle:nth-of-type(2) {{ fill: currentColor; }}
+.product-ateles .network-hero {{ grid-template-columns: minmax(0, 1.18fr) minmax(340px, .82fr); gap: clamp(42px, 7vw, 96px); }}
+.organization-board {{ border: 1px solid var(--line); border-radius: var(--radius); padding: clamp(20px, 3vw, 34px); background: var(--paper-2); box-shadow: var(--shadow-soft); }}
+.organization-head {{ display: flex; justify-content: space-between; gap: 18px; align-items: baseline; }}
+.organization-count {{ color: var(--ink-3); font-family: var(--mono); font-size: .66rem; letter-spacing: .06em; white-space: nowrap; }}
+.organization-map {{ display: block; width: 100%; height: auto; margin: 20px 0 18px; overflow: visible; }}
+.org-link, .org-flow {{ fill: none; stroke-linecap: round; stroke-linejoin: round; }}
+.org-link {{ stroke: var(--line); stroke-width: 1.5; }}
+.org-flow {{ stroke: var(--accent); stroke-width: 1.8; stroke-dasharray: 5 13; animation: coordination-flow 8s linear infinite; }}
+.role-node circle {{ fill: var(--paper); stroke: var(--ink-3); stroke-width: 1.4; }}
+.role-node text {{ fill: var(--ink-2); font-family: var(--mono); font-size: 10px; letter-spacing: .035em; text-anchor: middle; }}
+.role-node.operator circle {{ stroke: var(--accent); stroke-width: 2; }}
+.role-node.mission circle {{ fill: var(--accent); stroke: var(--accent); stroke-width: 2; }}
+.role-node.mission text {{ fill: var(--on-accent); font-weight: 600; }}
+.handoff-dot {{ fill: var(--accent); }}
+.coordination-states {{ border-top: 1px solid var(--line); }}
+.grant-row {{ display: grid; grid-template-columns: 1fr auto; gap: 18px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); }} .grant-row:last-child {{ border-bottom: 0; }}
+.state-mark {{ display: inline-flex; align-items: center; gap: 8px; }}
+.authorization-seal {{ display: inline-grid; place-items: center; width: 21px; height: 21px; color: var(--accent); }}
+.authorization-seal svg {{ display: block; width: 100%; height: 100%; }}
+.grant-row[data-state="GRANTED"] .authorization-seal, .grant-row[data-state="GRANTED"] .grant-state {{ color: var(--grant, var(--accent)); }}
+.grant-row[data-state="WITHHELD"] .authorization-seal, .grant-row[data-state="WITHHELD"] .grant-state {{ color: var(--revoked, var(--accent)); }}
+.grant-state {{ color: var(--accent); font-family: var(--mono); font-size: .66rem; letter-spacing: .05em; }}
+@keyframes coordination-flow {{ to {{ stroke-dashoffset: -72; }} }}
+@media (prefers-reduced-motion: reduce) {{ .org-flow {{ animation: none; }} .concept-film-media {{ display: none; }} }}
 .product-ateles .source-section > .source-inner {{ padding-left: clamp(20px, 5vw, 72px); border-left: 4px solid var(--accent); }}
 .product-ateles .capability-list {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 38px; }}
 .product-ateles .capability {{ position: relative; min-height: 220px; padding: 28px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper-2); }}
-.product-ateles .capability::after {{ content: "AUTHORIZED"; position: absolute; right: 18px; bottom: 16px; color: var(--accent); border: 1px solid currentColor; border-radius: 999px; padding: 3px 8px; font-family: var(--mono); font-size: .58rem; letter-spacing: .08em; transform: rotate(-4deg); opacity: .7; }}
+.product-ateles .capability::before {{ content: ""; position: absolute; right: 22px; top: 22px; width: 8px; height: 8px; border: 1px solid var(--accent); border-radius: 50%; background: var(--paper-2); }}
+.product-ateles .capability::after {{ content: "ROLE NODE"; position: absolute; right: 38px; top: 18px; color: var(--ink-3); font-family: var(--mono); font-size: .56rem; letter-spacing: .08em; }}
 .scope-line {{ margin-top: 16px; color: var(--ink-3); font-family: var(--mono); font-size: .72rem; }}
 .hierarchy {{ display: grid; grid-template-columns: repeat(5, 1fr); margin-top: 38px; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }}
 .hierarchy-item {{ min-width: 0; padding: 22px 14px; background: var(--paper-2); border-right: 1px solid var(--line); text-align: center; font-family: var(--heading); }} .hierarchy-item:last-child {{ border-right: 0; }}
@@ -165,11 +202,12 @@ footer {{ border-top: 1px solid var(--line); padding-block: 42px; }} .footer-in 
 .quorum {{ display: inline-flex; align-items: center; gap: 8px; margin-top: 22px; color: var(--grant, var(--accent)); font-family: var(--mono); font-size: .72rem; }}
 @media (max-width: 820px) {{
   .nav-in {{ gap: 12px; }} .nav-in > .btn {{ display: none; }} .brand small {{ display: none; }}
-  .product-neotoma .record-hero, .product-ateles .seal-hero {{ grid-template-columns: 1fr; }}
+  .product-neotoma .record-hero, .product-ateles .network-hero {{ grid-template-columns: 1fr; }}
   .product-neotoma .source-section {{ display: block; }} .product-neotoma .source-section::before {{ display: block; margin-bottom: 22px; }}
   .product-neotoma .source-section > .source-inner {{ display: block; }}
   .pain-grid, .product-ateles .capability-list {{ grid-template-columns: 1fr; }}
   .hierarchy {{ grid-template-columns: 1fr; }} .hierarchy-item {{ border-right: 0; border-bottom: 1px solid var(--line); text-align: left; }} .hierarchy-item:last-child {{ border-bottom: 0; }}
+  .flow-step {{ border-right: 0; border-bottom: 1px solid var(--line); }} .flow-step:last-child {{ border-bottom: 0; }} .flow-step:not(:last-child)::after {{ content: "↓"; right: 50%; top: auto; bottom: -12px; transform: translateX(50%); }}
 }}
 @media (max-width: 620px) {{
   .nav-in {{ padding-inline: 16px; }} .nav-links {{ gap: 14px; }} .tw-toggle {{ display: none; }}
@@ -222,6 +260,11 @@ def _pain_cards(body: str) -> str:
 
 
 def _render_source_section(section_id: str, resolved: dict) -> str:
+    projection = resolved.get("public_projection")
+    if projection:
+        # Evidence locators stay in the projection file's _source metadata.
+        # The public page receives only the reader-facing interpretation.
+        return _render_page_specific("", {"primary_cta": {}}, section_id, projection)
     section = resolved.get("section", {})
     _, body = mdlib.strip_frontmatter(resolved["markdown"])
     selected = _extract_markdown_sections(body, section.get("headings", []))
@@ -264,29 +307,79 @@ def _hero_ctas(page: dict, data: dict) -> str:
 
 def _record_hero(page: dict, data: dict) -> str:
     proof = data.get("proof", {})
+    poster = f"""<aside class="record-demo" aria-label="A fact moving from source through correction to its current version">
+<div class="record-row"><span class="record-key">SOURCE · {_esc(proof.get("source", "Customer record"))}</span><span class="record-value record-old">{_esc(proof.get("old", "London"))}</span><p class="record-stamp">Earlier version retained</p></div>
+<div class="record-row"><span class="record-key">CORRECTED · {_esc(proof.get("corrected", "Today"))}</span><span class="record-value record-current">{_esc(proof.get("current", "Madrid"))}</span><p class="record-stamp">{_esc(proof.get("provenance", "Confirmed by the named source"))}</p></div>
+<div class="record-row"><span class="record-key">CURRENT VERSION</span><span class="record-value record-current">{_esc(proof.get("read", "Madrid · active now"))}</span></div></aside>"""
+    media = _concept_film(poster, data, "A correction becoming shared truth")
     return f"""<section class="wrap hero record-hero" id="hero"><div class="hero-copy">
 <p class="eyebrow category">{_esc(data.get("category"))}</p><h1>{_esc(data["headline"])}</h1>
-<p class="lede">{_esc(data["body"])}</p>{_hero_ctas(page, data)}<p class="proof-line">{_esc(data.get("footnote"))}</p></div>
-<aside class="record-demo" aria-label="A corrected fact with provenance">
-<div class="record-row"><span class="record-key">{_esc(proof.get("field", "decision.status"))}</span><span class="record-value record-old">{_esc(proof.get("old", "approved"))}</span></div>
-<div class="record-row"><span class="record-key">current value</span><span class="record-value record-current">{_esc(proof.get("current", "superseded"))}</span><p class="record-stamp">{_esc(proof.get("provenance", "source · correction · effective time"))}</p></div>
-<div class="record-row"><span class="record-key">read policy</span><span class="record-value record-current">{_esc(proof.get("read", "current as of now"))}</span></div></aside></section>"""
+<p class="lede">{_esc(data["body"])}</p>{_hero_ctas(page, data)}<p class="proof-line">{_esc(data.get("footnote"))}</p></div>{media}</section>"""
 
 
-def _seal_svg() -> str:
-    return """<svg viewBox="0 0 120 120" role="img" aria-label="Bounded authority seal"><circle cx="60" cy="60" r="52" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="60" cy="60" r="43" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="2 5"/><path d="M38 74 60 31l22 43M47 58h26" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="square"/><path d="m28 87 9 3 5 9M92 87l-9 3-5 9" fill="none" stroke="currentColor" stroke-width="2"/></svg>"""
+def _concept_film(poster: str, data: dict, label: str) -> str:
+    """Wrap a load-bearing code-native poster in an optional local film slot."""
+    brief = data.get("concept_film") or {}
+    asset = brief.get("asset") or {}
+    video_src = asset.get("video_src") or ""
+    poster_src = asset.get("poster_src") or ""
+    fallback_src = asset.get("fallback_src") or ""
+    poster_attr = f' poster="{_esc(poster_src)}"' if poster_src else ""
+    sources = ""
+    if video_src:
+        sources += f'<source src="{_esc(video_src)}" type="video/webm">'
+    if fallback_src:
+        sources += f'<source src="{_esc(fallback_src)}" type="video/mp4">'
+    video = (
+        f'<video class="concept-film-media" muted autoplay playsinline loop preload="metadata"{poster_attr} aria-hidden="true">{sources}</video>'
+        if sources
+        else ""
+    )
+    duration = brief.get("duration_seconds", "")
+    return f'<figure class="concept-film" aria-label="{_esc(label)}" data-concept-film-ready="true" data-duration-seconds="{_esc(duration)}"><div class="concept-film-poster">{poster}</div>{video}</figure>'
 
 
-def _seal_hero(page: dict, data: dict) -> str:
+def _authorization_seal_svg(state: str) -> str:
+    mark = {
+        "GRANTED": "M7 12.5l3 3 7-8",
+        "CHECKPOINT": "M12 7v5l3 2",
+        "WITHHELD": "M7 12h10",
+    }.get(state, "M8 12h8")
+    return f'''<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="{mark}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>'''
+
+
+def _organization_svg(roles: list[str]) -> str:
+    defaults = ["Operator", "Research", "Build", "Review", "Operate"]
+    labels = (roles + defaults)[:5]
+    return f"""<svg class="organization-map" viewBox="0 0 440 300" role="img" aria-labelledby="org-title org-desc">
+<title id="org-title">A coordinated organization of named roles</title><desc id="org-desc">An operator and four agent roles coordinate around one mission through declared work handoffs.</desc>
+<defs><marker id="org-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="currentColor"/></marker></defs>
+<g aria-hidden="true"><path class="org-link" d="M220 62 220 126M194 141 100 101M246 141 340 101M200 167 118 231M240 167 322 231M112 99 326 226"/><path class="org-flow" d="M220 62 220 126M194 141 100 101M246 141 340 101M200 167 118 231M240 167 322 231"/><circle class="handoff-dot" cx="220" cy="94" r="3"/><circle class="handoff-dot" cx="148" cy="119" r="3"/><circle class="handoff-dot" cx="281" cy="119" r="3"/></g>
+<g class="role-node operator"><circle cx="220" cy="42" r="28"/><text x="220" y="46">{_esc(labels[0]).upper()}</text></g>
+<g class="role-node"><circle cx="75" cy="88" r="30"/><text x="75" y="92">{_esc(labels[1]).upper()}</text></g>
+<g class="role-node"><circle cx="365" cy="88" r="30"/><text x="365" y="92">{_esc(labels[2]).upper()}</text></g>
+<g class="role-node mission"><circle cx="220" cy="154" r="34"/><text x="220" y="158">MISSION</text></g>
+<g class="role-node"><circle cx="95" cy="248" r="30"/><text x="95" y="252">{_esc(labels[3]).upper()}</text></g>
+<g class="role-node"><circle cx="345" cy="248" r="30"/><text x="345" y="252">{_esc(labels[4]).upper()}</text></g>
+</svg>"""
+
+
+def _network_hero(page: dict, data: dict) -> str:
+    state_labels = {
+        "GRANTED": "Approved",
+        "CHECKPOINT": "Needs review",
+        "WITHHELD": "Not authorized",
+    }
     grants = "".join(
-        f'<div class="grant-row"><span>{_esc(item["label"])}</span><span class="grant-state">{_esc(item["state"])}</span></div>'
+        f'<div class="grant-row" data-state="{_esc(item["state"])}"><span>{_esc(item["label"])}</span><span class="state-mark"><span class="authorization-seal">{_authorization_seal_svg(item["state"])}</span><span class="grant-state">{_esc(state_labels.get(item["state"], item["state"]))}</span></span></div>'
         for item in data.get("grants", [])
     )
-    return f"""<section class="wrap hero seal-hero" id="hero"><div class="hero-copy">
+    poster = f"""<aside class="organization-board" aria-label="A coordinated organization with bounded authority"><div class="organization-head"><p class="scope-chip">{_esc(data.get("scope", "named roles · declared relationships"))}</p><span class="organization-count">5 ROLES · 1 MISSION</span></div>{_organization_svg(data.get("roles", []))}<div class="coordination-states">{grants}</div>
+<div class="quorum" aria-label="Two of three people approve"><span>●</span><span>●</span><span>○</span><span>two of three approve</span></div></aside>"""
+    media = _concept_film(poster, data, "A swarm becoming an organization")
+    return f"""<section class="wrap hero network-hero" id="hero"><div class="hero-copy">
 <p class="eyebrow category">{_esc(data.get("category"))}</p><h1>{_esc(data["headline"])}</h1><p class="lede">{_esc(data["body"])}</p>
-{_hero_ctas(page, data)}<p class="proof-line">{_esc(data.get("footnote"))}</p></div>
-<aside class="seal-board" aria-label="Example bounded delegation"><div class="seal-mark">{_seal_svg()}</div><p class="scope-chip">{_esc(data.get("scope", "scope · action · time"))}</p>{grants}
-<div class="quorum" aria-label="Two of three approval threshold"><span>●</span><span>●</span><span>○</span><span>quorum · 2 / 3</span></div></aside></section>"""
+{_hero_ctas(page, data)}<p class="proof-line">{_esc(data.get("footnote"))}</p></div>{media}</section>"""
 
 
 def _render_capabilities(section_id: str, data: dict) -> str:
@@ -310,7 +403,9 @@ def _render_hierarchy(section_id: str, data: dict) -> str:
         f'<div class="hierarchy-item">{_esc(item)}<span class="hierarchy-arrow">{"↓" if index < len(data["levels"]) - 1 else "act"}</span></div>'
         for index, item in enumerate(data["levels"])
     )
-    return f'<section class="wrap" id="{_esc(section_id)}"><p class="eyebrow">{_esc(data.get("eyebrow"))}</p><h2>{_esc(data["headline"])}</h2><p class="lede" style="margin-top:18px">{_esc(data["lede"])}</p><div class="hierarchy" aria-label="Planning hierarchy">{chain}</div><p class="source-note">{_esc(data.get("source_note"))}</p></section>'
+    proof_note = data.get("proof_note") or data.get("source_note")
+    note = f'<p class="status-note">{_esc(proof_note)}</p>' if proof_note else ""
+    return f'<section class="wrap" id="{_esc(section_id)}"><p class="eyebrow">{_esc(data.get("eyebrow"))}</p><h2>{_esc(data["headline"])}</h2><p class="lede" style="margin-top:18px">{_esc(data["lede"])}</p><div class="hierarchy" aria-label="Planning hierarchy">{chain}</div>{note}</section>'
 
 
 def _render_steps(section_id: str, data: dict) -> str:
@@ -323,7 +418,13 @@ def _render_steps(section_id: str, data: dict) -> str:
 
 def _render_cards(section_id: str, data: dict) -> str:
     cards = "".join(
-        f'<article class="card"><h3>{_esc(item["title"])}</h3><p>{_esc(item["body"])}</p>'
+        '<article class="card">'
+        + (
+            f'<p class="card-label">{_esc(item["label"])}</p>'
+            if item.get("label")
+            else ""
+        )
+        + f"<h3>{_esc(item['title'])}</h3><p>{_esc(item['body'])}</p>"
         + (f'<p class="meta">{_esc(item["meta"])}</p>' if item.get("meta") else "")
         + (
             f'<a href="{_esc(item["href"])}">{_esc(item.get("link_label", "Read more"))}</a>'
@@ -336,22 +437,45 @@ def _render_cards(section_id: str, data: dict) -> str:
     return f'<section class="wrap" id="{_esc(section_id)}"><p class="eyebrow">{_esc(data.get("eyebrow"))}</p><h2>{_esc(data["headline"])}</h2><p class="lede" style="margin-top:18px">{_esc(data.get("lede"))}</p><div class="cards">{cards}</div></section>'
 
 
+def _render_flow(section_id: str, data: dict) -> str:
+    items = "".join(
+        f'<article class="flow-step"><p class="flow-label">{_esc(item.get("label"))}</p><h3>{_esc(item["title"])}</h3><p>{_esc(item["body"])}</p></article>'
+        for item in data.get("items", [])
+    )
+    return f'<section class="wrap" id="{_esc(section_id)}"><p class="eyebrow">{_esc(data.get("eyebrow"))}</p><h2>{_esc(data["headline"])}</h2><p class="lede" style="margin-top:18px">{_esc(data.get("lede"))}</p><div class="public-flow">{items}</div></section>'
+
+
+def _render_comparison(section_id: str, data: dict) -> str:
+    head = "".join(f"<div>{_esc(value)}</div>" for value in data.get("columns", []))
+    rows = "".join(
+        '<div class="comparison-row comparison-body">'
+        + "".join(f"<div>{_esc(value)}</div>" for value in row)
+        + "</div>"
+        for row in data.get("rows", [])
+    )
+    return f'<section class="wrap" id="{_esc(section_id)}"><p class="eyebrow">{_esc(data.get("eyebrow"))}</p><h2>{_esc(data["headline"])}</h2><p class="lede" style="margin-top:18px">{_esc(data.get("lede"))}</p><div class="comparison-wrap"><div class="comparison-grid" role="table" aria-label="{_esc(data["headline"])}"><div class="comparison-row comparison-head" role="row">{head}</div>{rows}</div></div></section>'
+
+
 def _render_page_specific(product: str, page: dict, section_id: str, data: dict) -> str:
     layout = data.get("layout", section_id)
     if layout == "hero":
         return f'<section class="wrap hero" id="hero"><div class="hero-copy"><h1>{_esc(data["headline"])}</h1><p class="lede">{_esc(data.get("subheadline"))}</p><p>{_esc(data.get("body"))}</p>{_hero_ctas(page, data)}</div></section>'
     if layout == "record_hero":
         return _record_hero(page, data)
-    if layout == "seal_hero":
-        return _seal_hero(page, data)
+    if layout == "network_hero":
+        return _network_hero(page, data)
     if layout == "capabilities":
         return _render_capabilities(section_id, data)
     if layout == "hierarchy":
         return _render_hierarchy(section_id, data)
     if layout == "steps":
         return _render_steps(section_id, data)
-    if layout in ("cards", "comparison_teaser", "sibling"):
+    if layout in ("cards", "proof_cards", "comparison_teaser", "sibling"):
         return _render_cards(section_id, data)
+    if layout == "flow":
+        return _render_flow(section_id, data)
+    if layout == "comparison":
+        return _render_comparison(section_id, data)
     if layout == "cta_banner":
         return f'<section class="wrap" id="{_esc(section_id)}"><div class="panel"><p class="eyebrow">{_esc(data.get("eyebrow"))}</p><h2>{_esc(data["headline"])}</h2><p class="lede" style="margin-top:18px">{_esc(data.get("body"))}</p>{_hero_ctas(page, data)}</div></section>'
     import json as _json
@@ -362,19 +486,38 @@ def _render_page_specific(product: str, page: dict, section_id: str, data: dict)
 def _render_section(product: str, page: dict, section_id: str, resolved: dict) -> str:
     if not resolved["_resolved"]:
         return f'<section class="wrap" id="{_esc(section_id)}"><div class="blocker">BLOCKED — {_esc(resolved["_blocker"])}</div></section>'
-    if resolved["origin"] == "page_specific":
+    if "data" in resolved:
         return _render_page_specific(product, page, section_id, resolved["data"])
     if resolved["origin"] in ("authored", "positioning_mirror"):
         return _render_source_section(section_id, resolved)
     return f'<section class="wrap" id="{_esc(section_id)}"><div class="blocker">Unknown content origin.</div></section>'
 
 
-def _font_link(product: str) -> str:
-    if product == "neotoma":
-        family = "Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600"
-    else:
-        family = "Space+Grotesk:wght@500;600;700&family=Source+Sans+3:wght@400;500;600&family=IBM+Plex+Mono:wght@400;600"
-    return f'<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family={family}&display=swap" rel="stylesheet">'
+def _font_link(tokens: dict) -> str:
+    """Load the three token-declared families without product-name branches."""
+    type_scale = tokens.get("product", {}).get("type_scale", {})
+    families = []
+    for field, weights in (
+        ("heading_font_family", "500;600;700"),
+        ("body_font_family", "400;500;600"),
+        ("code_font_family", "400;600"),
+    ):
+        stack = type_scale.get(field, "")
+        primary = stack.split(",", 1)[0].strip().strip("'\"")
+        if primary and primary not in {family for family, _ in families}:
+            families.append((primary, weights))
+    if not families:
+        return ""
+    query = "&family=".join(
+        f"{quote_plus(family)}:wght@{weights}" for family, weights in families
+    )
+    return f'<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family={query}&display=swap" rel="stylesheet">'
+
+
+def _brand_mark(product: str) -> str:
+    if product != "ateles":
+        return ""
+    return """<svg class="swarm-mark" viewBox="0 0 28 28" role="img" aria-label="Ateles swarm mark"><path d="M6 8 14 5l8 5-3 9-9 3-5-7Z"/><circle cx="6" cy="8" r="2.2"/><circle cx="14" cy="5" r="2.2"/><circle cx="22" cy="10" r="2.2"/><circle cx="19" cy="19" r="2.2"/><circle cx="10" cy="22" r="2.2"/><circle cx="5" cy="15" r="2.2"/></svg>"""
 
 
 def render_page(
@@ -385,10 +528,19 @@ def render_page(
     tokens: dict,
 ) -> str:
     css = build_css(tokens, product)
-    body_sections = '\n<hr class="rule">\n'.join(
+    rendered_sections = [
         _render_section(product, page, section_id, resolved)
         for section_id, resolved in sections
-    )
+    ]
+    if rendered_sections and "<h1" not in rendered_sections[0]:
+        rendered_sections[0] = re.sub(
+            r"<h2>(.*?)</h2>",
+            r'<h1 class="page-title">\1</h1>',
+            rendered_sections[0],
+            count=1,
+            flags=re.DOTALL,
+        )
+    body_sections = '\n<hr class="rule">\n'.join(rendered_sections)
     primary_cta = page.get("primary_cta") or {}
     nav_cta = (
         f'<a class="btn" href="{_esc(primary_cta.get("href"))}">{_esc(primary_cta.get("label"))}</a>'
@@ -403,14 +555,15 @@ def render_page(
     noun = (
         "The system of record for AI agents."
         if product == "neotoma"
-        else "The distributed-authority operating layer for governed initiative."
+        else "The operating system for agent organizations."
     )
-    identity = "the record" if product == "neotoma" else "the seal"
+    identity = "the record" if product == "neotoma" else "the swarm"
+    brand_mark = _brand_mark(product)
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_esc(page.get("title", product.title()))}</title><meta name="description" content="{_esc(page.get("meta_description", ""))}">
-{_font_link(product)}<style>{css}</style></head><body class="product-{_esc(product)}">
-<header class="nav" id="site-nav"><div class="nav-in"><a class="brand" href="/">{_esc(product.title())}<small>{identity}</small></a><nav class="nav-links" aria-label="Primary">{site_nav}</nav>{nav_cta}{theme_toggle}</div></header>
+{_font_link(tokens)}<style>{css}</style></head><body class="product-{_esc(product)}">
+<header class="nav" id="site-nav"><div class="nav-in"><a class="brand" href="/">{brand_mark}{_esc(product.title())}<small>{identity}</small></a><nav class="nav-links" aria-label="Primary">{site_nav}</nav>{nav_cta}{theme_toggle}</div></header>
 <main>{body_sections}</main><footer><div class="wrap footer-in"><p class="footer-noun">{noun}</p><div class="flinks">{site_nav}</div></div></footer>
 <script>const nav=document.getElementById('site-nav');const syncNav=()=>nav.classList.toggle('scrolled',scrollY>12);syncNav();addEventListener('scroll',syncNav,{{passive:true}});</script></body></html>
 """
