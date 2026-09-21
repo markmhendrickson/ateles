@@ -22,8 +22,8 @@ The **Subject** column is a label of a few words, never a substitute for the row
 
 ## What this run found
 
-- **5** row(s) **ruled but not merged** — the corpus on `origin/main` reads open where a ruling exists on a branch.
-- **7** row(s) genuinely open — no ruling anywhere scanned.
+- **6** row(s) **ruled but not merged** — the corpus on `origin/main` reads open where a ruling exists on a branch.
+- **6** row(s) genuinely open — no ruling anywhere scanned.
 - **83** row(s) ruled and merged.
 - **94** row(s) whose implemented axis is `unknown`.
 
@@ -33,6 +33,7 @@ Each of these reads **open** to anything reading the corpus. The ruling is on th
 
 | # | Subject | Ruling lives on | Blocks |
 |---|---|---|---|
+| 84 | what distinguishes a task with no intake batch because it is still … | `origin/decision-84-task-assembly-hold` | nothing in the design; whether an assembling task is claimable before it is finished … |
 | 85 | where an artifact a principal produces about an issue or a pull … | `origin/decisions-85-105-106-2ba02e` | nothing in the design; which outbound row of `github.md` a principal's own artifact takes, … |
 | 103 | whether a step's declaration is a floor or a ceiling, and whether … | `origin/decisions-103-104-556945` | decision 41 and decision 94, which rule admission per entity type per principal, default-deny, … |
 | 104 | what a reader of adapter-sourced state in the record may rely on … | `origin/decisions-103-104-556945` | nothing in the design; and the placement of a claim `calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of` already makes in … |
@@ -115,7 +116,7 @@ Each of these reads **open** to anything reading the corpus. The ruling is on th
 | 81 | whether within-tenant default visibility is private-first ("see only my own book") or … | yes | yes | unknown | — | the soft-wall of that document's section 5 |
 | 82 | whether the fork case is a single hosted instance serving many forkers … | yes | yes | unknown | — | whether that document's section 3 is a hedge or a requirement |
 | 83 | the capability ceiling of a non-owner operator within a tenant: whether minting … | yes | yes | unknown | — | the shape of grants minted before the org's own ceiling is enforced |
-| 84 | what distinguishes a task with no intake batch because it is still … | no | no | unknown | — | nothing in the design; whether an assembling task is claimable before it is finished … |
+| 84 | what distinguishes a task with no intake batch because it is still … | yes | no | unknown | `origin/decision-84-task-assembly-hold` | nothing in the design; whether an assembling task is claimable before it is finished … |
 | 85 | where an artifact a principal produces about an issue or a pull … | yes | no | unknown | `origin/decisions-85-105-106-2ba02e` | nothing in the design; which outbound row of `github.md` a principal's own artifact takes, … |
 | 86 | by what grammar a capability names a tool, and therefore what the … | yes | yes | unknown | — | — |
 | 87 | whether a harness may provide a principal any capability its grant does … | yes | yes | unknown | — | decision 86, which supplied the grammar this rule is stated in and deliberately admitted … |
