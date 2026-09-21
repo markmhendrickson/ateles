@@ -345,9 +345,11 @@ which workflows it has gone through, and no router chose the successor: a step o
 
 ```mermaid
 flowchart TD
-    C[complete task created: publication] --> U{intake batch exists?}
-    U -->|no: unrouted by that fact| I[task enters intake; batch record opens]
-    I --> S1[classify: action_type, assigned_to, parent or children]
+    C[task + intake batch + ADDRESSED_BY admitted atomically] --> U[unrouted: no closing route verdict]
+    U --> A{persistent assembly exclusion?}
+    A -->|no: ordinary intake| S1[classify: action_type, assigned_to, parent or children]
+    A -->|yes: assembly hold| H[only resolved pm step owner may claim classify]
+    H -->|eligible pm claims| S1
     S1 --> S2[link: existing issue attached as artifact]
     S2 --> S3[dedupe: no open duplicate]
     S3 --> S4[prioritize: from the priority_rubric entity]

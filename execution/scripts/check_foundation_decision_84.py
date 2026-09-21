@@ -85,6 +85,16 @@ def check(root: Path) -> list[str]:
         "### Intake is every task's first workflow",
         "### What distinguishes a task being assembled from one intake has not reached",
     )
+    direct_model = _section(
+        texts["work_model.md"],
+        "### What distinguishes a task being assembled from one intake has not reached",
+        "### What a claim predicate treats as claimable",
+    )
+    claim_model = _section(
+        texts["work_model.md"],
+        "### What a claim predicate treats as claimable",
+        "### A task is live when some principal could claim it now",
+    )
     batch_formation = _section(
         texts["work_model.md"],
         "### How a batch is formed, and what chooses its workflow",
@@ -99,6 +109,11 @@ def check(root: Path) -> list[str]:
         texts["work_model.md"],
         "### A batch may hold on a condition discovered mid-flight",
         "### A batch may depend on a task it created",
+    )
+    scenario_j = _section(
+        texts["scenarios.md"],
+        "## (j) A task created, routed by intake, and entering its successor",
+        "## What the scenarios do not show",
     )
 
     problems: list[str] = []
@@ -115,13 +130,30 @@ def check(root: Path) -> list[str]:
     )
     problems += _require(
         "model",
-        texts["work_model.md"],
+        direct_model,
         (
             ("persistent assembly exclusion",),
             ("lease lapse", "lapsed lease"),
-            ("creation grants no lease", "creating principal receives no `classify` lease"),
+            ("creation grants no lease",),
             ("declared `pm` step owner", "declaration's `pm` owner role"),
             ("multi-agent assembly",),
+        ),
+    )
+    problems += _require(
+        "creator-authority-model",
+        direct_model,
+        (
+            ("the creating principal receives no `classify` lease by being the creator",),
+            ("contributors gain no lease or execution privilege",),
+        ),
+    )
+    problems += _require(
+        "claim-model",
+        claim_model,
+        (
+            (
+                "assembly exclusion exposes its open `classify` step only to a principal that resolves as the declaration's `pm` step owner",
+            ),
         ),
     )
     universal_surfaces = {
@@ -130,7 +162,7 @@ def check(root: Path) -> list[str]:
         "source-index": source_index,
         "data-model": task_schema,
         "workflow": texts["workflows.md"],
-        "scenario": texts["scenarios.md"],
+        "scenario": scenario_j,
         "creation-rows": creation_rows,
     }
     for surface, text in universal_surfaces.items():
@@ -166,6 +198,9 @@ def check(root: Path) -> list[str]:
             "ordinary task with a batch at creation",
             "complete task is created for ordinary intake; that is its publication. it has no intake batch",
             "every non-assembly task meets this condition once, at creation",
+            "intake batch exists?",
+            "no: unrouted by that fact",
+            "task enters intake; batch record opens",
         ),
     )
     problems += _require(
