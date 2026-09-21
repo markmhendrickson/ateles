@@ -3637,19 +3637,53 @@ class TestGateOwnerIdentity:
         assert launched == []
         mock_write.assert_not_called()
 
-    def test_codex_gate_owner_signer_env_without_proxy_args_is_refused(
+    def test_codex_gate_owner_stock_path_binds_role_proxy_and_launches(
         self, monkeypatch, tmp_path
     ) -> None:
-        result, launched, mock_write = self._run_provider_case(
+        """The supported path must construct the transport the guard requires.
+
+        RED on the audited PR head: the stock command has no Neotoma proxy
+        binding, so the guard refuses before launching even with the role JWK.
+        """
+        monkeypatch.setenv("NEOTOMA_AAUTH_SUB", "ambient-wrong-sub")
+        monkeypatch.setenv("NEOTOMA_AAUTH_PRIVATE_JWK_PATH", "/ambient/wrong.jwk")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN_PROD", "ambient-prod-bearer")
+        monkeypatch.setenv("MCP_PROXY_BEARER_TOKEN", "ambient-proxy-bearer")
+
+        result, launched, _ = self._run_provider_case(
             monkeypatch=monkeypatch,
             tmp_path=tmp_path,
             provider="codex",
             role_jwk=True,
         )
-        assert not result.ok
-        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
-        assert launched == []
-        mock_write.assert_not_called()
+
+        assert result.ok
+        assert len(launched) == 1
+        cmd, kwargs, _ = launched[0]
+        assert "--ignore-user-config" in cmd
+        assert (
+            'mcp_servers.neotoma.args=["mcp", "proxy", "--aauth", "--fail-closed"]'
+            in cmd
+        )
+        assert any(
+            value.startswith("mcp_servers.neotoma.command=") for value in cmd
+        )
+        assert (
+            'mcp_servers.neotoma.tools.correct.approval_mode="approve"' in cmd
+        )
+        child_env = kwargs["env"]
+        assert child_env["NEOTOMA_AAUTH_SUB"] == "accipiter@ateles-swarm"
+        assert child_env["NEOTOMA_AAUTH_PRIVATE_JWK_PATH"].endswith(
+            "/accipiter.jwk.json"
+        )
+        assert child_env["MCP_PROXY_AAUTH"] == "1"
+        assert child_env["MCP_PROXY_FAIL_CLOSED"] == "1"
+        assert child_env["MCP_PROXY_DOWNSTREAM_URL"] == (
+            "https://neotoma.example.com/mcp"
+        )
+        assert "MCP_PROXY_BEARER_TOKEN" not in child_env
+        assert "NEOTOMA_BEARER_TOKEN" not in child_env
+        assert "NEOTOMA_BEARER_TOKEN_PROD" not in child_env
 
     def test_codex_gate_owner_proxy_args_and_role_jwk_is_not_refused(
         self, monkeypatch, tmp_path

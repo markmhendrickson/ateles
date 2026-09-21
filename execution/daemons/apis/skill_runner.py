@@ -136,6 +136,22 @@ GATE_WRITEBACK_TOOLS: tuple[str, ...] = (
     "mcp__mcpsrv_neotoma__correct",
 )
 
+_CLAUDE_NEOTOMA_TOOL_PREFIX = "mcp__mcpsrv_neotoma__"
+_CODEX_NEOTOMA_MCP_SERVER = "neotoma"
+_CODEX_NEOTOMA_IDENTITY_TOOL = "get_session_identity"
+_CODEX_NEOTOMA_ENV_VARS: tuple[str, ...] = (
+    "NEOTOMA_AAUTH_PRIVATE_JWK_PATH",
+    "NEOTOMA_AAUTH_SUB",
+    "NEOTOMA_AAUTH_ISS",
+    "MCP_PROXY_DOWNSTREAM_URL",
+    "MCP_PROXY_AAUTH",
+    "MCP_PROXY_FAIL_CLOSED",
+    "MCP_PROXY_CLIENT_NAME",
+)
+_NEOTOMA_CLI_BIN = (
+    os.environ.get("NEOTOMA_CLI_BIN") or shutil.which("neotoma") or "neotoma"
+)
+
 
 def gate_writeback_allowlist(tools: list[str]) -> list[str]:
     """Extend *tools* with the gate-writeback tools, preserving order.
@@ -149,6 +165,53 @@ def gate_writeback_allowlist(tools: list[str]) -> list[str]:
         if tool not in merged:
             merged.append(tool)
     return merged
+
+
+def codex_gate_owner_proxy_flags(tools: list[str]) -> list[str]:
+    """Bind a gate-owning Codex run to the role-signed Neotoma proxy.
+
+    The dispatch ignores ambient user MCP configuration and supplies this exact
+    server itself, so an operator-scoped bearer cannot silently stand in for
+    the role principal. Only named Neotoma tools are enabled and approved;
+    wildcards and unrelated tools do not gain authority.
+    """
+    tool_names: list[str] = []
+    seen: set[str] = set()
+    for granted in tools:
+        if not granted.startswith(_CLAUDE_NEOTOMA_TOOL_PREFIX):
+            continue
+        tool = granted.removeprefix(_CLAUDE_NEOTOMA_TOOL_PREFIX)
+        if not tool or tool == "*" or not re.fullmatch(r"[A-Za-z0-9_-]+", tool):
+            continue
+        if tool in seen:
+            continue
+        seen.add(tool)
+        tool_names.append(tool)
+    if _CODEX_NEOTOMA_IDENTITY_TOOL not in seen:
+        tool_names.append(_CODEX_NEOTOMA_IDENTITY_TOOL)
+
+    server = _CODEX_NEOTOMA_MCP_SERVER
+    flags: list[str] = [
+        "-c",
+        f"mcp_servers.{server}.command={json.dumps(_NEOTOMA_CLI_BIN)}",
+        "-c",
+        (
+            f"mcp_servers.{server}.args="
+            + json.dumps(["mcp", "proxy", "--aauth", "--fail-closed"])
+        ),
+        "-c",
+        f"mcp_servers.{server}.enabled_tools={json.dumps(tool_names)}",
+        "-c",
+        f"mcp_servers.{server}.env_vars={json.dumps(_CODEX_NEOTOMA_ENV_VARS)}",
+    ]
+    for tool in tool_names:
+        flags.extend(
+            [
+                "-c",
+                f'mcp_servers.{server}.tools.{tool}.approval_mode="approve"',
+            ]
+        )
+    return flags
 
 
 # ── Per-agent Neotoma credential (ateles#795) ─────────────────────────────────
@@ -278,20 +341,31 @@ def gate_owner_transport_identity_error(
 
     if provider == "codex":
         expected_proxy_args = ["mcp", "proxy", "--aauth", "--fail-closed"]
-        proxy_bound = False
+        relevant_config: dict[str, str] = {}
         for index, arg in enumerate(cmd[:-1]):
             if arg != "-c":
                 continue
             config_arg = cmd[index + 1]
             key, separator, raw_value = config_arg.partition("=")
-            if separator != "=" or key != "mcp_servers.neotoma.args":
-                continue
+            if separator == "=" and key.startswith("mcp_servers.neotoma."):
+                # Codex applies later -c values last. Preserve that effective
+                # value so a trailing ambient/tampered override cannot hide
+                # behind an earlier good binding.
+                relevant_config[key] = raw_value
+
+        def _json_config(key: str):
             try:
-                proxy_bound = json.loads(raw_value) == expected_proxy_args
-            except json.JSONDecodeError:
-                proxy_bound = False
-            if proxy_bound:
-                break
+                return json.loads(relevant_config[key])
+            except (KeyError, TypeError, json.JSONDecodeError):
+                return None
+
+        proxy_bound = (
+            "--ignore-user-config" in cmd
+            and _json_config("mcp_servers.neotoma.command") == _NEOTOMA_CLI_BIN
+            and _json_config("mcp_servers.neotoma.args") == expected_proxy_args
+            and _json_config("mcp_servers.neotoma.env_vars")
+            == list(_CODEX_NEOTOMA_ENV_VARS)
+        )
         if not proxy_bound:
             return (
                 f"{NEOTOMA_IDENTITY_UNAVAILABLE}: '{role}' owns a pre-impl "
@@ -324,6 +398,30 @@ def gate_owner_transport_identity_error(
                 f"{NEOTOMA_IDENTITY_UNAVAILABLE}: '{role}' owns a pre-impl "
                 "gate, but this Codex launch does not carry the role's "
                 "non-empty AAuth subject on the fail-closed proxy transport."
+            )
+        expected_downstream = (
+            os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/") + "/mcp"
+        )
+        proxy_env_bound = (
+            subprocess_env.get("MCP_PROXY_AAUTH") == "1"
+            and subprocess_env.get("MCP_PROXY_FAIL_CLOSED") == "1"
+            and subprocess_env.get("MCP_PROXY_DOWNSTREAM_URL")
+            == expected_downstream
+            and subprocess_env.get("MCP_PROXY_CLIENT_NAME") == f"ateles-{role}"
+            and all(
+                bearer_name not in subprocess_env
+                for bearer_name in (
+                    "MCP_PROXY_BEARER_TOKEN",
+                    "NEOTOMA_BEARER_TOKEN",
+                    "NEOTOMA_BEARER_TOKEN_PROD",
+                )
+            )
+        )
+        if not proxy_env_bound:
+            return (
+                f"{NEOTOMA_IDENTITY_UNAVAILABLE}: '{role}' owns a pre-impl "
+                "gate, but this Codex launch does not carry the fail-closed "
+                "proxy environment without bearer fallback."
             )
         return None
 
@@ -1257,6 +1355,7 @@ def _provider_command(
     *,
     cwd: str | None,
     network: bool = False,
+    gate_owner_tools: list[str] | None = None,
 ) -> tuple[list[str], bytes | None]:
     """Build one provider's noninteractive command and initial stdin payload.
 
@@ -1293,15 +1392,24 @@ def _provider_command(
         network_flags = (
             ["-c", "sandbox_workspace_write.network_access=true"] if network else []
         )
+        gate_owner_flags = (
+            codex_gate_owner_proxy_flags(gate_owner_tools)
+            if gate_owner_tools is not None
+            else []
+        )
         if network:
             log.info("[apis] codex sandbox: network enabled for this dispatch")
         return (
             [
                 binary,
                 "exec",
+                # A gate owner must not inherit an ambient operator-scoped MCP
+                # server. Its exact role-signed Neotoma binding is below.
+                *(["--ignore-user-config"] if gate_owner_tools is not None else []),
                 "--sandbox",
                 "workspace-write",
                 *network_flags,
+                *gate_owner_flags,
                 *add_dir_flags,
                 "--ephemeral",
                 "--skip-git-repo-check",
@@ -1415,9 +1523,11 @@ async def _run_skill_once(
     False (the default) for all SSE/non-GitHub task dispatches so the contract never
     appears in payment, health, finance, or other non-GitHub work.
 
-    Claude's `--allowed-tools` and injected Neotoma MCP config remain specific
-    to the Claude adapter. Codex and Cursor receive the same system + skill
-    instructions as a composite prompt and use their ambient configured tools.
+    Claude's `--allowed-tools` and HTTP MCP config remain specific to the
+    Claude adapter. Codex and Cursor receive the same system + skill
+    instructions as a composite prompt. A gate-owning Codex run additionally
+    ignores ambient MCP config and binds the role-signed Neotoma proxy; an
+    advisory Codex run and every Cursor run keep their ambient configured tools.
 
     ``cwd`` (QE3 — eval-authoring affordance): when supplied, the dispatched
     child subprocess runs with this working directory instead of inheriting the
@@ -1529,6 +1639,11 @@ async def _run_skill_once(
             prompt,
             cwd=cwd,
             network=include_github_contract,
+            gate_owner_tools=(
+                gate_writeback_allowlist(agent_def.tools)
+                if provider == "codex" and owns_pending_gate
+                else None
+            ),
         )
     except ValueError:
         if not owns_pending_gate:
@@ -1686,6 +1801,19 @@ async def _run_skill_once(
         subprocess_env["GITHUB_TOKEN"] = github_token
         subprocess_env["GH_TOKEN"] = github_token
 
+    # A gated Codex dispatch must never inherit another principal's signer,
+    # including one supplied through env_extra. Clear it before injecting the
+    # role identity below; otherwise a missing role key could retain the
+    # caller's key and make the proxy write under the wrong principal.
+    if provider == "codex" and owns_pending_gate:
+        for signer_name in (
+            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH",
+            "NEOTOMA_AAUTH_SUB",
+            "NEOTOMA_AAUTH_ISS",
+            "NEOTOMA_AAUTH_ROLE",
+        ):
+            subprocess_env.pop(signer_name, None)
+
     # Stage 3 (ateles#94): inject the Neotoma AAuth client signer env vars so
     # the dispatched child can sign its own Neotoma writes as <role>@ateles-swarm.
     # The Neotoma client signer (aauth_client_signer.ts) reads three vars:
@@ -1714,6 +1842,23 @@ async def _run_skill_once(
                 subprocess_env["NEOTOMA_AAUTH_ISS"] = os.environ.get(
                     "NEOTOMA_AAUTH_ISS", "https://markmhendrickson.com"
                 )
+
+    if provider == "codex" and owns_pending_gate:
+        # The exact MCP command above starts Neotoma's existing signed proxy.
+        # Give it the intended downstream and fail-closed mode, and remove all
+        # bearer fallbacks so the role JWK/subject are the only identity path.
+        base_url = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
+        if base_url:
+            subprocess_env["MCP_PROXY_DOWNSTREAM_URL"] = f"{base_url}/mcp"
+        subprocess_env["MCP_PROXY_AAUTH"] = "1"
+        subprocess_env["MCP_PROXY_FAIL_CLOSED"] = "1"
+        subprocess_env["MCP_PROXY_CLIENT_NAME"] = f"ateles-{_role}"
+        for bearer_name in (
+            "MCP_PROXY_BEARER_TOKEN",
+            "NEOTOMA_BEARER_TOKEN",
+            "NEOTOMA_BEARER_TOKEN_PROD",
+        ):
+            subprocess_env.pop(bearer_name, None)
 
     # ateles#1087 — a gate owner that cannot be ATTRIBUTED on the provider's
     # actual transport must not run silently. Judge the final command and child

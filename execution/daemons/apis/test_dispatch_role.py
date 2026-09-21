@@ -103,7 +103,12 @@ def test_dispatch_forwards_role_provider_and_cwd(monkeypatch) -> None:
 
     result = asyncio.run(
         dispatch_role.dispatch(
-            "cicada", "do the thing", provider="codex", cwd="/tmp/wt", timeout=42
+            "cicada",
+            "do the thing",
+            provider="codex",
+            cwd="/tmp/wt",
+            timeout=42,
+            owns_pending_gate=True,
         )
     )
     assert result.ok
@@ -112,6 +117,7 @@ def test_dispatch_forwards_role_provider_and_cwd(monkeypatch) -> None:
     assert seen["provider"] == "codex"
     assert seen["cwd"] == "/tmp/wt"
     assert seen["timeout"] == 42
+    assert seen["owns_pending_gate"] is True
     assert seen["prompt"] == "do the thing"
 
 
@@ -131,6 +137,34 @@ def test_dispatch_without_override_leaves_provider_to_the_router(
     asyncio.run(dispatch_role.dispatch("cicada", "work"))
     # None, not a default string: run_skill treats None as "route normally".
     assert seen["provider"] is None
+    assert seen["owns_pending_gate"] is False
+
+
+def test_cli_forwards_gate_ownership_to_dispatch(fake_repo, monkeypatch) -> None:
+    """The supported public entrypoint must be able to invoke the guard."""
+    seen: dict = {}
+
+    async def _capture(role, task, **kwargs):
+        seen.update(kwargs)
+        return SkillResult(role, True, 0, "", "", provider="codex")
+
+    monkeypatch.setattr(dispatch_role, "dispatch", _capture)
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda r: _stub_def())
+
+    rc = dispatch_role.main(
+        [
+            "--role",
+            "cicada",
+            "--task",
+            "review the pending gate",
+            "--provider",
+            "codex",
+            "--owns-pending-gate",
+        ]
+    )
+
+    assert rc == 0
+    assert seen["owns_pending_gate"] is True
 
 
 def test_failed_run_exits_nonzero(fake_repo, monkeypatch) -> None:
