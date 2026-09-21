@@ -309,13 +309,62 @@ Note several legacy fields on this type from an earlier analysis-specific use;
 ignore them. This is the same registered type the upstream incumbent artifact
 uses; the two are distinguished by `subject` and `title`, not by a new type.
 
-Research two things together, because neither answers the question alone:
+Research three things together, because none of the three answers the
+question alone:
 
 - Best practice for THIS ICP — what this audience trusts, what it discounts,
   what reads as marketing noise to it.
 - Best practice for this TYPE of landing page given that CTA. A page whose CTA
   is "install" is a different genre from one whose CTA is "book a call", and
   the genre governs section order, proof placement, and page length.
+- **What the fetched competitor and adjacent pages actually DO** — a teardown,
+  not a second pass at general best practice. Best-practice research answers
+  "what should a page like this do"; a teardown answers "what does THIS page
+  do, and should this one copy it." Both are required because a competitor's
+  page mixes patterns worth adopting with patterns that only make sense inside
+  their own positioning — best-practice research alone cannot tell the two
+  apart for a specific fetched page, and a teardown without best-practice
+  grounding has no basis to reject anything.
+
+For each competitor or adjacent page fetched under (b)/(c) below, record its
+structure — section order, proof placement, worked examples, activation
+surfaces, what it leads with — as a list of discrete patterns, and mark each
+pattern ADOPT or REJECT with a reason:
+
+- An ADOPT reason is page-craft: why the pattern works for readers, citeable
+  independent of any product's positioning (e.g. "a single concrete example
+  threaded through every step keeps scan cost near zero").
+- A REJECT reason must cite the specific positioning this product holds that
+  the pattern would contradict — not taste, not "doesn't fit our style."
+  A shared-graph framing is rejected because it contradicts a stated
+  architecture claim, not because it reads poorly.
+
+**The rejection half is mandatory, not optional.** A teardown that only lists
+what to adopt is a shopping list, and a page built from an adopt-only list
+drifts toward the competitor's own category — the exact failure the register's
+`scenarios_must_fail_the_competitor_test` decision already guards against
+elsewhere in the argument chain. Every teardown finding this stage stores must
+carry at least one REJECT with a positioning-based reason, or state plainly
+that no pattern warranted rejection and why that is credible (e.g. the fetched
+page argues a genuinely different category with no overlap).
+
+A teardown is a snapshot of a page that can be redesigned at any time, not a
+durable fact about the competitor. Record the fetch date and treat a corpus
+teardown older than a few months as a hypothesis to re-verify against the live
+page, not a finding to apply as-is — the same staleness discipline as (d)
+below applies to teardown findings, and the reason is concrete, not
+hypothetical: a Neotoma `competitive_analysis` of a competitor's memory page
+(`ent_3d00b2dd9aafbf3742d5086c`, dated 2026-04-21) found a single concrete
+example threaded through all five how-it-works steps, a numbered verb-led
+spine, per-card "see it on GitHub" links, and a hero-adjacent "copy prompt to
+your agent" activation widget — all called out as the strongest, most
+adoptable page-craft on the page. By the time this amendment was written,
+that same competitor page had been repositioned from marketing copy to
+documentation: the threaded example, the spine, and the widget were gone from
+the live page, confirmed by re-fetching it and finding zero occurrences of the
+terms the analysis had cited. The analysis was not wrong when written — it was
+overtaken. Treat every stored teardown the same way going in: a hypothesis to
+re-verify, never a finding to apply untouched.
 
 This stage failed twice on 2026-09-21 in the same shape: both runs substituted
 internal artifacts for research and labelled the substitution — one run's
@@ -428,6 +477,41 @@ inventory in `gaps` and stop if the build cannot proceed without sources.
 
 Almost always a CONSUME, not a create: retrieve the existing `design_system`
 for these surfaces and use it. Create one only when none exists, and say so.
+
+**CONSUME stays the default. A stage-3 teardown adds one narrow PRODUCE path
+on top of it — it does not replace the default.** Consume-only cannot express
+a page-craft finding from a competitor teardown (see stage 3), and cannot
+express a correction when the consumed entity itself is wrong. Two failures on
+2026-09-21 motivate the two cases below: a finding with nowhere to land
+(`ent_3d00b2dd9aafbf3742d5086c`, the Lobu teardown, sat unattached to any
+stage for five months), and a consumed `design_system` that both
+2026-09-21 runs found did not match either live page — a blue/red,
+no-serif, sharp-cornered palette against pages that were neither — and
+correctly declined to overwrite unilaterally, flagging the mismatch in their
+stage-4 `gaps` instead. A human had to notice and correct it separately.
+
+- **Where a stage-3 teardown yields a structural or visual pattern worth
+  adopting**, record it against `design_system` — its declared
+  `positioning_principles` for a principle-level pattern, `anti_patterns` for
+  a pattern rejected with its positioning-based reason — so the next run
+  inherits the finding rather than re-deriving it from a page that may have
+  changed. Check `describe_entity_type` on `design_system` before writing;
+  do not invent a field.
+- **Where a consumed `design_system` disagrees with the live artifact**, the
+  existing flag-and-defer behaviour stays exactly as it is. This PRODUCE path
+  does not license unilateral overwriting of a shared entity — record the
+  mismatch in the stage-4 inventory's `gaps` and stop there; reconciling a
+  shared entity is a separate, explicit correction, not something a content
+  build does in passing.
+- **Be explicit about the split.** Structural patterns — spine, proof
+  placement, worked examples, section order — belong to the stage-1
+  template. Visual tokens — palette, type scale, spacing, radius — belong to
+  `design_system`. Two homes because they are two kinds of decision: a
+  structural pattern is meant to be usable by a second product with
+  different visual tokens, and conflating the two is how a template stops
+  being reusable for that second product — which the template's own existing
+  test (stage 1: "the template must be usable for a second product with a
+  different message") already forbids.
 
 Asset locators bifurcate by path. Do not invent undeclared keys
 (`asset_locators`, `assets`, `logo_paths`), and do NOT use the `asset` entity
