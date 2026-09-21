@@ -117,6 +117,11 @@ def check(root: Path) -> list[str]:
         "### Parent and child tasks",
         "### A recurring task is one live instance, and its completion creates the next",
     )
+    intake_workflow = _section(
+        texts["workflows.md"],
+        "## intake",
+        "## feature",
+    )
     scenario_f = _section(
         texts["scenarios.md"],
         "## (f) A parent task with children in independent batches",
@@ -176,7 +181,7 @@ def check(root: Path) -> list[str]:
         "batch-formation": batch_formation,
         "source-index": source_index,
         "data-model": task_schema,
-        "workflow": texts["workflows.md"],
+        "workflow": intake_workflow,
         "scenario": scenario_j,
         "creation-rows": creation_rows,
     }
@@ -219,12 +224,21 @@ def check(root: Path) -> list[str]:
         ),
     )
     problems += _require(
+        "intake-workflow-atomic-entry",
+        intake_workflow,
+        (
+            ("workflow-entering task enters with its intake batch",),
+            ("`addressed_by` edge",),
+            ("admitted atomically at creation",),
+        ),
+    )
+    problems += _require(
         "aggregate-parent-model",
         parent_model,
         (
             ("aggregate parent",),
             ("never enters a workflow",),
-            ("no intake batch",),
+            ("no intake batch or `addressed_by` edge",),
             ("not claimable",),
         ),
     )
@@ -234,7 +248,7 @@ def check(root: Path) -> list[str]:
         (
             ("aggregate parent",),
             ("never enters a workflow",),
-            ("no intake batch",),
+            ("no intake batch or `addressed_by` edge",),
             ("not claimable",),
         ),
     )
@@ -244,7 +258,7 @@ def check(root: Path) -> list[str]:
         (
             ("aggregate parent",),
             ("never enters a workflow",),
-            ("no intake batch",),
+            ("no intake batch or `addressed_by`",),
             ("not claimable",),
         ),
     )
@@ -300,13 +314,18 @@ def check(root: Path) -> list[str]:
     )
     problems += _require(
         "workflow-exception",
-        texts["workflows.md"],
+        intake_workflow,
         (("decision 84's assembly",), ("persistent",), ("intake batch",)),
     )
     problems += _require(
         "scenario-exception",
         texts["scenarios.md"],
         (("assembling task is the ruled exception",), ("resolved `pm` step owner",)),
+    )
+    problems += _require(
+        "wm-13-atomic-entry",
+        creation_row_map["WM-13"],
+        (("atomically",), ("`addressed_by`",), ("at creation",)),
     )
     problems += _require(
         "wm-14a",
