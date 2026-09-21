@@ -289,3 +289,92 @@ async def test_named_non_bot_reaches_confirm_gates_clear(monkeypatch):
         "a non-bot login named in APIS_COMMAND_LOGINS must reach "
         f"_handle_confirm_gates_clear; reached {reached}"
     )
+
+
+@pytest.mark.asyncio
+async def test_command_login_cannot_merge_via_the_approve_comment(monkeypatch):
+    """qa's blocking finding on PR #1131, made into a test.
+
+    `/approve` is a comment command, so before this fix it passed the SAME
+    widened `_COMMAND_LOGINS` guard as the mechanics commands — and
+    `_handle_approve` -> `_approve_and_maybe_merge` has no operator check of
+    its own. A login admitted for pipeline mechanics could therefore trigger a
+    real merge.
+
+    Widening the `pr_review` path would have been the obvious hole; routing
+    `/approve` through a widened COMMAND guard is the same hole by a different
+    door. This test watches that door.
+    """
+    sd = _reload(monkeypatch, APIS_COMMAND_LOGINS="castor-agent")
+    assert "castor-agent" in sd._COMMAND_LOGINS  # admitted for MECHANICS
+    assert not sd._is_bot_author("castor-agent")  # so Guard 0 is not the reason
+
+    dispatcher = sd.SwarmDispatcher.__new__(sd.SwarmDispatcher)
+    reached: list[str] = []
+
+    async def _spy(*a, **k):
+        reached.append("approve_and_maybe_merge")
+
+    monkeypatch.setattr(
+        sd.SwarmDispatcher, "_approve_and_maybe_merge", _spy, raising=True
+    )
+
+    trigger = sd.SwarmTrigger(
+        kind="issue_comment",
+        repository="markmhendrickson/ateles",
+        number=1,
+        title="t",
+        body="",
+        author="castor-agent",
+        html_url="https://github.com/markmhendrickson/ateles/pull/1",
+        delivery_id="test-delivery",
+        action="created",
+        comment_id=1,
+        comment_author="castor-agent",
+        comment_body="/approve",
+    )
+
+    await dispatcher._handle_issue_comment(trigger)
+
+    assert reached == [], (
+        "a login admitted for MECHANICS commands must not reach a merge via "
+        f"/approve; reached {reached}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reject_and_hold_are_also_operator_only(monkeypatch):
+    """The siblings of /approve, asserted so the split is not half-applied.
+
+    qa flagged /reject and /hold reachability as non-blocking. They resolve a
+    blocking checkpoint, so they carry the same verdict authority as /approve
+    even though they do not merge.
+    """
+    sd = _reload(monkeypatch, APIS_COMMAND_LOGINS="castor-agent")
+    dispatcher = sd.SwarmDispatcher.__new__(sd.SwarmDispatcher)
+
+    for cmd, attr in (("/reject", "_handle_reject"), ("/hold", "_handle_hold")):
+        if not hasattr(sd.SwarmDispatcher, attr):
+            continue
+        reached: list[str] = []
+
+        async def _spy(*a, _n=attr, **k):
+            reached.append(_n)
+
+        monkeypatch.setattr(sd.SwarmDispatcher, attr, _spy, raising=True)
+        trigger = sd.SwarmTrigger(
+            kind="issue_comment",
+            repository="markmhendrickson/ateles",
+            number=1,
+            title="t",
+            body="",
+            author="castor-agent",
+            html_url="https://github.com/markmhendrickson/ateles/pull/1",
+            delivery_id="d",
+            action="created",
+            comment_id=1,
+            comment_author="castor-agent",
+            comment_body=cmd,
+        )
+        await dispatcher._handle_issue_comment(trigger)
+        assert reached == [], f"{cmd} must stay operator-only; reached {reached}"

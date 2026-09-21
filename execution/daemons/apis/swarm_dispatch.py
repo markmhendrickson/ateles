@@ -5447,7 +5447,23 @@ class SwarmDispatcher:
             return
 
         # Guard 2: operator-only guardrail (applies to all commands).
-        if comment_author.lower() not in _COMMAND_LOGINS:
+        # Two classes of comment command, two guards.
+        #
+        # MECHANICS commands (`/swarm-run`, `/confirm-gates-clear`) re-drive or
+        # unblock the pipeline and are what CLAUDE.md's 2026-09-11 standing
+        # authorization covers.  They consult `_COMMAND_LOGINS`.
+        #
+        # VERDICT commands (`/approve`, `/reject`, `/hold`) resolve a blocking
+        # checkpoint, and `/approve` reaches `_approve_and_maybe_merge` — a real
+        # merge — with no operator check of its own.  They stay on
+        # `_OPERATOR_LOGIN` alone.  Widening the `pr_review` path would have been
+        # the obvious hole; routing `/approve` through a widened COMMAND guard is
+        # the same hole by a different door, and is the one qa caught on #1131.
+        _is_verdict_cmd = has_approve or has_reject or has_hold
+        _permitted = (
+            {_OPERATOR_LOGIN.lower()} if _is_verdict_cmd else _COMMAND_LOGINS
+        )
+        if comment_author.lower() not in _permitted:
             # Pick whichever command was detected for the log message.
             cmd = (
                 _CONFIRM_GATES_CLEAR_CMD if has_gates_clear
