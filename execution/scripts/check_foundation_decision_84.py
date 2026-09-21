@@ -111,16 +111,6 @@ def _section(text: str, start: str, end: str) -> str:
     return text[begin : stop if stop >= 0 else len(text)]
 
 
-def _paragraph_containing(text: str, marker: str) -> str:
-    normalized_marker = _normalize(marker)
-    matches = [
-        paragraph
-        for paragraph in re.split(r"\n\s*\n", text)
-        if normalized_marker in _normalize(paragraph)
-    ]
-    return matches[0] if len(matches) == 1 else ""
-
-
 def _require(label: str, text: str, groups: tuple[tuple[str, ...], ...]) -> list[str]:
     normalized = _normalize(text)
     missing = [
@@ -137,13 +127,13 @@ def _forbid(label: str, text: str, tokens: tuple[str, ...]) -> list[str]:
     return [f"decision-84-{label} — forbidden " + ", ".join(present)] if present else []
 
 
-def _require_exact_paragraph(
-    label: str, text: str, marker: str, expected: str
+def _require_exact_block(
+    label: str, text: str, start: str, end: str, expected: str
 ) -> list[str]:
-    paragraph = _paragraph_containing(text, marker)
-    if _normalize(paragraph) == _normalize(expected):
+    block = _section(text, start, end)
+    if _normalize(block) == _normalize(expected):
         return []
-    return [f"decision-84-{label} — canonical semantic paragraph changed"]
+    return [f"decision-84-{label} — canonical semantic block changed"]
 
 
 def _require_exact_cell(label: str, cell: str, expected: str) -> list[str]:
@@ -203,11 +193,6 @@ def check(root: Path) -> list[str]:
         texts["work_model.md"],
         "### How a batch is formed, and what chooses its workflow",
         "### A batch may hold on a condition discovered mid-flight",
-    )
-    batch_opening_clause = _section(
-        batch_formation,
-        "The consequence worth naming has two forms, not one.",
-        "**A successor batch's tasks",
     )
     source_index = _section(
         texts["work_model.md"],
@@ -330,22 +315,25 @@ def check(root: Path) -> list[str]:
             "task enters intake; batch record opens",
         ),
     )
-    problems += _require_exact_paragraph(
+    problems += _require_exact_block(
         "intake-workflow-atomic-entry",
         intake_workflow,
-        INTAKE_ATOMIC_ENTRY_CLAUSE,
+        "**Entry condition:**",
+        "**Steps**",
         INTAKE_ENTRY_PARAGRAPH,
     )
-    problems += _require_exact_paragraph(
+    problems += _require_exact_block(
         "aggregate-parent-model",
         parent_model,
-        AGGREGATE_PARENT_MODEL_CLAUSE,
+        "Children `PART_OF` an aggregate parent",
+        "**A task's one `PART_OF` edge",
         AGGREGATE_PARENT_MODEL_PARAGRAPH,
     )
-    problems += _require_exact_paragraph(
+    problems += _require_exact_block(
         "aggregate-parent-scenario",
         scenario_f,
-        AGGREGATE_PARENT_SCENARIO_CLAUSE,
+        "A parent task is created as the grouping",
+        "```mermaid",
         AGGREGATE_PARENT_SCENARIO_PARAGRAPH,
     )
     problems += _require_exact_cell(
@@ -353,10 +341,11 @@ def check(root: Path) -> list[str]:
         _table_cell(wm35, 1),
         WM35_REQUIREMENT,
     )
-    problems += _require_exact_paragraph(
+    problems += _require_exact_block(
         "batch-opening-model",
-        batch_opening_clause,
-        BATCH_OPENING_CLAUSE,
+        batch_formation,
+        "The consequence worth naming has two forms, not one.",
+        "**A successor batch's tasks",
         BATCH_OPENING_PARAGRAPH,
     )
     problems += _require(

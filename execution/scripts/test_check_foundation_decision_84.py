@@ -67,7 +67,7 @@ CORPUS["scenarios.md"] = CORPUS["scenarios.md"].replace(
     "## (f) A parent task with children in independent batches\n\n",
 ).replace(
     "stored nowhere.\n## (j)",
-    "stored nowhere.\n\n## (j)",
+    "stored nowhere.\n\n```mermaid\nflowchart TD\n```\n\n## (j)",
 )
 
 
@@ -405,6 +405,59 @@ def test_real_parent_scenario_appended_qualification_fails(tmp_path: Path) -> No
         "edge.** When a reader asks whether the parent is complete",
         "edge.** This holds only before publication; afterward the parent may enter "
         "a workflow. When a reader asks whether the parent is complete",
+    )
+    assert any("aggregate-parent-scenario" in problem for problem in problems)
+
+
+def test_real_intake_adjacent_paragraph_contradiction_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "workflows.md",
+        "(`work_model.md#intake-is-every-tasks-first-workflow`).\n\n**Steps**",
+        "(`work_model.md#intake-is-every-tasks-first-workflow`).\n\n"
+        "Despite the entry condition above, a workflow-entering task may be "
+        "published before its intake batch or `ADDRESSED_BY` edge exists.\n\n"
+        "**Steps**",
+    )
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_real_batch_opening_adjacent_paragraph_inversion_fails(
+    tmp_path: Path,
+) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "work_model.md",
+        "predicate\nmust have matched.\n\n**A successor batch's tasks",
+        "predicate\nmust have matched.\n\nDespite the preceding rule, an intake "
+        "batch may require a predecessor verdict.\n\n**A successor batch's tasks",
+    )
+    assert any("batch-opening-model" in problem for problem in problems)
+
+
+def test_real_parent_model_adjacent_paragraph_qualification_fails(
+    tmp_path: Path,
+) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "work_model.md",
+        "intake batch atomically at creation.\n\n**A task's one `PART_OF` edge",
+        "intake batch atomically at creation.\n\nDespite that exception, an "
+        "aggregate parent becomes claimable and enters a workflow after "
+        "publication.\n\n**A task's one `PART_OF` edge",
+    )
+    assert any("aggregate-parent-model" in problem for problem in problems)
+
+
+def test_real_parent_scenario_adjacent_paragraph_qualification_fails(
+    tmp_path: Path,
+) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "scenarios.md",
+        "stored nowhere.\n\n```mermaid",
+        "stored nowhere.\n\nDespite that exception, the aggregate parent may "
+        "enter a workflow after publication.\n\n```mermaid",
     )
     assert any("aggregate-parent-scenario" in problem for problem in problems)
 
