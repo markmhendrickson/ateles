@@ -1,5 +1,6 @@
 """Regression tests for the operator rulings embedded in the rule inventory."""
 
+import json
 import unittest
 
 import render_rule_inventory as inventory
@@ -52,6 +53,115 @@ class RuleInventoryRulingsTest(unittest.TestCase):
             inventory._portable(path),
             "~/.claude/projects/<project>/memory/rule.md",
         )
+
+    def test_statement_value_is_never_emitted(self) -> None:
+        statement = inventory.Statement(
+            store="private",
+            location="private",
+            locator="private",
+            text="Always deploy Client Codename to client-app-production",
+        )
+        self.assertEqual(statement.safe_text, inventory.WITHHELD)
+
+    def test_public_location_uses_store_kind_not_private_path_components(self) -> None:
+        cases = {
+            "Claude Code project memory": "~/.claude/projects/<project>/memory/<file>",
+            "Skills (user root)": "~/.claude/skills/<skill>/SKILL.md",
+            "agent_policy entities": "<entity>",
+            "foundation reference repo": "~/repos/<reference>/<file>",
+        }
+        source = "/Users/Operator/Client-Codename/person-daemon/private.md"
+        for store, expected in cases.items():
+            with self.subTest(store=store):
+                self.assertEqual(
+                    inventory.public_statement_location(store, source), expected
+                )
+
+    def test_render_redacts_every_dynamic_metadata_surface(self) -> None:
+        sensitive = {
+            "OperatorIdentity",
+            "ClientCodename",
+            "client-app-production",
+            "person-daemon",
+            "/Users/private",
+            "private.example.internal",
+        }
+        statement = inventory.Statement(
+            store="OperatorIdentity/private store",
+            location="/Users/private/ClientCodename/person-daemon.md",
+            locator="client-app-production",
+            text="Always use private.example.internal for ClientCodename",
+            kind="never_stash",
+            last_modified="OperatorIdentity",
+        )
+        cluster = inventory.Cluster(
+            kind="never_stash",
+            label="ClientCodename person-daemon",
+            statements=[statement],
+        )
+        store = inventory.Store(
+            name="OperatorIdentity/private store",
+            location="/Users/private/ClientCodename",
+            populated=1,
+            statements=1,
+            last_modified="ClientCodename",
+            reachable="client-app-production",
+            reach_note="person-daemon at private.example.internal",
+            note="ClientCodename",
+            read_ok=False,
+            read_error="/Users/private failed for OperatorIdentity",
+        )
+        rendered = inventory.render([cluster], [store], [], [statement])
+        for value in sensitive:
+            with self.subTest(value=value):
+                self.assertNotIn(value, rendered)
+
+    def test_public_store_label_drops_repository_owner_namespace(self) -> None:
+        self.assertEqual(
+            inventory.public_store_name("OperatorIdentity/foundation repo"),
+            "foundation reference repo",
+        )
+
+    def test_json_redacts_every_dynamic_metadata_surface(self) -> None:
+        sensitive = {
+            "OperatorIdentity",
+            "ClientCodename",
+            "client-app-production",
+            "person-daemon",
+            "/Users/private",
+            "private.example.internal",
+        }
+        statement = inventory.Statement(
+            store="OperatorIdentity/private store",
+            location="/Users/private/ClientCodename/person-daemon.md",
+            locator="client-app-production",
+            text="Always use private.example.internal for ClientCodename",
+            kind="never_stash",
+            last_modified="OperatorIdentity",
+        )
+        cluster = inventory.Cluster(
+            kind="never_stash",
+            label="ClientCodename person-daemon",
+            statements=[statement],
+        )
+        store = inventory.Store(
+            name="OperatorIdentity/private store",
+            location="/Users/private/ClientCodename",
+            populated=1,
+            statements=1,
+            last_modified="ClientCodename",
+            reachable="client-app-production",
+            reach_note="person-daemon at private.example.internal",
+            note="ClientCodename",
+            read_ok=False,
+            read_error="/Users/private failed for OperatorIdentity",
+        )
+        rendered = json.dumps(
+            inventory.public_payload([cluster], [store], [], [statement])
+        )
+        for value in sensitive:
+            with self.subTest(value=value):
+                self.assertNotIn(value, rendered)
 
 
 if __name__ == "__main__":

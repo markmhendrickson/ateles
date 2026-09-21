@@ -49,15 +49,16 @@ The four properties the inventory has to have
    both directions: over-splitting inflates the rule count and understates the
    duplication the migration exists to collapse, and is equally wrong.
 
-PII posture -- read this before changing the emitter
-----------------------------------------------------
+Public-data posture -- read this before changing the emitter
+------------------------------------------------------------
 Both repos are PUBLIC and at least five rule entities carry operator specifics
 (a live BTC address, a payee first name, a vendor, an instructor, a gym, EUR
 amounts). The inventory therefore records a rule's LOCATION and KIND and NEVER
-its operator-specific VALUE. `screen_for_pii()` runs over every string before it
-is emitted and replaces a statement that trips it with "operator-specific, value
-withheld"; `--check` re-runs the screen so a value that lands later still fails
-the gate. A PII-shaped literal in a committed inventory is the exact failure
+its operator-specific VALUE. A pattern screen cannot recognize arbitrary proper
+nouns, client identifiers, daemon names, or path components. The emitter
+therefore never copies dynamic rule values or metadata into either public
+output: it projects them to a closed vocabulary of store kinds and generic
+locations. A PII-shaped literal in a committed inventory is the exact failure
 this workstream already had to rewrite git history to undo (ateles#1099).
 
 Reachability is measured, not assumed
@@ -72,7 +73,7 @@ Read-only. Neotoma PROD, never the dev instance. Writes one repo file.
 Usage:
     python3 execution/scripts/render_rule_inventory.py            # write
     python3 execution/scripts/render_rule_inventory.py --check    # verify
-    python3 execution/scripts/render_rule_inventory.py --json OUT # raw dump
+    python3 execution/scripts/render_rule_inventory.py --json OUT # public dump
 """
 
 from __future__ import annotations
@@ -245,7 +246,10 @@ class Statement:
 
     @property
     def safe_text(self) -> str:
-        return safe_statement(self.text)
+        # The public inventory measures kind and location, not value. Pattern
+        # screens cannot recognize arbitrary proper nouns, so even text that
+        # passes screen_for_pii() must not be emitted.
+        return WITHHELD
 
 
 @dataclass
@@ -973,6 +977,200 @@ def _portable(path: str) -> str:
     )
 
 
+# Public rendering is a projection onto this closed vocabulary. It is not a
+# denylist of identifiers seen on one machine: an unknown store, path, label,
+# locator, date, or reachability value is withheld by default. This is the
+# enforcement boundary that a proper-noun screen cannot provide.
+PUBLIC_STORE_NAMES = frozenset({
+    "ateles/CLAUDE.md",
+    "neotoma/AGENTS.md",
+    "ateles/CLAUDE.md checkout copies",
+    "neotoma/AGENTS.md checkout copies",
+    "Claude Code user rules",
+    "Claude Code project memory",
+    "Codex",
+    "Cursor",
+    "OpenClaw",
+    "Skills (ateles repo)",
+    "Skills (user root)",
+    "foundation reference repo",
+    "Claude Code hooks (ateles)",
+    *(f"{entity_type} entities" for entity_type in RULE_ENTITY_TYPES),
+})
+
+PUBLIC_STORE_LOCATIONS = {
+    "ateles/CLAUDE.md": "CLAUDE.md",
+    "neotoma/AGENTS.md": "~/repos/neotoma/AGENTS.md",
+    "ateles/CLAUDE.md checkout copies": "~/repos/<checkout>",
+    "neotoma/AGENTS.md checkout copies": "~/repos/<checkout>",
+    "Claude Code user rules": "~/.claude/CLAUDE.md",
+    "Claude Code project memory": "~/.claude/projects/<project>/memory",
+    "Codex": "~/.codex/AGENTS.md",
+    "Cursor": "~/.cursor/rules",
+    "OpenClaw": "~/.openclaw/agents/<agent>",
+    "Skills (ateles repo)": ".claude/skills/<skill>",
+    "Skills (user root)": "~/.claude/skills/<skill>",
+    "foundation reference repo": "~/repos/<reference>",
+    "Claude Code hooks (ateles)": ".claude/hooks",
+    **{f"{entity_type} entities": "<entity>"
+       for entity_type in RULE_ENTITY_TYPES},
+}
+
+PUBLIC_STATEMENT_LOCATIONS = {
+    "ateles/CLAUDE.md": "CLAUDE.md",
+    "neotoma/AGENTS.md": "~/repos/neotoma/AGENTS.md",
+    "ateles/CLAUDE.md checkout copies": "~/repos/<checkout>/CLAUDE.md",
+    "neotoma/AGENTS.md checkout copies": "~/repos/<checkout>/AGENTS.md",
+    "Claude Code user rules": "~/.claude/CLAUDE.md",
+    "Claude Code project memory": "~/.claude/projects/<project>/memory/<file>",
+    "Codex": "~/.codex/AGENTS.md",
+    "Cursor": "~/.cursor/rules/<file>",
+    "OpenClaw": "~/.openclaw/agents/<agent>/<instruction-file>",
+    "Skills (ateles repo)": ".claude/skills/<skill>/SKILL.md",
+    "Skills (user root)": "~/.claude/skills/<skill>/SKILL.md",
+    "foundation reference repo": "~/repos/<reference>/<file>",
+    "Claude Code hooks (ateles)": ".claude/hooks/<hook>.py",
+    **{f"{entity_type} entities": "<entity>"
+       for entity_type in RULE_ENTITY_TYPES},
+}
+
+PUBLIC_REACHABILITY = frozenset({
+    "yes",
+    "no",
+    "unknown",
+    "n/a",
+    "divergent",
+    "stale",
+    "per-project",
+    "cited, unread",
+    "sidecar only",
+    "on retrieval",
+})
+
+
+def public_store_name(name: str) -> str:
+    """Return a public store-kind label, failing closed for unknown input."""
+    if name in PUBLIC_STORE_NAMES:
+        return name
+    # A repository owner is runtime/operator metadata. The useful information
+    # is that this is the reference repository, not whose namespace it uses.
+    if name.endswith("/foundation repo"):
+        return "foundation reference repo"
+    return "private rule store"
+
+
+def public_store_location(store_name: str, _raw_location: str) -> str:
+    """Return a generic store location derived only from its public kind."""
+    public_name = public_store_name(store_name)
+    return PUBLIC_STORE_LOCATIONS.get(public_name, "<private-location>")
+
+
+def public_statement_location(store_name: str, _raw_location: str) -> str:
+    """Return a generic statement location derived only from store kind."""
+    public_name = public_store_name(store_name)
+    return PUBLIC_STATEMENT_LOCATIONS.get(public_name, "<private-location>")
+
+
+def public_locator(locator: str) -> str:
+    """Keep only line numbers and the fixed entity field vocabulary."""
+    if re.fullmatch(r"L\d+", locator) or locator == "docstring":
+        return locator
+    if locator in TEXT_FIELDS:
+        return locator
+    if locator.startswith("raw_fragments.") and locator.removeprefix(
+        "raw_fragments."
+    ) in TEXT_FIELDS:
+        return locator
+    return "<field>"
+
+
+def public_last_modified(value: str) -> str:
+    """Only an ISO calendar date is useful public inventory metadata."""
+    return value if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value or "") else "—"
+
+
+def public_reachability(value: str) -> str:
+    """Project reachability onto the generator-owned public vocabulary."""
+    return value if value in PUBLIC_REACHABILITY else "unknown"
+
+
+def public_kind(kind: str) -> str:
+    """Kinds are safe only when declared by this generator."""
+    return kind if kind in KIND_LABELS else "unclassified"
+
+
+def public_cluster_label(kind: str, _raw_label: str) -> str:
+    """Use the generator-owned label, never a caller-provided label."""
+    return KIND_LABELS.get(kind, "unclassified rule kind")
+
+
+def public_cluster_stores(cluster: Cluster) -> list[str]:
+    """Return de-duplicated public store-kind labels for a cluster."""
+    return sorted({public_store_name(statement.store)
+                   for statement in cluster.statements})
+
+
+def public_rule_id(cluster: Cluster) -> str:
+    """Expose a stable identifier only for a declared rule kind."""
+    return cluster.rule_id if cluster.kind in KIND_LABELS else "R-unclassified"
+
+
+def public_payload(
+    clusters: list[Cluster],
+    stores: list[Store],
+    unclassified: list[Statement],
+    statements: list[Statement],
+) -> dict:
+    """Return the same fail-closed public projection used by Markdown."""
+    return {
+        "clusters": [
+            {
+                "id": public_rule_id(cluster),
+                "kind": public_kind(cluster.kind),
+                "label": public_cluster_label(cluster.kind, cluster.label),
+                "diverges": cluster.diverges,
+                "distinct_openings": cluster.distinct_openings,
+                "needs_split": cluster.needs_split,
+                "target_home": TARGET_HOME.get(cluster.kind),
+                "statements": [
+                    {
+                        "store": public_store_name(statement.store),
+                        "location": public_statement_location(
+                            statement.store, statement.location
+                        ),
+                        "locator": public_locator(statement.locator),
+                        "safe_text": statement.safe_text,
+                    }
+                    for statement in cluster.statements
+                ],
+            }
+            for cluster in clusters
+        ],
+        "stores": [
+            {
+                "name": public_store_name(store.name),
+                "location": public_store_location(store.name, store.location),
+                "populated": store.populated if store.read_ok else None,
+                "statements": store.statements if store.read_ok else None,
+                "last_modified": (
+                    public_last_modified(store.last_modified)
+                    if store.read_ok
+                    else None
+                ),
+                "reachable": (
+                    public_reachability(store.reachable)
+                    if store.read_ok
+                    else "unread"
+                ),
+                "read_ok": store.read_ok,
+            }
+            for store in stores
+        ],
+        "unclassified_count": len(unclassified),
+        "totals": {"rules": len(clusters), "statements": len(statements)},
+    }
+
+
 def _mtime(p: Path) -> str:
     try:
         return date.fromtimestamp(p.stat().st_mtime).isoformat()
@@ -1355,7 +1553,7 @@ def read_file_stores(home: Path) -> tuple[list[Statement], list[Store]]:
     if fr.is_dir():
         files = sorted(p for p in fr.rglob("*.md")
                        if ".git" not in p.parts and "tmp" not in p.parts)
-        st = add_store("markmhendrickson/foundation repo", str(fr), files,
+        st = add_store("foundation reference repo", str(fr), files,
                        reachable="cited, unread",
                        reach_note=("five lens skills cite five different files as "
                                    "canonical; no evidence any lens loads one at "
@@ -1419,7 +1617,7 @@ def build_clusters(statements: list[Statement]) -> tuple[list[Cluster], list[Sta
 def render(clusters: list[Cluster], stores: list[Store],
            unclassified: list[Statement], statements: list[Statement]) -> str:
     total_scanned = len(statements)
-    withheld_n = sum(1 for s in statements if s.text == WITHHELD_MARKER)
+    withheld_n = total_scanned
     clustered = sum(len(c.statements) for c in clusters)
     total_rules = len(clusters)
     dup = (clustered / total_rules) if total_rules else 0
@@ -1454,12 +1652,13 @@ def render(clusters: list[Cluster], stores: list[Store],
       "when they cite five different ones, one consumer each. A hand-count "
       "cannot be diffed and cannot detect its own drift.")
     A("")
-    A("**This file records a rule's LOCATION and KIND, never its "
-      "operator-specific VALUE.** Both repos are public and several rule "
-      "entities carry operator specifics; every statement passes a PII screen "
-      f"before emission and a statement that trips it reads *{WITHHELD}*. "
-      "Re-running with `--check` re-screens, so a value that lands later fails "
-      "the gate rather than shipping.")
+    A("**This file records a rule's LOCATION and KIND, never its VALUE.** "
+      "Both repos are public, so every statement value is replaced with "
+      f"*{WITHHELD}*. Store names, paths, locators, dates, labels, and "
+      "reachability are projected onto a generator-owned public vocabulary; "
+      "unknown metadata fails closed to a generic label. This structural "
+      "projection is the gate because a pattern screen cannot recognize every "
+      "proper noun or private identifier.")
     A("")
     A("**It is perishable.** Re-run it; never edit it to keep up. A figure here "
       "without an instrument is a defect in the generator.")
@@ -1476,7 +1675,7 @@ def render(clusters: list[Cluster], stores: list[Store],
     A(f"| Clusters whose statements DIVERGE on binding force | **{len(diverging)}** |")
     A(f"| Normative statements scanned in total | {total_scanned} |")
     A(f"| …of those, matching no known rule kind | {len(unclassified)} |")
-    A(f"| …of those, withheld as operator-specific | {withheld_n} |")
+    A(f"| Statement values withheld from public output | {withheld_n} |")
     A(f"| Stores inventoried | {len(stores)} |")
     A("")
     A("The duplication factor is the point. `migration.md` governs the target "
@@ -1545,19 +1744,14 @@ def render(clusters: list[Cluster], stores: list[Store],
     A("| Store | Location | Populated | Statements | Last modified | Reachable |")
     A("|---|---|---|---|---|---|")
     for st in sorted(stores, key=lambda s: -s.statements):
-        loc = _portable(st.location)
+        name = public_store_name(st.name)
+        loc = public_store_location(st.name, st.location)
         if not st.read_ok:
-            A(f"| {st.name} | `{loc}` | — | — | — | **UNREAD** |")
+            A(f"| {name} | `{loc}` | — | — | — | **UNREAD** |")
             continue
-        A(f"| {st.name} | `{loc}` | {st.populated} | {st.statements} | "
-          f"{st.last_modified or '—'} | {st.reachable} |")
-    A("")
-    for st in stores:
-        if st.note or st.reach_note or not st.read_ok:
-            bits = [b for b in (st.note, st.reach_note) if b]
-            if not st.read_ok:
-                bits.append(f"**could not be read**: {st.read_error}")
-            A(f"- **{st.name}** — {'; '.join(bits)}.")
+        A(f"| {name} | `{loc}` | {st.populated} | {st.statements} | "
+          f"{public_last_modified(st.last_modified)} | "
+          f"{public_reachability(st.reachable)} |")
     A("")
 
     A("## NEEDS-SPLIT: clusters that are still topical buckets")
@@ -1603,8 +1797,11 @@ def render(clusters: list[Cluster], stores: list[Store],
         A("|---|---|---|---|---|")
         for c in sorted(needs_split, key=lambda c: -len(c.statements)):
             n = len(c.statements)
-            A(f"| `{c.rule_id}` {c.label} | {n} | {c.distinct_openings} | "
-              f"{c.distinct_openings / n:.2f} | {len(c.stores)} |")
+            A(f"| `{public_rule_id(c)}` "
+              f"{public_cluster_label(c.kind, c.label)} | "
+              f"{n} | {c.distinct_openings} | "
+              f"{c.distinct_openings / n:.2f} | "
+              f"{len(public_cluster_stores(c))} |")
         A("")
     else:
         A("No cluster trips the probe on this run. That is not proof the "
@@ -1640,8 +1837,11 @@ def render(clusters: list[Cluster], stores: list[Store],
             # `c.shapes` excludes "unmarked" -- a statement that mentions the
             # rule without saying how strongly it binds is not evidence of
             # disagreement, and listing it here would suggest it was.
-            A(f"| `{c.rule_id}` {c.label} | {len(c.statements)} | "
-              f"{', '.join(sorted(c.shapes))} | {', '.join(c.stores)} |")
+            A(f"| `{public_rule_id(c)}` "
+              f"{public_cluster_label(c.kind, c.label)} | "
+              f"{len(c.statements)} | "
+              f"{', '.join(sorted(c.shapes))} | "
+              f"{', '.join(public_cluster_stores(c))} |")
         A("")
 
     A("## The clusters")
@@ -1664,14 +1864,17 @@ def render(clusters: list[Cluster], stores: list[Store],
         home = TARGET_HOME.get(c.kind, "**UNCLASSIFIED**")
         verdict = "**NEEDS-SPLIT**" if c.needs_split else (
             "DIVERGE" if c.diverges else "agree")
-        A(f"| `{c.rule_id}` | {c.label} | {len(c.statements)} | "
-          f"{c.distinct_openings} | {len(c.stores)} | {verdict} | {home} |")
+        A(f"| `{public_rule_id(c)}` | "
+          f"{public_cluster_label(c.kind, c.label)} | "
+          f"{len(c.statements)} | {c.distinct_openings} | "
+          f"{len(public_cluster_stores(c))} | {verdict} | {home} |")
     A("")
 
     A("### Where each rule is stated")
     A("")
     for c in clusters:
-        A(f"#### `{c.rule_id}` — {c.label}")
+        A(f"#### `{public_rule_id(c)}` — "
+          f"{public_cluster_label(c.kind, c.label)}")
         A("")
         A(f"Target home: **{TARGET_HOME.get(c.kind, 'UNCLASSIFIED')}** · "
           f"{len(c.statements)} statements, {c.distinct_openings} distinct · "
@@ -1680,8 +1883,9 @@ def render(clusters: list[Cluster], stores: list[Store],
         A("| Store | Location | At | Statement |")
         A("|---|---|---|---|")
         for s in sorted(c.statements, key=lambda x: (x.store, x.location)):
-            A(f"| {s.store} | `{_portable(s.location)}` | {s.locator} | "
-              f"{s.safe_text} |")
+            A(f"| {public_store_name(s.store)} | "
+              f"`{public_statement_location(s.store, s.location)}` | "
+              f"{public_locator(s.locator)} | {s.safe_text} |")
         A("")
 
     unmapped = [c for c in clusters if c.kind not in TARGET_HOME]
@@ -1694,7 +1898,8 @@ def render(clusters: list[Cluster], stores: list[Store],
           "migration exists to prevent.")
         A("")
         for c in unmapped:
-            A(f"- `{c.rule_id}` — {c.label}")
+            A(f"- `{public_rule_id(c)}` — "
+              f"{public_cluster_label(c.kind, c.label)}")
     else:
         A("Every rule kind maps to a home in the authority table.")
     A("")
@@ -1798,7 +2003,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true",
                     help="verify the committed inventory matches the system")
-    ap.add_argument("--json", metavar="PATH", help="also dump the raw extraction")
+    ap.add_argument(
+        "--json",
+        metavar="PATH",
+        help="also dump the public-safe extraction metadata",
+    )
     ap.add_argument("--cache", metavar="DIR",
                     help="cache entity reads here (re-run offline)")
     args = ap.parse_args()
@@ -1813,40 +2022,26 @@ def main() -> int:
     stores = ent_stores + file_stores
     clusters, unclassified = build_clusters(statements)
 
-    # The gate: no operator value reaches the committed file.
-    leaks = []
-    for c in clusters:
-        for s in c.statements:
-            if s.safe_text != WITHHELD:
-                ok, why = screen_for_pii(s.safe_text)
-                if not ok:
-                    leaks.append((s.location, why))
-    if leaks:
-        print(f"PII SCREEN FAILED on {len(leaks)} emitted statement(s):",
-              file=sys.stderr)
-        for loc, why in leaks[:10]:
-            print(f"  {loc}: {', '.join(why)}", file=sys.stderr)
-        return 2
-
     out = render(clusters, stores, unclassified, statements)
 
+    # Defense in depth for structured values. Proper nouns are kept out by the
+    # closed public projection above; this catches a future literal address,
+    # amount, email, or similar value introduced in static emitter prose.
+    clean, reasons = screen_for_pii(out)
+    if not clean:
+        print(
+            "PUBLIC OUTPUT SCREEN FAILED: " + ", ".join(reasons),
+            file=sys.stderr,
+        )
+        return 2
+
     if args.json:
-        Path(args.json).write_text(json.dumps({
-            "clusters": [
-                {"id": c.rule_id, "kind": c.kind, "label": c.label,
-                 "diverges": c.diverges,
-                 "distinct_openings": c.distinct_openings,
-                 "needs_split": c.needs_split,
-                 "target_home": TARGET_HOME.get(c.kind),
-                 "statements": [
-                     {"store": s.store, "location": s.location,
-                      "locator": s.locator, "safe_text": s.safe_text}
-                     for s in c.statements]}
-                for c in clusters],
-            "stores": [vars(s) for s in stores],
-            "unclassified_count": len(unclassified),
-            "totals": {"rules": len(clusters), "statements": len(statements)},
-        }, indent=2))
+        Path(args.json).write_text(
+            json.dumps(
+                public_payload(clusters, stores, unclassified, statements),
+                indent=2,
+            )
+        )
 
     if args.check:
         if not OUTPUT.exists():

@@ -9,7 +9,7 @@ Not keyed, not in the kernel, and never inlined into a review prompt: this docum
 
 Stage 0 of the rule migration, in the sense `migration.md` already gives the word: the inventory a migration starts from. It is generated rather than authored because the prose version this replaces was wrong twice, both times caught only by re-measuring — Cursor reported as 5 files when it holds 31, and five lenses reported as citing three foundation files when they cite five different ones, one consumer each. A hand-count cannot be diffed and cannot detect its own drift.
 
-**This file records a rule's LOCATION and KIND, never its operator-specific VALUE.** Both repos are public and several rule entities carry operator specifics; every statement passes a PII screen before emission and a statement that trips it reads *operator-specific, value withheld*. Re-running with `--check` re-screens, so a value that lands later fails the gate rather than shipping.
+**This file records a rule's LOCATION and KIND, never its VALUE.** Both repos are public, so every statement value is replaced with *operator-specific, value withheld*. Store names, paths, locators, dates, labels, and reachability are projected onto a generator-owned public vocabulary; unknown metadata fails closed to a generic label. This structural projection is the gate because a pattern screen cannot recognize every proper noun or private identifier.
 
 **It is perishable.** Re-run it; never edit it to keep up. A figure here without an instrument is a defect in the generator.
 
@@ -24,7 +24,7 @@ Stage 0 of the rule migration, in the sense `migration.md` already gives the wor
 | Clusters whose statements DIVERGE on binding force | **15** |
 | Normative statements scanned in total | 4429 |
 | …of those, matching no known rule kind | 3962 |
-| …of those, withheld as operator-specific | 35 |
+| Statement values withheld from public output | 4429 |
 | Stores inventoried | 16 |
 
 The duplication factor is the point. `migration.md` governs the target shape — *standing rules go to `task_policy` by kind, never by value* — so one rule stated in fourteen places collapses to ONE entity with fourteen locations, not fourteen entities. The factor is how much collapsing there is to do; the divergence count is how much of it needs a ruling rather than a merge.
@@ -47,38 +47,22 @@ This revision applies the merge test — two statements are the same rule only i
 
 | Store | Location | Populated | Statements | Last modified | Reachable |
 |---|---|---|---|---|---|
-| Skills (ateles repo) | `.claude/skills` | 96 | 1377 | 2026-09-21 | yes |
-| markmhendrickson/foundation repo | `~/repos/foundation` | 62 | 1178 | 2026-01-27 | cited, unread |
-| Skills (user root) | `~/.claude/skills` | 37 | 839 | 2026-09-21 | yes |
-| Claude Code project memory | `~/.claude/projects` | 338 | 657 | 2026-09-21 | per-project |
+| Skills (ateles repo) | `.claude/skills/<skill>` | 96 | 1377 | 2026-09-21 | yes |
+| foundation reference repo | `~/repos/<reference>` | 62 | 1178 | 2026-01-27 | cited, unread |
+| Skills (user root) | `~/.claude/skills/<skill>` | 37 | 839 | 2026-09-21 | yes |
+| Claude Code project memory | `~/.claude/projects/<project>/memory` | 338 | 657 | 2026-09-21 | per-project |
 | ateles/CLAUDE.md | `CLAUDE.md` | 1 | 81 | 2026-09-21 | yes |
-| standing_rule entities | `Neotoma PROD` | 51 | 70 | 2026-09-18 | sidecar only |
+| standing_rule entities | `<entity>` | 51 | 70 | 2026-09-18 | sidecar only |
 | Codex | `~/.codex/AGENTS.md` | 1 | 67 | 2026-09-14 | yes |
-| agent_policy entities | `Neotoma PROD` | 25 | 51 | 2026-09-18 | no |
+| agent_policy entities | `<entity>` | 25 | 51 | 2026-09-18 | no |
 | Claude Code hooks (ateles) | `.claude/hooks` | 18 | 48 | 2026-09-21 | yes |
 | neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | 1 | 30 | 2026-09-13 | yes |
-| task_policy entities | `Neotoma PROD` | 20 | 22 | 2026-09-09 | on retrieval |
+| task_policy entities | `<entity>` | 20 | 22 | 2026-09-09 | on retrieval |
 | Claude Code user rules | `~/.claude/CLAUDE.md` | 1 | 7 | 2026-07-16 | yes |
 | Cursor | `~/.cursor/rules` | 31 | 2 | 2026-09-13 | stale |
-| ateles/CLAUDE.md checkout copies | `~/repos` | 217 | 0 | 2026-09-21 | divergent |
-| neotoma/AGENTS.md checkout copies | `~/repos` | 143 | 0 | 2026-09-21 | divergent |
-| OpenClaw | `~/.openclaw/agents` | 0 | 0 | — | n/a |
-
-- **standing_rule entities** — delivered to serverInfo._neotoma.standing_rules, a field agents do not read (ateles#1114).
-- **agent_policy entities** — agent_loader filters on agent_sub, empty in every row (ateles#1118) — every agent loads zero policies.
-- **task_policy entities** — read only when a skill or session retrieves it explicitly.
-- **ateles/CLAUDE.md** — re-injected from disk at every compaction.
-- **neotoma/AGENTS.md** — sibling repo, read-only.
-- **ateles/CLAUDE.md checkout copies** — 217 copies on disk in 26 distinct versions — each checkout binds its own; a session or daemon reads the copy in ITS checkout, not origin/main.
-- **neotoma/AGENTS.md checkout copies** — 143 copies on disk in 4 distinct versions — each checkout binds its own; a session or daemon reads the copy in ITS checkout, not origin/main.
-- **Claude Code project memory** — 338 files across 11 project dirs; MEMORY.md index loads; linked files load on demand.
-- **Codex** — largest single rule file on the machine.
-- **Cursor** — 31 entries: 2 live, 29 dated .backup. copies, 26 symlinks into the neotoma repo; a preference maintained by copy-on-edit, backups 29 deep.
-- **OpenClaw** — no operator-authored rule file; the agent root holds session state and a vendored Codex home (528 shipped SKILL.md files that are a dependency, not operator rules). Earlier inventories counted the directory itself as 1 rule.
-- **Skills (ateles repo)** — 66 of 96 contain rule language.
-- **Skills (user root)** — 23 of 37 contain rule language.
-- **markmhendrickson/foundation repo** — five lens skills cite five different files as canonical; no evidence any lens loads one at runtime.
-- **Claude Code hooks (ateles)** — rules stated as enforcement code, not prose; binds only where settings.json wires it.
+| ateles/CLAUDE.md checkout copies | `~/repos/<checkout>` | 218 | 0 | 2026-09-21 | divergent |
+| neotoma/AGENTS.md checkout copies | `~/repos/<checkout>` | 143 | 0 | 2026-09-21 | divergent |
+| OpenClaw | `~/.openclaw/agents/<agent>` | 0 | 0 | — | n/a |
 
 ## NEEDS-SPLIT: clusters that are still topical buckets
 
@@ -128,7 +112,7 @@ The highest-value output. Each row is one rule whose statements do not agree on 
 | `R-228b8c` Absent or malformed safety values take the restrictive branch | 16 | advisory, mandatory, prohibitive/binding | Claude Code hooks (ateles), Claude Code project memory, Codex, Skills (ateles repo), Skills (user root), ateles/CLAUDE.md, neotoma/AGENTS.md |
 | `R-ae9bca` Durable work goes to a dispatched agent, never a harness task chip | 14 | advisory, prohibitive/binding | Claude Code project memory, Codex, Skills (user root), ateles/CLAUDE.md |
 | `R-680852` Read a write back; a success code is not a landed write | 12 | advisory, prohibitive/binding | Claude Code project memory, Codex, Skills (user root), agent_policy entities, ateles/CLAUDE.md, neotoma/AGENTS.md, task_policy entities |
-| `R-9993c8` One worktree, one agent; never point two at the same tree | 7 | advisory, prohibitive/binding | Claude Code project memory, Codex, ateles/CLAUDE.md, markmhendrickson/foundation repo |
+| `R-9993c8` One worktree, one agent; never point two at the same tree | 7 | advisory, prohibitive/binding | Claude Code project memory, Codex, ateles/CLAUDE.md, foundation reference repo |
 | `R-fa2cbe` Never assert what the operator feels, thinks, or said without evidence | 6 | advisory, prohibitive/binding | Claude Code project memory, Skills (ateles repo) |
 | `R-0cc9d7` Give status updates unprompted, per workstream | 6 | advisory, prohibitive/binding | Claude Code project memory, Codex, Skills (user root), ateles/CLAUDE.md |
 | `R-713e5d` Store the full body, not a path or a summary standing in for it | 5 | advisory, mandatory | Claude Code project memory, Skills (ateles repo) |
@@ -204,58 +188,58 @@ Target home: **agent_policy** · 52 statements, 49 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_always_persist_turn_by_turn.md` | L27 | store-neotoma transcript sweep without asking — do not offer it as a choice. Related: |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_analysis_neotoma_not_repo.md` | L10 | Session analysis (competitive/architectural/market analyses, design explorations) should be stored in Neotoma as… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_analysis_neotoma_not_repo.md` | L14 | How to apply: Put the full analysis text in the entity fields (competitivesectiontext, relevancesectiontext, design… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_op_cache_on_retrieve.md` | L22 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_unknown_contact_enrichment.md` | L3 | description: "When a person isn't in Neotoma, always check Gmail and LinkedIn before creating a stub; store whatever… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/project_markmhendrickson_website_ops.md` | L13 | Publishing a post (proven 2026-06-11, commits <sha>/<sha>/<sha>): flip published in the md + posts.json manifest,… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/reference_neotoma_hosted_only_no_local_server.md` | L23 | How to apply: with the env exported, neotoma store --file <json> and neotoma entities list work. Direct curl to /store… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/MEMORY.md` | L2 | - Always store to Neotoma — no exceptions(feedbackneotomastore.md) — Never skip the Neotoma store protocol, even for… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_neotoma_store.md` | L2 | name: Always store to Neotoma — no exceptions |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_plan_file_location.md` | L14 | How to apply: When creating a plan in neotoma, store it as a Neotoma plan entity only. Do not also write a file to… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_plans_in_neotoma.md` | L3 | description: Engineering / implementation plans must be stored as Neotoma entities, not only as markdown files under… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_plans_in_neotoma.md` | L7 | Always create plans as Neotoma entities (e.g. plan entitytype), not only as markdown files under .cursor/plans/,… |
-| Skills (ateles repo) | `.claude/skills/ateles/SKILL.md` | L38 | Neotoma first: durable memory lives in Neotoma, not markdown. Before relying on local files, query Neotoma. When the… |
-| Skills (ateles repo) | `.claude/skills/cotinga/SKILL.md` | L45 | Swarm context : You read calendarevent and contact entities (often populated by the ingestion/email-triage agents),… |
-| Skills (ateles repo) | `.claude/skills/create-execution-plan/SKILL.md` | L15 | Create an execution plan via Parquet MCP (Neotoma first if executionplans are in Neotoma), avoid duplicates, and link… |
-| Skills (ateles repo) | `.claude/skills/email-triage/SKILL.md` | L61 | Store drafts in Neotoma, don't paste them in chat : store every drafted reply as a draftmessage entity (fields: title,… |
-| Skills (ateles repo) | `.claude/skills/email-triage/SKILL.md` | L120 | Treat any thread as purely \"no action\" — every thread is stored in Neotoma as an email entity at minimum;… |
-| Skills (ateles repo) | `.claude/skills/email-triage/SKILL.md` | L128 | Echo full email bodies in the reply — summarize; store the full content in Neotoma. |
-| Skills (ateles repo) | `.claude/skills/extract-amazon-order/SKILL.md` | L39 | - Store in Neotoma first; do not write only to Parquet for user/agent-captured data. |
-| Skills (ateles repo) | `.claude/skills/import-audio/SKILL.md` | L51 | - Always search Neotoma first (retrieveentities / retrieveentitybyidentifier) before creating — update existing… |
-| Skills (ateles repo) | `.claude/skills/intake-relationship/SKILL.md` | L19 | 1. INTAKE (any source): gws gmail (never the Gmail MCP), gws drive for attachment links, WhatsApp audio, links.… |
-| Skills (ateles repo) | `.claude/skills/neotoma-learn/SKILL.md` | L135 | - Generic cross-MCP: "When you have pulled data from another MCP (email/calendar/search), do not respond with that… |
-| Skills (ateles repo) | `.claude/skills/neotoma-learn/SKILL.md` | L139 | - Agent-authored deliverable files: strengthen the instruction that markdown/text/json/csv deliverables authored or… |
-| Skills (ateles repo) | `.claude/skills/store-neotoma/SKILL.md` | L21 | /storeneotoma stores directly, then reports — it does NOT preview-and-wait. (Updated 2026-06-05 per operator: the… |
-| Skills (ateles repo) | `.claude/skills/store-neotoma/SKILL.md` | L54 | Unless the user explicitly excludes them, always store durable derived entities alongside dual messages. /storeneotoma… |
-| Skills (ateles repo) | `.claude/skills/sync-env-from-1password/SKILL.md` | L23 | Never store the secret VALUE in Neotoma — only the op:// reference. Resolved values live solely in the local… |
-| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L26 | /digest is READ-ONLY for domain data: it does NOT store domain entities, file tasks, write memory, invoke… |
-| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L269 | - MUST be read-only for domain data: no domain-entity stores, no task filing, no memory writes, no store-neotoma, no 🧠… |
-| Skills (user root) | `~/.claude/skills/email-triage/SKILL.md` | L214 | Store drafts in Neotoma, don't paste them in chat : store every drafted reply as a |
-| Skills (user root) | `~/.claude/skills/email-triage/SKILL.md` | L420 | Treat any thread as purely "no action" — every thread is stored in Neotoma as an email entity at minimum; "no-action"… |
-| Skills (user root) | `~/.claude/skills/email-triage/SKILL.md` | L427 | Echo full email bodies in the reply — summarize; store the full content in Neotoma. |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L136 | Auto-memory : a feedback-type memory file per durable rule (or extend an existing one), with the Why: / How to apply:… |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L192 | Voice (style guide updated directly): a bullet per durable voice rule captured: - <principle> (<channel>) — e.g.… |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L210 | Both /end and store-neotoma MUST emit a succinct affected-records list in the Neotoma-MCP turn-report style — the same… |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L215 | store-neotoma — full chat-transcript persistence. /end delegates to it when the conversation is not yet fully… |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L226 | - MUST NOT request confirmation before filing tasks, storing entities, writing the voice/style guide, or invoking… |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L234 | - MUST NOT author the draft-rendered-page skill edit inside /end: page-craft lessons are filed as /learn tasks, never… |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L240 | - MUST defer chat-transcript storage to store-neotoma, not re-implement it. |
-| agent_policy entities | `ent_82b64b6c4104843e43853666` | summary | Agent rules live in Neotoma (agentpolicy) and sync to the harness from there; never in ~/.claude memory files. |
-| agent_policy entities | `ent_82b64b6c4104843e43853666` | description | Durable agent operating rules MUST be stored as Neotoma agentpolicy entities (canonical source) and synced to the… |
-| agent_policy entities | `ent_aec7f8342e76be908d4a161f` | rule | No SaaS analytics vendors that store usage data outside Neotoma. Feature usage must be recorded as attributed… |
-| agent_policy entities | `ent_b9d18c4ba66bf9979b9c04f8` | description | Agents MUST NOT apply GDPR/RGPD data-minimization, redaction, or sensitive-detail summarization to the operator's… |
-| standing_rule entities | `ent_0235f006414d9d63762733e0` | instruction | Use this talk track when explaining why Neotoma is needed. 3-beat (non-technical): (1) Existing DBs don't know what a… |
-| standing_rule entities | `ent_2aaad867887e5b979ed1d2e1` | rule_text | Store user memory in Neotoma by default. Save contacts, people, birthdays, events, preferences, decisions, and other… |
-| standing_rule entities | `ent_7115d236ed0da6fa27d54898` | rule | Durable capture goes beyond dual agentmessage rows. Neotoma should hold navigable transcript + distilled analysis.… |
-| standing_rule entities | `ent_8e7f8acf32381b19e4759075` | instruction | store-neotoma skill must include (unless explicitly excluded in Phase 0 revision): (1) Transcript digest — ordered… |
-| task_policy entities | `ent_2ad0677fe23c0c1878ae43e8` | rule | Any Neotoma capability exposed through more than one surface MUST ship with a test on EACH exposed surface asserting… |
-| task_policy entities | `ent_4a1c0dd7a06727279c8f1edc` | rule | Store operator preferences, feedback, and behavior rules as Neotoma entities owned by the appropriate Ateles agent… |
-| task_policy entities | `ent_b23b09f85e370f87328cabea` | rule | Every session stores every turn as a user + assistant conversationmessage pair, PARTOF the conversation, with REFERSTO… |
-| task_policy entities | `ent_b23b09f85e370f87328cabea` | raw_fragments.policy_text | Every session stores every turn as a user + assistant conversationmessage pair, PARTOF the conversation, with REFERSTO… |
-| task_policy entities | `ent_cc6d596c73d5ebedd790b27f` | rule |  WhatsApp chats shared by operator are always captured to Neotoma Whenever the operator shares a WhatsApp chat in any… |
-| task_policy entities | `ent_cc6d596c73d5ebedd790b27f` | raw_fragments.policy | Whenever the operator shares a WhatsApp chat in any form — screenshot, pasted excerpt, export, or just naming a… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L27 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L10 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L14 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L22 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L23 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L2 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L2 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L14 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L7 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L38 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L45 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L15 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L61 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L120 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L128 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L39 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L51 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L19 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L135 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L139 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L21 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L54 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L23 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L26 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L269 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L214 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L420 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L427 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L136 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L192 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L210 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L215 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L226 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L234 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L240 | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | summary | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | description | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | description | operator-specific, value withheld |
+| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
+| standing_rule entities | `<entity>` | rule_text | operator-specific, value withheld |
+| standing_rule entities | `<entity>` | rule | operator-specific, value withheld |
+| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
+| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| task_policy entities | `<entity>` | raw_fragments.policy_text | operator-specific, value withheld |
+| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| task_policy entities | `<entity>` | raw_fragments.policy | operator-specific, value withheld |
 
 #### `R-fba8d4` — Irreversible or outward-facing actions need per-action operator approval
 
@@ -263,42 +247,42 @@ Target home: **docs/foundation/** · 36 statements, 35 distinct · **NEEDS-SPLIT
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/label-figure-provenance.md` | L10 | When preparing a figure for an outward-facing negotiation, explicitly label its provenance — quoted (the counterparty… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/proceed-without-asking-on-clear-recommendation.md` | L15 | How to apply: Reserve questions (incl. dont-ask-operator-implementer-decisions / AskUserQuestion) for genuine forks… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/verify-figures-against-source.md` | L10 | When a number read from an image or document becomes a load-bearing input to a calculation or an outward-facing claim,… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_operator_only_actions_hand_back.md` | L15 | git tag + npm publish / cutting a GitHub Release — irreversible distribution (npm can't truly unpublish). |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/reference_bottega8_deploys_from_feature_branch.md` | L29 | Always-on: NOT actually configured. Checked live 2026-07-23: the app runs autostopmachines=true /… |
-| Codex | `~/.codex/AGENTS.md` | L61 | Proceed with your recommendation — don't ask. When you have a recommended course of action, take it and report what… |
-| Codex | `~/.codex/AGENTS.md` | L62 | Escalate choices by material operator outcome. Ask the operator only when plausible options would materially change… |
-| Skills (ateles repo) | `.claude/skills/aquila/SKILL.md` | L76 | No external action. You never email, post publicly, or message third parties. Your audience is the operator, full… |
-| Skills (ateles repo) | `.claude/skills/ateles/SKILL.md` | L58 | approve <version> : (1) Retrieve the releaseresult for that version (retrieveentities(entitytype=releaseresult), match… |
-| Skills (ateles repo) | `.claude/skills/cicada/SKILL.md` | L125 | 4. Apply the gate (default executionpolicy entdfce6edecefe3eb7fc9e0337): high-confidence + low-blast → execute;… |
-| Skills (ateles repo) | `.claude/skills/corvus/SKILL.md` | L82 | 9. No relative-time anchors. Never date a referenced piece or event with relative phrasing — "just ran," "this… |
-| Skills (ateles repo) | `.claude/skills/corvus/SKILL.md` | L134 | 8. Flag for operator approval — Always required before posting. Present drafts only. |
-| Skills (ateles repo) | `.claude/skills/corvus/SKILL.md` | L142 | When you present drafts for operator approval, show EVERY platform draft in full, verbatim — never summarize or merely… |
-| Skills (ateles repo) | `.claude/skills/corvus/SKILL.md` | L223 | - Do not post to social platforms — present drafts for operator approval only |
-| Skills (ateles repo) | `.claude/skills/email-triage-auto/SKILL.md` | L17 | A no-human-in-the-loop email sweep designed to run unattended on an hourly cadence inside the Turdus daemon (T3,… |
-| Skills (ateles repo) | `.claude/skills/gorilla/SKILL.md` | L78 | 5. Preview the full draft in chat and wait for explicit operator confirmation before sending. Per the consent gate,… |
-| Skills (ateles repo) | `.claude/skills/intake-relationship/SKILL.md` | L23 | 5. SURFACE FOR OPERATOR APPROVAL — DO NOT AUTO-SEND: draft the outbound message (contact's language, warm, grounded) +… |
-| Skills (ateles repo) | `.claude/skills/monedula/SKILL.md` | L7 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/monedula/SKILL.md` | L16 | You are Monedula, the recurring-payment daemon in the Ateles swarm. Your genus is the jackdaw (Corvus monedula) —… |
-| Skills (ateles repo) | `.claude/skills/vanellus/SKILL.md` | L209 | Merge recommendation — your call. When APISAUTONOMYAUTOMERGE=1, merge autonomously once gate inheritance passes AND… |
-| Skills (user root) | `~/.claude/skills/end-sessions/SKILL.md` | L66 | - MUST propose the full batch and wait for explicit operator approval before any send, end, or archive. Approval is… |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L120 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L137 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L138 | 5. Make voice consumable by the generators. Drafting skills (write, write-blog-post, social, draft-rendered-page,… |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L150 | No hub exists yet → do NOT create one here. File a track task (Phase 4) proposing a first hub for that contact via the… |
-| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L35 | No consent gate — nothing in the task's execution path touches the OPERATOR-ONLY category below. Check the full path,… |
-| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L58 | Consent-gated or irreversible-outward actions: sending email to partners or clients, publishing or posting publicly,… |
-| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L78 | The consent gate is upstream of all of this and unchanged: an OPERATOR-ONLY task never reaches the assignment gate,… |
-| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L93 | Never let context completeness argue past a consent gate. The OPERATOR-ONLY test runs first and is absolute. |
-| agent_policy entities | `ent_00fae21cb9a74370c2fdd66d` | description | Autonomous Execution Constraints and Safety. Low-Risk Operations: Generate unit tests, add type annotations, fix… |
-| agent_policy entities | `ent_2f9bac75ca47814bd2af40a9` | body |  Corvus Release Radar — timely prioritization of recent product release activity Purpose: ensure recent Neotoma/Ateles… |
-| agent_policy entities | `ent_7dbf4c7835c282fc1ffd8832` | description | Autonomous Execution Constraints and Safety (mandatory version). Low-Risk Operations and High-Risk Operations defined.… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L75 | Proceed with your recommendation — don't ask. When you have a recommended course of action, take it and report what… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L168 | gmailsendgate.py (PreToolUse: Bash) — blocks Gmail operations that can deliver mail without a per-message operator… |
-| standing_rule entities | `ent_18bd99acb11c04c08467f62c` | instruction | After recommending or dispatching work, verify that the assigned executor actually claimed and began it. A pending… |
-| standing_rule entities | `ent_d22565e6723bd2a38385ac81` | instruction | Ask the operator only when plausible options would materially change their goals, risk, cost, external commitments,… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L10 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L10 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L29 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L61 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L62 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L76 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L58 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L125 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L82 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L134 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L142 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L223 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L17 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L78 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L23 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L7 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L16 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L209 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L66 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L120 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L137 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L138 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L150 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L35 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L58 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L78 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L93 | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | description | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | body | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | description | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L75 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L168 | operator-specific, value withheld |
+| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
+| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
 
 #### `R-29fd38` — Operator-specific config comes from entities, not code
 
@@ -306,34 +290,34 @@ Target home: **agent_policy** · 28 statements, 7 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L45 | Never hardcode secrets, IBANs, or contact details — always read from env or parquet. |
-| Codex | `~/.codex/AGENTS.md` | L108 | Agent prompts describe a role generically; specifics come from context entities. A prompt states what the agent does,… |
-| Codex | `~/.codex/AGENTS.md` | L109 | Operator-specific config is env/Neotoma-sourced, never baked into code. Operator identity, calendar IDs, recipients,… |
-| Skills (ateles repo) | `.claude/skills/apus/SKILL.md` | L20 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| Skills (ateles repo) | `.claude/skills/aquila/SKILL.md` | L87 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| Skills (ateles repo) | `.claude/skills/ateles/SKILL.md` | L103 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| Skills (ateles repo) | `.claude/skills/build-landing-page/SKILL.md` | L391 | - Where a context entity is missing, degrade safely or surface a blocker. Never |
-| Skills (ateles repo) | `.claude/skills/cicada/SKILL.md` | L176 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| Skills (ateles repo) | `.claude/skills/columba/SKILL.md` | L176 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| Skills (ateles repo) | `.claude/skills/formica/SKILL.md` | L45 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| Skills (ateles repo) | `.claude/skills/frame-product-argument/SKILL.md` | L232 | - Where a context entity is missing, degrade safely or surface a blocker. Never |
-| Skills (ateles repo) | `.claude/skills/gorilla/SKILL.md` | L110 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| Skills (ateles repo) | `.claude/skills/intake-relationship/SKILL.md` | L36 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/lanius/SKILL.md` | L134 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| Skills (ateles repo) | `.claude/skills/manucode/SKILL.md` | L148 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| Skills (ateles repo) | `.claude/skills/menura/SKILL.md` | L48 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| Skills (ateles repo) | `.claude/skills/monedula/SKILL.md` | L63 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| Skills (ateles repo) | `.claude/skills/pavo/SKILL.md` | L266 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| Skills (ateles repo) | `.claude/skills/picus/SKILL.md` | L80 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| Skills (ateles repo) | `.claude/skills/regulus/SKILL.md` | L40 | - The DoD claim — "a fresh operator can fork the public repo, supply their own context entities, and stand up the… |
-| Skills (ateles repo) | `.claude/skills/robin/SKILL.md` | L123 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| Skills (ateles repo) | `.claude/skills/struthio/SKILL.md` | L109 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| Skills (ateles repo) | `.claude/skills/sylvia/SKILL.md` | L57 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| Skills (ateles repo) | `.claude/skills/turdus/SKILL.md` | L49 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| Skills (ateles repo) | `.claude/skills/tyto/SKILL.md` | L63 | Context ladder: before acting on any assignment, load the strategy and the higher-context entities it references;… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L175 | Agent prompts describe a role generically; specifics come from context entities (agentpolicy… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L177 | Never hardcode secrets, IBANs, or contact details — always read from env or parquet. |
-| ateles/CLAUDE.md | `CLAUDE.md` | L178 | Operator-specific config is env/Neotoma-sourced, never baked into code. Operator identity (name, email), calendar IDs,… |
+| Codex | `~/.codex/AGENTS.md` | L45 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L108 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L109 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L20 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L87 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L103 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L391 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L176 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L176 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L45 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L232 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L110 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L36 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L134 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L148 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L48 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L63 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L266 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L80 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L40 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L123 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L109 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L57 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L49 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L63 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L175 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L177 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L178 | operator-specific, value withheld |
 
 #### `R-3be8e6` — Some actions stay the operator's absolutely; hand them back with the command
 
@@ -341,34 +325,34 @@ Target home: **docs/foundation/** · 28 statements, 24 distinct · **NEEDS-SPLIT
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code hooks (ateles) | `.claude/hooks/decision_shape_gate.py` | docstring | 3. AN OPERATOR-ONLY ACTION WITH NO COMMAND. The turn says the operator must |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_give_exact_command_for_operator_only_ops.md` | L3 | description: "When an action is operator-only, always hand over the exact runnable command — never just describe what… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_give_operator_commands_only_when_runnable_now.md` | L11 | Give Mark an operator-only command only when it is runnable right now. Never one prefixed with "when X merges" or… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_give_operator_commands_only_when_runnable_now.md` | L15 | This is distinct from, and bounded by, the rule that an operator-only action must carry its exact command… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_monitor_after_handing_over_operator_command.md` | L3 | description: "After giving an operator-only command, start a background watcher for its effect and continue… |
-| Codex | `~/.codex/AGENTS.md` | L46 | Merge stays gated; product releases, credentials, sends, and grants keep their existing gates. Do not merge where a… |
-| Codex | `~/.codex/AGENTS.md` | L62 | Escalate choices by material operator outcome. Ask the operator only when plausible options would materially change… |
-| Codex | `~/.codex/AGENTS.md` | L64 | A decision handed to the operator carries three things and nothing else : the choice stated as options with what each… |
-| Codex | `~/.codex/AGENTS.md` | L65 | For an operator-only action, give the exact command and what to verify after. Operator-only means the operator runs… |
-| Codex | `~/.codex/AGENTS.md` | L74 | Re-request review yourself whenever monitoring shows it is warranted — do not wait to be asked. Standing… |
-| Codex | `~/.codex/AGENTS.md` | L75 | Comment /confirm-gates-clear yourself when a PR is blocked only by swarm MECHANICS, never when it is blocked by… |
-| Skills (ateles repo) | `.claude/skills/columba/SKILL.md` | L16 | You are Columba, the constitution keeper in the Ateles swarm. Your genus is the dove (Columba livia) — grounding,… |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L284 | Credential values are operator-only. Never read, write, echo, or enter one. Prepare the step |
-| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L35 | No consent gate — nothing in the task's execution path touches the OPERATOR-ONLY category below. Check the full path,… |
-| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L78 | The consent gate is upstream of all of this and unchanged: an OPERATOR-ONLY task never reaches the assignment gate,… |
-| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L92 | When in doubt between grades, choose the more conservative one — NEEDS-CONTEXT over EXECUTABLE-NOW, OPERATOR-ONLY over… |
-| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L93 | Never let context completeness argue past a consent gate. The OPERATOR-ONLY test runs first and is absolute. |
-| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L102 | - MUST run the consent-gate (OPERATOR-ONLY) test before the completeness test; consent-gated tasks are never… |
-| Skills (user root) | `~/.claude/skills/rendered-pages/SKILL.md` | L445 | Internal recaps — the operator-only page the meeting pipeline always builds — go on the |
-| agent_policy entities | `ent_5456a8a2224d8211ef33749c` | body | A session that hands work to the Ateles swarm stays responsible for it until it MERGES and RELEASES. Do not treat… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L104 | A decision handed to the operator carries three things and nothing else : the choice stated as options with what each… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L105 | For an operator-only action, give the exact command and what to verify after. Operator-only means the operator runs… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L106 | Restart daemons as needed, without asking. Standing authorization, 2026-09-11, replacing the earlier rule that held… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L107 | Merge stays gated, and two classes stay Mark's absolutely. Do not merge where a live blocking review stands — live… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L109 | Re-request review yourself whenever monitoring shows it is warranted — do not wait to be asked. Standing… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L124 | Comment /confirm-gates-clear yourself when a PR is blocked only by swarm MECHANICS, never when it is blocked by… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L129 | decisionshapegate.py (Stop) — checks the closing section of a finished turn against three of the standing session… |
-| standing_rule entities | `ent_d22565e6723bd2a38385ac81` | instruction | Ask the operator only when plausible options would materially change their goals, risk, cost, external commitments,… |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L46 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L62 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L64 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L65 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L74 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L75 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L16 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L284 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L35 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L78 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L92 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L93 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L102 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L445 | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | body | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L104 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L105 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L106 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L107 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L109 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L124 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L129 | operator-specific, value withheld |
+| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
 
 #### `R-2fd7bd` — Use the gws CLI for Google Workspace, not the MCP
 
@@ -376,32 +360,32 @@ Target home: **agent_policy** · 26 statements, 22 distinct · **DIVERGE**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_unknown_contact_enrichment.md` | L10 | When a person entity is not found in Neotoma, always search Gmail (gws gmail users messages list with q:"from:<email>… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/reference_gws_gmail_draft_delete_send_params.md` | L14 | Delete: gws gmail users drafts delete --params '{"userId":"me","id":"<draftId>"}'. Both userId and id go in --params.… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/reference_gws_gmail_draft_delete_send_params.md` | L15 | Send: gws gmail users drafts send --params '{"userId":"me"}' --json '{"id":"<draftId>"}'. The draft id goes in the… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/MEMORY.md` | L3 | - Use GWS CLI for Google Calendar(feedbackgwsclicalendar.md) — Always use GWS CLI for calendar lookups, not computer… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_gws_cli_calendar.md` | L3 | description: Always use GWS CLI for Google Calendar interactions, not computer use or Calendar app |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_gws_cli_calendar.md` | L7 | Always use GWS CLI for any Google Calendar interaction (listing events, finding next session dates, etc.). |
-| Claude Code user rules | `~/.claude/CLAUDE.md` | L13 | gws first, MCP as fallback. Reach for gws by default. Use a Google |
-| Codex | `~/.codex/AGENTS.md` | L30 | A Gmail send is not gated here. No gws gmail ... drafts update, |
-| Codex | `~/.codex/AGENTS.md` | L131 | Prefer the gws CLI over any Gmail/Workspace MCP — it wraps the full REST API |
-| Codex | `~/.codex/AGENTS.md` | L141 | Gmail : always use gws gmail ... commands, not the Gmail MCP server. |
-| Codex | `~/.codex/AGENTS.md` | L142 | Google Calendar : always use gws CLI with Europe/Madrid timezone. |
-| Skills (ateles repo) | `.claude/skills/analyze-meeting/SKILL.md` | L346 | - Run gws gmail draft create --to "<name> <email>" --subject "<subject>" --body "<body>" (per the Always use GWS CLI… |
-| Skills (ateles repo) | `.claude/skills/email-triage/SKILL.md` | L22 | - gws CLI must be available (which gws). This is the required Gmail interface — do NOT use the Gmail MCP server. |
-| Skills (ateles repo) | `.claude/skills/email-triage/SKILL.md` | L124 | Use the Gmail MCP server — always use gws gmail CLI. |
-| Skills (ateles repo) | `.claude/skills/intake-relationship/SKILL.md` | L19 | 1. INTAKE (any source): gws gmail (never the Gmail MCP), gws drive for attachment links, WhatsApp audio, links.… |
-| Skills (user root) | `~/.claude/skills/email-mechanics/SKILL.md` | L35 | Always use gws gmail ... for Gmail operations — reading, searching, fetching threads, |
-| Skills (user root) | `~/.claude/skills/email-mechanics/SKILL.md` | L42 | gws gmail users <resource> --help first. A missing MCP capability is almost never a |
-| Skills (user root) | `~/.claude/skills/email-triage/SKILL.md` | L26 | - gws CLI must be available (which gws). This is the required Gmail interface — do NOT use the Gmail MCP server. |
-| Skills (user root) | `~/.claude/skills/email-triage/SKILL.md` | L323 | Always read the actual To: header from the email metadata before replying. Do not assume the reply will go to the… |
-| Skills (user root) | `~/.claude/skills/email-triage/SKILL.md` | L423 | Use the Gmail MCP server — always use gws gmail CLI. |
-| ateles/CLAUDE.md | `CLAUDE.md` | L168 | gmailsendgate.py (PreToolUse: Bash) — blocks Gmail operations that can deliver mail without a per-message operator… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L183 | Google Calendar : always use gws CLI with Europe/Madrid timezone. |
-| ateles/CLAUDE.md | `CLAUDE.md` | L184 | Gmail : always use gws gmail ... commands, not the Gmail MCP server. |
-| standing_rule entities | `ent_ac9af6ed6097faaa22f84020` | instruction | Always use the gws CLI for Gmail operations (reading emails, downloading attachments, etc.), not the Gmail MCP server… |
-| standing_rule entities | `ent_ac9af6ed6097faaa22f84020` | summary | Always use the gws CLI for Gmail operations, not the Gmail MCP server. |
-| task_policy entities | `ent_1681816e1e6536424eef480f` | rule | When replacing/updating a draft by creating a new one, immediately discard the old version. Never leave two drafts in… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L10 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L14 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L7 | operator-specific, value withheld |
+| Claude Code user rules | `~/.claude/CLAUDE.md` | L13 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L30 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L131 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L141 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L142 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L346 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L22 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L124 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L19 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L35 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L42 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L26 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L323 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L423 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L168 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L183 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L184 | operator-specific, value withheld |
+| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
+| standing_rule entities | `<entity>` | summary | operator-specific, value withheld |
+| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
 
 #### `R-78a082` — Echo the operator's input, cleaned up, each reply
 
@@ -409,30 +393,30 @@ Target home: **task_policy** · 24 statements, 22 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_always_relay_transcribed_speech_cleaned_up.md` | L11 | Whenever Mark's speech is transcribed — a voice memo, a live /stream-transcript chunk, a meeting recording — relay the… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_always_relay_transcribed_speech_cleaned_up.md` | L15 | Cleaned up means: fix whisper mishearings against known vocabulary ("Atili" → Ateles, "Otoma"/"Otomo" → Neotoma,… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_pause_when_ambiguous_or_irreversible.md` | L19 | May not be fully understood — the ask arrived through transcription and a key word is uncertain; it could plausibly… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/project_dev_release_tester_funnel.md` | L16 | How to apply: Neotoma reducers don't hard-reject enum violations, so use ONLY the six values, by convention. Never… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/project_tyto_recording_pipeline.md` | L28 | Daemon behavior fixes (same date): 0-byte/never-settling files are abandoned after TYTORECORDINGGIVEUPSECS (300s)… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/reference_neotoma_prod_tunnel_topology.md` | L12 | Auth model: daemons (Strix transcribe, Cyphorhinus poll) send Authorization: Bearer <NEOTOMABEARERTOKEN>. The server… |
-| Codex | `~/.codex/AGENTS.md` | L57 | Summarize what the operator said at the top of each reply, cleaned up. Most operator input arrives as live voice… |
-| Codex | `~/.codex/AGENTS.md` | L168 | Minimize at capture. When storing a person from a transcript or meeting, retain what serves the relationship (role,… |
-| Skills (ateles repo) | `.claude/skills/analyze-meeting/SKILL.md` | L36 | Absolute file path (exists on disk) — read the file. Handles transcripts produced by transcribeaudio.py, including… |
-| Skills (ateles repo) | `.claude/skills/intake-relationship/SKILL.md` | L19 | 1. INTAKE (any source): gws gmail (never the Gmail MCP), gws drive for attachment links, WhatsApp audio, links.… |
-| Skills (ateles repo) | `.claude/skills/manucode/SKILL.md` | L19 | You are Manucode, the copy and positioning agent in the Ateles swarm. (Formerly Paradisaea; renamed 2026-06-12 so the… |
-| Skills (ateles repo) | `.claude/skills/record_meeting/SKILL.md` | L33 | 1. Platform-native recording (preferred). If the call is on Zoom/Meet/Teams, prefer the platform's own Record button:… |
-| Skills (ateles repo) | `.claude/skills/record_meeting/SKILL.md` | L94 | Toggle: start if not running; stop (and transcribe + store) if running. With RECORDMEETINGSKIPTRANSCRIBE=1, a stop… |
-| Skills (ateles repo) | `.claude/skills/record_meeting/SKILL.md` | L109 | Direct-to-prod transport (since 2026-05-13): transcribeaudio.py calls the CLI with --api-only --base-url… |
-| Skills (ateles repo) | `.claude/skills/record_meeting/SKILL.md` | L110 | Neotoma-related call detection (auto-analyze): After transcription completes, scan the transcript text for… |
-| Skills (ateles repo) | `.claude/skills/record_meeting/SKILL.md` | L118 | Link transcription to people / feedback analysis (optional): After Neotoma stores the transcription,… |
-| Skills (ateles repo) | `.claude/skills/record_meeting/SKILL.md` | L132 | - The metered OpenAI Whisper API is now an explicit opt-in only: --backend openai or TRANSCRIBEBACKEND=openai. It is… |
-| Skills (ateles repo) | `.claude/skills/robin/SKILL.md` | L19 | You are Robin, the session compliance supervisor in the Ateles swarm. (Formerly Luscinia; renamed 2026-06-12 so the… |
-| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L177 | - topics: workstream labels. summary: 3–6 factual sentences. Summarize, never transcribe sensitive content — the… |
-| Skills (user root) | `~/.claude/skills/meetings-and-contacts/SKILL.md` | L139 | unless directly relevant to a stored task. Summarize, don't transcribe verbatim, when |
-| Skills (user root) | `~/.claude/skills/review-sessions/SKILL.md` | L184 | - summary — 3-6 sentences; summarize, never transcribe |
-| ateles/CLAUDE.md | `CLAUDE.md` | L72 | Summarize what the operator said at the top of each reply, cleaned up. Most operator input arrives as live voice… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L217 | Minimize at capture. When storing a person from a transcript or meeting, retain what serves the relationship (role,… |
-| standing_rule entities | `ent_711fd5a8c06d7f6b39f9cd1b` | rule | Transcript from recordmeeting stop was not speaker-diarized: single continuous text stream, no Speaker 1/2 or name… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L19 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L16 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L28 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L57 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L168 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L36 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L19 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L19 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L33 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L94 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L109 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L110 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L118 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L132 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L19 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L177 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L139 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L184 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L72 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L217 | operator-specific, value withheld |
+| standing_rule entities | `<entity>` | rule | operator-specific, value withheld |
 
 #### `R-f3271c` — Both repos are public; scrub PII before committing
 
@@ -440,25 +424,25 @@ Target home: **agent_policy** · 19 statements, 17 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_both_repos_are_public_scrub_client_names.md` | L3 | description: "BOTH neotoma and ateles are PUBLIC repos — never write a client codename, app name, or domain into… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_dispatch_agents_never_task_chips.md` | L17 | How to apply: when a session identifies durable work, launch it with the Agent tool AND create the paired Neotoma task… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_scrub_client_names_before_filing_not_after.md` | L23 | How to apply: before gh issue create on a public repo, grep the title and body for client names, contact names, and… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_security_pr_disclosure_hygiene.md` | L3 | description: "A security-fix PR to a public repo must contain ONLY the code fix + regression tests — never advisories,… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_security_pr_disclosure_hygiene.md` | L19 | How to apply: before pushing a security branch, categorize every changed file. Include src/ + tests/security/ +… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/reference_bottega8_deploys_from_feature_branch.md` | L25 | Pass --app bottega8-neotoma explicitly. Do NOT rely on -c fly.toml — the repo's fly.toml says app = 'neotoma-sandbox'… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L23 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L19 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L25 | operator-specific, value withheld |
 | Codex | `~/.codex/AGENTS.md` | L107 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L111 | Never deploy a hosted client instance from memory or from a repo doc alone — retrieve its deploymentconfiguration… |
-| Codex | `~/.codex/AGENTS.md` | L112 | Strip PII before filing issues — scrub usernames, worktree names, and platform names; use visibility: private for… |
-| Skills (ateles repo) | `.claude/skills/aquila/SKILL.md` | L78 | PII-free prompt; operator-specific data at runtime. This definition is public. Every operator-specific fact comes from… |
-| Skills (ateles repo) | `.claude/skills/hirundo/SKILL.md` | L149 | Default OFF — drafts staged as proposedgithubissue only. Enable via --open-issues or ANALYZEOPENGHISSUES=1. Allowlist:… |
-| Skills (ateles repo) | `.claude/skills/regulus/SKILL.md` | L40 | - The DoD claim — "a fresh operator can fork the public repo, supply their own context entities, and stand up the… |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L248 | invent a hostname, and never write a client-identifying host into a public repo. |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L282 | Treat public repos as public. No PII, no client names, no internal hostnames in anything you |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L402 | - MUST NOT put PII, client names, or internal hostnames into a public repo, an issue, or a published |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L241 | - MUST strip PII from any filed issues per the feedbackissuepii memory; use visibility: private for session-derived… |
-| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L66 | GitHub-shaped executable tasks — code changes, anything issue-fixable in a repo — convert to a GitHub issue in the… |
+| Codex | `~/.codex/AGENTS.md` | L111 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L112 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L78 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L149 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L40 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L248 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L282 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L402 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L241 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L66 | operator-specific, value withheld |
 | ateles/CLAUDE.md | `CLAUDE.md` | L174 | operator-specific, value withheld |
-| ateles/CLAUDE.md | `CLAUDE.md` | L185 | Strip PII before filing issues — scrub usernames, worktree names, platform names; use visibility: private for… |
+| ateles/CLAUDE.md | `CLAUDE.md` | L185 | operator-specific, value withheld |
 
 #### `R-fcd5a0` — Dispatch work to the owning agent; file it as you recommend it
 
@@ -466,24 +450,24 @@ Target home: **agent_policy** · 18 statements, 17 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code hooks (ateles) | `.claude/hooks/reinject_working_method.py` | docstring | say" had to be restated twice and "dispatch, don't work inline" four times, |
-| Claude Code hooks (ateles) | `.claude/hooks/reinject_working_method.py` | docstring | 1. DISPATCH, DON'T WORK INLINE. Create a Neotoma task entity and let an \ |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_agents_stall_on_monitors_instead_of_finishing.md` | L26 | not. And: you are the worker — do not delegate. |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_monitor_actively_dont_wait_to_be_asked.md` | L13 | Why: offering to monitor puts the tracking burden on the operator, which is exactly backwards: they delegated the work… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_worker_agents_delegate_instead_of_implementing.md` | L12 | An explicit mid-flight instruction ("implement it YOURSELF, do not delegate") |
-| Codex | `~/.codex/AGENTS.md` | L55 | Dispatch, don't work inline. Create a Neotoma task entity and let an agent claim it; use a subagent only where no… |
-| Skills (ateles repo) | `.claude/skills/analyze-neotoma-feedback/SKILL.md` | L37 | URL (starts with http:// or https://) — delegate to user-web-scraper MCP as in the analyze skill. Handles ChatGPT… |
-| Skills (ateles repo) | `.claude/skills/lanius/SKILL.md` | L43 | Gate state must be grounded in an artifact. Report a gate as signedoff/waived only when the issue entity's live… |
-| Skills (ateles repo) | `.claude/skills/ploceus/SKILL.md` | L76 | You are the sole appender of raw evidence-ledger rows: hours, gates, captures, and customer outcomes recorded… |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L116 | Rule or hook — when the fix is "always do X when Y" (creation delegated to /learn). |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L117 | Skill update or new skill — when the workflow is multi-step and reusable (creation delegated to /learn / skill-creator). |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L215 | store-neotoma — full chat-transcript persistence. /end delegates to it when the conversation is not yet fully… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L63 | "Dispatch, don't work inline" governs WHAT to dispatch into: a Neotoma task |
-| ateles/CLAUDE.md | `CLAUDE.md` | L70 | Dispatch, don't work inline. Create a Neotoma task entity and let an agent claim it; use a subagent only where no… |
-| task_policy entities | `ent_662b57b0a32d4a854c2183e9` | rule | Default to dispatch, not inline execution. When a task belongs to a swarm agent by role, route it to that agent… |
-| task_policy entities | `ent_9a556f58c444068b1409e60d` | rule | A task is dispatch-eligible only when it clears the context-readiness bar: (1) OUTCOME — the intended result is… |
-| task_policy entities | `ent_af149de1fa4666805a0bcdc8` | rule | For in-session work that calls for a swarm agent's role, default to the HYBRID pattern: spawn a Claude Agent-tool… |
-| task_policy entities | `ent_ea7255149ebf140f5b8b501a` | rule | Whenever an email is pulled from the mailbox — any pull, whether a single message, an inbox sweep, a thread fetch, or… |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L26 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L55 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L37 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L43 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L76 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L116 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L117 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L215 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L63 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L70 | operator-specific, value withheld |
+| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
 
 #### `R-228b8c` — Absent or malformed safety values take the restrictive branch
 
@@ -491,22 +475,22 @@ Target home: **docs/foundation/** · 16 statements, 13 distinct · **DIVERGE**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code hooks (ateles) | `.claude/hooks/git_stash_guard.py` | docstring | Fail-open: any error or unparseable input → exit 0 (never block a session on |
-| Claude Code hooks (ateles) | `.claude/hooks/gmail_send_gate.py` | docstring | Fail-open: any error or unparseable input → exit 0 (never block a session on our |
-| Claude Code hooks (ateles) | `.claude/hooks/reinject_working_method.py` | docstring | Fail-open: stdlib only, any error exits 0. Never block a session resume. |
-| Claude Code hooks (ateles) | `.claude/hooks/reinject_working_method.py` | docstring | except Exception:  noqa: BLE001 — fail open; never block a resume |
-| Claude Code hooks (ateles) | `.claude/hooks/sibling_repo_worktree_guard.py` | docstring | Fail-open: any error, missing git, or unparseable input → exit 0 (never block a |
-| Claude Code hooks (ateles) | `.claude/hooks/test_hook_wiring_reference.py` | docstring |  Fail-open. The hook must never crash or hang a session start — an |
-| Claude Code hooks (ateles) | `.claude/hooks/test_reinject_working_method.py` | docstring | 2. Fail-open — the main guard (lines 68-72) must swallow ANY exception |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_issue_publish_boundary.md` | L11 | Anything describing a soft authz/confidentiality boundary → keep private until fixed. A precise description of "here's… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/project_relationship_projection_system.md` | L17 | Field-level visibility + twin projections. Every relationship entity carries visibility: shared | private (default… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_verify_before_asserting_negative.md` | L17 | The shape is always the same: a probe fails or returns empty, and emptiness is read as evidence of absence rather than… |
-| Codex | `~/.codex/AGENTS.md` | L157 | Fail closed on the field that carries the safety meaning. When a value is absent, unrecognized, or malformed, the… |
-| Skills (ateles repo) | `.claude/skills/falco/SKILL.md` | L106 | Fail-open branches — each path that yields ALLOW on error/unset/unknown. |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L237 | - MUST NOT leak on a shared hub face: no secret-gist / internal / localhost links, no visibility: private entities or… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L44 | All hooks are fail-open (stdlib-only Python; any error or missing NEOTOMABEARERTOKEN → exit 0, never crash a session).… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L206 | Fail closed on the field that carries the safety meaning. Enforcement: Nothing (manual; <issue> fixes one instance,… |
-| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L54 | Fail closed on the field that carries the safety meaning. When a value is absent, unrecognized, or malformed, default… |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L157 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L106 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L237 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L44 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L206 | operator-specific, value withheld |
+| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L54 | operator-specific, value withheld |
 
 #### `R-f5e0b9` — Always use the Neotoma prod instance, never dev
 
@@ -514,21 +498,21 @@ Target home: **agent_policy** · 15 statements, 14 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_auto_file_issues.md` | L3 | description: User has permanently enabled auto-filing for all Neotoma product/tooling/doc/schema issues; never ask for… |
-| Codex | `~/.codex/AGENTS.md` | L92 | plan in June 2026. Always use Neotoma prod, never the dev instance. |
-| Codex | `~/.codex/AGENTS.md` | L143 | Always use Neotoma prod (mcpmcpsrvneotoma or the Neotoma CLI), never the dev instance. |
-| Skills (ateles repo) | `.claude/skills/cotinga/SKILL.md` | L108 | Neotoma prod only. |
-| Skills (ateles repo) | `.claude/skills/email-triage/SKILL.md` | L23 | - Neotoma prod MCP must be connected (mcpmcpsrvneotoma). Verify with getsessionidentity. |
-| Skills (ateles repo) | `.claude/skills/gorilla/SKILL.md` | L83 | Neotoma prod only (mcpmcpsrvneotoma). |
-| Skills (ateles repo) | `.claude/skills/menura/SKILL.md` | L36 | Conversational but inert on side effects. You never page the operator directly — you surface inbound interest through… |
-| Skills (user root) | `~/.claude/skills/email-triage/SKILL.md` | L27 | - Neotoma prod MCP must be connected (mcpmcpsrvneotoma). Verify with getsessionidentity. |
-| Skills (user root) | `~/.claude/skills/email-triage/SKILL.md` | L273 | Use mcpmcpsrvneotoma (prod) exclusively — never the dev instance. |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L36 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L120 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L242 | - MUST use Neotoma prod, never the dev instance. |
-| ateles/CLAUDE.md | `CLAUDE.md` | L32 | Use mcpmcpsrvneotomacorrect with idempotency keys in the form update-plan-<field>-<YYYY-MM-DD>. Use Neotoma prod… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L182 | Always use Neotoma prod (mcpmcpsrvneotoma), never the dev instance. |
-| standing_rule entities | `ent_0bb931a69f16cbbe8d8ef851` | summary | Always use Neotoma prod (mcpmcpsrvneotoma), never the dev instance by default. |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L92 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L143 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L108 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L23 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L83 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L36 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L27 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L273 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L36 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L120 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L242 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L32 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L182 | operator-specific, value withheld |
+| standing_rule entities | `<entity>` | summary | operator-specific, value withheld |
 
 #### `R-ae9bca` — Durable work goes to a dispatched agent, never a harness task chip
 
@@ -536,20 +520,20 @@ Target home: **agent_policy** · 14 statements, 12 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/MEMORY.md` | L37 | - Dispatch agents, never task chips(feedbackdispatchagentsnevertaskchips.md) |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_dispatch_agents_never_task_chips.md` | L3 | description: "Durable work goes to a dispatched agent, never a harness task chip — a chip makes Mark the dispatcher" |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_dispatch_agents_never_task_chips.md` | L11 | Dispatch durable work to an agent (the Agent tool, or a Neotoma task an agent claims). Never park it in a harness task… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_worker_agents_delegate_instead_of_implementing.md` | L30 | Prefer a task CHIP over a subagent for implementation work: a chip starts a real |
-| Codex | `~/.codex/AGENTS.md` | L55 | Dispatch, don't work inline. Create a Neotoma task entity and let an agent claim it; use a subagent only where no… |
-| Codex | `~/.codex/AGENTS.md` | L56 | Dispatch, don't drift inline. Work that belongs to an agent goes to an agent. The failure is drift — one small step at… |
-| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L3 | description: Mid-session status report. Summarizes what's been achieved so far this session, what work remains, and… |
-| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L72 | Then decide which recommendations this session should keep and which it should hand off. Ranking says what matters… |
-| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L115 | Operator-gated — a decision, sign-off, or answer to a blocking question. These belong at the top of the numbered list… |
-| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L283 | - MUST classify each recommendation KEEP HERE or SPIN OUT against this session's stated centre of gravity, and MUST… |
-| Skills (user root) | `~/.claude/skills/where/SKILL.md` | L379 | Spin-out task chips (spawntask, KEEP-HERE/SPIN-OUT classification). Dropped: scoping a |
-| ateles/CLAUDE.md | `CLAUDE.md` | L64 | entity, never a harness chip. "Dispatch, don't drift inline" governs the |
-| ateles/CLAUDE.md | `CLAUDE.md` | L70 | Dispatch, don't work inline. Create a Neotoma task entity and let an agent claim it; use a subagent only where no… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L71 | Dispatch, don't drift inline. Work that belongs to an agent goes to an agent. The failure is drift — one small step at… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L37 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L30 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L55 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L56 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L3 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L72 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L115 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L283 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L379 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L64 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L70 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L71 | operator-specific, value withheld |
 
 #### `R-606489` — Minimize personal data at capture; purpose-bind it
 
@@ -557,20 +541,20 @@ Target home: **docs/foundation/** · 14 statements, 13 distinct · **NEEDS-SPLIT
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/MEMORY.md` | L21 | - Say GDPR; scope legal claims(gdpr-say-gdpr-and-scope-legal-claims.md) — write GDPR not RGPD in English, and never… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/gdpr-say-gdpr-and-scope-legal-claims.md` | L3 | description: "Write GDPR (not RGPD) in English, and never assert which GDPR basis applies as fact — give the data… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/gdpr-say-gdpr-and-scope-legal-claims.md` | L25 | - CLAUDE.md's concrete rules (never store IBANs, minimize at capture, purpose-bind, honor objection) are operable… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_memory_skill_triggering.md` | L7 | When the user asks to "get", "show", "list", or "check" personal data sources that have a corresponding remember-… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_store_decision_subject_matter_even_when_sensitive.md` | L13 | privately. Do not withhold it under the RGPD minimization rule. |
-| Codex | `~/.codex/AGENTS.md` | L168 | Minimize at capture. When storing a person from a transcript or meeting, retain what serves the relationship (role,… |
-| Skills (ateles repo) | `.claude/skills/analyze-meeting/SKILL.md` | L104 | - Do NOT persist incidental Art. 9 sensitive disclosures (health, finances, family situations, political/religious… |
-| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L58 | Consent-gated or irreversible-outward actions: sending email to partners or clients, publishing or posting publicly,… |
-| agent_policy entities | `ent_b9d18c4ba66bf9979b9c04f8` | rule | operator's own personal data -> store verbatim and in full (no minimization/redaction/summarization). third-party… |
-| agent_policy entities | `ent_b9d18c4ba66bf9979b9c04f8` | summary | Store Mark's OWN personal data verbatim and in full; data-minimization applies only to third parties captured… |
-| agent_policy entities | `ent_b9d18c4ba66bf9979b9c04f8` | description | Agents MUST NOT apply GDPR/RGPD data-minimization, redaction, or sensitive-detail summarization to the operator's… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L217 | Minimize at capture. When storing a person from a transcript or meeting, retain what serves the relationship (role,… |
-| standing_rule entities | `ent_0bb931a69f16cbbe8d8ef851` | instruction | Always use the prod Neotoma MCP tools (mcpmcpsrvneotoma) for all retrieve, store, and relationship operations. Do not… |
-| task_policy entities | `ent_cc6d596c73d5ebedd790b27f` | rule |  WhatsApp chats shared by operator are always captured to Neotoma Whenever the operator shares a WhatsApp chat in any… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L21 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L25 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L7 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L168 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L104 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L58 | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | summary | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | description | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L217 | operator-specific, value withheld |
+| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
+| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
 
 #### `R-36cf5c` — Never mutate a sibling repo's shared main clone; add a worktree first
 
@@ -578,20 +562,20 @@ Target home: **agent_policy** · 14 statements, 11 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/reference_bottega8_deploys_from_feature_branch.md` | L31 | Canonical source is now Neotoma, not this memory. The full binding (app, domain, region, branch, build args, deploy… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/reference_sibling_repo_worktree_guard.md` | L3 | description: "A PreToolUse hook in ateles (.claude/hooks/siblingrepoworktreeguard.py) now HARD-BLOCKS mutating a… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/reference_sibling_repo_worktree_guard.md` | L13 | So the required workflow for any sibling-repo change is: |
-| Codex | `~/.codex/AGENTS.md` | L72 | Restart daemons as needed, without asking. Standing authorization, 2026-09-11. A merged fix reaches nothing until the… |
-| Codex | `~/.codex/AGENTS.md` | L118 | Daemons run dedicated checkouts, never the shared main clones where |
-| Codex | `~/.codex/AGENTS.md` | L126 | Never write into a sibling repo's shared main clone. Create a dedicated |
-| Skills (ateles repo) | `.claude/skills/learn/SKILL.md` | L46 | Relevant local MCP source repo when the issue is MCP-instruction behavior (for example Neotoma instruction text in… |
-| Skills (ateles repo) | `.claude/skills/report-error/SKILL.md` | L28 | - Must be a sibling repository (shares same parent directory) |
-| Skills (ateles repo) | `.claude/skills/report/SKILL.md` | L27 | - Must be a sibling repository (shares same parent directory) |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L275 | Never write to a shared main clone (the checkout sessions share, e.g. ~/repos/<repo>) or to a |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L400 | - MUST NOT write to a shared main clone or a daemon's deployment checkout; MUST use a linked worktree. |
-| ateles/CLAUDE.md | `CLAUDE.md` | L106 | Restart daemons as needed, without asking. Standing authorization, 2026-09-11, replacing the earlier rule that held… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L133 | siblingrepoworktreeguard.py (PreToolUse: Edit|Write|NotebookEdit|Bash) — a distinct concern from the session-integrity… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L153 | Daemons run dedicated checkouts, never the shared main clone where interactive sessions work: |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L31 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L72 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L118 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L126 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L46 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L28 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L27 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L275 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L400 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L106 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L133 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L153 | operator-specific, value withheld |
 
 #### `R-ebd526` — Persist every conversation turn to Neotoma
 
@@ -599,19 +583,19 @@ Target home: **agent_policy** · 13 statements, 11 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_always_persist_turn_by_turn.md` | L3 | description: "Always store every turn as user+assistant conversationmessage rows — never substitute a… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_neotoma_prod.md` | L11 | How to apply: On every turn, reach for mcpmcpsrvneotomaretrieveentitybyidentifier, mcpmcpsrvneotomastore, etc. — never… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_neotoma_store.md` | L7 | Always complete the Neotoma store protocol every turn, including for analysis, evaluation, and exploratory… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_neotoma_store.md` | L11 | How to apply: Before closing every turn, store the user message, assistant reply, and any extracted entities. Wire… |
-| Codex | `~/.codex/AGENTS.md` | L63 | End every turn with the decisions that need Mark , with enough context to decide: the options, what each implies, what… |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L210 | Both /end and store-neotoma MUST emit a succinct affected-records list in the Neotoma-MCP turn-report style — the same… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L41 | userpromptsubmit.py (UserPromptSubmit) — lightweight per-turn counter. Exits 0. |
-| ateles/CLAUDE.md | `CLAUDE.md` | L76 | End every turn with the decisions that need Mark , with enough context to decide: the options, what each implies, what… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L95 | PreCompact cannot do this — its stdout goes to the debug log, never into context. UserPromptSubmit does inject, but… |
-| standing_rule entities | `ent_0bb931a69f16cbbe8d8ef851` | instruction | Always use the prod Neotoma MCP tools (mcpmcpsrvneotoma) for all retrieve, store, and relationship operations. Do not… |
-| standing_rule entities | `ent_8e7f8acf32381b19e4759075` | instruction | store-neotoma skill must include (unless explicitly excluded in Phase 0 revision): (1) Transcript digest — ordered… |
-| task_policy entities | `ent_b23b09f85e370f87328cabea` | rule | Every session stores every turn as a user + assistant conversationmessage pair, PARTOF the conversation, with REFERSTO… |
-| task_policy entities | `ent_b23b09f85e370f87328cabea` | raw_fragments.policy_text | Every session stores every turn as a user + assistant conversationmessage pair, PARTOF the conversation, with REFERSTO… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L7 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L63 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L210 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L41 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L76 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L95 | operator-specific, value withheld |
+| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
+| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
+| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| task_policy entities | `<entity>` | raw_fragments.policy_text | operator-specific, value withheld |
 
 #### `R-f0b574` — Re-read and merge a plan field before correcting it
 
@@ -619,18 +603,18 @@ Target home: **agent_policy** · 12 statements, 9 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_no_staging_write_on_replace_fields.md` | L3 | description: Never send a placeholder or test value to a field that correct replaces wholesale; build the full payload… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/reference_correct_replaces_maps_wholesale_flattening_risk.md` | L3 | description: "correct() on a map field REPLACES it — a writer adding one key must carry every other value forward… |
-| Codex | `~/.codex/AGENTS.md` | L94 | Before correcting decisions or todos, RE-READ the current field and MERGE. correct replaces the entire field, so add… |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L266 | Before correcting decisions or todos, re-read the current field and merge. A correction |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L398 | - MUST re-read and merge before correcting decisions or todos, and MUST read back after writing. |
-| Skills (user root) | `~/.claude/skills/end-sessions/SKILL.md` | L68 | - MUST record the end/archive on each digest (re-read-and-merge, stable idempotency key). |
-| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L110 | - MUST use idempotency keys and re-read-and-merge on all writes. |
-| Skills (user root) | `~/.claude/skills/reconcile-tasks/SKILL.md` | L43 | On a match: UPDATE the existing task, never create a sibling. Merge the candidate's new context into the existing… |
-| Skills (user root) | `~/.claude/skills/reconcile-tasks/SKILL.md` | L95 | Corrections re-read and merge. correct replaces the ENTIRE field. Before correcting notes, todos, or any map/array… |
-| Skills (user root) | `~/.claude/skills/reconcile-tasks/SKILL.md` | L110 | - MUST use idempotency keys and re-read-and-merge on every correction; never rebuild a field from memory. |
-| Skills (user root) | `~/.claude/skills/verify-work/SKILL.md` | L55 | Write mechanics — re-read and merge, always. Apply updates via mcpmcpsrvneotomacorrect. correct replaces the ENTIRE… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L22 | Before correcting decisions or todos, RE-READ the current field and MERGE. correct replaces the entire field, so add… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L94 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L266 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L398 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L68 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L110 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L43 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L95 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L110 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L55 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L22 | operator-specific, value withheld |
 
 #### `R-680852` — Read a write back; a success code is not a landed write
 
@@ -638,18 +622,18 @@ Target home: **agent_policy** · 12 statements, 10 distinct · **DIVERGE**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_agent_pat_classic_for_public_repos.md` | L28 | How to verify a scope change landed (never print the token itself): |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_confirm_terminal_status_across_polls.md` | L17 | operator-specific, value withheld |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_hub_card_rule_destinations_vs_evidence.md` | L26 | How to apply: update the hub in the SAME turn as the publish, never as a follow-up — dependence on remembering is the… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_recheck_time_claims_before_sending_a_staged_draft.md` | L13 | How to apply: Prefer an absolute date over a relative one in any draft not being sent instantly. Before sending… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_verify_gh_account_before_each_write.md` | L30 | Verify authorship after the write (gh api user --jq .login), and never end a |
-| Codex | `~/.codex/AGENTS.md` | L154 | A write that reports success has not necessarily happened. Read it back. Neotoma /store accepts undeclared fields and… |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L270 | Read back after every write. A success code is not a landed write. |
-| Skills (user root) | `~/.claude/skills/reconcile-planning/SKILL.md` | L329 | Read every write back. A success code is not a landed value: a write to an undeclared field returns success, preserves… |
-| agent_policy entities | `ent_06550fd3f9956dab85dadc2e` | rule | To CREATE a renderedpage: publishrenderedpage with inline {title, htmlbody, customcss} and NO entityid. To UPDATE an… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L200 | A write that reports success has not necessarily happened. Read it back. Enforcement: Partial… |
-| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L51 | A write that reports success has not necessarily happened — read it back. /store accepts undeclared fields and routes… |
-| task_policy entities | `ent_12a20048bb8ba28b3ab0fd30` | rule | Sending an email is a non-idempotent, non-recallable external action. NEVER blindly re-run a send command. (1) Capture… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L28 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L26 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L30 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L154 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L270 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L329 | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L200 | operator-specific, value withheld |
+| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L51 | operator-specific, value withheld |
+| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
 
 #### `R-f08cfb` — Classify an action's blast radius before acting on it
 
@@ -657,17 +641,17 @@ Target home: **docs/foundation/** · 11 statements, 10 distinct · **NEEDS-SPLIT
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L157 | Fail closed on the field that carries the safety meaning. When a value is absent, unrecognized, or malformed, the… |
-| Skills (ateles repo) | `.claude/skills/cicada/SKILL.md` | L125 | 4. Apply the gate (default executionpolicy entdfce6edecefe3eb7fc9e0337): high-confidence + low-blast → execute;… |
-| Skills (ateles repo) | `.claude/skills/corvus/SKILL.md` | L197 | Drafting / adapting content = low blast radius. Flesh out from the source long-form, brand voice (brandvoice +… |
-| Skills (ateles repo) | `.claude/skills/corvus/SKILL.md` | L198 | Posting to any platform = high blast radius. This is ALWAYS operator-approved regardless of confidence — present the… |
-| Skills (ateles repo) | `.claude/skills/vanellus/SKILL.md` | L152 | 2. File a report, don't edit workflows. Editing .github/workflows/, branch protection, or CI config is a reviewed code… |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L119 | executionpolicy entity (swarm governance layer) — when a whole plan's worth of work needs autonomy calibration:… |
-| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L41 | Blocking checkpoints — the points where execution must pause for operator resolution, with what gets presented at each… |
-| Skills (user root) | `~/.claude/skills/ready-tasks/SKILL.md` | L108 | - MUST NOT dispatch any task, except to a dispatchable role at LOW blast radius: assignedto may be set only when the… |
-| agent_policy entities | `ent_00fae21cb9a74370c2fdd66d` | description | Autonomous Execution Constraints and Safety. Low-Risk Operations: Generate unit tests, add type annotations, fix… |
-| agent_policy entities | `ent_7dbf4c7835c282fc1ffd8832` | description | Autonomous Execution Constraints and Safety (mandatory version). Low-Risk Operations and High-Risk Operations defined.… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L206 | Fail closed on the field that carries the safety meaning. Enforcement: Nothing (manual; <issue> fixes one instance,… |
+| Codex | `~/.codex/AGENTS.md` | L157 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L125 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L197 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L198 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L152 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L119 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L41 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L108 | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | description | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | description | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L206 | operator-specific, value withheld |
 
 #### `R-4b8ce8` — Never use git stash; WIP-commit instead
 
@@ -675,16 +659,16 @@ Target home: **agent_policy** · 10 statements, 9 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code hooks (ateles) | `.claude/hooks/test_git_stash_guard.py` | docstring | S = "st" + "ash"  avoid a literal git stash token in this file's own text |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_dispatch_agents_never_task_chips.md` | L17 | How to apply: when a session identifies durable work, launch it with the Agent tool AND create the paired Neotoma task… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_no_staging_write_on_replace_fields.md` | L26 | git stash lesson: an instruction that names a forbidden action is weaker |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/neotoma_worktree_test_gotchas.md` | L14 | Do NOT use git stash to A/B-confirm in a .claude/worktrees/<name> worktree. These worktrees share the main repo's… |
-| Codex | `~/.codex/AGENTS.md` | L29 | git stash is not blocked here. Never run it in any form. |
-| Codex | `~/.codex/AGENTS.md` | L42 | NEVER git stash in any form — the stash stack is shared across worktrees and other sessions pop it. Use a WIP commit.… |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L279 | Never use git stash, in any form. The stash stack is shared across worktrees; another session |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L401 | - MUST NOT use git stash, --delete-branch on merge, or merge past a blocking verdict. |
-| ateles/CLAUDE.md | `CLAUDE.md` | L52 | scripts/verifyclaudemdmerge.py — compares CLAUDE.md rule-by-rule between revisions. It keys on the bolded lead of each… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L80 | NEVER git stash in any form — the stash stack is shared across worktrees and other sessions pop it. Use a WIP commit.… |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L26 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L14 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L29 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L42 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L279 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L401 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L52 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L80 | operator-specific, value withheld |
 
 #### `R-fab4cd` — Pose open decisions through the harness questions tool, not inline prose
 
@@ -692,15 +676,15 @@ Target home: **task_policy** · 9 statements, 9 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/MEMORY.md` | L32 | - Don't ask the operator implementer decisions(dont-ask-operator-implementer-decisions.md) — AskUserQuestion is for… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/dont-ask-operator-implementer-decisions.md` | L3 | description: "Never use AskUserQuestion for a decision the implementer should make from the code, and never recommend… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/proceed-without-asking-on-clear-recommendation.md` | L15 | How to apply: Reserve questions (incl. dont-ask-operator-implementer-decisions / AskUserQuestion) for genuine forks… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_always_pose_decisions_via_questions_tool.md` | L3 | description: Every decision for Mark goes through AskUserQuestion with full context, never prose at the end of a turn |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_always_pose_decisions_via_questions_tool.md` | L8 | Every decision that needs Mark's answer goes through the harness questions tool (AskUserQuestion), never as a prose… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_always_pose_decisions_via_questions_tool.md` | L12 | How to apply: When a turn produces one or more decisions for Mark, batch them into a single AskUserQuestion call (up… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_ask_via_harness_tooling_not_inline.md` | L3 | description: Pose decisions to Mark via AskUserQuestion, never as inline prose questions at the end of a turn |
-| Skills (user root) | `~/.claude/skills/reconcile-planning/SKILL.md` | L549 | When unattended is set, do not call the questions tool. File each decision as a |
-| standing_rule entities | `ent_fadc560850b8114b0ab61f80` | rule_text | Pose every open decision through the harness questions tool (AskUserQuestion): one call, N labeled options, each with… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L32 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L8 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L549 | operator-specific, value withheld |
+| standing_rule entities | `<entity>` | rule_text | operator-specific, value withheld |
 
 #### `R-f31026` — Gmail sends and draft-updates need per-message approval
 
@@ -708,15 +692,15 @@ Target home: **agent_policy** · 9 statements, 9 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_gws_draft_update_can_send.md` | L3 | description: "A gws drafts update on an existing draft can flip it to SENT; re-verify labelIds after EVERY draft write… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_gws_draft_update_can_send.md` | L25 | Prefer messages send over draft-then-update when the operator has approved a send. Reserve drafts for genuine staging,… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/reference_gws_gmail_draft_delete_send_params.md` | L17 | Verified 2026-07-09 (Nick joint-series reply). Because gws draft-update can SEND (feedbackgwsdraftupdatecansend.md),… |
-| Codex | `~/.codex/AGENTS.md` | L30 | A Gmail send is not gated here. No gws gmail ... drafts update, |
-| Skills (ateles repo) | `.claude/skills/email-triage-auto/SKILL.md` | L20 | - NEVER send an email. Only ever create Gmail drafts (createdraft). A draft is inert until the operator opens Gmail… |
-| Skills (user root) | `~/.claude/skills/email-triage-auto/SKILL.md` | L24 | NEVER send an email. Only ever create Gmail drafts (createdraft). A draft is inert until |
-| Skills (user root) | `~/.claude/skills/groom-leads-graph/SKILL.md` | L125 | contributor to update, draft (never send) a status email focused on what it means |
-| ateles/CLAUDE.md | `CLAUDE.md` | L168 | gmailsendgate.py (PreToolUse: Bash) — blocks Gmail operations that can deliver mail without a per-message operator… |
-| task_policy entities | `ent_ea7255149ebf140f5b8b501a` | rule | Whenever an email is pulled from the mailbox — any pull, whether a single message, an inbox sweep, a thread fetch, or… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L25 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L30 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L20 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L24 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L125 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L168 | operator-specific, value withheld |
+| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
 
 #### `R-ce6455` — Daemons run dedicated checkouts that must be fresh
 
@@ -724,14 +708,14 @@ Target home: **agent_policy** · 8 statements, 6 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/reference_neotoma_prod_tunnel_topology.md` | L12 | Auth model: daemons (Strix transcribe, Cyphorhinus poll) send Authorization: Bearer <NEOTOMABEARERTOKEN>. The server… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/neotoma_silent_failure_pattern.md` | L14 | - Five daemons run from the shared session clone rather than ~/ateles-rc-src; the drift guard checks whether a… |
-| Codex | `~/.codex/AGENTS.md` | L72 | Restart daemons as needed, without asking. Standing authorization, 2026-09-11. A merged fix reaches nothing until the… |
-| Codex | `~/.codex/AGENTS.md` | L118 | Daemons run dedicated checkouts, never the shared main clones where |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L400 | - MUST NOT write to a shared main clone or a daemon's deployment checkout; MUST use a linked worktree. |
-| ateles/CLAUDE.md | `CLAUDE.md` | L106 | Restart daemons as needed, without asking. Standing authorization, 2026-09-11, replacing the earlier rule that held… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L147 | Two deliberate non-verdicts: a failed fetch reports unknown, not drift (offline must not look identical to unpushed… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L153 | Daemons run dedicated checkouts, never the shared main clone where interactive sessions work: |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L14 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L72 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L118 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L400 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L106 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L147 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L153 | operator-specific, value withheld |
 
 #### `R-acf4ff` — Never invent facts about the operator's life, tools, or past
 
@@ -739,14 +723,14 @@ Target home: **task_policy** · 8 statements, 8 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/MEMORY.md` | L80 | - Never invent: facts(feedbacknoinventedfacts.md); emotion(feedbacknofabricatedoperatoremotion.md); internal… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_no_invented_facts.md` | L10 | Never invent or assume facts — about the operator's life, tools, habits, or past events — to make copy read warmer or… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_self_citation_verify_before_linking.md` | L12 | Read the post and confirm it actually makes the claim you're attributing to it. Mis-citing your own work is a… |
-| Skills (ateles repo) | `.claude/skills/picus/SKILL.md` | L61 | - Ground every figure in a Neotoma entity or a preparer document; never invent amounts. Cite source per line item. |
-| Skills (user root) | `~/.claude/skills/define-category/SKILL.md` | L200 | and put the seven fields in the body. Never invent fields on a registered |
-| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L217 | 2. Install and configure everything that does not require a human — add the MCP server entry, write the config,… |
-| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L289 | - MUST distinguish items the agent can move from items requiring an operator decision, human sign-off, or an external… |
-| Skills (user root) | `~/.claude/skills/where/SKILL.md` | L325 | that the link is local-only. Never invent a hostname, and never write a client-identifying host |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L80 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L10 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L61 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L200 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L217 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L289 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L325 | operator-specific, value withheld |
 
 #### `R-d99bae` — A renamed agent leaves no stale reference
 
@@ -754,14 +738,14 @@ Target home: **agent_policy** · 8 statements, 5 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L66 | Classify a blocker before surfacing it. When a pull request or task is blocked, decide which kind it is. Dispatch and… |
-| Codex | `~/.codex/AGENTS.md` | L99 | When a daemon, entity, or file is renamed — correct any stale references in body, decisions, and todos in the same… |
-| Codex | `~/.codex/AGENTS.md` | L110 | A renamed agent leaves no reference behind. When an agent is renamed, every reference must move in the same change — a… |
-| Codex | `~/.codex/AGENTS.md` | L156 | A test that cannot fail on the thing it watches is decoration. Before trusting a test as coverage, revert the fix and… |
-| Skills (ateles repo) | `.claude/skills/pavo/SKILL.md` | L139 | Gate-owner naming: always name gate owners by their CURRENT canonical agent name, resolved from the agentdefinition… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L28 | When a daemon, entity, or file is renamed — correct any stale references in body, decisions, and todos in the same… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L103 | Classify a blocker before surfacing it. When a pull request or task is blocked, decide which kind it is. Dispatch and… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L179 | A renamed agent leaves no reference behind. When an agent is renamed, every reference must move in the same change — a… |
+| Codex | `~/.codex/AGENTS.md` | L66 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L99 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L110 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L156 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L139 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L28 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L103 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L179 | operator-specific, value withheld |
 
 #### `R-12d4a8` — Restart affected daemons after a merge, then verify
 
@@ -769,14 +753,14 @@ Target home: **CLAUDE.md** · 8 statements, 7 distinct · **NEEDS-SPLIT**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/no-backfill-externally-seeded-identity-schema.md` | L42 | survives a redeploy with a behavioral dry-run — don't assume. |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/project_markmhendrickson_website_ops.md` | L15 | Dev server : launchd agent com.ateles.markmhendrickson-dev (plist in ateles execution/daemons/markmhendrickson-dev/,… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/neotoma_prod_served_from_worktree.md` | L16 | operator-specific, value withheld |
-| Codex | `~/.codex/AGENTS.md` | L72 | Restart daemons as needed, without asking. Standing authorization, 2026-09-11. A merged fix reaches nothing until the… |
-| Skills (ateles repo) | `.claude/skills/ploceus/SKILL.md` | L57 | Stand up and operate the per-anchor swarm instance: configure, deploy, restart, redeploy, harden. These internal… |
-| Skills (user root) | `~/.claude/skills/reconcile-tasks/SKILL.md` | L39 | Title similarity — not exact-match; "Fix daemon redeploy label gap" and "Daemon redeploy: labels missing after deploy"… |
-| agent_policy entities | `ent_5456a8a2224d8211ef33749c` | body | A session that hands work to the Ateles swarm stays responsible for it until it MERGES and RELEASES. Do not treat… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L106 | Restart daemons as needed, without asking. Standing authorization, 2026-09-11, replacing the earlier rule that held… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L42 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L16 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L72 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L57 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L39 | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | body | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L106 | operator-specific, value withheld |
 
 #### `R-765e54` — Extend the mechanism that exists; do not build a parallel one
 
@@ -784,14 +768,14 @@ Target home: **agent_policy** · 8 statements, 6 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L158 | Extend the mechanism that already generalizes; do not build a parallel one. Before building, look for the thing that… |
-| Skills (ateles repo) | `.claude/skills/analyze-meeting/SKILL.md` | L77 | Prior meetings / transcriptions / disputenotes / plans on the same matter (topical search), so this analysis links… |
-| Skills (ateles repo) | `.claude/skills/ateles/SKILL.md` | L79 | Contextualize before executing. Work you dispatch must check what already exists first — related tasks, open issues… |
-| Skills (ateles repo) | `.claude/skills/draft-rendered-page/SKILL.md` | L171 | 1. Mint the guest link automatically on page creation, and re-show it on every update. Use publishrenderedpage (one… |
-| Skills (ateles repo) | `.claude/skills/email-triage-auto/SKILL.md` | L49 | (b) An unsent DRAFT already exists in the thread (DRAFT label, no newer SENT) → DO NOT create a second competing draft… |
-| Skills (user root) | `~/.claude/skills/digest/SKILL.md` | L131 | Also check whether a durable record already exists (a Neotoma task, a GitHub issue). If so, the chip's prompt MUST… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L208 | Extend the mechanism that already generalizes; do not build a parallel one. Enforcement: Manual until… |
-| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L55 | Extend the mechanism that already generalizes; do not build a parallel one. Search the code for the existing path… |
+| Codex | `~/.codex/AGENTS.md` | L158 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L77 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L79 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L171 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L49 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L131 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L208 | operator-specific, value withheld |
+| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L55 | operator-specific, value withheld |
 
 #### `R-c14682` — Never hardcode secrets or credentials
 
@@ -799,13 +783,13 @@ Target home: **agent_policy** · 7 statements, 6 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L45 | Never hardcode secrets, IBANs, or contact details — always read from env or parquet. |
-| Skills (ateles repo) | `.claude/skills/monedula/SKILL.md` | L44 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/picus/SKILL.md` | L62 | - Never hardcode secrets, IBANs, account numbers, or filing identifiers in code or prompts — read from Neotoma/env. |
-| ateles/CLAUDE.md | `CLAUDE.md` | L177 | Never hardcode secrets, IBANs, or contact details — always read from env or parquet. |
-| ateles/CLAUDE.md | `CLAUDE.md` | L282 | Secrets management — SOPS+age, snapshots in the PRIVATE ateles-private repo (Design B) — 1Password Family stays… |
-| markmhendrickson/foundation repo | `~/repos/foundation/README.md` | L18 | Tooling - Secrets management, environment management, agent setup (optional) |
-| markmhendrickson/foundation repo | `~/repos/foundation/security/credential_management.md` | L141 | Use CI/CD secrets management - GitHub Secrets, GitLab CI/CD variables, etc. |
+| Codex | `~/.codex/AGENTS.md` | L45 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L44 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L62 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L177 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L282 | operator-specific, value withheld |
+| foundation reference repo | `~/repos/<reference>/<file>` | L18 | operator-specific, value withheld |
+| foundation reference repo | `~/repos/<reference>/<file>` | L141 | operator-specific, value withheld |
 
 #### `R-9993c8` — One worktree, one agent; never point two at the same tree
 
@@ -813,13 +797,13 @@ Target home: **agent_policy** · 7 statements, 6 distinct · **DIVERGE**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/MEMORY.md` | L36 | - dispatch, don't drift inline(feedbackdispatchdontdriftintoinlinework.md) · one worktree, one… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_dispatch_agents_never_task_chips.md` | L17 | How to apply: when a session identifies durable work, launch it with the Agent tool AND create the paired Neotoma task… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_one_worktree_one_agent.md` | L11 | Dispatch at most one agent per worktree at a time. If follow-up work is needed on a branch an agent is already in,… |
-| Codex | `~/.codex/AGENTS.md` | L43 | One worktree, one agent. Never point two agents at the same worktree: the second's uncommitted work reads to the first… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L79 | One worktree, one agent. Never point two agents at the same worktree: the second's uncommitted work reads to the first… |
-| markmhendrickson/foundation repo | `~/repos/foundation/development/workflow.md` | L100 | Each feature should be developed in its own worktree for isolation and parallel development: |
-| markmhendrickson/foundation repo | `~/repos/foundation/development/workflow.md` | L481 | 3. Use worktrees for isolation: When configured, each feature should have its own worktree |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L36 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L43 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L79 | operator-specific, value withheld |
+| foundation reference repo | `~/repos/<reference>/<file>` | L100 | operator-specific, value withheld |
+| foundation reference repo | `~/repos/<reference>/<file>` | L481 | operator-specific, value withheld |
 
 #### `R-71cf59` — Commit and PR titles follow the live title convention
 
@@ -827,12 +811,12 @@ Target home: **agent_policy** · 6 statements, 5 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Skills (ateles repo) | `.claude/skills/commit/SKILL.md` | L514 | MANDATORY: Submodule commits MUST use the same comprehensive analysis and detailed commit message format as main… |
-| agent_policy entities | `ent_bf7732d200868ea64d5e8182` | rule | When an agent owns a review gate on a PR (pm/Pavo, ux/Accipiter, arch/Bombycilla, qa/Phoenicurus, prreview/Vanellus,… |
-| agent_policy entities | `ent_bf7732d200868ea64d5e8182` | description | Every swarm PR review-gate owner reviews the full diff in depth through its role lens; reviewing from the PR… |
-| agent_policy entities | `ent_bf7732d200868ea64d5e8182` | body |  Swarm PR review: full diff + role-based depth Why this exists. A PR (neotoma1766) shipped with a real… |
-| markmhendrickson/foundation repo | `~/repos/foundation/agent_instructions/cursor_commands/commit.md` | L3 | CRITICAL REQUIREMENT: All submodule commits MUST use the same comprehensive change analysis and detailed commit… |
-| markmhendrickson/foundation repo | `~/repos/foundation/agent_instructions/cursor_commands/commit.md` | L753 | MANDATORY: Submodule commits MUST use the same comprehensive analysis and detailed commit message format as main… |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L514 | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | rule | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | description | operator-specific, value withheld |
+| agent_policy entities | `<entity>` | body | operator-specific, value withheld |
+| foundation reference repo | `~/repos/<reference>/<file>` | L3 | operator-specific, value withheld |
+| foundation reference repo | `~/repos/<reference>/<file>` | L753 | operator-specific, value withheld |
 
 #### `R-bdb72b` — Never mark work done citing an unverifiable artifact
 
@@ -840,12 +824,12 @@ Target home: **agent_policy** · 6 statements, 5 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L47 | Never mark a task or todo done while citing a commit, branch, file, or PR that does not resolve. Verify the artifact… |
-| Skills (ateles repo) | `.claude/skills/ploceus/SKILL.md` | L94 | An anchor is Stage-1 "done" only when its ledger row shows a named unique outcome in the customer's own words,… |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L271 | - Never mark anything done citing a commit, branch, file, or PR you have not confirmed resolves. |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L36 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/reconcile-tasks/SKILL.md` | L96 | Never mark a task done citing an artifact that does not resolve. Verify the artifact exists first — git cat-file /… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L24 | Never mark a task or todo done while citing a commit, branch, file, or PR that does not resolve. Verify the artifact… |
+| Codex | `~/.codex/AGENTS.md` | L47 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L94 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L271 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L36 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L96 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L24 | operator-specific, value withheld |
 
 #### `R-fa2cbe` — Never assert what the operator feels, thinks, or said without evidence
 
@@ -853,12 +837,12 @@ Target home: **task_policy** · 6 statements, 6 distinct · **DIVERGE**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/MEMORY.md` | L80 | - Never invent: facts(feedbacknoinventedfacts.md); emotion(feedbacknofabricatedoperatoremotion.md); internal… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_never_attribute_unverified_operator_speech.md` | L12 | Mark caught three of these in one letter to counsel: a fabricated admission he'd never |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_no_fabricated_operator_emotion.md` | L12 | Why: Operator correction 2026-07-01, on a Sturnus-drafted reply to Jeroen that opened "Your verification made my day,… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_no_fabricated_operator_internal_state.md` | L15 | Why: This is the self-directed twin of feedbacknoinventedpraiseoftheirwork and feedbacknofabricatedoperatoremotion.… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_summary_entity_is_not_a_source.md` | L13 | Why: derived summaries compress and lose the qualifiers that make a fact true — which project, what relationship,… |
-| Skills (ateles repo) | `.claude/skills/nucifraga/SKILL.md` | L29 | Never fabricate operator emotion. Do not assert what the operator feels, in digests, drafts, or anywhere else, without… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L80 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L29 | operator-specific, value withheld |
 
 #### `R-86601c` — Recurring obligations roll their date; never complete
 
@@ -866,12 +850,12 @@ Target home: **task_policy** · 6 statements, 5 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_payment_attendance_gate.md` | L17 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
 | Codex | `~/.codex/AGENTS.md` | L114 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/monedula/SKILL.md` | L45 | operator-specific, value withheld |
-| Skills (user root) | `~/.claude/skills/reconcile-tasks/SKILL.md` | L90 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L45 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L90 | operator-specific, value withheld |
 | ateles/CLAUDE.md | `CLAUDE.md` | L181 | operator-specific, value withheld |
-| task_policy entities | `ent_cca03c6fc579fe4fc8e8ac9c` | rule | Tasks of the listed kinds are NEVER marked completed; only roll their duedate forward. |
+| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
 
 #### `R-0cc9d7` — Give status updates unprompted, per workstream
 
@@ -879,12 +863,12 @@ Target home: **task_policy** · 6 statements, 5 distinct · **DIVERGE**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_hirundo_analysis_handoff_routing.md` | L13 | Fork B — person / 1:1 outreach → Sturnus (relationship/CRM agent, entb373b3d9af9082c559e954a8). Whenever the target… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_status_update_excludes_backward_corrections.md` | L11 | In a project status update to a client, include only what changes what the reader does next. A correction to something… |
-| Codex | `~/.codex/AGENTS.md` | L58 | Give status updates unprompted — what moved, what is blocked, and one recommended next step per workstream, so the… |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L242 | - Give status unprompted. Do not wait to be asked where things stand. |
-| Skills (user root) | `~/.claude/skills/reconcile-tasks/SKILL.md` | L45 | When two EXISTING tasks are found to duplicate each other during the sweep: keep the better-specified one (more… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L73 | Give status updates unprompted — what moved, what is blocked, and one recommended next step per workstream, so the… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L58 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L242 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L45 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L73 | operator-specific, value withheld |
 
 #### `R-580da5` — Tests follow this repo's naming and placement convention
 
@@ -892,12 +876,12 @@ Target home: **agent_policy** · 6 statements, 6 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_neotoma_ci_generated_files.md` | L13 | - Add an MCP tool → also add an OPENAPIOPERATIONMAPPINGS row + MCPTOOLTOOPERATIONID in src/shared/contractmappings.ts… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_neotoma_ci_generated_files.md` | L21 | 3. Regenerated-but-not-staged (hit TWICE — <issue> and <issue>). validate:test-catalog --check compares the GENERATED… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/neotoma_worktree_test_gotchas.md` | L12 | 1. Pre-existing contract-test failures are environmental, not regressions. Worktrees do not have a compiled dist/… |
-| Skills (ateles repo) | `.claude/skills/phoenicurus/SKILL.md` | L43 | npm run eval:tier1 runs the agentic-eval matrix (tests/integration/agenticevalmatrix.test.ts, expands harness ×… |
-| markmhendrickson/foundation repo | `~/repos/foundation/conventions/code_conventions.md` | L343 | Format: {sourcefile}.test.ts alongside source |
-| markmhendrickson/foundation repo | `~/repos/foundation/conventions/code_conventions.md` | L344 | Examples: userservice.test.ts, validation.test.ts |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L21 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L12 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L43 | operator-specific, value withheld |
+| foundation reference repo | `~/repos/<reference>/<file>` | L343 | operator-specific, value withheld |
+| foundation reference repo | `~/repos/<reference>/<file>` | L344 | operator-specific, value withheld |
 
 #### `R-258f23` — A test that cannot fail on its subject is decoration
 
@@ -905,12 +889,12 @@ Target home: **agent_policy** · 6 statements, 4 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/a-check-that-cannot-fail-proves-nothing.md` | L3 | description: "Before trusting a verification, ask what result would have disproved the claim — and never report… |
-| Codex | `~/.codex/AGENTS.md` | L156 | A test that cannot fail on the thing it watches is decoration. Before trusting a test as coverage, revert the fix and… |
-| Skills (ateles repo) | `.claude/skills/corvus/SKILL.md` | L77 | 4. No triadic/parallelism filler. Avoid the reflexive rule-of-three ("faster, cheaper, better"), "it's not just X,… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L204 | A test that cannot fail on the thing it watches is decoration. Enforcement: Nothing, not mechanizable (belongs in… |
-| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L53 | A test that cannot fail on the thing it watches is decoration. Before trusting a test as coverage, revert the fix and… |
-| task_policy entities | `ent_3c83d2c570d8c79e2865b988` | rule | Before opening any Neotoma PR, regenerate every generated/derived file whose SOURCE you touched, and commit the… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L156 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L77 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L204 | operator-specific, value withheld |
+| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L53 | operator-specific, value withheld |
+| task_policy entities | `<entity>` | rule | operator-specific, value withheld |
 
 #### `R-f398b5` — Act on your recommendation; ask only at a real fork
 
@@ -918,11 +902,11 @@ Target home: **task_policy** · 5 statements, 4 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/MEMORY.md` | L32 | - Don't ask the operator implementer decisions(dont-ask-operator-implementer-decisions.md) — AskUserQuestion is for… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/proceed-without-asking-on-clear-recommendation.md` | L3 | description: "When you have a clear recommendation, act on it — don't ask for approval first." |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/proceed-without-asking-on-clear-recommendation.md` | L15 | How to apply: Reserve questions (incl. dont-ask-operator-implementer-decisions / AskUserQuestion) for genuine forks… |
-| Codex | `~/.codex/AGENTS.md` | L61 | Proceed with your recommendation — don't ask. When you have a recommended course of action, take it and report what… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L75 | Proceed with your recommendation — don't ask. When you have a recommended course of action, take it and report what… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L32 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L61 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L75 | operator-specific, value withheld |
 
 #### `R-713e5d` — Store the full body, not a path or a summary standing in for it
 
@@ -930,11 +914,11 @@ Target home: **agent_policy** · 5 statements, 5 distinct · **DIVERGE**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/MEMORY.md` | L68 | - Plan entities always use the body field(feedbackplanentitiesusebodyfield.md) for the full narrative, not only… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_plan_entities_use_body_field.md` | L11 | When creating or updating a Neotoma plan entity, always populate the body field with the full prose narrative (why the… |
-| Skills (ateles repo) | `.claude/skills/corvus/SKILL.md` | L120 | Long-form platform — articles (long-form home). The configured long-form publisher (vendorbinding capability… |
-| Skills (ateles repo) | `.claude/skills/hirundo/SKILL.md` | L141 | Reuse types: analysis (overall, one per invocation; kind; full markdown in body), analysisfinding (one per finding,… |
-| Skills (ateles repo) | `.claude/skills/hirundo/SKILL.md` | L166 | Persistence is non-optional — Step P every invocation; full markdown in analysis.body (canonical). Fail loudly if… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L68 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L120 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L141 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L166 | operator-specific, value withheld |
 
 #### `R-8d5e55` — Verify against the live system of record before asserting
 
@@ -942,11 +926,11 @@ Target home: **agent_policy** · 5 statements, 4 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/MEMORY.md` | L23 | - Verify before asserting tool limits(verify-before-asserting-tool-limits.md) — read the schema / try the call before… |
-| Codex | `~/.codex/AGENTS.md` | L44 | Verify before asserting. Check the live system of record, not a cached copy or a local checkout — a stale worktree… |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L152 | 4. Never leak on the shared face. Do not link secret gists, internal/localhost URLs, or private entities on a shared… |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L237 | - MUST NOT leak on a shared hub face: no secret-gist / internal / localhost links, no visibility: private entities or… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L82 | Verify before asserting. Check the live system of record, not a cached copy or a local checkout — a stale worktree… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L23 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L44 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L152 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L237 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L82 | operator-specific, value withheld |
 
 #### `R-eecfc1` — End every turn with the decisions that need the operator
 
@@ -954,10 +938,10 @@ Target home: **task_policy** · 4 statements, 3 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code hooks (ateles) | `.claude/hooks/decision_shape_gate.py` | docstring | recommendation. CLAUDE.md: never re-raise one by name alone. |
-| Codex | `~/.codex/AGENTS.md` | L63 | End every turn with the decisions that need Mark , with enough context to decide: the options, what each implies, what… |
-| Skills (user root) | `~/.claude/skills/plan-status/SKILL.md` | L222 | what is already settled, and a recommendation. Never re-raise a decision by name alone. Carry |
-| ateles/CLAUDE.md | `CLAUDE.md` | L76 | End every turn with the decisions that need Mark , with enough context to decide: the options, what each implies, what… |
+| Claude Code hooks (ateles) | `.claude/hooks/<hook>.py` | docstring | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L63 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L222 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L76 | operator-specific, value withheld |
 
 #### `R-d26566` — Do not drift into an agent's work one step at a time
 
@@ -965,10 +949,10 @@ Target home: **agent_policy** · 4 statements, 3 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/MEMORY.md` | L36 | - dispatch, don't drift inline(feedbackdispatchdontdriftintoinlinework.md) · one worktree, one… |
-| Codex | `~/.codex/AGENTS.md` | L56 | Dispatch, don't drift inline. Work that belongs to an agent goes to an agent. The failure is drift — one small step at… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L64 | entity, never a harness chip. "Dispatch, don't drift inline" governs the |
-| ateles/CLAUDE.md | `CLAUDE.md` | L71 | Dispatch, don't drift inline. Work that belongs to an agent goes to an agent. The failure is drift — one small step at… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L36 | operator-specific, value withheld |
+| Codex | `~/.codex/AGENTS.md` | L56 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L64 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L71 | operator-specific, value withheld |
 
 #### `R-1bf77f` — Recover a stash by apply-with-SHA, never pop a shared stack
 
@@ -976,10 +960,10 @@ Target home: **agent_policy** · 4 statements, 4 distinct · **DIVERGE**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/MEMORY.md` | L33 | - File the issue, await its spec, then PR(feedbackfileissueandawaitspecbeforepr.md) · Stash recovery: apply by SHA,… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/reference_stash_recovery_apply_not_pop.md` | L3 | description: When an agent breaks the no-stash rule, recover with git stash apply <sha> then drop that entry by tag —… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/reference_stash_recovery_apply_not_pop.md` | L21 | 1. git stash push -u -m "<unique-tag>" — never bare git stash. |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/reference_stash_recovery_apply_not_pop.md` | L26 | 5. Verify the stack afterwards: git stash list should still show every |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L33 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L21 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L26 | operator-specific, value withheld |
 
 #### `R-ffe65b` — Never fabricate a finding or a conclusion to appear useful
 
@@ -987,10 +971,10 @@ Target home: **task_policy** · 4 statements, 4 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Skills (ateles repo) | `.claude/skills/analyze/SKILL.md` | L146 | No invented findings. Every analysisfinding traces to specific evidence — a verbatim quote from the source, an… |
-| Skills (ateles repo) | `.claude/skills/aquila/SKILL.md` | L79 | Speculation is labeled. When you reason past the evidence, mark it. A grounded "I don't know, and here is why that… |
-| Skills (ateles repo) | `.claude/skills/falco/SKILL.md` | L80 | - Do not fabricate a finding to appear useful. An honest, specific "I enumerated these sinks and these encodings; all… |
-| Skills (ateles repo) | `.claude/skills/hirundo/SKILL.md` | L121 | No invented findings — every finding traces to a verbatim quote, observed code/doc pattern, or measured metric. |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L146 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L79 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L80 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L121 | operator-specific, value withheld |
 
 #### `R-4038a8` — Never invent a quote; every quote traces to its source
 
@@ -998,10 +982,10 @@ Target home: **task_policy** · 4 statements, 4 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Skills (ateles repo) | `.claude/skills/analyze-meeting/SKILL.md` | L83 | Read the full transcript. Extract the following with verbatim quotes from the transcript where possible (never invent… |
-| Skills (ateles repo) | `.claude/skills/analyze-neotoma-feedback/SKILL.md` | L90 | 4. Pull verbatim quotes from the source. Never paraphrase into quote syntax — paraphrased content must be labeled as… |
-| Skills (ateles repo) | `.claude/skills/analyze-neotoma-feedback/SKILL.md` | L371 | No invented quotes — in the report or in stored entity fields. Every quote block in the markdown report AND every… |
-| Skills (ateles repo) | `.claude/skills/analyze-neotoma-feedback/SKILL.md` | L410 | Never invent quotes. Every quote carries the source entityid. If the snapshot only has a paraphrase, label it… |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L83 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L90 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L371 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L410 | operator-specific, value withheld |
 
 #### `R-57ff60` — Do not merge while a live blocking review stands
 
@@ -1009,10 +993,10 @@ Target home: **docs/foundation/** · 4 statements, 4 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L46 | Merge stays gated; product releases, credentials, sends, and grants keep their existing gates. Do not merge where a… |
-| Skills (ateles repo) | `.claude/skills/vanellus/SKILL.md` | L32 | 2. Enforce PR gate inheritance — verify pm, ux (if required), and arch (if required) are all signedoff or waived. If… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L107 | Merge stays gated, and two classes stay Mark's absolutely. Do not merge where a live blocking review stands — live… |
-| standing_rule entities | `ent_d22565e6723bd2a38385ac81` | instruction | Ask the operator only when plausible options would materially change their goals, risk, cost, external commitments,… |
+| Codex | `~/.codex/AGENTS.md` | L46 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L32 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L107 | operator-specific, value withheld |
+| standing_rule entities | `<entity>` | instruction | operator-specific, value withheld |
 
 #### `R-18616b` — Validate the instrument before believing a measurement; a surprising zero is the tool
 
@@ -1020,10 +1004,10 @@ Target home: **agent_policy** · 4 statements, 2 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L155 | Validate the instrument before believing the measurement. A zero, an empty result, or a silent pass is a claim about… |
-| Skills (user root) | `~/.claude/skills/continue-session/SKILL.md` | L289 | Verify the instrument before believing the measurement. A false zero from querying the wrong |
-| ateles/CLAUDE.md | `CLAUDE.md` | L202 | Validate the instrument before believing the measurement. Enforcement: Nothing (manual). A zero, an empty result, or a… |
-| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L52 | Validate the instrument before believing the measurement. A zero or an empty result is a claim about the query before… |
+| Codex | `~/.codex/AGENTS.md` | L155 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L289 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L202 | operator-specific, value withheld |
+| neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | L52 | operator-specific, value withheld |
 
 #### `R-fb4dbc` — Agent prompts are public and carry no operator data
 
@@ -1032,7 +1016,7 @@ Target home: **agent_policy** · 3 statements, 2 distinct · agree
 | Store | Location | At | Statement |
 |---|---|---|---|
 | Codex | `~/.codex/AGENTS.md` | L107 | operator-specific, value withheld |
-| Skills (ateles repo) | `.claude/skills/aquila/SKILL.md` | L78 | PII-free prompt; operator-specific data at runtime. This definition is public. Every operator-specific fact comes from… |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L78 | operator-specific, value withheld |
 | ateles/CLAUDE.md | `CLAUDE.md` | L174 | operator-specific, value withheld |
 
 #### `R-03c4c7` — Never invent praise or a judgement of someone else's work
@@ -1041,9 +1025,9 @@ Target home: **task_policy** · 3 statements, 3 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Skills (ateles repo) | `.claude/skills/corvus/SKILL.md` | L74 | 1. No unverifiable superlatives or claimed judgments. Never write "the clearest/best/sharpest writeup I've seen," "one… |
-| Skills (user root) | `~/.claude/skills/correspondence-voice/SKILL.md` | L65 | Other forbidden constructions to self-check: unverifiable superlatives and flattery the |
-| Skills (user root) | `~/.claude/skills/end/SKILL.md` | L130 | Voice deltas (apply to prose and to the copy on a page): lexical (words/phrases the operator removes — hype, filler,… |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L74 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L65 | operator-specific, value withheld |
+| Skills (user root) | `~/.claude/skills/<skill>/SKILL.md` | L130 | operator-specific, value withheld |
 
 #### `R-c6d782` — Merge by squash
 
@@ -1051,9 +1035,9 @@ Target home: **agent_policy** · 3 statements, 3 distinct · **DIVERGE**
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_finish_and_merge_open_prs.md` | L33 | Never merge past a BLOCKING verdict. Squash-merge; never |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/reference_squash_merge_drops_commits_pushed_after.md` | L17 | After ANY merge, verify origin/main contains every commit you meant to land — git fetch origin main, then grep the… |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/reference_squash_merge_hides_supersession_from_topology.md` | L32 | How to apply: never bulk-close ancestors of a squash merge on topology alone — |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L33 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L32 | operator-specific, value withheld |
 
 #### `R-4706ff` — Never predict or assert a third party's reaction
 
@@ -1061,8 +1045,8 @@ Target home: **task_policy** · 2 statements, 2 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_never_assert_a_remediation_you_have_not_tested.md` | L23 | but I haven't verified how it renders for the recipient." Never predict a third party's |
-| Skills (ateles repo) | `.claude/skills/analyze-meeting/SKILL.md` | L389 | No invented commitments. Every action item, decision, and quote MUST trace to specific transcript text. Paraphrase is… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L23 | operator-specific, value withheld |
+| Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L389 | operator-specific, value withheld |
 
 #### `R-d2c4bb` — Never bypass the pre-commit hook with --no-verify
 
@@ -1070,8 +1054,8 @@ Target home: **agent_policy** · 2 statements, 1 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Codex | `~/.codex/AGENTS.md` | L159 | Never bypass the pre-commit hook with --no-verify. When a commit must land with tests skipped, use the hook's own… |
-| ateles/CLAUDE.md | `CLAUDE.md` | L186 | Never bypass the pre-commit hook with --no-verify. When a commit must land with tests skipped, use the hook's own… |
+| Codex | `~/.codex/AGENTS.md` | L159 | operator-specific, value withheld |
+| ateles/CLAUDE.md | `CLAUDE.md` | L186 | operator-specific, value withheld |
 
 #### `R-b5f10c` — Pass PR and comment bodies by file, never inline
 
@@ -1079,7 +1063,7 @@ Target home: **agent_policy** · 1 statements, 1 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_dispatch_agents_never_task_chips.md` | L17 | How to apply: when a session identifies durable work, launch it with the Agent tool AND create the paired Neotoma task… |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L17 | operator-specific, value withheld |
 
 #### `R-e0f7e8` — Store artifacts as the work happens, not at session end
 
@@ -1087,7 +1071,7 @@ Target home: **agent_policy** · 1 statements, 1 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| ateles/CLAUDE.md | `CLAUDE.md` | L30 | Do not wait until end of session. Apply corrections in the same turn as the work, after the work completes. |
+| ateles/CLAUDE.md | `CLAUDE.md` | L30 | operator-specific, value withheld |
 
 #### `R-765925` — Verify the GitHub identity before any write
 
@@ -1095,7 +1079,7 @@ Target home: **agent_policy** · 1 statements, 1 distinct · agree
 
 | Store | Location | At | Statement |
 |---|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/feedback_verify_gh_account_before_each_write.md` | L30 | Verify authorship after the write (gh api user --jq .login), and never end a |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L30 | operator-specific, value withheld |
 
 ## What this inventory could not classify
 
