@@ -37,6 +37,30 @@ INTAKE_ENTRY_PARAGRAPH = (
     "closing `route` verdict; there is no separate unrouted state "
     "(`work_model.md#intake-is-every-tasks-first-workflow`)."
 )
+INTAKE_PURPOSE_PARAGRAPH = (
+    "**Purpose:** turn a created task into a routed one: classified, linked to the "
+    "records it concerns, deduplicated, prioritized, and handed to exactly one "
+    "successor workflow, to none, or to the operator."
+)
+INTAKE_SEMANTIC_BLOCK = (
+    INTAKE_PURPOSE_PARAGRAPH + "\n\n" + INTAKE_ENTRY_PARAGRAPH + "\n\n**Steps**"
+)
+BATCH_CREATION_PARAGRAPH = (
+    "**A batch comes into existence at one of two moments, and at no other: every "
+    "workflow-entering task's creation, which opens its intake batch at creation, "
+    "and a closing verdict naming a successor, which opens the successor's.** Two "
+    "causes, both recorded, and no third. Intake's `route` step closes on a verdict "
+    "naming one successor workflow, none, or operator-only; every later batch closes "
+    "the same way (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`). "
+    "Where a successor is named, the batch for it opens and carries a `FOLLOWS` edge "
+    "back to the batch that named it. Where none is named, the task's chain ends. "
+    "Nothing else opens a batch: no daemon opens one because it noticed eligible "
+    "tasks, no adapter opens one on an inbound event, and no scheduler sweeps for "
+    "work to group. The one batch with no predecessor is a task's intake batch, "
+    "opened on the task's creation, which is the universal entry "
+    "(`#intake-is-every-tasks-first-workflow`, above) and the reason every chain has "
+    "a first link."
+)
 BATCH_OPENING_CLAUSE = (
     "An intake batch opens in the admitted creation unit of the workflow-entering "
     "task, without a predecessor verdict."
@@ -50,6 +74,36 @@ BATCH_OPENING_PARAGRAPH = (
     "a reason, and a reader asking why these tasks are in that later workflow is "
     "answered by a conclusion rather than by inferring what some sweeper's "
     "predicate must have matched."
+)
+BATCH_SUCCESSOR_TASKS_PARAGRAPH = (
+    "**A successor batch's tasks are the tasks the closing verdict carried; an intake "
+    "batch carries the one task whose creation opened it, and grouping beyond either "
+    "is a step's judgement, recorded as one.** The default is the simple one: the "
+    "tasks attached to the closing batch move together into the successor, and a "
+    "batch of one stays a batch of one. Two operations change a task set, both "
+    "already defined and both edges (principle 11): **detach**, which ends a task's "
+    "`ADDRESSED_BY` edge and opens a new batch for it from the first step of its "
+    "workflow, and **attach**, which writes that edge. What this section adds is who "
+    "may do them and on what basis. Attaching a task to a batch that is already open, "
+    "part-way through its steps, is a step owner's judgement written into that "
+    "step's verdict — `tasks_attached[]` names them (`data_model.md#concepts`), so an "
+    "`ADDRESSED_BY` edge written after the batch opened that no verdict names is the "
+    "failing artefact — never an adapter's guess and never a matcher's inference — "
+    "the adapter rule already forbids the first "
+    "(`adapters.md#what-the-adapter-does-with-every-event`), and the second is the "
+    "routing fallthrough the pull rule forbids. A task attached part-way through "
+    "enters at the batch's current step and inherits the verdicts already written on "
+    "it, which is exactly why the judgement is a recorded one: those verdicts were "
+    "made against a task set that did not include it, and a step owner who attaches "
+    "is asserting that they still hold. Where that assertion is not safe, the task "
+    "is its own batch."
+)
+BATCH_FORMATION_SEMANTIC_BLOCK = (
+    BATCH_CREATION_PARAGRAPH
+    + "\n\n"
+    + BATCH_OPENING_PARAGRAPH
+    + "\n\n"
+    + BATCH_SUCCESSOR_TASKS_PARAGRAPH
 )
 AGGREGATE_PARENT_MODEL_CLAUSE = (
     "An **aggregate parent task is not claimable, never enters a workflow, and "
@@ -65,6 +119,24 @@ AGGREGATE_PARENT_MODEL_PARAGRAPH = (
     "every child and every other workflow-entering peer task still opens its intake "
     "batch atomically at creation."
 )
+AGGREGATE_PARENT_ASCENT_PARAGRAPH = (
+    "**A task's one `PART_OF` edge targets its parent task or a planning record, and "
+    "the records above it are its ascent.** The same edge, with the same one-parent "
+    "rule, relates a task to the plan it is under and a plan to whatever the instance "
+    "holds above it; the walk upward from a task along `PART_OF` is a derived read, "
+    "distinct from the chain, and what a step reads of it is declared and resolved at "
+    "hydration "
+    "(`planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward`, "
+    "`planning_model.md#upward-context-is-a-declared-read-resolved-along-the-ascent-at-hydration`). "
+    "A task with no planning record above it is unplanned, a derived read and never a "
+    "status, and it is admitted through intake like any task. Completion at every "
+    "level above the task is the parent's rule applied again: derived from the "
+    "descendants' terminal states, never stored "
+    "(`planning_model.md#downward-state-is-derived-upward-content-is-authored-as-entities`)."
+)
+AGGREGATE_PARENT_MODEL_SECTION = (
+    AGGREGATE_PARENT_MODEL_PARAGRAPH + "\n\n" + AGGREGATE_PARENT_ASCENT_PARAGRAPH
+)
 AGGREGATE_PARENT_SCENARIO_CLAUSE = (
     "**aggregate parent is the explicit workflow-entry exception: it is not "
     "claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY` "
@@ -78,6 +150,31 @@ AGGREGATE_PARENT_SCENARIO_PARAGRAPH = (
     + " When a reader asks whether the parent is complete, the answer is derived "
     "from the children's terminal states at that moment and is stored nowhere."
 )
+AGGREGATE_PARENT_SCENARIO_DIAGRAM = """```mermaid
+flowchart TD
+    P[aggregate parent: not claimable, no intake batch, never in a workflow]
+    C1[child 1] -->|PART_OF| P
+    C2[child 2] -->|PART_OF| P
+    C3[child 3] -->|PART_OF| P
+    C1 -->|ADDRESSED_BY| R1[batch 1]
+    C2 -->|ADDRESSED_BY| R2[batch 2]
+    C3 -->|ADDRESSED_BY| R3[batch 3]
+    R1 --> D{all children terminal?}
+    R2 --> D
+    R3 --> D
+    D -->|derived at read| PC[parent reads complete]
+```"""
+AGGREGATE_PARENT_SCENARIO_INVARIANTS = (
+    "**Invariants:** [`work_model.md#parent-and-child-tasks`]"
+    "(work_model.md#parent-and-child-tasks); `principles.md` invariant 11."
+)
+AGGREGATE_PARENT_SCENARIO_SECTION = (
+    AGGREGATE_PARENT_SCENARIO_PARAGRAPH
+    + "\n\n"
+    + AGGREGATE_PARENT_SCENARIO_DIAGRAM
+    + "\n\n"
+    + AGGREGATE_PARENT_SCENARIO_INVARIANTS
+)
 WM35_REQUIREMENT = (
     "`work_model.md#parent-and-child-tasks`: an aggregate parent is not claimable, "
     "never enters a workflow, and has no intake batch or `ADDRESSED_BY`; its "
@@ -90,7 +187,7 @@ class CorpusProblem(Exception):
 
 
 def _line(text: str, pattern: str) -> str:
-    match = re.search(pattern, text, re.M)
+    match = re.search(pattern, _active_prose(text), re.M)
     return match.group(0) if match else ""
 
 
@@ -103,12 +200,74 @@ def _normalize(text: str) -> str:
     return " ".join(text.lower().split())
 
 
-def _section(text: str, start: str, end: str) -> str:
-    begin = text.find(start)
-    if begin < 0:
+def _blank(text: str) -> str:
+    return "".join("\n" if char == "\n" else " " for char in text)
+
+
+def _without_html_comments(text: str) -> str:
+    return re.sub(r"<!--.*?-->", lambda match: _blank(match.group(0)), text, flags=re.S)
+
+
+def _active_prose(text: str) -> str:
+    """Return same-length Markdown with comments and fenced blocks blanked."""
+
+    visible = _without_html_comments(text)
+    output: list[str] = []
+    fence_char = ""
+    fence_size = 0
+    for line in visible.splitlines(keepends=True):
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if fence_char:
+            output.append(_blank(line))
+            if marker and marker.group(1)[0] == fence_char and len(marker.group(1)) >= fence_size:
+                fence_char = ""
+                fence_size = 0
+            continue
+        if marker:
+            fence_char = marker.group(1)[0]
+            fence_size = len(marker.group(1))
+            output.append(_blank(line))
+            continue
+        output.append(line)
+    return "".join(output)
+
+
+def _heading_spans(text: str, heading: str) -> list[tuple[int, int]]:
+    visible = _without_html_comments(text)
+    spans: list[tuple[int, int]] = []
+    fence_char = ""
+    fence_size = 0
+    offset = 0
+    for line in visible.splitlines(keepends=True):
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if fence_char:
+            if marker and marker.group(1)[0] == fence_char and len(marker.group(1)) >= fence_size:
+                fence_char = ""
+                fence_size = 0
+            offset += len(line)
+            continue
+        if marker:
+            fence_char = marker.group(1)[0]
+            fence_size = len(marker.group(1))
+            offset += len(line)
+            continue
+        if re.fullmatch(
+            rf" {{0,3}}{re.escape(heading)}[ \t]*", line.rstrip("\r\n")
+        ):
+            spans.append((offset, offset + len(line)))
+        offset += len(line)
+    return spans
+
+
+def _heading_section(text: str, start: str, end: str) -> str:
+    """Return one active Markdown heading section, refusing ambiguity."""
+
+    starts = _heading_spans(text, start)
+    ends = _heading_spans(text, end)
+    if len(starts) != 1 or len(ends) != 1 or starts[0][0] >= ends[0][0]:
         return ""
-    stop = text.find(end, begin + len(start))
-    return text[begin : stop if stop >= 0 else len(text)]
+    visible = _without_html_comments(text)
+    return visible[starts[0][1] : ends[0][0]]
 
 
 def _require(label: str, text: str, groups: tuple[tuple[str, ...], ...]) -> list[str]:
@@ -128,12 +287,32 @@ def _forbid(label: str, text: str, tokens: tuple[str, ...]) -> list[str]:
 
 
 def _require_exact_block(
-    label: str, text: str, start: str, end: str, expected: str
+    label: str,
+    text: str,
+    start: str,
+    end: str,
+    expected: str,
+    *,
+    require_section_start: bool = False,
 ) -> list[str]:
-    block = _section(text, start, end)
+    visible = _without_html_comments(text)
+    active = _active_prose(text)
+    starts = [match.start() for match in re.finditer(re.escape(start), active)]
+    ends = [match.start() for match in re.finditer(re.escape(end), active)]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        return [f"decision-84-{label} — canonical semantic block is ambiguous"]
+    if require_section_start and visible[: starts[0]].strip():
+        return [f"decision-84-{label} — content precedes canonical semantic block"]
+    block = visible[starts[0] : ends[0]]
     if _normalize(block) == _normalize(expected):
         return []
     return [f"decision-84-{label} — canonical semantic block changed"]
+
+
+def _require_exact_section(label: str, text: str, expected: str) -> list[str]:
+    if _normalize(_without_html_comments(text)) == _normalize(expected):
+        return []
+    return [f"decision-84-{label} — canonical semantic section changed"]
 
 
 def _require_exact_cell(label: str, cell: str, expected: str) -> list[str]:
@@ -174,52 +353,52 @@ def check(root: Path) -> list[str]:
     wm13_requirement = _table_cell(creation_row_map["WM-13"], 1)
     creation_rows = " ".join(creation_row_map.values())
     task_schema = _line(texts["data_model.md"], r"^\|\s*task\s*\|.*$")
-    intake_model = _section(
+    intake_model = _heading_section(
         texts["work_model.md"],
         "### Intake is every task's first workflow",
         "### What distinguishes a task being assembled from one intake has not reached",
     )
-    direct_model = _section(
+    direct_model = _heading_section(
         texts["work_model.md"],
         "### What distinguishes a task being assembled from one intake has not reached",
         "### What a claim predicate treats as claimable",
     )
-    claim_model = _section(
+    claim_model = _heading_section(
         texts["work_model.md"],
         "### What a claim predicate treats as claimable",
         "### A task is live when some principal could claim it now",
     )
-    batch_formation = _section(
+    batch_formation = _heading_section(
         texts["work_model.md"],
         "### How a batch is formed, and what chooses its workflow",
         "### A batch may hold on a condition discovered mid-flight",
     )
-    source_index = _section(
+    source_index = _heading_section(
         texts["work_model.md"],
         "### Where tasks come from: every source, indexed",
         "### An intake rule turns a described change in the record into a task, and nothing else",
     )
-    hold_model = _section(
+    hold_model = _heading_section(
         texts["work_model.md"],
         "### A batch may hold on a condition discovered mid-flight",
         "### A batch may depend on a task it created",
     )
-    parent_model = _section(
+    parent_model = _heading_section(
         texts["work_model.md"],
         "### Parent and child tasks",
         "### A recurring task is one live instance, and its completion creates the next",
     )
-    intake_workflow = _section(
+    intake_workflow = _heading_section(
         texts["workflows.md"],
         "## intake",
         "## feature",
     )
-    scenario_f = _section(
+    scenario_f = _heading_section(
         texts["scenarios.md"],
         "## (f) A parent task with children in independent batches",
-        "## (g) The operator-only claim",
+        "## (g) An operator-only task, claimed by the operator-facing agent",
     )
-    scenario_j = _section(
+    scenario_j = _heading_section(
         texts["scenarios.md"],
         "## (j) A task created, routed by intake, and entering its successor",
         "## What the scenarios do not show",
@@ -318,23 +497,20 @@ def check(root: Path) -> list[str]:
     problems += _require_exact_block(
         "intake-workflow-atomic-entry",
         intake_workflow,
-        "**Entry condition:**",
-        "**Steps**",
-        INTAKE_ENTRY_PARAGRAPH,
+        "**Purpose:**",
+        "| # | Step | Step owner (role) | Required | Parallel / join | Closes on |",
+        INTAKE_SEMANTIC_BLOCK,
+        require_section_start=True,
     )
-    problems += _require_exact_block(
+    problems += _require_exact_section(
         "aggregate-parent-model",
         parent_model,
-        "Children `PART_OF` an aggregate parent",
-        "**A task's one `PART_OF` edge",
-        AGGREGATE_PARENT_MODEL_PARAGRAPH,
+        AGGREGATE_PARENT_MODEL_SECTION,
     )
-    problems += _require_exact_block(
+    problems += _require_exact_section(
         "aggregate-parent-scenario",
         scenario_f,
-        "A parent task is created as the grouping",
-        "```mermaid",
-        AGGREGATE_PARENT_SCENARIO_PARAGRAPH,
+        AGGREGATE_PARENT_SCENARIO_SECTION,
     )
     problems += _require_exact_cell(
         "aggregate-parent-wm-35",
@@ -344,9 +520,9 @@ def check(root: Path) -> list[str]:
     problems += _require_exact_block(
         "batch-opening-model",
         batch_formation,
-        "The consequence worth naming has two forms, not one.",
-        "**A successor batch's tasks",
-        BATCH_OPENING_PARAGRAPH,
+        "**A batch comes into existence at one of two moments",
+        "**The workflow is fixed once:",
+        BATCH_FORMATION_SEMANTIC_BLOCK,
     )
     problems += _require(
         "wm-27",

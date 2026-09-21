@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -22,52 +23,54 @@ CORPUS = {
     "conformance_suite.md": "| WM-13 | `work_model.md#intake-is-every-tasks-first-workflow`: every workflow-entering task atomically gets one intake batch and `ADDRESSED_BY` at creation; an aggregate parent gets neither and is not claimable | read | red | M |\n| WM-14 | every workflow-entering child task | intake batch on creation | read | red | M |\n| WM-14a | every workflow-entering task | persistent hold | lapse and transfer | creator and declaration-resolved `pm` step owner | mutant |\n| WM-21 | every daemon-created workflow-entering task | intake batch at creation | read | red | M |\n| WM-27 | intake batch opens at creation without a predecessor verdict; every successor batch is opened by a closing verdict | read | red | M |\n| WM-31 | assembly exception creator-time finding | fixture | read | survives lapse | M |\n| WM-31a | assembly exception | lapse | read | PM-only | M |\n| WM-32b | every workflow-entering peer task | intake batch at creation | read | red | M |\n| WM-35 | `work_model.md#parent-and-child-tasks`: an aggregate parent is not claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY`; its children are workflow-entering tasks | read | red | M |\n| WM-35a | every recurring workflow-entering task | intake batch at creation | read | red | M |\n| WM-39 | every ordinary workflow-entering peer task and every assembling task gets an intake batch at creation; aggregate parent is the exception; the assembly exception adds a persistent assembly exclusion | declared `pm` step owner | effect | red | M |\n",
 }
 
-# Keep the compact fixture's pinned semantic paragraphs identical to the live
-# corpus while leaving the rest of the fixture deliberately minimal.
-CORPUS["workflows.md"] = CORPUS["workflows.md"].replace(
-    "**Entry condition:** every workflow-entering task enters with its intake "
-    "batch and `ADDRESSED_BY` edge admitted atomically at creation. An aggregate "
-    "parent never enters a workflow; decision 84's assembly exception adds a "
-    "persistent `classify` hold.",
-    decision_84.INTAKE_ENTRY_PARAGRAPH,
-).replace("## intake\n", "## intake\n\n").replace("\n## feature", "\n\n## feature")
-CORPUS["work_model.md"] = CORPUS["work_model.md"].replace(
-    "The consequence worth naming has two forms, not one. An intake batch opens "
-    "in the admitted creation unit of the workflow-entering task, without a "
-    "predecessor verdict. Every successor batch is opened by a closing verdict.",
-    decision_84.BATCH_OPENING_PARAGRAPH,
-).replace(
-    "An **aggregate parent task is not claimable, never enters a workflow, and "
-    "has no intake batch or `ADDRESSED_BY` edge** — it is a grouping, and a batch "
-    "carries tasks that are executed, which an aggregate parent never is.",
-    decision_84.AGGREGATE_PARENT_MODEL_PARAGRAPH,
-).replace(
-    "### How a batch is formed, and what chooses its workflow\n",
-    "### How a batch is formed, and what chooses its workflow\n\n",
-).replace(
-    "persistent classify hold. The consequence worth naming",
-    "persistent classify hold.\n\nThe consequence worth naming",
-).replace(
-    "predicate must have matched.\n**A successor batch's tasks",
-    "predicate must have matched.\n\n**A successor batch's tasks",
-).replace(
-    "### Parent and child tasks\n",
-    "### Parent and child tasks\n\n",
-).replace(
-    "intake batch atomically at creation.\n### A recurring task",
-    "intake batch atomically at creation.\n\n### A recurring task",
+# Keep the compact fixture's protected semantic regions identical to the live
+# corpus while leaving every unrelated section deliberately minimal.
+CORPUS["workflows.md"] = (
+    "## intake\n\n"
+    + decision_84.INTAKE_SEMANTIC_BLOCK
+    + "\n\n| # | Step | Step owner (role) | Required | Parallel / join | Closes on |\n"
+    + "|---|---|---|---|---|---|\n"
+    + "| 1 | `classify` | `pm` | yes | | routed |\n\n"
+    + "## feature\nEvery workflow-entering task is mentioned here too, but this "
+    + "section cannot satisfy intake's contract.\n"
 )
-CORPUS["scenarios.md"] = CORPUS["scenarios.md"].replace(
-    "**aggregate parent is the explicit workflow-entry exception: it is not "
-    "claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY` "
-    "edge.**",
-    decision_84.AGGREGATE_PARENT_SCENARIO_PARAGRAPH,
-).replace(
-    "## (f) A parent task with children in independent batches\n",
-    "## (f) A parent task with children in independent batches\n\n",
-).replace(
-    "stored nowhere.\n## (j)",
-    "stored nowhere.\n\n```mermaid\nflowchart TD\n```\n\n## (j)",
+
+work_model = CORPUS["work_model.md"]
+batch_start = work_model.index("### How a batch is formed, and what chooses its workflow")
+batch_end = work_model.index("### A batch may hold on a condition discovered mid-flight")
+batch_section = (
+    "### How a batch is formed, and what chooses its workflow\n\n"
+    "Every workflow-entering task has an intake batch on creation; an assembly "
+    "exception adds a persistent assembly exclusion.\n\n"
+    + decision_84.BATCH_FORMATION_SEMANTIC_BLOCK
+    + "\n\n**The workflow is fixed once:** fixed.\n\n"
+)
+work_model = work_model[:batch_start] + batch_section + work_model[batch_end:]
+parent_start = work_model.index("### Parent and child tasks")
+parent_end = work_model.index(
+    "### A recurring task is one live instance, and its completion creates the next"
+)
+parent_section = (
+    "### Parent and child tasks\n\n"
+    + decision_84.AGGREGATE_PARENT_MODEL_SECTION
+    + "\n\n"
+)
+CORPUS["work_model.md"] = (
+    work_model[:parent_start] + parent_section + work_model[parent_end:]
+)
+
+CORPUS["scenarios.md"] = (
+    "## (f) A parent task with children in independent batches\n\n"
+    + decision_84.AGGREGATE_PARENT_SCENARIO_SECTION
+    + "\n\n## (g) An operator-only task, claimed by the operator-facing agent\n\n"
+    + "Operator-only scenario.\n\n"
+    + "## (j) A task created, routed by intake, and entering its successor\n"
+    + "Every workflow-entering task has its intake batch at creation; an assembling "
+    + "task is the ruled exception only in carrying a persistent assembly exclusion, "
+    + "and only the resolved `pm` step owner claims.\n"
+    + "C[task and intake batch created atomically] --> I[intake batch: unrouted with "
+    + "no route verdict]\nF -.->|FOLLOWS| I\n"
+    + "## What the scenarios do not show\n"
 )
 
 
@@ -96,6 +99,21 @@ def mutate_real_corpus(
     text = path.read_text(encoding="utf-8")
     assert text.count(old) == 1
     path.write_text(text.replace(old, new, 1), encoding="utf-8")
+    return decision_84.check(tmp_path)
+
+
+def mutate_real_corpus_text(
+    tmp_path: Path, name: str, transform: Callable[[str], str]
+) -> list[str]:
+    fdir = tmp_path / "docs" / "foundation"
+    fdir.mkdir(parents=True)
+    for corpus_name in CORPUS:
+        shutil.copy2(REPO_ROOT / "docs" / "foundation" / corpus_name, fdir)
+    path = fdir / name
+    before = path.read_text(encoding="utf-8")
+    after = transform(before)
+    assert after != before
+    path.write_text(after, encoding="utf-8")
     return decision_84.check(tmp_path)
 
 
@@ -460,6 +478,307 @@ def test_real_parent_scenario_adjacent_paragraph_qualification_fails(
         "enter a workflow after publication.\n\n```mermaid",
     )
     assert any("aggregate-parent-scenario" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "name, old, new, label",
+    (
+        (
+            "workflows.md",
+            "(`work_model.md#intake-is-every-tasks-first-workflow`).\n\n**Steps**",
+            "(`work_model.md#intake-is-every-tasks-first-workflow`).\n\n"
+            "**Steps**\n\nDespite the entry condition, a task may be published "
+            "before its intake batch or `ADDRESSED_BY` edge exists.",
+            "intake-workflow-atomic-entry",
+        ),
+        (
+            "work_model.md",
+            "**A successor batch's tasks are the tasks the closing verdict carried",
+            "**A successor batch's tasks also establish that an intake batch may "
+            "require a predecessor verdict; the tasks the closing verdict carried",
+            "batch-opening-model",
+        ),
+        (
+            "work_model.md",
+            "**A task's one `PART_OF` edge targets its parent task or a planning record",
+            "**A task's one `PART_OF` edge targets its parent task or a planning "
+            "record; after publication an aggregate parent may become claimable, "
+            "enter a workflow, and receive an intake batch",
+            "aggregate-parent-model",
+        ),
+        (
+            "scenarios.md",
+            "```mermaid\nflowchart TD\n    P[aggregate parent: not claimable, no "
+            "intake batch, never in a workflow]",
+            "```mermaid\nflowchart TD\n    P[aggregate parent becomes claimable and "
+            "enters intake after publication]\n    P -->|ADDRESSED_BY| PB[aggregate "
+            "parent batch]",
+            "aggregate-parent-scenario",
+        ),
+    ),
+)
+def test_real_contradiction_at_protected_end_boundary_fails(
+    tmp_path: Path, name: str, old: str, new: str, label: str
+) -> None:
+    problems = mutate_real_corpus(tmp_path, name, old, new)
+    assert any(label in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "name, old, new, label",
+    (
+        (
+            "workflows.md",
+            "**Entry condition:** every workflow-entering task",
+            "Despite the following entry condition, a task may be published before "
+            "its intake batch exists.\n\n**Entry condition:** every workflow-entering task",
+            "intake-workflow-atomic-entry",
+        ),
+        (
+            "work_model.md",
+            "The consequence worth naming has two forms, not one.",
+            "Despite the following rule, an intake batch may require a predecessor "
+            "verdict.\n\nThe consequence worth naming has two forms, not one.",
+            "batch-opening-model",
+        ),
+        (
+            "work_model.md",
+            "Children `PART_OF` an aggregate parent",
+            "Despite the following exception, an aggregate parent may enter a "
+            "workflow.\n\nChildren `PART_OF` an aggregate parent",
+            "aggregate-parent-model",
+        ),
+        (
+            "scenarios.md",
+            "A parent task is created as the grouping",
+            "Despite the following scenario, an aggregate parent may enter a "
+            "workflow.\n\nA parent task is created as the grouping",
+            "aggregate-parent-scenario",
+        ),
+    ),
+)
+def test_real_contradiction_at_protected_start_boundary_fails(
+    tmp_path: Path, name: str, old: str, new: str, label: str
+) -> None:
+    problems = mutate_real_corpus(tmp_path, name, old, new)
+    assert any(label in problem for problem in problems)
+
+
+def test_real_canonical_decoy_before_contradictory_intake_fails(tmp_path: Path) -> None:
+    def transform(text: str) -> str:
+        marker = "**Entry condition:**"
+        position = text.index(marker, text.index("## intake"))
+        decoy = decision_84.INTAKE_ENTRY_PARAGRAPH + "\n\n**Steps**\n\n"
+        text = text[:position] + decoy + text[position:]
+        old = "batch and `ADDRESSED_BY` edge admitted atomically at\ncreation."
+        position = text.rfind(old)
+        return text[:position] + text[position:].replace(
+            old,
+            "batch and `ADDRESSED_BY` edge admitted later after\ncreation.",
+            1,
+        )
+
+    problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_real_canonical_decoy_before_contradictory_batch_opening_fails(
+    tmp_path: Path,
+) -> None:
+    def transform(text: str) -> str:
+        marker = "The consequence worth naming has two forms, not one."
+        position = text.index(marker)
+        decoy = (
+            decision_84.BATCH_OPENING_PARAGRAPH
+            + "\n\n**A successor batch's tasks are fixed by its verdict.**\n\n"
+        )
+        text = text[:position] + decoy + text[position:]
+        old = "the workflow-entering task, without a predecessor verdict."
+        position = text.rfind(old)
+        return text[:position] + text[position:].replace(
+            old,
+            "the workflow-entering task, only after a predecessor verdict.",
+            1,
+        )
+
+    problems = mutate_real_corpus_text(tmp_path, "work_model.md", transform)
+    assert any("batch-opening-model" in problem for problem in problems)
+
+
+def test_real_canonical_decoy_before_contradictory_parent_model_fails(
+    tmp_path: Path,
+) -> None:
+    def transform(text: str) -> str:
+        marker = "Children `PART_OF` an aggregate parent"
+        position = text.index(marker)
+        decoy = (
+            decision_84.AGGREGATE_PARENT_MODEL_PARAGRAPH
+            + "\n\n**A task's one `PART_OF` edge targets its parent task or a "
+            "planning record.**\n\n"
+        )
+        text = text[:position] + decoy + text[position:]
+        old = (
+            "is not claimable,\nnever enters a workflow, and has no intake batch "
+            "or `ADDRESSED_BY` edge**"
+        )
+        position = text.rfind(old)
+        return text[:position] + text[position:].replace(
+            old,
+            "becomes claimable after publication,\nenters a workflow, and receives "
+            "an intake batch and `ADDRESSED_BY` edge**",
+            1,
+        )
+
+    problems = mutate_real_corpus_text(tmp_path, "work_model.md", transform)
+    assert any("aggregate-parent-model" in problem for problem in problems)
+
+
+def test_real_canonical_decoy_before_contradictory_parent_scenario_fails(
+    tmp_path: Path,
+) -> None:
+    def transform(text: str) -> str:
+        marker = "A parent task is created as the grouping"
+        position = text.index(marker)
+        decoy = (
+            decision_84.AGGREGATE_PARENT_SCENARIO_PARAGRAPH
+            + "\n\n```mermaid\nflowchart TD\n```\n\n"
+        )
+        text = text[:position] + decoy + text[position:]
+        old = (
+            "is not claimable, never enters a workflow,\nand has no intake batch "
+            "or `ADDRESSED_BY` edge.**"
+        )
+        position = text.rfind(old)
+        return text[:position] + text[position:].replace(
+            old,
+            "becomes claimable after publication, enters a workflow,\nand receives "
+            "an intake batch and `ADDRESSED_BY` edge.**",
+            1,
+        )
+
+    problems = mutate_real_corpus_text(tmp_path, "scenarios.md", transform)
+    assert any("aggregate-parent-scenario" in problem for problem in problems)
+
+
+def test_real_duplicate_intake_heading_with_contradiction_fails(tmp_path: Path) -> None:
+    def transform(text: str) -> str:
+        intake = text.index("## intake")
+        feature = text.index("## feature", intake)
+        duplicate = (
+            "## intake\n\n**Entry condition:** a workflow-entering task may be "
+            "published before its intake batch and `ADDRESSED_BY` edge exist.\n\n"
+            "**Steps**\n\n"
+        )
+        return text[:feature] + duplicate + text[feature:]
+
+    problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_real_duplicate_parent_scenario_heading_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "scenarios.md",
+        "## (g) An operator-only task, claimed by the operator-facing agent",
+        "## (f) A parent task with children in independent batches\n\n"
+        "An aggregate parent may enter a workflow.\n\n"
+        "## (g) An operator-only task, claimed by the operator-facing agent",
+    )
+    assert any("aggregate-parent-scenario" in problem for problem in problems)
+
+
+def test_real_html_comment_decoy_cannot_mask_live_intake_mutant(tmp_path: Path) -> None:
+    def transform(text: str) -> str:
+        marker = "**Entry condition:**"
+        position = text.index(marker, text.index("## intake"))
+        decoy = "<!-- " + decision_84.INTAKE_ENTRY_PARAGRAPH + "\n\n**Steps** -->\n\n"
+        text = text[:position] + decoy + text[position:]
+        old = "batch and `ADDRESSED_BY` edge admitted atomically at\ncreation."
+        return text.replace(
+            old,
+            "batch and `ADDRESSED_BY` edge admitted later after\ncreation.",
+            1,
+        )
+
+    problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_real_reordered_intake_markers_fail(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "workflows.md",
+        "**Purpose:** turn a created task into a routed one:",
+        "**Steps**\n\n**Purpose:** turn a created task into a routed one:",
+    )
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_real_missing_intake_end_marker_fails(tmp_path: Path) -> None:
+    def transform(text: str) -> str:
+        start = text.index("## intake")
+        end = text.index("## feature", start)
+        section = text[start:end]
+        old = "| # | Step | Step owner (role) | Required | Parallel / join | Closes on |"
+        assert section.count(old) == 1
+        return text[:start] + section.replace(
+            old, "| steps table deliberately missing its canonical header |", 1
+        ) + text[end:]
+
+    problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_real_scenario_corruption_cannot_be_masked_by_later_decoy(
+    tmp_path: Path,
+) -> None:
+    def transform(text: str) -> str:
+        section_start = text.index(
+            "## (f) A parent task with children in independent batches"
+        )
+        prose_start = text.index("A parent task is created as the grouping", section_start)
+        diagram_start = text.index("```mermaid", prose_start)
+        corrupted = (
+            "An aggregate parent becomes claimable, enters a workflow, and receives "
+            "an intake batch and `ADDRESSED_BY` edge.\n\n"
+        )
+        text = text[:prose_start] + corrupted + text[diagram_start:]
+        return (
+            text
+            + "\n\n"
+            + decision_84.AGGREGATE_PARENT_SCENARIO_PARAGRAPH
+            + "\n\n```mermaid\nflowchart TD\n```\n"
+        )
+
+    problems = mutate_real_corpus_text(tmp_path, "scenarios.md", transform)
+    assert any("aggregate-parent-scenario" in problem for problem in problems)
+
+
+def test_real_missing_parent_scenario_end_heading_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "scenarios.md",
+        "## (g) An operator-only task, claimed by the operator-facing agent",
+        "The operator-only scenario heading is missing.",
+    )
+    assert any("aggregate-parent-scenario" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "decoy",
+    (
+        "<!--\n## intake\n## feature\n-->",
+        "```markdown\n## intake\n## feature\n```",
+    ),
+)
+def test_real_inactive_heading_decoys_are_ignored(
+    tmp_path: Path, decoy: str
+) -> None:
+    def transform(text: str) -> str:
+        position = text.index("## intake")
+        return text[:position] + decoy + "\n\n" + text[position:]
+
+    assert mutate_real_corpus_text(tmp_path, "workflows.md", transform) == []
 
 
 def test_wm27_closing_verdict_claim_applied_to_intake_fails(tmp_path: Path) -> None:
