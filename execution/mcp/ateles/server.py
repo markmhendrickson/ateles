@@ -679,14 +679,25 @@ _RELEASE_CONFIRMED_TASK_STATUSES = frozenset(
 )
 
 
-async def _consume_checkpoint_resolution(checkpoint_id: str, snapshot: dict) -> bool:
-    """Run the existing Apis checkpoint consumer in-process."""
+def _load_apis_daemon():
+    """Load the shared checkpoint consumer without duplicating its safety policy."""
     daemon_dir = Path(__file__).resolve().parents[2] / "daemons" / "apis"
     if str(daemon_dir) not in sys.path:
         sys.path.insert(0, str(daemon_dir))
 
     import apis as apis_daemon
 
+    return apis_daemon
+
+
+def _require_checkpoint_release_state() -> Path:
+    """Fail MCP startup closed unless replay-denial state is durably bound."""
+    return _load_apis_daemon()._require_checkpoint_denial_store()
+
+
+async def _consume_checkpoint_resolution(checkpoint_id: str, snapshot: dict) -> bool:
+    """Run the existing Apis checkpoint consumer in-process."""
+    apis_daemon = _load_apis_daemon()
     notifier = apis_daemon.Notifier.from_neotoma()
     return await apis_daemon.handle_checkpoint_brief(
         checkpoint_id,
@@ -1687,6 +1698,8 @@ TOOL_HANDLERS = {
 
 
 async def main():
+    denial_store = _require_checkpoint_release_state()
+    log.info("Checkpoint denial store ready at %s", denial_store)
     server = Server("ateles", instructions=SERVER_INSTRUCTIONS)
 
     @server.list_tools()

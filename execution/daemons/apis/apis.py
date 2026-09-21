@@ -78,6 +78,7 @@ import os
 import stat
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ── Env bootstrap (launchd does not source shell profiles) ───────────────────
@@ -1111,6 +1112,25 @@ def _record_snapshot(record: dict | None) -> dict | None:
     return None
 
 
+_LEGACY_CHECKPOINT_RELEASES = {
+    "ent_06ca38a8fac215559a0ac394": "ent_4f418c943405f840990c64ba",
+    "ent_11b31c2fc651eadc0781ee9e": "ent_46a9527947b537ca9bc01d79",
+}
+_LEGACY_CHECKPOINT_RELEASE_DEADLINE = datetime(2026, 10, 1, tzinfo=timezone.utc)
+
+
+def _checkpoint_release_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _legacy_checkpoint_release_authorized(checkpoint_id: str, task_id: str) -> bool:
+    """Allow only the two already-approved #1141 keystones, temporarily."""
+    return (
+        _checkpoint_release_now() < _LEGACY_CHECKPOINT_RELEASE_DEADLINE
+        and _LEGACY_CHECKPOINT_RELEASES.get(checkpoint_id) == task_id
+    )
+
+
 def _release_lifecycle_proven(task_id: str, expected_status: TaskStatus) -> bool:
     """Read back the lifecycle fields that authorize an approved-task spawn."""
     snapshot = fetch_task_snapshot(task_id)
@@ -1140,6 +1160,49 @@ def _checkpoint_denial_marker(checkpoint_id: str) -> Path | None:
         return None
     digest = hashlib.sha256(checkpoint_id.encode()).hexdigest()
     return root / f"{digest}.denied"
+
+
+def _require_checkpoint_denial_store() -> Path:
+    """Prove the configured denial store is absolute, durable, and writable."""
+    configured = os.environ.get("APIS_CHECKPOINT_DENIAL_DIR", "").strip()
+    if not configured:
+        raise RuntimeError("APIS_CHECKPOINT_DENIAL_DIR is required")
+    root = Path(configured)
+    if not root.is_absolute():
+        raise RuntimeError("APIS_CHECKPOINT_DENIAL_DIR must be absolute")
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        root_mode = os.lstat(root).st_mode
+        if not stat.S_ISDIR(root_mode) or stat.S_ISLNK(root_mode):
+            raise RuntimeError(
+                "APIS_CHECKPOINT_DENIAL_DIR must be a real directory, not a symlink"
+            )
+        probe = root / f".startup-probe-{os.getpid()}-{time.time_ns()}"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(probe, flags, 0o600)
+        try:
+            os.write(fd, b"probe\n")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        probe.unlink()
+        dir_flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            dir_flags |= os.O_DIRECTORY
+        dir_fd = os.open(root, dir_flags)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except RuntimeError:
+        raise
+    except OSError as exc:
+        raise RuntimeError(
+            f"APIS_CHECKPOINT_DENIAL_DIR is unusable: {type(exc).__name__}"
+        ) from exc
+    return root
 
 
 def _valid_checkpoint_denial_marker(marker: Path) -> bool:
@@ -1471,28 +1534,47 @@ async def handle_checkpoint_brief(
         _deny_checkpoint_release(entity_id, reason="referenced task is operator_only")
         return False
 
+    # A malformed safety classification is terminally non-releasable even if
+    # the authorization envelope is also absent or stale.  Consume it through
+    # the durable denial path before considering migration or replacement.
+    if gate_action not in releasable_actions:
+        log.info(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
+            f"gate_action={gate_action!r} — closing resolution without dispatch"
+        )
+        _deny_checkpoint_release(
+            entity_id, reason=f"non-releasable gate_action={gate_action!r}"
+        )
+        return False
+    if blast_radius not in {"low", "high"}:
+        log.info(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
+            f"blast_radius={blast_radius!r} — closing resolution without dispatch"
+        )
+        _deny_checkpoint_release(
+            entity_id, reason=f"non-releasable blast_radius={blast_radius!r}"
+        )
+        return False
+
     authorization = read_authenticated_checkpoint_authorization(
         entity_id, checkpoint_record
     )
-    legacy_v1_present = any(
-        snapshot.get(field) not in (None, "")
-        for field in (
-            "authorization_context_version",
-            "authorization_action_type",
-            "authorization_context_digest",
-        )
-    )
-    authorization_expected = legacy_v1_present or bool(snapshot.get("body"))
     authorization_bound = authorization is not None
-    if authorization_expected and not authorization_bound:
+    legacy_release = _legacy_checkpoint_release_authorized(entity_id, task_id)
+    if not authorization_bound and not legacy_release:
         _require_fresh_release_authority(
             entity_id,
             task_id=task_id,
             task_snapshot=task_snapshot,
             notifier=notifier,
-            reason="checkpoint authorization is not backed by its signed observation",
+            reason=("checkpoint has no current AAuth-backed authorization observation"),
         )
         return False
+    if legacy_release and not authorization_bound:
+        log.warning(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} is using the bounded "
+            "#1141 keystone migration path"
+        )
 
     if authorization_bound:
         auth_action_type = str(authorization.get("action_type") or "").strip().lower()
@@ -1529,28 +1611,6 @@ async def handle_checkpoint_brief(
                 reason="task or execution policy changed after approval",
             )
             return False
-
-    # Only the two gate actions and LOW/HIGH blast tiers authorize agent work.
-    # With a bound snapshot, this also checks the exact fields the operator saw;
-    # without one it retains the legacy fail-closed allow-list.
-    if gate_action not in releasable_actions:
-        log.info(
-            f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
-            f"gate_action={gate_action!r} — closing resolution without dispatch"
-        )
-        _deny_checkpoint_release(
-            entity_id, reason=f"non-releasable gate_action={gate_action!r}"
-        )
-        return False
-    if blast_radius not in {"low", "high"}:
-        log.info(
-            f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
-            f"blast_radius={blast_radius!r} — closing resolution without dispatch"
-        )
-        _deny_checkpoint_release(
-            entity_id, reason=f"non-releasable blast_radius={blast_radius!r}"
-        )
-        return False
 
     if not authorization_bound and current_action_type:
         # Legacy checkpoints predate the explicit authorization snapshot. Known
@@ -1731,7 +1791,9 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
 
 
 async def main() -> None:
+    denial_store = _require_checkpoint_denial_store()
     log.info(f"[{DAEMON_NAME}] Starting up...")
+    log.info(f"[{DAEMON_NAME}] checkpoint_denial_store={denial_store}")
     log.info(f"[{DAEMON_NAME}] ateles_repo={ATELES_REPO}")
     log.info(
         f"[{DAEMON_NAME}] dry_run={DRY_RUN} auto_execute={AUTO_EXECUTE} "

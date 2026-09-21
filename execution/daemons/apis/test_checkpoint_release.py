@@ -18,11 +18,14 @@ import hashlib
 import inspect
 import importlib.util
 import json
+import plistlib
 import sys
 import types
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 
 _HERE = Path(__file__).resolve().parent
 _MCP_DIR = _HERE.parent.parent / "mcp" / "ateles"
@@ -84,7 +87,7 @@ async def _resolve(checkpoint_id: str, action: str) -> dict:
 
 
 @pytest.fixture
-def release_store(monkeypatch):
+def release_store(monkeypatch, tmp_path):
     brief_id = "ent_cp1"
     task_id = "ent_task_1"
     records = {
@@ -98,7 +101,8 @@ def release_store(monkeypatch):
                 "resolved_dispatched": False,
                 "task_entity_id": task_id,
                 "gate_action": "checkpoint_plan_approval",
-                "blast_radius": "high",
+                "blast_radius": "low",
+                "policy_entity_id": "default",
                 "title": "Approve the bounded implementation",
                 "user_id": "tenant-a",
             },
@@ -115,6 +119,8 @@ def release_store(monkeypatch):
                 "title": "Implement the bounded change",
                 "body": "Engineering work in the dispatcher.",
                 "user_id": "tenant-a",
+                "action_type": "local_edit",
+                "confidence": 0.3,
             },
         },
     }
@@ -184,9 +190,32 @@ def release_store(monkeypatch):
             "user_id"
         ),
     )
-    monkeypatch.setattr(
-        apis, "read_authenticated_checkpoint_authorization", lambda *args: None
+    policy = ExecutionPolicy(
+        entity_id="default",
+        low_blast_action_types=frozenset({"local_edit"}),
+        high_blast_action_types=frozenset(),
+        loaded=True,
     )
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+    encoded_authority = build_checkpoint_authorization_envelope(
+        task_record=records[task_id],
+        policy=policy,
+        decision=decision,
+        action_type="local_edit",
+        user_id="tenant-a",
+    )
+    authority = json.loads(encoded_authority)
+    records[brief_id]["snapshot"]["body"] = encoded_authority
+    monkeypatch.setattr(
+        apis,
+        "read_authenticated_checkpoint_authorization",
+        lambda checkpoint_id, record: (
+            dict(authority)
+            if (record.get("snapshot") or {}).get("body") == encoded_authority
+            else None
+        ),
+    )
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda skill: policy)
     monkeypatch.setattr(apis, "set_task_status", set_status)
     monkeypatch.setattr(apis, "stamp_checkpoint_dispatched", stamp)
     monkeypatch.setattr(
@@ -200,6 +229,9 @@ def release_store(monkeypatch):
         apis, "_file_fresh_checkpoint", lambda **kwargs: "ent_fresh_checkpoint"
     )
     monkeypatch.setattr(apis, "DRY_RUN", True)
+    monkeypatch.setenv(
+        "APIS_CHECKPOINT_DENIAL_DIR", str(tmp_path / "checkpoint-denials")
+    )
     monkeypatch.setattr(apis.Notifier, "from_neotoma", lambda: _Notifier())
 
     # Keep the effect test hermetic: ActivityLogger is observability, not the
@@ -1051,10 +1083,27 @@ def test_denial_marker_rejects_non_regular_existing_entry(
 async def test_already_approved_unstamped_checkpoint_releases_task(
     monkeypatch, release_store
 ):
-    """Legacy recovery: an approved event may predate the inline MCP consumer."""
+    """The exact operator-approved keystone may use bounded legacy recovery."""
     records, brief_id, task_id = release_store
+    legacy_brief_id = "ent_06ca38a8fac215559a0ac394"
+    legacy_task_id = "ent_4f418c943405f840990c64ba"
+    records[legacy_brief_id] = records.pop(brief_id)
+    records[legacy_brief_id]["entity_id"] = legacy_brief_id
+    records[legacy_task_id] = records.pop(task_id)
+    records[legacy_task_id]["entity_id"] = legacy_task_id
+    records[legacy_brief_id]["snapshot"]["task_entity_id"] = legacy_task_id
+    brief_id, task_id = legacy_brief_id, legacy_task_id
     brief = records[brief_id]["snapshot"]
     brief.update({"status": "approved", "resolved_dispatched": False})
+    brief.pop("body", None)
+    monkeypatch.setattr(
+        apis,
+        "_checkpoint_release_now",
+        lambda: datetime(2026, 9, 21, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        apis, "read_authenticated_checkpoint_authorization", lambda *args: None
+    )
     original_dispatch = apis.dispatch_task
     dispatches: list[str] = []
 
@@ -1070,6 +1119,165 @@ async def test_already_approved_unstamped_checkpoint_releases_task(
     assert dispatches == [task_id]
     assert brief["resolved_dispatched"] is True
     assert records[task_id]["snapshot"]["status"] == "routed"
+
+
+@pytest.mark.asyncio
+async def test_unsigned_generic_approved_checkpoint_never_dispatches(
+    monkeypatch, release_store
+):
+    records, brief_id, _task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief.update({"status": "approved", "resolved_dispatched": False})
+    brief.pop("body", None)
+    monkeypatch.setattr(
+        apis, "read_authenticated_checkpoint_authorization", lambda *args: None
+    )
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert brief["resolved_dispatched"] is False
+    assert brief["status"] == "approved_requires_fresh_approval"
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_id", "task_id", "now", "expected"),
+    [
+        (
+            "ent_06ca38a8fac215559a0ac394",
+            "ent_4f418c943405f840990c64ba",
+            datetime(2026, 9, 21, tzinfo=timezone.utc),
+            True,
+        ),
+        (
+            "ent_11b31c2fc651eadc0781ee9e",
+            "ent_46a9527947b537ca9bc01d79",
+            datetime(2026, 9, 21, tzinfo=timezone.utc),
+            True,
+        ),
+        (
+            "ent_06ca38a8fac215559a0ac394",
+            "ent_wrong_task",
+            datetime(2026, 9, 21, tzinfo=timezone.utc),
+            False,
+        ),
+        (
+            "ent_other_checkpoint",
+            "ent_4f418c943405f840990c64ba",
+            datetime(2026, 9, 21, tzinfo=timezone.utc),
+            False,
+        ),
+        (
+            "ent_06ca38a8fac215559a0ac394",
+            "ent_4f418c943405f840990c64ba",
+            datetime(2026, 10, 1, tzinfo=timezone.utc),
+            False,
+        ),
+    ],
+)
+def test_legacy_release_is_exact_pair_and_time_bounded(
+    checkpoint_id, task_id, now, expected, monkeypatch
+):
+    monkeypatch.setattr(apis, "_checkpoint_release_now", lambda: now)
+
+    assert (
+        apis._legacy_checkpoint_release_authorized(checkpoint_id, task_id) is expected
+    )
+
+
+def test_runtime_configs_bind_absolute_persistent_denial_store():
+    plist_path = _HERE / "com.ateles.apis.plist"
+    plist = plistlib.loads(plist_path.read_bytes())
+    assert plist["EnvironmentVariables"]["APIS_CHECKPOINT_DENIAL_DIR"] == (
+        "/var/tmp/ateles/checkpoint-denials"
+    )
+
+    compose_path = (
+        _HERE.parent.parent.parent / "deploy" / "cloud" / "docker-compose.yml"
+    )
+    compose = yaml.safe_load(compose_path.read_text())
+    apis_service = compose["services"]["apis"]
+    assert apis_service["environment"]["APIS_CHECKPOINT_DENIAL_DIR"] == (
+        "/var/lib/ateles/checkpoint-denials"
+    )
+    assert (
+        "apis-checkpoint-denials:/var/lib/ateles/checkpoint-denials"
+        in apis_service["volumes"]
+    )
+    assert "apis-checkpoint-denials" in compose["volumes"]
+
+    mcp_wrapper = (
+        _HERE.parent.parent / "mcp" / "ateles" / "run_ateles_mcp.sh"
+    ).read_text()
+    assert (
+        'APIS_CHECKPOINT_DENIAL_DIR="${APIS_CHECKPOINT_DENIAL_DIR:-'
+        '/var/tmp/ateles/checkpoint-denials}"'
+    ) in mcp_wrapper
+    assert "export APIS_CHECKPOINT_DENIAL_DIR" in mcp_wrapper
+
+
+def test_mcp_startup_proves_checkpoint_denial_store(monkeypatch, tmp_path):
+    root = tmp_path / "mcp-checkpoint-denials"
+    monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", str(root))
+
+    assert server._require_checkpoint_release_state() == root
+    assert root.is_dir()
+
+
+def test_denial_store_startup_fails_closed_when_unconfigured(monkeypatch):
+    monkeypatch.delenv("APIS_CHECKPOINT_DENIAL_DIR", raising=False)
+
+    with pytest.raises(RuntimeError, match="APIS_CHECKPOINT_DENIAL_DIR"):
+        apis._require_checkpoint_denial_store()
+
+
+@pytest.mark.asyncio
+async def test_main_refuses_to_start_without_denial_store(monkeypatch):
+    monkeypatch.delenv("APIS_CHECKPOINT_DENIAL_DIR", raising=False)
+    monkeypatch.setattr(
+        apis.AgentLoader,
+        "load",
+        lambda self: pytest.fail("startup advanced past denial-store validation"),
+    )
+
+    with pytest.raises(RuntimeError, match="APIS_CHECKPOINT_DENIAL_DIR"):
+        await apis.main()
+
+
+def test_denial_store_startup_proves_writable_directory(monkeypatch, tmp_path):
+    root = tmp_path / "checkpoint-denials"
+    monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", str(root))
+
+    assert apis._require_checkpoint_denial_store() == root
+    assert root.is_dir()
+    assert list(root.iterdir()) == []
+
+
+@pytest.mark.parametrize("bad_kind", ["relative", "file", "symlink"])
+def test_denial_store_startup_rejects_unusable_binding(bad_kind, monkeypatch, tmp_path):
+    if bad_kind == "relative":
+        configured = "relative/checkpoint-denials"
+    elif bad_kind == "file":
+        configured_path = tmp_path / "not-a-directory"
+        configured_path.write_text("no\n")
+        configured = str(configured_path)
+    else:
+        target = tmp_path / "target"
+        target.mkdir()
+        configured_path = tmp_path / "linked"
+        configured_path.symlink_to(target, target_is_directory=True)
+        configured = str(configured_path)
+    monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", configured)
+
+    with pytest.raises(RuntimeError):
+        apis._require_checkpoint_denial_store()
 
 
 @pytest.mark.asyncio
@@ -1222,6 +1430,20 @@ async def test_task_without_route_blocks_without_claiming_release(
             "assigned_to": "",
             "tags": [],
         }
+    )
+    policy = ExecutionPolicy(
+        entity_id="default",
+        low_blast_action_types=frozenset({"local_edit"}),
+        high_blast_action_types=frozenset(),
+        loaded=True,
+    )
+    _bind_v2_authorization(
+        monkeypatch,
+        records,
+        brief_id,
+        task_id,
+        action_type="local_edit",
+        policy=policy,
     )
     monkeypatch.setattr(
         apis._activity,
