@@ -1,0 +1,92 @@
+{
+  "_observation_ids": {
+    "anti_patterns": "c33f9fbb-0b65-f363-aed8-0a717c987303",
+    "border_radius": "4b14fa48-7ea0-448f-527d-48536cde2f8e",
+    "color_palette": "e8f1959c-6e1e-4631-37dc-9ac522359298",
+    "positioning_principles": "6cf174ca-305f-6da1-550f-478c589dbe54",
+    "scope": "49c9cf91-c089-c3f5-37c7-20c57be85985",
+    "spacing_system": "e77cd4e0-bc0a-8e34-293c-0f04407d85ad",
+    "type_scale": "4398315c-8712-635a-1193-4f52643b6adb"
+  },
+  "_source": {
+    "entity_id": "ent_72e01f1008653b601be1a956",
+    "entity_type": "design_system",
+    "fetched_at": "2026-09-21T12:49:29+00:00",
+    "product": "neotoma"
+  },
+  "product": {
+    "color_palette": {
+      "dark": {
+        "accent": "#4ecdc4",
+        "accent_2": "#7fded7",
+        "accent_wash": "#11282a",
+        "ink": "#e8edf0",
+        "ink_2": "#b2bec8",
+        "ink_3": "#7e8b96",
+        "line": "#26323b",
+        "line_2": "#1d272e",
+        "paper": "#0d1318",
+        "paper_2": "#141c22",
+        "warn": "#d9a441"
+      },
+      "light": {
+        "accent": "#0c6b6b",
+        "accent_2": "#0a8f8a",
+        "accent_wash": "#e3efee",
+        "ink": "#101820",
+        "ink_2": "#33414f",
+        "ink_3": "#62727f",
+        "line": "#d9dfe3",
+        "line_2": "#e7ebee",
+        "paper": "#f4f6f7",
+        "paper_2": "#ffffff",
+        "warn": "#8a5a10"
+      }
+    },
+    "type_scale": {
+      "body_base_size": "16px",
+      "body_font_family": "Inter, system-ui, -apple-system, 'Segoe UI', sans-serif",
+      "code_font_family": "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace",
+      "h1_size": "clamp(2.1rem, 6.2vw, 3.6rem)",
+      "h2_size": "clamp(1.5rem, 4vw, 2.1rem)",
+      "heading_font_family": "Fraunces, Georgia, 'Times New Roman', serif",
+      "heading_weight": 600
+    }
+  },
+  "shared": {
+    "anti_patterns": [
+      "Do not reuse the Neotoma app/Inspector's own warm cream/terracotta palette on a public product page \u2014 decision public_pages_do_not_reuse_inspector_palette (DECIDED 2026-09-15, plan ent_98ef9d45f8a6896fed408f8f): it is a recognizable AI-generated design signature and these pages are handed to strangers (e.g. AI Summit Barcelona business-card QR). Each product gets its own deliberate, distinct accent + typeface identity built on the shared structural system, not a copy of the app's own look. This is the rule that made the prior version of this entity stale: it described a blue/red, no-serif, sharp-corner palette that matched neither product's actual shipped page.",
+      "Do not describe this entity's palette/type fields as if ONE set of values applies to both products \u2014 they do not; color_palette and type_scale are per-product. Only spacing_system and border_radius are shared verbatim.",
+      "No unstyled system-UI-only type stack for headings on either product \u2014 both pair a distinctive display font (Fraunces / Space Grotesk) with a plain sans body, never a single generic sans for everything.",
+      "No sharp 0-2px corners \u2014 both products use 10px card/panel radius and 8px button radius; only the fully-rounded (999px) toggle pill is an exception.",
+      "Do not silently reconcile a mismatch between this entity and a live served page \u2014 the 2026-09-21 build-landing-page runs (Ateles ent_48b0cb1115898ddc730c78bd, Neotoma ent_189a531c49bfc35d983e1135) correctly flagged the drift in their stage-4 gaps instead of overwriting it unilaterally; this correction is the reconciliation those two runs deferred."
+    ],
+    "border_radius": {
+      "buttons": "border-radius: 8px",
+      "cards_panels_tiers": "border-radius: var(--radius) (10px)",
+      "note": "Verified 2026-09-22 identical on both served pages. Supersedes the prior 'sharp corners, 2px max' rule, which matches neither live page.",
+      "root_radius_variable": "--radius: 10px",
+      "shared_verbatim": true,
+      "toggle_pills": "border-radius: 999px (fully rounded)"
+    },
+    "positioning_principles": [
+      "One shared structural system, two product themes: spacing scale, radius, layout grid, and component patterns (.cap, .card, .tier/.panel, .tw-toggle, .hanchor, footer .noun) are shared verbatim; accent colour, ink/paper hues, and typeface family carry each product's distinct identity per decision public_pages_do_not_reuse_inspector_palette",
+      "Warm, editorial, not utilitarian: soft paper backgrounds (not pure white/black), a display/heading serif or grotesk paired with a plain-text sans body, generous radius (10px) and soft shadows on cards/panels \u2014 the opposite of a sharp-cornered inspector aesthetic",
+      "Accent as the single differentiator: each product reads as itself through ONE hue (teal for Neotoma, terracotta/amber for Ateles) applied consistently to CTAs, eyebrows, cap-ticks, and hanchors, not through structural divergence",
+      "Light/dark parity: every token pair is fully specified for both color-scheme states via :root[data-theme] plus @media (prefers-color-scheme: dark), toggled by the same .tw-toggle control on both products",
+      "Accessible density: base body size 16-16.5px, line-height ~1.5-1.62, max reading width in ch units (62-64ch) on prose blocks"
+    ],
+    "scope": "Public-facing product pages (rendered_page entities for neotoma.io and ateles.co). ONE shared structural system \u2014 spacing scale, border radius, layout grid, component patterns (.cap, .card, .tier/.panel, .tw-toggle, .hanchor) and the light/dark toggle mechanism are identical across products \u2014 with per-product THEME tokens (accent colour, ink/paper hues, and typeface family) layered on top. Verified 2026-09-22 against both served pages' actual embedded CSS custom properties: shared tokens (--radius: 10px, --maxw: 1080px, section padding-block: 64px, .hero padding-block: clamp(56px,11vw,104px) 56px, .cap grid-template-columns: 10px 1fr / gap 22px / padding 28px 0, .btn padding 11px 20px / border-radius 8px) are byte-identical between neotoma.io and ateles.co; only --ink/--paper/--accent hues and font-family declarations differ. Does NOT cover the Neotoma app/inspector UI, which keeps its own warm cream/terracotta palette per decision public_pages_do_not_reuse_inspector_palette (plan ent_98ef9d45f8a6896fed408f8f) \u2014 these public pages are deliberately NOT that palette.",
+    "spacing_system": {
+      "button_padding": ".btn { padding: 11px 20px; }",
+      "cap_row": ".cap { grid-template-columns: 10px 1fr; gap: 22px; padding: 28px 0; }",
+      "card_padding": ".card { padding: 22px; } / .panel, .tier { padding: 16-24px 18-24px; }",
+      "container": ".wrap { max-width: var(--maxw); margin: 0 auto; padding-inline: 20px; } with --maxw: 1080px",
+      "cta_row_gap": ".cta-row { gap: 12px; margin-top: 30px; }",
+      "hero_padding": ".hero { padding-block: clamp(56px, 11vw, 104px) 56px; }",
+      "note": "Identical between neotoma.io and ateles.co as served \u2014 this is the strongest evidence the two pages are one system, not two.",
+      "section_padding": "section { padding-block: 64px; }",
+      "shared_verbatim": true
+    }
+  }
+}
