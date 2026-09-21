@@ -556,6 +556,11 @@ is the coupling that would make the migration a rewrite.
 
 ## Routing a product finding back to the product
 
+**This section is deliberately duplicated verbatim in `/frame-product-argument`
+(`ent_a373b02fb2f3c136f55b1890`) — skills load independently, so a
+cross-reference here would point at a file not in context when this skill
+runs alone. Edit both copies together.**
+
 Positioning work surfaces two different kinds of finding, and only one of them
 belongs in this skill's own artifacts:
 
