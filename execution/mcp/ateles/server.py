@@ -243,10 +243,22 @@ def _retrieve_entities(
 def _snapshot_of(entity: dict) -> dict:
     snap = (entity.get("snapshot") or {}).get("snapshot")
     if isinstance(snap, dict):
-        return snap
-    if isinstance(entity.get("snapshot"), dict):
-        return entity["snapshot"]
-    return entity
+        snapshot = dict(snap)
+    elif isinstance(entity.get("snapshot"), dict):
+        snapshot = dict(entity["snapshot"])
+    else:
+        snapshot = dict(entity)
+
+    # Neotoma may return tenant provenance on the entity envelope while the
+    # checkpoint consumer works from the inner snapshot. Preserve it, but make
+    # conflicting sources fail closed instead of choosing one.
+    envelope_user_id = entity.get("user_id")
+    snapshot_user_id = snapshot.get("user_id")
+    if envelope_user_id and snapshot_user_id and envelope_user_id != snapshot_user_id:
+        snapshot["user_id"] = None
+    elif envelope_user_id and not snapshot_user_id:
+        snapshot["user_id"] = envelope_user_id
+    return snapshot
 
 
 def _correct(entity_id: str, entity_type: str, field: str, value: Any, idem_key: str) -> bool:
@@ -765,10 +777,12 @@ async def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
         )
         task_data = _get(f"/entities/{task_id}") if task_id else None
         task_snap = _snapshot_of(task_data or {})
-        same_tenant = not (
-            resolved_snap.get("user_id")
-            and task_snap.get("user_id")
-            and resolved_snap.get("user_id") != task_snap.get("user_id")
+        brief_user_id = resolved_snap.get("user_id")
+        task_user_id = task_snap.get("user_id")
+        same_tenant = bool(
+            brief_user_id
+            and task_user_id
+            and brief_user_id == task_user_id
         )
         if (
             released
@@ -781,8 +795,10 @@ async def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
             and task_snap.get("blocked_reason") == ""
         ):
             action_taken = "approved — task re-dispatched"
-        elif str(resolved_snap.get("gate_action", "")).strip().lower() == "operator_only":
-            action_taken = "approved — operator-only checkpoint recorded; no agent dispatch"
+        elif str(resolved_snap.get("blast_radius", "")).strip().lower() == "never":
+            action_taken = (
+                "approved — never-tier checkpoint recorded; no agent dispatch"
+            )
         else:
             action_taken = "approved — task release not confirmed by read-back"
 

@@ -56,6 +56,7 @@ if importlib.util.find_spec("mcp") is None:
 
 import apis  # noqa: E402
 import server  # noqa: E402
+from lib.daemon_runtime.gating import ExecutionPolicy, evaluate_gate  # noqa: E402
 
 CHECKPOINT_TYPE = "checkpoint_" + "brief"
 
@@ -88,6 +89,7 @@ def release_store(monkeypatch):
                 "resolved_dispatched": False,
                 "task_entity_id": task_id,
                 "gate_action": "checkpoint_plan_approval",
+                "blast_radius": "low",
                 "title": "Approve the bounded implementation",
                 "user_id": "tenant-a",
             },
@@ -138,12 +140,22 @@ def release_store(monkeypatch):
         records[checkpoint_entity_id]["snapshot"]["resolved_dispatched"] = True
         return True
 
+    def close_without_release(checkpoint_entity_id, *, handler, reason):
+        records[checkpoint_entity_id]["snapshot"]["status"] = "approved_no_release"
+        return True
+
     monkeypatch.setattr(server, "_get", get)
     monkeypatch.setattr(server, "_correct", correct)
     monkeypatch.setattr(apis, "fetch_task_snapshot", fetch_task)
     monkeypatch.setattr(apis, "fetch_checkpoint_snapshot", fetch_checkpoint)
     monkeypatch.setattr(apis, "set_task_status", set_status)
     monkeypatch.setattr(apis, "stamp_checkpoint_dispatched", stamp)
+    monkeypatch.setattr(
+        apis,
+        "close_checkpoint_without_release",
+        close_without_release,
+        raising=False,
+    )
     monkeypatch.setattr(apis, "DRY_RUN", True)
     monkeypatch.setattr(apis.Notifier, "from_neotoma", lambda: _Notifier())
 
@@ -430,6 +442,65 @@ async def test_non_swarm_gate_actions_never_dispatch(
 
 
 @pytest.mark.asyncio
+async def test_operator_only_producer_shape_never_releases(
+    monkeypatch, release_store
+):
+    records, brief_id, task_id = release_store
+    decision = evaluate_gate(
+        confidence=1.0,
+        action_type="operator_only",
+        policy=ExecutionPolicy(entity_id="default", loaded=False),
+    )
+    brief = records[brief_id]["snapshot"]
+    brief["gate_action"] = decision.action.value
+    brief["blast_radius"] = decision.blast_radius.value
+    brief["reason"] = decision.reason
+    records[task_id]["snapshot"]["action_type"] = "operator_only"
+    brief["status"] = "approved"
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert decision.action.value == "checkpoint_plan_approval"
+    assert decision.blast_radius.value == "never"
+    assert released is False
+    assert dispatches == []
+    assert records[brief_id]["snapshot"]["resolved_dispatched"] is False
+    assert records[brief_id]["snapshot"]["status"] == "approved_no_release"
+    assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blast_radius", [None, "", "never", "critical"])
+async def test_absent_never_or_unknown_blast_radius_never_releases(
+    blast_radius, monkeypatch, release_store
+):
+    records, brief_id, task_id = release_store
+    if blast_radius is None:
+        records[brief_id]["snapshot"].pop("blast_radius")
+    else:
+        records[brief_id]["snapshot"]["blast_radius"] = blast_radius
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    result = await _resolve(brief_id, "approve")
+
+    assert dispatches == []
+    assert records[brief_id]["snapshot"]["resolved_dispatched"] is False
+    assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+    assert "re-dispatched" not in result["action_taken"]
+
+
+@pytest.mark.asyncio
 async def test_cross_tenant_task_is_not_dispatched(monkeypatch, release_store):
     records, brief_id, task_id = release_store
     records[task_id]["snapshot"]["user_id"] = "tenant-b"
@@ -446,6 +517,81 @@ async def test_cross_tenant_task_is_not_dispatched(monkeypatch, release_store):
     assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
     assert records[brief_id]["snapshot"]["resolved_dispatched"] is False
     assert "re-dispatched" not in result["action_taken"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("brief_user_id", "task_user_id", "should_dispatch"),
+    [
+        (None, None, False),
+        (None, "tenant-a", False),
+        ("tenant-a", None, False),
+        ("tenant-a", "tenant-b", False),
+        ("tenant-a", "tenant-a", True),
+    ],
+)
+async def test_release_requires_matching_present_tenant_provenance(
+    brief_user_id,
+    task_user_id,
+    should_dispatch,
+    monkeypatch,
+    release_store,
+):
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    task = records[task_id]["snapshot"]
+    if brief_user_id is None:
+        brief.pop("user_id")
+    else:
+        brief["user_id"] = brief_user_id
+    if task_user_id is None:
+        task.pop("user_id")
+    else:
+        task["user_id"] = task_user_id
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    await _resolve(brief_id, "approve")
+
+    assert bool(dispatches) is should_dispatch
+    if not should_dispatch:
+        assert records[brief_id]["snapshot"]["resolved_dispatched"] is False
+        assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+async def test_non_releasable_approval_cannot_be_reclassified_and_replayed(
+    monkeypatch, release_store
+):
+    records, brief_id, _task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief.update(
+        {
+            "status": "approved",
+            "gate_action": "operator_only",
+            "resolved_dispatched": False,
+        }
+    )
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    first = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+    brief["gate_action"] = "checkpoint_plan_approval"
+    second = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert first is False
+    assert second is False
+    assert dispatches == []
+    assert brief["resolved_dispatched"] is False
+    assert brief["status"] == "approved_no_release"
 
 
 @pytest.mark.asyncio

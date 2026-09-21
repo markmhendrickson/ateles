@@ -14,10 +14,13 @@ from lib.daemon_runtime.gating import (
     GateAction,
     InvalidCheckpointPosture,
     _parse_policy,
+    close_checkpoint_without_release,
     evaluate_gate,
+    fetch_checkpoint_snapshot,
     fetch_task_snapshot,
     read_checkpoint_resolution,
     stamp_checkpoint_dispatched,
+    write_checkpoint_brief,
 )
 
 
@@ -650,6 +653,55 @@ def test_checkpoint_task_fetch_accepts_only_declared_task_type(monkeypatch):
     assert fetch_task_snapshot("ent_task") == {"status": "awaiting_approval"}
 
 
+@pytest.mark.parametrize(
+    ("fetch", "entity_type"),
+    [
+        (fetch_task_snapshot, "task"),
+        (fetch_checkpoint_snapshot, "checkpoint_" + "brief"),
+    ],
+)
+def test_checkpoint_fetch_preserves_envelope_tenant(
+    monkeypatch, fetch, entity_type
+):
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": entity_type,
+            "user_id": "tenant-a",
+            "snapshot": {"status": "awaiting_operator"},
+        },
+    )
+
+    assert fetch("ent")["user_id"] == "tenant-a"
+
+
+@pytest.mark.parametrize(
+    ("fetch", "entity_type"),
+    [
+        (fetch_task_snapshot, "task"),
+        (fetch_checkpoint_snapshot, "checkpoint_" + "brief"),
+    ],
+)
+def test_checkpoint_fetch_fails_tenant_conflict_closed(
+    monkeypatch, fetch, entity_type
+):
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": entity_type,
+            "user_id": "tenant-envelope",
+            "snapshot": {
+                "status": "awaiting_operator",
+                "user_id": "tenant-snapshot",
+            },
+        },
+    )
+
+    assert fetch("ent")["user_id"] is None
+
+
 @pytest.mark.parametrize("entity_type", ["plan", "", None])
 def test_checkpoint_task_fetch_fails_closed_on_wrong_or_missing_type(
     monkeypatch, entity_type
@@ -714,3 +766,67 @@ def test_checkpoint_stamp_duplicate_caller_does_not_own_claim(monkeypatch):
     )
 
     assert stamp_checkpoint_dispatched("ent_cp", handler="apis") is False
+
+
+@pytest.mark.parametrize(
+    ("readback_status", "expected"),
+    [("approved_no_release", True), ("approved", False)],
+)
+def test_non_releasable_checkpoint_close_requires_exact_readback(
+    monkeypatch, readback_status, expected
+):
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(gating_module.httpx, "post", lambda *args, **kwargs: _Response())
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": "checkpoint_" + "brief",
+            "snapshot": {"status": readback_status},
+        },
+    )
+
+    assert (
+        close_checkpoint_without_release(
+            "ent_cp", handler="apis", reason="non-releasable test"
+        )
+        is expected
+    )
+
+
+def test_checkpoint_brief_carries_task_tenant_in_snapshot(monkeypatch):
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    posted: list[dict] = []
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"entities": [{"entity_id": "ent_cp"}]}
+
+    def post(*args, **kwargs):
+        posted.append(kwargs["json"])
+        return _Response()
+
+    monkeypatch.setattr(gating_module.httpx, "post", post)
+    decision = evaluate_gate(
+        confidence=0.3, action_type="local_edit", policy=_default()
+    )
+
+    brief_id = write_checkpoint_brief(
+        task_entity_id="ent_task",
+        decision=decision,
+        title="Tenant-bound checkpoint",
+        plan_summary="Bounded work",
+        handler="apis",
+        user_id="tenant-a",
+    )
+
+    assert brief_id == "ent_cp"
+    assert posted[0]["entities"][0]["user_id"] == "tenant-a"

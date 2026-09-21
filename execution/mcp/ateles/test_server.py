@@ -388,6 +388,7 @@ class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
                     "status": "awaiting_operator",
                     "task_entity_id": "ent_task_1",
                     "gate_action": "checkpoint_plan_approval",
+                    "user_id": "tenant-a",
                 },
             },
             {
@@ -396,6 +397,7 @@ class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
                     "status": "approved",
                     "task_entity_id": "ent_task_1",
                     "gate_action": "checkpoint_plan_approval",
+                    "user_id": "tenant-a",
                 },
             },
             {
@@ -405,11 +407,16 @@ class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
                     "resolved_dispatched": True,
                     "task_entity_id": "ent_task_1",
                     "gate_action": "checkpoint_plan_approval",
+                    "user_id": "tenant-a",
                 },
             },
             {
                 "entity_type": "task",
-                "snapshot": {"status": "routed", "blocked_reason": ""},
+                "snapshot": {
+                    "status": "routed",
+                    "blocked_reason": "",
+                    "user_id": "tenant-a",
+                },
             },
         ]
         mock_correct.return_value = True

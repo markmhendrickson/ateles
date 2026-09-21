@@ -183,6 +183,7 @@ from lib.daemon_runtime import (  # noqa: E402
 )
 from lib.daemon_runtime.gating import (  # noqa: E402
     checkpoint_already_dispatched,
+    close_checkpoint_without_release,
     fetch_checkpoint_snapshot,
     fetch_task_snapshot,
     mark_task_declined,
@@ -834,6 +835,7 @@ async def dispatch_task(
                     f"Trigger: {trigger}. {decision.reason}."
                 ),
                 handler=DAEMON_NAME,
+                user_id=snapshot.get("user_id") or None,
                 alternatives=(
                     ["Re-scope to a lower-blast action", "Provide missing inputs", "Decline"]
                     if decision.action == GateAction.CHECKPOINT_WITH_ALTERNATIVES
@@ -1115,7 +1117,29 @@ async def handle_checkpoint_brief(
     if gate_action not in releasable_actions:
         log.info(
             f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
-            f"gate_action={gate_action!r} — recording resolution without dispatch"
+            f"gate_action={gate_action!r} — closing resolution without dispatch"
+        )
+        close_checkpoint_without_release(
+            entity_id,
+            handler=DAEMON_NAME,
+            reason=f"non-releasable gate_action={gate_action!r}",
+        )
+        return False
+
+    # The producer uses the same gate_action for low/high approvals and for the
+    # NEVER tier (including operator_only and unclassified actions). Therefore
+    # gate_action alone is not an authorization allowlist: only the two known
+    # releasable blast tiers may pass. Missing and future values fail closed.
+    blast_radius = str(snapshot.get("blast_radius", "")).strip().lower()
+    if blast_radius not in {"low", "high"}:
+        log.info(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
+            f"blast_radius={blast_radius!r} — closing resolution without dispatch"
+        )
+        close_checkpoint_without_release(
+            entity_id,
+            handler=DAEMON_NAME,
+            reason=f"non-releasable blast_radius={blast_radius!r}",
         )
         return False
 
@@ -1133,12 +1157,30 @@ async def handle_checkpoint_brief(
         )
         return False
 
+    task_action_type = str(task_snapshot.get("action_type", "")).strip().lower()
+    if task_action_type == "operator_only":
+        log.warning(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} references operator-only task "
+            f"{task_id} — closing resolution without dispatch"
+        )
+        close_checkpoint_without_release(
+            entity_id,
+            handler=DAEMON_NAME,
+            reason="referenced task is operator_only",
+        )
+        return False
+
     brief_user_id = snapshot.get("user_id")
     task_user_id = task_snapshot.get("user_id")
-    if brief_user_id and task_user_id and brief_user_id != task_user_id:
+    if not brief_user_id or not task_user_id or brief_user_id != task_user_id:
         log.warning(
-            f"[{DAEMON_NAME}] checkpoint {entity_id} and task {task_id} belong to "
-            "different users — not dispatching"
+            f"[{DAEMON_NAME}] checkpoint {entity_id} and task {task_id} do not have "
+            "matching present tenant provenance — closing without dispatch"
+        )
+        close_checkpoint_without_release(
+            entity_id,
+            handler=DAEMON_NAME,
+            reason="missing or mismatched tenant provenance",
         )
         return False
 

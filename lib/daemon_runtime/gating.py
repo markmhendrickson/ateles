@@ -581,6 +581,7 @@ def write_checkpoint_brief(
     plan_summary: str,
     handler: str,
     alternatives: list[str] | None = None,
+    user_id: str | None = None,
 ) -> str | None:
     """
     Store a blocking checkpoint_brief entity in Neotoma and link it to the task.
@@ -622,6 +623,11 @@ def write_checkpoint_brief(
         ],
         "idempotency_key": f"checkpoint-{handler}-{task_entity_id}-plan",
     }
+    if user_id:
+        # Tenant provenance is part of the authorization boundary on release.
+        # Keep it on the snapshot itself because checkpoint consumers receive
+        # snapshots, not the outer entity envelope.
+        body["entities"][0]["user_id"] = user_id
     try:
         resp = httpx.post(
             f"{NEOTOMA_BASE_URL}/store",
@@ -653,6 +659,7 @@ def write_checkpoint_brief(
 # Statuses that resolve a checkpoint, and how the dispatcher should treat them.
 CHECKPOINT_APPROVED_STATES = frozenset({"approved", "approve", "accepted"})
 CHECKPOINT_REJECTED_STATES = frozenset({"rejected", "reject", "declined", "denied"})
+CHECKPOINT_APPROVED_NO_RELEASE = "approved_no_release"
 
 
 def _snapshot_of(data: dict) -> dict:
@@ -663,6 +670,23 @@ def _snapshot_of(data: dict) -> dict:
     if isinstance(data.get("snapshot"), dict):
         return data["snapshot"]
     return data
+
+
+def _snapshot_with_tenant(data: dict) -> dict:
+    """Return a snapshot without dropping tenant provenance on the envelope."""
+    snapshot = dict(_snapshot_of(data))
+    envelope_user_id = data.get("user_id")
+    snapshot_user_id = snapshot.get("user_id")
+    if envelope_user_id and snapshot_user_id and envelope_user_id != snapshot_user_id:
+        # Preserve the conflict as absent authorization rather than choosing
+        # either source. Checkpoint consumers require a truthy matching value.
+        log.warning(
+            "[gating] entity tenant provenance conflicts between envelope and snapshot"
+        )
+        snapshot["user_id"] = None
+    elif envelope_user_id and not snapshot_user_id:
+        snapshot["user_id"] = envelope_user_id
+    return snapshot
 
 
 def read_checkpoint_resolution(snapshot: dict) -> str | None:
@@ -694,7 +718,7 @@ def fetch_task_snapshot(task_entity_id: str) -> dict | None:
             entity_type or "unknown",
         )
         return None
-    return _snapshot_of(data)
+    return _snapshot_with_tenant(data)
 
 
 def fetch_checkpoint_snapshot(checkpoint_entity_id: str) -> dict | None:
@@ -710,7 +734,7 @@ def fetch_checkpoint_snapshot(checkpoint_entity_id: str) -> dict | None:
             entity_type or "unknown",
         )
         return None
-    return _snapshot_of(data)
+    return _snapshot_with_tenant(data)
 
 
 def checkpoint_already_dispatched(snapshot: dict) -> bool:
@@ -785,6 +809,73 @@ def stamp_checkpoint_dispatched(checkpoint_entity_id: str, *, handler: str) -> b
     except Exception as exc:  # noqa: BLE001
         log.warning(
             f"[gating] failed to stamp checkpoint {checkpoint_entity_id} dispatched: {exc}"
+        )
+        return False
+
+
+def close_checkpoint_without_release(
+    checkpoint_entity_id: str, *, handler: str, reason: str
+) -> bool:
+    """Durably consume an approval that is not authorized to release work.
+
+    The distinct terminal status prevents a later edit to a safety field from
+    reusing the old approval, without falsely stamping the brief as dispatched.
+    Success requires a typed read-back of the exact terminal status.
+    """
+    if not NEOTOMA_BEARER_TOKEN:
+        log.warning(
+            "[gating] no bearer token — cannot close non-releasable checkpoint"
+        )
+        return False
+    body = {
+        "entity_id": checkpoint_entity_id,
+        "entity_type": "checkpoint_brief",
+        "field": "status",
+        "value": CHECKPOINT_APPROVED_NO_RELEASE,
+        "idempotency_key": (
+            f"checkpoint-no-release-{handler}-{checkpoint_entity_id}"
+        ),
+    }
+    try:
+        resp = httpx.post(
+            f"{NEOTOMA_BASE_URL}/correct",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            json=body,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = _fetch_entity(checkpoint_entity_id)
+        if data is None:
+            log.warning(
+                "[gating] non-releasable checkpoint %s could not be read back",
+                checkpoint_entity_id,
+            )
+            return False
+        entity_type = str(
+            data.get("entity_type") or data.get("type") or ""
+        ).strip().lower()
+        snapshot = _snapshot_of(data)
+        if (
+            entity_type != "checkpoint_" + "brief"
+            or str(snapshot.get("status", "")).strip().lower()
+            != CHECKPOINT_APPROVED_NO_RELEASE
+        ):
+            log.warning(
+                "[gating] non-releasable checkpoint %s close did not materialize",
+                checkpoint_entity_id,
+            )
+            return False
+        log.info(
+            "[gating] checkpoint %s closed without release (%s)",
+            checkpoint_entity_id,
+            reason,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "[gating] failed to close checkpoint %s without release: %s",
+            checkpoint_entity_id,
+            exc,
         )
         return False
 
