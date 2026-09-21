@@ -5371,7 +5371,11 @@ class SwarmDispatcher:
     async def _handle_issue_comment(self, trigger: SwarmTrigger) -> None:
         """Handle an issue_comment webhook event.
 
-        Reacts to operator commands (only _OPERATOR_LOGIN may invoke any of them):
+        Reacts to comment commands (logins in ``_COMMAND_LOGINS`` may invoke
+        them; the operator is always a member). Guard 0 still drops bot/
+        machine identities before this allowlist is consulted, so a usable
+        command principal must be a non-bot login (see ``_COMMAND_LOGINS``
+        note). Approval via ``pr_review`` stays on ``_OPERATOR_LOGIN`` alone.
           /confirm-gates-clear  — waive unsigned pre-impl gates + re-trigger PR pipeline.
           /swarm-run            — re-run the full issue pipeline (Lanius triage +
                                   expectation pre-registration + Pavo scoping) on the
@@ -5395,8 +5399,9 @@ class SwarmDispatcher:
         All other comments are silently ignored — this is the best-effort,
         never-crash path.
 
-        Security guardrail: only _OPERATOR_LOGIN may invoke any command.  Any
-        other commenter — including swarm agents — is silently ignored.
+        Security guardrail: only ``_COMMAND_LOGINS`` may invoke any command.
+        Bot identities are dropped by Guard 0 first (neotoma#1686). The
+        ``pr_review`` approval path stays on ``_OPERATOR_LOGIN`` alone.
         """
         comment_author = trigger.comment_author
         comment_body = (trigger.comment_body or "").strip()

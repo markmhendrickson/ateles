@@ -1,6 +1,6 @@
 """The command guard is widenable; the approval guard is not.
 
-ateles#1114 / CLAUDE.md 2026-09-11: a session holds standing authorization to
+ateles#1132 / CLAUDE.md 2026-09-11: a session holds standing authorization to
 comment `/confirm-gates-clear` where a PR is blocked only by swarm MECHANICS.
 That authorization was never exercisable — the guard accepted only the
 operator's login, so every such comment was declined.
@@ -185,8 +185,107 @@ def test_a_bot_login_named_here_is_still_dropped_by_guard_0(monkeypatch):
 
     Naming `ateles-agent` changes nothing: Guard 0 drops it first. This is
     the self-trigger defence (neotoma#1686) and widening it for commands
-    would reopen the loop it closes.
+    would reopen the loop it closes. Option B: enablement names a non-bot
+    principal (`castor-agent`), not `ateles-agent`.
     """
     sd = _reload(monkeypatch, APIS_COMMAND_LOGINS="ateles-agent")
     assert "ateles-agent" in sd._COMMAND_LOGINS  # admitted by THIS guard
     assert sd._is_bot_author("ateles-agent")  # and dropped by the earlier one
+
+
+@pytest.mark.asyncio
+async def test_login_not_in_command_logins_never_reaches_command_dispatch(monkeypatch):
+    """Guard 2 behavioural negative: outside the allowlist never dispatches.
+
+    Membership assertions alone are decoration — reverting Guard 2 to
+    ``_OPERATOR_LOGIN`` while leaving ``_COMMAND_LOGINS`` intact would leave
+    those green. This drives ``_handle_issue_comment`` and spies both handlers.
+    """
+    sd = _reload(monkeypatch, APIS_COMMAND_LOGINS="castor-agent")
+    assert "drive-by-contributor" not in sd._COMMAND_LOGINS
+
+    dispatcher = sd.SwarmDispatcher.__new__(sd.SwarmDispatcher)
+    reached: list[str] = []
+
+    async def _spy_confirm(*a, **k):
+        reached.append("_handle_confirm_gates_clear")
+
+    async def _spy_swarm(*a, **k):
+        reached.append("_handle_swarm_run")
+
+    assert hasattr(sd.SwarmDispatcher, "_handle_confirm_gates_clear")
+    assert hasattr(sd.SwarmDispatcher, "_handle_swarm_run")
+    monkeypatch.setattr(
+        sd.SwarmDispatcher, "_handle_confirm_gates_clear", _spy_confirm, raising=True
+    )
+    monkeypatch.setattr(
+        sd.SwarmDispatcher, "_handle_swarm_run", _spy_swarm, raising=True
+    )
+
+    trigger = sd.SwarmTrigger(
+        kind="issue_comment",
+        repository="markmhendrickson/ateles",
+        number=1,
+        title="t",
+        body="",
+        author="drive-by-contributor",
+        html_url="https://github.com/markmhendrickson/ateles/issues/1",
+        delivery_id="test-delivery",
+        action="created",
+        comment_id=1,
+        comment_author="drive-by-contributor",
+        comment_body="/confirm-gates-clear",
+    )
+
+    await dispatcher._handle_issue_comment(trigger)
+
+    assert reached == [], (
+        "a login not in APIS_COMMAND_LOGINS must never reach command dispatch; "
+        f"reached {reached}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_named_non_bot_reaches_confirm_gates_clear(monkeypatch):
+    """Planted positive on the QA-named command token (/confirm-gates-clear)."""
+    sd = _reload(monkeypatch, APIS_COMMAND_LOGINS="castor-agent")
+    assert "castor-agent" in sd._COMMAND_LOGINS
+    assert not sd._is_bot_author("castor-agent")
+
+    dispatcher = sd.SwarmDispatcher.__new__(sd.SwarmDispatcher)
+    reached: list[str] = []
+
+    async def _spy_confirm(*a, **k):
+        reached.append("_handle_confirm_gates_clear")
+
+    async def _spy_swarm(*a, **k):
+        reached.append("_handle_swarm_run")
+
+    monkeypatch.setattr(
+        sd.SwarmDispatcher, "_handle_confirm_gates_clear", _spy_confirm, raising=True
+    )
+    monkeypatch.setattr(
+        sd.SwarmDispatcher, "_handle_swarm_run", _spy_swarm, raising=True
+    )
+
+    trigger = sd.SwarmTrigger(
+        kind="issue_comment",
+        repository="markmhendrickson/ateles",
+        number=1,
+        title="t",
+        body="",
+        author="castor-agent",
+        html_url="https://github.com/markmhendrickson/ateles/issues/1",
+        delivery_id="test-delivery",
+        action="created",
+        comment_id=1,
+        comment_author="castor-agent",
+        comment_body="/confirm-gates-clear",
+    )
+
+    await dispatcher._handle_issue_comment(trigger)
+
+    assert reached == ["_handle_confirm_gates_clear"], (
+        "a non-bot login named in APIS_COMMAND_LOGINS must reach "
+        f"_handle_confirm_gates_clear; reached {reached}"
+    )
