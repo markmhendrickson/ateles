@@ -5,7 +5,7 @@
 
 Every rule `work_model.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`work_model.md`](../work_model.md) and are not repeated here (decision 66).
 
-53 rules.
+54 rules.
 
 ## [Pull is the only delivery; assignment constrains eligibility](../work_model.md#pull-is-the-only-delivery-assignment-constrains-eligibility)
 
@@ -47,6 +47,10 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 - **WM-13** — the rule this heading states *[M]*
 - **WM-14** — the same: a child may take intake's fast path and never skips intake *[M]*
+
+## [What distinguishes a task being assembled from one intake has not reached](../work_model.md#what-distinguishes-a-task-being-assembled-from-one-intake-has-not-reached)
+
+- **WM-14a** — (decision 84): an assembling task first becomes readable together with its intake batch, `ADDRESSED_BY` edge, held `classify` lease, and hold finding; the unit is admitted whole or not at all; a genuinely awaiting-intake task carries none of the assembly unit and stays claimable *[M — effect-shaped acceptance for decision 84; it fails on the creation-time gap a later ordinary claim leaves]*
 
 ## [What a claim predicate treats as claimable](../work_model.md#what-a-claim-predicate-treats-as-claimable)
 
