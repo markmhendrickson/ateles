@@ -27,6 +27,14 @@ def _line(text: str, pattern: str) -> str:
     return match.group(0) if match else ""
 
 
+def _section(text: str, start: str, end: str) -> str:
+    begin = text.find(start)
+    if begin < 0:
+        return ""
+    stop = text.find(end, begin + len(start))
+    return text[begin : stop if stop >= 0 else len(text)]
+
+
 def _require(label: str, text: str, groups: tuple[tuple[str, ...], ...]) -> list[str]:
     normalized = " ".join(text.lower().split())
     missing = [
@@ -42,6 +50,7 @@ def check(root: Path) -> list[str]:
     names = (
         "conformance.md",
         "work_model.md",
+        "data_model.md",
         "workflows.md",
         "scenarios.md",
         "conformance_suite.md",
@@ -55,7 +64,14 @@ def check(root: Path) -> list[str]:
 
     register = _line(texts["conformance.md"], r"^\|\s*84\s*\|.*$")
     wm14a = _line(texts["conformance_suite.md"], r"^\|\s*WM-14a\s*\|.*$")
+    wm31 = _line(texts["conformance_suite.md"], r"^\|\s*WM-31\s*\|.*$")
+    wm31a = _line(texts["conformance_suite.md"], r"^\|\s*WM-31a\s*\|.*$")
     wm39 = _line(texts["conformance_suite.md"], r"^\|\s*WM-39\s*\|.*$")
+    hold_model = _section(
+        texts["work_model.md"],
+        "### A batch may hold on a condition discovered mid-flight",
+        "### A batch may depend on a task it created",
+    )
 
     problems: list[str] = []
     problems += _require(
@@ -81,6 +97,27 @@ def check(root: Path) -> list[str]:
         ),
     )
     problems += _require(
+        "hold-model",
+        hold_model,
+        (
+            ("assembly exception",),
+            ("creator-time",),
+            ("before a step owner or held lease exists",),
+            ("persistent assembly exclusion",),
+            ("survive the lease lapse", "survives the lease lapse"),
+        ),
+    )
+    problems += _require(
+        "finding-schema",
+        texts["data_model.md"],
+        (
+            ("creator-time assembly finding",),
+            ("persistent assembly exclusion",),
+            ("survives lease lapse",),
+            ("declaration-resolved `pm`",),
+        ),
+    )
+    problems += _require(
         "workflow-exception",
         texts["workflows.md"],
         (("decision 84's assembly",), ("persistent",), ("intake batch",)),
@@ -100,6 +137,16 @@ def check(root: Path) -> list[str]:
             ("creator",),
             ("resolved `pm` step owner", "declaration-resolved `pm`"),
             ("mutant",),
+        ),
+    )
+    problems += _require(
+        "wm-31",
+        wm31 + " " + wm31a,
+        (
+            ("assembly exception",),
+            ("creator-time",),
+            ("survives lapse",),
+            ("pm-only",),
         ),
     )
     problems += _require(

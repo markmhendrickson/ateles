@@ -259,7 +259,7 @@ exactly one resolved `pm` step owner may hold that lease; contributors gain no l
 by touching the task. The holder **holds**, exactly under
 `#a-batch-may-hold-on-a-condition-discovered-mid-flight`: the finding names what remains to be written and
 by whom where known, no verdict is written, and the lease keeps renewing while assembly continues. On a
-lease transfer or crash may return or lapse the lease, after which another resolved `pm` step owner may claim `classify`,
+lease transfer the holder returns the lease; after a crash it may lapse. Another resolved `pm` step owner may then claim `classify`,
 but the persistent assembly exclusion stays until that owner can write the verdict that ends the hold. No
 new record, relationship type, or task field is introduced.
 
@@ -932,24 +932,37 @@ no conclusion is written until the condition resolves; the rule that a conclusio
 (`vocabulary.md#condition`) is untouched, because a hold is the absence of a conclusion, not a conclusion with a
 clause.
 
-**There is no held state, no waiting value, and no field on the batch or the task.** A held step is read
-from the record as every other claimed step is: a held lease on the step, a finding on it naming an unmet
-condition, and no verdict. That derivation is what principle 11 asks for — a stored hold would need a
+**There is no held state, no waiting value, and no field on the batch or the task.** Ordinarily, a held step
+is read from the record as every other claimed step is: a held lease on the step, a finding on it naming an
+unmet condition, and no verdict. That derivation is what principle 11 asks for — a stored hold would need a
 process to clear it, and a step owner that died would leave it asserting a hold nobody holds, where the lease
-lapses on its own and the step is claimable again with no process acting. It is also why a hold is not a
+lapses on its own and the step is claimable again with no process acting.
+
+**Decision 84's assembly exception starts one boundary earlier.** Its creator-time finding is admitted with
+the task, intake batch, and `ADDRESSED_BY` edge before a step owner or held lease exists. In that exact
+shape, the finding with no `classify` verdict derives the persistent assembly exclusion; it does not assert
+that an absent holder is holding. When the declaration-resolved `pm` step owner holds the `classify` lease,
+the ordinary three-part read above also says the step is holding. When that lease lapses, the active hold
+ends and `classify` becomes claimable again only to an eligible `pm` step owner, but the finding and its
+persistent assembly exclusion survive the lease lapse and still refuse every ordinary claim. Only the
+`classify` verdict clears that exclusion. This is also why a hold is not a
 second waiting mechanism beside the checkpoint (principle 6), which was the cost the open question weighed:
 the checkpoint is still the only mechanism by which a principal is asked for a decision, a hold asks nobody
 anything, and a reader finding held steps uses the same read that finds any claimed step — there is no hold
 queue to consume or to neglect (principle 1). The distinction between a declared condition and a discovered
 one is only **when it is recorded**: `applies_when` is written on the declaration and evaluated when the step
-would open (`gates_and_workflows.md#declaration-batch-projection`); a discovered condition is written on the
-batch by the step owner at the moment it is met. Both are conditions on a step, and neither is a status. The
+would open (`gates_and_workflows.md#declaration-batch-projection`); a discovered condition is ordinarily
+written on the batch by the step owner at the moment it is met. The assembly exception is written by the
+creator at admission because waiting for a step owner would publish the incomplete task without its
+exclusion; the atomic-unit and exact-`classify` checks refuse that creator-time authorship anywhere else.
+All are conditions on a step, and none is a status. The
 declared case is therefore not a second mechanism: a step whose close condition names an arrival from outside
 the swarm — a reply, a confirmation, the operator's decision — holds exactly as a discovered condition holds,
 and the bound it holds under is the `hold_bound` its declaration carries
 (`gates_and_workflows.md#declaration-batch-projection`).
 
-**A hold is bounded, and it is bounded by mechanisms that already exist.** Three ends, no new one. Where the
+**An ordinary lease-bearing hold is bounded, and it is bounded by mechanisms that already exist.** Three
+ends, no new one. Where the
 condition **resolves** — the re-quote arrives, the read returns, the task completes — the step owner reads
 that from the record and signs or blocks on its own judgement; the hold ends because the verdict is written.
 Where the condition **owes a principal a decision** — the re-quote is outside what was consented to, the
@@ -960,9 +973,11 @@ condition **owes nobody a decision and does not resolve**, the hold is a deferra
 rule 5 already bounds every deferral: backoff between re-evaluations, a ceiling, and at the ceiling one
 checkpoint on the task with reason `rounds_exhausted`, carrying the finding so the operator is told what the
 step was waiting on rather than asked to diagnose it. A step owner that stops renewing lets the lease lapse,
-the step is claimable again, and repeated lapse raises `repeated_lapse` — so a hold whose holder has died is
-not a hold, it is a lapsed lease, and the design already knows what to do with one. **No hold ends by elapsed
-time into a pass**: the ends above are a verdict, a checkpoint, or a lapse, never a clearance
+the step is claimable again, and repeated lapse raises `repeated_lapse` — so an ordinary hold whose holder
+has died is not an active hold, it is a lapsed lease, and the design already knows what to do with one. For
+decision 84's assembly exception, lapse likewise ends the active lease-bearing hold, while the creator-time
+finding stays and continues its PM-only persistent exclusion until `classify` has a verdict. **No active hold
+ends by elapsed time into a pass**: the ends above are a verdict, a checkpoint, or a lapse, never a clearance
 (`failure_posture.md#repeated-lapse-raises-a-checkpoint`).
 
 **Why not the alternative.** The other answer was that a step owner who cannot sign either raises a

@@ -96,8 +96,8 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 ## [A batch may hold on a condition discovered mid-flight](../work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight)
 
-- **WM-31** — a hold is a finding naming the condition, no verdict, the lease renewed; no held state and no field *[M (X-14 closed)]*
-- **WM-31a** — the same: a hold ends by verdict, checkpoint, or lapse, never by elapsed time into a pass; a hold owing nobody a decision is a rule-5 deferral *[M (`hold_bound`; U-20 closed)]*
+- **WM-31** — an ordinary active hold is a finding naming the condition, no verdict, and a renewed lease; no held state and no field. Decision 84's assembly exception admits its creator-time `classify` finding before any owner or lease, and that finding derives the persistent exclusion rather than falsely asserting an active holder *[M (X-14 closed; decision 84 assembly exception)]*
+- **WM-31a** — the same: an ordinary active hold ends by verdict, checkpoint, or lapse, never by elapsed time into a pass; a hold owing nobody a decision is a rule-5 deferral. Under the assembly exception, lapse ends only the active hold: the finding's exclusion survives lapse, ordinary claims remain refused, the PM-only `classify` claim reopens, and only its verdict clears the exclusion *[M (`hold_bound`; U-20 closed; decision 84 assembly exception)]*
 
 ## [A batch may depend on a task it created](../work_model.md#a-batch-may-depend-on-a-task-it-created)
 
