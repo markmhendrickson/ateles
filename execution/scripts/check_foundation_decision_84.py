@@ -18,9 +18,9 @@ from pathlib import Path
 
 FOUNDATION_DIR = Path("docs/foundation")
 
-INTAKE_SECTION_SHA256 = "f20792d9423bc1fe55c933bb5a9060e618aa32c73889ac7b657f91fc9e940d2c"
+INTAKE_SECTION_SHA256 = "855ec3c7297e8a7e15741c46f4b23076d5cc22dd208acfb458393bb37157030a"
 BATCH_FORMATION_SECTION_SHA256 = (
-    "1c8854cbd687bb3dfe5edcbff90334be33c879f063b5bbd638a9741ac09d019b"
+    "ecb8482a9f0c50abd8f4a623f4c8577fd402d1205dd43567a6dd58711520fd05"
 )
 
 WM13_REQUIREMENT = (
@@ -301,22 +301,32 @@ def _active_headings(text: str) -> list[tuple[int, str, int, int]]:
     return headings
 
 
-def _owning_heading_section(text: str, heading: str) -> str:
-    """Return one heading's active body through the next peer/ancestor heading."""
+def _owning_heading_section(text: str, heading: str, end_heading: str) -> str:
+    """Return one heading's raw body through its unique expected successor."""
 
     headings = _active_headings(text)
-    matches = [
+    starts = [
         (index, entry)
         for index, entry in enumerate(headings)
         if entry[1] == heading
     ]
-    if len(matches) != 1:
+    ends = [
+        (index, entry)
+        for index, entry in enumerate(headings)
+        if entry[1] == end_heading
+    ]
+    if len(starts) != 1 or len(ends) != 1:
         return ""
-    index, entry = matches[0]
-    following = [candidate for candidate in headings[index + 1 :] if candidate[0] <= entry[0]]
-    if not following:
+    start_index, start = starts[0]
+    end_index, end = ends[0]
+    if end_index <= start_index or end[0] != start[0]:
         return ""
-    return _active_prose(text)[entry[3] : following[0][2]]
+    following = [
+        candidate for candidate in headings[start_index + 1 :] if candidate[0] <= start[0]
+    ]
+    if not following or following[0] != end:
+        return ""
+    return text[start[3] : end[2]]
 
 
 def _heading_section(text: str, start: str, end: str) -> str:
@@ -464,7 +474,9 @@ def check(root: Path) -> list[str]:
         "## intake",
         "## feature",
     )
-    intake_workflow_owner = _owning_heading_section(texts["workflows.md"], "intake")
+    intake_workflow_owner = _owning_heading_section(
+        texts["workflows.md"], "intake", "feature"
+    )
     scenario_f = _heading_section(
         texts["scenarios.md"],
         "## (f) A parent task with children in independent batches",
@@ -476,7 +488,9 @@ def check(root: Path) -> list[str]:
         "## What the scenarios do not show",
     )
     batch_formation_owner = _owning_heading_section(
-        texts["work_model.md"], "How a batch is formed, and what chooses its workflow"
+        texts["work_model.md"],
+        "How a batch is formed, and what chooses its workflow",
+        "A batch may hold on a condition discovered mid-flight",
     )
 
     problems: list[str] = []

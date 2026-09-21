@@ -821,6 +821,83 @@ def test_real_batch_contradiction_after_block_end_fails(tmp_path: Path) -> None:
     assert any("batch-opening-model" in problem for problem in problems)
 
 
+def test_real_batch_mermaid_predecessor_inversion_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "work_model.md",
+        'IB["its intake batch opens without a predecessor verdict"]',
+        'IB["its intake batch opens only after a predecessor verdict; not without '
+        'a predecessor verdict"]',
+    )
+    assert any("batch-opening-model" in problem for problem in problems)
+
+
+def test_real_intake_comment_mutation_inside_fingerprint_fails(
+    tmp_path: Path,
+) -> None:
+    def transform(text: str) -> str:
+        start = text.index("## intake")
+        marker = "or to the operator.\n\n"
+        position = text.index(marker, start) + len(marker)
+        return (
+            text[:position]
+            + "<!-- decision-84 protected section changed -->\n\n"
+            + text[position:]
+        )
+
+    problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_real_intake_inserted_peer_heading_cannot_truncate_fingerprint(
+    tmp_path: Path,
+) -> None:
+    def transform(text: str) -> str:
+        position = text.index("## feature", text.index("## intake"))
+        contradiction = (
+            "## Intake exceptions\n\n"
+            "Despite the intake rule, a workflow-entering task may be published "
+            "before its intake batch or `ADDRESSED_BY` edge exists.\n\n"
+        )
+        return text[:position] + contradiction + text[position:]
+
+    problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_real_batch_inserted_peer_heading_cannot_truncate_fingerprint(
+    tmp_path: Path,
+) -> None:
+    def transform(text: str) -> str:
+        start = text.index("### How a batch is formed, and what chooses its workflow")
+        position = text.index(
+            "### A batch may hold on a condition discovered mid-flight", start
+        )
+        contradiction = (
+            "### Batch-opening exceptions\n\n"
+            "Despite the formation rule, an intake batch opens only after a "
+            "predecessor verdict.\n\n"
+        )
+        return text[:position] + contradiction + text[position:]
+
+    problems = mutate_real_corpus_text(tmp_path, "work_model.md", transform)
+    assert any("batch-opening-model" in problem for problem in problems)
+
+
+def test_owning_heading_section_keeps_child_headings_in_its_body() -> None:
+    text = (
+        "## protected\n"
+        "body\n"
+        "### child\n"
+        "child body\n"
+        "## expected end\n"
+        "after\n"
+    )
+    assert decision_84._owning_heading_section(
+        text, "protected", "expected end"
+    ) == "body\n### child\nchild body\n"
+
+
 @pytest.mark.parametrize(
     "decoy",
     (
