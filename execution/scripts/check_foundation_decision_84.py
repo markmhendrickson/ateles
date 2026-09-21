@@ -45,6 +45,12 @@ def _require(label: str, text: str, groups: tuple[tuple[str, ...], ...]) -> list
     return [f"decision-84-{label} — missing " + ", ".join(missing)] if missing else []
 
 
+def _forbid(label: str, text: str, tokens: tuple[str, ...]) -> list[str]:
+    normalized = " ".join(text.lower().split())
+    present = [token for token in tokens if token in normalized]
+    return [f"decision-84-{label} — forbidden " + ", ".join(present)] if present else []
+
+
 def check(root: Path) -> list[str]:
     fdir = root / FOUNDATION_DIR
     names = (
@@ -67,6 +73,28 @@ def check(root: Path) -> list[str]:
     wm31 = _line(texts["conformance_suite.md"], r"^\|\s*WM-31\s*\|.*$")
     wm31a = _line(texts["conformance_suite.md"], r"^\|\s*WM-31a\s*\|.*$")
     wm39 = _line(texts["conformance_suite.md"], r"^\|\s*WM-39\s*\|.*$")
+    creation_row_names = ("WM-13", "WM-14", "WM-21", "WM-32b", "WM-35a", "WM-39")
+    creation_row_map = {
+        row: _line(texts["conformance_suite.md"], rf"^\|\s*{row}\s*\|.*$")
+        for row in creation_row_names
+    }
+    creation_rows = " ".join(creation_row_map.values())
+    task_schema = _line(texts["data_model.md"], r"^\|\s*task\s*\|.*$")
+    intake_model = _section(
+        texts["work_model.md"],
+        "### Intake is every task's first workflow",
+        "### What distinguishes a task being assembled from one intake has not reached",
+    )
+    batch_formation = _section(
+        texts["work_model.md"],
+        "### How a batch is formed, and what chooses its workflow",
+        "### A batch may hold on a condition discovered mid-flight",
+    )
+    source_index = _section(
+        texts["work_model.md"],
+        "### Where tasks come from: every source, indexed",
+        "### An intake rule turns a described change in the record into a task, and nothing else",
+    )
     hold_model = _section(
         texts["work_model.md"],
         "### A batch may hold on a condition discovered mid-flight",
@@ -94,6 +122,50 @@ def check(root: Path) -> list[str]:
             ("creation grants no lease", "creating principal receives no `classify` lease"),
             ("declared `pm` step owner", "declaration's `pm` owner role"),
             ("multi-agent assembly",),
+        ),
+    )
+    universal_surfaces = {
+        "intake-model": intake_model,
+        "batch-formation": batch_formation,
+        "source-index": source_index,
+        "data-model": task_schema,
+        "workflow": texts["workflows.md"],
+        "scenario": texts["scenarios.md"],
+        "creation-rows": creation_rows,
+    }
+    for surface, text in universal_surfaces.items():
+        problems += _require(
+            f"universal-entry-{surface}",
+            text,
+            (
+                ("every task",),
+                ("intake batch",),
+                ("at creation", "on creation", "creation boundary"),
+            ),
+        )
+    for row, text in creation_row_map.items():
+        problems += _require(
+            f"universal-entry-{row.lower()}",
+            text,
+            (("intake batch",), ("at creation", "on creation")),
+        )
+    universal_entry = " ".join(universal_surfaces.values())
+    problems += _require(
+        "universal-entry-assembly-difference",
+        universal_entry,
+        (
+            ("assembly exception", "assembling task"),
+            ("persistent assembly exclusion", "persistent `classify` hold"),
+        ),
+    )
+    problems += _forbid(
+        "universal-entry",
+        universal_entry,
+        (
+            "ordinary complete tasks end creation with no intake batch",
+            "ordinary task with a batch at creation",
+            "complete task is created for ordinary intake; that is its publication. it has no intake batch",
+            "every non-assembly task meets this condition once, at creation",
         ),
     )
     problems += _require(

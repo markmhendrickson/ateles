@@ -329,11 +329,12 @@ invariants 2 and 7.
 
 ## (j) A task created, routed by intake, and entering its successor
 
-A complete task is created for ordinary intake; that is its publication. It has no intake batch, so it is
-unrouted by that fact, and nothing else records it as such. (An assembling task is the ruled exception: its
-task, intake batch, edge, and persistent `classify` hold become readable together, and only the declaration's
-resolved `pm` step owner may claim assembly.) The ordinary task enters intake: a batch record opens for it, and the `pm` step
-owner claims each step in turn — a lease on the step, and a verdict to close it: `classify` writes the
+A complete task is created for ordinary intake; that is its publication. Every task's intake batch and
+`ADDRESSED_BY` edge become readable with it at creation, and it is unrouted while that batch has no closing
+`route` verdict. (An assembling task is the ruled exception only in adding its persistent `classify` hold to
+the same atomic creation unit; only the declaration's resolved `pm` step owner may claim assembly.) The
+ordinary task proceeds through intake as the `pm` step owner claims each step in turn — a lease on the step,
+and a verdict to close it: `classify` writes the
 task's `action_type` and, where a named principal is the point, `assigned_to`; `link` attaches the issue
 the task already concerns as an artifact; `dedupe` finds no open duplicate; `prioritize` sets the
 priority from the `priority_rubric` entity; `route`'s verdict, the closing verdict of the batch, names

@@ -147,9 +147,10 @@ the redo it calls for is a new task through intake
 
 ### Intake is every task's first workflow
 
-Every task enters intake before any other workflow (`workflows.md#intake`): `classify`, `link`,
-`dedupe`, `prioritize`, `route` (closing verdict names one successor, none, or operator-only). An
-unrouted task is a task with no intake batch — no separate unrouted state. `link` attaches what the task
+Every task enters intake before any other workflow (`workflows.md#intake`): at creation it atomically opens
+the intake batch and writes the `ADDRESSED_BY` edge, then `classify`, `link`, `dedupe`, `prioritize`, and
+`route` run (the closing verdict names one successor, none, or operator-only). An unrouted task is one whose
+intake batch has no closing `route` verdict — no separate unrouted state. `link` attaches what the task
 names, a record in the record and an external one alike, and nothing on relevance alone; what a step needs
 beyond that is hydration's, per step (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`).
 Tasks a batch creates
@@ -165,20 +166,18 @@ batch, held.** Registered in `conformance.md#the-register-of-open-design-decisio
 at `classify` on the discovered condition that the task is not yet fully written — not a fourth
 disposition, but the third of the four already listed, `#a-batch-may-hold-on-a-condition-discovered-mid-flight`
 applied to intake's own first step.** Registered in `conformance.md#the-register-of-open-design-decisions`.
-The rule above makes an unrouted task a task with no intake batch, and that one definition covered two
-situations the design did not separate: a task with no intake batch **because it is still being written** —
-several agents each contributing part of it, the operator's case — and a task with no intake batch
-**because intake has not yet picked it up**. Both were unrouted, nothing in the record said which was
-which, and so nothing said whether the first was finished enough to be claimed and executed. The ruling
-closes the gap by moving the first case out of "no intake batch" entirely: an assembling task **has** an
-intake batch, opened the moment it is created exactly as `#intake-is-every-tasks-first-workflow` already
-requires of every task, and that batch's `classify` step carries an assembly hold finding rather than a
-closing verdict. The creation write makes the task, its intake batch, their `ADDRESSED_BY` edge, and the
-hold finding readable as one admitted unit; none of those records is readable without the others. A lease
-is deliberately not part of that minimum: creation grants no step ownership, and a creator who also
+Before the ruling, the open question treated both an assembling task and one whose intake owner had not begun
+classification as
+having no intake batch. That premise conflicted with the already-settled creation boundary: **every task's
+intake batch opens at creation**. The distinction is therefore not whether the batch exists. An ordinary
+task's creation write makes the task, its intake batch, and their `ADDRESSED_BY` edge readable as one admitted
+unit, and its open `classify` step is eligible for the ordinary claim path. An assembling task's same atomic
+unit additionally carries an assembly hold finding on `classify`, naming what is incomplete. None of that
+assembly unit is readable without the rest. A lease is deliberately not part of either minimum: creation
+grants no step ownership, and a creator who also
 resolves as the declared `pm` step owner may acquire the `classify` lease only through the ordinary atomic
-claim check. Only the second case — genuinely unrouted, nobody yet looking at it — keeps the
-no-intake-batch reading.
+claim check. Thus both shapes are already in intake and unrouted until `route` closes; only the assembly
+shape carries the persistent exclusion that withholds ordinary claims.
 
 **The operator's proposal was a `draft` status**, and a status is disfavoured on three independent grounds,
 none of which touch the need itself:
@@ -198,14 +197,15 @@ none of which touch the need itself:
 **The dispositions, argued against each other rather than only against the status the operator proposed.**
 Four were listed and three are rejected here, each at its strongest before the reason it does not win.
 
-- **Nothing, at its strongest.** The absence of an intake batch already is *a* state, and being assembled is
+- **Nothing, at its strongest.** The open intake batch already makes the task unrouted, and being assembled is
   a fact about the assembler rather than about the task — the cheapest possible answer, since it asks the
-  design to add nothing at all, and it is not merely lazy: every other unrouted task already reads this way,
+  design to add nothing at all, and it is not merely lazy: every ordinary unrouted task already reads this way,
   so treating the assembling case identically is the reading that adds no special case. It fails on the
-  question the register names explicitly, not on tidiness. Under "nothing," an assembling task *is* a task
-  with no intake batch, which is exactly the claimable, unrouted case `#intake-is-every-tasks-first-workflow`
-  already defines — no lease, no checkpoint, nothing distinguishing it from a task genuinely waiting for
-  intake to arrive. A second agent, or a queue reading for claimable work, cannot tell "half-written" from
+  question the register names explicitly, not on tidiness. Under "nothing," an assembling task has the same
+  task + intake batch + `ADDRESSED_BY` unit as an ordinary task and no assembly finding, which is exactly the
+  claimable case `#intake-is-every-tasks-first-workflow` already defines — no lease, no checkpoint, nothing
+  distinguishing it from a complete task waiting for an intake owner to claim `classify`. A second agent, or
+  a queue reading for claimable work, cannot tell "half-written" from
   "ready and unclaimed," and the claim predicate would let either be claimed and executed. That is the cost
   the section already named, and read against the sub-question the register asks — whether an assembling
   task is claimable before it is finished — "nothing" answers it wrongly: it would be.
@@ -284,11 +284,11 @@ the task remains absent from ordinary intake and successor-workflow pools. Endin
 lease holder judges the condition resolved and writes `classify`'s verdict; until that verdict exists the
 finding cannot be ignored, including across crash and lease transfer.
 
-**What this settles, and what it does not.** Settled: an assembling task and its held intake state become
-readable atomically; that batch's `classify` step holds rather than closing while the task is incomplete;
-creation grants no lease; and the persistent assembly exclusion survives a missing, returned, transferred,
-or lapsed lease. A task created without that unit is the genuinely awaiting-intake case and remains
-claimable.
+**What this settles, and what it does not.** Settled: every task becomes readable atomically with its intake
+batch and `ADDRESSED_BY` edge; an assembling task adds the creator-time finding to that same unit, and that
+batch's `classify` step holds rather than closing while the task is incomplete. Creation grants no lease,
+and the persistent assembly exclusion survives a missing, returned, transferred, or lapsed lease. An
+ordinary task lacks only that finding and remains claimable through intake's usual owner resolution.
 Not settled, and not part of this question: how a contributing agent signals that its portion is done, or
 how many agents' contributions `classify` waits on before resolving the hold — those are a matter of how
 `classify` is executed, which is `workflows.md#intake`'s to state if it ever needs to, not a new mechanism
@@ -819,8 +819,8 @@ batch to come into existence, which tasks are in it, and which workflow it goes 
 by a mechanism the model already has, and stating them together is what stops the answer being re-derived
 differently at each call site.
 
-**A batch comes into existence at one of two moments, and at no other: a task's creation, which opens its
-intake batch, and a closing verdict naming a successor, which opens the successor's.** Two causes, both
+**A batch comes into existence at one of two moments, and at no other: every task's creation, which opens its
+intake batch at creation, and a closing verdict naming a successor, which opens the successor's.** Two causes, both
 recorded, and no third. Intake's `route` step closes on a verdict naming one successor workflow, none,
 or operator-only; every later batch closes the same way (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`).
 Where a successor is named, the batch for it opens and carries a `FOLLOWS` edge back to the batch that
@@ -1340,8 +1340,9 @@ through workflows in batches — and each way a task comes to exist is stated wh
 creates it is argued. That leaves a reader who asks "in how many ways can work enter this swarm" reading
 eight documents. This section is the index, in the register's style
 (`conformance.md#the-register-of-open-design-decisions`): one line per source, pointing at the home that
-argues it, and restating nothing (principle 9). It is complete in one sense by construction — every source
-below ends in the same place, a task with no intake batch, which is the universal entry
+argues it, and restating nothing (principle 9). It is complete in one sense by construction: every task source
+below ends in the same place, a task with its intake batch opened atomically at creation,
+which is the universal entry
 (`#intake-is-every-tasks-first-workflow`) — and a source that does not end there is not a source of tasks
 but a side door, which the model does not have (`#a-task-is-executed-only-through-a-workflow`).
 

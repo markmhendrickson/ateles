@@ -45,12 +45,12 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 ## [Intake is every task's first workflow](../work_model.md#intake-is-every-tasks-first-workflow)
 
-- **WM-13** — the rule this heading states *[M]*
+- **WM-13** — every task is admitted with exactly one intake batch at creation *[M]*
 - **WM-14** — the same: a child may take intake's fast path and never skips intake *[M]*
 
 ## [What distinguishes a task being assembled from one intake has not reached](../work_model.md#what-distinguishes-a-task-being-assembled-from-one-intake-has-not-reached)
 
-- **WM-14a** — (decision 84): an assembling task first becomes readable together with its intake batch, `ADDRESSED_BY` edge, and persistent `classify` hold finding; the unit is admitted whole or not at all; creation grants no lease, and only the declaration-resolved `pm` step owner may claim assembly; the exclusion survives lease lapse, crash, return, and transfer until a `classify` verdict exists; a genuinely awaiting-intake task carries none of the unit and stays claimable *[M — effect-shaped acceptance for decision 84; the persistent-exclusion and creator-ownership mutants prove the rule can fail]*
+- **WM-14a** — (decision 84): every task first becomes readable with its intake batch and `ADDRESSED_BY` edge; an assembling task's same unit also contains the persistent `classify` hold finding and is admitted whole or not at all; creation grants no lease, and only the declaration-resolved `pm` step owner may claim assembly; the exclusion survives lease lapse, crash, return, and transfer until a `classify` verdict exists; an ordinary intake task has the batch and edge but no assembly finding and stays claimable *[M — effect-shaped acceptance for decision 84; the persistent-exclusion and creator-ownership mutants prove the rule can fail]*
 
 ## [What a claim predicate treats as claimable](../work_model.md#what-a-claim-predicate-treats-as-claimable)
 
@@ -72,7 +72,7 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 ## [A task is executed only through a workflow](../work_model.md#a-task-is-executed-only-through-a-workflow)
 
 - **WM-20** — the rule this heading states *[M]*
-- **WM-21** — the same: a daemon's task enters intake like any other *[M]*
+- **WM-21** — the same: a daemon's task enters intake like every task, with its intake batch at creation *[M]*
 
 ## [Changing the swarm is work, and it goes through a workflow like any other](../work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other)
 
@@ -103,7 +103,7 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 - **WM-32** — a `DEPENDS_ON` edge, never a field; the verdict is refused while it is unended and the task non-terminal; ending it is a recorded act *[M]*
 - **WM-32a** — the same: a cycle is refused at write and at attach; one found later escalates every batch in it as `dependency_cycle` *[M — the cross-type walk is the writer's (X-15), so the mutant is a writer that skips it]*
-- **WM-32b** — the same: `DEPENDS_ON` is not on the chain; the created task is a peer with its own intake and its own priority *[M]*
+- **WM-32b** — the same: `DEPENDS_ON` is not on the chain; the created task is a peer with its own intake batch admitted at creation and its own priority *[M]*
 
 ## [Artifacts are records a batch leaves, never its subject](../work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject)
 
@@ -119,7 +119,7 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 ## [A recurring task is one live instance, and its completion creates the next](../work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next)
 
-- **WM-35a** — one live instance, never zero and never two; the closing verdict creates the next, `FOLLOWS` task to task, the rule copied *[M]*
+- **WM-35a** — one live instance, never zero and never two; the closing verdict creates the next with its intake batch at creation, `FOLLOWS` task to task, and the rule copied *[M]*
 - **WM-35b** — the same: `due_date` is computed from the schedule, never from completion; a missed point is owed unless the rule says otherwise *[M]*
 - **WM-35c** — the same: no series entity, count, or live marker; the rule lives on the instance; ending the series is a correction to the live instance's rule; postponing is a `due_date` correction and creates nothing *[M]*
 - **WM-35d** — the same: a stopped series is one overdue instance, and its batch reaches the queue *[M]*
@@ -136,7 +136,7 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 ## [Where tasks come from: every source, indexed](../work_model.md#where-tasks-come-from-every-source-indexed)
 
-- **WM-39** — nine sources; ordinary complete tasks end creation with no intake batch, while decision 84's assembly exception ends creation with its intake batch and persistent hold; the creating principal holds no privilege over either shape *[M]*
+- **WM-39** — every task from all nine sources gets its intake batch and `ADDRESSED_BY` edge at creation; decision 84's assembly exception adds the persistent hold to that same unit, and the creating principal holds no privilege over either shape *[M]*
 
 ## [An intake rule turns a described change in the record into a task, and nothing else](../work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else)
 
