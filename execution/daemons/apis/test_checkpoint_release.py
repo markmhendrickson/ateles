@@ -13,6 +13,7 @@ the brief's new ``approved`` status passed on the broken implementation.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import importlib.util
 import sys
@@ -225,6 +226,7 @@ async def test_stale_sse_snapshot_cannot_dispatch_after_inline_consumer(
 async def test_failed_stamp_does_not_dispatch(monkeypatch, release_store):
     records, brief_id, task_id = release_store
     dispatches: list[tuple] = []
+    notifier = _Notifier()
 
     async def spy_dispatch(*args, **kwargs):
         dispatches.append((args, kwargs))
@@ -233,6 +235,7 @@ async def test_failed_stamp_does_not_dispatch(monkeypatch, release_store):
     monkeypatch.setattr(
         apis, "stamp_checkpoint_dispatched", lambda checkpoint_id, *, handler: False
     )
+    monkeypatch.setattr(apis.Notifier, "from_neotoma", lambda: notifier)
 
     result = await _resolve(brief_id, "approve")
 
@@ -240,6 +243,79 @@ async def test_failed_stamp_does_not_dispatch(monkeypatch, release_store):
     assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
     assert records[brief_id]["snapshot"]["resolved_dispatched"] is False
     assert "re-dispatched" not in result["action_taken"]
+    assert not any("re-dispatch" in message for message in notifier.sent)
+
+
+@pytest.mark.asyncio
+async def test_resolve_acknowledges_before_slow_agent_completion(
+    monkeypatch, release_store
+):
+    records, brief_id, task_id = release_store
+    finish_spawn = asyncio.Event()
+    spawn_started = asyncio.Event()
+    monkeypatch.setattr(apis, "DRY_RUN", False)
+    monkeypatch.setattr(apis, "RUN_CONVERSATIONS", False)
+    monkeypatch.setattr(apis, "RUN_EMAIL", False)
+
+    class _Success:
+        ok = True
+        error = None
+        returncode = 0
+
+    async def slow_spawn(*args, **kwargs):
+        spawn_started.set()
+        await finish_spawn.wait()
+        return _Success()
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", slow_spawn)
+
+    try:
+        result = await asyncio.wait_for(_resolve(brief_id, "approve"), timeout=0.02)
+        await asyncio.wait_for(spawn_started.wait(), timeout=0.02)
+    finally:
+        finish_spawn.set()
+
+    assert result["action_taken"] == "approved — task re-dispatched"
+    assert records[brief_id]["snapshot"]["resolved_dispatched"] is True
+    assert records[task_id]["snapshot"]["status"] == "executing"
+
+    background = list(getattr(apis, "_background_dispatch_tasks", ()))
+    if background:
+        await asyncio.gather(*background)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_mcp_waiter_does_not_cancel_release_consumer(
+    monkeypatch, release_store
+):
+    _records, brief_id, _task_id = release_store
+    consumer_started = asyncio.Event()
+    let_consumer_finish = asyncio.Event()
+    consumer_finished = asyncio.Event()
+    consumer_cancelled = False
+
+    async def cancellable_consumer(checkpoint_id, snapshot):
+        nonlocal consumer_cancelled
+        consumer_started.set()
+        try:
+            await let_consumer_finish.wait()
+        except asyncio.CancelledError:
+            consumer_cancelled = True
+            raise
+        consumer_finished.set()
+        return True
+
+    monkeypatch.setattr(server, "_consume_checkpoint_resolution", cancellable_consumer)
+
+    waiter = asyncio.create_task(_resolve(brief_id, "approve"))
+    await consumer_started.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    let_consumer_finish.set()
+    await asyncio.wait_for(consumer_finished.wait(), timeout=0.02)
+    assert consumer_cancelled is False
 
 
 @pytest.mark.asyncio

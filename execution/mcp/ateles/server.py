@@ -37,6 +37,7 @@ Transport: stdio (launched by Claude Code as an MCP server subprocess).
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -58,6 +59,21 @@ from mcp.types import (
 )
 
 log = logging.getLogger("ateles")
+
+# Keep release-acceptance work alive if the MCP caller times out or cancels.
+# Once a checkpoint is approved, cancelling the transport must not cancel the
+# consumer that owns its durable dispatch claim.
+_release_acceptance_tasks: set[asyncio.Task[bool]] = set()
+
+
+def _release_acceptance_done(task: asyncio.Task[bool]) -> None:
+    _release_acceptance_tasks.discard(task)
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception:
+        log.exception("checkpoint release acceptance failed after caller detached")
 
 NEOTOMA_BASE_URL = os.environ.get(
     "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
@@ -660,7 +676,23 @@ async def _consume_checkpoint_resolution(checkpoint_id: str, snapshot: dict) -> 
     import apis as apis_daemon
 
     notifier = apis_daemon.Notifier.from_neotoma()
-    return await apis_daemon.handle_checkpoint_brief(checkpoint_id, snapshot, notifier)
+    return await apis_daemon.handle_checkpoint_brief(
+        checkpoint_id,
+        snapshot,
+        notifier,
+        detach_after_accept=True,
+    )
+
+
+async def _await_release_acceptance(checkpoint_id: str, snapshot: dict) -> bool:
+    """Shield the durable release handshake from MCP transport cancellation."""
+    task = asyncio.create_task(
+        _consume_checkpoint_resolution(checkpoint_id, snapshot),
+        name=f"checkpoint-release-{checkpoint_id}",
+    )
+    _release_acceptance_tasks.add(task)
+    task.add_done_callback(_release_acceptance_done)
+    return await asyncio.shield(task)
 
 
 async def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
@@ -716,7 +748,7 @@ async def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
             and _entity_type_of(resolved_data) == "checkpoint_brief"
             and str(resolved_snap.get("status", "")).strip().lower() == "approved"
         ):
-            released = await _consume_checkpoint_resolution(checkpoint_id, resolved_snap)
+            released = await _await_release_acceptance(checkpoint_id, resolved_snap)
 
         # Claim a release only when BOTH the checkpoint claim and task lifecycle
         # read back. A 2xx from either correction is not that proof.

@@ -209,6 +209,22 @@ logging.basicConfig(
 )
 log = logging.getLogger("apis")
 
+# A checkpoint release only needs to wait until the task transition that
+# authorizes execution is durably read back.  The harness run itself can last
+# much longer than an MCP request, so detached runs need a strong reference and
+# an exception-draining callback for the rest of the daemon process lifetime.
+_background_dispatch_tasks: set[asyncio.Task[None]] = set()
+
+
+def _background_dispatch_done(task: asyncio.Task[None]) -> None:
+    _background_dispatch_tasks.discard(task)
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        log.warning("[%s] detached dispatch was cancelled", DAEMON_NAME)
+    except Exception:
+        log.exception("[%s] detached dispatch failed", DAEMON_NAME)
+
 # ── Config ────────────────────────────────────────────────────────────────────
 DAEMON_NAME = "apis"
 
@@ -508,6 +524,7 @@ async def dispatch_task(
     notifier: Notifier,
     gate_override: bool = False,
     snapshot_hydrated: bool | None = None,
+    detach_after_accept: bool = False,
 ) -> None:
     """
     Route a task to the appropriate T4 skill and spawn it via a bundled-plan CLI.
@@ -529,6 +546,10 @@ async def dispatch_task(
             read, so the escalation is deferred. None means "not applicable"
             (callers that fetched the snapshot themselves, e.g. the reconciler
             and the watchdog, which only ever hold real query results).
+        detach_after_accept: Return after the approved task has durably entered
+            EXECUTING, while completing the harness run in the background.
+            Used by the request/response checkpoint-release path so client
+            cancellation cannot abort work that the operator already released.
     """
     title = snapshot.get("title", "(untitled)")
     current_status = snapshot.get("status")
@@ -871,96 +892,132 @@ async def dispatch_task(
         )
         return
 
-    # E1/E2: this run's thread. run_key keys it to the attempt so SSE replays reuse
-    # it while a genuine retry opens a fresh run.
-    run_key = f"{trigger}-{snapshot.get('attempt', snapshot.get('attempt_count', 0))}"
+    async def _finish_dispatch() -> None:
+        # E1/E2: this run's thread. run_key keys it to the attempt so SSE
+        # replays reuse it while a genuine retry opens a fresh run.
+        run_key = f"{trigger}-{snapshot.get('attempt', snapshot.get('attempt_count', 0))}"
 
-    # E1: open one conversation for this execution run (flag-gated, fail-open).
-    run_conversation_id: str | None = None
-    if RUN_CONVERSATIONS:
-        run_conversation_id = create_run_conversation(
-            task_id=entity_id,
-            plan_id=snapshot.get("plan_id") or None,
-            agent=skill,
-            run_key=run_key,
-            title=f"{skill} run · {title[:60]}",
-        )
-        if run_conversation_id:
-            log.info(
-                f"[{DAEMON_NAME}] run conversation {run_conversation_id} opened "
-                f"for task {entity_id} (run={run_key})"
+        # E1: open one conversation for this execution run (flag-gated,
+        # fail-open).
+        run_conversation_id: str | None = None
+        if RUN_CONVERSATIONS:
+            run_conversation_id = create_run_conversation(
+                task_id=entity_id,
+                plan_id=snapshot.get("plan_id") or None,
+                agent=skill,
+                run_key=run_key,
+                title=f"{skill} run · {title[:60]}",
             )
+            if run_conversation_id:
+                log.info(
+                    f"[{DAEMON_NAME}] run conversation {run_conversation_id} opened "
+                    f"for task {entity_id} (run={run_key})"
+                )
 
-    def _run_stage(role: str, content: str, stage: str) -> None:
-        """Record one run-thread event: append to the run conversation (E1) AND
-        send it on the run's Gmail thread (E2). Both flag-gated + fail-open. Apis
-        OWNS the run thread, so it is populated regardless of whether the spawned
-        agent finalizes into it; the agent's own /end (advised via prompt) layers
-        on top and is not relied upon for binding.
-        """
-        if run_conversation_id:
-            append_turn(
-                conversation_id=run_conversation_id, role=role, content=content,
-                sender_kind="orchestrator",
-                idempotency_key=f"runturn-{entity_id}-{stage}-{trigger}",
+        def _run_stage(role: str, content: str, stage: str) -> None:
+            """Record one run-thread event in Neotoma and Gmail."""
+            if run_conversation_id:
+                append_turn(
+                    conversation_id=run_conversation_id,
+                    role=role,
+                    content=content,
+                    sender_kind="orchestrator",
+                    idempotency_key=f"runturn-{entity_id}-{stage}-{trigger}",
+                )
+            if RUN_EMAIL:
+                send_run_email(
+                    task_id=entity_id,
+                    run_key=run_key,
+                    stage=stage,
+                    title=title,
+                    body=content,
+                )
+
+        _run_stage(
+            "user",
+            f"Dispatched {skill} for task {entity_id} (trigger={trigger}): {title}",
+            stage="kickoff",
+        )
+
+        try:
+            result = await _spawn_harness_skill(
+                skill,
+                entity_id,
+                snapshot,
+                trigger,
+                notifier,
+                role=role,
+                run_conversation_id=run_conversation_id,
             )
-        if RUN_EMAIL:
-            send_run_email(
-                task_id=entity_id, run_key=run_key, stage=stage, title=title,
-                body=content,
+        except Exception as exc:
+            # Unexpected crash in the spawn machinery itself → record as a
+            # failed run.
+            _run_stage(
+                "assistant",
+                f"{skill} dispatch crashed: {type(exc).__name__}: {exc}",
+                stage="crash",
             )
+            set_task_status(
+                entity_id,
+                TaskStatus.FAILED,
+                handler=DAEMON_NAME,
+                from_status=TaskStatus.EXECUTING.value,
+                reason=f"dispatch raised {type(exc).__name__}: {exc}",
+                key_suffix=trigger,
+            )
+            job.failed(
+                f"task {entity_id} → {skill} dispatch failed: {type(exc).__name__}"
+            )
+            raise
 
-    _run_stage("user",
-               f"Dispatched {skill} for task {entity_id} (trigger={trigger}): {title}",
-               stage="kickoff")
+        if result.ok:
+            _run_stage(
+                "assistant", f"{skill} completed (trigger={trigger}).", stage="done"
+            )
+            set_task_status(
+                entity_id,
+                TaskStatus.DONE,
+                handler=DAEMON_NAME,
+                from_status=TaskStatus.EXECUTING.value,
+                result=f"{skill} completed (trigger={trigger})",
+                key_suffix=trigger,
+            )
+            job.finished(
+                f"task {entity_id} dispatched → {skill} (gate: {_gate_label})"
+            )
+        else:
+            reason = result.error or f"rc={result.returncode}"
+            _run_stage(
+                "assistant",
+                f"{skill} failed (trigger={trigger}): {reason}",
+                stage="failed",
+            )
+            # FAILED (not BLOCKED): the stall watchdog owns retry-with-backoff
+            # and escalation-on-exhaustion out-of-band.
+            set_task_status(
+                entity_id,
+                TaskStatus.FAILED,
+                handler=DAEMON_NAME,
+                from_status=TaskStatus.EXECUTING.value,
+                reason=reason,
+                key_suffix=trigger,
+            )
+            notifier.send(
+                f"{skill} failed on {entity_id} ({reason}) — task marked FAILED",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+            job.failed(f"task {entity_id} → {skill} failed: {reason[:60]}")
 
-    try:
-        result = await _spawn_harness_skill(
-            skill, entity_id, snapshot, trigger, notifier, role=role,
-            run_conversation_id=run_conversation_id,
+    if detach_after_accept:
+        task = asyncio.create_task(
+            _finish_dispatch(), name=f"apis-dispatch-{entity_id}-{trigger}"
         )
-    except Exception as exc:
-        # Unexpected crash in the spawn machinery itself → record as a failed run.
-        _run_stage("assistant", f"{skill} dispatch crashed: {type(exc).__name__}: {exc}",
-                   stage="crash")
-        set_task_status(
-            entity_id, TaskStatus.FAILED, handler=DAEMON_NAME,
-            from_status=TaskStatus.EXECUTING.value,
-            reason=f"dispatch raised {type(exc).__name__}: {exc}",
-            key_suffix=trigger,
-        )
-        job.failed(f"task {entity_id} → {skill} dispatch failed: {type(exc).__name__}")
-        raise
+        _background_dispatch_tasks.add(task)
+        task.add_done_callback(_background_dispatch_done)
+        return
 
-    if result.ok:
-        _run_stage("assistant", f"{skill} completed (trigger={trigger}).",
-                   stage="done")
-        set_task_status(
-            entity_id, TaskStatus.DONE, handler=DAEMON_NAME,
-            from_status=TaskStatus.EXECUTING.value,
-            result=f"{skill} completed (trigger={trigger})",
-            key_suffix=trigger,
-        )
-        job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
-    else:
-        reason = result.error or f"rc={result.returncode}"
-        _run_stage("assistant", f"{skill} failed (trigger={trigger}): {reason}",
-                   stage="failed")
-        # FAILED (not BLOCKED): the stall watchdog (plan task ent_3cdd75…) owns
-        # retry-with-backoff and escalation-on-exhaustion out-of-band, so the SSE
-        # loop is never blocked by an inline sleep. Notify now so failures are not
-        # silent in the interim before the watchdog ships.
-        set_task_status(
-            entity_id, TaskStatus.FAILED, handler=DAEMON_NAME,
-            from_status=TaskStatus.EXECUTING.value, reason=reason,
-            key_suffix=trigger,
-        )
-        notifier.send(
-            f"{skill} failed on {entity_id} ({reason}) — task marked FAILED",
-            priority=Priority.BLOCKER,
-            handler=DAEMON_NAME,
-        )
-        job.failed(f"task {entity_id} → {skill} failed: {reason[:60]}")
+    await _finish_dispatch()
 
 
 # ── Checkpoint resolution ───────────────────────────────────────────────────
@@ -978,7 +1035,10 @@ def _release_lifecycle_proven(task_id: str, expected_status: TaskStatus) -> bool
 
 
 async def handle_checkpoint_brief(
-    entity_id: str, snapshot: dict, notifier: Notifier
+    entity_id: str,
+    snapshot: dict,
+    notifier: Notifier,
+    detach_after_accept: bool = False,
 ) -> bool:
     """
     React to a checkpoint_brief the gate raised once the operator resolves it.
@@ -1086,11 +1146,6 @@ async def handle_checkpoint_brief(
         f"[{DAEMON_NAME}] checkpoint {entity_id} APPROVED — re-dispatching task "
         f"{task_id} with gate override"
     )
-    notifier.send(
-        f"Checkpoint approved: {title[:70]}\n  re-dispatching task {task_id}",
-        priority=Priority.INFO,
-        handler=DAEMON_NAME,
-    )
     # The stamp is the existing replay claim. If it does not land, this attempt
     # owns nothing and must not dispatch; a later consumer delivery may retry.
     if not stamp_checkpoint_dispatched(entity_id, handler=DAEMON_NAME):
@@ -1100,19 +1155,36 @@ async def handle_checkpoint_brief(
         )
         return False
     await dispatch_task(
-        task_id, task_snapshot, trigger="approved", notifier=notifier, gate_override=True
+        task_id,
+        task_snapshot,
+        trigger="approved",
+        notifier=notifier,
+        gate_override=True,
+        detach_after_accept=detach_after_accept,
     )
     final_task = fetch_task_snapshot(task_id)
     if final_task is None or final_task.get("blocked_reason") != "":
         return False
     final_status = normalize_status(final_task.get("status"))
     if DRY_RUN:
-        return final_status == TaskStatus.ROUTED.value
-    return final_status in {
-        TaskStatus.EXECUTING.value,
-        TaskStatus.VERIFIED.value,
-        TaskStatus.DONE.value,
-    }
+        accepted = final_status == TaskStatus.ROUTED.value
+    else:
+        accepted = final_status in {
+            TaskStatus.EXECUTING.value,
+            TaskStatus.VERIFIED.value,
+            TaskStatus.DONE.value,
+        }
+    if not accepted:
+        return False
+
+    # This message is an externally visible success claim. Emit it only after
+    # both the replay claim and the released task lifecycle have been read back.
+    notifier.send(
+        f"Checkpoint approved: {title[:70]}\n  re-dispatching task {task_id}",
+        priority=Priority.INFO,
+        handler=DAEMON_NAME,
+    )
+    return True
 
 
 # ── Event handler ─────────────────────────────────────────────────────────────
