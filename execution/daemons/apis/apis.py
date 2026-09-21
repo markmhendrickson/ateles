@@ -47,6 +47,8 @@ Environment variables:
   APIS_ALLOW_METERED_HARNESS  "1" permits usage-based API-key fallback. Default 0:
                               API keys are removed and capped plans fail over/queue.
   APIS_DISPATCH_TIMEOUT       Per-dispatch timeout in seconds (default: 1800)
+  APIS_CHECKPOINT_DENIAL_DIR  Durable replay-denial marker directory
+                              (default: ~/.local/state/ateles/checkpoint-denials)
   ATELES_REPO_PATH            Local path to ateles clone (default: ~/repos/ateles)
 
 Task reconciliation sweep (ateles#586 — see task_reconciler.py):
@@ -70,6 +72,8 @@ GitHub trigger layer (ateles#80 — see github_gateway.py / swarm_dispatch.py):
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
 import sys
@@ -176,6 +180,7 @@ from lib.daemon_runtime import (  # noqa: E402
     BlastRadius,
     ExecutionPolicy,
     GateAction,
+    GateDecision,
     NeotomaEvent,
     SSEClient,
     evaluate_gate,
@@ -184,12 +189,14 @@ from lib.daemon_runtime import (  # noqa: E402
     write_checkpoint_brief,
 )
 from lib.daemon_runtime.gating import (  # noqa: E402
+    checkpoint_authorization_digest,
     checkpoint_already_dispatched,
     close_checkpoint_without_release,
     fetch_checkpoint_snapshot,
     fetch_task_snapshot,
     mark_task_declined,
     read_checkpoint_resolution,
+    require_fresh_checkpoint_approval,
     stamp_checkpoint_dispatched,
 )
 from lib.daemon_runtime.task_lifecycle import (  # noqa: E402
@@ -217,7 +224,7 @@ log = logging.getLogger("apis")
 # much longer than an MCP request, so detached runs need a strong reference and
 # an exception-draining callback for the rest of the daemon process lifetime.
 _background_dispatch_tasks: set[asyncio.Task[None]] = set()
-_nonreleasable_checkpoint_quarantine: set[str] = set()
+_background_checkpoint_tasks: set[asyncio.Task[None]] = set()
 
 
 def _background_dispatch_done(task: asyncio.Task[None]) -> None:
@@ -228,6 +235,16 @@ def _background_dispatch_done(task: asyncio.Task[None]) -> None:
         log.warning("[%s] detached dispatch was cancelled", DAEMON_NAME)
     except Exception:
         log.exception("[%s] detached dispatch failed", DAEMON_NAME)
+
+
+def _background_checkpoint_done(task: asyncio.Task[None]) -> None:
+    _background_checkpoint_tasks.discard(task)
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        log.warning("[%s] fresh-checkpoint creation was cancelled", DAEMON_NAME)
+    except Exception:
+        log.exception("[%s] fresh-checkpoint creation failed", DAEMON_NAME)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DAEMON_NAME = "apis"
@@ -839,6 +856,7 @@ async def dispatch_task(
                 ),
                 handler=DAEMON_NAME,
                 user_id=snapshot.get("user_id") or None,
+                action_type=action_type,
                 alternatives=(
                     ["Re-scope to a lower-blast action", "Provide missing inputs", "Decline"]
                     if decision.action == GateAction.CHECKPOINT_WITH_ALTERNATIVES
@@ -1039,8 +1057,44 @@ def _release_lifecycle_proven(task_id: str, expected_status: TaskStatus) -> bool
     )
 
 
+def _checkpoint_denial_marker(checkpoint_id: str) -> Path:
+    root = Path(
+        os.environ.get(
+            "APIS_CHECKPOINT_DENIAL_DIR",
+            str(Path.home() / ".local" / "state" / "ateles" / "checkpoint-denials"),
+        )
+    )
+    digest = hashlib.sha256(checkpoint_id.encode()).hexdigest()
+    return root / f"{digest}.denied"
+
+
+def _checkpoint_denial_persisted(checkpoint_id: str) -> bool:
+    return _checkpoint_denial_marker(checkpoint_id).is_file()
+
+
+def _persist_checkpoint_denial(checkpoint_id: str) -> bool:
+    """Persist a cross-process replay deny when Neotoma writes both fail."""
+    marker = _checkpoint_denial_marker(checkpoint_id)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return True
+    except OSError:
+        log.exception(
+            "[%s] could not create durable checkpoint denial marker", DAEMON_NAME
+        )
+        return False
+    try:
+        os.write(fd, b"denied\n")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return marker.is_file()
+
+
 def _deny_checkpoint_release(checkpoint_id: str, *, reason: str) -> None:
-    """Consume a denied approval, with a fail-closed fallback and quarantine."""
+    """Consume a denied approval with durable cross-process fallbacks."""
     if close_checkpoint_without_release(
         checkpoint_id, handler=DAEMON_NAME, reason=reason
     ):
@@ -1049,21 +1103,129 @@ def _deny_checkpoint_release(checkpoint_id: str, *, reason: str) -> None:
     # If the purpose-built terminal state cannot be proven, consume the replay
     # claim as a last-resort durable deny. This field normally means a dispatch
     # happened, so use it only on terminalization failure and log the degraded
-    # representation loudly. If that write also fails, quarantine this ID for
-    # the lifetime of the process: a later safety-field edit must not make the
-    # same approval reusable in this consumer.
-    _nonreleasable_checkpoint_quarantine.add(checkpoint_id)
+    # representation loudly. If that write also fails, a host-persistent
+    # marker blocks this approval across daemon restarts and consumer processes.
     if stamp_checkpoint_dispatched(checkpoint_id, handler=DAEMON_NAME):
-        _nonreleasable_checkpoint_quarantine.discard(checkpoint_id)
         log.error(
             f"[{DAEMON_NAME}] checkpoint {checkpoint_id} denial could not be "
             "terminalized; consumed replay claim as a fail-closed fallback"
         )
-    else:
+    elif _persist_checkpoint_denial(checkpoint_id):
         log.critical(
             f"[{DAEMON_NAME}] checkpoint {checkpoint_id} denial could not be "
-            "persisted; quarantined in-process and will never dispatch here"
+            "persisted in Neotoma; wrote a durable host denial marker"
         )
+    else:
+        raise RuntimeError(
+            f"checkpoint {checkpoint_id} denial could not be persisted safely"
+        )
+
+
+def _file_fresh_checkpoint(
+    *,
+    prior_checkpoint_id: str,
+    task_id: str,
+    task_snapshot: dict,
+    notifier: Notifier,
+) -> None:
+    """Create a replacement checkpoint under the current live policy."""
+    assigned_to = _canonical_assignee(task_snapshot.get("assigned_to"))
+    skill = assigned_to
+    if not skill:
+        tags = task_snapshot.get("tags", []) or []
+        if isinstance(tags, str):
+            import json as _json
+
+            try:
+                tags = _json.loads(tags)
+            except (ValueError, TypeError):
+                tags = []
+        skill = _resolve_skill(tags, assigned_to=assigned_to)
+    action_type = _infer_action_type(skill or "", task_snapshot)
+    policy = resolve_policy_for_agent(skill)
+    decision = evaluate_gate(
+        confidence=_read_confidence(task_snapshot),
+        action_type=action_type,
+        policy=policy,
+        successful_recurrences=_successful_recurrences(task_snapshot),
+    )
+    if decision.action == GateAction.AUTO_EXECUTE:
+        decision = GateDecision(
+            action=GateAction.CHECKPOINT,
+            blast_radius=decision.blast_radius,
+            confidence=decision.confidence,
+            threshold=decision.threshold,
+            policy_id=decision.policy_id,
+            reason="task authorization context changed; fresh approval required",
+            confidence_unscored=decision.confidence_unscored,
+        )
+    context = hashlib.sha256(
+        f"{prior_checkpoint_id}\0{action_type or ''}\0{policy.entity_id}".encode()
+    ).hexdigest()[:20]
+    brief_id = write_checkpoint_brief(
+        task_entity_id=task_id,
+        decision=decision,
+        title=str(task_snapshot.get("title") or "Re-approve changed task"),
+        plan_summary=(
+            "The task authorization context changed after the prior approval. "
+            f"Current action: {action_type or 'unknown'}. {decision.reason}."
+        ),
+        handler=DAEMON_NAME,
+        user_id=task_snapshot.get("user_id") or None,
+        action_type=action_type,
+        idempotency_context=f"fresh-{context}",
+    )
+    if brief_id:
+        notifier.send(
+            f"Fresh approval required for changed task {task_id}\n  brief={brief_id}",
+            priority=Priority.BLOCKER,
+            handler=DAEMON_NAME,
+        )
+
+
+def _schedule_fresh_checkpoint(
+    *,
+    prior_checkpoint_id: str,
+    task_id: str,
+    task_snapshot: dict,
+    notifier: Notifier,
+) -> None:
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            _file_fresh_checkpoint,
+            prior_checkpoint_id=prior_checkpoint_id,
+            task_id=task_id,
+            task_snapshot=dict(task_snapshot),
+            notifier=notifier,
+        ),
+        name=f"apis-fresh-checkpoint-{task_id}",
+    )
+    _background_checkpoint_tasks.add(task)
+    task.add_done_callback(_background_checkpoint_done)
+
+
+def _require_fresh_release_authority(
+    checkpoint_id: str,
+    *,
+    task_id: str,
+    task_snapshot: dict,
+    notifier: Notifier,
+    reason: str,
+) -> None:
+    """Retire stale approval and asynchronously file a current-policy one."""
+    retired = require_fresh_checkpoint_approval(
+        checkpoint_id, handler=DAEMON_NAME, reason=reason
+    )
+    if not retired and not _persist_checkpoint_denial(checkpoint_id):
+        raise RuntimeError(
+            f"checkpoint {checkpoint_id} stale authority could not be retired safely"
+        )
+    _schedule_fresh_checkpoint(
+        prior_checkpoint_id=checkpoint_id,
+        task_id=task_id,
+        task_snapshot=task_snapshot,
+        notifier=notifier,
+    )
 
 
 async def handle_checkpoint_brief(
@@ -1099,10 +1261,10 @@ async def handle_checkpoint_brief(
         return False
     snapshot = current_snapshot
 
-    if entity_id in _nonreleasable_checkpoint_quarantine:
+    if _checkpoint_denial_persisted(entity_id):
         log.critical(
-            f"[{DAEMON_NAME}] checkpoint {entity_id} is quarantined after a failed "
-            "non-release write — refusing replay"
+            f"[{DAEMON_NAME}] checkpoint {entity_id} has a durable denial marker "
+            "— refusing replay"
         )
         return False
 
@@ -1143,40 +1305,8 @@ async def handle_checkpoint_brief(
         )
         return True
 
-    # An approval bypasses the execution gate only for the two actions that the
-    # gate itself emits for swarm-executable work. `operator_only`, an absent
-    # value, and every unrecognized value fail closed.
-    gate_action = str(snapshot.get("gate_action", "")).strip().lower()
-    releasable_actions = {
-        GateAction.CHECKPOINT.value,
-        GateAction.CHECKPOINT_WITH_ALTERNATIVES.value,
-    }
-    if gate_action not in releasable_actions:
-        log.info(
-            f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
-            f"gate_action={gate_action!r} — closing resolution without dispatch"
-        )
-        _deny_checkpoint_release(
-            entity_id, reason=f"non-releasable gate_action={gate_action!r}"
-        )
-        return False
-
-    # The producer uses the same gate_action for low/high approvals and for the
-    # NEVER tier (including operator_only and unclassified actions). Therefore
-    # gate_action alone is not an authorization allowlist: only the two known
-    # releasable blast tiers may pass. Missing and future values fail closed.
-    blast_radius = str(snapshot.get("blast_radius", "")).strip().lower()
-    if blast_radius not in {"low", "high"}:
-        log.info(
-            f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
-            f"blast_radius={blast_radius!r} — closing resolution without dispatch"
-        )
-        _deny_checkpoint_release(
-            entity_id, reason=f"non-releasable blast_radius={blast_radius!r}"
-        )
-        return False
-
-    # approved → re-dispatch with the gate bypassed
+    # approved → fetch the live task before deciding whether the old approval
+    # still authorizes its current action.
     task_snapshot = fetch_task_snapshot(task_id)
     if task_snapshot is None:
         log.warning(
@@ -1187,17 +1317,6 @@ async def handle_checkpoint_brief(
             f"Checkpoint approved but task {task_id} unreachable — manual dispatch needed",
             priority=Priority.WARN,
             handler=DAEMON_NAME,
-        )
-        return False
-
-    task_action_type = str(task_snapshot.get("action_type", "")).strip().lower()
-    if task_action_type == "operator_only":
-        log.warning(
-            f"[{DAEMON_NAME}] checkpoint {entity_id} references operator-only task "
-            f"{task_id} — closing resolution without dispatch"
-        )
-        _deny_checkpoint_release(
-            entity_id, reason="referenced task is operator_only"
         )
         return False
 
@@ -1213,10 +1332,12 @@ async def handle_checkpoint_brief(
         )
         return False
 
-    # Recompute the task's current classification rather than trusting the
-    # brief's stored blast radius. The task or policy may have changed while
-    # the checkpoint waited, and an old LOW classification cannot authorize a
-    # task that is NOW unclassified or operator-only (NEVER).
+    gate_action = str(snapshot.get("gate_action", "")).strip().lower()
+    blast_radius = str(snapshot.get("blast_radius", "")).strip().lower()
+    releasable_actions = {
+        GateAction.CHECKPOINT.value,
+        GateAction.CHECKPOINT_WITH_ALTERNATIVES.value,
+    }
     assigned_to = _canonical_assignee(task_snapshot.get("assigned_to"))
     safety_skill = assigned_to
     if not safety_skill:
@@ -1230,41 +1351,105 @@ async def handle_checkpoint_brief(
                 task_tags = []
         safety_skill = _resolve_skill(task_tags, assigned_to=assigned_to)
 
-    try:
-        # Release acknowledgement has a strict latency contract and cannot
-        # block on a live policy fetch. Re-evaluate against the runtime's local
-        # conservative policy vocabulary: known action classes retain their
-        # radius, while every newly declared/unclassified action resolves to
-        # NEVER. A live policy may classify more actions, but this fallback
-        # never makes the release decision less safe.
-        safety_policy = ExecutionPolicy(
-            entity_id="checkpoint-release-fallback", loaded=False
-        )
-        current_decision = evaluate_gate(
-            confidence=_read_confidence(task_snapshot),
-            action_type=_infer_action_type(safety_skill or "", task_snapshot),
-            policy=safety_policy,
-            successful_recurrences=_successful_recurrences(task_snapshot),
-        )
-    except Exception as exc:
+    current_action_type = _infer_action_type(safety_skill or "", task_snapshot)
+    if current_action_type == "operator_only":
         log.warning(
-            f"[{DAEMON_NAME}] checkpoint {entity_id} current safety classification "
-            f"failed ({type(exc).__name__}) — closing without dispatch"
+            f"[{DAEMON_NAME}] checkpoint {entity_id} references operator-only task "
+            f"{task_id} — closing resolution without dispatch"
+        )
+        _deny_checkpoint_release(entity_id, reason="referenced task is operator_only")
+        return False
+
+    auth_version = snapshot.get("authorization_context_version")
+    auth_action_type = str(
+        snapshot.get("authorization_action_type", "")
+    ).strip().lower()
+    auth_digest = str(snapshot.get("authorization_context_digest", "")).strip()
+    has_authorization_snapshot = any(
+        value not in (None, "")
+        for value in (auth_version, auth_action_type, auth_digest)
+    )
+    authorization_bound = False
+    if has_authorization_snapshot:
+        expected_digest = checkpoint_authorization_digest(
+            task_entity_id=task_id,
+            user_id=str(brief_user_id),
+            action_type=auth_action_type,
+            gate_action=gate_action,
+            blast_radius=blast_radius,
+            policy_id=str(snapshot.get("policy_entity_id", "")),
+        )
+        authorization_bound = (
+            str(auth_version) == "1"
+            and bool(auth_action_type)
+            and bool(auth_digest)
+            and hmac.compare_digest(auth_digest, expected_digest)
+        )
+        if not authorization_bound:
+            _require_fresh_release_authority(
+                entity_id,
+                task_id=task_id,
+                task_snapshot=task_snapshot,
+                notifier=notifier,
+                reason="checkpoint authorization snapshot is incomplete or changed",
+            )
+            return False
+
+    # Only the two gate actions and LOW/HIGH blast tiers authorize agent work.
+    # With a bound snapshot, this also checks the exact fields the operator saw;
+    # without one it retains the legacy fail-closed allow-list.
+    if gate_action not in releasable_actions:
+        log.info(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
+            f"gate_action={gate_action!r} — closing resolution without dispatch"
         )
         _deny_checkpoint_release(
-            entity_id, reason="current task safety classification unavailable"
+            entity_id, reason=f"non-releasable gate_action={gate_action!r}"
+        )
+        return False
+    if blast_radius not in {"low", "high"}:
+        log.info(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
+            f"blast_radius={blast_radius!r} — closing resolution without dispatch"
+        )
+        _deny_checkpoint_release(
+            entity_id, reason=f"non-releasable blast_radius={blast_radius!r}"
         )
         return False
 
-    if current_decision.blast_radius == BlastRadius.NEVER:
-        log.warning(
-            f"[{DAEMON_NAME}] checkpoint {entity_id} task {task_id} currently "
-            "classifies as NEVER — closing without dispatch"
-        )
-        _deny_checkpoint_release(
-            entity_id, reason="current task safety classification is never"
-        )
-        return False
+    if authorization_bound:
+        if current_action_type != auth_action_type:
+            _require_fresh_release_authority(
+                entity_id,
+                task_id=task_id,
+                task_snapshot=task_snapshot,
+                notifier=notifier,
+                reason=(
+                    "task action changed after approval: "
+                    f"{auth_action_type!r} -> {current_action_type!r}"
+                ),
+            )
+            return False
+    elif current_action_type:
+        # Legacy checkpoints predate the explicit authorization snapshot. Known
+        # fallback actions may recover only when their current radius still
+        # matches the approved radius. Unknown actions are policy divergence,
+        # not proof of NEVER: retire the old authority and ask the live policy
+        # to create a fresh checkpoint non-destructively.
+        current_radius = ExecutionPolicy(
+            entity_id="checkpoint-release-fallback", loaded=False
+        ).blast_radius_for(current_action_type)
+        if current_radius == BlastRadius.NEVER or current_radius.value != blast_radius:
+            _require_fresh_release_authority(
+                entity_id,
+                task_id=task_id,
+                task_snapshot=task_snapshot,
+                notifier=notifier,
+                reason=(
+                    "legacy checkpoint does not match current task classification"
+                ),
+            )
+            return False
 
     log.info(
         f"[{DAEMON_NAME}] checkpoint {entity_id} APPROVED — re-dispatching task "

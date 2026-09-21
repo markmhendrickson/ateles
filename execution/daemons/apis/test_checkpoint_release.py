@@ -14,8 +14,10 @@ the brief's new ``approved`` status passed on the broken implementation.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -81,7 +83,6 @@ async def _resolve(checkpoint_id: str, action: str) -> dict:
 def release_store(monkeypatch):
     brief_id = "ent_cp1"
     task_id = "ent_task_1"
-    apis._nonreleasable_checkpoint_quarantine.discard(brief_id)
     records = {
         brief_id: {
             "entity_type": CHECKPOINT_TYPE,
@@ -90,7 +91,7 @@ def release_store(monkeypatch):
                 "resolved_dispatched": False,
                 "task_entity_id": task_id,
                 "gate_action": "checkpoint_plan_approval",
-                "blast_radius": "low",
+                "blast_radius": "high",
                 "title": "Approve the bounded implementation",
                 "user_id": "tenant-a",
             },
@@ -145,6 +146,12 @@ def release_store(monkeypatch):
         records[checkpoint_entity_id]["snapshot"]["status"] = "approved_no_release"
         return True
 
+    def require_fresh(checkpoint_entity_id, *, handler, reason):
+        records[checkpoint_entity_id]["snapshot"][
+            "status"
+        ] = "approved_requires_fresh_approval"
+        return True
+
     monkeypatch.setattr(server, "_get", get)
     monkeypatch.setattr(server, "_correct", correct)
     monkeypatch.setattr(apis, "fetch_task_snapshot", fetch_task)
@@ -157,6 +164,8 @@ def release_store(monkeypatch):
         close_without_release,
         raising=False,
     )
+    monkeypatch.setattr(apis, "require_fresh_checkpoint_approval", require_fresh)
+    monkeypatch.setattr(apis, "_schedule_fresh_checkpoint", lambda **kwargs: None)
     monkeypatch.setattr(apis, "DRY_RUN", True)
     monkeypatch.setattr(apis.Notifier, "from_neotoma", lambda: _Notifier())
 
@@ -169,6 +178,25 @@ def release_store(monkeypatch):
     monkeypatch.setattr(apis._activity, "started", lambda message: _Job())
 
     return records, brief_id, task_id
+
+
+def _authorization_digest(
+    *, task_id: str, user_id: str, action_type: str, gate_action: str, blast_radius: str,
+    policy_id: str,
+) -> str:
+    canonical = json.dumps(
+        {
+            "action_type": action_type,
+            "blast_radius": blast_radius,
+            "gate_action": gate_action,
+            "policy_id": policy_id,
+            "task_entity_id": task_id,
+            "user_id": user_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 @pytest.mark.asyncio
@@ -477,7 +505,7 @@ async def test_operator_only_producer_shape_never_releases(
 
 
 @pytest.mark.asyncio
-async def test_current_never_classification_overrides_stale_low_brief(
+async def test_unknown_current_classification_requires_fresh_policy_brief(
     monkeypatch, release_store
 ):
     records, brief_id, task_id = release_store
@@ -510,7 +538,7 @@ async def test_current_never_classification_overrides_stale_low_brief(
     assert released is False
     assert dispatches == []
     assert brief["resolved_dispatched"] is False
-    assert brief["status"] == "approved_no_release"
+    assert brief["status"] == "approved_requires_fresh_approval"
 
 
 @pytest.mark.asyncio
@@ -552,6 +580,213 @@ async def test_failed_nonrelease_close_cannot_make_approval_reusable(
     assert second is False
     assert dispatches == []
     assert brief["resolved_dispatched"] is True
+
+
+@pytest.mark.asyncio
+async def test_failed_close_and_stamp_denial_survives_consumer_restart(
+    monkeypatch, release_store, tmp_path
+):
+    """A failed Neotoma terminal write still cannot make approval reusable."""
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief.update(
+        {
+            "status": "approved",
+            "gate_action": "operator_only",
+            "resolved_dispatched": False,
+        }
+    )
+    dispatches: list[tuple] = []
+    stamp_attempts = 0
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    def fail_denial_stamp_then_allow_release(checkpoint_id, *, handler):
+        nonlocal stamp_attempts
+        stamp_attempts += 1
+        if stamp_attempts == 1:
+            return False
+        brief["resolved_dispatched"] = True
+        return True
+
+    monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", str(tmp_path / "denials"))
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+    monkeypatch.setattr(
+        apis, "close_checkpoint_without_release", lambda *args, **kwargs: False
+    )
+    monkeypatch.setattr(
+        apis, "stamp_checkpoint_dispatched", fail_denial_stamp_then_allow_release
+    )
+
+    first = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    # Model a different consumer process: module-local memory is absent, while
+    # the host-persistent denial record remains.  Then mutate the old approval
+    # into a superficially releasable shape.
+    quarantine = getattr(apis, "_nonreleasable_checkpoint_quarantine", None)
+    if quarantine is not None:
+        quarantine.clear()
+    brief.update(
+        {
+            "gate_action": "checkpoint_plan_approval",
+            "blast_radius": "low",
+        }
+    )
+    records[task_id]["snapshot"]["action_type"] = "local_edit"
+    second = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert first is False
+    assert second is False
+    assert dispatches == []
+    assert brief["resolved_dispatched"] is False
+    assert stamp_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_current_high_requires_fresh_approval_instead_of_stale_low_authority(
+    monkeypatch, release_store
+):
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief.update(
+        {
+            "status": "approved",
+            "blast_radius": "low",
+            "authorization_action_type": "local_edit",
+            "authorization_context_version": 1,
+            "policy_entity_id": "default",
+            "authorization_context_digest": _authorization_digest(
+                task_id=task_id,
+                user_id="tenant-a",
+                action_type="local_edit",
+                gate_action="checkpoint_plan_approval",
+                blast_radius="low",
+                policy_id="default",
+            ),
+        }
+    )
+    records[task_id]["snapshot"]["action_type"] = "payment"
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert brief["resolved_dispatched"] is False
+    assert brief["status"] == "approved_requires_fresh_approval"
+
+
+@pytest.mark.asyncio
+async def test_live_policy_custom_low_authorization_is_not_guessed_never(
+    monkeypatch, release_store
+):
+    records, brief_id, task_id = release_store
+    action_type = "tenant_bounded_local_transform"
+    policy_id = "ent_custom_policy"
+    brief = records[brief_id]["snapshot"]
+    brief.update(
+        {
+            "status": "approved",
+            "authorization_action_type": action_type,
+            "authorization_context_version": 1,
+            "blast_radius": "low",
+            "policy_entity_id": policy_id,
+            "authorization_context_digest": _authorization_digest(
+                task_id=task_id,
+                user_id="tenant-a",
+                action_type=action_type,
+                gate_action="checkpoint_plan_approval",
+                blast_radius="low",
+                policy_id=policy_id,
+            ),
+        }
+    )
+    records[task_id]["snapshot"]["action_type"] = action_type
+    original_dispatch = apis.dispatch_task
+    dispatches: list[str] = []
+
+    async def spy_dispatch(entity_id, *args, **kwargs):
+        dispatches.append(entity_id)
+        await original_dispatch(entity_id, *args, **kwargs)
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is True
+    assert dispatches == [task_id]
+    assert brief["resolved_dispatched"] is True
+    assert brief["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_legacy_unknown_classification_requests_fresh_approval_non_destructively(
+    monkeypatch, release_store
+):
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief.update({"status": "approved", "blast_radius": "low"})
+    records[task_id]["snapshot"]["action_type"] = "tenant_bounded_local_transform"
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert brief["resolved_dispatched"] is False
+    assert brief["status"] == "approved_requires_fresh_approval"
+
+
+def test_replacement_checkpoint_uses_current_live_policy(monkeypatch):
+    action_type = "tenant_bounded_local_transform"
+    task = {
+        "title": "Bounded transform",
+        "assigned_to": "cicada",
+        "action_type": action_type,
+        "confidence": 0.99,
+        "user_id": "tenant-a",
+    }
+    policy = ExecutionPolicy(
+        entity_id="ent_current_policy",
+        low_blast_action_types=frozenset({action_type}),
+        high_blast_action_types=frozenset(),
+        loaded=True,
+    )
+    writes: list[dict] = []
+    notifier = _Notifier()
+
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda skill: policy)
+    monkeypatch.setattr(
+        apis,
+        "write_checkpoint_brief",
+        lambda **kwargs: writes.append(kwargs) or "ent_fresh",
+    )
+
+    apis._file_fresh_checkpoint(
+        prior_checkpoint_id="ent_old",
+        task_id="ent_task",
+        task_snapshot=task,
+        notifier=notifier,
+    )
+
+    assert len(writes) == 1
+    assert writes[0]["action_type"] == action_type
+    assert writes[0]["decision"].blast_radius.value == "low"
+    assert writes[0]["decision"].action.value == "checkpoint_plan_approval"
+    assert writes[0]["decision"].policy_id == "ent_current_policy"
+    assert writes[0]["idempotency_context"].startswith("fresh-")
+    assert any("Fresh approval required" in message for message in notifier.sent)
 
 
 @pytest.mark.asyncio

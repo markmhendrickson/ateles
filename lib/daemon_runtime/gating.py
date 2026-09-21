@@ -47,6 +47,8 @@ from __future__ import annotations
 
 import logging
 import os
+import hashlib
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -582,6 +584,8 @@ def write_checkpoint_brief(
     handler: str,
     alternatives: list[str] | None = None,
     user_id: str | None = None,
+    action_type: str | None = None,
+    idempotency_context: str | None = None,
 ) -> str | None:
     """
     Store a blocking checkpoint_brief entity in Neotoma and link it to the task.
@@ -628,6 +632,28 @@ def write_checkpoint_brief(
         # Keep it on the snapshot itself because checkpoint consumers receive
         # snapshots, not the outer entity envelope.
         body["entities"][0]["user_id"] = user_id
+    normalized_action = str(action_type or "").strip().lower()
+    if normalized_action:
+        # Bind the operator's approval to the exact action and policy context
+        # that was presented.  Release validates this snapshot instead of
+        # reclassifying a custom live-policy action through a hard-coded
+        # fallback vocabulary.
+        body["entities"][0].update(
+            {
+                "authorization_context_version": 1,
+                "authorization_action_type": normalized_action,
+                "authorization_context_digest": checkpoint_authorization_digest(
+                    task_entity_id=task_entity_id,
+                    user_id=user_id or "",
+                    action_type=normalized_action,
+                    gate_action=decision.action.value,
+                    blast_radius=decision.blast_radius.value,
+                    policy_id=decision.policy_id,
+                ),
+            }
+        )
+    if idempotency_context:
+        body["idempotency_key"] += f"-{idempotency_context}"
     try:
         resp = httpx.post(
             f"{NEOTOMA_BASE_URL}/store",
@@ -638,7 +664,24 @@ def write_checkpoint_brief(
         resp.raise_for_status()
         data = resp.json()
         ents = data.get("entities") or []
-        return ents[0].get("entity_id") if ents else None
+        entity_id = ents[0].get("entity_id") if ents else None
+        if entity_id and normalized_action:
+            readback = _fetch_entity(entity_id)
+            snapshot = _snapshot_of(readback or {})
+            expected_digest = body["entities"][0]["authorization_context_digest"]
+            if (
+                str(snapshot.get("authorization_context_version")) != "1"
+                or str(snapshot.get("authorization_action_type", "")).strip().lower()
+                != normalized_action
+                or snapshot.get("authorization_context_digest") != expected_digest
+            ):
+                log.warning(
+                    "[gating] checkpoint %s authorization snapshot did not "
+                    "materialize on read-back",
+                    entity_id,
+                )
+                return None
+        return entity_id
     except Exception as exc:  # noqa: BLE001
         log.warning(f"[gating] failed to persist checkpoint_brief: {exc}")
         return None
@@ -660,6 +703,36 @@ def write_checkpoint_brief(
 CHECKPOINT_APPROVED_STATES = frozenset({"approved", "approve", "accepted"})
 CHECKPOINT_REJECTED_STATES = frozenset({"rejected", "reject", "declined", "denied"})
 CHECKPOINT_APPROVED_NO_RELEASE = "approved_no_release"
+CHECKPOINT_REQUIRES_FRESH_APPROVAL = "approved_requires_fresh_approval"
+
+
+def checkpoint_authorization_digest(
+    *,
+    task_entity_id: str,
+    user_id: str,
+    action_type: str,
+    gate_action: str,
+    blast_radius: str,
+    policy_id: str,
+) -> str:
+    """Hash the exact release authority shown to the operator.
+
+    This is an integrity binding, not a credential.  A later task/action or
+    checkpoint-field change cannot inherit the old approval accidentally.
+    """
+    canonical = json.dumps(
+        {
+            "action_type": str(action_type).strip().lower(),
+            "blast_radius": str(blast_radius).strip().lower(),
+            "gate_action": str(gate_action).strip().lower(),
+            "policy_id": str(policy_id).strip(),
+            "task_entity_id": str(task_entity_id).strip(),
+            "user_id": str(user_id).strip(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def _snapshot_of(data: dict) -> dict:
@@ -813,28 +886,26 @@ def stamp_checkpoint_dispatched(checkpoint_entity_id: str, *, handler: str) -> b
         return False
 
 
-def close_checkpoint_without_release(
-    checkpoint_entity_id: str, *, handler: str, reason: str
+def _transition_checkpoint_status(
+    checkpoint_entity_id: str,
+    *,
+    handler: str,
+    reason: str,
+    status: str,
+    idempotency_label: str,
 ) -> bool:
-    """Durably consume an approval that is not authorized to release work.
-
-    The distinct terminal status prevents a later edit to a safety field from
-    reusing the old approval, without falsely stamping the brief as dispatched.
-    Success requires a typed read-back of the exact terminal status.
-    """
+    """Write and read back a terminal/non-releasable checkpoint status."""
     if not NEOTOMA_BEARER_TOKEN:
         log.warning(
-            "[gating] no bearer token — cannot close non-releasable checkpoint"
+            "[gating] no bearer token — cannot transition checkpoint to %s", status
         )
         return False
     body = {
         "entity_id": checkpoint_entity_id,
         "entity_type": "checkpoint_brief",
         "field": "status",
-        "value": CHECKPOINT_APPROVED_NO_RELEASE,
-        "idempotency_key": (
-            f"checkpoint-no-release-{handler}-{checkpoint_entity_id}"
-        ),
+        "value": status,
+        "idempotency_key": f"checkpoint-{idempotency_label}-{handler}-{checkpoint_entity_id}",
     }
     try:
         resp = httpx.post(
@@ -847,8 +918,9 @@ def close_checkpoint_without_release(
         data = _fetch_entity(checkpoint_entity_id)
         if data is None:
             log.warning(
-                "[gating] non-releasable checkpoint %s could not be read back",
+                "[gating] checkpoint %s transition to %s could not be read back",
                 checkpoint_entity_id,
+                status,
             )
             return False
         entity_type = str(
@@ -858,26 +930,55 @@ def close_checkpoint_without_release(
         if (
             entity_type != "checkpoint_" + "brief"
             or str(snapshot.get("status", "")).strip().lower()
-            != CHECKPOINT_APPROVED_NO_RELEASE
+            != status
         ):
             log.warning(
-                "[gating] non-releasable checkpoint %s close did not materialize",
+                "[gating] checkpoint %s transition to %s did not materialize",
                 checkpoint_entity_id,
+                status,
             )
             return False
         log.info(
-            "[gating] checkpoint %s closed without release (%s)",
+            "[gating] checkpoint %s transitioned to %s (%s)",
             checkpoint_entity_id,
+            status,
             reason,
         )
         return True
     except Exception as exc:  # noqa: BLE001
         log.warning(
-            "[gating] failed to close checkpoint %s without release: %s",
+            "[gating] failed to transition checkpoint %s to %s: %s",
             checkpoint_entity_id,
+            status,
             exc,
         )
         return False
+
+
+def close_checkpoint_without_release(
+    checkpoint_entity_id: str, *, handler: str, reason: str
+) -> bool:
+    """Durably consume an approval that is not authorized to release work."""
+    return _transition_checkpoint_status(
+        checkpoint_entity_id,
+        handler=handler,
+        reason=reason,
+        status=CHECKPOINT_APPROVED_NO_RELEASE,
+        idempotency_label="no-release",
+    )
+
+
+def require_fresh_checkpoint_approval(
+    checkpoint_entity_id: str, *, handler: str, reason: str
+) -> bool:
+    """Retire stale authority while preserving the task for a new approval."""
+    return _transition_checkpoint_status(
+        checkpoint_entity_id,
+        handler=handler,
+        reason=reason,
+        status=CHECKPOINT_REQUIRES_FRESH_APPROVAL,
+        idempotency_label="fresh-approval",
+    )
 
 
 def mark_task_declined(task_entity_id: str, *, reason: str, handler: str) -> bool:

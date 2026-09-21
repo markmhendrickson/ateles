@@ -19,6 +19,7 @@ from lib.daemon_runtime.gating import (
     fetch_checkpoint_snapshot,
     fetch_task_snapshot,
     read_checkpoint_resolution,
+    require_fresh_checkpoint_approval,
     stamp_checkpoint_dispatched,
     write_checkpoint_brief,
 )
@@ -790,10 +791,40 @@ def test_non_releasable_checkpoint_close_requires_exact_readback(
             "snapshot": {"status": readback_status},
         },
     )
-
     assert (
         close_checkpoint_without_release(
             "ent_cp", handler="apis", reason="non-releasable test"
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("readback_status", "expected"),
+    [("approved_requires_fresh_approval", True), ("approved", False)],
+)
+def test_fresh_approval_transition_requires_exact_readback(
+    monkeypatch, readback_status, expected
+):
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(gating_module.httpx, "post", lambda *args, **kwargs: _Response())
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": "checkpoint_" + "brief",
+            "snapshot": {"status": readback_status},
+        },
+    )
+
+    assert (
+        require_fresh_checkpoint_approval(
+            "ent_cp", handler="apis", reason="authorization changed"
         )
         is expected
     )
@@ -815,6 +846,14 @@ def test_checkpoint_brief_carries_task_tenant_in_snapshot(monkeypatch):
         return _Response()
 
     monkeypatch.setattr(gating_module.httpx, "post", post)
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": "checkpoint_" + "brief",
+            "snapshot": posted[0]["entities"][0],
+        },
+    )
     decision = evaluate_gate(
         confidence=0.3, action_type="local_edit", policy=_default()
     )
@@ -826,7 +865,58 @@ def test_checkpoint_brief_carries_task_tenant_in_snapshot(monkeypatch):
         plan_summary="Bounded work",
         handler="apis",
         user_id="tenant-a",
+        action_type="local_edit",
     )
 
     assert brief_id == "ent_cp"
-    assert posted[0]["entities"][0]["user_id"] == "tenant-a"
+    snapshot = posted[0]["entities"][0]
+    assert snapshot["user_id"] == "tenant-a"
+    assert snapshot["authorization_context_version"] == 1
+    assert snapshot["authorization_action_type"] == "local_edit"
+    assert snapshot["authorization_context_digest"] == (
+        gating_module.checkpoint_authorization_digest(
+            task_entity_id="ent_task",
+            user_id="tenant-a",
+            action_type="local_edit",
+            gate_action=decision.action.value,
+            blast_radius=decision.blast_radius.value,
+            policy_id=decision.policy_id,
+        )
+    )
+
+
+def test_checkpoint_brief_requires_authorization_snapshot_readback(monkeypatch):
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"entities": [{"entity_id": "ent_cp"}]}
+
+    monkeypatch.setattr(gating_module.httpx, "post", lambda *args, **kwargs: _Response())
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": "checkpoint_" + "brief",
+            "snapshot": {"authorization_action_type": "local_edit"},
+        },
+    )
+    decision = evaluate_gate(
+        confidence=0.3, action_type="local_edit", policy=_default()
+    )
+
+    assert (
+        write_checkpoint_brief(
+            task_entity_id="ent_task",
+            decision=decision,
+            title="Tenant-bound checkpoint",
+            plan_summary="Bounded work",
+            handler="apis",
+            user_id="tenant-a",
+            action_type="local_edit",
+        )
+        is None
+    )
