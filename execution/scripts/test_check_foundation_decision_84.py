@@ -37,8 +37,12 @@ CORPUS["workflows.md"] = (
 )
 
 work_model = CORPUS["work_model.md"]
-batch_start = work_model.index("### How a batch is formed, and what chooses its workflow")
-batch_end = work_model.index("### A batch may hold on a condition discovered mid-flight")
+batch_start = work_model.index(
+    "### How a batch is formed, and what chooses its workflow"
+)
+batch_end = work_model.index(
+    "### A batch may hold on a condition discovered mid-flight"
+)
 batch_section = (
     "### How a batch is formed, and what chooses its workflow\n\n"
     "Every workflow-entering task has an intake batch on creation; an assembly "
@@ -79,7 +83,12 @@ def write_corpus(root: Path) -> None:
     fdir = root / "docs" / "foundation"
     fdir.mkdir(parents=True)
     for name, text in CORPUS.items():
-        if name in {"work_model.md", "workflows.md"}:
+        if name in {
+            "conformance_suite.md",
+            "data_model.md",
+            "work_model.md",
+            "workflows.md",
+        }:
             text = (REPO_ROOT / "docs" / "foundation" / name).read_text(
                 encoding="utf-8"
             )
@@ -93,9 +102,7 @@ def mutate(tmp_path: Path, name: str, old: str, new: str) -> list[str]:
     return decision_84.check(tmp_path)
 
 
-def mutate_real_corpus(
-    tmp_path: Path, name: str, old: str, new: str
-) -> list[str]:
+def mutate_real_corpus(tmp_path: Path, name: str, old: str, new: str) -> list[str]:
     fdir = tmp_path / "docs" / "foundation"
     fdir.mkdir(parents=True)
     for corpus_name in CORPUS:
@@ -141,7 +148,9 @@ def test_complete_carry_passes(tmp_path: Path) -> None:
 
 
 def test_lease_only_mutant_fails(tmp_path: Path) -> None:
-    problems = mutate(tmp_path, "conformance.md", "persistent assembly exclusion", "held lease")
+    problems = mutate(
+        tmp_path, "conformance.md", "persistent assembly exclusion", "held lease"
+    )
     assert any("register" in problem for problem in problems)
 
 
@@ -178,16 +187,25 @@ def test_generic_hold_model_without_assembly_exception_fails(tmp_path: Path) -> 
 
 
 def test_finding_schema_without_persistent_exclusion_fails(tmp_path: Path) -> None:
-    problems = mutate(tmp_path, "data_model.md", "persistent assembly exclusion", "ordinary hold")
+    problems = mutate_real_corpus_normalized(
+        tmp_path,
+        "data_model.md",
+        "whether the creator-time assembly finding is a persistent assembly exclusion",
+        "whether the creator-time assembly finding is an ordinary hold",
+    )
     assert any("finding-schema" in problem for problem in problems)
 
 
 def test_workflow_assembly_mutant_fails(tmp_path: Path) -> None:
-    problems = mutate(tmp_path, "workflows.md", "Decision 84's assembly exception", "every task")
+    problems = mutate(
+        tmp_path, "workflows.md", "Decision 84's assembly exception", "every task"
+    )
     assert any("workflow-exception" in problem for problem in problems)
 
 
-def test_ordinary_task_without_intake_batch_at_creation_mutant_fails(tmp_path: Path) -> None:
+def test_ordinary_task_without_intake_batch_at_creation_mutant_fails(
+    tmp_path: Path,
+) -> None:
     problems = mutate_real_corpus_normalized(
         tmp_path,
         "workflows.md",
@@ -739,11 +757,17 @@ def test_real_missing_intake_end_marker_fails(tmp_path: Path) -> None:
         start = text.index("## intake")
         end = text.index("## feature", start)
         section = text[start:end]
-        old = "| # | Step | Step owner (role) | Required | Parallel / join | Closes on |"
+        old = (
+            "| # | Step | Step owner (role) | Required | Parallel / join | Closes on |"
+        )
         assert section.count(old) == 1
-        return text[:start] + section.replace(
-            old, "| steps table deliberately missing its canonical header |", 1
-        ) + text[end:]
+        return (
+            text[:start]
+            + section.replace(
+                old, "| steps table deliberately missing its canonical header |", 1
+            )
+            + text[end:]
+        )
 
     problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
     assert any("intake-workflow-atomic-entry" in problem for problem in problems)
@@ -756,7 +780,9 @@ def test_real_scenario_corruption_cannot_be_masked_by_later_decoy(
         section_start = text.index(
             "## (f) A parent task with children in independent batches"
         )
-        prose_start = text.index("A parent task is created as the grouping", section_start)
+        prose_start = text.index(
+            "A parent task is created as the grouping", section_start
+        )
         diagram_start = text.index("```mermaid", prose_start)
         corrupted = (
             "An aggregate parent becomes claimable, enters a workflow, and receives "
@@ -787,7 +813,9 @@ def test_real_missing_parent_scenario_end_heading_fails(tmp_path: Path) -> None:
 def test_real_intake_contradiction_after_table_header_fails(tmp_path: Path) -> None:
     def transform(text: str) -> str:
         start = text.index("## intake")
-        marker = "| # | Step | Step owner (role) | Required | Parallel / join | Closes on |"
+        marker = (
+            "| # | Step | Step owner (role) | Required | Parallel / join | Closes on |"
+        )
         position = text.index(marker, start) + len(marker)
         contradiction = (
             "\nDespite the entry rule, a task may be published before its intake "
@@ -885,17 +913,137 @@ def test_real_batch_inserted_peer_heading_cannot_truncate_fingerprint(
 
 
 def test_owning_heading_section_keeps_child_headings_in_its_body() -> None:
-    text = (
-        "## protected\n"
-        "body\n"
-        "### child\n"
-        "child body\n"
-        "## expected end\n"
-        "after\n"
+    text = "## protected\nbody\n### child\nchild body\n## expected end\nafter\n"
+    assert (
+        decision_84._owning_heading_section(text, "protected", "expected end")
+        == "body\n### child\nchild body\n"
     )
-    assert decision_84._owning_heading_section(
-        text, "protected", "expected end"
-    ) == "body\n### child\nchild body\n"
+
+
+def test_real_comment_fence_precedence_cannot_expose_hidden_intake(
+    tmp_path: Path,
+) -> None:
+    def transform(text: str) -> str:
+        position = text.index("## intake")
+        prefix = "```markdown\n<!--\n```\n-->\n```\n"
+        return text[:position] + prefix + text[position:]
+
+    problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "name,marker,label",
+    (
+        ("conformance.md", "| 84 |", "register"),
+        ("conformance_suite.md", "| WM-13 |", "wm-13-atomic-entry"),
+    ),
+)
+def test_real_unclosed_comment_cannot_expose_hidden_table_row(
+    tmp_path: Path, name: str, marker: str, label: str
+) -> None:
+    def transform(text: str) -> str:
+        position = text.index(marker)
+        return text[:position] + "<!--\n" + text[position:]
+
+    problems = mutate_real_corpus_text(tmp_path, name, transform)
+    assert any(label in problem for problem in problems)
+
+
+def test_real_creator_auto_lease_appended_contradiction_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus_normalized(
+        tmp_path,
+        "work_model.md",
+        "The creating principal receives no `classify` lease by being the creator.",
+        "The creating principal receives no `classify` lease by being the creator. "
+        "Despite that sentence, the creator automatically receives the `classify` lease.",
+    )
+    assert any("creator-authority-model" in problem for problem in problems)
+
+
+def test_real_non_pm_claim_appended_contradiction_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus_normalized(
+        tmp_path,
+        "work_model.md",
+        "assembly exclusion exposes its open `classify` step only to a principal that resolves as the declaration's `pm` step owner",
+        "assembly exclusion exposes its open `classify` step only to a principal that "
+        "resolves as the declaration's `pm` step owner; despite that sentence, any "
+        "principal may claim `classify`",
+    )
+    assert any("claim-model" in problem for problem in problems)
+
+
+def test_real_lease_lapse_deletes_exclusion_appended_contradiction_fails(
+    tmp_path: Path,
+) -> None:
+    problems = mutate_real_corpus_normalized(
+        tmp_path,
+        "work_model.md",
+        "the finding and its persistent assembly exclusion survive the lease lapse",
+        "the finding and its persistent assembly exclusion survive the lease lapse; "
+        "despite that sentence, lease lapse deletes the assembly finding and exclusion",
+    )
+    assert any("hold-model" in problem for problem in problems)
+
+
+def test_real_finding_schema_lease_lapse_contradiction_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus_normalized(
+        tmp_path,
+        "data_model.md",
+        "which survives lease lapse and exposes only `classify` to the declaration-resolved `pm` step owner",
+        "which survives lease lapse and exposes only `classify` to the declaration-resolved "
+        "`pm` step owner; despite that sentence, lease lapse deletes the assembly finding",
+    )
+    assert any("finding-schema" in problem for problem in problems)
+
+
+def test_real_wm14a_non_pm_permission_contradiction_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus_normalized(
+        tmp_path,
+        "conformance_suite.md",
+        "only the declaration-resolved `pm` step owner may claim it",
+        "only the declaration-resolved `pm` step owner may claim it; despite that "
+        "sentence, the creator and any non-PM principal may claim it",
+    )
+    assert any("wm-14a" in problem for problem in problems)
+
+
+def test_real_duplicate_scenario_heading_with_closing_hashes_fails(
+    tmp_path: Path,
+) -> None:
+    def transform(text: str) -> str:
+        duplicate = (
+            "\n\n## (f) A parent task with children in independent batches ##\n\n"
+            "The aggregate parent enters intake and receives `ADDRESSED_BY`.\n\n"
+        )
+        return text + duplicate
+
+    problems = mutate_real_corpus_text(tmp_path, "scenarios.md", transform)
+    assert any("aggregate-parent-scenario" in problem for problem in problems)
+
+
+def test_real_batch_fingerprint_preserves_paragraph_boundary(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "work_model.md",
+        "must have matched.\n\n**A successor batch's tasks",
+        "must have matched.\n**A successor batch's tasks",
+    )
+    assert any("batch-opening-model" in problem for problem in problems)
+
+
+def test_real_batch_fingerprint_preserves_identifier_case(tmp_path: Path) -> None:
+    def transform(text: str) -> str:
+        start = text.index("### How a batch is formed, and what chooses its workflow")
+        end = text.index(
+            "### A batch may hold on a condition discovered mid-flight", start
+        )
+        section = text[start:end]
+        assert section.count("`FOLLOWS`") >= 1
+        return text[:start] + section.replace("`FOLLOWS`", "`follows`", 1) + text[end:]
+
+    problems = mutate_real_corpus_text(tmp_path, "work_model.md", transform)
+    assert any("batch-opening-model" in problem for problem in problems)
 
 
 @pytest.mark.parametrize(
@@ -905,9 +1053,7 @@ def test_owning_heading_section_keeps_child_headings_in_its_body() -> None:
         "```markdown\n## intake\n## feature\n```",
     ),
 )
-def test_real_inactive_heading_decoys_are_ignored(
-    tmp_path: Path, decoy: str
-) -> None:
+def test_real_inactive_heading_decoys_are_ignored(tmp_path: Path, decoy: str) -> None:
     def transform(text: str) -> str:
         position = text.index("## intake")
         return text[:position] + decoy + "\n\n" + text[position:]
@@ -988,10 +1134,10 @@ def test_real_valid_fence_info_strings_remain_inert(
 
 
 def test_wm27_closing_verdict_claim_applied_to_intake_fails(tmp_path: Path) -> None:
-    problems = mutate(
+    problems = mutate_real_corpus_normalized(
         tmp_path,
         "conformance_suite.md",
-        "intake batch opens at creation without a predecessor verdict; every successor batch is opened by a closing verdict",
+        "an intake batch opens at workflow-entering task creation without a predecessor verdict; every successor batch is opened only by a closing verdict",
         "every batch is opened only by a closing verdict",
     )
     assert any("wm-27" in problem for problem in problems)
@@ -1008,28 +1154,43 @@ def test_scenario_intake_predecessor_node_must_be_defined(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize(
-    "row, phrase",
-    (
-        ("WM-13", "atomically gets one intake batch and `ADDRESSED_BY` at creation"),
-        ("WM-14", "intake batch on creation"),
-        ("WM-21", "intake batch at creation"),
-        ("WM-32b", "intake batch at creation"),
-        ("WM-35a", "intake batch at creation"),
-        ("WM-39", "intake batch at creation"),
-    ),
+    "row", ("WM-13", "WM-14", "WM-21", "WM-32b", "WM-35a", "WM-39")
 )
 def test_each_creation_row_without_atomic_intake_entry_fails(
-    tmp_path: Path, row: str, phrase: str
+    tmp_path: Path, row: str
 ) -> None:
-    problems = mutate(tmp_path, "conformance_suite.md", phrase, "later intake")
+    def transform(text: str) -> str:
+        match = re.search(rf"^\|\s*{re.escape(row)}\s*\|.*$", text, re.M)
+        assert match
+        original = match.group(0)
+        changed = original
+        for phrase in ("at creation", "on creation", "task creation"):
+            changed = changed.replace(phrase, "later")
+        assert changed != original
+        return text[: match.start()] + changed + text[match.end() :]
+
+    problems = mutate_real_corpus_text(tmp_path, "conformance_suite.md", transform)
     assert any(f"universal-entry-{row.lower()}" in problem for problem in problems)
 
 
 def test_wm14a_without_transfer_fails(tmp_path: Path) -> None:
-    problems = mutate(tmp_path, "conformance_suite.md", "lapse and transfer", "renewal")
+    problems = mutate_real_corpus_normalized(
+        tmp_path,
+        "conformance_suite.md",
+        "the exclusion survives lapse, crash, return, and transfer",
+        "the exclusion survives renewal",
+    )
     assert any("wm-14a" in problem for problem in problems)
 
 
 def test_wm39_without_exception_fails(tmp_path: Path) -> None:
-    problems = mutate(tmp_path, "conformance_suite.md", "assembly exception", "all tasks lack a batch")
+    def transform(text: str) -> str:
+        match = re.search(r"^\|\s*WM-39\s*\|.*$", text, re.M)
+        assert match
+        original = match.group(0)
+        assert "assembly exception" in original
+        changed = original.replace("assembly exception", "all tasks lack a batch", 1)
+        return text[: match.start()] + changed + text[match.end() :]
+
+    problems = mutate_real_corpus_text(tmp_path, "conformance_suite.md", transform)
     assert any("wm-39" in problem for problem in problems)

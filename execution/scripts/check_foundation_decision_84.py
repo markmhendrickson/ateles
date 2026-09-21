@@ -18,10 +18,25 @@ from pathlib import Path
 
 FOUNDATION_DIR = Path("docs/foundation")
 
-INTAKE_SECTION_SHA256 = "855ec3c7297e8a7e15741c46f4b23076d5cc22dd208acfb458393bb37157030a"
-BATCH_FORMATION_SECTION_SHA256 = (
-    "ecb8482a9f0c50abd8f4a623f4c8577fd402d1205dd43567a6dd58711520fd05"
+INTAKE_SECTION_SHA256 = (
+    "d8d8e27147fbef3d4ddaef9451bd96e0c43dc512680b9ccd3f2eb31f342f67d9"
 )
+BATCH_FORMATION_SECTION_SHA256 = (
+    "3c9318488e76d1245b2867e0d868dcff6b558b03c81fa425b1147b71bb8d1b38"
+)
+DIRECT_MODEL_SECTION_SHA256 = (
+    "baf247ddc33f69d6db844ec80805f704b6caf8f2c22b917543d6cf3be0c7f37e"
+)
+CLAIM_MODEL_SECTION_SHA256 = (
+    "3d2ff563b78ecab399c0e58448817807686fa95762f4c5790cd358a2bbc2b59c"
+)
+HOLD_MODEL_SECTION_SHA256 = (
+    "f14d9ba6700ea67fedd13ca47cfd680d9da667f852be0adfc48959b33997c1e7"
+)
+FINDING_SCHEMA_ROW_SHA256 = (
+    "24056643959d3cb6f24b35943bb4caa242cca205e32c210c75181a7fd3831500"
+)
+WM14A_ROW_SHA256 = "1b3c03b571c2a44ccab30b99bb06746774b9eada13f86551d30066878914c76e"
 
 WM13_REQUIREMENT = (
     "`work_model.md#intake-is-every-tasks-first-workflow`: every "
@@ -206,12 +221,13 @@ def _normalize(text: str) -> str:
     return " ".join(text.lower().split())
 
 
+def _fingerprint_normalize(text: str) -> str:
+    stable = text.replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(line.rstrip(" \t") for line in stable.split("\n")).strip("\n")
+
+
 def _blank(text: str) -> str:
     return "".join("\n" if char == "\n" else " " for char in text)
-
-
-def _without_html_comments(text: str) -> str:
-    return re.sub(r"<!--.*?-->", lambda match: _blank(match.group(0)), text, flags=re.S)
 
 
 def _fence_opening(line: str) -> str:
@@ -229,6 +245,63 @@ def _is_fence_closer(line: str, fence_char: str, fence_size: int) -> bool:
     return bool(
         match and match.group(1)[0] == fence_char and len(match.group(1)) >= fence_size
     )
+
+
+def _mask_html_comments(line: str, in_comment: bool) -> tuple[str, bool]:
+    """Blank HTML comments on one line while preserving offsets and newlines."""
+
+    output: list[str] = []
+    cursor = 0
+    while cursor < len(line):
+        if in_comment:
+            stop = line.find("-->", cursor)
+            if stop < 0:
+                output.append(_blank(line[cursor:]))
+                return "".join(output), True
+            stop += len("-->")
+            output.append(_blank(line[cursor:stop]))
+            cursor = stop
+            in_comment = False
+            continue
+        start = line.find("<!--", cursor)
+        if start < 0:
+            output.append(line[cursor:])
+            break
+        output.append(line[cursor:start])
+        stop = line.find("-->", start + len("<!--"))
+        if stop < 0:
+            output.append(_blank(line[start:]))
+            return "".join(output), True
+        stop += len("-->")
+        output.append(_blank(line[start:stop]))
+        cursor = stop
+    return "".join(output), in_comment
+
+
+def _without_html_comments(text: str) -> str:
+    """Blank active HTML comments without treating fenced content as comments."""
+
+    output: list[str] = []
+    in_comment = False
+    fence_char = ""
+    fence_size = 0
+    for line in text.splitlines(keepends=True):
+        if fence_char:
+            output.append(line)
+            if _is_fence_closer(line, fence_char, fence_size):
+                fence_char = ""
+                fence_size = 0
+            continue
+        if not in_comment:
+            marker = _fence_opening(line)
+            if marker:
+                fence_char = marker[0]
+                fence_size = len(marker)
+                output.append(line)
+                continue
+        visible, in_comment = _mask_html_comments(line, in_comment)
+        output.append(visible)
+    return "".join(output)
 
 
 def _active_prose(text: str) -> str:
@@ -256,30 +329,16 @@ def _active_prose(text: str) -> str:
 
 
 def _heading_spans(text: str, heading: str) -> list[tuple[int, int]]:
-    visible = _without_html_comments(text)
-    spans: list[tuple[int, int]] = []
-    fence_char = ""
-    fence_size = 0
-    offset = 0
-    for line in visible.splitlines(keepends=True):
-        if fence_char:
-            if _is_fence_closer(line, fence_char, fence_size):
-                fence_char = ""
-                fence_size = 0
-            offset += len(line)
-            continue
-        marker = _fence_opening(line)
-        if marker:
-            fence_char = marker[0]
-            fence_size = len(marker)
-            offset += len(line)
-            continue
-        if re.fullmatch(
-            rf" {{0,3}}{re.escape(heading)}[ \t]*", line.rstrip("\r\n")
-        ):
-            spans.append((offset, offset + len(line)))
-        offset += len(line)
-    return spans
+    expected = re.fullmatch(r"(#{1,6})[ \t]+(.+)", heading)
+    if not expected:
+        return []
+    level = len(expected.group(1))
+    title = expected.group(2)
+    return [
+        (start, end)
+        for candidate_level, candidate_title, start, end in _active_headings(text)
+        if candidate_level == level and candidate_title == title
+    ]
 
 
 def _active_headings(text: str) -> list[tuple[int, str, int, int]]:
@@ -306,9 +365,7 @@ def _owning_heading_section(text: str, heading: str, end_heading: str) -> str:
 
     headings = _active_headings(text)
     starts = [
-        (index, entry)
-        for index, entry in enumerate(headings)
-        if entry[1] == heading
+        (index, entry) for index, entry in enumerate(headings) if entry[1] == heading
     ]
     ends = [
         (index, entry)
@@ -322,7 +379,9 @@ def _owning_heading_section(text: str, heading: str, end_heading: str) -> str:
     if end_index <= start_index or end[0] != start[0]:
         return ""
     following = [
-        candidate for candidate in headings[start_index + 1 :] if candidate[0] <= start[0]
+        candidate
+        for candidate in headings[start_index + 1 :]
+        if candidate[0] <= start[0]
     ]
     if not following or following[0] != end:
         return ""
@@ -390,7 +449,7 @@ def _require_exact_section_digest(
 ) -> list[str]:
     if not section:
         return [f"decision-84-{label} — owning Markdown section is ambiguous"]
-    actual = hashlib.sha256(_normalize(section).encode()).hexdigest()
+    actual = hashlib.sha256(_fingerprint_normalize(section).encode()).hexdigest()
     if actual == expected_sha256:
         return []
     return [f"decision-84-{label} — canonical owning section changed"]
@@ -434,6 +493,7 @@ def check(root: Path) -> list[str]:
     wm13_requirement = _table_cell(creation_row_map["WM-13"], 1)
     creation_rows = " ".join(creation_row_map.values())
     task_schema = _line(texts["data_model.md"], r"^\|\s*task\s*\|.*$")
+    finding_schema = _line(texts["data_model.md"], r"^\|\s*finding\s*\|.*$")
     intake_model = _heading_section(
         texts["work_model.md"],
         "### Intake is every task's first workflow",
@@ -444,10 +504,15 @@ def check(root: Path) -> list[str]:
         "### What distinguishes a task being assembled from one intake has not reached",
         "### What a claim predicate treats as claimable",
     )
-    claim_model = _heading_section(
+    direct_model_owner = _owning_heading_section(
         texts["work_model.md"],
-        "### What a claim predicate treats as claimable",
-        "### A task is live when some principal could claim it now",
+        "What distinguishes a task being assembled from one intake has not reached",
+        "What a claim predicate treats as claimable",
+    )
+    claim_model_owner = _owning_heading_section(
+        texts["work_model.md"],
+        "What a claim predicate treats as claimable",
+        "A task is live when some principal could claim it now",
     )
     batch_formation = _heading_section(
         texts["work_model.md"],
@@ -459,10 +524,10 @@ def check(root: Path) -> list[str]:
         "### Where tasks come from: every source, indexed",
         "### An intake rule turns a described change in the record into a task, and nothing else",
     )
-    hold_model = _heading_section(
+    hold_model_owner = _owning_heading_section(
         texts["work_model.md"],
-        "### A batch may hold on a condition discovered mid-flight",
-        "### A batch may depend on a task it created",
+        "A batch may hold on a condition discovered mid-flight",
+        "A batch may depend on a task it created",
     )
     parent_model = _heading_section(
         texts["work_model.md"],
@@ -519,22 +584,15 @@ def check(root: Path) -> list[str]:
             ("workflow-entering",),
         ),
     )
-    problems += _require(
+    problems += _require_exact_section_digest(
         "creator-authority-model",
-        direct_model,
-        (
-            ("the creating principal receives no `classify` lease by being the creator",),
-            ("contributors gain no lease or execution privilege",),
-        ),
+        direct_model_owner,
+        DIRECT_MODEL_SECTION_SHA256,
     )
-    problems += _require(
+    problems += _require_exact_section_digest(
         "claim-model",
-        claim_model,
-        (
-            (
-                "assembly exclusion exposes its open `classify` step only to a principal that resolves as the declaration's `pm` step owner",
-            ),
-        ),
+        claim_model_owner,
+        CLAIM_MODEL_SECTION_SHA256,
     )
     universal_surfaces = {
         "intake-model": intake_model,
@@ -627,26 +685,15 @@ def check(root: Path) -> list[str]:
             ("f -.->|follows| i",),
         ),
     )
-    problems += _require(
+    problems += _require_exact_section_digest(
         "hold-model",
-        hold_model,
-        (
-            ("assembly exception",),
-            ("creator-time",),
-            ("before a step owner or held lease exists",),
-            ("persistent assembly exclusion",),
-            ("survive the lease lapse", "survives the lease lapse"),
-        ),
+        hold_model_owner,
+        HOLD_MODEL_SECTION_SHA256,
     )
-    problems += _require(
+    problems += _require_exact_section_digest(
         "finding-schema",
-        texts["data_model.md"],
-        (
-            ("creator-time assembly finding",),
-            ("persistent assembly exclusion",),
-            ("survives lease lapse",),
-            ("declaration-resolved `pm`",),
-        ),
+        finding_schema,
+        FINDING_SCHEMA_ROW_SHA256,
     )
     problems += _require(
         "workflow-exception",
@@ -663,17 +710,10 @@ def check(root: Path) -> list[str]:
         wm13_requirement,
         WM13_REQUIREMENT,
     )
-    problems += _require(
+    problems += _require_exact_section_digest(
         "wm-14a",
         wm14a,
-        (
-            ("persistent",),
-            ("lapse",),
-            ("transfer",),
-            ("creator",),
-            ("resolved `pm` step owner", "declaration-resolved `pm`"),
-            ("mutant",),
-        ),
+        WM14A_ROW_SHA256,
     )
     problems += _require(
         "wm-31",
@@ -695,7 +735,9 @@ def check(root: Path) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument(
+        "--root", type=Path, default=Path(__file__).resolve().parents[2]
+    )
     args = parser.parse_args(argv)
     try:
         problems = check(args.root)
