@@ -197,16 +197,16 @@ def touches_product_code(changed_files: list[str]) -> bool:
             return True
     return False
 
-# Operator command that clears (waives) all unsigned pre-impl gates on a PR's
-# parent issue so the PR pipeline can proceed.  Only the operator login may
-# issue this command (ateles#112 guardrail).
+# Mechanics command that clears (waives) all unsigned pre-impl gates on a PR's
+# parent issue so the PR pipeline can proceed.  Admitted by _COMMAND_LOGINS
+# (ateles#112 guardrail, widened for mechanics only by ateles#1132).
 _CONFIRM_GATES_CLEAR_CMD = "/confirm-gates-clear"
 
-# Operator command that re-runs the issue pipeline (Lanius triage + expectation
+# Mechanics command that re-runs the issue pipeline (Lanius triage + expectation
 # pre-registration + Pavo scoping) on an EXISTING issue.  Useful for the
 # operator's iteration-test rhythm: after each design increment, comment
 # /swarm-run on the issue to re-drive the pipeline without having to close and
-# re-open the issue.  Only _OPERATOR_LOGIN may invoke this command.
+# re-open the issue.  Admitted by _COMMAND_LOGINS, not by _OPERATOR_LOGIN alone.
 #
 # Re-runs rely on Lanius's idempotent triage and Pavo's idempotent scoping:
 # they edit-not-duplicate their own comments and correct-not-recreate the
@@ -281,43 +281,47 @@ PRE_IMPL_GATES = ("pm", "ux", "arch")
 # approving a merge is the human act the gate exists to require.
 _OPERATOR_LOGIN = os.environ.get("APIS_OPERATOR_LOGIN", "markmhendrickson")
 
-# Logins permitted to invoke a comment COMMAND (`/swarm-run`,
-# `/confirm-gates-clear`, `/approve`, `/reject`, `/hold`).  Distinct from
-# _OPERATOR_LOGIN on purpose, and the distinction is the point:
+# Logins permitted to invoke MECHANICS commands only (`/confirm-gates-clear`,
+# `/swarm-run`).  Distinct from _OPERATOR_LOGIN on purpose:
 #
-#   * APPROVAL is a human act.  It stays on _OPERATOR_LOGIN alone (the
-#     `pr_review` path), and nothing here widens it.
-#   * A COMMAND re-drives or unblocks the pipeline.  `CLAUDE.md` grants a
-#     session standing authorization (2026-09-11) to comment
-#     `/confirm-gates-clear` where a PR is blocked only by swarm MECHANICS,
-#     and to re-request review where monitoring shows it warranted.  That
-#     authorization was never exercisable: a session runs as its agent
-#     identity and this guard accepted only the operator's, so every such
-#     comment was declined — silently, before ateles#743 landed.
+#   * APPROVAL (`pr_review` "approved" → merge) stays on _OPERATOR_LOGIN alone.
+#   * H1 / merge-control comments (`/approve`, `/reject`, `/hold`) stay on
+#     _OPERATOR_LOGIN alone.  They are not members of this widenable set.
+#   * MECHANICS commands re-drive or unblock the pipeline.  `CLAUDE.md` grants
+#     a session standing authorization (2026-09-11) to comment
+#     `/confirm-gates-clear` where a PR is blocked only by swarm MECHANICS.
 #
-# Widening the command guard makes a granted authorization work; widening the
-# approval guard would let an agent approve its own merge.  They are separate
-# variables so that cannot happen by accident.
+# Comma-separated via APIS_COMMAND_LOGINS.  The operator login is always
+# included.  Empty or unset leaves mechanics behaviour exactly as before
+# (operator only).  Tokens containing `*` or `?` are dropped — exact
+# case-folded equality only, never a glob.
 #
-# Comma-separated; the operator login is always included.  Empty or unset
-# leaves behaviour exactly as before (operator only).
-#
-# NOTE the principal this can usefully name.  Guard 0 (`_is_bot_author`)
-# short-circuits BEFORE this guard, and `_BOT_EXACT_LOGINS` contains
-# `ateles-agent` and `neotoma-agent`, so naming either here has NO effect --
-# the comment is dropped as a self-trigger before the command guard is
-# reached.  That ordering is deliberate (neotoma#1686) and is not weakened
-# here: a bot carve-out for commands would reopen the self-trigger loop the
-# guard exists to close.  A command principal must therefore be a non-bot
-# login with repo access.
-_COMMAND_LOGINS: frozenset[str] = frozenset(
-    {_OPERATOR_LOGIN.lower()}
-    | {
-        login.strip().lower()
-        for login in os.environ.get("APIS_COMMAND_LOGINS", "").split(",")
-        if login.strip()
-    }
+# Guard 0 (`_is_bot_author`) still drops bot/machine authors, with one
+# mechanics-only carve-out: an exact member of this set may fall through for
+# `/confirm-gates-clear` and `/swarm-run`.  That does not remove names from
+# `_BOT_EXACT_LOGINS` and does not weaken `_is_bot_author` on `pr_review`.
+# H1 comments and ordinary bot comments (no command token) stay refused.
+# A body carrying `<!-- swarm-run-confirmation -->` does not get the carve-out
+# (neotoma#1686).
+def _parse_command_logins(raw: str, operator_login: str) -> frozenset[str]:
+    """Exact-login allowlist for mechanics commands. Operator is always in."""
+    admitted = {operator_login.lower()}
+    for login in raw.split(","):
+        token = login.strip().lower()
+        if not token or "*" in token or "?" in token:
+            continue
+        admitted.add(token)
+    return frozenset(admitted)
+
+
+_COMMAND_LOGINS: frozenset[str] = _parse_command_logins(
+    os.environ.get("APIS_COMMAND_LOGINS", ""),
+    _OPERATOR_LOGIN,
 )
+
+# Stable marker on the swarm-run confirmation comment. Must not contain a
+# command token. Guard 0's mechanics carve-out refuses a body that includes it.
+_SWARM_RUN_CONFIRMATION_MARKER = "<!-- swarm-run-confirmation -->"
 
 # Bot/machine-account identities whose comments must NEVER trigger swarm
 # commands, regardless of comment content.  This is the structural guard
@@ -5371,115 +5375,113 @@ class SwarmDispatcher:
     async def _handle_issue_comment(self, trigger: SwarmTrigger) -> None:
         """Handle an issue_comment webhook event.
 
-        Reacts to comment commands (logins in ``_COMMAND_LOGINS`` may invoke
-        them; the operator is always a member). Guard 0 still drops bot/
-        machine identities before this allowlist is consulted, so a usable
-        command principal must be a non-bot login (see ``_COMMAND_LOGINS``
-        note). Approval via ``pr_review`` stays on ``_OPERATOR_LOGIN`` alone.
-          /confirm-gates-clear  — waive unsigned pre-impl gates + re-trigger PR pipeline.
-          /swarm-run            — re-run the full issue pipeline (Lanius triage +
-                                  expectation pre-registration + Pavo scoping) on the
-                                  existing issue.  Useful for iteration testing after a
-                                  design increment without closing/re-opening the issue.
-          /approve              — (Phase H1) approve the pending pre-merge checkpoint:
-                                  resolve the checkpoint_brief, post a confirmation,
-                                  remove the operator from PR reviewers, hand back to
-                                  Vanellus.  Does NOT auto-merge (conservative; operator
-                                  may then merge directly on GitHub).
-          /reject <reason>      — (Phase H1) reject the pending checkpoint; record the
-                                  reason (text after "/reject "); resolve as rejected;
-                                  remove operator from reviewers.  Does NOT proceed.
-          /hold                 — (Phase H1) park: ack only, leave checkpoint blocking
-                                  and operator still requested as reviewer.
+        Three authorization layers, checked in order:
 
-        Priority: /confirm-gates-clear wins if present alongside any other command
-        (gate clearance is the most time-sensitive action).  Among H1 commands:
-        /approve > /reject > /hold (first match dispatched).
+          * Guard 0 (``bot_self_trigger``) — bot/machine authors are ignored,
+            except an exact ``_COMMAND_LOGINS`` member posting a mechanics
+            command whose body does not carry the swarm-run confirmation
+            marker.  That carve-out does not admit H1 and does not apply to
+            ``pr_review``.
+          * H1 / merge-control (``h1_operator_only``) — ``/approve``,
+            ``/reject``, ``/hold`` require ``_OPERATOR_LOGIN``.  Membership in
+            ``APIS_COMMAND_LOGINS`` does not grant them.
+          * Mechanics (``command_allowlist``) — ``/confirm-gates-clear`` and
+            ``/swarm-run`` require ``_COMMAND_LOGINS``.  The operator is always
+            a member; unset or empty ``APIS_COMMAND_LOGINS`` is operator-only.
+
+        Approval via ``pr_review`` is a fourth, separate compare against
+        ``_OPERATOR_LOGIN`` alone (``approval_operator_only``).
+
+        Priority when several tokens are present: /confirm-gates-clear, then
+        /swarm-run, then /approve, then /reject, then /hold.  The winning
+        token selects the layer.  A body with both a mechanics token and an
+        H1 token is mechanics.
 
         All other comments are silently ignored — this is the best-effort,
         never-crash path.
-
-        Security guardrail: only ``_COMMAND_LOGINS`` may invoke any command.
-        Bot identities are dropped by Guard 0 first (neotoma#1686). The
-        ``pr_review`` approval path stays on ``_OPERATOR_LOGIN`` alone.
         """
-        comment_author = trigger.comment_author
+        comment_author = trigger.comment_author or ""
         comment_body = (trigger.comment_body or "").strip()
         ref = f"{trigger.repository}#{trigger.number}"
-
-        # Guard 0: bot/machine-account self-trigger prevention (neotoma#1686).
-        # A swarm confirmation comment containing the command token would re-fire
-        # the handler via its own issue_comment webhook.  Return immediately for
-        # ANY known bot identity — before even checking for command tokens — so
-        # no swarm-authored comment can ever reach the dispatch path.  This is
-        # stronger than the operator-login positive check (Guard 2) and must
-        # come first so it cannot be bypassed by a comment_author that happens to
-        # match the operator login (defence-in-depth).
-        if _is_bot_author(comment_author):
-            log.debug(
-                f"[{DAEMON_NAME}] issue_comment on {ref} from bot/machine "
-                f"account {comment_author!r} — ignored (self-trigger prevention)"
-            )
-            return
+        author_key = comment_author.lower()
 
         has_gates_clear = _CONFIRM_GATES_CLEAR_CMD in comment_body
         has_swarm_run = _SWARM_RUN_CMD in comment_body
-        # Phase H1 commands — check with word-boundary awareness: "/approve" must
-        # not match "/approve-something-else".  Simple startswith/split check:
-        # a command is present when the token appears as a standalone word (i.e.
-        # followed by whitespace, end-of-string, or a space-delimited argument).
-        has_approve = bool(
-            re.search(r"(?:^|\s)/approve(?:\s|$)", comment_body)
-        )
-        has_reject = bool(
-            re.search(r"(?:^|\s)/reject(?:\s|$)", comment_body)
-        )
-        has_hold = bool(
-            re.search(r"(?:^|\s)/hold(?:\s|$)", comment_body)
-        )
+        # Word-boundary: "/approve" must not match "/approve-something-else".
+        has_approve = bool(re.search(r"(?:^|\s)/approve(?:\s|$)", comment_body))
+        has_reject = bool(re.search(r"(?:^|\s)/reject(?:\s|$)", comment_body))
+        has_hold = bool(re.search(r"(?:^|\s)/hold(?:\s|$)", comment_body))
+
+        if has_gates_clear:
+            kind, cmd = "mechanics", _CONFIRM_GATES_CLEAR_CMD
+        elif has_swarm_run:
+            kind, cmd = "mechanics", _SWARM_RUN_CMD
+        elif has_approve:
+            kind, cmd = "h1", _APPROVE_CMD
+        elif has_reject:
+            kind, cmd = "h1", _REJECT_CMD
+        elif has_hold:
+            kind, cmd = "h1", _HOLD_CMD
+        else:
+            kind, cmd = None, None
+
+        # Guard 0: bot/machine self-trigger prevention (neotoma#1686).
+        # Ordinary bot comments (no command token) stay inert.  H1 never
+        # carves out.  Mechanics carve out only for an exact allowlist member
+        # whose body does not embed the confirmation marker.
+        if _is_bot_author(comment_author):
+            allowlisted = author_key in _COMMAND_LOGINS
+            confirmation = _SWARM_RUN_CONFIRMATION_MARKER in comment_body
+            carve_out = (
+                kind == "mechanics" and allowlisted and not confirmation
+            )
+            if not carve_out:
+                if kind is None:
+                    log.debug(
+                        f"[{DAEMON_NAME}] issue_comment on {ref} from bot/machine "
+                        f"account {comment_author!r} — ignored (bot_self_trigger)"
+                    )
+                else:
+                    bypass = (
+                        " Allowlist membership did not bypass Guard 0."
+                        if allowlisted
+                        else ""
+                    )
+                    log.warning(
+                        f"[{DAEMON_NAME}] {cmd} from {comment_author!r} on {ref} "
+                        f"refused by bot_self_trigger.{bypass}"
+                    )
+                return
 
         # Guard 1: only react when a known command is present.
-        if not any([has_gates_clear, has_swarm_run, has_approve, has_reject, has_hold]):
+        if kind is None:
             log.debug(
                 f"[{DAEMON_NAME}] issue_comment on {ref} has no recognised "
                 f"command — ignored"
             )
             return
 
-        # Guard 2: operator-only guardrail (applies to all commands).
-        # Two classes of comment command, two guards.
-        #
-        # MECHANICS commands (`/swarm-run`, `/confirm-gates-clear`) re-drive or
-        # unblock the pipeline and are what CLAUDE.md's 2026-09-11 standing
-        # authorization covers.  They consult `_COMMAND_LOGINS`.
-        #
-        # VERDICT commands (`/approve`, `/reject`, `/hold`) resolve a blocking
-        # checkpoint, and `/approve` reaches `_approve_and_maybe_merge` — a real
-        # merge — with no operator check of its own.  They stay on
-        # `_OPERATOR_LOGIN` alone.  Widening the `pr_review` path would have been
-        # the obvious hole; routing `/approve` through a widened COMMAND guard is
-        # the same hole by a different door, and is the one qa caught on #1131.
-        _is_verdict_cmd = has_approve or has_reject or has_hold
-        _permitted = (
-            {_OPERATOR_LOGIN.lower()} if _is_verdict_cmd else _COMMAND_LOGINS
-        )
-        if comment_author.lower() not in _permitted:
-            # Pick whichever command was detected for the log message.
-            cmd = (
-                _CONFIRM_GATES_CLEAR_CMD if has_gates_clear
-                else _SWARM_RUN_CMD if has_swarm_run
-                else _APPROVE_CMD if has_approve
-                else _REJECT_CMD if has_reject
-                else _HOLD_CMD
-            )
+        # H1 stays on the operator login.  Checked before dispatch so
+        # _handle_approve / _handle_reject / _handle_hold are never entered
+        # for anyone else, including an allowlisted agent.
+        if kind == "h1" and author_key != _OPERATOR_LOGIN.lower():
             log.warning(
-                f"[{DAEMON_NAME}] {cmd} from non-operator {comment_author!r} "
-                f"on {ref} — ignored (operator login: {_OPERATOR_LOGIN!r})"
+                f"[{DAEMON_NAME}] {cmd} from {comment_author!r} on {ref} "
+                f"refused by h1_operator_only; membership in APIS_COMMAND_LOGINS "
+                f"does not grant H1; only {_OPERATOR_LOGIN!r} may"
             )
             return
 
-        # Dispatch: /confirm-gates-clear wins over everything when present.
-        # Among H1 commands: /approve > /reject > /hold.
+        # Mechanics consult the widenable allowlist, not the H1 compare.
+        if kind == "mechanics" and author_key not in _COMMAND_LOGINS:
+            log.warning(
+                f"[{DAEMON_NAME}] {cmd} from {comment_author!r} on {ref} "
+                f"refused by command_allowlist; add the login to "
+                f"APIS_COMMAND_LOGINS (comma-separated). The operator is always "
+                f"included; unset or empty APIS_COMMAND_LOGINS is operator-only"
+            )
+            return
+
         if has_gates_clear:
             await self._handle_confirm_gates_clear(trigger)
         elif has_swarm_run:
@@ -5492,7 +5494,7 @@ class SwarmDispatcher:
             await self._handle_hold(trigger)
 
     async def _handle_confirm_gates_clear(self, trigger: SwarmTrigger) -> None:
-        """Execute the /confirm-gates-clear operator command.
+        """Execute /confirm-gates-clear after the comment guards have admitted it.
 
         Waives all unsigned pre-impl gates on the issue and re-triggers the PR
         pipeline if the comment is on a PR.  Internal helper called from
@@ -5643,8 +5645,9 @@ class SwarmDispatcher:
 
           - Bot/machine reviewers are ignored (defence-in-depth; a swarm agent
             review must never drive a merge).
-          - Only the operator login may approve-to-merge (same guard as the
-            comment commands).
+          - Only the operator login may approve-to-merge
+            (``approval_operator_only``).  ``APIS_COMMAND_LOGINS`` is not read
+            here and is not a remedy.
           - Only state == "approved" acts. "changes_requested" / "commented" /
             "dismissed" are acknowledged in the log and ignored — they are not
             an approval.
@@ -5665,8 +5668,9 @@ class SwarmDispatcher:
             return
         if reviewer.lower() != _OPERATOR_LOGIN.lower():
             log.debug(
-                f"[{DAEMON_NAME}] pr_review on {ref} from non-operator "
-                f"{reviewer!r} — ignored (operator login: {_OPERATOR_LOGIN!r})"
+                f"[{DAEMON_NAME}] pr_review on {ref} from {reviewer!r} "
+                f"refused by approval_operator_only "
+                f"(only {_OPERATOR_LOGIN!r} may approve a merge)"
             )
             return
         if state != "approved":
@@ -6944,7 +6948,7 @@ class SwarmDispatcher:
         """
         # Stable marker that identifies THIS dispatcher's confirmation comment.
         # Must NOT contain a command token (that would re-trigger the handler).
-        _CONFIRMATION_MARKER = "<!-- swarm-run-confirmation -->"
+        _CONFIRMATION_MARKER = _SWARM_RUN_CONFIRMATION_MARKER
 
         repo_token = _token_for_repo(trigger.repository)
         if not repo_token:

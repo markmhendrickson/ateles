@@ -57,6 +57,19 @@
         <string>claude,codex,cursor</string>
         <key>APIS_ALLOW_METERED_HARNESS</key>
         <string>0</string>
+        <!-- Mechanics-command allowlist (ateles#1132). Comma-separated GitHub
+             logins. The operator is always included. Unset or empty preserves
+             prior operator-only mechanics behaviour — that empty state is
+             intentional, not a misconfiguration. Example, after this checkout
+             is what the daemon runs:
+               APIS_COMMAND_LOGINS=ateles-agent
+             Guard 0 still classifies ateles-agent as a bot; the mechanics
+             carve-out admits that login for /confirm-gates-clear and
+             /swarm-run only. Does NOT grant H1 comments (/approve, /reject,
+             /hold) or pr_review approval / merge. Verify from the running
+             process, not this file:
+               ps eww $(pgrep -f apis/apis.py | head -1) | tr ' ' '\n' | grep APIS_
+             [COPY: short refuse reason for future GitHub decline comment — out of scope #743] -->
     </dict>
 </dict>
 </plist>
