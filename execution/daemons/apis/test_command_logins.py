@@ -57,18 +57,73 @@ def test_whitespace_and_case_are_normalised(monkeypatch):
     assert "" not in sd._COMMAND_LOGINS
 
 
-def test_approval_guard_is_not_widened(monkeypatch):
-    """APPROVAL stays the human act. This is the test that must never be
-    'fixed' by widening it: a pr_review approved event is honoured only from
-    _OPERATOR_LOGIN, so an agent cannot approve its own merge."""
+@pytest.mark.asyncio
+async def test_agent_in_command_logins_still_cannot_approve_a_merge(monkeypatch):
+    """APPROVAL stays the human act.
+
+    This is the test that must never be "fixed" by widening the approval
+    guard. An agent named in APIS_COMMAND_LOGINS may drive commands; it may
+    NOT have its `pr_review` approved event honoured, because approving a
+    merge is the human act the gate exists to require.
+
+    Exercised behaviourally through `_handle_pr_review` rather than by
+    matching source text: a substring assertion over an untouched region goes
+    red on an innocent reformat and green on a real regression that happens to
+    keep the same characters.
+    """
+    # A NON-bot login, deliberately: `ateles-agent` is already caught by
+    # `_is_bot_author` and returns before the approval guard is reached, so a
+    # test using it can never exercise the guard. (That double block is real
+    # defence-in-depth, and is asserted separately below.)
+    sd = _reload(monkeypatch, APIS_COMMAND_LOGINS="castor-agent")
+    assert "castor-agent" in sd._COMMAND_LOGINS  # admitted for COMMANDS
+    assert not sd._is_bot_author("castor-agent")  # so the guard IS reached
+
+    dispatcher = sd.SwarmDispatcher.__new__(sd.SwarmDispatcher)
+
+    reached: list[str] = []
+
+    async def _spy(*a, **k):
+        reached.append("_approve_and_maybe_merge")
+
+    # The single call the approval path makes once its guard admits the
+    # reviewer. Stubbing the WRONG name is how this test silently became
+    # decoration on a first pass: it passed even with the approval guard
+    # widened, because nothing it watched was ever reached.
+    assert hasattr(sd.SwarmDispatcher, "_approve_and_maybe_merge")
+    monkeypatch.setattr(
+        sd.SwarmDispatcher, "_approve_and_maybe_merge", _spy, raising=True
+    )
+
+    trigger = sd.SwarmTrigger(
+        kind="pr_review",
+        repository="markmhendrickson/ateles",
+        number=1,
+        title="t",
+        body="",
+        author="castor-agent",
+        html_url="https://github.com/markmhendrickson/ateles/pull/1",
+        delivery_id="test-delivery",
+        action="submitted",
+        review_author="castor-agent",
+        review_state="approved",
+    )
+
+    await dispatcher._handle_pr_review(trigger)
+
+    assert reached == [], (
+        "an agent login admitted for COMMANDS must not have its pr_review "
+        f"approval honoured; reached {reached}"
+    )
+
+
+def test_the_agent_identity_is_also_caught_as_a_bot(monkeypatch):
+    """Defence in depth, asserted so it is not removed by accident.
+
+    `ateles-agent` is blocked from the approval path TWICE: once by
+    `_is_bot_author` (self-trigger prevention) and once by the approval guard.
+    Naming it in APIS_COMMAND_LOGINS changes neither.
+    """
     sd = _reload(monkeypatch, APIS_COMMAND_LOGINS="ateles-agent")
-    src = (
-        __import__("pathlib")
-        .Path(sd.__file__)
-        .read_text()
-    )
-    assert "reviewer.lower() != _OPERATOR_LOGIN.lower()" in src, (
-        "the pr_review approval guard must compare against _OPERATOR_LOGIN "
-        "alone; widening it would let an agent approve its own merge"
-    )
-    assert "reviewer.lower() not in _COMMAND_LOGINS" not in src
+    assert sd._is_bot_author("ateles-agent")
+    assert "ateles-agent" in sd._COMMAND_LOGINS
