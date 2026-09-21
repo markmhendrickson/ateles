@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
@@ -400,7 +401,7 @@ class RuleInventoryRulingsTest(unittest.TestCase):
             first = base / "repo-one"
             second = base / "repo-two"
             for root in (first, second):
-                (root / ".git").mkdir(parents=True)
+                subprocess.run(["git", "init", "--quiet", str(root)], check=True)
             (first / "CLAUDE.md").write_text(
                 "- **Never `git stash`.** Keep durable work visible.\n"
             )
@@ -440,7 +441,7 @@ class RuleInventoryRulingsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             good = base / "repo-good"
-            good.joinpath(".git").mkdir(parents=True)
+            subprocess.run(["git", "init", "--quiet", str(good)], check=True)
             good.joinpath("CLAUDE.md").write_text(
                 "Never expose ClientCodename value ent_private_123.\n"
             )
@@ -465,6 +466,117 @@ class RuleInventoryRulingsTest(unittest.TestCase):
             with self.subTest(secret=secret):
                 self.assertNotIn(secret, public)
         self.assertIn("Canonical repository instruction roots", public)
+
+    def test_external_symlinked_git_directory_is_not_a_primary_clone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            metadata_owner = base / "metadata-owner"
+            subprocess.run(
+                ["git", "init", "--quiet", str(metadata_owner)], check=True
+            )
+            configured = base / "configured-root"
+            configured.mkdir()
+            configured.joinpath(".git").symlink_to(
+                metadata_owner / ".git", target_is_directory=True
+            )
+            configured.joinpath("AGENTS.md").write_text(
+                "Never bypass verification for ClientCodename.\n"
+            )
+
+            statements, store = inventory.read_canonical_repository_instruction_roots(
+                str(configured)
+            )
+
+        self.assertEqual(statements, [])
+        self.assertFalse(store.read_ok)
+        self.assertIn("not a primary clone", store.read_error)
+
+    def test_fabricated_git_directory_is_not_a_primary_clone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            configured = Path(tmpdir) / "configured-root"
+            configured.joinpath(".git").mkdir(parents=True)
+            configured.joinpath("CLAUDE.md").write_text(
+                "Never bypass verification.\n"
+            )
+
+            statements, store = inventory.read_canonical_repository_instruction_roots(
+                str(configured)
+            )
+
+        self.assertEqual(statements, [])
+        self.assertFalse(store.read_ok)
+        self.assertIn("not a primary clone", store.read_error)
+
+    def test_external_common_git_directory_is_not_a_primary_clone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            configured = base / "configured-root"
+            metadata_owner = base / "metadata-owner"
+            subprocess.run(["git", "init", "--quiet", str(configured)], check=True)
+            subprocess.run(
+                ["git", "init", "--quiet", str(metadata_owner)], check=True
+            )
+            configured.joinpath(".git", "commondir").write_text(
+                str(metadata_owner / ".git") + "\n"
+            )
+            configured.joinpath("AGENTS.md").write_text(
+                "Never bypass verification.\n"
+            )
+
+            statements, store = inventory.read_canonical_repository_instruction_roots(
+                str(configured)
+            )
+
+        self.assertEqual(statements, [])
+        self.assertFalse(store.read_ok)
+        self.assertIn("not a primary clone", store.read_error)
+
+    def test_git_worktree_is_not_a_primary_clone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            primary = base / "primary"
+            subprocess.run(["git", "init", "--quiet", str(primary)], check=True)
+            primary.joinpath("tracked.txt").write_text("fixture\n")
+            subprocess.run(["git", "-C", str(primary), "add", "tracked.txt"], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(primary),
+                    "-c",
+                    "user.name=Rule Inventory Test",
+                    "-c",
+                    "user.email=rule-inventory@example.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "fixture",
+                ],
+                check=True,
+            )
+            configured = base / "worktree"
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(primary),
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "--detach",
+                    str(configured),
+                ],
+                check=True,
+            )
+            configured.joinpath("AGENTS.md").write_text("Never bypass verification.\n")
+
+            statements, store = inventory.read_canonical_repository_instruction_roots(
+                str(configured)
+            )
+
+        self.assertEqual(statements, [])
+        self.assertFalse(store.read_ok)
+        self.assertIn("not a primary clone", store.read_error)
 
     def test_unconfigured_canonical_repository_roots_are_unread_not_empty(self) -> None:
         statements, store = inventory.read_canonical_repository_instruction_roots("")

@@ -1521,7 +1521,42 @@ def read_canonical_repository_instruction_roots(
                 raise FileNotFoundError(
                     f"canonical repository root is unavailable: {root}"
                 )
-            if not (root / ".git").is_dir():
+            git_dir = root / ".git"
+            if git_dir.is_symlink() or not git_dir.is_dir():
+                raise ValueError(
+                    f"canonical repository root is not a primary clone: {root}"
+                )
+            git_env = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("GIT_")
+            }
+            verified = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--show-toplevel",
+                    "--absolute-git-dir",
+                    "--git-common-dir",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=git_env,
+            )
+            resolved_root = root.resolve(strict=True)
+            resolved_git_dir = git_dir.resolve(strict=True)
+            identity = [line.strip() for line in verified.stdout.splitlines()]
+            if (
+                verified.returncode != 0
+                or len(identity) != 3
+                or Path(identity[0]).resolve(strict=True) != resolved_root
+                or Path(identity[1]).resolve(strict=True) != resolved_git_dir
+                or Path(identity[2]).resolve(strict=True) != resolved_git_dir
+            ):
                 raise ValueError(
                     f"canonical repository root is not a primary clone: {root}"
                 )
@@ -1545,7 +1580,7 @@ def read_canonical_repository_instruction_roots(
                     resolved.read_bytes()
                     seen_instruction_files.add(resolved_key)
                     instruction_files.append(resolved)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         store.read_ok = False
         store.read_error = f"{type(exc).__name__}: {exc}"
         return [], store
