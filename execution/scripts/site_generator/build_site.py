@@ -261,7 +261,9 @@ def _attach_concept_film(data: dict) -> str | None:
     brief_rel = data.get("concept_film_brief")
     if not brief_rel:
         return None
-    path = GEN_DIR / brief_rel
+    path = (GEN_DIR / brief_rel).resolve()
+    if not path.is_relative_to(GEN_DIR.resolve()):
+        return f"concept film brief escapes the generator directory: {brief_rel}"
     if not path.exists():
         return f"concept film brief missing: {brief_rel}"
     brief = json.loads(path.read_text())
@@ -279,11 +281,19 @@ def _attach_concept_film(data: dict) -> str | None:
     if not isinstance(max_bytes, int) or max_bytes > 1_800_000:
         return f"concept film brief {brief_rel} exceeds the 1.8 MB media budget"
     asset = brief.get("asset") or {}
-    for field in ("video_src", "poster_src"):
+    for field in ("video_src", "fallback_src", "poster_src"):
         value = asset.get(field) or ""
-        if value.startswith(("http://", "https://")):
-            return f"concept film brief {brief_rel} uses an external {field}"
+        if value:
+            source_path = PurePosixPath(value)
+            if (
+                not value.startswith("/assets/")
+                or ".." in source_path.parts
+                or source_path.name == ""
+            ):
+                return f"concept film brief {brief_rel} has invalid {field}"
     if asset.get("enabled_in_hero") is False:
+        for field in ("video_src", "fallback_src", "poster_src"):
+            asset[field] = ""
         data["concept_film"] = brief
         return None
     asset_bindings = (
@@ -366,7 +376,12 @@ def _collect_concept_assets(inventory: dict) -> tuple[dict[Path, bytes], list[st
         if section_data.get("concept_film_brief")
     }
     for brief_rel in sorted(brief_paths):
-        brief_path = GEN_DIR / brief_rel
+        brief_path = (GEN_DIR / brief_rel).resolve()
+        if not brief_path.is_relative_to(GEN_DIR.resolve()):
+            blockers.append(
+                f"concept film brief escapes the generator directory: {brief_rel}"
+            )
+            continue
         if not brief_path.exists():
             continue
         brief = json.loads(brief_path.read_text())
@@ -384,6 +399,11 @@ def _collect_concept_assets(inventory: dict) -> tuple[dict[Path, bytes], list[st
             if not repository_value:
                 continue
             repository_path = (REPO_ROOT / repository_value).resolve()
+            if not repository_path.is_relative_to(REPO_ROOT.resolve()):
+                blockers.append(
+                    f"concept film brief {brief_rel} escapes the repository"
+                )
+                continue
             if not repository_path.exists():
                 continue
             if not public_value.startswith("/assets/"):

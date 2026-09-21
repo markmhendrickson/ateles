@@ -405,9 +405,10 @@ def _concept_film(poster: str, data: dict, label: str, overlay: str = "") -> str
     """Wrap a load-bearing code-native poster in an optional local film slot."""
     brief = data.get("concept_film") or {}
     asset = brief.get("asset") or {}
-    video_src = asset.get("video_src") or ""
-    poster_src = asset.get("poster_src") or ""
-    fallback_src = asset.get("fallback_src") or ""
+    enabled = asset.get("enabled_in_hero") is not False
+    video_src = (asset.get("video_src") or "") if enabled else ""
+    poster_src = (asset.get("poster_src") or "") if enabled else ""
+    fallback_src = (asset.get("fallback_src") or "") if enabled else ""
     poster_attr = f' poster="{_esc(poster_src)}"' if poster_src else ""
     sources = ""
     if video_src:
