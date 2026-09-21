@@ -33,7 +33,16 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-DEFAULT_PLAN_ID = "ent_99ace4dd6673aa36ed08b1fe"  # Ateles Agent Swarm Architecture plan
+# No default plan. A session binds to the plan matching its own workstream,
+# resolved at bind time (CLAUDE.md, "Plan and task maintenance"). The swarm
+# architecture plan was hardcoded here until 2026-09-21 and is now superseded
+# for new work; a hardcoded default is the fallthrough shape that silently
+# resolved every session's binding to one workstream regardless of its work.
+DEFAULT_PLAN_ID = None
+
+# Recognized as a plan reference when judging whether a transcript bound one.
+# Not a default: this is read-only pattern matching, never a binding target.
+_LEGACY_SWARM_PLAN_ID = "ent_99ace4dd6673aa36ed08b1fe"
 BOOKKEEPING_TYPES = {"conversation", "conversation_message", "agent_message"}
 # Durable insight artifacts whose presence means the session captured a learning
 # (used by the Stop hook's /end nudge — task #3 of the task-spine plan).
@@ -197,7 +206,7 @@ def _entity_types_in(payload: dict) -> set:
 
 def _mentions_plan(payload: dict) -> bool:
     blob = json.dumps(payload) if payload else ""
-    return '"plan"' in blob or "plan_id" in blob or DEFAULT_PLAN_ID in blob
+    return '"plan"' in blob or "plan_id" in blob or _LEGACY_SWARM_PLAN_ID in blob
 
 
 def _mentions_task_binding(payload: dict) -> bool:

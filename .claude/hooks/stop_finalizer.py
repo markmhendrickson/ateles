@@ -92,8 +92,9 @@ def main() -> int:
     detail = (
         "Session integrity violation: this session made domain writes but has "
         + " and ".join(reasons)
-        + ". Per docs/session_integrity.md, bind the conversation to a plan "
-        "(default ent_99ace4dd6673aa36ed08b1fe) OR a task, store the turns, and "
+        + ". Per docs/session_integrity.md, bind the conversation to the plan "
+        "matching this session's workstream (there is no default plan; resolve "
+        "it by workstream) OR a task, store the turns, and "
         "run /end to finalize before stopping."
     )
 
