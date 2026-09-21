@@ -896,6 +896,13 @@ def test_product_routes_reject_disclosure_components_and_keep_named_links(tmp_pa
     )
 
 
+def test_ateles_status_distinguishes_vision_from_execution(tmp_path):
+    assert build_site.build("ateles", tmp_path) == []
+    status = (tmp_path / "ateles" / "status" / "index.html").read_text()
+    assert "Vision and execution status" in status
+    assert "nothing built" in status
+
+
 @contextlib.contextmanager
 def _serve_directory(directory: Path):
     handler = functools.partial(
