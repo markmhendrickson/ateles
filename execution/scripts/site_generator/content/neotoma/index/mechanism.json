@@ -1,0 +1,14 @@
+{
+  "layout": "capabilities",
+  "eyebrow": "Robust epistemological design",
+  "headline": "Knowledge your agents can rely on—not merely recall.",
+  "lede": "A record earns trust by making writes, corrections, disagreement, and time explicit. Neotoma turns each of those into something agents can query instead of a convention they must remember to follow.",
+  "items": [
+    {"label": "WRITE", "title": "Facts are committed to a record", "body": "Typed entities and relationships give important state a durable home outside any one prompt, thread, or model context.", "terms": "entity · relationship · observation"},
+    {"label": "CORRECT", "title": "Corrections replace without erasing", "body": "The current value changes, while its source and superseded value remain available for reconstruction.", "terms": "correction · provenance · supersession"},
+    {"label": "DISAGREE", "title": "Conflicts stay visible", "body": "Competing observations can remain attributable instead of being flattened into whichever sentence was written last.", "terms": "attribution · conflict · policy"},
+    {"label": "REFRESH", "title": "Changing sources can be re-read", "body": "The record distinguishes when something happened from when it was learned, so an agent can reason against the state that was valid at the relevant time.", "terms": "effective time · ingestion time · replay"}
+  ],
+  "correction": {"old": "status = approved", "current": "status = superseded", "note": "The correction is visible; the prior claim does not silently disappear."},
+  "status_note": "The page leads with the long-term product ambition. The repository remains the authority for what is shipped today and what is still planned."
+}

@@ -1,0 +1,7 @@
+{
+  "layout": "cta_banner",
+  "eyebrow": "Design and checkout are different claims",
+  "headline": "Use the repository status before relying on a mechanism.",
+  "body": "The vision explains the system Ateles is built toward. The status document identifies what is designed, implemented, partially enforced, or still open.",
+  "primary_cta": {"label": "Open the repository", "href": "https://github.com/markmhendrickson/ateles"}
+}

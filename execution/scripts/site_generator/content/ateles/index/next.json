@@ -1,0 +1,10 @@
+{
+  "layout": "comparison_teaser",
+  "eyebrow": "Not another orchestration framework",
+  "headline": "Coordination is not the same as legitimate action.",
+  "lede": "Frameworks can spawn agents, route work, and persist execution state. Ateles is designed around the questions those mechanisms leave open: who was entitled to act, under whose authority, against which state, and how the result can be reviewed.",
+  "items": [
+    {"title": "Read the foundation", "body": "See the charter, authority model, work model, planning model, and the status that distinguishes design from current execution.", "href": "/design/", "link_label": "Open the design"},
+    {"title": "Inspect the comparison", "body": "Review the source-backed incumbent and competitor test, including where competing systems are stronger and where the boundary still holds.", "href": "/compare/", "link_label": "Open comparison"}
+  ]
+}

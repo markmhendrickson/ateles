@@ -1,0 +1,16 @@
+{
+  "layout": "record_hero",
+  "category": "The system of record for AI agents",
+  "headline": "Delegate more than a session can hold.",
+  "body": "Neotoma gives your agents a durable, correctable record of facts, decisions, provenance, and disagreement. They can take on longer-lived work without asking you to re-upload context, repeat a correction, or arbitrate conflicting recollections by hand.",
+  "primary_cta": {"label": "Install Neotoma", "href": "/install/"},
+  "secondary_cta": {"label": "Evaluate the fit", "href": "/evaluate/"},
+  "footnote": "Robust epistemological design for agents · open source · local-first",
+  "proof": {
+    "field": "shipping_address.city",
+    "old": "London",
+    "current": "Madrid",
+    "provenance": "corrected by source · prior value retained",
+    "read": "Madrid · effective now"
+  }
+}

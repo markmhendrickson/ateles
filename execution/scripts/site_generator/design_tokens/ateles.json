@@ -1,90 +1,92 @@
 {
   "_observation_ids": {
-    "anti_patterns": "c33f9fbb-0b65-f363-aed8-0a717c987303",
-    "border_radius": "4b14fa48-7ea0-448f-527d-48536cde2f8e",
-    "color_palette": "e8f1959c-6e1e-4631-37dc-9ac522359298",
-    "positioning_principles": "6cf174ca-305f-6da1-550f-478c589dbe54",
-    "scope": "49c9cf91-c089-c3f5-37c7-20c57be85985",
-    "spacing_system": "e77cd4e0-bc0a-8e34-293c-0f04407d85ad",
-    "type_scale": "4398315c-8712-635a-1193-4f52643b6adb"
+    "anti_patterns": "b94eb877-e86f-4167-3477-00bd1817342f",
+    "border_radius": "b94eb877-e86f-4167-3477-00bd1817342f",
+    "color_palette": "b94eb877-e86f-4167-3477-00bd1817342f",
+    "design_system_name": "b94eb877-e86f-4167-3477-00bd1817342f",
+    "positioning_principles": "b94eb877-e86f-4167-3477-00bd1817342f",
+    "scope": "b94eb877-e86f-4167-3477-00bd1817342f",
+    "spacing_system": "b94eb877-e86f-4167-3477-00bd1817342f",
+    "type_scale": "b94eb877-e86f-4167-3477-00bd1817342f"
   },
   "_source": {
-    "entity_id": "ent_72e01f1008653b601be1a956",
+    "entity_id": "ent_9158c8b39e0f437fdb2a86de",
     "entity_type": "design_system",
-    "fetched_at": "2026-09-21T12:49:29+00:00",
+    "fetched_at": "2026-09-21T14:13:48+00:00",
     "product": "ateles"
+  },
+  "identity": {
+    "anti_patterns": [
+      "Do not let the grant seal become a decorative bullet \u2014 it must appear only beside an actual claim about a specific grant/approval/checkpoint, never as generic visual punctuation, or it loses its argument that authority is bounded and deliberate.",
+      "Do not spread --grant/--revoked as general accents \u2014 reserved exclusively for showing an active vs. revoked/expired authorization state.",
+      "Do not diverge the shared structural tokens from Neotoma's \u2014 see Neotoma identity's matching anti-pattern.",
+      "Do not reuse the Neotoma app/Inspector's warm cream/terracotta palette \u2014 this identity's deepened wax-seal red-brown (#8a3b1f) is deliberately distinct from both the inspector's terracotta and from the current live page's lighter amber (#9a5b14), per ruled decision public_pages_do_not_reuse_inspector_palette (plan ent_98ef9d45f8a6896fed408f8f)."
+    ],
+    "border_radius": {
+      "note": "KEPT VERBATIM: 10px cards/panels, 8px buttons, 999px toggle pill."
+    },
+    "design_system_name": "Ateles visual identity \u2014 the seal",
+    "positioning_principles": [
+      "Authority properties get visual devices, not prose: declared/scoped/approved/attributed-to-a-principal map to specific moves (grant seal = declared+scoped; quorum diagram = approved; bracketed scope micro-format = attributed) rather than being asserted in copy alone.",
+      "Grant seal (signature move): a single small bounded inline-SVG mark (circular, quoted attributes) placed next to any claim about a specific grant, approval, or checkpoint \u2014 never diffused as a background wash. Visual argument for 'declared and scoped' as opposed to 'implicit and diffuse'; deliberately the opposite device from Neotoma's continuous provenance rail (authority is granted discretely, not accumulated).",
+      "Quorum diagram (signature move): one instance renders an actual small SVG diagram \u2014 3 circles, 2 filled --grant green + 1 outlined \u2014 captioned with the real mechanism name ('quorum: 2 of 3 distinct principals'), showing an approval threshold rather than describing it in prose.",
+      "Iconography: seal glyph, a 'scope boundary' bracket motif, and a two-vertical-bar checkpoint/gate glyph replace the single generic Feather-style line icon currently shared visually with Neotoma.",
+      "Color as seal, not wash: accent is a bounded, deliberately deepened terracotta-red used sparingly per authorized act, never as a diffuse hero gradient or background fill."
+    ],
+    "scope": "Ateles product pages only (distinct from the shared structural design_system ent_72e01f1008653b601be1a956, which this entity does NOT replace or overwrite). A DESIGNED, not-yet-applied identity: derives its signature devices from Ateles's category as 'the distributed-authority operating layer for governed initiative' \u2014 declared, scoped, approved, attributed-to-a-principal \u2014 rather than from a generic dev-tool palette. Siblings with, not twins of, the Neotoma identity (ent to be linked): shares the existing structural system but diverges in accent palette, the JOB assigned to the monospace type family, and one signature move (a bounded 'grant seal' mark used sparingly per authorized act) that is the deliberate visual OPPOSITE of Neotoma's continuous provenance rail \u2014 authority is granted discretely, not accumulated continuously.",
+    "spacing_system": {
+      "note": "KEPT VERBATIM from the shared design_system ent_72e01f1008653b601be1a956 \u2014 same rationale as the Neotoma identity: shared skeleton, divergent skin."
+    }
   },
   "product": {
     "color_palette": {
       "dark": {
-        "accent": "#e0a458",
-        "accent_2": "#eec287",
-        "accent_wash": "#2a2115",
-        "ink": "#edeae4",
-        "ink_2": "#b6b1a8",
-        "ink_3": "#85807a",
-        "line": "#2f2e2a",
-        "line_2": "#24241f",
-        "paper": "#131311",
-        "paper_2": "#1b1b19"
+        "accent": "#e08a4f",
+        "accent_2": "#eba26e",
+        "accent_wash": "#241a10",
+        "grant": "#8fae7f",
+        "ink": "#f0ebe1",
+        "ink_2": "#cabfae",
+        "ink_3": "#b3a794",
+        "line": "#2b241a",
+        "on_accent": "#14100b",
+        "paper": "#14100b",
+        "paper_2": "#1a1510",
+        "revoked": "#c97b62"
       },
       "light": {
-        "accent": "#9a5b14",
-        "accent_2": "#b8741f",
-        "accent_wash": "#f6efe4",
-        "ink": "#16181c",
-        "ink_2": "#454a52",
-        "ink_3": "#757b85",
-        "line": "#e0ddd7",
-        "line_2": "#eceae5",
-        "paper": "#fbfaf8",
-        "paper_2": "#ffffff"
+        "accent": "#8a3b1f",
+        "accent_2": "#a8552d",
+        "accent_wash": "#f2e6da",
+        "grant": "#4a6741",
+        "ink": "#1c1710",
+        "ink_2": "#453d30",
+        "ink_3": "#6b6255",
+        "line": "#ddd3bf",
+        "on_accent": "#f7f4ee",
+        "paper": "#f7f4ee",
+        "paper_2": "#efe9dd",
+        "revoked": "#9c4a3a"
+      },
+      "rationale": "Seal/stamp metaphor, not a diffuse SaaS accent wash: an authority system's oldest visual analogue is a mark that says 'this was authorized' \u2014 bounded and applied deliberately, never ambient. Terracotta retained as seed hue from the current live palette (evolutionary) but deepened/more saturated (#8a3b1f vs current #9a5b14) to read as a wax-seal red-brown rather than 'friendly SaaS orange'. 'grant' and 'revoked' are NEW semantic color roles mapped to the product's own real vocabulary (blast_radius_for(), low/high_blast_action_types) \u2014 reserved exclusively for an active vs. revoked/expired grant state.",
+      "wcag_aa_verified_2026_09_21": {
+        "accent_on_paper_dark": "7.14:1",
+        "accent_on_paper_light": "7.02:1",
+        "ink_on_paper_dark": "15.94:1",
+        "ink_on_paper_light": "16.22:1",
+        "method": "relative-luminance WCAG contrast formula computed directly (python), all 8 pairs exceed 4.5:1 AA-normal-text threshold with margin; the deepened accent gains contrast headroom as a side effect of the seal rationale, not as a separate fix",
+        "muted_on_paper_dark": "8.00:1",
+        "muted_on_paper_light": "5.46:1",
+        "on_accent_on_accent_dark_button_text": "7.14:1",
+        "on_accent_on_accent_light_button_text": "7.02:1"
       }
     },
     "type_scale": {
-      "body_base_size": "16.5px",
       "body_font_family": "'Source Sans 3', system-ui, -apple-system, 'Segoe UI', sans-serif",
       "code_font_family": "'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace",
-      "h1_size": "clamp(2.15rem, 6.6vw, 3.7rem)",
-      "h2_size": "clamp(1.5rem, 4.2vw, 2.15rem)",
+      "google_fonts_licence": "All three (Space Grotesk, Source Sans 3, IBM Plex Mono) are free, open-license Google Fonts already loaded via @import on the live page \u2014 no cost, no licensing action needed.",
       "heading_font_family": "'Space Grotesk', system-ui, sans-serif",
-      "heading_weight": 700
-    }
-  },
-  "shared": {
-    "anti_patterns": [
-      "Do not reuse the Neotoma app/Inspector's own warm cream/terracotta palette on a public product page \u2014 decision public_pages_do_not_reuse_inspector_palette (DECIDED 2026-09-15, plan ent_98ef9d45f8a6896fed408f8f): it is a recognizable AI-generated design signature and these pages are handed to strangers (e.g. AI Summit Barcelona business-card QR). Each product gets its own deliberate, distinct accent + typeface identity built on the shared structural system, not a copy of the app's own look. This is the rule that made the prior version of this entity stale: it described a blue/red, no-serif, sharp-corner palette that matched neither product's actual shipped page.",
-      "Do not describe this entity's palette/type fields as if ONE set of values applies to both products \u2014 they do not; color_palette and type_scale are per-product. Only spacing_system and border_radius are shared verbatim.",
-      "No unstyled system-UI-only type stack for headings on either product \u2014 both pair a distinctive display font (Fraunces / Space Grotesk) with a plain sans body, never a single generic sans for everything.",
-      "No sharp 0-2px corners \u2014 both products use 10px card/panel radius and 8px button radius; only the fully-rounded (999px) toggle pill is an exception.",
-      "Do not silently reconcile a mismatch between this entity and a live served page \u2014 the 2026-09-21 build-landing-page runs (Ateles ent_48b0cb1115898ddc730c78bd, Neotoma ent_189a531c49bfc35d983e1135) correctly flagged the drift in their stage-4 gaps instead of overwriting it unilaterally; this correction is the reconciliation those two runs deferred."
-    ],
-    "border_radius": {
-      "buttons": "border-radius: 8px",
-      "cards_panels_tiers": "border-radius: var(--radius) (10px)",
-      "note": "Verified 2026-09-22 identical on both served pages. Supersedes the prior 'sharp corners, 2px max' rule, which matches neither live page.",
-      "root_radius_variable": "--radius: 10px",
-      "shared_verbatim": true,
-      "toggle_pills": "border-radius: 999px (fully rounded)"
-    },
-    "positioning_principles": [
-      "One shared structural system, two product themes: spacing scale, radius, layout grid, and component patterns (.cap, .card, .tier/.panel, .tw-toggle, .hanchor, footer .noun) are shared verbatim; accent colour, ink/paper hues, and typeface family carry each product's distinct identity per decision public_pages_do_not_reuse_inspector_palette",
-      "Warm, editorial, not utilitarian: soft paper backgrounds (not pure white/black), a display/heading serif or grotesk paired with a plain-text sans body, generous radius (10px) and soft shadows on cards/panels \u2014 the opposite of a sharp-cornered inspector aesthetic",
-      "Accent as the single differentiator: each product reads as itself through ONE hue (teal for Neotoma, terracotta/amber for Ateles) applied consistently to CTAs, eyebrows, cap-ticks, and hanchors, not through structural divergence",
-      "Light/dark parity: every token pair is fully specified for both color-scheme states via :root[data-theme] plus @media (prefers-color-scheme: dark), toggled by the same .tw-toggle control on both products",
-      "Accessible density: base body size 16-16.5px, line-height ~1.5-1.62, max reading width in ch units (62-64ch) on prose blocks"
-    ],
-    "scope": "Public-facing product pages (rendered_page entities for neotoma.io and ateles.co). ONE shared structural system \u2014 spacing scale, border radius, layout grid, component patterns (.cap, .card, .tier/.panel, .tw-toggle, .hanchor) and the light/dark toggle mechanism are identical across products \u2014 with per-product THEME tokens (accent colour, ink/paper hues, and typeface family) layered on top. Verified 2026-09-22 against both served pages' actual embedded CSS custom properties: shared tokens (--radius: 10px, --maxw: 1080px, section padding-block: 64px, .hero padding-block: clamp(56px,11vw,104px) 56px, .cap grid-template-columns: 10px 1fr / gap 22px / padding 28px 0, .btn padding 11px 20px / border-radius 8px) are byte-identical between neotoma.io and ateles.co; only --ink/--paper/--accent hues and font-family declarations differ. Does NOT cover the Neotoma app/inspector UI, which keeps its own warm cream/terracotta palette per decision public_pages_do_not_reuse_inspector_palette (plan ent_98ef9d45f8a6896fed408f8f) \u2014 these public pages are deliberately NOT that palette.",
-    "spacing_system": {
-      "button_padding": ".btn { padding: 11px 20px; }",
-      "cap_row": ".cap { grid-template-columns: 10px 1fr; gap: 22px; padding: 28px 0; }",
-      "card_padding": ".card { padding: 22px; } / .panel, .tier { padding: 16-24px 18-24px; }",
-      "container": ".wrap { max-width: var(--maxw); margin: 0 auto; padding-inline: 20px; } with --maxw: 1080px",
-      "cta_row_gap": ".cta-row { gap: 12px; margin-top: 30px; }",
-      "hero_padding": ".hero { padding-block: clamp(56px, 11vw, 104px) 56px; }",
-      "note": "Identical between neotoma.io and ateles.co as served \u2014 this is the strongest evidence the two pages are one system, not two.",
-      "section_padding": "section { padding-block: 64px; }",
-      "shared_verbatim": true
+      "rationale": "Family kept deliberately: research fetched 2026-09-21 (typewolf.com/space-grotesk, madegooddesigns.com/space-grotesk-font) found Space Grotesk's real-world brand associations (NordVPN, Lemonade, Miro) are generic 'forward-looking tech', not authority-specific \u2014 a NEGATIVE finding that ruled out chasing a 'more authoritative' type family (none of the researched alternatives specifically signal governance either) and instead justified changing the type's JOB. IBM Plex Mono is elevated from generic code font to carrying a compact bracketed scope micro-format next to every grant/role/checkpoint mention \u2014 e.g. '[blast:low \u00b7 expires:30d]', '[quorum:2/3]' \u2014 using real vocabulary from the product's own code, not invented labels."
     }
   }
 }

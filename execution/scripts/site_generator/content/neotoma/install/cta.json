@@ -1,0 +1,7 @@
+{
+  "layout": "cta_banner",
+  "eyebrow": "Current source",
+  "headline": "Use the repository instructions for the exact install path.",
+  "body": "This preview does not duplicate commands that can drift. The repository is the current execution source; this site carries the product argument and the route into it.",
+  "primary_cta": {"label": "Open Neotoma on GitHub", "href": "https://github.com/markmhendrickson/neotoma"}
+}
