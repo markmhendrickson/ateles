@@ -61,7 +61,9 @@ def test_unrecognized_action_type_never_auto_executes(caplog):
     written down as expected behaviour: the next unclassified action type
     inherits "safe" from a default that was never a judgment about it.
     """
-    low = ExecutionPolicy(entity_id="p", blast_radius_default=BlastRadius.LOW, loaded=True)
+    low = ExecutionPolicy(
+        entity_id="p", blast_radius_default=BlastRadius.LOW, loaded=True
+    )
     with caplog.at_level("WARNING"):
         d = evaluate_gate(confidence=0.9, action_type="totally_unknown", policy=low)
     assert d.action == GateAction.CHECKPOINT
@@ -89,13 +91,15 @@ def test_unrecognized_action_type_warns_by_name(caplog):
 
 
 def test_absent_action_type_still_uses_policy_default():
-    """"Nothing declared" is distinct from "declared and unclassified".
+    """ "Nothing declared" is distinct from "declared and unclassified".
 
     A task with no action_type at all keeps the policy default — that is the
     case the default exists for, and tightening it would checkpoint every
     unannotated task. Only a DECLARED-but-unclassified value fails closed.
     """
-    low = ExecutionPolicy(entity_id="p", blast_radius_default=BlastRadius.LOW, loaded=True)
+    low = ExecutionPolicy(
+        entity_id="p", blast_radius_default=BlastRadius.LOW, loaded=True
+    )
     assert low.blast_radius_for(None) == BlastRadius.LOW
     assert low.blast_radius_for("") == BlastRadius.LOW
     d = evaluate_gate(confidence=0.9, action_type=None, policy=low)
@@ -202,6 +206,7 @@ def test_checkpoint_resolution_pending_is_none():
 
 def test_checkpoint_already_dispatched():
     from lib.daemon_runtime.gating import checkpoint_already_dispatched
+
     assert checkpoint_already_dispatched({"resolved_dispatched": True}) is True
     assert checkpoint_already_dispatched({"resolved_dispatched": "true"}) is True
     assert checkpoint_already_dispatched({"resolved_dispatched": "1"}) is True
@@ -351,9 +356,7 @@ def test_operator_only_never_auto_executes_at_any_confidence(confidence):
 
 def test_operator_only_reproduces_the_observed_case():
     """Exactly the logged case: action=operator_only, conf=0.95, threshold 0.85."""
-    d = evaluate_gate(
-        confidence=0.95, action_type="operator_only", policy=_default()
-    )
+    d = evaluate_gate(confidence=0.95, action_type="operator_only", policy=_default())
     assert d.action == GateAction.CHECKPOINT
     assert not d.may_auto_execute
     assert d.blast_radius == BlastRadius.NEVER
@@ -427,7 +430,9 @@ def test_policy_cannot_demote_operator_only_to_low_blast():
     )
     assert permissive.blast_radius_for("operator_only") == BlastRadius.NEVER
     d = evaluate_gate(
-        confidence=1.0, action_type="operator_only", policy=permissive,
+        confidence=1.0,
+        action_type="operator_only",
+        policy=permissive,
         successful_recurrences=999,
     )
     assert d.action == GateAction.CHECKPOINT
@@ -535,11 +540,15 @@ def test_unscored_and_scored_low_high_blast_produce_different_reasons():
     policy = _default()
 
     unscored = evaluate_gate(
-        confidence=0.0, action_type="payment", policy=policy,
+        confidence=0.0,
+        action_type="payment",
+        policy=policy,
         confidence_unscored=True,
     )
     scored_low = evaluate_gate(
-        confidence=0.0, action_type="payment", policy=policy,
+        confidence=0.0,
+        action_type="payment",
+        policy=policy,
         confidence_unscored=False,
     )
 
@@ -563,11 +572,15 @@ def test_unscored_and_scored_low_below_threshold_produce_different_reasons():
     policy = _default()
 
     unscored = evaluate_gate(
-        confidence=0.0, action_type="local_edit", policy=policy,
+        confidence=0.0,
+        action_type="local_edit",
+        policy=policy,
         confidence_unscored=True,
     )
     scored_low = evaluate_gate(
-        confidence=0.0, action_type="local_edit", policy=policy,
+        confidence=0.0,
+        action_type="local_edit",
+        policy=policy,
         confidence_unscored=False,
     )
 
@@ -595,7 +608,9 @@ def test_unscored_high_blast_task_still_checkpoints_fail_closed():
     """
     policy = _default()
     d = evaluate_gate(
-        confidence=0.0, action_type="open_pr", policy=policy,
+        confidence=0.0,
+        action_type="open_pr",
+        policy=policy,
         confidence_unscored=True,
     )
     assert d.action != GateAction.AUTO_EXECUTE
@@ -609,7 +624,9 @@ def test_unscored_low_blast_task_still_checkpoints_below_threshold():
     """
     policy = _default()
     d = evaluate_gate(
-        confidence=0.2, action_type="local_edit", policy=policy,
+        confidence=0.2,
+        action_type="local_edit",
+        policy=policy,
         confidence_unscored=True,
     )
     assert d.action == GateAction.CHECKPOINT
@@ -661,9 +678,7 @@ def test_checkpoint_task_fetch_accepts_only_declared_task_type(monkeypatch):
         (fetch_checkpoint_snapshot, "checkpoint_" + "brief"),
     ],
 )
-def test_checkpoint_fetch_preserves_envelope_tenant(
-    monkeypatch, fetch, entity_type
-):
+def test_checkpoint_fetch_preserves_envelope_tenant(monkeypatch, fetch, entity_type):
     monkeypatch.setattr(
         gating_module,
         "_fetch_entity",
@@ -684,9 +699,7 @@ def test_checkpoint_fetch_preserves_envelope_tenant(
         (fetch_checkpoint_snapshot, "checkpoint_" + "brief"),
     ],
 )
-def test_checkpoint_fetch_fails_tenant_conflict_closed(
-    monkeypatch, fetch, entity_type
-):
+def test_checkpoint_fetch_fails_tenant_conflict_closed(monkeypatch, fetch, entity_type):
     monkeypatch.setattr(
         gating_module,
         "_fetch_entity",
@@ -729,7 +742,9 @@ def test_checkpoint_stamp_requires_materialized_readback(monkeypatch):
         def json(self):
             return {"success": True, "snapshot": {"resolved_dispatched": True}}
 
-    monkeypatch.setattr(gating_module.httpx, "post", lambda *args, **kwargs: _Response())
+    monkeypatch.setattr(
+        gating_module.httpx, "post", lambda *args, **kwargs: _Response()
+    )
     monkeypatch.setattr(
         gating_module,
         "_fetch_entity",
@@ -782,7 +797,9 @@ def test_non_releasable_checkpoint_close_requires_exact_readback(
         def raise_for_status(self):
             return None
 
-    monkeypatch.setattr(gating_module.httpx, "post", lambda *args, **kwargs: _Response())
+    monkeypatch.setattr(
+        gating_module.httpx, "post", lambda *args, **kwargs: _Response()
+    )
     monkeypatch.setattr(
         gating_module,
         "_fetch_entity",
@@ -812,7 +829,9 @@ def test_fresh_approval_transition_requires_exact_readback(
         def raise_for_status(self):
             return None
 
-    monkeypatch.setattr(gating_module.httpx, "post", lambda *args, **kwargs: _Response())
+    monkeypatch.setattr(
+        gating_module.httpx, "post", lambda *args, **kwargs: _Response()
+    )
     monkeypatch.setattr(
         gating_module,
         "_fetch_entity",
@@ -830,9 +849,15 @@ def test_fresh_approval_transition_requires_exact_readback(
     )
 
 
-def test_checkpoint_brief_carries_task_tenant_in_snapshot(monkeypatch):
+def test_checkpoint_brief_carries_authenticated_immutable_authority(monkeypatch):
     monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
     posted: list[dict] = []
+
+    class _Signer:
+        is_stub = False
+
+        def headers(self, method, path):
+            return {"X-AAuth-Token": "signed"}
 
     class _Response:
         def raise_for_status(self):
@@ -846,17 +871,56 @@ def test_checkpoint_brief_carries_task_tenant_in_snapshot(monkeypatch):
         return _Response()
 
     monkeypatch.setattr(gating_module.httpx, "post", post)
+    from lib.daemon_runtime import aauth_signer
+
+    monkeypatch.setattr(
+        aauth_signer.AAuthSigner, "from_key_file", lambda handler: _Signer()
+    )
     monkeypatch.setattr(
         gating_module,
         "_fetch_entity",
         lambda entity_id: {
+            "entity_id": entity_id,
             "entity_type": "checkpoint_" + "brief",
             "snapshot": posted[0]["entities"][0],
+            "provenance": {
+                field: "obs-create"
+                for field in (
+                    "body",
+                    "task_entity_id",
+                    "policy_entity_id",
+                    "blast_radius",
+                    "gate_action",
+                    "handler",
+                )
+            },
         },
     )
-    decision = evaluate_gate(
-        confidence=0.3, action_type="local_edit", policy=_default()
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity_observations",
+        lambda entity_id: [
+            {
+                "id": "obs-create",
+                "fields": posted[0]["entities"][0],
+                "user_id": "tenant-a",
+                "provenance": {
+                    "agent_sub": "apis@ateles-swarm",
+                    "agent_thumbprint": "thumbprint",
+                    "attribution_tier": "software",
+                },
+            }
+        ],
     )
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 4,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "snapshot": {"title": "Bounded work", "status": "awaiting_approval"},
+    }
+    policy = _default()
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
 
     brief_id = write_checkpoint_brief(
         task_entity_id="ent_task",
@@ -866,22 +930,21 @@ def test_checkpoint_brief_carries_task_tenant_in_snapshot(monkeypatch):
         handler="apis",
         user_id="tenant-a",
         action_type="local_edit",
+        task_record=task_record,
+        policy=policy,
     )
 
     assert brief_id == "ent_cp"
     snapshot = posted[0]["entities"][0]
-    assert snapshot["user_id"] == "tenant-a"
-    assert snapshot["authorization_context_version"] == 1
-    assert snapshot["authorization_action_type"] == "local_edit"
-    assert snapshot["authorization_context_digest"] == (
-        gating_module.checkpoint_authorization_digest(
-            task_entity_id="ent_task",
-            user_id="tenant-a",
-            action_type="local_edit",
-            gate_action=decision.action.value,
-            blast_radius=decision.blast_radius.value,
-            policy_id=decision.policy_id,
-        )
+    assert "user_id" not in snapshot
+    authority = gating_module.read_authenticated_checkpoint_authorization(
+        "ent_cp", gating_module._fetch_entity("ent_cp")
+    )
+    assert authority["version"] == 2
+    assert authority["task_entity_id"] == "ent_task"
+    assert authority["task_revision"] == gating_module.entity_record_digest(task_record)
+    assert authority["policy_revision"] == gating_module.execution_policy_revision(
+        policy
     )
 
 
@@ -895,7 +958,21 @@ def test_checkpoint_brief_requires_authorization_snapshot_readback(monkeypatch):
         def json(self):
             return {"entities": [{"entity_id": "ent_cp"}]}
 
-    monkeypatch.setattr(gating_module.httpx, "post", lambda *args, **kwargs: _Response())
+    monkeypatch.setattr(
+        gating_module.httpx, "post", lambda *args, **kwargs: _Response()
+    )
+
+    class _Signer:
+        is_stub = False
+
+        def headers(self, method, path):
+            return {"X-AAuth-Token": "signed"}
+
+    from lib.daemon_runtime import aauth_signer
+
+    monkeypatch.setattr(
+        aauth_signer.AAuthSigner, "from_key_file", lambda handler: _Signer()
+    )
     monkeypatch.setattr(
         gating_module,
         "_fetch_entity",
@@ -907,6 +984,13 @@ def test_checkpoint_brief_requires_authorization_snapshot_readback(monkeypatch):
     decision = evaluate_gate(
         confidence=0.3, action_type="local_edit", policy=_default()
     )
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 1,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "snapshot": {"status": "awaiting_approval"},
+    }
 
     assert (
         write_checkpoint_brief(
@@ -917,6 +1001,76 @@ def test_checkpoint_brief_requires_authorization_snapshot_readback(monkeypatch):
             handler="apis",
             user_id="tenant-a",
             action_type="local_edit",
+            task_record=task_record,
+            policy=_default(),
         )
+        is None
+    )
+
+
+@pytest.mark.parametrize("tamper", ["protected_field", "producer", "body"])
+def test_authenticated_checkpoint_authority_rejects_mutable_or_untrusted_state(
+    monkeypatch, tamper
+):
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 2,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "snapshot": {"status": "awaiting_approval", "body": "approved effect"},
+    }
+    policy = _default()
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+    encoded = gating_module.build_checkpoint_authorization_envelope(
+        task_record=task_record,
+        policy=policy,
+        decision=decision,
+        action_type="local_edit",
+        user_id="tenant-a",
+    )
+    fields = {
+        "body": encoded,
+        "task_entity_id": "ent_task",
+        "policy_entity_id": decision.policy_id,
+        "blast_radius": decision.blast_radius.value,
+        "gate_action": decision.action.value,
+        "handler": "apis",
+    }
+    provenance = {field: "obs-create" for field in fields}
+    auth = {
+        "agent_sub": "apis@ateles-swarm",
+        "agent_thumbprint": "thumbprint",
+        "attribution_tier": "software",
+    }
+    if tamper == "protected_field":
+        provenance["gate_action"] = "obs-correction"
+    elif tamper == "producer":
+        auth["agent_sub"] = "other@ateles-swarm"
+    else:
+        fields["body"] = encoded.replace("local_edit", "payment")
+    record = {
+        "entity_id": "ent_cp",
+        "entity_type": "checkpoint_" + "brief",
+        "snapshot": dict(fields),
+        "provenance": provenance,
+    }
+    observation_fields = dict(fields)
+    if tamper == "body":
+        observation_fields["body"] = encoded
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity_observations",
+        lambda entity_id: [
+            {
+                "id": "obs-create",
+                "fields": observation_fields,
+                "user_id": "tenant-a",
+                "provenance": auth,
+            }
+        ],
+    )
+
+    assert (
+        gating_module.read_authenticated_checkpoint_authorization("ent_cp", record)
         is None
     )

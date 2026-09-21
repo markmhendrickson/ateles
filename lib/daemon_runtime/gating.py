@@ -196,6 +196,10 @@ class ExecutionPolicy:
     )
     checkpoint_postures: dict[str, CheckpointPosture] = field(default_factory=dict)
     loaded: bool = False  # False = using fallbacks (Neotoma unreachable)
+    # Canonical content/revision fingerprint of the entity record used to make
+    # the gate decision.  Checkpoint release re-reads the policy and requires
+    # this exact value so a same-id policy edit cannot inherit old authority.
+    authorization_revision: str = ""
 
     def blast_radius_for(self, action_type: str | None) -> BlastRadius:
         """Classify an action type's blast radius under this policy.
@@ -285,6 +289,38 @@ class GateDecision:
         )
 
 
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def entity_record_digest(record: dict) -> str:
+    """Fingerprint a complete Neotoma entity revision deterministically."""
+    return hashlib.sha256(_canonical_json(record).encode()).hexdigest()
+
+
+def execution_policy_revision(policy: ExecutionPolicy) -> str:
+    """Return the loaded entity revision, or a deterministic fallback revision."""
+    if policy.authorization_revision:
+        return policy.authorization_revision
+    content = {
+        "entity_id": policy.entity_id,
+        "title": policy.title,
+        "confidence_threshold": policy.confidence_threshold,
+        "blast_radius_default": policy.blast_radius_default.value,
+        "auto_execute_after_n_successful_recurrences": (
+            policy.auto_execute_after_n_successful_recurrences
+        ),
+        "high_blast_action_types": sorted(policy.high_blast_action_types),
+        "low_blast_action_types": sorted(policy.low_blast_action_types),
+        "checkpoint_postures": {
+            key: value.value
+            for key, value in sorted(policy.checkpoint_postures.items())
+        },
+        "loaded": policy.loaded,
+    }
+    return hashlib.sha256(_canonical_json(content).encode()).hexdigest()
+
+
 def _parse_policy(entity_id: str, data: dict) -> ExecutionPolicy:
     snap = (data.get("snapshot") or {}).get("snapshot") or data.get("snapshot") or data
 
@@ -320,7 +356,9 @@ def _parse_policy(entity_id: str, data: dict) -> ExecutionPolicy:
     except (TypeError, ValueError):
         n_recur = None
 
-    high = _as_set(snap.get("high_blast_action_types")) or frozenset(_FALLBACK_HIGH_BLAST)
+    high = _as_set(snap.get("high_blast_action_types")) or frozenset(
+        _FALLBACK_HIGH_BLAST
+    )
     low = _as_set(snap.get("low_blast_action_types")) or frozenset(_FALLBACK_LOW_BLAST)
     postures = _parse_checkpoint_postures(snap.get("checkpoint_postures"), entity_id)
 
@@ -334,6 +372,7 @@ def _parse_policy(entity_id: str, data: dict) -> ExecutionPolicy:
         low_blast_action_types=low,
         checkpoint_postures=postures,
         loaded=True,
+        authorization_revision=entity_record_digest(data),
     )
 
 
@@ -388,8 +427,37 @@ def _fetch_entity(entity_id: str) -> dict | None:
         resp.raise_for_status()
         return resp.json()
     except Exception as exc:  # noqa: BLE001 — fail closed, never crash dispatch
-        log.warning(f"[gating] could not fetch policy {entity_id}: {exc}")
+        log.warning(f"[gating] could not fetch entity {entity_id}: {exc}")
         return None
+
+
+def _fetch_entity_observations(entity_id: str, *, limit: int = 100) -> list[dict]:
+    if not NEOTOMA_BEARER_TOKEN:
+        return []
+    try:
+        resp = httpx.get(
+            f"{NEOTOMA_BASE_URL}/entities/{entity_id}/observations",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            params={"limit": limit},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        observations = data.get("observations") if isinstance(data, dict) else None
+        return observations if isinstance(observations, list) else []
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[gating] could not fetch observations for %s: %s", entity_id, exc)
+        return []
+
+
+def fetch_entity_user_id(entity_id: str) -> str | None:
+    """Resolve tenant provenance from immutable observation ownership."""
+    user_ids = {
+        str(item.get("user_id")).strip()
+        for item in _fetch_entity_observations(entity_id)
+        if item.get("user_id")
+    }
+    return next(iter(user_ids)) if len(user_ids) == 1 else None
 
 
 def load_policy(policy_id: str | None = None) -> ExecutionPolicy:
@@ -514,8 +582,7 @@ def evaluate_gate(
     # set n=None).
     graduated = (
         policy.auto_execute_after_n_successful_recurrences is not None
-        and successful_recurrences
-        >= policy.auto_execute_after_n_successful_recurrences
+        and successful_recurrences >= policy.auto_execute_after_n_successful_recurrences
         and blast == BlastRadius.LOW  # NEVER and HIGH never graduate
     )
 
@@ -575,6 +642,96 @@ def evaluate_gate(
     )
 
 
+CHECKPOINT_AUTHORIZATION_VERSION = 2
+_TRUSTED_AAUTH_TIERS = frozenset({"software", "operator_attested", "hardware"})
+
+
+def build_checkpoint_authorization_envelope(
+    *,
+    task_record: dict,
+    policy: ExecutionPolicy,
+    decision: GateDecision,
+    action_type: str,
+    user_id: str,
+) -> str:
+    """Serialize the exact task and policy revisions shown for approval."""
+    payload = {
+        "version": CHECKPOINT_AUTHORIZATION_VERSION,
+        "producer": "apis@ateles-swarm",
+        "task_entity_id": str(task_record.get("entity_id") or ""),
+        "task_revision": entity_record_digest(task_record),
+        "task_observation_count": task_record.get("observation_count"),
+        "task_last_observation_at": task_record.get("last_observation_at"),
+        "user_id": str(user_id),
+        "action_type": str(action_type).strip().lower(),
+        "policy_entity_id": policy.entity_id,
+        "policy_revision": execution_policy_revision(policy),
+        "gate_action": decision.action.value,
+        "blast_radius": decision.blast_radius.value,
+    }
+    return _canonical_json(payload)
+
+
+def read_authenticated_checkpoint_authorization(
+    checkpoint_id: str, checkpoint_record: dict
+) -> dict | None:
+    """Read an authorization envelope only from its AAuth-backed observation.
+
+    The current snapshot fields are mutable reducer output.  Trust comes from
+    the immutable creation observation named by per-field provenance, after
+    Neotoma has verified and recorded Apis's AAuth identity.
+    """
+    snapshot = _snapshot_of(checkpoint_record)
+    encoded = snapshot.get("body")
+    provenance = checkpoint_record.get("provenance")
+    if not isinstance(encoded, str) or not isinstance(provenance, dict):
+        return None
+    observation_id = provenance.get("body")
+    if not isinstance(observation_id, str) or not observation_id:
+        return None
+    protected_fields = (
+        "body",
+        "task_entity_id",
+        "policy_entity_id",
+        "blast_radius",
+        "gate_action",
+        "handler",
+    )
+    if any(provenance.get(field) != observation_id for field in protected_fields):
+        return None
+    observation = next(
+        (
+            item
+            for item in _fetch_entity_observations(checkpoint_id)
+            if item.get("id") == observation_id
+        ),
+        None,
+    )
+    if not isinstance(observation, dict):
+        return None
+    fields = observation.get("fields")
+    auth = observation.get("provenance")
+    if not isinstance(fields, dict) or fields.get("body") != encoded:
+        return None
+    if not isinstance(auth, dict):
+        return None
+    if (
+        auth.get("agent_sub") != "apis@ateles-swarm"
+        or not auth.get("agent_thumbprint")
+        or auth.get("attribution_tier") not in _TRUSTED_AAUTH_TIERS
+    ):
+        return None
+    try:
+        payload = json.loads(encoded)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("version") != 2:
+        return None
+    if payload.get("producer") != "apis@ateles-swarm":
+        return None
+    return payload
+
+
 def write_checkpoint_brief(
     *,
     task_entity_id: str,
@@ -586,6 +743,8 @@ def write_checkpoint_brief(
     user_id: str | None = None,
     action_type: str | None = None,
     idempotency_context: str | None = None,
+    task_record: dict | None = None,
+    policy: ExecutionPolicy | None = None,
 ) -> str | None:
     """
     Store a blocking checkpoint_brief entity in Neotoma and link it to the task.
@@ -627,37 +786,41 @@ def write_checkpoint_brief(
         ],
         "idempotency_key": f"checkpoint-{handler}-{task_entity_id}-plan",
     }
-    if user_id:
-        # Tenant provenance is part of the authorization boundary on release.
-        # Keep it on the snapshot itself because checkpoint consumers receive
-        # snapshots, not the outer entity envelope.
-        body["entities"][0]["user_id"] = user_id
     normalized_action = str(action_type or "").strip().lower()
-    if normalized_action:
-        # Bind the operator's approval to the exact action and policy context
-        # that was presented.  Release validates this snapshot instead of
-        # reclassifying a custom live-policy action through a hard-coded
-        # fallback vocabulary.
-        body["entities"][0].update(
-            {
-                "authorization_context_version": 1,
-                "authorization_action_type": normalized_action,
-                "authorization_context_digest": checkpoint_authorization_digest(
-                    task_entity_id=task_entity_id,
-                    user_id=user_id or "",
-                    action_type=normalized_action,
-                    gate_action=decision.action.value,
-                    blast_radius=decision.blast_radius.value,
-                    policy_id=decision.policy_id,
-                ),
-            }
+    authorization_expected = task_record is not None and policy is not None
+    expected_authorization: dict | None = None
+    if authorization_expected:
+        if (
+            task_record.get("entity_id") != task_entity_id
+            or str(task_record.get("entity_type", "")).strip().lower() != "task"
+            or not user_id
+        ):
+            log.warning("[gating] incomplete task provenance for checkpoint authority")
+            return None
+        encoded_authorization = build_checkpoint_authorization_envelope(
+            task_record=task_record,
+            policy=policy,
+            decision=decision,
+            action_type=normalized_action,
+            user_id=user_id,
         )
+        body["entities"][0]["body"] = encoded_authorization
+        expected_authorization = json.loads(encoded_authorization)
     if idempotency_context:
         body["idempotency_key"] += f"-{idempotency_context}"
     try:
+        headers = {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}
+        if authorization_expected:
+            from .aauth_signer import AAuthSigner
+
+            signer = AAuthSigner.from_key_file(handler)
+            if signer.is_stub:
+                log.error("[gating] no AAuth signer for checkpoint authorization")
+                return None
+            headers.update(signer.headers("POST", "/store"))
         resp = httpx.post(
             f"{NEOTOMA_BASE_URL}/store",
-            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            headers=headers,
             json=body,
             timeout=15,
         )
@@ -665,19 +828,17 @@ def write_checkpoint_brief(
         data = resp.json()
         ents = data.get("entities") or []
         entity_id = ents[0].get("entity_id") if ents else None
-        if entity_id and normalized_action:
+        if entity_id and authorization_expected:
             readback = _fetch_entity(entity_id)
-            snapshot = _snapshot_of(readback or {})
-            expected_digest = body["entities"][0]["authorization_context_digest"]
-            if (
-                str(snapshot.get("authorization_context_version")) != "1"
-                or str(snapshot.get("authorization_action_type", "")).strip().lower()
-                != normalized_action
-                or snapshot.get("authorization_context_digest") != expected_digest
-            ):
+            authorization = (
+                read_authenticated_checkpoint_authorization(entity_id, readback)
+                if isinstance(readback, dict)
+                else None
+            )
+            if authorization != expected_authorization:
                 log.warning(
-                    "[gating] checkpoint %s authorization snapshot did not "
-                    "materialize on read-back",
+                    "[gating] checkpoint %s authenticated authorization did not "
+                    "materialize exactly on read-back",
                     entity_id,
                 )
                 return None
@@ -715,11 +876,7 @@ def checkpoint_authorization_digest(
     blast_radius: str,
     policy_id: str,
 ) -> str:
-    """Hash the exact release authority shown to the operator.
-
-    This is an integrity binding, not a credential.  A later task/action or
-    checkpoint-field change cannot inherit the old approval accidentally.
-    """
+    """Return the retired v1 sibling-field checksum for legacy detection."""
     canonical = json.dumps(
         {
             "action_type": str(action_type).strip().lower(),
@@ -775,11 +932,8 @@ def read_checkpoint_resolution(snapshot: dict) -> str | None:
     return None
 
 
-def fetch_task_snapshot(task_entity_id: str) -> dict | None:
-    """
-    Fetch the current snapshot of the task a checkpoint_brief refers to, so the
-    dispatcher can re-run it on approval. Returns None if unreachable.
-    """
+def fetch_task_record(task_entity_id: str) -> dict | None:
+    """Fetch the complete typed task record, including revision provenance."""
     data = _fetch_entity(task_entity_id)
     if data is None:
         return None
@@ -791,11 +945,17 @@ def fetch_task_snapshot(task_entity_id: str) -> dict | None:
             entity_type or "unknown",
         )
         return None
-    return _snapshot_with_tenant(data)
+    return data
 
 
-def fetch_checkpoint_snapshot(checkpoint_entity_id: str) -> dict | None:
-    """Fetch a checkpoint brief from the record, rejecting ambiguous types."""
+def fetch_task_snapshot(task_entity_id: str) -> dict | None:
+    """Fetch the current typed task snapshot for dispatch."""
+    data = fetch_task_record(task_entity_id)
+    return _snapshot_with_tenant(data) if data is not None else None
+
+
+def fetch_checkpoint_record(checkpoint_entity_id: str) -> dict | None:
+    """Fetch a complete typed checkpoint record, including provenance."""
     data = _fetch_entity(checkpoint_entity_id)
     if data is None:
         return None
@@ -807,7 +967,13 @@ def fetch_checkpoint_snapshot(checkpoint_entity_id: str) -> dict | None:
             entity_type or "unknown",
         )
         return None
-    return _snapshot_with_tenant(data)
+    return data
+
+
+def fetch_checkpoint_snapshot(checkpoint_entity_id: str) -> dict | None:
+    """Fetch a checkpoint snapshot, rejecting ambiguous types."""
+    data = fetch_checkpoint_record(checkpoint_entity_id)
+    return _snapshot_with_tenant(data) if data is not None else None
 
 
 def checkpoint_already_dispatched(snapshot: dict) -> bool:
@@ -865,13 +1031,12 @@ def stamp_checkpoint_dispatched(checkpoint_entity_id: str, *, handler: str) -> b
                 checkpoint_entity_id,
             )
             return False
-        entity_type = str(
-            data.get("entity_type") or data.get("type") or ""
-        ).strip().lower()
+        entity_type = (
+            str(data.get("entity_type") or data.get("type") or "").strip().lower()
+        )
         snapshot = _snapshot_of(data)
-        if (
-            entity_type != "checkpoint_" + "brief"
-            or not checkpoint_already_dispatched(snapshot)
+        if entity_type != "checkpoint_" + "brief" or not checkpoint_already_dispatched(
+            snapshot
         ):
             log.warning(
                 "[gating] checkpoint %s stamp was not materialized on read-back",
@@ -923,14 +1088,13 @@ def _transition_checkpoint_status(
                 status,
             )
             return False
-        entity_type = str(
-            data.get("entity_type") or data.get("type") or ""
-        ).strip().lower()
+        entity_type = (
+            str(data.get("entity_type") or data.get("type") or "").strip().lower()
+        )
         snapshot = _snapshot_of(data)
         if (
             entity_type != "checkpoint_" + "brief"
-            or str(snapshot.get("status", "")).strip().lower()
-            != status
+            or str(snapshot.get("status", "")).strip().lower() != status
         ):
             log.warning(
                 "[gating] checkpoint %s transition to %s did not materialize",

@@ -58,7 +58,11 @@ if importlib.util.find_spec("mcp") is None:
 
 import apis  # noqa: E402
 import server  # noqa: E402
-from lib.daemon_runtime.gating import ExecutionPolicy, evaluate_gate  # noqa: E402
+from lib.daemon_runtime.gating import (  # noqa: E402
+    ExecutionPolicy,
+    build_checkpoint_authorization_envelope,
+    evaluate_gate,
+)
 
 CHECKPOINT_TYPE = "checkpoint_" + "brief"
 
@@ -85,7 +89,10 @@ def release_store(monkeypatch):
     task_id = "ent_task_1"
     records = {
         brief_id: {
+            "entity_id": brief_id,
             "entity_type": CHECKPOINT_TYPE,
+            "observation_count": 1,
+            "last_observation_at": "2026-09-21T00:00:00Z",
             "snapshot": {
                 "status": "awaiting_operator",
                 "resolved_dispatched": False,
@@ -97,7 +104,10 @@ def release_store(monkeypatch):
             },
         },
         task_id: {
+            "entity_id": task_id,
             "entity_type": "task",
+            "observation_count": 1,
+            "last_observation_at": "2026-09-21T00:00:00Z",
             "snapshot": {
                 "status": "awaiting_approval",
                 "blocked_reason": "waiting for operator approval",
@@ -125,12 +135,6 @@ def release_store(monkeypatch):
             return None
         return record["snapshot"]
 
-    def fetch_checkpoint(checkpoint_entity_id):
-        record = records.get(checkpoint_entity_id)
-        if record is None or record["entity_type"] != CHECKPOINT_TYPE:
-            return None
-        return record["snapshot"]
-
     def set_status(task_entity_id, status, *, reason=None, **kwargs):
         value = status.value if hasattr(status, "value") else str(status)
         records[task_entity_id]["snapshot"]["status"] = value
@@ -147,15 +151,42 @@ def release_store(monkeypatch):
         return True
 
     def require_fresh(checkpoint_entity_id, *, handler, reason):
-        records[checkpoint_entity_id]["snapshot"][
-            "status"
-        ] = "approved_requires_fresh_approval"
+        records[checkpoint_entity_id]["snapshot"]["status"] = (
+            "approved_requires_fresh_approval"
+        )
         return True
 
     monkeypatch.setattr(server, "_get", get)
     monkeypatch.setattr(server, "_correct", correct)
     monkeypatch.setattr(apis, "fetch_task_snapshot", fetch_task)
-    monkeypatch.setattr(apis, "fetch_checkpoint_snapshot", fetch_checkpoint)
+    monkeypatch.setattr(
+        apis,
+        "fetch_task_record",
+        lambda entity_id: (
+            records.get(entity_id)
+            if records.get(entity_id, {}).get("entity_type") == "task"
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        apis,
+        "fetch_checkpoint_record",
+        lambda entity_id: (
+            records.get(entity_id)
+            if records.get(entity_id, {}).get("entity_type") == CHECKPOINT_TYPE
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        apis,
+        "fetch_entity_user_id",
+        lambda entity_id: (records.get(entity_id, {}).get("snapshot") or {}).get(
+            "user_id"
+        ),
+    )
+    monkeypatch.setattr(
+        apis, "read_authenticated_checkpoint_authorization", lambda *args: None
+    )
     monkeypatch.setattr(apis, "set_task_status", set_status)
     monkeypatch.setattr(apis, "stamp_checkpoint_dispatched", stamp)
     monkeypatch.setattr(
@@ -165,7 +196,9 @@ def release_store(monkeypatch):
         raising=False,
     )
     monkeypatch.setattr(apis, "require_fresh_checkpoint_approval", require_fresh)
-    monkeypatch.setattr(apis, "_schedule_fresh_checkpoint", lambda **kwargs: None)
+    monkeypatch.setattr(
+        apis, "_file_fresh_checkpoint", lambda **kwargs: "ent_fresh_checkpoint"
+    )
     monkeypatch.setattr(apis, "DRY_RUN", True)
     monkeypatch.setattr(apis.Notifier, "from_neotoma", lambda: _Notifier())
 
@@ -181,7 +214,12 @@ def release_store(monkeypatch):
 
 
 def _authorization_digest(
-    *, task_id: str, user_id: str, action_type: str, gate_action: str, blast_radius: str,
+    *,
+    task_id: str,
+    user_id: str,
+    action_type: str,
+    gate_action: str,
+    blast_radius: str,
     policy_id: str,
 ) -> str:
     canonical = json.dumps(
@@ -197,6 +235,49 @@ def _authorization_digest(
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _bind_v2_authorization(
+    monkeypatch,
+    records: dict,
+    brief_id: str,
+    task_id: str,
+    *,
+    action_type: str,
+    policy: ExecutionPolicy,
+) -> dict:
+    """Model a creation-observation authority, frozen before later mutation."""
+    task_record = records[task_id]
+    task_record["snapshot"]["action_type"] = action_type
+    decision = evaluate_gate(
+        confidence=float(task_record["snapshot"].get("confidence", 0.5)),
+        action_type=action_type,
+        policy=policy,
+    )
+    encoded = build_checkpoint_authorization_envelope(
+        task_record=task_record,
+        policy=policy,
+        decision=decision,
+        action_type=action_type,
+        user_id="tenant-a",
+    )
+    authority = json.loads(encoded)
+    brief = records[brief_id]["snapshot"]
+    brief.update(
+        {
+            "body": encoded,
+            "gate_action": decision.action.value,
+            "blast_radius": decision.blast_radius.value,
+            "policy_entity_id": policy.entity_id,
+        }
+    )
+    monkeypatch.setattr(
+        apis,
+        "read_authenticated_checkpoint_authorization",
+        lambda checkpoint_id, record: dict(authority),
+    )
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda skill: policy)
+    return authority
 
 
 @pytest.mark.asyncio
@@ -471,9 +552,7 @@ async def test_non_swarm_gate_actions_never_dispatch(
 
 
 @pytest.mark.asyncio
-async def test_operator_only_producer_shape_never_releases(
-    monkeypatch, release_store
-):
+async def test_operator_only_producer_shape_never_releases(monkeypatch, release_store):
     records, brief_id, task_id = release_store
     decision = evaluate_gate(
         confidence=1.0,
@@ -683,6 +762,131 @@ async def test_current_high_requires_fresh_approval_instead_of_stale_low_authori
 
 
 @pytest.mark.asyncio
+async def test_bound_approval_rejects_same_action_task_payload_mutation(
+    monkeypatch, release_store
+):
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    policy = ExecutionPolicy(
+        entity_id="default",
+        confidence_threshold=0.95,
+        high_blast_action_types=frozenset({"open_or_merge_pr"}),
+        low_blast_action_types=frozenset(),
+        loaded=True,
+    )
+    _bind_v2_authorization(
+        monkeypatch,
+        records,
+        brief_id,
+        task_id,
+        action_type="open_or_merge_pr",
+        policy=policy,
+    )
+    brief["status"] = "approved"
+    records[task_id]["snapshot"]["body"] = "Changed recipient and amount"
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert brief["status"] == "approved_requires_fresh_approval"
+
+
+@pytest.mark.asyncio
+async def test_bound_approval_rejects_same_policy_id_content_reclassification(
+    monkeypatch, release_store
+):
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    original_policy = ExecutionPolicy(
+        entity_id="default",
+        confidence_threshold=1.0,
+        high_blast_action_types=frozenset(),
+        low_blast_action_types=frozenset({"local_edit"}),
+        loaded=True,
+    )
+    _bind_v2_authorization(
+        monkeypatch,
+        records,
+        brief_id,
+        task_id,
+        action_type="local_edit",
+        policy=original_policy,
+    )
+    brief["status"] = "approved"
+    changed_policy = ExecutionPolicy(
+        entity_id="default",
+        high_blast_action_types=frozenset({"local_edit"}),
+        low_blast_action_types=frozenset(),
+        loaded=True,
+    )
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda skill: changed_policy)
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert brief["status"] == "approved_requires_fresh_approval"
+
+
+@pytest.mark.asyncio
+async def test_recomputed_sibling_digest_cannot_rewrite_approved_authority(
+    monkeypatch, release_store
+):
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    policy = ExecutionPolicy(
+        entity_id="default",
+        confidence_threshold=1.0,
+        high_blast_action_types=frozenset({"payment"}),
+        low_blast_action_types=frozenset({"local_edit"}),
+        loaded=True,
+    )
+    _bind_v2_authorization(
+        monkeypatch,
+        records,
+        brief_id,
+        task_id,
+        action_type="local_edit",
+        policy=policy,
+    )
+    brief.update(
+        {
+            "status": "approved",
+            "blast_radius": "high",
+            "authorization_action_type": "payment",
+            "authorization_context_version": 1,
+            "authorization_context_digest": "attacker-recomputed",
+        }
+    )
+    records[task_id]["snapshot"]["action_type"] = "payment"
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert brief["status"] == "approved_requires_fresh_approval"
+
+
+@pytest.mark.asyncio
 async def test_live_policy_custom_low_authorization_is_not_guessed_never(
     monkeypatch, release_store
 ):
@@ -690,24 +894,22 @@ async def test_live_policy_custom_low_authorization_is_not_guessed_never(
     action_type = "tenant_bounded_local_transform"
     policy_id = "ent_custom_policy"
     brief = records[brief_id]["snapshot"]
-    brief.update(
-        {
-            "status": "approved",
-            "authorization_action_type": action_type,
-            "authorization_context_version": 1,
-            "blast_radius": "low",
-            "policy_entity_id": policy_id,
-            "authorization_context_digest": _authorization_digest(
-                task_id=task_id,
-                user_id="tenant-a",
-                action_type=action_type,
-                gate_action="checkpoint_plan_approval",
-                blast_radius="low",
-                policy_id=policy_id,
-            ),
-        }
+    policy = ExecutionPolicy(
+        entity_id=policy_id,
+        confidence_threshold=1.0,
+        low_blast_action_types=frozenset({action_type}),
+        high_blast_action_types=frozenset(),
+        loaded=True,
     )
-    records[task_id]["snapshot"]["action_type"] = action_type
+    _bind_v2_authorization(
+        monkeypatch,
+        records,
+        brief_id,
+        task_id,
+        action_type=action_type,
+        policy=policy,
+    )
+    brief["status"] = "approved"
     original_dispatch = apis.dispatch_task
     dispatches: list[str] = []
 
@@ -765,8 +967,17 @@ def test_replacement_checkpoint_uses_current_live_policy(monkeypatch):
     )
     writes: list[dict] = []
     notifier = _Notifier()
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 1,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "snapshot": task,
+    }
 
     monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda skill: policy)
+    monkeypatch.setattr(apis, "fetch_task_record", lambda task_id: task_record)
+    monkeypatch.setattr(apis, "fetch_entity_user_id", lambda task_id: "tenant-a")
     monkeypatch.setattr(
         apis,
         "write_checkpoint_brief",
@@ -787,6 +998,53 @@ def test_replacement_checkpoint_uses_current_live_policy(monkeypatch):
     assert writes[0]["decision"].policy_id == "ent_current_policy"
     assert writes[0]["idempotency_context"].startswith("fresh-")
     assert any("Fresh approval required" in message for message in notifier.sent)
+
+
+def test_failed_replacement_write_leaves_old_approval_retriable_and_visible(
+    monkeypatch, release_store
+):
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "approved"
+    notifier = _Notifier()
+    monkeypatch.setattr(apis, "_file_fresh_checkpoint", lambda **kwargs: None)
+
+    apis._require_fresh_release_authority(
+        brief_id,
+        task_id=task_id,
+        task_snapshot=records[task_id]["snapshot"],
+        notifier=notifier,
+        reason="task changed",
+    )
+
+    assert brief["status"] == "approved"
+    assert any("retry" in message.lower() for message in notifier.sent)
+
+
+def test_denial_marker_rejects_relative_state_path(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", "relative/denials")
+
+    assert apis._persist_checkpoint_denial("ent_cp") is False
+
+
+@pytest.mark.parametrize("entry_kind", ["directory", "symlink"])
+def test_denial_marker_rejects_non_regular_existing_entry(
+    entry_kind, monkeypatch, tmp_path
+):
+    root = tmp_path / "denials"
+    monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", str(root))
+    marker = apis._checkpoint_denial_marker("ent_cp")
+    marker.parent.mkdir(parents=True)
+    if entry_kind == "directory":
+        marker.mkdir()
+    else:
+        target = tmp_path / "target"
+        target.write_text("denied\n")
+        marker.symlink_to(target)
+
+    assert apis._persist_checkpoint_denial("ent_cp") is False
+    assert apis._checkpoint_denial_persisted("ent_cp") is False
 
 
 @pytest.mark.asyncio
@@ -965,9 +1223,13 @@ async def test_task_without_route_blocks_without_claiming_release(
             "tags": [],
         }
     )
-    monkeypatch.setattr(apis._activity, "started", lambda message: pytest.fail(
-        "unroutable task must not start a dispatch activity"
-    ))
+    monkeypatch.setattr(
+        apis._activity,
+        "started",
+        lambda message: pytest.fail(
+            "unroutable task must not start a dispatch activity"
+        ),
+    )
 
     result = await _resolve(brief_id, "approve")
 
