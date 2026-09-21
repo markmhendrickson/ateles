@@ -4,7 +4,7 @@
     "border_radius": "f4f0a201-7785-bf62-4a2b-a8ec811d1cfc",
     "color_palette": "f4f0a201-7785-bf62-4a2b-a8ec811d1cfc",
     "design_system_name": "f4f0a201-7785-bf62-4a2b-a8ec811d1cfc",
-    "positioning_principles": "42efd6ae-24aa-351f-9019-1669c3304678",
+    "positioning_principles": "c7de0f10-04d9-44f3-8cc1-92dadf72a7f0",
     "scope": "e809b72e-b40a-d82e-5210-5b419901c8b0",
     "spacing_system": "f4f0a201-7785-bf62-4a2b-a8ec811d1cfc",
     "type_scale": "48c45b5f-3720-4fb7-225b-7de8cb04ec2b"
@@ -12,7 +12,7 @@
   "_source": {
     "entity_id": "ent_746b1d7c717e7780e7943782",
     "entity_type": "design_system",
-    "fetched_at": "2026-09-21T15:42:14+00:00",
+    "fetched_at": "2026-09-21T16:12:06+00:00",
     "product": "neotoma"
   },
   "identity": {
@@ -30,14 +30,14 @@
     },
     "design_system_name": "Neotoma visual identity \u2014 the record",
     "positioning_principles": [
-      "Record properties become visual stories rather than implementation prose: source, version, correction, disagreement, and refresh each receive a distinct, reader-recognizable state.",
-      "Record flow (primary move): show a fact entering from a named source, becoming the current version, being corrected without losing history, and refreshing when its source changes. A timeline or flow diagram should make the sequence understandable before any supporting copy is read.",
+      "Neotoma\u2019s visual grammar is a persistent graph: typed records and durable relationships remain connected to sources, prior versions, and the agents that create, retrieve, and update them. Correction is one behavior in that graph, not the whole identity.",
+      "Graph and record flows make provenance, version history, relationships, disagreement, and current state understandable before supporting copy. Technical diagrams belong as supporting or reduced-motion media rather than displacing strong cinematic storytelling.",
       "Public provenance rail: use plain labels such as \u201cSource\u201d, \u201cRecorded\u201d, \u201cVersion\u201d, \u201cCorrected\u201d, and \u201cReviewed\u201d. The rail may link to deeper evidence, but it never displays internal record IDs, schema names, field keys, code-call names, repo filenames, or unexplained system vocabulary.",
       "Visible correction: show a concise prior value beside its current replacement, with the superseded value struck through and the current value clearly identified. The story is change with continuity, not a database operation.",
       "Disagreement remains visible: two sourced claims can coexist until review settles the current view. Present who or what disagrees and the current status in ordinary language.",
       "Typography supports the record metaphor: editorial headings carry permanence; monospace is reserved for short public labels such as dates, versions, and statuses\u2014not implementation notation.",
       "Motion may trace a record from source to current state or pulse when a refresh arrives, but the static diagram must retain the full meaning under reduced-motion preferences.",
-      "Hero concept film: a silent 6\u201310 second cinematic loop may show fragmented state streams converging on one durable record, a correction retaining its prior layer, and that correction propagating to dependent paths. Copy remains in a separate split-hero column. The code-native record flow is the poster and reduced-motion fallback and remains the load-bearing visual. No generated text, UI, faces, or generic AI/database imagery."
+      "Hero cinema is the preferred primary medium. The current silent 8-second correction-propagation film is a provisional full-field takeover because its cinematic execution is stronger than the code-native diagram; it must be replaced by a graph-first film showing persistent records and relationships, provenance, version history, and multiple agents creating, retrieving, and updating. The graph diagram remains the poster and reduced-motion fallback. No generated text, UI, faces, or generic AI/database imagery."
     ],
     "scope": "Neotoma product pages only, distinct from the shared structural design system. The identity is the living record: truth remains understandable as sources arrive, corrections supersede earlier values, disagreement is retained, and freshness changes over time. Public visuals use recognizable source, version, correction, current-state, disagreement, and refresh concepts. Deep provenance stays in linked source and repository artifacts; landing-page surfaces never display internal record IDs, schema names, field names, code-call names, decision keys, or unexplained system vocabulary. Neotoma remains a sibling, not a twin, of Ateles: shared spacing and restraint, different symbolic grammar.",
     "spacing_system": {

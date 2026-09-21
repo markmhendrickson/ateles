@@ -53,10 +53,11 @@
     "no_external_runtime_dependency": true
   },
   "asset": {
-    "status": "integrated",
-    "video_src": "/assets/neotoma/hero-concept.webm",
-    "fallback_src": "/assets/neotoma/hero-concept.mp4",
-    "poster_src": "/assets/neotoma/hero-concept.avif",
+    "status": "provisional_primary_pending_graph_first_replacement",
+    "enabled_in_hero": true,
+    "video_src": "",
+    "fallback_src": "",
+    "poster_src": "",
     "repository_video_path": "execution/scripts/site_generator/assets/neotoma/hero-concept.webm",
     "repository_fallback_path": "execution/scripts/site_generator/assets/neotoma/hero-concept.mp4",
     "repository_poster_path": "execution/scripts/site_generator/assets/neotoma/hero-concept.avif",

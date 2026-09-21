@@ -283,6 +283,9 @@ def _attach_concept_film(data: dict) -> str | None:
         value = asset.get(field) or ""
         if value.startswith(("http://", "https://")):
             return f"concept film brief {brief_rel} uses an external {field}"
+    if asset.get("enabled_in_hero") is False:
+        data["concept_film"] = brief
+        return None
     asset_bindings = (
         ("repository_video_path", "public_video_path", "video_src"),
         ("repository_fallback_path", "public_fallback_path", "fallback_src"),
@@ -368,6 +371,8 @@ def _collect_concept_assets(inventory: dict) -> tuple[dict[Path, bytes], list[st
             continue
         brief = json.loads(brief_path.read_text())
         asset = brief.get("asset") or {}
+        if asset.get("enabled_in_hero") is False:
+            continue
         max_bytes = (brief.get("performance") or {}).get("max_bytes", 0)
         for repository_field, public_field in (
             ("repository_video_path", "public_video_path"),
@@ -568,11 +573,16 @@ def _validate_site(
             if claim in lower:
                 blockers.append(f"homepage contains retired Neotoma framing: {claim}")
     if product == "ateles":
-        for marker in ("organization-map", "role-node", "authorization-seal"):
+        for marker in (
+            "swarm-field",
+            "swarm-member",
+            "handoff-signal",
+            "authorization-seal",
+        ):
             if marker not in home_html:
-                blockers.append(
-                    f"homepage is missing Ateles living-organization marker: {marker}"
-                )
+                blockers.append(f"homepage is missing Ateles swarm marker: {marker}")
+        if "org-link" in home_html:
+            blockers.append("homepage gives the Ateles swarm permanent graph edges")
         if "seal-board" in home_html:
             blockers.append(
                 "homepage still renders the seal as Ateles's primary metaphor"
