@@ -201,6 +201,13 @@ jobs:
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           python3 "$f"
 
+      - name: Decisions 99 and 107-109 — planning and acts-as effects
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_decisions_99_107_109.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
       - name: Decision 102 — acyclicity declaration in migration and bootstrap
         if: always() && steps.corpus.outputs.present == 'true'
         run: |
