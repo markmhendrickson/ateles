@@ -37,10 +37,26 @@ canonical_context_entities:
   - operator_profile
   - locale_profile
   - swarm_roster
-  - channel_config
   - vendor_binding
   - task_policy
   - payment_profile
+  - channel_config
+observation_ids:
+  name: be5eaaab-1f73-e953-56a6-991324bfa49b
+  description: 1136af2b-4dbb-a516-6cc5-8827b177154c
+  tier: be5eaaab-1f73-e953-56a6-991324bfa49b
+  genus: be5eaaab-1f73-e953-56a6-991324bfa49b
+  status: be5eaaab-1f73-e953-56a6-991324bfa49b
+  aauth_sub: be5eaaab-1f73-e953-56a6-991324bfa49b
+  agent_grant: be5eaaab-1f73-e953-56a6-991324bfa49b
+  observation_source_default: ea38ccd5-789a-9618-c3d3-5bcc8b45051d
+  harness_preferences: unknown
+  triggers: unknown
+  tool_allowlist: b95a76f0-b902-016d-2ff2-f0291bffd0af
+  context_entity_types: ffd85e84-cd94-e06a-be69-6eea5ce7f866
+  operational_entity_types: 9bed9f07-89a0-0c8a-6a01-c8600e48611c
+  user_invocable: unknown
+  prompt_markdown: 2cfca23b-88b3-b571-eb27-28a5b2ac757a
 ---
 
 # monedula

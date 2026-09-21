@@ -36,9 +36,25 @@ canonical_context_entities:
   - operator_profile
   - product_profile
   - locale_profile
-  - channel_config
   - vendor_binding
+  - channel_config
   - calendar_routing_config
+observation_ids:
+  name: b3d64b6c-e2ca-42f5-a696-e6fee11601a6
+  description: b3d64b6c-e2ca-42f5-a696-e6fee11601a6
+  tier: b3d64b6c-e2ca-42f5-a696-e6fee11601a6
+  genus: b3d64b6c-e2ca-42f5-a696-e6fee11601a6
+  status: b3d64b6c-e2ca-42f5-a696-e6fee11601a6
+  aauth_sub: b3d64b6c-e2ca-42f5-a696-e6fee11601a6
+  agent_grant: b3d64b6c-e2ca-42f5-a696-e6fee11601a6
+  observation_source_default: 19a3c6ab-9665-989b-5ad2-89bc174a6873
+  harness_preferences: unknown
+  triggers: unknown
+  tool_allowlist: f5b135a8-3ff9-b08d-1039-512085151177
+  context_entity_types: f5a6a99a-4cd0-e41b-7269-aef4b2b5a600
+  operational_entity_types: 6f8bd72b-3f56-cba2-efb4-3c3772f92b18
+  user_invocable: unknown
+  prompt_markdown: 13c3ccbb-534d-6136-4bcf-6d41062d611d
 ---
 
 # cotinga

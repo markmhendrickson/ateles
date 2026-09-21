@@ -5,6 +5,12 @@ entity_id: ent_acdb65a8c5dccc1c5f6c7171
 entity_type: agent_definition
 name: apis
 description: Universal task dispatcher daemon. Subscribes to task.created/updated/due_today SSE events, infers domain tags, routes tasks to appropriate T4 agents (Cicada, Monedula, etc.) via domain routing table. Phase 4 skeleton; Phase 5 adds subprocess dispatch.
+observation_ids:
+  name: 0148dd44-f1cd-e4e9-de9f-0b579571a4c9
+  description: ac6f1a86-151b-81e5-8ba0-c65c0179342f
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: bda95bb9-22ee-6e7b-2258-128d8900ce65
 ---
 
 <!-- Claude Code adapter for agent `apis`. Canonical file: docs/agents/apis.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

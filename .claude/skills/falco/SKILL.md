@@ -9,6 +9,12 @@ triggers:
   - falco
   - /falco
 user_invocable: true
+observation_ids:
+  name: 8617fda3-bc9d-4985-57fe-cf9231009b0c
+  description: 8617fda3-bc9d-4985-57fe-cf9231009b0c
+  triggers: ea9025ba-4446-7040-b05a-b222b506b876
+  user_invocable: ea9025ba-4446-7040-b05a-b222b506b876
+  prompt_markdown: 634c7776-8cfd-12df-264c-9cea78f66908
 ---
 
 <!-- Claude Code adapter for agent `falco`. Canonical file: docs/agents/falco.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

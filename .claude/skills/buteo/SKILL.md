@@ -9,6 +9,12 @@ triggers:
   - buteo
   - /buteo
 user_invocable: true
+observation_ids:
+  name: 257ea21a-c4e2-56ff-f384-4c746c4c8c11
+  description: 257ea21a-c4e2-56ff-f384-4c746c4c8c11
+  triggers: 257ea21a-c4e2-56ff-f384-4c746c4c8c11
+  user_invocable: 257ea21a-c4e2-56ff-f384-4c746c4c8c11
+  prompt_markdown: ca78e0a9-5eef-40d9-4e86-499f194aba86
 ---
 
 <!-- Claude Code adapter for agent `buteo`. Canonical file: docs/agents/buteo.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

@@ -67,6 +67,22 @@ operational_entity_types:
   - strategy_drift_signal
 canonical_context_entities:
   - operator_profile
+observation_ids:
+  name: 1c385789-fc2a-4791-1acd-d5c72005e9d8
+  description: ba084dfb-1139-b1f2-3a57-d5c410a9926f
+  tier: 2407c8d1-a24d-8d24-a413-c0cbb0d052f2
+  genus: 7bcc337c-5760-2086-ee57-c779e4de956c
+  status: 1d918aaa-bbfd-31d3-25cd-c4ffd2238b82
+  aauth_sub: a9c5ec00-5e4e-873d-ae75-3e2169e91dfc
+  agent_grant: 077dfd98-d33f-a7ff-b6f9-7d70f64cb5fc
+  observation_source_default: 2c320837-7956-b502-60bd-e439b189f836
+  harness_preferences: unknown
+  triggers: 4eaaba2e-f280-d21e-50b9-203d9820c790
+  tool_allowlist: 2c320837-7956-b502-60bd-e439b189f836
+  context_entity_types: 98b67212-f109-64bc-a648-2d402a0f4094
+  operational_entity_types: 7d1f93aa-3361-e613-94cc-9d7db5073001
+  user_invocable: 1263b705-202a-d9b0-60d7-5b2e00200d4c
+  prompt_markdown: 4de0dabd-6b5c-d3ff-1e49-8a5a430bef49
 ---
 
 # cicada

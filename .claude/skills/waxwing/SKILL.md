@@ -9,6 +9,12 @@ triggers:
   - waxwing
   - /waxwing
 user_invocable: true
+observation_ids:
+  name: daff0349-656a-e832-99a6-8411dc796599
+  description: aef48e75-6eb0-ce27-05ce-269aa465b6a2
+  triggers: f3260115-869c-2f48-8dd8-40d81c6f75e5
+  user_invocable: 0176c2bd-026a-33c7-5c0a-50cc066f342e
+  prompt_markdown: 12ea401c-a14e-dbcc-79b6-23cdcfd61670
 ---
 
 <!-- Claude Code adapter for agent `waxwing`. Canonical file: docs/agents/waxwing.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

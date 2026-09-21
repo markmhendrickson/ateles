@@ -59,6 +59,22 @@ operational_entity_types:
   - strategy_drift_signal
 canonical_context_entities:
   - operator_profile
+observation_ids:
+  name: 3734f3c9-7af8-749c-01e9-5ef610719c4a
+  description: fefed35f-c927-39db-5b27-f88d9a767ead
+  tier: 18547fb0-e7e2-f6b1-aff8-7efbaaa1774f
+  genus: 18547fb0-e7e2-f6b1-aff8-7efbaaa1774f
+  status: 1c45128e-8b9d-6343-2326-ff9f497d7e8a
+  aauth_sub: unknown
+  agent_grant: 18547fb0-e7e2-f6b1-aff8-7efbaaa1774f
+  observation_source_default: a8dfb35c-c84d-3b46-5601-82f194affef9
+  harness_preferences: unknown
+  triggers: fefed35f-c927-39db-5b27-f88d9a767ead
+  tool_allowlist: a8dfb35c-c84d-3b46-5601-82f194affef9
+  context_entity_types: e13a04c6-9df3-6392-a57d-08cfbafce1ab
+  operational_entity_types: bdf9069d-9d80-3b5d-9d2e-8a1c40e7a050
+  user_invocable: fefed35f-c927-39db-5b27-f88d9a767ead
+  prompt_markdown: ce53874e-8803-4825-8ac0-d3735e1c1088
 ---
 
 # pavo

@@ -70,6 +70,22 @@ operational_entity_types:
   - issue
 canonical_context_entities:
   - operator_profile
+observation_ids:
+  name: 00e017dc-1303-df43-5ff1-5cb1bf94bedc
+  description: 370c9fd6-93c5-da25-33c6-29dd586d9bbc
+  tier: 80b32854-ed9d-1525-0763-f5f6cc621dfe
+  genus: 80b32854-ed9d-1525-0763-f5f6cc621dfe
+  status: 6b5969b8-2b11-4a15-50fa-04128f57d0d0
+  aauth_sub: unknown
+  agent_grant: 80b32854-ed9d-1525-0763-f5f6cc621dfe
+  observation_source_default: 664e1fd6-5e7f-05e8-b703-3057f8287852
+  harness_preferences: unknown
+  triggers: 370c9fd6-93c5-da25-33c6-29dd586d9bbc
+  tool_allowlist: 664e1fd6-5e7f-05e8-b703-3057f8287852
+  context_entity_types: 9bbdd1da-03b6-db38-da64-ca1d3acde8c9
+  operational_entity_types: 36ba01dc-9c66-10bd-97ee-2dd1aa25583b
+  user_invocable: 370c9fd6-93c5-da25-33c6-29dd586d9bbc
+  prompt_markdown: 923e3a6a-4856-1521-52cc-20ba4896e62a
 ---
 
 # accipiter

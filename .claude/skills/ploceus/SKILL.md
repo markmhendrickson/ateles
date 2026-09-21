@@ -9,6 +9,12 @@ triggers:
   - ploceus
   - /ploceus
 user_invocable: true
+observation_ids:
+  name: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  description: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  triggers: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  user_invocable: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  prompt_markdown: 28987d24-8492-eac9-806c-162a1af1ddb5
 ---
 
 <!-- Claude Code adapter for agent `ploceus`. Canonical file: docs/agents/ploceus.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

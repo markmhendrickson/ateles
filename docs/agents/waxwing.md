@@ -61,6 +61,22 @@ operational_entity_types:
 canonical_context_entities:
   - operator_profile
   - payment_profile
+observation_ids:
+  name: daff0349-656a-e832-99a6-8411dc796599
+  description: aef48e75-6eb0-ce27-05ce-269aa465b6a2
+  tier: 70e685bd-d4a5-3774-690c-4cba9da4aeff
+  genus: c816ce7d-7fa5-a670-ef08-dce8442f3c7c
+  status: f6d12d09-94df-cc86-a28b-9cabf081aa0f
+  aauth_sub: 6d0d73c5-0226-15f8-84b9-a66a7264d418
+  agent_grant: 70e685bd-d4a5-3774-690c-4cba9da4aeff
+  observation_source_default: 4b8723f4-268c-ab01-e15e-d5d404d933f3
+  harness_preferences: unknown
+  triggers: f3260115-869c-2f48-8dd8-40d81c6f75e5
+  tool_allowlist: 4b8723f4-268c-ab01-e15e-d5d404d933f3
+  context_entity_types: b766d8d3-ad81-3ab1-f4e9-08cc173dcd6c
+  operational_entity_types: cb918563-2319-e086-401a-09c2faa175a3
+  user_invocable: 0176c2bd-026a-33c7-5c0a-50cc066f342e
+  prompt_markdown: 12ea401c-a14e-dbcc-79b6-23cdcfd61670
 ---
 
 # waxwing

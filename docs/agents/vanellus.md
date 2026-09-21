@@ -56,6 +56,22 @@ operational_entity_types:
   - strategy_drift_signal
 canonical_context_entities:
   - operator_profile
+observation_ids:
+  name: 98390c21-c55b-97c3-7891-e01f5c7b033e
+  description: d7dc41e9-f691-2475-ceae-03c581998b4f
+  tier: 9fecb670-8163-359a-d0d8-d799b2f1380b
+  genus: 9fecb670-8163-359a-d0d8-d799b2f1380b
+  status: e2636c58-c359-9fc9-bca3-45ea789531e8
+  aauth_sub: unknown
+  agent_grant: 9fecb670-8163-359a-d0d8-d799b2f1380b
+  observation_source_default: 03522fbe-30e8-d373-25ac-d96628dd75a4
+  harness_preferences: unknown
+  triggers: 98390c21-c55b-97c3-7891-e01f5c7b033e
+  tool_allowlist: 03522fbe-30e8-d373-25ac-d96628dd75a4
+  context_entity_types: 1524f3fc-ecc2-28c2-5c29-d9a6fb81b9ca
+  operational_entity_types: a5bb0757-7e64-f08d-ade2-d544958a6995
+  user_invocable: 98390c21-c55b-97c3-7891-e01f5c7b033e
+  prompt_markdown: 55dbc52e-464b-a7e1-1256-c7809bd60e49
 ---
 
 # vanellus

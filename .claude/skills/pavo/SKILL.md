@@ -9,6 +9,12 @@ triggers:
   - pavo
   - /pavo
 user_invocable: true
+observation_ids:
+  name: 3734f3c9-7af8-749c-01e9-5ef610719c4a
+  description: fefed35f-c927-39db-5b27-f88d9a767ead
+  triggers: fefed35f-c927-39db-5b27-f88d9a767ead
+  user_invocable: fefed35f-c927-39db-5b27-f88d9a767ead
+  prompt_markdown: ce53874e-8803-4825-8ac0-d3735e1c1088
 ---
 
 <!-- Claude Code adapter for agent `pavo`. Canonical file: docs/agents/pavo.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

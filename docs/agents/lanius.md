@@ -26,6 +26,22 @@ tool_allowlist:
   - Bash
 canonical_context_entities:
   - operator_profile
+observation_ids:
+  name: 3850bad3-bb81-a54f-0c2d-c62174a5fd64
+  description: edad793c-e8bf-632a-adbd-ea993dc9c674
+  tier: 3850bad3-bb81-a54f-0c2d-c62174a5fd64
+  genus: 3850bad3-bb81-a54f-0c2d-c62174a5fd64
+  status: b8aab20e-02c4-83a5-e7a0-f8621016e9db
+  aauth_sub: unknown
+  agent_grant: 62db423f-4cb2-92cf-121a-1ab6ffbdaadd
+  observation_source_default: ee5d4bfb-a792-0fed-27b3-b3f985b0b16e
+  harness_preferences: unknown
+  triggers: edad793c-e8bf-632a-adbd-ea993dc9c674
+  tool_allowlist: ee5d4bfb-a792-0fed-27b3-b3f985b0b16e
+  context_entity_types: unknown
+  operational_entity_types: unknown
+  user_invocable: edad793c-e8bf-632a-adbd-ea993dc9c674
+  prompt_markdown: 30143479-2245-31f6-d3d4-668cbb865b4d
 ---
 
 # lanius

@@ -22,6 +22,22 @@ canonical_context_entities:
   - product_profile
   - swarm_roster
   - constitution
+observation_ids:
+  name: 9176fff1-1537-b6c4-56e4-b549209d21b1
+  description: 7551cc1c-cd00-e029-37fb-07a424676adb
+  tier: 838eefa0-9ffe-98c2-0cb7-7dcf5cad0c6d
+  genus: 838eefa0-9ffe-98c2-0cb7-7dcf5cad0c6d
+  status: 838eefa0-9ffe-98c2-0cb7-7dcf5cad0c6d
+  aauth_sub: unknown
+  agent_grant: 838eefa0-9ffe-98c2-0cb7-7dcf5cad0c6d
+  observation_source_default: 79180f61-1fbf-2b73-c042-153a8aed51cc
+  harness_preferences: unknown
+  triggers: unknown
+  tool_allowlist: 79180f61-1fbf-2b73-c042-153a8aed51cc
+  context_entity_types: unknown
+  operational_entity_types: unknown
+  user_invocable: unknown
+  prompt_markdown: 4f5f09b1-e574-8fb0-2650-ed937ea3aae1
 ---
 
 # columba

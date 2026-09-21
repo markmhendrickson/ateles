@@ -35,7 +35,24 @@ operational_entity_types:
 canonical_context_entities:
   - operator_profile
   - swarm_roster
+  - deployment_configuration
   - channel_config
+observation_ids:
+  name: 14500ca3-b435-62b4-be9b-06df67a8d2f5
+  description: 94685509-a986-b871-9fc9-e40c28b7a5a1
+  tier: c18e162e-7dc6-a489-4510-8e54babddaad
+  genus: 589c2316-9457-de10-af62-5a640a5b14e2
+  status: c18e162e-7dc6-a489-4510-8e54babddaad
+  aauth_sub: c27f0586-1385-4912-020a-fe9428e54dcc
+  agent_grant: c18e162e-7dc6-a489-4510-8e54babddaad
+  observation_source_default: 390598f9-e611-671f-e53f-d2558ae651da
+  harness_preferences: unknown
+  triggers: unknown
+  tool_allowlist: 330fd473-d914-5443-98e7-4395aee31435
+  context_entity_types: 4e401d89-de08-8ec7-6abb-82e75f53f38a
+  operational_entity_types: 103affaa-55eb-7e30-b2a4-7e3c7c35b497
+  user_invocable: unknown
+  prompt_markdown: 524c0d8b-b2f6-7c1a-d52e-75b8d0033657
 ---
 
 # ateles
