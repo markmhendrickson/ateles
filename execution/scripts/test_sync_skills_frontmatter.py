@@ -97,6 +97,18 @@ BRAND_RESEARCH_REQUIRED_CONTRACTS = {
     ),
 }
 
+PUBLIC_SURFACE_GATE_SCOPES = {
+    "public_translation": "every public route",
+    "public_source_projection": "each public source-derived block",
+    "public_design_language": "every public route",
+    "audience_read": "every public route",
+    "visual_story": "each major claim",
+    "responsive_visual_qa": (
+        "every public route at representative desktop and mobile widths"
+    ),
+    "internal_leakage_scan": "every public route",
+}
+
 
 def _skill(**overrides) -> dict:
     """A fixture `skill` entity in the shape fetch_skills() produces."""
@@ -155,6 +167,36 @@ def _missing_brand_research_contracts(text: str) -> list[str]:
     ]
 
 
+def _public_surface_gate_rows(text: str) -> dict[str, tuple[str, str]]:
+    """Parse the stable final-gate table without coupling to its prose."""
+    start = text.index("### Final public-surface gates")
+    end = text.index("\n\nThe audience-read pass", start)
+    rows: dict[str, tuple[str, str]] = {}
+    for line in text[start:end].splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        gate_id = cells[0].strip("`")
+        rows[gate_id] = (cells[1], cells[2])
+    return rows
+
+
+def _public_surface_gate_errors(text: str) -> list[str]:
+    """Validate named gates, route coverage, and a real pass condition."""
+    rows = _public_surface_gate_rows(text)
+    errors = []
+    for gate_id, expected_scope in PUBLIC_SURFACE_GATE_SCOPES.items():
+        if gate_id not in rows:
+            errors.append(f"missing gate: {gate_id}")
+            continue
+        scope, pass_condition = rows[gate_id]
+        if scope != expected_scope:
+            errors.append(f"wrong scope: {gate_id} -> {scope}")
+        if len(pass_condition.split()) < 8:
+            errors.append(f"empty pass condition: {gate_id}")
+    return errors
+
+
 def test_product_finding_routing_contract_stays_in_sync() -> None:
     """Independently loaded skills must not silently diverge on filing behavior.
 
@@ -196,6 +238,31 @@ def test_brand_research_contract_check_fails_when_no_copying_rule_is_removed() -
     assert (
         "patterns are translated without copying"
         in _missing_brand_research_contracts(mutated)
+    )
+
+
+def test_public_surface_gates_cover_every_route_and_major_claim() -> None:
+    """The public-output contract is structured, scoped, and independently parsed."""
+    skill = (
+        _REPO_ROOT / ".claude" / "skills" / "build-landing-page" / "SKILL.md"
+    ).read_text()
+
+    assert _public_surface_gate_errors(skill) == []
+
+
+def test_public_surface_gate_check_rejects_homepage_only_leakage_scan() -> None:
+    """Mutation proof: checking only the homepage fails the all-routes contract."""
+    skill = (
+        _REPO_ROOT / ".claude" / "skills" / "build-landing-page" / "SKILL.md"
+    ).read_text()
+    mutated = skill.replace(
+        "| `internal_leakage_scan` | every public route |",
+        "| `internal_leakage_scan` | homepage only |",
+        1,
+    )
+
+    assert "wrong scope: internal_leakage_scan -> homepage only" in (
+        _public_surface_gate_errors(mutated)
     )
 
 
