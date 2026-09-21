@@ -22,6 +22,54 @@ CORPUS = {
     "conformance_suite.md": "| WM-13 | `work_model.md#intake-is-every-tasks-first-workflow`: every workflow-entering task atomically gets one intake batch and `ADDRESSED_BY` at creation; an aggregate parent gets neither and is not claimable | read | red | M |\n| WM-14 | every workflow-entering child task | intake batch on creation | read | red | M |\n| WM-14a | every workflow-entering task | persistent hold | lapse and transfer | creator and declaration-resolved `pm` step owner | mutant |\n| WM-21 | every daemon-created workflow-entering task | intake batch at creation | read | red | M |\n| WM-27 | intake batch opens at creation without a predecessor verdict; every successor batch is opened by a closing verdict | read | red | M |\n| WM-31 | assembly exception creator-time finding | fixture | read | survives lapse | M |\n| WM-31a | assembly exception | lapse | read | PM-only | M |\n| WM-32b | every workflow-entering peer task | intake batch at creation | read | red | M |\n| WM-35 | `work_model.md#parent-and-child-tasks`: an aggregate parent is not claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY`; its children are workflow-entering tasks | read | red | M |\n| WM-35a | every recurring workflow-entering task | intake batch at creation | read | red | M |\n| WM-39 | every ordinary workflow-entering peer task and every assembling task gets an intake batch at creation; aggregate parent is the exception; the assembly exception adds a persistent assembly exclusion | declared `pm` step owner | effect | red | M |\n",
 }
 
+# Keep the compact fixture's pinned semantic paragraphs identical to the live
+# corpus while leaving the rest of the fixture deliberately minimal.
+CORPUS["workflows.md"] = CORPUS["workflows.md"].replace(
+    "**Entry condition:** every workflow-entering task enters with its intake "
+    "batch and `ADDRESSED_BY` edge admitted atomically at creation. An aggregate "
+    "parent never enters a workflow; decision 84's assembly exception adds a "
+    "persistent `classify` hold.",
+    decision_84.INTAKE_ENTRY_PARAGRAPH,
+).replace("## intake\n", "## intake\n\n").replace("\n## feature", "\n\n## feature")
+CORPUS["work_model.md"] = CORPUS["work_model.md"].replace(
+    "The consequence worth naming has two forms, not one. An intake batch opens "
+    "in the admitted creation unit of the workflow-entering task, without a "
+    "predecessor verdict. Every successor batch is opened by a closing verdict.",
+    decision_84.BATCH_OPENING_PARAGRAPH,
+).replace(
+    "An **aggregate parent task is not claimable, never enters a workflow, and "
+    "has no intake batch or `ADDRESSED_BY` edge** — it is a grouping, and a batch "
+    "carries tasks that are executed, which an aggregate parent never is.",
+    decision_84.AGGREGATE_PARENT_MODEL_PARAGRAPH,
+).replace(
+    "### How a batch is formed, and what chooses its workflow\n",
+    "### How a batch is formed, and what chooses its workflow\n\n",
+).replace(
+    "persistent classify hold. The consequence worth naming",
+    "persistent classify hold.\n\nThe consequence worth naming",
+).replace(
+    "predicate must have matched.\n**A successor batch's tasks",
+    "predicate must have matched.\n\n**A successor batch's tasks",
+).replace(
+    "### Parent and child tasks\n",
+    "### Parent and child tasks\n\n",
+).replace(
+    "intake batch atomically at creation.\n### A recurring task",
+    "intake batch atomically at creation.\n\n### A recurring task",
+)
+CORPUS["scenarios.md"] = CORPUS["scenarios.md"].replace(
+    "**aggregate parent is the explicit workflow-entry exception: it is not "
+    "claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY` "
+    "edge.**",
+    decision_84.AGGREGATE_PARENT_SCENARIO_PARAGRAPH,
+).replace(
+    "## (f) A parent task with children in independent batches\n",
+    "## (f) A parent task with children in independent batches\n\n",
+).replace(
+    "stored nowhere.\n## (j)",
+    "stored nowhere.\n\n## (j)",
+)
+
 
 def write_corpus(root: Path) -> None:
     fdir = root / "docs" / "foundation"
@@ -97,7 +145,7 @@ def test_finding_schema_without_persistent_exclusion_fails(tmp_path: Path) -> No
 
 
 def test_workflow_assembly_mutant_fails(tmp_path: Path) -> None:
-    problems = mutate(tmp_path, "workflows.md", "decision 84's assembly exception", "every task")
+    problems = mutate(tmp_path, "workflows.md", "Decision 84's assembly exception", "every task")
     assert any("workflow-exception" in problem for problem in problems)
 
 
@@ -108,7 +156,7 @@ def test_ordinary_task_without_intake_batch_at_creation_mutant_fails(tmp_path: P
         "every workflow-entering task enters with its intake batch and `ADDRESSED_BY` edge admitted atomically at creation",
         "Every non-assembly task meets the no-intake-batch entry condition once, at creation",
     )
-    assert any("universal-entry" in problem for problem in problems)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
 
 
 def test_retired_scenario_no_batch_diagram_fails(tmp_path: Path) -> None:
@@ -313,6 +361,52 @@ def test_real_aggregate_parent_qualified_exception_fails(tmp_path: Path) -> None
         "is created**",
     )
     assert any("aggregate-parent-model" in problem for problem in problems)
+
+
+def test_real_intake_appended_contradiction_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "workflows.md",
+        "creation. Creation is publication",
+        "creation. Despite that sentence, a workflow-entering task need not receive "
+        "its intake batch or `ADDRESSED_BY` atomically at creation. Creation is "
+        "publication",
+    )
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_real_parent_model_appended_qualification_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "work_model.md",
+        "which an aggregate parent never is. This is the deliberate exception",
+        "which an aggregate parent never is. This exception lasts only until "
+        "publication; afterward the aggregate parent becomes claimable and enters "
+        "a workflow. This is the deliberate exception",
+    )
+    assert any("aggregate-parent-model" in problem for problem in problems)
+
+
+def test_real_batch_opening_appended_inversion_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "work_model.md",
+        "task, without a predecessor verdict. Every successor batch",
+        "task, without a predecessor verdict. Despite that sentence, an intake "
+        "batch may require a predecessor verdict. Every successor batch",
+    )
+    assert any("batch-opening-model" in problem for problem in problems)
+
+
+def test_real_parent_scenario_appended_qualification_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "scenarios.md",
+        "edge.** When a reader asks whether the parent is complete",
+        "edge.** This holds only before publication; afterward the parent may enter "
+        "a workflow. When a reader asks whether the parent is complete",
+    )
+    assert any("aggregate-parent-scenario" in problem for problem in problems)
 
 
 def test_wm27_closing_verdict_claim_applied_to_intake_fails(tmp_path: Path) -> None:

@@ -26,19 +26,57 @@ INTAKE_ATOMIC_ENTRY_CLAUSE = (
     "**Entry condition:** every workflow-entering task enters with its intake "
     "batch and `ADDRESSED_BY` edge admitted atomically at creation."
 )
+INTAKE_ENTRY_PARAGRAPH = (
+    INTAKE_ATOMIC_ENTRY_CLAUSE
+    + " Creation is publication (`work_model.md#the-transition-vocabulary`), so "
+    "this boundary is crossed once and no workflow-entering task enters intake "
+    "twice. The aggregate parent is the explicit exception: it is not claimable, "
+    "never enters a workflow, and has no intake batch. Decision 84's assembly "
+    "exception differs only by adding the persistent `classify` hold finding to "
+    "that same creation unit. A task is unrouted while its intake batch has no "
+    "closing `route` verdict; there is no separate unrouted state "
+    "(`work_model.md#intake-is-every-tasks-first-workflow`)."
+)
 BATCH_OPENING_CLAUSE = (
     "An intake batch opens in the admitted creation unit of the workflow-entering "
     "task, without a predecessor verdict."
+)
+BATCH_OPENING_PARAGRAPH = (
+    "The consequence worth naming has two forms, not one. "
+    + BATCH_OPENING_CLAUSE
+    + " Every successor batch is opened **by a principal's recorded conclusion**, "
+    "never by a process acting on its own reading of the record. That closing "
+    "verdict names the successor, so the decision has an author, a timestamp, and "
+    "a reason, and a reader asking why these tasks are in that later workflow is "
+    "answered by a conclusion rather than by inferring what some sweeper's "
+    "predicate must have matched."
 )
 AGGREGATE_PARENT_MODEL_CLAUSE = (
     "An **aggregate parent task is not claimable, never enters a workflow, and "
     "has no intake batch or `ADDRESSED_BY` edge** — it is a grouping, and a "
     "batch carries tasks that are executed, which an aggregate parent never is."
 )
+AGGREGATE_PARENT_MODEL_PARAGRAPH = (
+    "Children `PART_OF` an aggregate parent (at most one parent). Parent completion "
+    "is derived from children's terminal states. Children go through workflows "
+    "independently. "
+    + AGGREGATE_PARENT_MODEL_CLAUSE
+    + " This is the deliberate exception to the workflow-entry creation rule; "
+    "every child and every other workflow-entering peer task still opens its intake "
+    "batch atomically at creation."
+)
 AGGREGATE_PARENT_SCENARIO_CLAUSE = (
     "**aggregate parent is the explicit workflow-entry exception: it is not "
     "claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY` "
     "edge.**"
+)
+AGGREGATE_PARENT_SCENARIO_PARAGRAPH = (
+    "A parent task is created as the grouping of a piece of work; three child tasks "
+    "each carry a `PART_OF` edge to it. Each child is claimed, executed, and goes "
+    "through its own batch on its own schedule. The "
+    + AGGREGATE_PARENT_SCENARIO_CLAUSE
+    + " When a reader asks whether the parent is complete, the answer is derived "
+    "from the children's terminal states at that moment and is stored nowhere."
 )
 WM35_REQUIREMENT = (
     "`work_model.md#parent-and-child-tasks`: an aggregate parent is not claimable, "
@@ -73,6 +111,16 @@ def _section(text: str, start: str, end: str) -> str:
     return text[begin : stop if stop >= 0 else len(text)]
 
 
+def _paragraph_containing(text: str, marker: str) -> str:
+    normalized_marker = _normalize(marker)
+    matches = [
+        paragraph
+        for paragraph in re.split(r"\n\s*\n", text)
+        if normalized_marker in _normalize(paragraph)
+    ]
+    return matches[0] if len(matches) == 1 else ""
+
+
 def _require(label: str, text: str, groups: tuple[tuple[str, ...], ...]) -> list[str]:
     normalized = _normalize(text)
     missing = [
@@ -89,10 +137,13 @@ def _forbid(label: str, text: str, tokens: tuple[str, ...]) -> list[str]:
     return [f"decision-84-{label} — forbidden " + ", ".join(present)] if present else []
 
 
-def _require_exact_clause(label: str, text: str, clause: str) -> list[str]:
-    if _normalize(clause) in _normalize(text):
+def _require_exact_paragraph(
+    label: str, text: str, marker: str, expected: str
+) -> list[str]:
+    paragraph = _paragraph_containing(text, marker)
+    if _normalize(paragraph) == _normalize(expected):
         return []
-    return [f"decision-84-{label} — canonical clause changed"]
+    return [f"decision-84-{label} — canonical semantic paragraph changed"]
 
 
 def _require_exact_cell(label: str, cell: str, expected: str) -> list[str]:
@@ -279,30 +330,34 @@ def check(root: Path) -> list[str]:
             "task enters intake; batch record opens",
         ),
     )
-    problems += _require_exact_clause(
+    problems += _require_exact_paragraph(
         "intake-workflow-atomic-entry",
         intake_workflow,
         INTAKE_ATOMIC_ENTRY_CLAUSE,
+        INTAKE_ENTRY_PARAGRAPH,
     )
-    problems += _require_exact_clause(
+    problems += _require_exact_paragraph(
         "aggregate-parent-model",
         parent_model,
         AGGREGATE_PARENT_MODEL_CLAUSE,
+        AGGREGATE_PARENT_MODEL_PARAGRAPH,
     )
-    problems += _require_exact_clause(
+    problems += _require_exact_paragraph(
         "aggregate-parent-scenario",
         scenario_f,
         AGGREGATE_PARENT_SCENARIO_CLAUSE,
+        AGGREGATE_PARENT_SCENARIO_PARAGRAPH,
     )
     problems += _require_exact_cell(
         "aggregate-parent-wm-35",
         _table_cell(wm35, 1),
         WM35_REQUIREMENT,
     )
-    problems += _require_exact_clause(
+    problems += _require_exact_paragraph(
         "batch-opening-model",
         batch_opening_clause,
         BATCH_OPENING_CLAUSE,
+        BATCH_OPENING_PARAGRAPH,
     )
     problems += _require(
         "wm-27",
