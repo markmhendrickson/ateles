@@ -17,6 +17,35 @@ from pathlib import Path
 
 FOUNDATION_DIR = Path("docs/foundation")
 
+WM13_REQUIREMENT = (
+    "`work_model.md#intake-is-every-tasks-first-workflow`: every "
+    "workflow-entering task atomically gets one intake batch and `ADDRESSED_BY` "
+    "at creation; an aggregate parent gets neither and is not claimable"
+)
+INTAKE_ATOMIC_ENTRY_CLAUSE = (
+    "**Entry condition:** every workflow-entering task enters with its intake "
+    "batch and `ADDRESSED_BY` edge admitted atomically at creation."
+)
+BATCH_OPENING_CLAUSE = (
+    "An intake batch opens in the admitted creation unit of the workflow-entering "
+    "task, without a predecessor verdict."
+)
+AGGREGATE_PARENT_MODEL_CLAUSE = (
+    "An **aggregate parent task is not claimable, never enters a workflow, and "
+    "has no intake batch or `ADDRESSED_BY` edge** — it is a grouping, and a "
+    "batch carries tasks that are executed, which an aggregate parent never is."
+)
+AGGREGATE_PARENT_SCENARIO_CLAUSE = (
+    "**aggregate parent is the explicit workflow-entry exception: it is not "
+    "claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY` "
+    "edge.**"
+)
+WM35_REQUIREMENT = (
+    "`work_model.md#parent-and-child-tasks`: an aggregate parent is not claimable, "
+    "never enters a workflow, and has no intake batch or `ADDRESSED_BY`; its "
+    "children are workflow-entering tasks"
+)
+
 
 class CorpusProblem(Exception):
     """The decision-84 corpus files are missing or unreadable."""
@@ -32,6 +61,10 @@ def _table_cell(row: str, index: int) -> str:
     return cells[index] if index < len(cells) else ""
 
 
+def _normalize(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
 def _section(text: str, start: str, end: str) -> str:
     begin = text.find(start)
     if begin < 0:
@@ -41,7 +74,7 @@ def _section(text: str, start: str, end: str) -> str:
 
 
 def _require(label: str, text: str, groups: tuple[tuple[str, ...], ...]) -> list[str]:
-    normalized = " ".join(text.lower().split())
+    normalized = _normalize(text)
     missing = [
         "/".join(group)
         for group in groups
@@ -51,9 +84,21 @@ def _require(label: str, text: str, groups: tuple[tuple[str, ...], ...]) -> list
 
 
 def _forbid(label: str, text: str, tokens: tuple[str, ...]) -> list[str]:
-    normalized = " ".join(text.lower().split())
+    normalized = _normalize(text)
     present = [token for token in tokens if token in normalized]
     return [f"decision-84-{label} — forbidden " + ", ".join(present)] if present else []
+
+
+def _require_exact_clause(label: str, text: str, clause: str) -> list[str]:
+    if _normalize(clause) in _normalize(text):
+        return []
+    return [f"decision-84-{label} — canonical clause changed"]
+
+
+def _require_exact_cell(label: str, cell: str, expected: str) -> list[str]:
+    if _normalize(cell) == _normalize(expected):
+        return []
+    return [f"decision-84-{label} — canonical requirement cell changed"]
 
 
 def check(root: Path) -> list[str]:
@@ -234,59 +279,30 @@ def check(root: Path) -> list[str]:
             "task enters intake; batch record opens",
         ),
     )
-    problems += _require(
+    problems += _require_exact_clause(
         "intake-workflow-atomic-entry",
         intake_workflow,
-        (
-            ("workflow-entering task enters with its intake batch",),
-            ("`addressed_by` edge",),
-            ("admitted atomically at creation",),
-        ),
+        INTAKE_ATOMIC_ENTRY_CLAUSE,
     )
-    problems += _forbid(
-        "intake-workflow-atomic-entry",
-        intake_workflow,
-        ("not admitted atomically", "non-atomically", "admitted later"),
-    )
-    problems += _require(
+    problems += _require_exact_clause(
         "aggregate-parent-model",
         parent_model,
-        (
-            ("aggregate parent",),
-            ("never enters a workflow",),
-            ("no intake batch or `addressed_by` edge",),
-            ("not claimable",),
-        ),
+        AGGREGATE_PARENT_MODEL_CLAUSE,
     )
-    problems += _require(
+    problems += _require_exact_clause(
         "aggregate-parent-scenario",
         scenario_f,
-        (
-            ("aggregate parent",),
-            ("never enters a workflow",),
-            ("no intake batch or `addressed_by` edge",),
-            ("not claimable",),
-        ),
+        AGGREGATE_PARENT_SCENARIO_CLAUSE,
     )
-    problems += _require(
+    problems += _require_exact_cell(
         "aggregate-parent-wm-35",
-        wm35,
-        (
-            ("aggregate parent",),
-            ("never enters a workflow",),
-            ("no intake batch or `addressed_by`",),
-            ("not claimable",),
-        ),
+        _table_cell(wm35, 1),
+        WM35_REQUIREMENT,
     )
-    problems += _require(
+    problems += _require_exact_clause(
         "batch-opening-model",
         batch_opening_clause,
-        (
-            ("intake batch",),
-            ("without a predecessor verdict",),
-            ("successor batch",),
-            ("closing verdict",),
-        ),
+        BATCH_OPENING_CLAUSE,
     )
     problems += _require(
         "wm-27",
@@ -338,21 +354,10 @@ def check(root: Path) -> list[str]:
         texts["scenarios.md"],
         (("assembling task is the ruled exception",), ("resolved `pm` step owner",)),
     )
-    problems += _require(
+    problems += _require_exact_cell(
         "wm-13-atomic-entry",
         wm13_requirement,
-        (
-            ("workflow-entering",),
-            ("atomically",),
-            ("intake batch",),
-            ("`addressed_by`",),
-            ("at creation",),
-        ),
-    )
-    problems += _forbid(
-        "wm-13-atomic-entry",
-        wm13_requirement,
-        ("not atomically", "non-atomically", "eventually", "after creation"),
+        WM13_REQUIREMENT,
     )
     problems += _require(
         "wm-14a",

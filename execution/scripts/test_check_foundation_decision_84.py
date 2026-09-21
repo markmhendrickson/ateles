@@ -15,11 +15,11 @@ import check_foundation_decision_84 as decision_84  # noqa: E402
 
 CORPUS = {
     "conformance.md": "| 84 | question | pointer | dependency | **ruled**: every workflow-entering task gets an intake batch; an aggregate parent is exempt; persistent assembly exclusion survives a lapsed lease; creation grants no lease; only the `pm` step owner claims |\n",
-    "work_model.md": "### Intake is every task's first workflow\nEvery workflow-entering task's intake batch opens at creation; an aggregate parent task never enters a workflow and has no intake batch.\n### What distinguishes a task being assembled from one intake has not reached\nFor a workflow-entering task: persistent assembly exclusion; lease lapse; creation grants no lease; the declared `pm` step owner; multi-agent assembly. The creating principal receives no `classify` lease by being the creator. Contributors gain no lease or execution privilege.\n### What a claim predicate treats as claimable\nThe assembly exclusion exposes its open `classify` step only to a principal that resolves as the declaration's `pm` step owner.\n### A task is live when some principal could claim it now\n### How a batch is formed, and what chooses its workflow\nEvery workflow-entering task has an intake batch on creation; an assembling task adds a persistent classify hold. The consequence worth naming has two forms, not one. An intake batch opens at task creation without a predecessor verdict; only a successor batch is opened by a closing verdict.\n**A successor batch's tasks are chosen by its verdict.**\n### A batch may hold on a condition discovered mid-flight\nThe assembly exception admits its creator-time finding before a step owner or held lease exists; its persistent assembly exclusion survives the lease lapse.\n### A batch may depend on a task it created\n### Parent and child tasks\nAn aggregate parent task never enters a workflow and has no intake batch or `ADDRESSED_BY` edge; it is not claimable.\n### A recurring task is one live instance, and its completion creates the next\n### Where tasks come from: every source, indexed\nEvery workflow-entering task source ends at the universal workflow entry: a task with its intake batch at creation; an aggregate parent is the exception.\n### An intake rule turns a described change in the record into a task, and nothing else\n",
+    "work_model.md": "### Intake is every task's first workflow\nEvery workflow-entering task's intake batch opens at creation; an aggregate parent task never enters a workflow and has no intake batch.\n### What distinguishes a task being assembled from one intake has not reached\nFor a workflow-entering task: persistent assembly exclusion; lease lapse; creation grants no lease; the declared `pm` step owner; multi-agent assembly. The creating principal receives no `classify` lease by being the creator. Contributors gain no lease or execution privilege.\n### What a claim predicate treats as claimable\nThe assembly exclusion exposes its open `classify` step only to a principal that resolves as the declaration's `pm` step owner.\n### A task is live when some principal could claim it now\n### How a batch is formed, and what chooses its workflow\nEvery workflow-entering task has an intake batch on creation; an assembling task adds a persistent classify hold. The consequence worth naming has two forms, not one. An intake batch opens in the admitted creation unit of the workflow-entering task, without a predecessor verdict. Every successor batch is opened by a closing verdict.\n**A successor batch's tasks are chosen by its verdict.**\n### A batch may hold on a condition discovered mid-flight\nThe assembly exception admits its creator-time finding before a step owner or held lease exists; its persistent assembly exclusion survives the lease lapse.\n### A batch may depend on a task it created\n### Parent and child tasks\nAn **aggregate parent task is not claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY` edge** — it is a grouping, and a batch carries tasks that are executed, which an aggregate parent never is.\n### A recurring task is one live instance, and its completion creates the next\n### Where tasks come from: every source, indexed\nEvery workflow-entering task source ends at the universal workflow entry: a task with its intake batch at creation; an aggregate parent is the exception.\n### An intake rule turns a described change in the record into a task, and nothing else\n",
     "data_model.md": "| task | every workflow-entering task | intake batch at creation; aggregate parent has none |\nA creator-time assembly finding is a persistent assembly exclusion that survives lease lapse and exposes only the declaration-resolved `pm` owner.\n",
-    "workflows.md": "## intake\nEvery workflow-entering task enters with its intake batch and `ADDRESSED_BY` edge admitted atomically at creation; an aggregate parent never enters a workflow; decision 84's assembly exception adds a persistent `classify` hold.\n## feature\nEvery workflow-entering task is mentioned here too, but this section cannot satisfy intake's contract.\n",
-    "scenarios.md": "## (f) A parent task with children in independent batches\nAn aggregate parent task never enters a workflow and has no intake batch or `ADDRESSED_BY` edge; it is not claimable.\n## (j) A task created, routed by intake, and entering its successor\nEvery workflow-entering task has its intake batch at creation; an assembling task is the ruled exception only in carrying a persistent assembly exclusion, and only the resolved `pm` step owner claims.\nC[task and intake batch created atomically] --> I[intake batch: unrouted with no route verdict]\nF -.->|FOLLOWS| I\n## What the scenarios do not show\n",
-    "conformance_suite.md": "| WM-13 | every workflow-entering task atomically gets its intake batch and `ADDRESSED_BY` at creation | read | red | M |\n| WM-14 | every workflow-entering child task | intake batch on creation | read | red | M |\n| WM-14a | every workflow-entering task | persistent hold | lapse and transfer | creator and declaration-resolved `pm` step owner | mutant |\n| WM-21 | every daemon-created workflow-entering task | intake batch at creation | read | red | M |\n| WM-27 | intake batch opens at creation without a predecessor verdict; every successor batch is opened by a closing verdict | read | red | M |\n| WM-31 | assembly exception creator-time finding | fixture | read | survives lapse | M |\n| WM-31a | assembly exception | lapse | read | PM-only | M |\n| WM-32b | every workflow-entering peer task | intake batch at creation | read | red | M |\n| WM-35 | aggregate parent never enters a workflow, has no intake batch or `ADDRESSED_BY`, and is not claimable | read | red | M |\n| WM-35a | every recurring workflow-entering task | intake batch at creation | read | red | M |\n| WM-39 | every ordinary workflow-entering peer task and every assembling task gets an intake batch at creation; aggregate parent is the exception; the assembly exception adds a persistent assembly exclusion | declared `pm` step owner | effect | red | M |\n",
+    "workflows.md": "## intake\n**Entry condition:** every workflow-entering task enters with its intake batch and `ADDRESSED_BY` edge admitted atomically at creation. An aggregate parent never enters a workflow; decision 84's assembly exception adds a persistent `classify` hold.\n## feature\nEvery workflow-entering task is mentioned here too, but this section cannot satisfy intake's contract.\n",
+    "scenarios.md": "## (f) A parent task with children in independent batches\n**aggregate parent is the explicit workflow-entry exception: it is not claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY` edge.**\n## (j) A task created, routed by intake, and entering its successor\nEvery workflow-entering task has its intake batch at creation; an assembling task is the ruled exception only in carrying a persistent assembly exclusion, and only the resolved `pm` step owner claims.\nC[task and intake batch created atomically] --> I[intake batch: unrouted with no route verdict]\nF -.->|FOLLOWS| I\n## What the scenarios do not show\n",
+    "conformance_suite.md": "| WM-13 | `work_model.md#intake-is-every-tasks-first-workflow`: every workflow-entering task atomically gets one intake batch and `ADDRESSED_BY` at creation; an aggregate parent gets neither and is not claimable | read | red | M |\n| WM-14 | every workflow-entering child task | intake batch on creation | read | red | M |\n| WM-14a | every workflow-entering task | persistent hold | lapse and transfer | creator and declaration-resolved `pm` step owner | mutant |\n| WM-21 | every daemon-created workflow-entering task | intake batch at creation | read | red | M |\n| WM-27 | intake batch opens at creation without a predecessor verdict; every successor batch is opened by a closing verdict | read | red | M |\n| WM-31 | assembly exception creator-time finding | fixture | read | survives lapse | M |\n| WM-31a | assembly exception | lapse | read | PM-only | M |\n| WM-32b | every workflow-entering peer task | intake batch at creation | read | red | M |\n| WM-35 | `work_model.md#parent-and-child-tasks`: an aggregate parent is not claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY`; its children are workflow-entering tasks | read | red | M |\n| WM-35a | every recurring workflow-entering task | intake batch at creation | read | red | M |\n| WM-39 | every ordinary workflow-entering peer task and every assembling task gets an intake batch at creation; aggregate parent is the exception; the assembly exception adds a persistent assembly exclusion | declared `pm` step owner | effect | red | M |\n",
 }
 
 
@@ -105,7 +105,7 @@ def test_ordinary_task_without_intake_batch_at_creation_mutant_fails(tmp_path: P
     problems = mutate(
         tmp_path,
         "workflows.md",
-        "Every workflow-entering task enters with its intake batch and `ADDRESSED_BY` edge admitted atomically at creation",
+        "every workflow-entering task enters with its intake batch and `ADDRESSED_BY` edge admitted atomically at creation",
         "Every non-assembly task meets the no-intake-batch entry condition once, at creation",
     )
     assert any("universal-entry" in problem for problem in problems)
@@ -126,7 +126,7 @@ def test_aggregate_parent_forced_into_intake_fails(tmp_path: Path) -> None:
     problems = mutate(
         tmp_path,
         "work_model.md",
-        "An aggregate parent task never enters a workflow and has no intake batch or `ADDRESSED_BY` edge; it is not claimable.",
+        "An **aggregate parent task is not claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY` edge** — it is a grouping, and a batch carries tasks that are executed, which an aggregate parent never is.",
         "An aggregate parent task enters intake and receives an intake batch.",
     )
     assert any("aggregate-parent" in problem for problem in problems)
@@ -136,7 +136,7 @@ def test_intake_atomic_entry_is_scoped_to_intake_workflow(tmp_path: Path) -> Non
     problems = mutate(
         tmp_path,
         "workflows.md",
-        "Every workflow-entering task enters with its intake batch and `ADDRESSED_BY` edge admitted atomically at creation",
+        "every workflow-entering task enters with its intake batch and `ADDRESSED_BY` edge admitted atomically at creation",
         "Tasks may enter intake later without atomic admission",
     )
     assert any("intake-workflow-atomic-entry" in problem for problem in problems)
@@ -146,8 +146,8 @@ def test_aggregate_parent_with_addressed_by_edge_fails(tmp_path: Path) -> None:
     problems = mutate(
         tmp_path,
         "work_model.md",
-        "never enters a workflow and has no intake batch or `ADDRESSED_BY` edge",
-        "never enters a workflow and has no intake batch but does carry an `ADDRESSED_BY` edge",
+        "never enters a workflow, and has no intake batch or `ADDRESSED_BY` edge",
+        "never enters a workflow, and has no intake batch but does carry an `ADDRESSED_BY` edge",
     )
     assert any("aggregate-parent-model" in problem for problem in problems)
 
@@ -156,7 +156,7 @@ def test_wm13_eventual_intake_without_edge_fails(tmp_path: Path) -> None:
     problems = mutate(
         tmp_path,
         "conformance_suite.md",
-        "every workflow-entering task atomically gets its intake batch and `ADDRESSED_BY` at creation",
+        "every workflow-entering task atomically gets one intake batch and `ADDRESSED_BY` at creation",
         "every workflow-entering task gets its intake batch eventually",
     )
     assert any("wm-13-atomic-entry" in problem for problem in problems)
@@ -246,6 +246,75 @@ def test_real_batch_opening_predecessor_inversion_fails(tmp_path: Path) -> None:
     assert any("batch-opening-model" in problem for problem in problems)
 
 
+def test_real_wm13_fails_to_atomic_inversion_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "conformance_suite.md",
+        "every workflow-entering task atomically gets one intake batch and "
+        "`ADDRESSED_BY` at creation",
+        "every workflow-entering task fails to atomically get one intake batch and "
+        "`ADDRESSED_BY` at creation",
+    )
+    assert any("wm-13-atomic-entry" in problem for problem in problems)
+
+
+def test_real_wm13_no_addressed_by_inversion_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "conformance_suite.md",
+        "every workflow-entering task atomically gets one intake batch and "
+        "`ADDRESSED_BY` at creation",
+        "every workflow-entering task atomically gets one intake batch and no "
+        "`ADDRESSED_BY` at creation",
+    )
+    assert any("wm-13-atomic-entry" in problem for problem in problems)
+
+
+def test_real_intake_never_atomic_inversion_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "workflows.md",
+        "`ADDRESSED_BY` edge admitted atomically at\ncreation",
+        "`ADDRESSED_BY` edge is never admitted atomically at\ncreation",
+    )
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_real_intake_creation_or_later_inversion_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "workflows.md",
+        "`ADDRESSED_BY` edge admitted atomically at\ncreation",
+        "`ADDRESSED_BY` edge admitted atomically at\ncreation or later",
+    )
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_real_batch_opening_not_without_inversion_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "work_model.md",
+        "the workflow-entering task, without a predecessor verdict. "
+        "Every successor batch is opened",
+        "the workflow-entering task, not without a predecessor verdict. "
+        "Every successor batch is opened",
+    )
+    assert any("batch-opening-model" in problem for problem in problems)
+
+
+def test_real_aggregate_parent_qualified_exception_fails(tmp_path: Path) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "work_model.md",
+        "is not claimable,\nnever enters a workflow, and has no intake batch or "
+        "`ADDRESSED_BY` edge**",
+        "is not claimable until publication,\nnever enters a workflow without an "
+        "intake batch, and has no intake batch or `ADDRESSED_BY` edge until one "
+        "is created**",
+    )
+    assert any("aggregate-parent-model" in problem for problem in problems)
+
+
 def test_wm27_closing_verdict_claim_applied_to_intake_fails(tmp_path: Path) -> None:
     problems = mutate(
         tmp_path,
@@ -269,7 +338,7 @@ def test_scenario_intake_predecessor_node_must_be_defined(tmp_path: Path) -> Non
 @pytest.mark.parametrize(
     "row, phrase",
     (
-        ("WM-13", "atomically gets its intake batch and `ADDRESSED_BY` at creation"),
+        ("WM-13", "atomically gets one intake batch and `ADDRESSED_BY` at creation"),
         ("WM-14", "intake batch on creation"),
         ("WM-21", "intake batch at creation"),
         ("WM-32b", "intake batch at creation"),
