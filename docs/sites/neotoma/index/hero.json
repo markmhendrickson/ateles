@@ -1,8 +1,8 @@
 {
   "layout": "record_hero",
   "category": "The system of record for AI agents",
-  "headline": "Delegate more than a session can hold.",
-  "body": "Neotoma gives your agents a durable, correctable record of facts, decisions, provenance, and disagreement. They can take on longer-lived work without asking you to re-upload context, repeat a correction, or arbitrate conflicting recollections by hand.",
+  "headline": "The system of record for AI agents.",
+  "body": "Persistent, connected context agents can create, retrieve, and update—with provenance intact.",
   "primary_cta": {"label": "Install Neotoma", "href": "/install/"},
   "secondary_cta": {"label": "Evaluate the fit", "href": "/evaluate/"},
   "concept_film_brief": "content/neotoma/index/concept-film.json",

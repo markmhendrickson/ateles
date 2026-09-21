@@ -53,10 +53,11 @@
     "no_external_runtime_dependency": true
   },
   "asset": {
-    "status": "integrated",
-    "video_src": "/assets/ateles/hero-concept.webm",
-    "fallback_src": "/assets/ateles/hero-concept.mp4",
-    "poster_src": "/assets/ateles/hero-concept.avif",
+    "status": "exploratory_secondary_asset",
+    "enabled_in_hero": false,
+    "video_src": "",
+    "fallback_src": "",
+    "poster_src": "",
     "repository_video_path": "execution/scripts/site_generator/assets/ateles/hero-concept.webm",
     "repository_fallback_path": "execution/scripts/site_generator/assets/ateles/hero-concept.mp4",
     "repository_poster_path": "execution/scripts/site_generator/assets/ateles/hero-concept.avif",

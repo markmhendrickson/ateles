@@ -15,6 +15,7 @@ Run with: pytest execution/scripts/site_generator/test_build_site.py -v
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -766,10 +767,15 @@ def test_product_identities_render_distinct_signature_devices(tmp_path):
 
     assert neotoma_tokens["_source"]["entity_id"] == "ent_746b1d7c717e7780e7943782"
     assert ateles_tokens["_source"]["entity_id"] == "ent_9158c8b39e0f437fdb2a86de"
-    assert "record-demo" in neotoma
-    assert "record-old" in neotoma
-    assert "organization-map" in ateles
-    assert "role-node" in ateles
+    assert "record-graph" in neotoma
+    assert "graph-edge" in neotoma
+    assert "CREATE" in neotoma
+    assert "UPDATE" in neotoma
+    assert "RETRIEVE" in neotoma
+    assert "swarm-field" in ateles
+    assert "swarm-member" in ateles
+    assert "handoff-signal" in ateles
+    assert "org-link" not in ateles
     assert "the swarm" in ateles
     assert "swarm-mark" in ateles
     assert "seal-board" not in ateles
@@ -777,6 +783,44 @@ def test_product_identities_render_distinct_signature_devices(tmp_path):
     # authorization/checkpoint result, not as the product symbol.
     assert "authorization-seal" in ateles
     assert "grant-state" in ateles
+    assert 'data-concept-film-active="true"' in neotoma
+    assert 'data-concept-film-active="false"' in ateles
+    assert "<video" in neotoma
+    assert "<video" not in ateles
+    assert (tmp_path / "neotoma/assets/neotoma/hero-concept.webm").exists()
+    assert not (tmp_path / "ateles/assets/ateles/hero-concept.webm").exists()
+    assert "prefers-reduced-motion: reduce" in neotoma
+    assert ".concept-film-media { display: none; }" in neotoma
+    assert "The system of record for AI agents." in neotoma
+    assert (
+        "Persistent, connected context agents can create, retrieve, and update—with provenance intact."
+        in neotoma
+    )
+    assert "Delegate more than a session can hold." not in neotoma
+    assert "The operating system for agent organizations." in ateles
+    assert (
+        "Give agents distinct roles, bounded authority, and shared direction—so the organization keeps moving without constant supervision."
+        in ateles
+    )
+    assert ateles.count("Delegate outcomes, not every next step.") == 1
+
+
+@pytest.mark.parametrize("product", ["neotoma", "ateles"])
+def test_every_major_section_is_visual_first_with_contextual_depth_link(
+    tmp_path, product
+):
+    rendered, blockers = build_site.render_site(product)
+    assert blockers == []
+    for rel, document in rendered.items():
+        if isinstance(document, bytes):
+            continue
+        sections = re.findall(r"(?s)(<section\b[^>]*>.*?</section>)", document)
+        assert sections, rel
+        for section in sections:
+            if 'id="hero"' in section:
+                continue
+            assert "section-visual" in section, rel
+        assert ">Learn more<" not in document
 
 
 def test_selected_markdown_heading_must_exist(tmp_repo):

@@ -4,7 +4,7 @@
     "border_radius": "b94eb877-e86f-4167-3477-00bd1817342f",
     "color_palette": "f576c952-4444-48ba-57ed-9b6fc77bbe86",
     "design_system_name": "5be50f72-dd0c-fa69-d02c-bbc98f6982dc",
-    "positioning_principles": "957fbf0c-7eb1-2c81-6260-3b2e00909d38",
+    "positioning_principles": "bf236bd9-e563-0a5d-09a8-08c7d71287d2",
     "scope": "60aa8ef1-e29b-fb16-60e2-adaf4b70115a",
     "spacing_system": "b94eb877-e86f-4167-3477-00bd1817342f",
     "type_scale": "30ea4d91-18e3-6bd8-61e8-a26ac4ac7005"
@@ -12,7 +12,7 @@
   "_source": {
     "entity_id": "ent_9158c8b39e0f437fdb2a86de",
     "entity_type": "design_system",
-    "fetched_at": "2026-09-21T15:42:13+00:00",
+    "fetched_at": "2026-09-21T16:12:07+00:00",
     "product": "ateles"
   },
   "identity": {
@@ -32,15 +32,15 @@
     },
     "design_system_name": "Ateles visual identity \u2014 the swarm",
     "positioning_principles": [
-      "Organizational properties become visual stories rather than implementation prose: named roles are nodes; relationships are labeled connections; coordinated execution is a visible handoff path; priority context is a mission-to-task chain; intervention points are explicit checkpoints.",
-      "Swarm (primary symbol): an abstract constellation of distinct, semi-autonomous roles coordinating around shared work and mission. A compact swarm mark uses several differentiated nodes and one or two directional paths so it remains recognizable at logo and navigation size; the homepage expands the same grammar into a richer role, relationship, and handoff network.",
-      "The swarm names Ateles-specific collective behavior; the organization is the product promise. The visual must feel coordinated and adaptive, while authority, governance, and accountability provide the structure that makes the collective trustworthy.",
-      "Relationship before authority marker: the swarm network carries the brand recognition. A small seal may appear only beside a concrete authorization, commitment, approval, or completed checkpoint; it annotates state and never becomes the logo or hero object.",
+      "Organizational properties become visual stories rather than implementation prose: named roles are differentiated swarm members; coordinated execution appears as temporary signals and short handoffs; priority context is a mission-to-task sequence; intervention points are explicit checkpoints.",
+      "Swarm (primary symbol): an abstract constellation of distinct, semi-autonomous roles coordinating through motion, proximity, signals, and temporary handoffs around shared purpose. The mark remains recognizable at navigation size and expands into a cinematic field without permanent connecting edges or a central hub.",
+      "The swarm names Ateles-specific collective behavior; the organization is the product promise. The visual feels coordinated and adaptive, while authority, governance, and accountability provide the structure that makes the collective trustworthy.",
+      "Swarm before authority marker: differentiated members and their temporary coordination carry brand recognition. A small seal appears only beside a concrete authorization, commitment, approval, or completed checkpoint; it annotates state and never becomes the logo or hero object.",
       "Public labels use ordinary organizational language: role, responsibility, scope, handoff, current priority, needs review, approved, and paused. Never display internal IDs, entity types, decision keys, repository filenames, code-call names, phase bookkeeping, or unexplained product vocabulary.",
-      "Coordination rhythm: connecting rules, orbit-like spacing, differentiated nodes, and restrained motion show work passing between accountable roles. The static graph remains complete when motion is reduced.",
-      "Approval and escalation appear as structural proof: distinct people or roles show who must agree; a stopped path shows where work waits; an escalation path returns a consequential decision to the operator. Phrase thresholds in plain language, such as \u201ctwo of three approve\u201d.",
-      "Color is semantic: rust traces active relationships and handoffs; green marks an active authorization; withdrawn or paused states stay visually separate. Avoid ambient seal washes and generic SaaS gradients.",
-      "Hero concept film: a silent 6\u201310 second cinematic loop may expand the swarm mark into differentiated roles, shared purpose, visible handoffs, one bounded checkpoint, and resumed coordinated work. Copy remains in a separate split-hero column. The code-native organization network is the poster and reduced-motion fallback and remains the load-bearing visual. No literal creatures, robots, hives, honeycomb, or anonymous neural mesh."
+      "Coordination rhythm: proximity, differentiated shapes, restrained member motion, and short-lived signals show work passing between accountable roles. Static reduced-motion views preserve clustering, role difference, shared direction, and checkpoints without drawing a permanent graph.",
+      "Approval and escalation appear as structural proof: a temporary handoff pauses at a bounded checkpoint, a consequential decision returns to the operator, and collective action visibly resumes. Phrase thresholds in plain language.",
+      "Color is semantic: rust marks active but temporary coordination signals; green marks an active authorization or resolved checkpoint; withdrawn or paused states stay visually separate. Avoid ambient seal washes and generic SaaS gradients.",
+      "Hero cinema is the preferred primary medium once the visual semantics are correct: a silent 6\u201310 second loop should show autonomous differentiated members self-organizing, exchanging work through temporary signals, pausing at one bounded checkpoint, and continuing\u2014without permanent edges, a central hub, literal creatures, robots, hives, honeycomb, or anonymous neural mesh. Until that replacement exists, the code-native swarm takeover is primary and the current connected-node film remains exploratory only."
     ],
     "scope": "Ateles product pages only (distinct from the shared structural design system, which this identity does not replace). The primary symbol is a swarm: many distinct, semi-autonomous human and agent roles coordinating around shared work and mission. Render it as an abstract, differentiated node-and-path mark that remains recognizable in the navigation and expands into a richer organization network in the hero. Never use literal insects, monkeys, spiders, hives, honeycomb, or an anonymous neural-network mesh. The organization is the public product promise; authority and governance are the structure that makes coordinated action legitimate. The authorization seal is secondary: a compact state marker applied only to a specific grant, commitment, approval, or completed checkpoint. Ateles remains a sibling, not a twin, of Neotoma: shared spacing and restraint, different symbolic grammar.",
     "spacing_system": {

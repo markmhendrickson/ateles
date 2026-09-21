@@ -1,8 +1,8 @@
 {
   "layout": "network_hero",
   "category": "The operating system for agent organizations",
-  "headline": "Delegate outcomes, not every next step.",
-  "body": "Ateles gives role-specific agents an organization to work within: named relationships, explicit authority, high-level context, coordinated execution, and checkpoints only when a decision genuinely needs you. That is robust organizational design for agents.",
+  "headline": "The operating system for agent organizations.",
+  "body": "Give agents distinct roles, bounded authority, and shared direction—so the organization keeps moving without constant supervision.",
   "primary_cta": {"label": "Read the design", "href": "/design/"},
   "secondary_cta": {"label": "Compare approaches", "href": "/compare/"},
   "concept_film_brief": "content/ateles/index/concept-film.json",
