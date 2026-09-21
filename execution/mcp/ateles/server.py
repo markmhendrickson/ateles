@@ -37,6 +37,7 @@ Transport: stdio (launched by Claude Code as an MCP server subprocess).
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -640,7 +641,24 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
     return result
 
 
-def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
+def _entity_type_of(data: dict) -> str:
+    """Return the declared entity type, or empty when the read is ambiguous."""
+    return str(data.get("entity_type") or data.get("type") or "").strip().lower()
+
+
+async def _consume_checkpoint_resolution(checkpoint_id: str, snapshot: dict) -> None:
+    """Run the existing Apis checkpoint consumer in-process."""
+    daemon_dir = Path(__file__).resolve().parents[2] / "daemons" / "apis"
+    if str(daemon_dir) not in sys.path:
+        sys.path.insert(0, str(daemon_dir))
+
+    import apis as apis_daemon
+
+    notifier = apis_daemon.Notifier.from_neotoma()
+    await apis_daemon.handle_checkpoint_brief(checkpoint_id, snapshot, notifier)
+
+
+async def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
     action_lower = action.strip().lower()
     if action_lower not in ("approve", "reject"):
         return {"error": f"action must be 'approve' or 'reject', got '{action}'"}
@@ -648,6 +666,11 @@ def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
     data = _get(f"/entities/{checkpoint_id}")
     if data is None:
         return {"error": f"checkpoint {checkpoint_id} not found or Neotoma unreachable"}
+    if _entity_type_of(data) != "checkpoint_brief":
+        return {
+            "error": f"entity {checkpoint_id} is not a checkpoint_brief",
+            "checkpoint_id": checkpoint_id,
+        }
 
     snap = _snapshot_of(data)
     current_status = str(snap.get("status", "")).strip().lower()
@@ -675,15 +698,47 @@ def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
     if action_lower == "reject" and task_id:
         _correct(task_id, "task", "status", "declined", f"decline-swarm-harness-{task_id}")
 
+    action_taken = "rejected — task marked declined"
+    if action_lower == "approve":
+        # Read the write back before releasing anything. The original defect
+        # returned success after the correction request even when no consumer
+        # had acted on the approved brief.
+        resolved_data = _get(f"/entities/{checkpoint_id}")
+        resolved_snap = _snapshot_of(resolved_data or {})
+        if (
+            resolved_data is not None
+            and _entity_type_of(resolved_data) == "checkpoint_brief"
+            and str(resolved_snap.get("status", "")).strip().lower() == "approved"
+        ):
+            await _consume_checkpoint_resolution(checkpoint_id, resolved_snap)
+
+        # Claim a release only when the task itself proves the consumer reached
+        # ROUTED and cleared the old hold reason. A 2xx is not that proof.
+        task_data = _get(f"/entities/{task_id}") if task_id else None
+        task_snap = _snapshot_of(task_data or {})
+        same_tenant = not (
+            resolved_snap.get("user_id")
+            and task_snap.get("user_id")
+            and resolved_snap.get("user_id") != task_snap.get("user_id")
+        )
+        if (
+            task_data is not None
+            and _entity_type_of(task_data) == "task"
+            and same_tenant
+            and str(task_snap.get("status", "")).strip().lower() == "routed"
+            and task_snap.get("blocked_reason") == ""
+        ):
+            action_taken = "approved — task re-dispatched"
+        elif str(resolved_snap.get("gate_action", "")).strip().lower() == "operator_only":
+            action_taken = "approved — operator-only checkpoint recorded; no agent dispatch"
+        else:
+            action_taken = "approved — task release not confirmed by read-back"
+
     return {
         "checkpoint_id": checkpoint_id,
         "new_status": new_status,
         "task_entity_id": task_id,
-        "action_taken": (
-            "approved — dispatcher will re-dispatch"
-            if action_lower == "approve"
-            else "rejected — task marked declined"
-        ),
+        "action_taken": action_taken,
     }
 
 
@@ -1472,7 +1527,10 @@ TOOLS = [
         description=(
             "Approves or rejects a pending checkpoint_brief by entity ID. Validates "
             "that the checkpoint is awaiting_operator and has not already been "
-            "dispatched. On rejection, also marks the referenced task as declined."
+            "dispatched. Approval releases only swarm-executable plan checkpoints "
+            "through the existing Apis consumer; operator_only approvals record the "
+            "decision without dispatching an agent. On rejection, also marks the "
+            "referenced task as declined."
         ),
         inputSchema={
             "type": "object",
@@ -1573,6 +1631,8 @@ async def main():
         if not handler:
             return [TextContent(type="text", text=json.dumps({"error": f"unknown tool: {name}"}))]
         result = handler(arguments or {})
+        if inspect.isawaitable(result):
+            result = await result
         return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
     options = server.create_initialization_options()

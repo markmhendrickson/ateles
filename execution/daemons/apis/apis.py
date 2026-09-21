@@ -709,7 +709,11 @@ async def dispatch_task(
     # never read "pending" while it is actually in flight.
     set_task_status(
         entity_id, TaskStatus.ROUTED, handler=DAEMON_NAME,
-        from_status=current_status, key_suffix=trigger,
+        from_status=current_status,
+        # An approved release consumes the prior hold. Supplying the empty
+        # reason produces taskreason-apis-{task_id}-routed-approved.
+        reason="" if gate_override else None,
+        key_suffix=trigger,
     )
 
     # ── Readiness gate (E4) ───────────────────────────────────────────────────
@@ -950,7 +954,8 @@ async def handle_checkpoint_brief(
     rejected → mark the task declined; do not execute.
     pending/unknown → no-op (waiting on the operator).
 
-    Idempotency: after acting, the brief is stamped resolved_dispatched=true; a
+    Idempotency: after deciding the resolution is actionable, the consumer must
+    acquire the existing resolved_dispatched stamp before it dispatches. A
     replayed approved/rejected event whose brief carries that stamp is a no-op.
     Re-dispatch is also safe because the task skill owns its own idempotency, but
     the stamp avoids spawning the work twice on SSE redelivery.
@@ -992,6 +997,21 @@ async def handle_checkpoint_brief(
         )
         return
 
+    # An approval bypasses the execution gate only for the two actions that the
+    # gate itself emits for swarm-executable work. `operator_only`, an absent
+    # value, and every unrecognized value fail closed.
+    gate_action = str(snapshot.get("gate_action", "")).strip().lower()
+    releasable_actions = {
+        GateAction.CHECKPOINT.value,
+        GateAction.CHECKPOINT_WITH_ALTERNATIVES.value,
+    }
+    if gate_action not in releasable_actions:
+        log.info(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
+            f"gate_action={gate_action!r} — recording resolution without dispatch"
+        )
+        return
+
     # approved → re-dispatch with the gate bypassed
     task_snapshot = fetch_task_snapshot(task_id)
     if task_snapshot is None:
@@ -1006,6 +1026,15 @@ async def handle_checkpoint_brief(
         )
         return
 
+    brief_user_id = snapshot.get("user_id")
+    task_user_id = task_snapshot.get("user_id")
+    if brief_user_id and task_user_id and brief_user_id != task_user_id:
+        log.warning(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} and task {task_id} belong to "
+            "different users — not dispatching"
+        )
+        return
+
     log.info(
         f"[{DAEMON_NAME}] checkpoint {entity_id} APPROVED — re-dispatching task "
         f"{task_id} with gate override"
@@ -1015,9 +1044,14 @@ async def handle_checkpoint_brief(
         priority=Priority.INFO,
         handler=DAEMON_NAME,
     )
-    # Stamp before dispatch so an SSE replay can't double-spawn the work; the task
-    # skill's own idempotency covers the rare stamp-succeeded-then-dispatch-crashed case.
-    stamp_checkpoint_dispatched(entity_id, handler=DAEMON_NAME)
+    # The stamp is the existing replay claim. If it does not land, this attempt
+    # owns nothing and must not dispatch; a later consumer delivery may retry.
+    if not stamp_checkpoint_dispatched(entity_id, handler=DAEMON_NAME):
+        log.warning(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} could not be stamped as "
+            "dispatched — not releasing task"
+        )
+        return
     await dispatch_task(
         task_id, task_snapshot, trigger="approved", notifier=notifier, gate_override=True
     )

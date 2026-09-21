@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from lib.daemon_runtime import gating as gating_module
 from lib.daemon_runtime.gating import (
     DEFAULT_CLOSED_BOUNDARIES,
     NEVER_AUTO_EXECUTE_ACTION_TYPES,
@@ -14,6 +15,7 @@ from lib.daemon_runtime.gating import (
     InvalidCheckpointPosture,
     _parse_policy,
     evaluate_gate,
+    fetch_task_snapshot,
     read_checkpoint_resolution,
 )
 
@@ -633,3 +635,30 @@ def test_unscored_reason_never_claims_no_confidence_was_recorded():
         assert "no confidence recorded" not in low, f"{blast_action}: {d.reason}"
         assert "never scored" not in low, f"{blast_action}: {d.reason}"
         assert d.confidence == 0.55
+
+
+def test_checkpoint_task_fetch_accepts_only_declared_task_type(monkeypatch):
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": "task",
+            "snapshot": {"status": "awaiting_approval"},
+        },
+    )
+    assert fetch_task_snapshot("ent_task") == {"status": "awaiting_approval"}
+
+
+@pytest.mark.parametrize("entity_type", ["plan", "", None])
+def test_checkpoint_task_fetch_fails_closed_on_wrong_or_missing_type(
+    monkeypatch, entity_type
+):
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": entity_type,
+            "snapshot": {"status": "awaiting_approval"},
+        },
+    )
+    assert fetch_task_snapshot("ent_not_task") is None

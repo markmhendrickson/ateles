@@ -16,8 +16,7 @@ Run: python execution/mcp/ateles/test_server.py
 
 from __future__ import annotations
 
-import json
-import os
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -26,9 +25,9 @@ from unittest.mock import patch
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
-import httpx
+import httpx  # noqa: E402
 
-import server as srv
+import server as srv  # noqa: E402
 
 
 def _set_token(module, value: str) -> None:
@@ -326,75 +325,97 @@ class TestRouteTask(unittest.TestCase):
         self.assertEqual(result["matched_agent"], "vanellus")
 
 
-class TestResolveCheckpoint(unittest.TestCase):
+class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
 
-    def test_invalid_action(self):
-        result = srv._resolve_checkpoint("ent_123", "maybe")
+    async def test_invalid_action(self):
+        result = await srv._resolve_checkpoint("ent_123", "maybe")
         self.assertIn("error", result)
         self.assertIn("must be 'approve' or 'reject'", result["error"])
 
     @patch("server._get")
-    def test_not_found(self, mock_get):
+    async def test_not_found(self, mock_get):
         mock_get.return_value = None
-        result = srv._resolve_checkpoint("ent_fake", "approve")
+        result = await srv._resolve_checkpoint("ent_fake", "approve")
         self.assertIn("error", result)
         self.assertIn("not found", result["error"])
 
     @patch("server._get")
-    def test_already_resolved(self, mock_get):
+    async def test_already_resolved(self, mock_get):
         mock_get.return_value = {
+            "entity_type": "checkpoint_brief",
             "snapshot": {"status": "approved", "task_entity_id": "ent_task_1"},
         }
-        result = srv._resolve_checkpoint("ent_cp1", "approve")
+        result = await srv._resolve_checkpoint("ent_cp1", "approve")
         self.assertIn("error", result)
         self.assertIn("not 'awaiting_operator'", result["error"])
 
     @patch("server._get")
-    def test_already_dispatched_replay(self, mock_get):
+    async def test_already_dispatched_replay(self, mock_get):
         mock_get.return_value = {
+            "entity_type": "checkpoint_brief",
             "snapshot": {
                 "status": "awaiting_operator",
                 "resolved_dispatched": True,
                 "task_entity_id": "ent_task_1",
             },
         }
-        result = srv._resolve_checkpoint("ent_cp1", "approve")
+        result = await srv._resolve_checkpoint("ent_cp1", "approve")
         self.assertIn("error", result)
         self.assertIn("already dispatched", result["error"])
 
     @patch("server._get")
-    def test_dispatched_string_coercion(self, mock_get):
+    async def test_dispatched_string_coercion(self, mock_get):
         mock_get.return_value = {
+            "entity_type": "checkpoint_brief",
             "snapshot": {
                 "status": "awaiting_operator",
                 "resolved_dispatched": "true",
                 "task_entity_id": "ent_task_1",
             },
         }
-        result = srv._resolve_checkpoint("ent_cp1", "approve")
+        result = await srv._resolve_checkpoint("ent_cp1", "approve")
         self.assertIn("error", result)
         self.assertIn("already dispatched", result["error"])
 
+    @patch("server._consume_checkpoint_resolution")
     @patch("server._correct")
     @patch("server._get")
-    def test_approve_success(self, mock_get, mock_correct):
-        mock_get.return_value = {
-            "snapshot": {
-                "status": "awaiting_operator",
-                "task_entity_id": "ent_task_1",
+    async def test_approve_success(self, mock_get, mock_correct, mock_consume):
+        mock_get.side_effect = [
+            {
+                "entity_type": "checkpoint_brief",
+                "snapshot": {
+                    "status": "awaiting_operator",
+                    "task_entity_id": "ent_task_1",
+                    "gate_action": "checkpoint_plan_approval",
+                },
             },
-        }
+            {
+                "entity_type": "checkpoint_brief",
+                "snapshot": {
+                    "status": "approved",
+                    "task_entity_id": "ent_task_1",
+                    "gate_action": "checkpoint_plan_approval",
+                },
+            },
+            {
+                "entity_type": "task",
+                "snapshot": {"status": "routed", "blocked_reason": ""},
+            },
+        ]
         mock_correct.return_value = True
 
-        result = srv._resolve_checkpoint("ent_cp1", "approve")
+        result = await srv._resolve_checkpoint("ent_cp1", "approve")
         self.assertEqual(result["new_status"], "approved")
-        self.assertIn("dispatcher will re-dispatch", result["action_taken"])
+        self.assertIn("task re-dispatched", result["action_taken"])
         mock_correct.assert_called_once()
+        mock_consume.assert_awaited_once()
 
     @patch("server._correct")
     @patch("server._get")
-    def test_reject_marks_task_declined(self, mock_get, mock_correct):
+    async def test_reject_marks_task_declined(self, mock_get, mock_correct):
         mock_get.return_value = {
+            "entity_type": "checkpoint_brief",
             "snapshot": {
                 "status": "awaiting_operator",
                 "task_entity_id": "ent_task_1",
@@ -402,15 +423,16 @@ class TestResolveCheckpoint(unittest.TestCase):
         }
         mock_correct.return_value = True
 
-        result = srv._resolve_checkpoint("ent_cp1", "reject")
+        result = await srv._resolve_checkpoint("ent_cp1", "reject")
         self.assertEqual(result["new_status"], "rejected")
         self.assertIn("task marked declined", result["action_taken"])
         self.assertEqual(mock_correct.call_count, 2)
 
     @patch("server._correct")
     @patch("server._get")
-    def test_correct_failure(self, mock_get, mock_correct):
+    async def test_correct_failure(self, mock_get, mock_correct):
         mock_get.return_value = {
+            "entity_type": "checkpoint_brief",
             "snapshot": {
                 "status": "awaiting_operator",
                 "task_entity_id": "ent_task_1",
@@ -418,7 +440,7 @@ class TestResolveCheckpoint(unittest.TestCase):
         }
         mock_correct.return_value = False
 
-        result = srv._resolve_checkpoint("ent_cp1", "approve")
+        result = await srv._resolve_checkpoint("ent_cp1", "approve")
         self.assertIn("error", result)
         self.assertIn("failed to correct", result["error"])
 
@@ -463,7 +485,7 @@ class TestGracefulDegradation(unittest.TestCase):
 
     def test_resolve_checkpoint_without_token(self):
         srv.NEOTOMA_BEARER_TOKEN = ""
-        result = srv._resolve_checkpoint("ent_123", "approve")
+        result = asyncio.run(srv._resolve_checkpoint("ent_123", "approve"))
         self.assertIn("error", result)
 
 

@@ -686,6 +686,14 @@ def fetch_task_snapshot(task_entity_id: str) -> dict | None:
     data = _fetch_entity(task_entity_id)
     if data is None:
         return None
+    entity_type = str(data.get("entity_type") or data.get("type") or "").strip().lower()
+    if entity_type != "task":
+        log.warning(
+            "[gating] entity %s is type %r, not task — refusing checkpoint release",
+            task_entity_id,
+            entity_type or "unknown",
+        )
+        return None
     return _snapshot_of(data)
 
 
@@ -701,9 +709,10 @@ def checkpoint_already_dispatched(snapshot: dict) -> bool:
 
 def stamp_checkpoint_dispatched(checkpoint_entity_id: str, *, handler: str) -> bool:
     """
-    Mark a checkpoint_brief `resolved_dispatched: true` after the dispatcher has
-    acted on its resolution, so SSE replays of the same approved/rejected event
-    are no-ops. Best-effort; logs and returns False on failure.
+    Claim a checkpoint_brief resolution with `resolved_dispatched: true` once
+    the consumer has decided it can act, so SSE replays are no-ops. The caller
+    must not dispatch if this write fails. Best-effort; logs and returns False
+    on failure.
     """
     if not NEOTOMA_BEARER_TOKEN:
         log.warning("[gating] no bearer token — cannot stamp checkpoint dispatched")
