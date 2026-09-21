@@ -123,6 +123,12 @@ TEXT_FIELDS = (
 # rather than treated only as a destination.
 RULE_ENTITY_TYPES = ("standing_rule", "agent_policy", "task_policy")
 
+# The canonical measurement runner supplies the additional repository clones
+# that belong to the rule estate. Keeping this list in runner configuration
+# avoids publishing repository names or local paths while making missing
+# configuration a blocking, unread measurement rather than an empty one.
+CANONICAL_REPOSITORY_ROOTS_ENV = "RULE_INVENTORY_CANONICAL_REPOSITORY_ROOTS"
+
 
 # ---------------------------------------------------------------------------
 # PII screen
@@ -999,6 +1005,7 @@ PUBLIC_STORE_NAMES = frozenset({
     "Skills (ateles repo)",
     "Skills (user root)",
     "foundation reference repo",
+    "Canonical repository instruction roots",
     "Claude Code hooks (ateles)",
     *(f"{entity_type} entities" for entity_type in RULE_ENTITY_TYPES),
 })
@@ -1016,6 +1023,7 @@ PUBLIC_STORE_LOCATIONS = {
     "Skills (ateles repo)": ".claude/skills/<skill>",
     "Skills (user root)": "~/.claude/skills/<skill>",
     "foundation reference repo": "~/repos/<reference>",
+    "Canonical repository instruction roots": "~/repos/<canonical-roots>",
     "Claude Code hooks (ateles)": ".claude/hooks",
     **{f"{entity_type} entities": "<entity>"
        for entity_type in RULE_ENTITY_TYPES},
@@ -1034,6 +1042,9 @@ PUBLIC_STATEMENT_LOCATIONS = {
     "Skills (ateles repo)": ".claude/skills/<skill>/SKILL.md",
     "Skills (user root)": "~/.claude/skills/<skill>/SKILL.md",
     "foundation reference repo": "~/repos/<reference>/<file>",
+    "Canonical repository instruction roots": (
+        "~/repos/<canonical-root>/<instruction-file>"
+    ),
     "Claude Code hooks (ateles)": ".claude/hooks/<hook>.py",
     **{f"{entity_type} entities": "<entity>"
        for entity_type in RULE_ENTITY_TYPES},
@@ -1462,6 +1473,99 @@ def extract_md_rules(path: Path, store_name: str,
     return out
 
 
+def read_canonical_repository_instruction_roots(
+    configured: str | None = None,
+) -> tuple[list[Statement], Store]:
+    """Measure runner-configured canonical repository instruction roots.
+
+    The configured values are private runner state. Public outputs receive one
+    aggregate store kind and generic locations only. A missing, malformed,
+    absent, symlinked, or unreadable root makes the whole aggregate unread:
+    partial success would silently drop a required repo and turn a lower bound
+    into a completeness claim.
+    """
+    store = Store(
+        name="Canonical repository instruction roots",
+        location="",
+        reachable="per-project",
+        reach_note="each repository's root instruction file binds its own sessions",
+    )
+    raw = (
+        os.environ.get(CANONICAL_REPOSITORY_ROOTS_ENV, "")
+        if configured is None
+        else configured
+    )
+    root_values = [item.strip() for item in raw.split(os.pathsep) if item.strip()]
+    if not root_values:
+        store.read_ok = False
+        store.read_error = f"{CANONICAL_REPOSITORY_ROOTS_ENV} is required"
+        return [], store
+
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for value in root_values:
+        root = Path(value).expanduser()
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(root)
+
+    instruction_files: list[Path] = []
+    seen_instruction_files: set[str] = set()
+    try:
+        for root in roots:
+            if not root.is_absolute():
+                raise ValueError(f"canonical repository root is not absolute: {root}")
+            if root.is_symlink() or not root.is_dir():
+                raise FileNotFoundError(
+                    f"canonical repository root is unavailable: {root}"
+                )
+            if not (root / ".git").is_dir():
+                raise ValueError(
+                    f"canonical repository root is not a primary clone: {root}"
+                )
+            for filename in ("CLAUDE.md", "AGENTS.md", ".cursorrules"):
+                candidate = root / filename
+                if candidate.exists() or candidate.is_symlink():
+                    resolved = candidate.resolve(strict=True)
+                    if not resolved.is_relative_to(root.resolve()):
+                        raise ValueError(
+                            "repository instruction symlink leaves its canonical root: "
+                            f"{candidate}"
+                        )
+                    if not resolved.is_file():
+                        raise ValueError(
+                            f"repository instruction path is not a file: {candidate}"
+                        )
+                    resolved_key = str(resolved)
+                    if resolved_key in seen_instruction_files:
+                        continue
+                    # Prove readability before accepting any partial aggregate.
+                    resolved.read_bytes()
+                    seen_instruction_files.add(resolved_key)
+                    instruction_files.append(resolved)
+    except (OSError, ValueError) as exc:
+        store.read_ok = False
+        store.read_error = f"{type(exc).__name__}: {exc}"
+        return [], store
+
+    store.location = os.pathsep.join(str(root) for root in roots)
+    store.populated = len(roots)
+    store.note = (
+        f"{len(instruction_files)} root instruction file(s) across "
+        f"{len(roots)} configured canonical repository root(s)"
+    )
+    store.last_modified = max(
+        (_mtime(path) for path in instruction_files), default=""
+    )
+    statements: list[Statement] = []
+    for path in instruction_files:
+        statements.extend(extract_md_rules(path, store.name))
+    store.statements = len(statements)
+    return statements, store
+
+
 def read_file_stores(home: Path) -> tuple[list[Statement], list[Store]]:
     statements: list[Statement] = []
     stores: list[Store] = []
@@ -1492,6 +1596,16 @@ def read_file_stores(home: Path) -> tuple[list[Statement], list[Store]]:
         s = extract_md_rules(neo_md, st.name)
         statements += s
         st.statements = len(s)
+
+    # -- other canonical repository instruction roots --------------------
+    # The operator's bounded cross-repo sweep is configured on the canonical
+    # measurement runner. It intentionally excludes worktrees: those are
+    # version-drift copies measured below, not independent rule authorship.
+    repository_statements, repository_store = (
+        read_canonical_repository_instruction_roots()
+    )
+    statements += repository_statements
+    stores.append(repository_store)
 
     # -- the copy problem: one instruction file, many checkouts ----------
     # A rule that lives in only one checkout does not bind

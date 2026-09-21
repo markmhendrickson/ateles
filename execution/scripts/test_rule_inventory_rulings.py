@@ -1,6 +1,7 @@
 """Regression tests for the operator rulings embedded in the rule inventory."""
 
 import json
+import os
 import tempfile
 import unittest
 from dataclasses import replace
@@ -370,6 +371,11 @@ class RuleInventoryRulingsTest(unittest.TestCase):
             inventory.REPO_ROOT / ".github/workflows/foundation-checks.yml"
         ).read_text()
         self.assertIn('NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}', workflow)
+        self.assertIn(
+            "RULE_INVENTORY_CANONICAL_REPOSITORY_ROOTS: "
+            "${{ vars.RULE_INVENTORY_CANONICAL_REPOSITORY_ROOTS }}",
+            workflow,
+        )
         self.assertIn("Rule inventory — full measured output matches", workflow)
         self.assertIn("python3 \"$f\" --check", workflow)
         self.assertIn("--require-complete-measurement", workflow)
@@ -387,6 +393,86 @@ class RuleInventoryRulingsTest(unittest.TestCase):
         self.assertEqual(missing, [])
         self.assertEqual(unread, ["agent_policy entities"])
         self.assertNotIn("ClientCodename", json.dumps([missing, unread]))
+
+    def test_canonical_repository_instruction_roots_are_measured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            first = base / "repo-one"
+            second = base / "repo-two"
+            for root in (first, second):
+                (root / ".git").mkdir(parents=True)
+            (first / "CLAUDE.md").write_text(
+                "- **Never `git stash`.** Keep durable work visible.\n"
+            )
+            (second / "AGENTS.md").write_text(
+                "- **Always verify writes.** Read the changed field back.\n"
+            )
+            (second / "CLAUDE.md").symlink_to("AGENTS.md")
+            (second / ".cursorrules").write_text(
+                "Never bypass the repository's verification gate.\n"
+            )
+
+            statements, store = inventory.read_canonical_repository_instruction_roots(
+                os.pathsep.join((str(first), str(second)))
+            )
+
+        self.assertTrue(store.read_ok)
+        self.assertEqual(store.populated, 2)
+        self.assertIn("3 root instruction file(s)", store.note)
+        self.assertEqual(store.statements, len(statements))
+        self.assertGreater(store.statements, 0)
+        self.assertEqual(
+            {statement.store for statement in statements},
+            {"Canonical repository instruction roots"},
+        )
+        self.assertEqual(
+            inventory.public_store_location(store.name, store.location),
+            "~/repos/<canonical-roots>",
+        )
+        self.assertEqual(
+            inventory.public_statement_location(
+                store.name, statements[0].location
+            ),
+            "~/repos/<canonical-root>/<instruction-file>",
+        )
+
+    def test_missing_canonical_repository_root_fails_closed_without_leaking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            good = base / "repo-good"
+            good.joinpath(".git").mkdir(parents=True)
+            good.joinpath("CLAUDE.md").write_text(
+                "Never expose ClientCodename value ent_private_123.\n"
+            )
+            missing = base / "ClientCodename-ent_private_123-missing"
+
+            statements, store = inventory.read_canonical_repository_instruction_roots(
+                os.pathsep.join((str(good), str(missing)))
+            )
+
+        self.assertEqual(statements, [])
+        self.assertFalse(store.read_ok)
+        self.assertIn(str(missing), store.read_error)
+        missing_kinds, unread_kinds = inventory.measurement_readiness([store])
+        self.assertIn("Canonical repository instruction roots", unread_kinds)
+        public = json.dumps(inventory.public_payload([], [store], [], []))
+        for secret in (
+            str(missing),
+            "ClientCodename",
+            "ent_private_123",
+            store.read_error,
+        ):
+            with self.subTest(secret=secret):
+                self.assertNotIn(secret, public)
+        self.assertIn("Canonical repository instruction roots", public)
+
+    def test_unconfigured_canonical_repository_roots_are_unread_not_empty(self) -> None:
+        statements, store = inventory.read_canonical_repository_instruction_roots("")
+
+        self.assertEqual(statements, [])
+        self.assertFalse(store.read_ok)
+        self.assertEqual(store.populated, 0)
+        self.assertIn("required", store.read_error)
 
     def test_public_store_label_drops_repository_owner_namespace(self) -> None:
         self.assertEqual(

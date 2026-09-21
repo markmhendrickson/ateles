@@ -104,6 +104,7 @@ jobs:
         if: always() && steps.corpus.outputs.present == 'true'
         env:
           NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}
+          RULE_INVENTORY_CANONICAL_REPOSITORY_ROOTS: ${{ vars.RULE_INVENTORY_CANONICAL_REPOSITORY_ROOTS }}
         run: |
           f=execution/scripts/render_rule_inventory.py
           [ -f "$f" ] || { echo "::error::$f is absent; full inventory equality cannot run"; exit 1; }
