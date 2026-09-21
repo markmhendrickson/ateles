@@ -81,6 +81,7 @@ async def _resolve(checkpoint_id: str, action: str) -> dict:
 def release_store(monkeypatch):
     brief_id = "ent_cp1"
     task_id = "ent_task_1"
+    apis._nonreleasable_checkpoint_quarantine.discard(brief_id)
     records = {
         brief_id: {
             "entity_type": CHECKPOINT_TYPE,
@@ -473,6 +474,109 @@ async def test_operator_only_producer_shape_never_releases(
     assert records[brief_id]["snapshot"]["resolved_dispatched"] is False
     assert records[brief_id]["snapshot"]["status"] == "approved_no_release"
     assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+async def test_current_never_classification_overrides_stale_low_brief(
+    monkeypatch, release_store
+):
+    records, brief_id, task_id = release_store
+    policy = ExecutionPolicy(entity_id="default", loaded=False)
+    task = records[task_id]["snapshot"]
+    task["action_type"] = "future_external_action"
+    decision = evaluate_gate(
+        confidence=1.0,
+        action_type=task["action_type"],
+        policy=policy,
+    )
+    brief = records[brief_id]["snapshot"]
+    brief.update(
+        {
+            "status": "approved",
+            "gate_action": "checkpoint_plan_approval",
+            "blast_radius": "low",
+        }
+    )
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert decision.blast_radius.value == "never"
+    assert released is False
+    assert dispatches == []
+    assert brief["resolved_dispatched"] is False
+    assert brief["status"] == "approved_no_release"
+
+
+@pytest.mark.asyncio
+async def test_failed_nonrelease_close_cannot_make_approval_reusable(
+    monkeypatch, release_store
+):
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief.update(
+        {
+            "status": "approved",
+            "gate_action": "operator_only",
+            "resolved_dispatched": False,
+        }
+    )
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+    monkeypatch.setattr(
+        apis,
+        "close_checkpoint_without_release",
+        lambda *args, **kwargs: False,
+    )
+
+    first = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+    brief.update(
+        {
+            "gate_action": "checkpoint_plan_approval",
+            "blast_radius": "low",
+        }
+    )
+    records[task_id]["snapshot"]["action_type"] = "local_edit"
+    second = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert first is False
+    assert second is False
+    assert dispatches == []
+    assert brief["resolved_dispatched"] is True
+
+
+@pytest.mark.asyncio
+async def test_already_approved_unstamped_checkpoint_releases_task(
+    monkeypatch, release_store
+):
+    """Legacy recovery: an approved event may predate the inline MCP consumer."""
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief.update({"status": "approved", "resolved_dispatched": False})
+    original_dispatch = apis.dispatch_task
+    dispatches: list[str] = []
+
+    async def spy_dispatch(entity_id, *args, **kwargs):
+        dispatches.append(entity_id)
+        await original_dispatch(entity_id, *args, **kwargs)
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is True
+    assert dispatches == [task_id]
+    assert brief["resolved_dispatched"] is True
+    assert records[task_id]["snapshot"]["status"] == "routed"
 
 
 @pytest.mark.asyncio

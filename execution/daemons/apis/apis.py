@@ -173,6 +173,8 @@ from lib.daemon_runtime import (  # noqa: E402
     score_confidence,
     send_run_email,
     write_assessment,
+    BlastRadius,
+    ExecutionPolicy,
     GateAction,
     NeotomaEvent,
     SSEClient,
@@ -215,6 +217,7 @@ log = logging.getLogger("apis")
 # much longer than an MCP request, so detached runs need a strong reference and
 # an exception-draining callback for the rest of the daemon process lifetime.
 _background_dispatch_tasks: set[asyncio.Task[None]] = set()
+_nonreleasable_checkpoint_quarantine: set[str] = set()
 
 
 def _background_dispatch_done(task: asyncio.Task[None]) -> None:
@@ -1036,6 +1039,33 @@ def _release_lifecycle_proven(task_id: str, expected_status: TaskStatus) -> bool
     )
 
 
+def _deny_checkpoint_release(checkpoint_id: str, *, reason: str) -> None:
+    """Consume a denied approval, with a fail-closed fallback and quarantine."""
+    if close_checkpoint_without_release(
+        checkpoint_id, handler=DAEMON_NAME, reason=reason
+    ):
+        return
+
+    # If the purpose-built terminal state cannot be proven, consume the replay
+    # claim as a last-resort durable deny. This field normally means a dispatch
+    # happened, so use it only on terminalization failure and log the degraded
+    # representation loudly. If that write also fails, quarantine this ID for
+    # the lifetime of the process: a later safety-field edit must not make the
+    # same approval reusable in this consumer.
+    _nonreleasable_checkpoint_quarantine.add(checkpoint_id)
+    if stamp_checkpoint_dispatched(checkpoint_id, handler=DAEMON_NAME):
+        _nonreleasable_checkpoint_quarantine.discard(checkpoint_id)
+        log.error(
+            f"[{DAEMON_NAME}] checkpoint {checkpoint_id} denial could not be "
+            "terminalized; consumed replay claim as a fail-closed fallback"
+        )
+    else:
+        log.critical(
+            f"[{DAEMON_NAME}] checkpoint {checkpoint_id} denial could not be "
+            "persisted; quarantined in-process and will never dispatch here"
+        )
+
+
 async def handle_checkpoint_brief(
     entity_id: str,
     snapshot: dict,
@@ -1068,6 +1098,13 @@ async def handle_checkpoint_brief(
         )
         return False
     snapshot = current_snapshot
+
+    if entity_id in _nonreleasable_checkpoint_quarantine:
+        log.critical(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} is quarantined after a failed "
+            "non-release write — refusing replay"
+        )
+        return False
 
     resolution = read_checkpoint_resolution(snapshot)
     if resolution is None:
@@ -1119,10 +1156,8 @@ async def handle_checkpoint_brief(
             f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
             f"gate_action={gate_action!r} — closing resolution without dispatch"
         )
-        close_checkpoint_without_release(
-            entity_id,
-            handler=DAEMON_NAME,
-            reason=f"non-releasable gate_action={gate_action!r}",
+        _deny_checkpoint_release(
+            entity_id, reason=f"non-releasable gate_action={gate_action!r}"
         )
         return False
 
@@ -1136,10 +1171,8 @@ async def handle_checkpoint_brief(
             f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
             f"blast_radius={blast_radius!r} — closing resolution without dispatch"
         )
-        close_checkpoint_without_release(
-            entity_id,
-            handler=DAEMON_NAME,
-            reason=f"non-releasable blast_radius={blast_radius!r}",
+        _deny_checkpoint_release(
+            entity_id, reason=f"non-releasable blast_radius={blast_radius!r}"
         )
         return False
 
@@ -1163,10 +1196,8 @@ async def handle_checkpoint_brief(
             f"[{DAEMON_NAME}] checkpoint {entity_id} references operator-only task "
             f"{task_id} — closing resolution without dispatch"
         )
-        close_checkpoint_without_release(
-            entity_id,
-            handler=DAEMON_NAME,
-            reason="referenced task is operator_only",
+        _deny_checkpoint_release(
+            entity_id, reason="referenced task is operator_only"
         )
         return False
 
@@ -1177,10 +1208,61 @@ async def handle_checkpoint_brief(
             f"[{DAEMON_NAME}] checkpoint {entity_id} and task {task_id} do not have "
             "matching present tenant provenance — closing without dispatch"
         )
-        close_checkpoint_without_release(
-            entity_id,
-            handler=DAEMON_NAME,
-            reason="missing or mismatched tenant provenance",
+        _deny_checkpoint_release(
+            entity_id, reason="missing or mismatched tenant provenance"
+        )
+        return False
+
+    # Recompute the task's current classification rather than trusting the
+    # brief's stored blast radius. The task or policy may have changed while
+    # the checkpoint waited, and an old LOW classification cannot authorize a
+    # task that is NOW unclassified or operator-only (NEVER).
+    assigned_to = _canonical_assignee(task_snapshot.get("assigned_to"))
+    safety_skill = assigned_to
+    if not safety_skill:
+        task_tags = task_snapshot.get("tags", []) or []
+        if isinstance(task_tags, str):
+            import json as _json
+
+            try:
+                task_tags = _json.loads(task_tags)
+            except (ValueError, TypeError):
+                task_tags = []
+        safety_skill = _resolve_skill(task_tags, assigned_to=assigned_to)
+
+    try:
+        # Release acknowledgement has a strict latency contract and cannot
+        # block on a live policy fetch. Re-evaluate against the runtime's local
+        # conservative policy vocabulary: known action classes retain their
+        # radius, while every newly declared/unclassified action resolves to
+        # NEVER. A live policy may classify more actions, but this fallback
+        # never makes the release decision less safe.
+        safety_policy = ExecutionPolicy(
+            entity_id="checkpoint-release-fallback", loaded=False
+        )
+        current_decision = evaluate_gate(
+            confidence=_read_confidence(task_snapshot),
+            action_type=_infer_action_type(safety_skill or "", task_snapshot),
+            policy=safety_policy,
+            successful_recurrences=_successful_recurrences(task_snapshot),
+        )
+    except Exception as exc:
+        log.warning(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} current safety classification "
+            f"failed ({type(exc).__name__}) — closing without dispatch"
+        )
+        _deny_checkpoint_release(
+            entity_id, reason="current task safety classification unavailable"
+        )
+        return False
+
+    if current_decision.blast_radius == BlastRadius.NEVER:
+        log.warning(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} task {task_id} currently "
+            "classifies as NEVER — closing without dispatch"
+        )
+        _deny_checkpoint_release(
+            entity_id, reason="current task safety classification is never"
         )
         return False
 
