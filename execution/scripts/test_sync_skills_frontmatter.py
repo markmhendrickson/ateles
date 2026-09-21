@@ -57,6 +57,46 @@ ENTITY_ID = "ent_0a0a481fb03a8fd9ea292bcb"
 ROUTING_SECTION_START = "Positioning work surfaces two different kinds of finding"
 ROUTING_SECTION_END = "\n\n## Scope rules"
 
+BRAND_RESEARCH_REQUIRED_CONTRACTS = {
+    "separate identity and structure tracks": (
+        "Brand identity research:",
+        "Site/page structure research:",
+    ),
+    "ambition and discipline drive selection": (
+        "delegation ambition and enabling discipline",
+        "This premise is the selection brief",
+    ),
+    "three design surfaces are covered": (
+        "Visual language:",
+        "Information architecture and proof:",
+        "Interaction and motion:",
+    ),
+    "stored corpora remain discovery seeds": (
+        "Use them as discovery seeds and query expansion",
+        "it does not prove the linked page still says or looks the same now",
+    ),
+    "live evidence is fetched and dated": (
+        "fetch the actual current pages",
+        "record its date",
+    ),
+    "patterns are translated without copying": (
+        "ADOPT, ADAPT, or REJECT",
+        "Never copy another brand's signature mark",
+    ),
+    "identity and structure have distinct homes": (
+        "Identity findings may revise a product-specific `design_system`",
+        "structural page-craft findings correct the stage-1 template and page inventory",
+    ),
+    "narrow metaphors are challenged": (
+        "Audit the existing identity metaphor against the full current product premise",
+        "Record missing premise coverage in the inventory's `gaps`",
+    ),
+    "the repository preview remains the design ceiling": (
+        "`rendered_page` is not the product-site preview",
+        "repository-built preview",
+    ),
+}
+
 
 def _skill(**overrides) -> dict:
     """A fixture `skill` entity in the shape fetch_skills() produces."""
@@ -105,6 +145,16 @@ def _routing_section(path: Path) -> str:
     return text[start:end]
 
 
+def _missing_brand_research_contracts(text: str) -> list[str]:
+    """Name decision contracts absent from the generated landing-page skill."""
+    normalized = " ".join(text.split())
+    return [
+        contract
+        for contract, markers in BRAND_RESEARCH_REQUIRED_CONTRACTS.items()
+        if any(marker not in normalized for marker in markers)
+    ]
+
+
 def test_product_finding_routing_contract_stays_in_sync() -> None:
     """Independently loaded skills must not silently diverge on filing behavior.
 
@@ -119,6 +169,33 @@ def test_product_finding_routing_contract_stays_in_sync() -> None:
     assert frame == build, (
         "the duplicated product-finding routing contract diverged; correct both "
         "canonical skill entities, read them back, then regenerate both mirrors"
+    )
+
+
+def test_build_landing_page_keeps_brand_research_decision_contracts() -> None:
+    """Dropping either research track or its destination must fail the skill checks."""
+    skill = (
+        _REPO_ROOT / ".claude" / "skills" / "build-landing-page" / "SKILL.md"
+    ).read_text()
+
+    assert _missing_brand_research_contracts(skill) == [], (
+        "build-landing-page lost brand/site research contracts: "
+        f"{_missing_brand_research_contracts(skill)}"
+    )
+
+
+def test_brand_research_contract_check_fails_when_no_copying_rule_is_removed() -> None:
+    """Mutation proof: the contract check fails on a missing safety boundary."""
+    skill = (
+        _REPO_ROOT / ".claude" / "skills" / "build-landing-page" / "SKILL.md"
+    ).read_text()
+    mutated = skill.replace(
+        "Never copy another brand's signature mark", "Copy a signature mark", 1
+    )
+
+    assert (
+        "patterns are translated without copying"
+        in _missing_brand_research_contracts(mutated)
     )
 
 
