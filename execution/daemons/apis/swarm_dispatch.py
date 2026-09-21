@@ -275,9 +275,40 @@ def parse_approve_token(text: str) -> tuple[str, int] | None:
 # PR gate inheritance kept blocking on a gate the operator believed cleared.
 PRE_IMPL_GATES = ("pm", "ux", "arch")
 
-# Operator GitHub login — only this login may waive gates via the comment
-# command.  Defaults to the repo owner; override with APIS_OPERATOR_LOGIN.
+# Operator GitHub login — the human principal.  Defaults to the repo owner;
+# override with APIS_OPERATOR_LOGIN.  This login alone carries the APPROVAL
+# boundary: a `pr_review` "approved" event is honoured only from it, because
+# approving a merge is the human act the gate exists to require.
 _OPERATOR_LOGIN = os.environ.get("APIS_OPERATOR_LOGIN", "markmhendrickson")
+
+# Logins permitted to invoke a comment COMMAND (`/swarm-run`,
+# `/confirm-gates-clear`, `/approve`, `/reject`, `/hold`).  Distinct from
+# _OPERATOR_LOGIN on purpose, and the distinction is the point:
+#
+#   * APPROVAL is a human act.  It stays on _OPERATOR_LOGIN alone (the
+#     `pr_review` path), and nothing here widens it.
+#   * A COMMAND re-drives or unblocks the pipeline.  `CLAUDE.md` grants a
+#     session standing authorization (2026-09-11) to comment
+#     `/confirm-gates-clear` where a PR is blocked only by swarm MECHANICS,
+#     and to re-request review where monitoring shows it warranted.  That
+#     authorization was never exercisable: a session runs as its agent
+#     identity and this guard accepted only the operator's, so every such
+#     comment was declined — silently, before ateles#743 landed.
+#
+# Widening the command guard makes a granted authorization work; widening the
+# approval guard would let an agent approve its own merge.  They are separate
+# variables so that cannot happen by accident.
+#
+# Comma-separated; the operator login is always included.  Empty or unset
+# leaves behaviour exactly as before (operator only).
+_COMMAND_LOGINS: frozenset[str] = frozenset(
+    {_OPERATOR_LOGIN.lower()}
+    | {
+        login.strip().lower()
+        for login in os.environ.get("APIS_COMMAND_LOGINS", "").split(",")
+        if login.strip()
+    }
+)
 
 # Bot/machine-account identities whose comments must NEVER trigger swarm
 # commands, regardless of comment content.  This is the structural guard
@@ -5402,7 +5433,7 @@ class SwarmDispatcher:
             return
 
         # Guard 2: operator-only guardrail (applies to all commands).
-        if comment_author.lower() != _OPERATOR_LOGIN.lower():
+        if comment_author.lower() not in _COMMAND_LOGINS:
             # Pick whichever command was detected for the log message.
             cmd = (
                 _CONFIRM_GATES_CLEAR_CMD if has_gates_clear
