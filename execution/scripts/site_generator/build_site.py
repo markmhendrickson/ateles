@@ -531,6 +531,13 @@ def _validate_site(
     for rel, html in rendered.items():
         if isinstance(html, bytes):
             continue
+        if product in {"neotoma", "ateles"}:
+            for disclosure in ("<details", "<summary"):
+                if disclosure in html.casefold():
+                    blockers.append(
+                        f"{rel}: public product routes must not hide copy in "
+                        f"{disclosure[1:]} disclosures"
+                    )
         for href in re.findall(r'href="(/[^"]*)"', html):
             path = href.split("#", 1)[0]
             if path and path not in routes:
@@ -560,6 +567,20 @@ def _validate_site(
     if category and category not in home_html:
         blockers.append(f"homepage is missing settled category noun: {category}")
     if product == "neotoma":
+        for marker in (
+            "record-semantic-overlay",
+            "semantic-node",
+            "semantic-edge",
+            "CREATE",
+            "UPDATE",
+            "RETRIEVE",
+            "PROVENANCE",
+            "PRIOR STATE",
+        ):
+            if marker not in home_html:
+                blockers.append(
+                    f"homepage is missing Neotoma graph-operation marker: {marker}"
+                )
         banned_claims = (
             "your agent forgot",
             "your agents forgot",

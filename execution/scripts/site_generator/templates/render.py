@@ -137,6 +137,8 @@ th, td {{ padding: 11px 13px; border: 1px solid var(--line); text-align: left; v
 .concept-film {{ position: relative; min-width: 0; margin: 0; overflow: hidden; border-radius: var(--radius); }}
 .concept-film-poster {{ position: relative; z-index: 1; }}
 .concept-film-media {{ position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; border: 0; object-fit: cover; background: var(--paper-2); }}
+.concept-film-overlay {{ position: absolute; inset: 0; z-index: 3; pointer-events: none; }}
+.concept-film-overlay svg {{ display: block; width: 100%; height: 100%; }}
 .visual-section {{ padding-block: clamp(76px, 11vw, 144px); }}
 .section-visual {{ position: relative; min-height: clamp(330px, 48vw, 620px); margin: 0 0 clamp(34px, 5vw, 64px); overflow: hidden; border: 1px solid var(--line); border-radius: calc(var(--radius) * 1.35); background: color-mix(in srgb, var(--paper-2) 88%, var(--accent-wash)); box-shadow: var(--shadow-soft); }}
 .section-visual svg {{ display: block; width: 100%; height: 100%; min-height: inherit; }}
@@ -146,9 +148,7 @@ th, td {{ padding: 11px 13px; border: 1px solid var(--line); text-align: left; v
 .section-copy .lede {{ margin-top: 18px; }}
 .section-link {{ display: inline-flex; align-items: center; gap: 10px; margin-top: 12px; font-weight: 700; text-decoration: none; }}
 .section-link span {{ transition: transform .2s ease; }} .section-link:hover span {{ transform: translateX(4px); }}
-.section-details {{ margin-top: 34px; }}
-.section-details > summary {{ width: fit-content; cursor: pointer; color: var(--accent); font-family: var(--mono); font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; }}
-.section-details[open] > summary {{ margin-bottom: 24px; }}
+.section-evidence {{ margin-top: 34px; }}
 .visual-edge {{ stroke: var(--line-2, var(--line)); stroke-width: 1.5; fill: none; }}
 .visual-pulse {{ stroke: var(--accent); stroke-width: 2.5; fill: none; stroke-linecap: round; stroke-dasharray: 7 19; animation: signal-flow 7s linear infinite; }}
 .visual-record {{ fill: var(--paper); stroke: var(--accent); stroke-width: 2; }}
@@ -191,6 +191,12 @@ footer {{ border-top: 1px solid var(--line); padding-block: 42px; }} .footer-in 
 .record-graph .agent-orbit circle {{ fill: var(--accent); }}
 .record-graph .agent-orbit text {{ fill: var(--on-accent); font-family: var(--mono); font-size: 14px; text-anchor: middle; }}
 .record-graph .version-ghost {{ opacity: .56; }}
+.record-semantic-overlay .semantic-edge {{ fill: none; stroke: color-mix(in srgb, var(--accent) 72%, white); stroke-width: 2; opacity: .72; }}
+.record-semantic-overlay .semantic-edge.active {{ stroke-dasharray: 7 17; animation: signal-flow 7s linear infinite; }}
+.record-semantic-overlay .semantic-node {{ fill: color-mix(in srgb, var(--paper) 23%, transparent); stroke: color-mix(in srgb, var(--accent) 76%, white); stroke-width: 1.7; }}
+.record-semantic-overlay .semantic-node.prior {{ opacity: .62; }}
+.record-semantic-overlay .operation-marker {{ fill: color-mix(in srgb, var(--accent) 88%, white); }}
+.record-semantic-overlay text {{ fill: color-mix(in srgb, var(--ink) 82%, white); font-family: var(--mono); font-size: 19px; font-weight: 700; letter-spacing: .08em; paint-order: stroke; stroke: color-mix(in srgb, var(--paper) 58%, transparent); stroke-width: 5px; }}
 .product-neotoma .record-demo {{ position: relative; border-top: 3px double var(--ink); border-bottom: 1px solid var(--line); padding: 28px 0 12px 68px; }}
 .product-neotoma .record-demo::before {{ content: "RECORD"; position: absolute; left: 0; top: 30px; writing-mode: vertical-rl; transform: rotate(180deg); color: var(--ink-3); font-family: var(--mono); font-size: .62rem; letter-spacing: .14em; }}
 .record-row {{ padding: 18px 0; border-bottom: 1px solid var(--line); }} .record-row:last-child {{ border-bottom: 0; }}
@@ -228,7 +234,7 @@ footer {{ border-top: 1px solid var(--line); padding-block: 42px; }} .footer-in 
 .grant-row[data-state="GRANTED"] .authorization-seal, .grant-row[data-state="GRANTED"] .grant-state {{ color: var(--grant, var(--accent)); }}
 .grant-row[data-state="WITHHELD"] .authorization-seal, .grant-row[data-state="WITHHELD"] .grant-state {{ color: var(--revoked, var(--accent)); }}
 .grant-state {{ color: var(--accent); font-family: var(--mono); font-size: .66rem; letter-spacing: .05em; }}
-@media (prefers-reduced-motion: reduce) {{ .graph-edge.active, .swarm-member, .handoff-signal, .visual-pulse, .visual-swarm-member, .visual-signal {{ animation: none; }} .concept-film-media {{ display: none; }} }}
+@media (prefers-reduced-motion: reduce) {{ .graph-edge.active, .semantic-edge.active, .swarm-member, .handoff-signal, .visual-pulse, .visual-swarm-member, .visual-signal {{ animation: none; }} .concept-film-media, .concept-film-overlay {{ display: none; }} }}
 .product-ateles .source-section > .source-inner {{ padding-left: clamp(20px, 5vw, 72px); border-left: 4px solid var(--accent); }}
 .product-ateles .capability-list {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 38px; }}
 .product-ateles .capability {{ position: relative; min-height: 220px; padding: 28px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper-2); }}
@@ -243,6 +249,7 @@ footer {{ border-top: 1px solid var(--line); padding-block: 42px; }} .footer-in 
   .nav-in {{ gap: 12px; }} .nav-in > .btn {{ display: none; }} .brand small {{ display: none; }}
   .takeover-hero {{ min-height: 860px; align-items: start; padding-top: 54px; }} .takeover-hero::after {{ background: linear-gradient(180deg, var(--paper) 0%, color-mix(in srgb, var(--paper) 94%, transparent) 36%, color-mix(in srgb, var(--paper) 48%, transparent) 60%, transparent 82%); }}
   .takeover-hero .hero-takeover-visual svg {{ transform: translate(13%, 18%) scale(1.18); transform-origin: center; }}
+  .product-neotoma .record-semantic-overlay {{ transform: translateY(26%) scale(.98); transform-origin: center; }}
   .product-ateles .takeover-hero .hero-takeover-visual svg {{ transform: translate(15%, 22%) scale(1.22); }}
   .coordination-states {{ bottom: 22px; }}
   .product-neotoma .source-section {{ display: block; }} .product-neotoma .source-section::before {{ display: block; margin-bottom: 22px; }}
@@ -302,14 +309,14 @@ def _pain_cards(body: str) -> str:
     return f'<div class="pain-grid">{"".join(cards)}</div>'
 
 
-def _render_source_section(product: str, section_id: str, resolved: dict) -> str:
+def _render_source_section(
+    product: str, page: dict, section_id: str, resolved: dict
+) -> str:
     projection = resolved.get("public_projection")
     if projection:
         # Evidence locators stay in the projection file's _source metadata.
         # The public page receives only the reader-facing interpretation.
-        return _render_page_specific(
-            product, {"primary_cta": {}}, section_id, projection
-        )
+        return _render_page_specific(product, page, section_id, projection)
     section = resolved.get("section", {})
     _, body = mdlib.strip_frontmatter(resolved["markdown"])
     selected = _extract_markdown_sections(body, section.get("headings", []))
@@ -356,6 +363,7 @@ def _record_hero(page: dict, data: dict) -> str:
         poster,
         data,
         "A persistent graph of records, relationships, provenance, and version history used by several agents",
+        overlay=_record_semantic_overlay_svg(),
     )
     category = str(data.get("category") or "").rstrip(".")
     headline = str(data["headline"]).rstrip(".")
@@ -372,7 +380,7 @@ def _record_hero(page: dict, data: dict) -> str:
 def _record_graph_svg(proof: dict) -> str:
     """Graph-first hero: durable edges are a feature, not decoration."""
     return f"""<svg class="record-graph" viewBox="0 0 1440 820" role="img" aria-labelledby="record-graph-title record-graph-desc" preserveAspectRatio="xMidYMid slice">
-<title id="record-graph-title">A durable knowledge graph shared by agents</title><desc id="record-graph-desc">Typed records remain connected to sources and prior versions while agents create, update, and retrieve the current state.</desc>
+<title id="record-graph-title">A durable knowledge graph shared by agents</title><desc id="record-graph-desc">Typed records preserve provenance, supersession, disagreement, refresh, relationships, and effective time while agents create, update, and retrieve the current state.</desc>
 <g aria-hidden="true"><path class="graph-edge" d="M745 162C860 202 900 245 955 320M955 320C1080 348 1145 420 1175 510M955 320C900 438 828 482 780 610M1175 510C1060 585 930 622 780 610M745 162C670 260 675 380 780 610"/><path class="graph-edge active" d="M745 162C860 202 900 245 955 320M955 320C1080 348 1145 420 1175 510M1175 510C1060 585 930 622 780 610"/></g>
 <g class="graph-node current" transform="translate(886 262)"><rect width="196" height="112" rx="14"/><text x="18" y="30">CURRENT RECORD</text><text class="node-value" x="18" y="66">{_esc(proof.get("current", "Shared truth"))}</text><text x="18" y="92">version 4 · current</text></g>
 <g class="graph-node" transform="translate(1084 468)"><rect width="184" height="96" rx="14"/><text x="18" y="29">PROVENANCE</text><text class="node-value" x="18" y="64">Named source</text></g>
@@ -382,7 +390,18 @@ def _record_graph_svg(proof: dict) -> str:
 </svg>"""
 
 
-def _concept_film(poster: str, data: dict, label: str) -> str:
+def _record_semantic_overlay_svg() -> str:
+    """Sparse, legible semantics above the provisional cinematic layer."""
+    return """<svg class="record-semantic-overlay" viewBox="700 100 700 700" role="img" aria-labelledby="semantic-graph-title semantic-graph-desc" preserveAspectRatio="xMaxYMid meet">
+<title id="semantic-graph-title">Agents create, update, and retrieve a persistent record graph</title><desc id="semantic-graph-desc">Durable record nodes retain relationships, provenance, and prior state while create, update, and retrieve operations pulse along persistent edges.</desc>
+<g aria-hidden="true"><path class="semantic-edge" d="M864 192C984 246 1034 310 1068 390M1068 390C1164 432 1210 500 1238 584M1068 390C1018 512 948 572 846 634M1238 584C1090 650 972 666 846 634"/><path class="semantic-edge active" d="M864 192C984 246 1034 310 1068 390M1068 390C1164 432 1210 500 1238 584"/></g>
+<g aria-hidden="true"><rect class="semantic-node" x="980" y="332" width="176" height="112" rx="18"/><rect class="semantic-node" x="1160" y="532" width="156" height="94" rx="18"/><rect class="semantic-node prior" x="768" y="586" width="164" height="92" rx="18"/><rect class="semantic-node" x="790" y="142" width="150" height="92" rx="18"/></g>
+<text x="1010" y="374">CURRENT</text><text x="1010" y="408">RECORD</text><text x="1187" y="570">PROVENANCE</text><text x="797" y="624">PRIOR STATE</text><text x="820" y="180">RELATIONSHIP</text>
+<g aria-hidden="true"><circle class="operation-marker" cx="1184" cy="190" r="28"/><circle class="operation-marker" cx="1320" cy="364" r="28"/><circle class="operation-marker" cx="1212" cy="704" r="28"/></g><text x="1147" y="196">CREATE</text><text x="1283" y="370">UPDATE</text><text x="1166" y="710">RETRIEVE</text>
+</svg>"""
+
+
+def _concept_film(poster: str, data: dict, label: str, overlay: str = "") -> str:
     """Wrap a load-bearing code-native poster in an optional local film slot."""
     brief = data.get("concept_film") or {}
     asset = brief.get("asset") or {}
@@ -402,7 +421,10 @@ def _concept_film(poster: str, data: dict, label: str) -> str:
     )
     duration = brief.get("duration_seconds", "")
     active = "true" if video else "false"
-    return f'<figure class="concept-film" aria-label="{_esc(label)}" data-concept-film-ready="true" data-concept-film-active="{active}" data-duration-seconds="{_esc(duration)}"><div class="concept-film-poster">{poster}</div>{video}</figure>'
+    overlay_html = (
+        f'<div class="concept-film-overlay">{overlay}</div>' if overlay else ""
+    )
+    return f'<figure class="concept-film" aria-label="{_esc(label)}" data-concept-film-ready="true" data-concept-film-active="{active}" data-duration-seconds="{_esc(duration)}"><div class="concept-film-poster">{poster}</div>{video}{overlay_html}</figure>'
 
 
 def _authorization_seal_svg(state: str) -> str:
@@ -418,7 +440,7 @@ def _swarm_svg(roles: list[str]) -> str:
     defaults = ["Operator", "Research", "Build", "Review", "Operate"]
     labels = (roles + defaults)[:5]
     return f"""<svg class="swarm-field" viewBox="0 0 1440 820" role="img" aria-labelledby="swarm-title swarm-desc" preserveAspectRatio="xMidYMid slice">
-<title id="swarm-title">Distinct roles coordinating as a swarm</title><desc id="swarm-desc">Autonomous members move around shared purpose, exchange work through brief signals, pause at a bounded checkpoint, and continue without permanent connecting edges or a central hub.</desc>
+<title id="swarm-title">Distinct roles coordinating as a swarm</title><desc id="swarm-desc">Relational, autonomous members move around shared purpose, exchange work through brief signals, pause at a bounded checkpoint or quorum, and continue without permanent connecting edges or a central hub.</desc>
 <ellipse class="purpose-field" cx="1010" cy="420" rx="350" ry="260"/><text class="purpose-label" x="910" y="110">SHARED PURPOSE</text>
 <g aria-hidden="true"><path class="handoff-signal" d="M820 240C900 280 930 320 962 360"/><path class="handoff-signal" d="M1075 272C1140 320 1160 362 1134 420"/><path class="handoff-signal" d="M1170 530C1090 565 1030 594 948 610"/><path class="handoff-signal" d="M870 590C790 550 760 505 790 458"/></g>
 <g class="swarm-member" transform="translate(770 190)"><circle r="56"/><text y="4">{_esc(labels[0]).upper()}</text></g>
@@ -529,7 +551,14 @@ def _section_intro(product: str, section_id: str, data: dict) -> str:
     return f"""{_section_visual(product, section_id, data.get("layout", section_id))}<div class="section-copy"><p class="eyebrow">{_esc(data.get("eyebrow"))}</p><h2>{_esc(data["headline"])}</h2><p class="lede">{_esc(data.get("lede") or data.get("body"))}</p>{_deep_link(product, section_id, data.get("layout", section_id))}</div>"""
 
 
-def _render_capabilities(product: str, section_id: str, data: dict) -> str:
+def _focused_evidence(page: dict, content: str) -> str:
+    """Keep landing pages concise; expose supporting detail on focused routes."""
+    if page.get("slug") == "index" or not content:
+        return ""
+    return f'<div class="section-evidence">{content}</div>'
+
+
+def _render_capabilities(page: dict, product: str, section_id: str, data: dict) -> str:
     items = "".join(
         f'<article class="capability"><p class="meta">{_esc(item.get("label", f"0{index}"))}</p><h3>{_esc(item["title"])}</h3><p>{_esc(item["body"])}</p><p class="scope-line">{_esc(item.get("terms"))}</p></article>'
         for index, item in enumerate(data.get("items", []), start=1)
@@ -542,28 +571,36 @@ def _render_capabilities(product: str, section_id: str, data: dict) -> str:
         if data.get("status_note")
         else ""
     )
-    return f'<section class="wrap visual-section" id="{_esc(section_id)}">{_section_intro(product, section_id, data)}<details class="section-details"><summary>Inspect the mechanism</summary><div class="capability-list">{items}</div>{correction}{status}</details></section>'
+    evidence = _focused_evidence(
+        page, f'<div class="capability-list">{items}</div>{correction}{status}'
+    )
+    return f'<section class="wrap visual-section" id="{_esc(section_id)}">{_section_intro(product, section_id, data)}{evidence}</section>'
 
 
-def _render_hierarchy(product: str, section_id: str, data: dict) -> str:
+def _render_hierarchy(page: dict, product: str, section_id: str, data: dict) -> str:
     chain = "".join(
         f'<div class="hierarchy-item">{_esc(item)}<span class="hierarchy-arrow">{"↓" if index < len(data["levels"]) - 1 else "act"}</span></div>'
         for index, item in enumerate(data["levels"])
     )
     proof_note = data.get("proof_note") or data.get("source_note")
     note = f'<p class="status-note">{_esc(proof_note)}</p>' if proof_note else ""
-    return f'<section class="wrap visual-section" id="{_esc(section_id)}">{_section_intro(product, section_id, data)}<details class="section-details"><summary>Trace the full hierarchy</summary><div class="hierarchy" aria-label="Planning hierarchy">{chain}</div>{note}</details></section>'
+    evidence = _focused_evidence(
+        page,
+        f'<div class="hierarchy" aria-label="Planning hierarchy">{chain}</div>{note}',
+    )
+    return f'<section class="wrap visual-section" id="{_esc(section_id)}">{_section_intro(product, section_id, data)}{evidence}</section>'
 
 
-def _render_steps(product: str, section_id: str, data: dict) -> str:
+def _render_steps(page: dict, product: str, section_id: str, data: dict) -> str:
     steps = "".join(
         f'<article class="step"><span class="step-num">{index:02d}</span><div><h3>{_esc(item["title"])}</h3><p>{_esc(item["body"])}</p></div></article>'
         for index, item in enumerate(data.get("items", []), start=1)
     )
-    return f'<section class="wrap visual-section" id="{_esc(section_id)}">{_section_intro(product, section_id, data)}<details class="section-details" open><summary>Follow the sequence</summary><div class="steps">{steps}</div></details></section>'
+    evidence = _focused_evidence(page, f'<div class="steps">{steps}</div>')
+    return f'<section class="wrap visual-section" id="{_esc(section_id)}">{_section_intro(product, section_id, data)}{evidence}</section>'
 
 
-def _render_cards(product: str, section_id: str, data: dict) -> str:
+def _render_cards(page: dict, product: str, section_id: str, data: dict) -> str:
     cards = "".join(
         '<article class="card">'
         + (
@@ -581,18 +618,20 @@ def _render_cards(product: str, section_id: str, data: dict) -> str:
         + "</article>"
         for item in data.get("items", [])
     )
-    return f'<section class="wrap visual-section" id="{_esc(section_id)}">{_section_intro(product, section_id, data)}<details class="section-details"><summary>See the evidence</summary><div class="cards">{cards}</div></details></section>'
+    evidence = _focused_evidence(page, f'<div class="cards">{cards}</div>')
+    return f'<section class="wrap visual-section" id="{_esc(section_id)}">{_section_intro(product, section_id, data)}{evidence}</section>'
 
 
-def _render_flow(product: str, section_id: str, data: dict) -> str:
+def _render_flow(page: dict, product: str, section_id: str, data: dict) -> str:
     items = "".join(
         f'<article class="flow-step"><p class="flow-label">{_esc(item.get("label"))}</p><h3>{_esc(item["title"])}</h3><p>{_esc(item["body"])}</p></article>'
         for item in data.get("items", [])
     )
-    return f'<section class="wrap visual-section" id="{_esc(section_id)}">{_section_intro(product, section_id, data)}<details class="section-details" open><summary>Follow the handoff</summary><div class="public-flow">{items}</div></details></section>'
+    evidence = _focused_evidence(page, f'<div class="public-flow">{items}</div>')
+    return f'<section class="wrap visual-section" id="{_esc(section_id)}">{_section_intro(product, section_id, data)}{evidence}</section>'
 
 
-def _render_comparison(product: str, section_id: str, data: dict) -> str:
+def _render_comparison(page: dict, product: str, section_id: str, data: dict) -> str:
     head = "".join(f"<div>{_esc(value)}</div>" for value in data.get("columns", []))
     rows = "".join(
         '<div class="comparison-row comparison-body">'
@@ -600,7 +639,11 @@ def _render_comparison(product: str, section_id: str, data: dict) -> str:
         + "</div>"
         for row in data.get("rows", [])
     )
-    return f'<section class="wrap visual-section" id="{_esc(section_id)}">{_section_intro(product, section_id, data)}<details class="section-details"><summary>Compare the details</summary><div class="comparison-wrap"><div class="comparison-grid" role="table" aria-label="{_esc(data["headline"])}"><div class="comparison-row comparison-head" role="row">{head}</div>{rows}</div></div></details></section>'
+    evidence = _focused_evidence(
+        page,
+        f'<div class="comparison-wrap"><div class="comparison-grid" role="table" aria-label="{_esc(data["headline"])}"><div class="comparison-row comparison-head" role="row">{head}</div>{rows}</div></div>',
+    )
+    return f'<section class="wrap visual-section" id="{_esc(section_id)}">{_section_intro(product, section_id, data)}{evidence}</section>'
 
 
 def _render_page_specific(product: str, page: dict, section_id: str, data: dict) -> str:
@@ -612,17 +655,17 @@ def _render_page_specific(product: str, page: dict, section_id: str, data: dict)
     if layout == "network_hero":
         return _network_hero(page, data)
     if layout == "capabilities":
-        return _render_capabilities(product, section_id, data)
+        return _render_capabilities(page, product, section_id, data)
     if layout == "hierarchy":
-        return _render_hierarchy(product, section_id, data)
+        return _render_hierarchy(page, product, section_id, data)
     if layout == "steps":
-        return _render_steps(product, section_id, data)
+        return _render_steps(page, product, section_id, data)
     if layout in ("cards", "proof_cards", "comparison_teaser", "sibling"):
-        return _render_cards(product, section_id, data)
+        return _render_cards(page, product, section_id, data)
     if layout == "flow":
-        return _render_flow(product, section_id, data)
+        return _render_flow(page, product, section_id, data)
     if layout == "comparison":
-        return _render_comparison(product, section_id, data)
+        return _render_comparison(page, product, section_id, data)
     if layout == "cta_banner":
         return f'<section class="wrap visual-section" id="{_esc(section_id)}">{_section_visual(product, section_id, layout)}<div class="panel"><p class="eyebrow">{_esc(data.get("eyebrow"))}</p><h2>{_esc(data["headline"])}</h2><p class="lede" style="margin-top:18px">{_esc(data.get("body"))}</p>{_hero_ctas(page, data)}</div></section>'
     import json as _json
@@ -636,7 +679,7 @@ def _render_section(product: str, page: dict, section_id: str, resolved: dict) -
     if "data" in resolved:
         return _render_page_specific(product, page, section_id, resolved["data"])
     if resolved["origin"] in ("authored", "positioning_mirror"):
-        return _render_source_section(product, section_id, resolved)
+        return _render_source_section(product, page, section_id, resolved)
     return f'<section class="wrap" id="{_esc(section_id)}"><div class="blocker">Unknown content origin.</div></section>'
 
 

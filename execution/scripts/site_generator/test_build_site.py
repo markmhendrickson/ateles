@@ -14,12 +14,18 @@ Run with: pytest execution/scripts/site_generator/test_build_site.py -v
 
 from __future__ import annotations
 
+import contextlib
+import functools
+import http.server
 import json
 import re
+import shutil
 import sys
+import threading
 from pathlib import Path
 
 import pytest
+from playwright.sync_api import sync_playwright
 
 _GEN_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_GEN_DIR))
@@ -768,6 +774,9 @@ def test_product_identities_render_distinct_signature_devices(tmp_path):
     assert neotoma_tokens["_source"]["entity_id"] == "ent_746b1d7c717e7780e7943782"
     assert ateles_tokens["_source"]["entity_id"] == "ent_9158c8b39e0f437fdb2a86de"
     assert "record-graph" in neotoma
+    assert "record-semantic-overlay" in neotoma
+    assert "semantic-edge active" in neotoma
+    assert "semantic-node prior" in neotoma
     assert "graph-edge" in neotoma
     assert "CREATE" in neotoma
     assert "UPDATE" in neotoma
@@ -790,7 +799,7 @@ def test_product_identities_render_distinct_signature_devices(tmp_path):
     assert (tmp_path / "neotoma/assets/neotoma/hero-concept.webm").exists()
     assert not (tmp_path / "ateles/assets/ateles/hero-concept.webm").exists()
     assert "prefers-reduced-motion: reduce" in neotoma
-    assert ".concept-film-media { display: none; }" in neotoma
+    assert ".concept-film-media, .concept-film-overlay { display: none; }" in neotoma
     assert "The system of record for AI agents." in neotoma
     assert (
         "Persistent, connected context agents can create, retrieve, and update—with provenance intact."
@@ -803,6 +812,185 @@ def test_product_identities_render_distinct_signature_devices(tmp_path):
         in ateles
     )
     assert ateles.count("Delegate outcomes, not every next step.") == 1
+
+
+def test_generated_html_shows_product_motifs(tmp_path):
+    for product in ("neotoma", "ateles"):
+        assert build_site.build(product, tmp_path) == []
+
+    neotoma = "\n".join(
+        path.read_text() for path in sorted((tmp_path / "neotoma").rglob("*.html"))
+    )
+    ateles = "\n".join(
+        path.read_text() for path in sorted((tmp_path / "ateles").rglob("*.html"))
+    )
+
+    # Durable epistemological cues: the generated public surface must show
+    # where a claim came from, how it changed, and when to refresh it.
+    for motif in (
+        "provenance",
+        "supersession",
+        "disagreement",
+        "REFRESH",
+        "effective time",
+    ):
+        assert motif.casefold() in neotoma.casefold(), motif
+
+    # Durable organizational cues: Ateles must read as roles coordinating
+    # through bounded, temporary handoffs rather than as a persistent graph.
+    for motif in (
+        "relational",
+        "grant-state",
+        "CHECKPOINT",
+        "quorum",
+        "coordinated",
+        "handoff-signal",
+    ):
+        assert motif.casefold() in ateles.casefold(), motif
+    assert "org-link" not in ateles
+    hierarchy_markers = [
+        f'class="hierarchy-item">{level}'
+        for level in (
+            "Mission",
+            "Strategy",
+            "Project",
+            "Plan",
+            "Task",
+        )
+    ]
+    assert [ateles.index(marker) for marker in hierarchy_markers] == sorted(
+        ateles.index(marker) for marker in hierarchy_markers
+    )
+
+
+def test_product_routes_reject_disclosure_components_and_keep_named_links(tmp_path):
+    for product in ("neotoma", "ateles"):
+        assert build_site.build(product, tmp_path) == []
+        pages = sorted((tmp_path / product).rglob("*.html"))
+        assert len(pages) == 4
+        for page in pages:
+            document = page.read_text()
+            assert "<details" not in document.casefold(), page
+            assert "<summary" not in document.casefold(), page
+            assert "section-details" not in document, page
+            for section in re.findall(
+                r"(?s)(<section\b[^>]*class=\"[^\"]*visual-section[^\"]*\"[^>]*>.*?</section>)",
+                document,
+            ):
+                assert 'class="section-link"' in section or 'class="btn' in section
+
+    # Prove the validator fails on the forbidden interaction, instead of
+    # treating a zero count as sufficient evidence.
+    rendered, blockers = build_site.render_site("neotoma")
+    assert blockers == []
+    mutated = dict(rendered)
+    mutated[Path("index.html")] = str(mutated[Path("index.html")]).replace(
+        "</section>", "<details><summary>More</summary></details></section>", 1
+    )
+    neotoma_inventory = json.loads(
+        (_GEN_DIR / "inventory" / "neotoma.json").read_text()
+    )
+    assert any(
+        "must not hide copy" in blocker
+        for blocker in build_site._validate_site("neotoma", neotoma_inventory, mutated)
+    )
+
+
+@contextlib.contextmanager
+def _serve_directory(directory: Path):
+    handler = functools.partial(
+        http.server.SimpleHTTPRequestHandler,
+        directory=str(directory),
+    )
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def _launch_chromium(playwright):
+    """Use installed Chrome in CI; use Playwright Chromium when available."""
+    executable = next(
+        (
+            path
+            for path in (
+                shutil.which("google-chrome"),
+                shutil.which("chromium"),
+                shutil.which("chromium-browser"),
+            )
+            if path
+        ),
+        None,
+    )
+    options = {"executable_path": executable} if executable else {}
+    return playwright.chromium.launch(headless=True, **options)
+
+
+def test_eight_routes_have_no_document_overflow_at_390px(tmp_path):
+    for product in ("neotoma", "ateles"):
+        assert build_site.build(product, tmp_path) == []
+
+    with sync_playwright() as playwright:
+        browser = _launch_chromium(playwright)
+        try:
+            page = browser.new_page(viewport={"width": 390, "height": 844})
+
+            # Prove the browser measurement can detect a known overflow before
+            # trusting a zero-overflow result from the generated pages.
+            overflow_fixture = tmp_path / "overflow-fixture.html"
+            overflow_fixture.write_text(
+                '<!doctype html><div style="width:800px;height:1px"></div>'
+            )
+            page.goto(overflow_fixture.resolve().as_uri())
+            assert page.evaluate(
+                "document.documentElement.scrollWidth > "
+                "document.documentElement.clientWidth"
+            )
+
+            routes = {
+                "neotoma": ("/", "/install/", "/evaluate/", "/compare/"),
+                "ateles": ("/", "/design/", "/compare/", "/status/"),
+            }
+            for product, product_routes in routes.items():
+                with _serve_directory(tmp_path / product) as base_url:
+                    for route in product_routes:
+                        page.goto(f"{base_url}{route}", wait_until="load")
+                        widths = page.evaluate(
+                            """() => ({
+                              scroll: document.documentElement.scrollWidth,
+                              client: document.documentElement.clientWidth,
+                              htmlOverflow: getComputedStyle(document.documentElement).overflowX,
+                              bodyOverflow: getComputedStyle(document.body).overflowX,
+                            })"""
+                        )
+                        assert widths["scroll"] <= widths["client"], (
+                            product,
+                            route,
+                            widths,
+                        )
+                        assert widths["htmlOverflow"] not in {"hidden", "clip"}
+                        assert widths["bodyOverflow"] not in {"hidden", "clip"}
+
+                    page.set_viewport_size({"width": 1280, "height": 800})
+                    page.goto(f"{base_url}/", wait_until="load")
+                    assert (
+                        page.locator(".nav-in").evaluate(
+                            "element => getComputedStyle(element).flexWrap"
+                        )
+                        == "nowrap"
+                    )
+                    page.evaluate("scrollTo(0, 40)")
+                    page.wait_for_function(
+                        "document.querySelector('#site-nav').classList.contains('scrolled')"
+                    )
+                    page.set_viewport_size({"width": 390, "height": 844})
+        finally:
+            browser.close()
 
 
 @pytest.mark.parametrize("product", ["neotoma", "ateles"])
