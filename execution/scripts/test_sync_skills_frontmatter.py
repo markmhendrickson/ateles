@@ -99,6 +99,7 @@ BRAND_RESEARCH_REQUIRED_CONTRACTS = {
 
 PUBLIC_SURFACE_GATE_SCOPES = {
     "public_translation": "every public route",
+    "category_noun_integrity": "every public route",
     "public_source_projection": "each public source-derived block",
     "public_design_language": "every public route",
     "audience_read": "every public route",
@@ -262,6 +263,22 @@ def test_public_surface_gate_check_rejects_homepage_only_leakage_scan() -> None:
     )
 
     assert "wrong scope: internal_leakage_scan -> homepage only" in (
+        _public_surface_gate_errors(mutated)
+    )
+
+
+def test_public_surface_gate_check_rejects_missing_category_integrity() -> None:
+    """Mutation proof: category, metaphor, mechanism, and state cannot collapse."""
+    skill = (
+        _REPO_ROOT / ".claude" / "skills" / "build-landing-page" / "SKILL.md"
+    ).read_text()
+    mutated = "\n".join(
+        line
+        for line in skill.splitlines()
+        if not line.startswith("| `category_noun_integrity` |")
+    )
+
+    assert "missing gate: category_noun_integrity" in (
         _public_surface_gate_errors(mutated)
     )
 

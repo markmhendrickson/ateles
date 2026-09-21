@@ -125,10 +125,23 @@ stage would invite a run to re-derive a noun that has already been ruled.
 the definition or register lists as superseded may not appear on the page, in
 any inflection, however well it reads.
 
+**The category noun stays a single, settled public phrase.** Keep four layers
+separate and trace each to its owning source: the category noun names what kind
+of product this is; a symbolic metaphor or primary visual symbol expresses the
+brand ambition; mechanisms and structural differentiators explain why the
+product works; and state markers or secondary icons communicate local status.
+Internal collective vocabulary such as `swarm`, plus governance, authority,
+and mechanism language, may support the argument without becoming part of the
+category name. MUST NOT concatenate those layers into a new compound category
+phrase, and MUST NOT promote a secondary state marker into the primary brand
+metaphor. Copy may relate the layers in a sentence, but wherever it names the
+category it preserves the settled noun exactly and puts metaphor,
+differentiation, and state in separate supporting language.
+
 | Stage | Check |
 |---|---|
 | 1 — Template | The structure may not bury the noun. The hero states the delegation AMBITION and how the product enables it; the noun appears immediately with that product role and anywhere else the current placement rule requires. Record which decision key the template honors. |
-| 2 — Content specification | The drafted copy carries the noun where the placement rule puts it, with its article when the decision specifies one, and contains no retired noun. |
+| 2 — Content specification | The drafted copy carries the noun exactly where the placement rule puts it, with its article when the decision specifies one, and contains no retired noun. Symbolic metaphor, differentiating mechanisms, and state-marker language stay in separate supporting clauses rather than forming a compound category alias. |
 | 5 — Build | FAIL the build on any retired noun found in the assembled page, and assert the current noun is present in its required positions. This is the mechanical check; the two above are authoring checks, and a check that only ever runs at authoring time does not bind. |
 
 ## Ambition-first product argument — a standing sequence
@@ -772,6 +785,7 @@ what must pass.
 | Gate id | Scope | Pass condition |
 |---|---|---|
 | `public_translation` | every public route | Claims preserve source meaning and confidence in plain reader language; internal evidence references are absent unless the route is explicitly an internal review artifact. |
+| `category_noun_integrity` | every public route | The settled category noun appears unchanged wherever named; symbolic metaphor, collective vocabulary, structural differentiators, and state-marker language remain supporting concepts and never form a compound category alias. |
 | `public_source_projection` | each public source-derived block | Current source evidence is selected and translated at render time; a mirror containing internal references is never rendered as-is. |
 | `public_design_language` | every public route | Visual language expresses reader-recognizable concepts rather than entity ids, schema or field vocabulary, grant micro-formats, or control syntax. |
 | `audience_read` | every public route | A final reader-altitude pass removes pasted analysis, repeated rationale, and provenance-as-prose while the durable source entities retain the evidence. |
