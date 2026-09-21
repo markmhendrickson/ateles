@@ -107,6 +107,28 @@ EXPECTED_GENERALIZATION_RULINGS = {
 
 
 class RuleInventoryRulingsTest(unittest.TestCase):
+    def assert_public_store_metadata_withheld(
+        self, store: inventory.Store, *private_values: str
+    ) -> None:
+        payload = inventory.public_payload([], [store], [], [])
+        self.assertNotIn("read_error", payload["stores"][0])
+        serialized = json.dumps(payload)
+        for value in (*private_values, store.read_error):
+            if value:
+                with self.subTest(private_value=value):
+                    self.assertNotIn(value, serialized)
+
+    def assert_read_error_leak_mutant_rejected(
+        self, store: inventory.Store, *private_values: str
+    ) -> None:
+        payload = inventory.public_payload([], [store], [], [])
+        payload["stores"][0]["read_error"] = store.read_error
+        serialized = json.dumps(payload)
+        with self.assertRaises(AssertionError):
+            for value in (*private_values, store.read_error):
+                if value:
+                    self.assertNotIn(value, serialized)
+
     def assert_rulings_exact(
         self,
         actual: dict[str, inventory.RuleRuling],
@@ -469,20 +491,24 @@ class RuleInventoryRulingsTest(unittest.TestCase):
         self.assertIn("Canonical repository instruction roots", public)
 
     def test_relative_canonical_repository_root_fails_closed(self) -> None:
+        configured = "ClientCodename-ent_private_123-relative/repository"
         statements, store = inventory.read_canonical_repository_instruction_roots(
-            "relative/repository"
+            configured
         )
 
         self.assertEqual(statements, [])
         self.assertFalse(store.read_ok)
         self.assertIn("not absolute", store.read_error)
+        private_values = (configured, "ClientCodename", "ent_private_123")
+        self.assert_public_store_metadata_withheld(store, *private_values)
+        self.assert_read_error_leak_mutant_rejected(store, *private_values)
 
     def test_symlinked_canonical_repository_root_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             primary = base / "primary"
             subprocess.run(["git", "init", "--quiet", str(primary)], check=True)
-            configured = base / "configured-root"
+            configured = base / "ClientCodename-ent_private_123-root"
             configured.symlink_to(primary, target_is_directory=True)
 
             statements, store = inventory.read_canonical_repository_instruction_roots(
@@ -492,6 +518,9 @@ class RuleInventoryRulingsTest(unittest.TestCase):
         self.assertEqual(statements, [])
         self.assertFalse(store.read_ok)
         self.assertIn("unavailable", store.read_error)
+        private_values = (str(configured), "ClientCodename", "ent_private_123")
+        self.assert_public_store_metadata_withheld(store, *private_values)
+        self.assert_read_error_leak_mutant_rejected(store, *private_values)
 
     def test_repository_instruction_symlink_escape_fails_closed_without_leaking(
         self,
@@ -502,7 +531,8 @@ class RuleInventoryRulingsTest(unittest.TestCase):
             subprocess.run(["git", "init", "--quiet", str(configured)], check=True)
             outside = base / "ClientCodename-ent_private_123.md"
             outside.write_text("Never expose this private instruction value.\n")
-            configured.joinpath("AGENTS.md").symlink_to(outside)
+            candidate = configured / "AGENTS.md"
+            candidate.symlink_to(outside)
 
             statements, store = inventory.read_canonical_repository_instruction_roots(
                 str(configured)
@@ -511,10 +541,15 @@ class RuleInventoryRulingsTest(unittest.TestCase):
         self.assertEqual(statements, [])
         self.assertFalse(store.read_ok)
         self.assertIn("leaves its canonical root", store.read_error)
-        public = json.dumps(inventory.public_payload([], [store], [], []))
-        for secret in (str(outside), "ClientCodename", "ent_private_123"):
-            with self.subTest(secret=secret):
-                self.assertNotIn(secret, public)
+        private_values = (
+            str(configured),
+            str(candidate),
+            str(outside),
+            "ClientCodename",
+            "ent_private_123",
+        )
+        self.assert_public_store_metadata_withheld(store, *private_values)
+        self.assert_read_error_leak_mutant_rejected(store, *private_values)
 
     def test_malformed_canonical_repository_root_fails_closed_without_leaking(
         self,
