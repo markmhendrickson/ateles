@@ -587,20 +587,25 @@ def _validate_site(
     if category and category not in home_html:
         blockers.append(f"homepage is missing settled category noun: {category}")
     if product == "neotoma":
-        for marker in (
-            "record-semantic-overlay",
-            "semantic-node",
-            "semantic-edge",
-            "CREATE",
-            "UPDATE",
-            "RETRIEVE",
-            "PROVENANCE",
-            "PRIOR STATE",
-        ):
-            if marker not in home_html:
+        hero_match = re.search(
+            r'(?s)<section class="takeover-hero record-hero" id="hero">(.*?)</section>',
+            home_html,
+        )
+        hero_html = hero_match.group(1) if hero_match else ""
+        if not hero_match:
+            blockers.append("homepage is missing the Neotoma cinematic hero")
+        for marker in ("<svg", "concept-film-overlay", "record-semantic-overlay"):
+            if marker in hero_html:
                 blockers.append(
-                    f"homepage is missing Neotoma graph-operation marker: {marker}"
+                    f"Neotoma cinematic hero must not contain a semantic overlay: {marker}"
                 )
+        for marker in (
+            'data-concept-film-active="true"',
+            '<video class="concept-film-media"',
+            '<img class="concept-film-poster-media"',
+        ):
+            if marker not in hero_html:
+                blockers.append(f"Neotoma cinematic hero is missing media: {marker}")
         banned_claims = (
             "your agent forgot",
             "your agents forgot",

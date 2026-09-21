@@ -197,8 +197,7 @@ def test_authored_json_composition_resolves_and_renders(tmp_repo):
     assert build_site.build("testproduct", repo_root / "dist" / "site") == []
     html = (repo_root / "dist" / "site" / "testproduct" / "index.html").read_text()
     assert "Durable truth" in html
-    assert "Earlier" in html
-    assert "Current" in html
+    assert "A current record." in html
 
 
 def test_page_specific_rejects_composition_keys(tmp_repo):
@@ -828,14 +827,7 @@ def test_product_identities_render_distinct_signature_devices(tmp_path):
 
     assert neotoma_tokens["_source"]["entity_id"] == "ent_746b1d7c717e7780e7943782"
     assert ateles_tokens["_source"]["entity_id"] == "ent_9158c8b39e0f437fdb2a86de"
-    assert "record-graph" in neotoma
-    assert "record-semantic-overlay" in neotoma
-    assert "semantic-edge active" in neotoma
-    assert "semantic-node prior" in neotoma
-    assert "graph-edge" in neotoma
-    assert "CREATE" in neotoma
-    assert "UPDATE" in neotoma
-    assert "RETRIEVE" in neotoma
+    assert "concept-film-poster-media" in neotoma
     assert "swarm-field" in ateles
     assert "swarm-member" in ateles
     assert "handoff-signal" in ateles
@@ -869,6 +861,49 @@ def test_product_identities_render_distinct_signature_devices(tmp_path):
     assert ateles.count("Delegate outcomes, not every next step.") == 1
 
 
+def test_neotoma_cinematic_hero_has_no_semantic_svg_or_overlay(tmp_path):
+    assert build_site.build("neotoma", tmp_path) == []
+    document = (tmp_path / "neotoma" / "index.html").read_text()
+    hero_match = re.search(
+        r'(?s)<section class="takeover-hero record-hero" id="hero">(.*?)</section>',
+        document,
+    )
+    assert hero_match is not None
+    hero = hero_match.group(1)
+
+    assert '<video class="concept-film-media"' in hero
+    assert '<img class="concept-film-poster-media"' in hero
+    assert "<svg" not in hero
+    assert "concept-film-overlay" not in hero
+    assert "record-semantic-overlay" not in hero
+    assert "record-graph" not in hero
+    for diagram_label in (
+        "CREATE",
+        "UPDATE",
+        "RETRIEVE",
+        "CURRENT RECORD",
+        "PROVENANCE",
+        "PRIOR STATE",
+    ):
+        assert diagram_label not in hero
+
+    # Calibrate the binding validator with a known-positive forbidden overlay.
+    rendered, blockers = build_site.render_site("neotoma")
+    assert blockers == []
+    mutated = dict(rendered)
+    mutated[Path("index.html")] = str(mutated[Path("index.html")]).replace(
+        '<div class="concept-film-poster">',
+        '<div class="concept-film-overlay"><svg></svg></div>'
+        '<div class="concept-film-poster">',
+        1,
+    )
+    inventory = json.loads((_GEN_DIR / "inventory" / "neotoma.json").read_text())
+    overlay_blockers = build_site._validate_site("neotoma", inventory, mutated)
+    assert any(
+        "must not contain a semantic overlay" in item for item in overlay_blockers
+    )
+
+
 def test_generated_html_shows_product_motifs(tmp_path):
     for product in ("neotoma", "ateles"):
         assert build_site.build(product, tmp_path) == []
@@ -881,13 +916,13 @@ def test_generated_html_shows_product_motifs(tmp_path):
     )
 
     # Durable epistemological cues: the generated public surface must show
-    # where a claim came from, how it changed, and when to refresh it.
+    # where a claim came from and retain its version history and disagreement.
     for motif in (
         "provenance",
-        "supersession",
+        "superseded",
         "disagreement",
-        "REFRESH",
-        "effective time",
+        "version",
+        "history",
     ):
         assert motif.casefold() in neotoma.casefold(), motif
 

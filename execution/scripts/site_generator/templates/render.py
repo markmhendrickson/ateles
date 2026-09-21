@@ -136,6 +136,7 @@ th, td {{ padding: 11px 13px; border: 1px solid var(--line); text-align: left; v
 .comparison-body {{ color: var(--ink-2); background: var(--paper-2); }} .comparison-body > :first-child {{ color: var(--ink); font-weight: 700; }}
 .concept-film {{ position: relative; min-width: 0; margin: 0; overflow: hidden; border-radius: var(--radius); }}
 .concept-film-poster {{ position: relative; z-index: 1; }}
+.concept-film-poster-media {{ display: block; width: 100%; height: 100%; object-fit: cover; }}
 .concept-film-media {{ position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; border: 0; object-fit: cover; background: var(--paper-2); }}
 .concept-film-overlay {{ position: absolute; inset: 0; z-index: 3; pointer-events: none; }}
 .concept-film-overlay svg {{ display: block; width: 100%; height: 100%; }}
@@ -181,22 +182,6 @@ footer {{ border-top: 1px solid var(--line); padding-block: 42px; }} .footer-in 
 .takeover-hero .hero-takeover-visual svg {{ width: 100%; height: 100%; }}
 .takeover-hero::after {{ content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; background: linear-gradient(90deg, var(--paper) 0%, color-mix(in srgb, var(--paper) 94%, transparent) 34%, color-mix(in srgb, var(--paper) 54%, transparent) 56%, transparent 78%); }}
 .takeover-hero .hero-copy {{ width: min(100%, 650px); position: relative; z-index: 3; padding: clamp(24px, 4vw, 46px) 0; }}
-.record-graph {{ overflow: visible; }}
-.record-graph .graph-edge {{ fill: none; stroke: var(--line-2, var(--line)); stroke-width: 1.6; }}
-.record-graph .graph-edge.active {{ stroke: var(--accent); stroke-dasharray: 8 15; animation: signal-flow 8s linear infinite; }}
-.record-graph .graph-node rect {{ fill: color-mix(in srgb, var(--paper) 91%, transparent); stroke: var(--line-2, var(--line)); stroke-width: 1.5; }}
-.record-graph .graph-node.current rect {{ stroke: var(--accent); stroke-width: 2.5; }}
-.record-graph .graph-node text {{ fill: var(--ink-2); font-family: var(--mono); font-size: 18px; }}
-.record-graph .graph-node .node-value {{ fill: var(--ink); font-family: var(--heading); font-size: 27px; letter-spacing: 0; }}
-.record-graph .agent-orbit circle {{ fill: var(--accent); }}
-.record-graph .agent-orbit text {{ fill: var(--on-accent); font-family: var(--mono); font-size: 14px; text-anchor: middle; }}
-.record-graph .version-ghost {{ opacity: .56; }}
-.record-semantic-overlay .semantic-edge {{ fill: none; stroke: color-mix(in srgb, var(--accent) 72%, white); stroke-width: 2; opacity: .72; }}
-.record-semantic-overlay .semantic-edge.active {{ stroke-dasharray: 7 17; animation: signal-flow 7s linear infinite; }}
-.record-semantic-overlay .semantic-node {{ fill: color-mix(in srgb, var(--paper) 23%, transparent); stroke: color-mix(in srgb, var(--accent) 76%, white); stroke-width: 1.7; }}
-.record-semantic-overlay .semantic-node.prior {{ opacity: .62; }}
-.record-semantic-overlay .operation-marker {{ fill: color-mix(in srgb, var(--accent) 88%, white); }}
-.record-semantic-overlay text {{ fill: color-mix(in srgb, var(--ink) 82%, white); font-family: var(--mono); font-size: 19px; font-weight: 700; letter-spacing: .08em; paint-order: stroke; stroke: color-mix(in srgb, var(--paper) 58%, transparent); stroke-width: 5px; }}
 .product-neotoma .record-demo {{ position: relative; border-top: 3px double var(--ink); border-bottom: 1px solid var(--line); padding: 28px 0 12px 68px; }}
 .product-neotoma .record-demo::before {{ content: "RECORD"; position: absolute; left: 0; top: 30px; writing-mode: vertical-rl; transform: rotate(180deg); color: var(--ink-3); font-family: var(--mono); font-size: .62rem; letter-spacing: .14em; }}
 .record-row {{ padding: 18px 0; border-bottom: 1px solid var(--line); }} .record-row:last-child {{ border-bottom: 0; }}
@@ -234,7 +219,7 @@ footer {{ border-top: 1px solid var(--line); padding-block: 42px; }} .footer-in 
 .grant-row[data-state="GRANTED"] .authorization-seal, .grant-row[data-state="GRANTED"] .grant-state {{ color: var(--grant, var(--accent)); }}
 .grant-row[data-state="WITHHELD"] .authorization-seal, .grant-row[data-state="WITHHELD"] .grant-state {{ color: var(--revoked, var(--accent)); }}
 .grant-state {{ color: var(--accent); font-family: var(--mono); font-size: .66rem; letter-spacing: .05em; }}
-@media (prefers-reduced-motion: reduce) {{ .graph-edge.active, .semantic-edge.active, .swarm-member, .handoff-signal, .visual-pulse, .visual-swarm-member, .visual-signal {{ animation: none; }} .concept-film-media, .concept-film-overlay {{ display: none; }} }}
+@media (prefers-reduced-motion: reduce) {{ .swarm-member, .handoff-signal, .visual-pulse, .visual-swarm-member, .visual-signal {{ animation: none; }} .concept-film-media, .concept-film-overlay {{ display: none; }} }}
 .product-ateles .source-section > .source-inner {{ padding-left: clamp(20px, 5vw, 72px); border-left: 4px solid var(--accent); }}
 .product-ateles .capability-list {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 38px; }}
 .product-ateles .capability {{ position: relative; min-height: 220px; padding: 28px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper-2); }}
@@ -249,7 +234,6 @@ footer {{ border-top: 1px solid var(--line); padding-block: 42px; }} .footer-in 
   .nav-in {{ gap: 12px; }} .nav-in > .btn {{ display: none; }} .brand small {{ display: none; }}
   .takeover-hero {{ min-height: 860px; align-items: start; padding-top: 54px; }} .takeover-hero::after {{ background: linear-gradient(180deg, var(--paper) 0%, color-mix(in srgb, var(--paper) 94%, transparent) 36%, color-mix(in srgb, var(--paper) 48%, transparent) 60%, transparent 82%); }}
   .takeover-hero .hero-takeover-visual svg {{ transform: translate(13%, 18%) scale(1.18); transform-origin: center; }}
-  .product-neotoma .record-semantic-overlay {{ transform: translateY(26%) scale(.98); transform-origin: center; }}
   .product-ateles .takeover-hero .hero-takeover-visual svg {{ transform: translate(15%, 22%) scale(1.22); }}
   .coordination-states {{ bottom: 22px; }}
   .product-neotoma .source-section {{ display: block; }} .product-neotoma .source-section::before {{ display: block; margin-bottom: 22px; }}
@@ -358,12 +342,17 @@ def _hero_ctas(page: dict, data: dict) -> str:
 
 
 def _record_hero(page: dict, data: dict) -> str:
-    poster = f'<div class="hero-takeover-visual">{_record_graph_svg(data.get("proof", {}))}</div>'
+    asset = (data.get("concept_film") or {}).get("asset") or {}
+    poster_src = asset.get("poster_src") or ""
+    poster = (
+        f'<img class="concept-film-poster-media" src="{_esc(poster_src)}" alt="" aria-hidden="true">'
+        if poster_src
+        else ""
+    )
     media = _concept_film(
         poster,
         data,
         "A persistent graph of records, relationships, provenance, and version history used by several agents",
-        overlay=_record_semantic_overlay_svg(),
     )
     category = str(data.get("category") or "").rstrip(".")
     headline = str(data["headline"]).rstrip(".")
@@ -377,32 +366,8 @@ def _record_hero(page: dict, data: dict) -> str:
 <p class="lede">{_esc(data["body"])}</p>{_hero_ctas(page, data)}<p class="proof-line">{_esc(data.get("footnote"))}</p></div>{media}</section>"""
 
 
-def _record_graph_svg(proof: dict) -> str:
-    """Graph-first hero: durable edges are a feature, not decoration."""
-    return f"""<svg class="record-graph" viewBox="0 0 1440 820" role="img" aria-labelledby="record-graph-title record-graph-desc" preserveAspectRatio="xMidYMid slice">
-<title id="record-graph-title">A durable knowledge graph shared by agents</title><desc id="record-graph-desc">Typed records preserve provenance, supersession, disagreement, refresh, relationships, and effective time while agents create, update, and retrieve the current state.</desc>
-<g aria-hidden="true"><path class="graph-edge" d="M745 162C860 202 900 245 955 320M955 320C1080 348 1145 420 1175 510M955 320C900 438 828 482 780 610M1175 510C1060 585 930 622 780 610M745 162C670 260 675 380 780 610"/><path class="graph-edge active" d="M745 162C860 202 900 245 955 320M955 320C1080 348 1145 420 1175 510M1175 510C1060 585 930 622 780 610"/></g>
-<g class="graph-node current" transform="translate(886 262)"><rect width="196" height="112" rx="14"/><text x="18" y="30">CURRENT RECORD</text><text class="node-value" x="18" y="66">{_esc(proof.get("current", "Shared truth"))}</text><text x="18" y="92">version 4 · current</text></g>
-<g class="graph-node" transform="translate(1084 468)"><rect width="184" height="96" rx="14"/><text x="18" y="29">PROVENANCE</text><text class="node-value" x="18" y="64">Named source</text></g>
-<g class="graph-node version-ghost" transform="translate(682 568)"><rect width="196" height="104" rx="14"/><text x="18" y="29">PRIOR VERSION</text><text class="node-value" x="18" y="64">{_esc(proof.get("old", "Still visible"))}</text><text x="18" y="88">superseded, not erased</text></g>
-<g class="graph-node" transform="translate(660 110)"><rect width="170" height="90" rx="14"/><text x="18" y="28">RELATIONSHIP</text><text class="node-value" x="18" y="62">Depends on</text></g>
-<g class="agent-orbit" transform="translate(1240 205)"><circle r="38"/><text y="4">CREATE</text></g><g class="agent-orbit" transform="translate(1320 380)"><circle r="38"/><text y="4">UPDATE</text></g><g class="agent-orbit" transform="translate(1230 680)"><circle r="38"/><text y="4">RETRIEVE</text></g>
-</svg>"""
-
-
-def _record_semantic_overlay_svg() -> str:
-    """Sparse, legible semantics above the provisional cinematic layer."""
-    return """<svg class="record-semantic-overlay" viewBox="700 100 700 700" role="img" aria-labelledby="semantic-graph-title semantic-graph-desc" preserveAspectRatio="xMaxYMid meet">
-<title id="semantic-graph-title">Agents create, update, and retrieve a persistent record graph</title><desc id="semantic-graph-desc">Durable record nodes retain relationships, provenance, and prior state while create, update, and retrieve operations pulse along persistent edges.</desc>
-<g aria-hidden="true"><path class="semantic-edge" d="M864 192C984 246 1034 310 1068 390M1068 390C1164 432 1210 500 1238 584M1068 390C1018 512 948 572 846 634M1238 584C1090 650 972 666 846 634"/><path class="semantic-edge active" d="M864 192C984 246 1034 310 1068 390M1068 390C1164 432 1210 500 1238 584"/></g>
-<g aria-hidden="true"><rect class="semantic-node" x="980" y="332" width="176" height="112" rx="18"/><rect class="semantic-node" x="1160" y="532" width="156" height="94" rx="18"/><rect class="semantic-node prior" x="768" y="586" width="164" height="92" rx="18"/><rect class="semantic-node" x="790" y="142" width="150" height="92" rx="18"/></g>
-<text x="1010" y="374">CURRENT</text><text x="1010" y="408">RECORD</text><text x="1187" y="570">PROVENANCE</text><text x="797" y="624">PRIOR STATE</text><text x="820" y="180">RELATIONSHIP</text>
-<g aria-hidden="true"><circle class="operation-marker" cx="1184" cy="190" r="28"/><circle class="operation-marker" cx="1320" cy="364" r="28"/><circle class="operation-marker" cx="1212" cy="704" r="28"/></g><text x="1147" y="196">CREATE</text><text x="1283" y="370">UPDATE</text><text x="1166" y="710">RETRIEVE</text>
-</svg>"""
-
-
 def _concept_film(poster: str, data: dict, label: str, overlay: str = "") -> str:
-    """Wrap a load-bearing code-native poster in an optional local film slot."""
+    """Wrap a local poster in an optional local film slot."""
     brief = data.get("concept_film") or {}
     asset = brief.get("asset") or {}
     enabled = asset.get("enabled_in_hero") is not False
