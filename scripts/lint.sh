@@ -170,8 +170,19 @@ if [ -n "$NEOTOMA_BASE_URL" ]; then
     # .github/workflows/agent-config-validation.yml for the tracking note).
     echo "  - Checking agent-doc mirrors are in sync with Neotoma (informational)..."
     python3 execution/scripts/render_agent_docs.py --check || true
+
+    # Positioning-doc mirrors (docs/positioning/) are rendered FROM the
+    # target_persona/analysis/research_finding entities named in
+    # render_positioning_docs.py's POSITIONING_ENTITIES registry — never
+    # hand-edited, same contract as the agent-doc mirrors above. Informational
+    # only for now (same posture as the agent-doc-mirror check above, on the
+    # same rationale: this is the check's first pass and pre-existing drift
+    # from a corrected-but-not-yet-regenerated entity should not fail every
+    # unrelated PR in this checkout on day one).
+    echo "  - Checking positioning-doc mirrors are in sync with Neotoma (informational)..."
+    python3 execution/scripts/render_positioning_docs.py --check || true
 else
-    echo "  - Skipping tool_allowlist + agent-doc-mirror checks (NEOTOMA_BASE_URL unset)"
+    echo "  - Skipping tool_allowlist + agent-doc-mirror + positioning-doc-mirror checks (NEOTOMA_BASE_URL unset)"
 fi
 
 echo ""

@@ -8,6 +8,12 @@ description: Session compliance supervisor (formerly Luscinia; renamed 2026-06-1
 triggers:
   - robin
   - /robin
+observation_ids:
+  name: 4c3d7f16-cf76-de98-26a4-f70458d93f99
+  description: 2ca389de-6a33-d252-1cc7-82647f5e0439
+  triggers: 95ee82b3-04df-c357-89b8-72d793a471c0
+  user_invocable: unknown
+  prompt_markdown: 4d5f14c8-dd6a-377e-0fe9-8493ba48066c
 ---
 
 <!-- Claude Code adapter for agent `robin`. Canonical file: docs/agents/robin.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

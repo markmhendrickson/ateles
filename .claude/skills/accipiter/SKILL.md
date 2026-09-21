@@ -9,6 +9,12 @@ triggers:
   - accipiter
   - /accipiter
 user_invocable: true
+observation_ids:
+  name: 00e017dc-1303-df43-5ff1-5cb1bf94bedc
+  description: 370c9fd6-93c5-da25-33c6-29dd586d9bbc
+  triggers: 370c9fd6-93c5-da25-33c6-29dd586d9bbc
+  user_invocable: 370c9fd6-93c5-da25-33c6-29dd586d9bbc
+  prompt_markdown: 923e3a6a-4856-1521-52cc-20ba4896e62a
 ---
 
 <!-- Claude Code adapter for agent `accipiter`. Canonical file: docs/agents/accipiter.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

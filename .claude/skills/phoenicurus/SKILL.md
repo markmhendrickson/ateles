@@ -9,6 +9,12 @@ triggers:
   - phoenicurus
   - /phoenicurus
 user_invocable: true
+observation_ids:
+  name: c41db504-e11a-75c8-c649-32c653c1a2cb
+  description: 1ad56e23-8096-c927-eaee-ed1edc68cb1f
+  triggers: 5ab3bd16-da32-7978-553e-d5529ba48f33
+  user_invocable: 5ab3bd16-da32-7978-553e-d5529ba48f33
+  prompt_markdown: 9802bd08-74dd-6c6f-29d2-d3b2b3b17f8d
 ---
 
 <!-- Claude Code adapter for agent `phoenicurus`. Canonical file: docs/agents/phoenicurus.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

@@ -50,9 +50,25 @@ canonical_context_entities:
   - operator_profile
   - locale_profile
   - swarm_roster
-  - channel_config
   - vendor_binding
   - brand_voice
+  - channel_config
+observation_ids:
+  name: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  description: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  tier: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  genus: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  status: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  aauth_sub: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  agent_grant: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  observation_source_default: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  harness_preferences: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  triggers: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  tool_allowlist: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  context_entity_types: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  operational_entity_types: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  user_invocable: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  prompt_markdown: 1d962a70-59be-898a-0d50-9d82192a569e
 ---
 
 # nucifraga

@@ -72,6 +72,22 @@ operational_entity_types:
   - issue
 canonical_context_entities:
   - operator_profile
+observation_ids:
+  name: c41db504-e11a-75c8-c649-32c653c1a2cb
+  description: 1ad56e23-8096-c927-eaee-ed1edc68cb1f
+  tier: 3d03af2b-28f9-3e48-5622-aaff57f4eee5
+  genus: 7b939d18-e744-ec41-04a2-7cffed75410d
+  status: 4af18e11-6516-fec9-78f5-9f67237fd7bc
+  aauth_sub: unknown
+  agent_grant: 6ef9c4e5-9c9b-d4e9-69e0-245101f353d7
+  observation_source_default: 7c608ccd-fa10-1f48-0ef3-3fc93da38bcb
+  harness_preferences: unknown
+  triggers: 5ab3bd16-da32-7978-553e-d5529ba48f33
+  tool_allowlist: 7c608ccd-fa10-1f48-0ef3-3fc93da38bcb
+  context_entity_types: d7ee5cf7-ccce-345e-e093-7a45e4ee168d
+  operational_entity_types: e33ad274-0ece-fc48-86a2-b4cf271ef739
+  user_invocable: 5ab3bd16-da32-7978-553e-d5529ba48f33
+  prompt_markdown: 9802bd08-74dd-6c6f-29d2-d3b2b3b17f8d
 ---
 
 # phoenicurus

@@ -5,6 +5,12 @@ entity_id: ent_706f1432822b4a9d9d71c127
 entity_type: agent_definition
 name: ateles
 description: Primary operator interface and root agent of the Ateles swarm; shares the repo identity. Runs in the operator configured T1 host (e.g. a Claude Code / OpenClaw instance) and conversational channel. Full operator scope — reads and writes all entity types, executes skills, manages other agents. Resolves operator identity, roster, channels, and locale from context entities at spawn.
+observation_ids:
+  name: 14500ca3-b435-62b4-be9b-06df67a8d2f5
+  description: 94685509-a986-b871-9fc9-e40c28b7a5a1
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: 524c0d8b-b2f6-7c1a-d52e-75b8d0033657
 ---
 
 <!-- Claude Code adapter for agent `ateles`. Canonical file: docs/agents/ateles.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

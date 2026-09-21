@@ -5,6 +5,12 @@ entity_id: ent_fe71134e46209c21cf413b9b
 entity_type: agent_definition
 name: aythya
 description: Visual and brand designer. Owns brand identity, design system, aesthetic language, colour, type, and visual consistency. Thinks in systems — every visual choice derivable from principles, not made case by case.
+observation_ids:
+  name: 0f0d32f4-436c-979f-e90f-d116cc1ebf1d
+  description: 6657b311-9e59-24c1-e993-0ba4d9546a00
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: e60b54d3-6b24-18c6-7161-3b118895449a
 ---
 
 <!-- Claude Code adapter for agent `aythya`. Canonical file: docs/agents/aythya.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

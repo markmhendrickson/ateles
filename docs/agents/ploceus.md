@@ -51,6 +51,22 @@ canonical_context_entities:
   - operator_profile
   - swarm_roster
   - vendor_binding
+observation_ids:
+  name: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  description: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  tier: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  genus: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  status: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  aauth_sub: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  agent_grant: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  observation_source_default: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  harness_preferences: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  triggers: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  tool_allowlist: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  context_entity_types: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  operational_entity_types: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  user_invocable: cb466a83-d8d3-443e-d0ea-b5cb68c638d5
+  prompt_markdown: 28987d24-8492-eac9-806c-162a1af1ddb5
 ---
 
 # ploceus
