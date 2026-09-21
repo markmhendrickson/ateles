@@ -231,7 +231,7 @@ retroactively reshape or minimize what these rows already hold; it declares the 
 | `agent_policy` | keep | `agent_policy` | the design names it as the authoritative home of skill bodies and agent behavioural rules, and as one target of a standing finding. Prompts and skills rendered from it still carry retired words; the correction is to the entities, then a re-render (`conformance.md#direction-of-truth-per-class-of-record`) |
 | `agent_strategy` | keep | — | outside the four models. Each names an agent by credential rather than by role, which population's phase 1 will want to read; not migrated |
 | `operator_profile` | keep | `operator_profile`, descriptive | the design keeps it descriptive and hangs no authority edge on it (`authority_model.md#principals`) |
-| `operator` (the human principal), `principal_binding`, `ownership_grant`, `delegation_edge` | introduce | themselves | the one `operator` entity is the first write of the bootstrap and the first operator act. Each `agent` then carries a `principal_binding` to it; each registered type carries one `ownership_grant` to it. Credentials (a store identity, a host login, an address, a chat identity) bind to it many-to-one — through an edge the design has not named (G17) |
+| `operator` (the human principal), `principal_binding`, `ownership_grant`, `delegation_edge` | introduce | themselves | the one `operator` entity is the first write of the bootstrap and the first operator act. Each `agent` then carries a traversal-only `principal_binding` to the operator with `credential_kind: acts_as`; each registered type carries one `ownership_grant` to it. Presented credentials (a store identity, a host login, an address, a chat identity) bind many-to-one to the principal they identify through a second `principal_binding` variant carrying decision 101's four fields (G17) |
 
 ### Operational records
 
@@ -673,7 +673,9 @@ against each other is measured before either is treated as evidence of anything.
 `action`, `checkpoint`, `artifact`, `action_policy`, each with `reducer_config` and version, and the
 relationship types `LEASE`, `ADDRESSED_BY`, `FOLLOWS`, `CLOSES`, `SIGNED_BY`, `PRODUCES`, `CHECKPOINTS`,
 `AWAITS`, `RESOLVED_BY`, `RAISED_BY`, `principal_binding`, `ownership_grant`, `delegation_edge`
-(`DEPENDS_ON`, `PART_OF`, `REFERS_TO`, and `DUPLICATE_OF` the record already has). Create the `operator`
+(`DEPENDS_ON`, `PART_OF`, `REFERS_TO`, and `DUPLICATE_OF` the record already has). Every relationship type
+is registered with its decision-102 declaration, exactly one of `acyclic` or `cycles_admitted`; a missing,
+malformed, or unknown declaration is refused before any edge of that type can be written. Create the `operator`
 entity; write one `ownership_grant` from each registered type to it. **Depends on** the record admitting
 new relationship types at all: the relationship-type vocabulary the record exposes is a closed list that
 holds one of the design's new edges and none of the other thirteen, and the record offers no primitive
@@ -813,7 +815,7 @@ pointer is what makes that hold, and the read-back that proves it is an as-of re
 
 | Write | Reversible | How, or what is checked first |
 |---|---|---|
-| a schema registration (stage 1) | no | the registry is permanent; a field can be removed and restored, a type cannot be retired (G26). Checked first: the type's name and fields against `data_model.md#concepts`, the `reducer_config` against the field's writers, and the `ownership_grant` present; registered once, by the operator, read back against the registry |
+| a schema registration (stage 1) | no | the registry is permanent; a field can be removed and restored, a type cannot be retired (G26). Checked first: the type's name and fields against `data_model.md#concepts`, the `reducer_config` against the field's writers, the `ownership_grant` present, and — for every relationship type — one recognized acyclicity declaration; absence is a refused precheck, never a default. Registered once, by the operator, read back against the registry |
 | a correction (stages 3, 5, 6, 10) | yes | a further correction; the superseded value stays readable as an observation |
 | a relationship (stages 1, 5, 7, 8) | yes | a soft delete, restorable; the edge's own timestamps record the interval it held |
 | a derivation (stages 5, 7, 8) | yes | the derived rows are new entities with provenance to the source, and the source is untouched; reversing is ending them |
@@ -831,7 +833,7 @@ the `verify` step of the migration's workflow re-reads independently of the `app
 | Stage | What proves it landed |
 |---|---|
 | 0 | the inventory in `status.md` carries a date and an instrument for every figure, and the parity measurement of the two retired step records reports a number rather than an absence |
-| 1 | the registry describes each type with the fields and version written; a relationship of each new edge type can be written and read back on two test-owned entities that are then ended, never on production entities; each type's `ownership_grant` resolves to the `operator` |
+| 1 | the registry describes each entity type with the fields and version written and each relationship type with the written `acyclic` or `cycles_admitted` declaration; a registration omitting or corrupting that declaration is refused on read-back; a relationship of each new edge type can be written and read back on two test-owned entities that are then ended, never on production entities; a cycle-closing edge is refused for a declared-acyclic test type while a declared-cycles-admitted test type accepts its cycle; each type's `ownership_grant` resolves to the `operator` |
 | 2 | both declarations are retrievable, every `owner_role` in them resolves through the roster to an `agent` with a credential, and the `action_policy` resolves every migration class to a tier that is not the unclassified default; the conformance suite's bootstrap read-backs hold |
 | 3 | every grant that named a retired type now names both; a read of each grant lists the new type; the roster's unresolved roles are listed, and the list is what the operator expects |
 | 4 | (a) no task's retired liveness value changes and no step record is written over the window; (b) each `workflow` resolves by its new id, each retired id resolves with a merge pointer to it, and an as-of read on the retired id at a time before the merge returns the pre-merge content; the count of `workflow` equals the count of retired declarations less the retired smoke-test one; (c) the first claim under the design writes a `LEASE` edge whose `runner_id` the lease holder reads back as its own |
@@ -967,7 +969,7 @@ numbers are separate and only two of these are opened as decisions below.
   merges name pull requests the record holds as typed rows but not as `artifact`; deriving their
   checkpoints needs an artifact that no adapter read produced. Either the derivation is allowed to mint
   from the record's own reference, or those held decisions cannot be carried.
-- **G17 — the credential binding has no edge type. RULED by decision 101 (2026-09-10): the edge is `principal_binding`, one per credential, carrying `credential_kind`, `credential_value`, `credential_issuer`, and `expires_at`; what remains is registering it, which is stage 1's work.** `data_model.md#concepts` says credentials bind to a
+- **G17 — the credential binding has no edge type. RULED by decision 101 (2026-09-10), as narrowed by decisions 107–109: the edge is `principal_binding`; its presented-credential variant is one edge per credential carrying `credential_kind`, `credential_value`, `credential_issuer`, and `expires_at`, while its traversal-only `acts_as` variant carries only its kind and is agent → operator. What remains is registering both admitted variants, which is stage 1’s work.** `data_model.md#concepts` says credentials bind to a
   principal many-to-one; the relationships table names no edge for it, and the instance holds the
   bindings as fields on the agent and on the grant.
 - **G18 — `agent_grant.expires_at`, `sub`, `iss` versus the source's field names.** A tolerant-reader

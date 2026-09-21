@@ -9,13 +9,13 @@ Which rules a lens reviewing for one kind of failure should select, by the confo
 
 - [`adapters.md`](adapters.md) — AD-1, AD-2, AD-3, AD-4, AD-5, AD-6, AD-7, AD-8, AD-8a, AD-9, AD-10, AD-11, AD-12, AD-13, AD-14, AD-15, AD-16, AD-17, AD-18, AD-19, AD-20, AD-21, AD-22, AD-23, AD-24, AD-25, AD-26, AD-27, AD-28, AD-29, AD-30, AD-31, AD-32, AD-33, AD-34, AD-36, AD-37, AD-38, AD-39, AD-40, AD-41, AD-42
 
-- [`authority_model.md`](authority_model.md) — AU-1, AU-2, AU-3, AU-4, AU-5, AU-7, AU-8, AU-9, AU-10, AU-11, AU-12, AU-13, AU-14, AU-15, AU-16, AU-17, AU-18, AU-19, AU-20, AU-21, AU-22
+- [`authority_model.md`](authority_model.md) — AU-1, AU-2, AU-3, AU-4, AU-5, AU-7, AU-8, AU-9, AU-10, AU-11, AU-12, AU-13, AU-14, AU-15, AU-16, AU-17, AU-18, AU-19, AU-20, AU-21, AU-29
 
 - [`calendar.md`](calendar.md) — CA-1, CA-2, CA-3, CA-4, CA-5, CA-6, CA-7, CA-8
 
 - [`conformance.md`](conformance.md) — CF-1, CF-3, CF-5, CF-6, CF-7, CF-8
 
-- [`data_model.md`](data_model.md) — DM-1, DM-2, DM-3, DM-4, DM-5, DM-6, DM-7, DM-8, DM-9, DM-10, DM-10b, DM-11, DM-12, DM-13, DM-14, DM-15, DM-16, DM-17, DM-18, DM-19, DM-20, DM-21, DM-22, DM-23, DM-24, DM-25, DM-26, DM-27, DM-29
+- [`data_model.md`](data_model.md) — DM-1, DM-2, DM-3, DM-4, DM-5, DM-6, DM-7, DM-8, DM-9, DM-10, DM-10b, DM-11, DM-12, DM-13, DM-14, DM-15, DM-16, DM-17, DM-18, DM-19, DM-20, DM-21, DM-22, DM-23, DM-24, DM-25, DM-26, DM-27, DM-31
 
 - [`failure_posture.md`](failure_posture.md) — GW-50, FP-1, FP-2, FP-3, FP-4, FP-5, FP-6, FP-7, FP-8, FP-9, FP-10, FP-11, FP-12, FP-13, FP-14, FP-15, FP-16, FP-17, FP-18, FP-19, FP-20, FP-21, FP-22, FP-23, FP-24
 

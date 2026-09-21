@@ -57,4 +57,4 @@ Every rule `authority_model.md` owns, one entry each: the rule's own statement f
 
 ## [What the credential binding carries, and what a check reads to resolve a credential to a principal](../authority_model.md#what-the-credential-binding-carries-and-what-a-check-reads-to-resolve-a-credential-to-a-principal)
 
-- **AU-22** — (decisions 107–109): `acts_as` is traversal-only, agent → operator exactly; it carries no presented value; agent → agent uses `delegation_edge`; an operator never sources acts-as *[M — removing the presentation-kind exclusion or either endpoint check turns this row red]*
+- **AU-29** — (decisions 107–109): `acts_as` is traversal-only, agent → operator exactly; it carries no presented value; agent → agent uses `delegation_edge`; an operator never sources acts-as *[M — removing the presentation-kind exclusion or either endpoint check turns this row red]*

@@ -19,7 +19,7 @@ CONFORMANCE = """\
 
 | # | Question | Pointer | Dependencies | Status |
 |---|---|---|---|---|
-| 101 | what fields the credential-binding edge carries | `authority_model.md#what-the-credential-binding-carries` | stage 1 | **ruled** |
+| 101 | what fields the credential-binding edge carries | `authority_model.md#what-the-credential-binding-carries` | stage 1 | **ruled**: the presented-credential `principal_binding` carries the four fields; traversal-only `acts_as` is the other admitted variant |
 """
 
 DATA_MODEL_OK = """\
@@ -29,7 +29,7 @@ DATA_MODEL_OK = """\
 
 | Edge type | Source → target | Meaning | What derives from it |
 |---|---|---|---|
-| `principal_binding` | credential (edge-keyed; no credential entity) → principal | binds one presented credential; one edge per credential; fields: `credential_kind`, `credential_value`, `credential_issuer`, `expires_at` | credential-to-principal resolution (match live edges on kind+value[+issuer] → principal endpoint) |
+| `principal_binding` | presented credential (edge-keyed; no credential entity) → principal; or agent → operator for acts-as | binds one presented credential; one edge per credential; fields: `credential_kind`, `credential_value`, `credential_issuer`, `expires_at`; traversal-only `acts_as` carries no presented value | credential-to-principal resolution (match live edges on kind+value[+issuer] → principal endpoint) |
 """
 
 DATA_MODEL_LEGACY = """\
@@ -49,7 +49,7 @@ DATA_MODEL_NO_EXPIRY = """\
 
 | Edge type | Source → target | Meaning | What derives from it |
 |---|---|---|---|
-| `principal_binding` | credential → principal | one edge per credential; fields: `credential_kind`, `credential_value`, `credential_issuer` | credential-to-principal resolution (match kind+value → principal) |
+| `principal_binding` | presented credential → principal; or agent → operator for acts-as | one edge per credential; fields: `credential_kind`, `credential_value`, `credential_issuer`; traversal-only `acts_as` carries no presented value | credential-to-principal resolution (match kind+value → principal) |
 """
 
 
@@ -58,7 +58,7 @@ AUTHORITY_RULED = f"""\
 
 {decision_101.AUTHORITY_HEADING}
 
-**Ruled** (decision 101, 2026-09-10): **`principal_binding` carries `credential_kind`,
+**Ruled** (decision 101, 2026-09-10): **the presented-credential `principal_binding` carries `credential_kind`,
 `credential_value`, `credential_issuer`, and `expires_at`.**
 
 **Endpoint / source.** For an AAuth credential the binding resolves `credential_value` +
@@ -148,6 +148,39 @@ def test_passes_when_ruled_and_data_model_row_carries_fields(tmp_path: Path) -> 
     assert decision_101.check(tmp_path) == []
 
 
+def test_fails_when_register_assigns_fields_to_principal_binding_universally(
+    tmp_path: Path,
+) -> None:
+    universal = CONFORMANCE.replace(
+        "the presented-credential `principal_binding` carries the four fields; "
+        "traversal-only `acts_as` is the other admitted variant",
+        "`principal_binding` carries the four fields",
+    )
+    write_corpus(tmp_path, conformance=universal)
+
+    problems = decision_101.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "decision-101-variants" in problems[0]
+    assert "presented-credential" in problems[0]
+
+
+def test_fails_when_authority_opener_assigns_fields_to_all_bindings(
+    tmp_path: Path,
+) -> None:
+    universal = AUTHORITY_RULED.replace(
+        "the presented-credential `principal_binding` carries",
+        "`principal_binding` carries",
+    )
+    write_corpus(tmp_path, authority_model=universal)
+
+    problems = decision_101.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "decision-101-variants" in problems[0]
+    assert "not principal_binding universally" in problems[0]
+
+
 def test_fails_on_legacy_principal_binding_row(tmp_path: Path) -> None:
     write_corpus(tmp_path, data_model=DATA_MODEL_LEGACY)
 
@@ -220,8 +253,9 @@ def test_fails_when_ruling_section_still_open(tmp_path: Path) -> None:
     # A reverted section carries no `**Endpoint / source.**` paragraph either,
     # so that assertion fires alongside, as one consolidated message — the
     # ruling being open is exactly when both are true.
-    assert len(problems) == 2
+    assert len(problems) == 3
     assert sum("decision-101-endpoints" in p for p in problems) == 1
+    assert sum("decision-101-variants" in p for p in problems) == 1
     assert any("no" in p and "Endpoint / source" in p for p in problems)
 
 

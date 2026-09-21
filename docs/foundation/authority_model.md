@@ -562,9 +562,12 @@ value it held.
 
 ### What the credential binding carries, and what a check reads to resolve a credential to a principal
 
-**Ruled** (decision 101, 2026-09-10): **`principal_binding` carries `credential_kind`, `credential_value`,
-`credential_issuer`, and `expires_at`, and a principal holding several credentials holds several edges.**
-One edge per credential, properties on the edge, and no separate credential entity. Field vocabulary:
+**Ruled** (decision 101, 2026-09-10): **the presented-credential `principal_binding` carries
+`credential_kind`, `credential_value`, `credential_issuer`, and `expires_at`, and a principal holding
+several credentials holds several presented-credential edges.** One edge per presented credential,
+properties on the edge, and no separate credential entity. The same relationship type admits the
+traversal-only `acts_as` variant decision 107 rules below; that second variant carries only its kind. Field
+vocabulary for the presented-credential variant:
 
 | Field | Holds | AAuth map | Host / operator map |
 |---|---|---|---|
@@ -718,12 +721,13 @@ attribution, is what this decision has to say rather than leave to whichever cal
    in a design that already resolves credentials at the grant, and it has to say what the credential entity
    holds that the grant's `sub` and `iss` do not.
 
-2. **Properties on the binding edge itself, one edge per credential.** *(Historical candidate — chosen.)*
-   `principal_binding` stays the edge type and carries the credential's identifying values — its kind, its
+2. **Properties on the presented-credential binding edge itself, one edge per credential.** *(Historical
+   candidate — chosen for that variant.)* `principal_binding` stays the edge type and its
+   presented-credential variant carries the credential's identifying values — its kind, its
    issuer, and an expiry where the issuer states one — so a principal has as many edges as it has
    credentials and rotation writes a second edge before ending the first. This is the shape
    `conformance_suite.md#what-the-documents-leave-unspecified-here-and-how-each-is-recorded` already
-   derives — an edge type carrying the credential kind and value, the principal, and an expiry — and that
+   derives — an edge variant carrying the credential kind and value, the principal, and an expiry — and that
    derivation is recorded there as proposed rather than assumed, which is the vacancy this row registers.
    Candidate 2 owed two answers the ruling above closes: the edge's source is not a credential entity —
    credential identity lives in edge fields (`credential_kind`, `credential_value`, `credential_issuer`)

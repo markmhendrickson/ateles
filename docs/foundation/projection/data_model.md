@@ -52,4 +52,4 @@ Every rule `data_model.md` owns, one entry each: the rule's own statement from `
 
 ## [Whether acyclicity is a property of a relationship type or of the graph](../data_model.md#whether-acyclicity-is-a-property-of-a-relationship-type-or-of-the-graph)
 
-- **DM-29** — (decision 102): every relationship type declares acyclic or cycles-admitted at registration; absence, malformed values, and unknown values are refused; an acyclic type is checked before every relationship write, and unknown check state denies *[M — the missing-declaration and skipped-write-check mutants are planted positives]*
+- **DM-31** — (decision 102): every relationship type declares acyclic or cycles-admitted at registration; absence, malformed values, and unknown values are refused; an acyclic type is checked before every relationship write, and unknown check state denies *[M — the missing-declaration and skipped-write-check mutants are planted positives]*
