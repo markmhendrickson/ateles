@@ -935,7 +935,7 @@ closed: it produces an institutionalization task as decision 17 already rules.
 task returning to open is a status mutation a process would have to perform, and the `task` row already
 lists a reopened status among the things that are deliberately not a field (`data_model.md#concepts`).
 *Sequencing is data* (`#sequencing-is-data-successors-and-the-chain`): a batch is opened only by a closing
-verdict naming a successor, or at intake for a created task, and a closed batch has no verdict left to
+verdict naming a successor, or in the atomic creation unit of a workflow-entering task for intake, and a closed batch has no verdict left to
 write, so reopening one would open a batch by a mechanism formation does not have. *A verdict is terminal
 and pinned* (`data_model.md#record-conventions`): the closed batch's conclusions were made against the artifact
 heads they name and stay true as the account of what was judged then; a redo that wrote new verdicts into

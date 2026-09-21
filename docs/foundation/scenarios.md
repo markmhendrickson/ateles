@@ -25,8 +25,9 @@ cites disagree, the owning document governs; nothing here is normative on its ow
 
 ## (a) Create, claim, execute, return, complete
 
-A task is created; publication is creation. An agent whose definition matches the task reads it as
-claimable, writes a lease edge keyed on the task, and reads the edge back: it holds the task only if the
+A workflow-entering task is created with its intake batch and `ADDRESSED_BY` edge; publication is that
+atomic creation. Intake routes it to an executable workflow. An agent whose definition matches the task
+then reads it as claimable, writes a lease edge keyed on the task, and reads the edge back: it holds the task only if the
 persisted lease names its own runner id. It executes the task, renewing `expires_at` as its heartbeat,
 and its `agent_session` and observations make the lease read as `active`. On completion it writes the
 task's terminal status, reads that back, and returns the lease. The task carries no lease field at any
@@ -37,7 +38,8 @@ sequenceDiagram
     participant P as principal (creator)
     participant N as record
     participant A as agent runner
-    P->>N: store task (status open, action_type declared)
+    P->>N: store task + intake batch + ADDRESSED_BY atomically
+    N-->>A: intake closes; successor workflow batch opens
     A->>N: read task, claimable?
     A->>N: write lease edge (agent → task, claimed_at, expires_at)
     A->>N: read lease back
@@ -201,12 +203,13 @@ flowchart TD
 
 A parent task is created as the grouping of a piece of work; three child tasks each carry a `PART_OF`
 edge to it. Each child is claimed, executed, and goes through its own batch on its own schedule. The
-parent is never claimed and never enters a workflow. When a reader asks whether the parent is complete,
+**aggregate parent is the explicit workflow-entry exception: it is not claimable, never enters a workflow,
+and has no intake batch or `ADDRESSED_BY` edge.** When a reader asks whether the parent is complete,
 the answer is derived from the children's terminal states at that moment and is stored nowhere.
 
 ```mermaid
 flowchart TD
-    P[parent task: never claimed, never in a batch]
+    P[aggregate parent: not claimable, no intake batch, never in a workflow]
     C1[child 1] -->|PART_OF| P
     C2[child 2] -->|PART_OF| P
     C3[child 3] -->|PART_OF| P
@@ -329,7 +332,8 @@ invariants 2 and 7.
 
 ## (j) A task created, routed by intake, and entering its successor
 
-A complete task is created for ordinary intake; that is its publication. Every task's intake batch and
+A complete workflow-entering task is created for ordinary intake; that is its publication. Every
+workflow-entering task's intake batch and
 `ADDRESSED_BY` edge become readable with it at creation, and it is unrouted while that batch has no closing
 `route` verdict. (An assembling task is the ruled exception only in adding its persistent `classify` hold to
 the same atomic creation unit; only the declaration's resolved `pm` step owner may claim assembly.) The
@@ -345,8 +349,8 @@ which workflows it has gone through, and no router chose the successor: a step o
 
 ```mermaid
 flowchart TD
-    C[task + intake batch + ADDRESSED_BY admitted atomically] --> U[unrouted: no closing route verdict]
-    U --> A{persistent assembly exclusion?}
+    C[task + intake batch + ADDRESSED_BY admitted atomically] --> I[intake batch: unrouted while no closing route verdict]
+    I --> A{persistent assembly exclusion?}
     A -->|no: ordinary intake| S1[classify: action_type, assigned_to, parent or children]
     A -->|yes: assembly hold| H[only resolved pm step owner may claim classify]
     H -->|eligible pm claims| S1

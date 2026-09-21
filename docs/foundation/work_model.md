@@ -18,7 +18,8 @@ Amendment history: `revisions.md#work_modelmd`.
 
 State how work is created, taken, executed, and returned: pull-only delivery; assignment as eligibility;
 claim and lease as one primitive (lease as relationship); liveness derived at read time; no assignment
-log; a task carries only status and edges; intake is every task's first workflow; tasks go through
+log; a task carries only status and edges; intake is every workflow-entering task's first workflow, while
+an aggregate parent remains outside claim and enters none; tasks go through
 workflows in batches, are attached to and detached from them, and nest under parents; a batch is opened
 by a closing verdict naming a successor and goes through exactly one workflow; a batch may hold on a
 condition discovered mid-flight, and may depend on a task it created, under its held lease and with no held
@@ -147,13 +148,14 @@ the redo it calls for is a new task through intake
 
 ### Intake is every task's first workflow
 
-Every task enters intake before any other workflow (`workflows.md#intake`): at creation it atomically opens
+Every workflow-entering task enters intake before any other workflow (`workflows.md#intake`): at creation it atomically opens
 the intake batch and writes the `ADDRESSED_BY` edge, then `classify`, `link`, `dedupe`, `prioritize`, and
 `route` run (the closing verdict names one successor, none, or operator-only). An unrouted task is one whose
 intake batch has no closing `route` verdict — no separate unrouted state. `link` attaches what the task
 names, a record in the record and an external one alike, and nothing on relevance alone; what a step needs
 beyond that is hydration's, per step (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`).
-Tasks a batch creates
+The aggregate parent described under `#parent-and-child-tasks` is the deliberate exception: it is a
+grouping that is not claimable, never enters a workflow, and therefore has no intake batch. Tasks a batch creates
 (children, detached tasks, tasks extracted from a meeting) enter intake themselves; a child may take
 intake's declared fast path and never skips intake.
 
@@ -162,15 +164,16 @@ batch, held.** Registered in `conformance.md#the-register-of-open-design-decisio
 
 ### What distinguishes a task being assembled from one intake has not reached
 
-**Ruled (decision 84, 2026-09-21): a task being assembled is a task whose intake batch exists and is held
+**Ruled (decision 84, 2026-09-21): a workflow-entering task being assembled is a task whose intake batch exists and is held
 at `classify` on the discovered condition that the task is not yet fully written — not a fourth
 disposition, but the third of the four already listed, `#a-batch-may-hold-on-a-condition-discovered-mid-flight`
 applied to intake's own first step.** Registered in `conformance.md#the-register-of-open-design-decisions`.
 Before the ruling, the open question treated both an assembling task and one whose intake owner had not begun
 classification as
-having no intake batch. That premise conflicted with the already-settled creation boundary: **every task's
+having no intake batch. That premise conflicted with the already-settled creation boundary: **every
+workflow-entering task's
 intake batch opens at creation**. The distinction is therefore not whether the batch exists. An ordinary
-task's creation write makes the task, its intake batch, and their `ADDRESSED_BY` edge readable as one admitted
+workflow-entering task's creation write makes the task, its intake batch, and their `ADDRESSED_BY` edge readable as one admitted
 unit, and its open `classify` step is eligible for the ordinary claim path. An assembling task's same atomic
 unit additionally carries an assembly hold finding on `classify`, naming what is incomplete. None of that
 assembly unit is readable without the rest. A lease is deliberately not part of either minimum: creation
@@ -241,9 +244,10 @@ Four were listed and three are rejected here, each at its strongest before the r
   the batch and lease already carry once the held-batch disposition exists, which is invariant 9's second
   home again.
 
-**What is ruled: a held intake batch, established at the creation boundary.** The task enters intake
-immediately, exactly as `#intake-is-every-tasks-first-workflow` already requires of every task without
-exception. Where a creator knows the task is still being assembled, creation is one admitted unit: the
+**What is ruled: a held intake batch, established at the creation boundary.** The workflow-entering task enters intake
+immediately, exactly as `#intake-is-every-tasks-first-workflow` already requires of every claimable peer
+task. This leaves the aggregate-parent exemption intact: that grouping remains outside claim, never enters
+a workflow, and has no intake batch. Where a creator knows the workflow-entering task is still being assembled, creation is one admitted unit: the
 task, its intake batch and `ADDRESSED_BY` edge, and a non-blocking `hold` finding on `classify` naming the
 incomplete parts are written together and read back together. The record admits all of that unit or none
 of it. The finding is the **persistent assembly exclusion**: while it has no `classify` verdict, the task
@@ -284,7 +288,7 @@ the task remains absent from ordinary intake and successor-workflow pools. Endin
 lease holder judges the condition resolved and writes `classify`'s verdict; until that verdict exists the
 finding cannot be ignored, including across crash and lease transfer.
 
-**What this settles, and what it does not.** Settled: every task becomes readable atomically with its intake
+**What this settles, and what it does not.** Settled: every workflow-entering task becomes readable atomically with its intake
 batch and `ADDRESSED_BY` edge; an assembling task adds the creator-time finding to that same unit, and that
 batch's `classify` step holds rather than closing while the task is incomplete. Creation grants no lease,
 and the persistent assembly exclusion survives a missing, returned, transferred, or lapsed lease. An
@@ -511,7 +515,7 @@ only when an action inside it reaches the action gate, which resolves `operator_
 
 ### A task is executed only through a workflow
 
-There is no path by which a task is executed outside a workflow. Every task enters intake, and intake's
+There is no path by which a task is executed outside a workflow. Every workflow-entering task enters intake, and intake's
 closing verdict names the successor workflow it goes to, or none, or operator-only; whatever it does
 after that, it does inside a batch going through a declared workflow, with that workflow's steps, step
 owners, and verdicts. The design offers no side door: no status a principal sets that means "done
@@ -819,7 +823,7 @@ batch to come into existence, which tasks are in it, and which workflow it goes 
 by a mechanism the model already has, and stating them together is what stops the answer being re-derived
 differently at each call site.
 
-**A batch comes into existence at one of two moments, and at no other: every task's creation, which opens its
+**A batch comes into existence at one of two moments, and at no other: every workflow-entering task's creation, which opens its
 intake batch at creation, and a closing verdict naming a successor, which opens the successor's.** Two causes, both
 recorded, and no third. Intake's `route` step closes on a verdict naming one successor workflow, none,
 or operator-only; every later batch closes the same way (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`).
@@ -830,13 +834,16 @@ work to group. The one batch with no predecessor is a task's intake batch, opene
 which is the universal entry (`#intake-is-every-tasks-first-workflow`, above) and the reason every chain
 has a first link.
 
-The consequence worth naming: a batch is always opened **by a principal's recorded conclusion**, never by a
-process acting on its own reading of the record. The verdict names the successor, so the decision has an
-author, a timestamp, and a reason, and a reader asking why these tasks are in this workflow is answered by
-a conclusion rather than by inferring what some sweeper's predicate must have matched.
+The consequence worth naming has two forms, not one. An intake batch opens in the admitted creation unit of
+the workflow-entering task, without a predecessor verdict. Every successor batch is opened **by a principal's
+recorded conclusion**, never by a process acting on its own reading of the record. That closing verdict names
+the successor, so the decision has an author, a timestamp, and a reason, and a reader asking why these tasks
+are in that later workflow is answered by a conclusion rather than by inferring what some sweeper's predicate
+must have matched.
 
-**A batch's tasks are the tasks the closing verdict carried, and grouping beyond that is a step's
-judgement, recorded as one.** The default is the simple one: the tasks attached to the closing batch move
+**A successor batch's tasks are the tasks the closing verdict carried; an intake batch carries the one task
+whose creation opened it, and grouping beyond either is a step's judgement, recorded as one.** The default is
+the simple one: the tasks attached to the closing batch move
 together into the successor, and a batch of one stays a batch of one. Two operations change a task set,
 both already defined and both edges (principle 11): **detach**, which ends a task's `ADDRESSED_BY` edge and
 opens a new batch for it from the first step of its workflow, and **attach**, which writes that edge. What
@@ -851,8 +858,9 @@ verdicts already written on it, which is exactly why the judgement is a recorded
 against a task set that did not include it, and a step owner who attaches is asserting that they still
 hold. Where that assertion is not safe, the task is its own batch.
 
-**The workflow is chosen once, by the verdict that names the successor, from the declared list.** The
-choice is not open-ended: `workflow.successors` names the workflows a closing batch's tasks may enter, and
+**The workflow is fixed once: `intake` by the task-creation contract for an intake batch, and for every
+successor batch by the verdict that names it from the declared list.** The successor choice is not open-ended:
+`workflow.successors` names the workflows a closing batch's tasks may enter, and
 the closing verdict selects exactly one from that list or none. So the workflow for a batch is fixed
 before the batch opens, by a named principal, bounded by a declaration that was reviewed when it was
 written. There is no run-time selection inside the batch, no re-selection, and no workflow chosen by
@@ -874,7 +882,7 @@ The three questions and their one answer each, with the paths the rules above ex
 
 ```mermaid
 flowchart TD
-    CR["task created"] --> IB["its intake batch opens: the one batch with no predecessor"]
+    CR["workflow-entering task created"] --> IB["its intake batch opens without a predecessor verdict"]
     IB --> CS["closing verdict of a batch"]
     CS --> SEL{"does it name a successor?"}
     SEL -->|"none"| END["the task's chain ends"]
@@ -891,8 +899,8 @@ flowchart TD
     X4["a label an external system carries"] -.->|"chooses no workflow"| W
 ```
 
-Every arrow into a batch is a principal's recorded conclusion; every dotted one is a path the rules above
-close.
+The arrow into intake is the task's admitted creation unit; every arrow into a successor batch is a
+principal's recorded conclusion. Every dotted arrow is a path the rules above close.
 
 **What this deliberately does not do is let batch formation key on anything discovered later.** A
 declaration's conditional may turn only on a property of the task set at intake, never on a label an
@@ -1129,9 +1137,12 @@ a live one. Work needing two workflows at once is split into child tasks, one pe
 
 ### Parent and child tasks
 
-Children `PART_OF` a parent (at most one parent). Parent completion is derived from children's terminal
-states. Children go through workflows independently. A parent never enters a workflow — it is a
-grouping, and a batch carries tasks that are executed, which a parent never is.
+Children `PART_OF` an aggregate parent (at most one parent). Parent completion is derived from children's
+terminal states. Children go through workflows independently. An **aggregate parent task is not claimable,
+never enters a workflow, and has no intake batch or `ADDRESSED_BY` edge** — it is a grouping, and a batch
+carries tasks that are executed, which an aggregate parent never is. This is the deliberate exception to
+the workflow-entry creation rule; every child and every other workflow-entering peer task still opens its
+intake batch atomically at creation.
 
 **A task's one `PART_OF` edge targets its parent task or a planning record, and the records above it are
 its ascent.** The same edge, with the same one-parent rule, relates a task to the plan it is under and a
@@ -1340,11 +1351,13 @@ through workflows in batches — and each way a task comes to exist is stated wh
 creates it is argued. That leaves a reader who asks "in how many ways can work enter this swarm" reading
 eight documents. This section is the index, in the register's style
 (`conformance.md#the-register-of-open-design-decisions`): one line per source, pointing at the home that
-argues it, and restating nothing (principle 9). It is complete in one sense by construction: every task source
-below ends in the same place, a task with its intake batch opened atomically at creation,
-which is the universal entry
-(`#intake-is-every-tasks-first-workflow`) — and a source that does not end there is not a source of tasks
-but a side door, which the model does not have (`#a-task-is-executed-only-through-a-workflow`).
+argues it, and restating nothing (principle 9). It is complete in one sense by construction: every source
+below that creates a workflow-entering peer task ends in the same place, a task with its intake batch opened
+atomically at creation, which is the universal workflow entry
+(`#intake-is-every-tasks-first-workflow`) — and a source of executable work that does not end there is a side
+door, which the model does not have (`#a-task-is-executed-only-through-a-workflow`). The one
+task-shaped exception is an aggregate parent: it is a grouping that is not claimable rather than executable work, so
+it has children from the same indexed sources but no intake batch of its own.
 
 | # | Source | What creates the task | Home |
 |---|---|---|---|
@@ -1397,7 +1410,7 @@ One task per rule per change, never more. The created task refers to the entity 
 an entity in the record (gap G12, which this section makes load-bearing and does not close) — and its
 provenance names the rule and the identifier of the change, which is the idempotency key of the write
 (`data_model.md#record-conventions`), so a change delivered twice fires a rule once. The task's intake
-batch opens on its creation as every task's does (`#how-a-batch-is-formed-and-what-chooses-its-workflow`),
+batch opens on its creation as every workflow-entering task's does (`#how-a-batch-is-formed-and-what-chooses-its-workflow`),
 and that is the only sense in which a rule opens anything. A rule never opens a batch of its own, never
 attaches a task to an open batch, never names a workflow, and never takes an action: the first two are the
 sweeper's predicate that section closes, the third is routing by a matcher, and the fourth is an effect no

@@ -72,6 +72,8 @@ def check(root: Path) -> list[str]:
     wm14a = _line(texts["conformance_suite.md"], r"^\|\s*WM-14a\s*\|.*$")
     wm31 = _line(texts["conformance_suite.md"], r"^\|\s*WM-31\s*\|.*$")
     wm31a = _line(texts["conformance_suite.md"], r"^\|\s*WM-31a\s*\|.*$")
+    wm27 = _line(texts["conformance_suite.md"], r"^\|\s*WM-27\s*\|.*$")
+    wm35 = _line(texts["conformance_suite.md"], r"^\|\s*WM-35\s*\|.*$")
     wm39 = _line(texts["conformance_suite.md"], r"^\|\s*WM-39\s*\|.*$")
     creation_row_names = ("WM-13", "WM-14", "WM-21", "WM-32b", "WM-35a", "WM-39")
     creation_row_map = {
@@ -110,6 +112,16 @@ def check(root: Path) -> list[str]:
         "### A batch may hold on a condition discovered mid-flight",
         "### A batch may depend on a task it created",
     )
+    parent_model = _section(
+        texts["work_model.md"],
+        "### Parent and child tasks",
+        "### A recurring task is one live instance, and its completion creates the next",
+    )
+    scenario_f = _section(
+        texts["scenarios.md"],
+        "## (f) A parent task with children in independent batches",
+        "## (g) The operator-only claim",
+    )
     scenario_j = _section(
         texts["scenarios.md"],
         "## (j) A task created, routed by intake, and entering its successor",
@@ -126,6 +138,8 @@ def check(root: Path) -> list[str]:
             ("lapsed", "lease lapse"),
             ("creation grants no lease",),
             ("`pm` step owner",),
+            ("workflow-entering",),
+            ("aggregate parent",),
         ),
     )
     problems += _require(
@@ -137,6 +151,7 @@ def check(root: Path) -> list[str]:
             ("creation grants no lease",),
             ("declared `pm` step owner", "declaration's `pm` owner role"),
             ("multi-agent assembly",),
+            ("workflow-entering",),
         ),
     )
     problems += _require(
@@ -170,7 +185,7 @@ def check(root: Path) -> list[str]:
             f"universal-entry-{surface}",
             text,
             (
-                ("every task",),
+                ("workflow-entering",),
                 ("intake batch",),
                 ("at creation", "on creation", "creation boundary"),
             ),
@@ -179,7 +194,7 @@ def check(root: Path) -> list[str]:
         problems += _require(
             f"universal-entry-{row.lower()}",
             text,
-            (("intake batch",), ("at creation", "on creation")),
+            (("workflow-entering",), ("intake batch",), ("at creation", "on creation")),
         )
     universal_entry = " ".join(universal_surfaces.values())
     problems += _require(
@@ -201,6 +216,65 @@ def check(root: Path) -> list[str]:
             "intake batch exists?",
             "no: unrouted by that fact",
             "task enters intake; batch record opens",
+        ),
+    )
+    problems += _require(
+        "aggregate-parent-model",
+        parent_model,
+        (
+            ("aggregate parent",),
+            ("never enters a workflow",),
+            ("no intake batch",),
+            ("not claimable",),
+        ),
+    )
+    problems += _require(
+        "aggregate-parent-scenario",
+        scenario_f,
+        (
+            ("aggregate parent",),
+            ("never enters a workflow",),
+            ("no intake batch",),
+            ("not claimable",),
+        ),
+    )
+    problems += _require(
+        "aggregate-parent-wm-35",
+        wm35,
+        (
+            ("aggregate parent",),
+            ("never enters a workflow",),
+            ("no intake batch",),
+            ("not claimable",),
+        ),
+    )
+    problems += _require(
+        "batch-opening-model",
+        batch_formation,
+        (
+            ("intake batch",),
+            ("without a predecessor verdict",),
+            ("successor batch",),
+            ("closing verdict",),
+        ),
+    )
+    problems += _require(
+        "wm-27",
+        wm27,
+        (
+            ("intake batch",),
+            ("at creation", "task creation"),
+            ("without a predecessor verdict",),
+            ("successor batch",),
+            ("closing verdict",),
+        ),
+    )
+    problems += _require(
+        "scenario-intake-node",
+        scenario_j,
+        (
+            ("i[intake batch:",),
+            ("f -.->|follows| i",),
         ),
     )
     problems += _require(
