@@ -21,7 +21,6 @@ import json
 import plistlib
 import sys
 import types
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -1083,27 +1082,10 @@ def test_denial_marker_rejects_non_regular_existing_entry(
 async def test_already_approved_unstamped_checkpoint_releases_task(
     monkeypatch, release_store
 ):
-    """The exact operator-approved keystone may use bounded legacy recovery."""
+    """A v2-authorized approval may recover after its original consumer stopped."""
     records, brief_id, task_id = release_store
-    legacy_brief_id = "ent_06ca38a8fac215559a0ac394"
-    legacy_task_id = "ent_4f418c943405f840990c64ba"
-    records[legacy_brief_id] = records.pop(brief_id)
-    records[legacy_brief_id]["entity_id"] = legacy_brief_id
-    records[legacy_task_id] = records.pop(task_id)
-    records[legacy_task_id]["entity_id"] = legacy_task_id
-    records[legacy_brief_id]["snapshot"]["task_entity_id"] = legacy_task_id
-    brief_id, task_id = legacy_brief_id, legacy_task_id
     brief = records[brief_id]["snapshot"]
     brief.update({"status": "approved", "resolved_dispatched": False})
-    brief.pop("body", None)
-    monkeypatch.setattr(
-        apis,
-        "_checkpoint_release_now",
-        lambda: datetime(2026, 9, 21, tzinfo=timezone.utc),
-    )
-    monkeypatch.setattr(
-        apis, "read_authenticated_checkpoint_authorization", lambda *args: None
-    )
     original_dispatch = apis.dispatch_task
     dispatches: list[str] = []
 
@@ -1147,49 +1129,59 @@ async def test_unsigned_generic_approved_checkpoint_never_dispatches(
     assert brief["status"] == "approved_requires_fresh_approval"
 
 
-@pytest.mark.parametrize(
-    ("checkpoint_id", "task_id", "now", "expected"),
-    [
-        (
-            "ent_06ca38a8fac215559a0ac394",
-            "ent_4f418c943405f840990c64ba",
-            datetime(2026, 9, 21, tzinfo=timezone.utc),
-            True,
-        ),
-        (
-            "ent_11b31c2fc651eadc0781ee9e",
-            "ent_46a9527947b537ca9bc01d79",
-            datetime(2026, 9, 21, tzinfo=timezone.utc),
-            True,
-        ),
-        (
-            "ent_06ca38a8fac215559a0ac394",
-            "ent_wrong_task",
-            datetime(2026, 9, 21, tzinfo=timezone.utc),
-            False,
-        ),
-        (
-            "ent_other_checkpoint",
-            "ent_4f418c943405f840990c64ba",
-            datetime(2026, 9, 21, tzinfo=timezone.utc),
-            False,
-        ),
-        (
-            "ent_06ca38a8fac215559a0ac394",
-            "ent_4f418c943405f840990c64ba",
-            datetime(2026, 10, 1, tzinfo=timezone.utc),
-            False,
-        ),
-    ],
-)
-def test_legacy_release_is_exact_pair_and_time_bounded(
-    checkpoint_id, task_id, now, expected, monkeypatch
+@pytest.mark.asyncio
+async def test_unsigned_legacy_approval_cannot_authorize_mutated_task_revision(
+    monkeypatch, release_store
 ):
-    monkeypatch.setattr(apis, "_checkpoint_release_now", lambda: now)
-
-    assert (
-        apis._legacy_checkpoint_release_authorized(checkpoint_id, task_id) is expected
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief.update({"status": "approved", "resolved_dispatched": False})
+    brief.pop("body", None)
+    records[task_id]["snapshot"]["body"] = "changed after operator approval"
+    monkeypatch.setattr(
+        apis, "read_authenticated_checkpoint_authorization", lambda *args: None
     )
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert brief["status"] == "approved_requires_fresh_approval"
+
+
+def test_legacy_migration_creates_fresh_v2_approval_without_dispatch(
+    monkeypatch, release_store
+):
+    records, brief_id, _task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief.update({"status": "approved", "resolved_dispatched": False})
+    brief.pop("body", None)
+    monkeypatch.setattr(
+        apis, "read_authenticated_checkpoint_authorization", lambda *args: None
+    )
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    replacement_id = apis.migrate_checkpoint_authority(brief_id, notifier=_Notifier())
+
+    assert replacement_id == "ent_fresh_checkpoint"
+    assert brief["status"] == "approved_requires_fresh_approval"
+    assert brief["resolved_dispatched"] is False
+    assert dispatches == []
+
+
+def test_automatic_release_has_no_operator_specific_legacy_allowlist():
+    assert not hasattr(apis, "_LEGACY_CHECKPOINT_RELEASES")
 
 
 def test_runtime_configs_bind_absolute_persistent_denial_store():
@@ -1226,6 +1218,13 @@ def test_runtime_configs_bind_absolute_persistent_denial_store():
 def test_mcp_startup_proves_checkpoint_denial_store(monkeypatch, tmp_path):
     root = tmp_path / "mcp-checkpoint-denials"
     monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", str(root))
+    monkeypatch.setattr(
+        server,
+        "_load_apis_daemon",
+        lambda: pytest.fail(
+            "MCP startup imported the full Apis daemon dependency tree"
+        ),
+    )
 
     assert server._require_checkpoint_release_state() == root
     assert root.is_dir()

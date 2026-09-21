@@ -692,7 +692,12 @@ def _load_apis_daemon():
 
 def _require_checkpoint_release_state() -> Path:
     """Fail MCP startup closed unless replay-denial state is durably bound."""
-    return _load_apis_daemon()._require_checkpoint_denial_store()
+    daemon_dir = Path(__file__).resolve().parents[2] / "daemons" / "apis"
+    if str(daemon_dir) not in sys.path:
+        sys.path.insert(0, str(daemon_dir))
+    from checkpoint_denial_store import require_checkpoint_denial_store
+
+    return require_checkpoint_denial_store()
 
 
 async def _consume_checkpoint_resolution(checkpoint_id: str, snapshot: dict) -> bool:

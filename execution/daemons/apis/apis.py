@@ -78,7 +78,6 @@ import os
 import stat
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 # ── Env bootstrap (launchd does not source shell profiles) ───────────────────
@@ -168,6 +167,9 @@ _DAEMON_DIR = Path(__file__).resolve().parent
 if str(_DAEMON_DIR) not in sys.path:
     sys.path.insert(0, str(_DAEMON_DIR))
 
+from checkpoint_denial_store import (  # noqa: E402
+    require_checkpoint_denial_store as _require_checkpoint_denial_store,
+)
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
     AgentLoader,
@@ -179,8 +181,6 @@ from lib.daemon_runtime import (  # noqa: E402
     score_confidence,
     send_run_email,
     write_assessment,
-    BlastRadius,
-    ExecutionPolicy,
     GateAction,
     GateDecision,
     NeotomaEvent,
@@ -1112,25 +1112,6 @@ def _record_snapshot(record: dict | None) -> dict | None:
     return None
 
 
-_LEGACY_CHECKPOINT_RELEASES = {
-    "ent_06ca38a8fac215559a0ac394": "ent_4f418c943405f840990c64ba",
-    "ent_11b31c2fc651eadc0781ee9e": "ent_46a9527947b537ca9bc01d79",
-}
-_LEGACY_CHECKPOINT_RELEASE_DEADLINE = datetime(2026, 10, 1, tzinfo=timezone.utc)
-
-
-def _checkpoint_release_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _legacy_checkpoint_release_authorized(checkpoint_id: str, task_id: str) -> bool:
-    """Allow only the two already-approved #1141 keystones, temporarily."""
-    return (
-        _checkpoint_release_now() < _LEGACY_CHECKPOINT_RELEASE_DEADLINE
-        and _LEGACY_CHECKPOINT_RELEASES.get(checkpoint_id) == task_id
-    )
-
-
 def _release_lifecycle_proven(task_id: str, expected_status: TaskStatus) -> bool:
     """Read back the lifecycle fields that authorize an approved-task spawn."""
     snapshot = fetch_task_snapshot(task_id)
@@ -1160,49 +1141,6 @@ def _checkpoint_denial_marker(checkpoint_id: str) -> Path | None:
         return None
     digest = hashlib.sha256(checkpoint_id.encode()).hexdigest()
     return root / f"{digest}.denied"
-
-
-def _require_checkpoint_denial_store() -> Path:
-    """Prove the configured denial store is absolute, durable, and writable."""
-    configured = os.environ.get("APIS_CHECKPOINT_DENIAL_DIR", "").strip()
-    if not configured:
-        raise RuntimeError("APIS_CHECKPOINT_DENIAL_DIR is required")
-    root = Path(configured)
-    if not root.is_absolute():
-        raise RuntimeError("APIS_CHECKPOINT_DENIAL_DIR must be absolute")
-    try:
-        root.mkdir(parents=True, exist_ok=True)
-        root_mode = os.lstat(root).st_mode
-        if not stat.S_ISDIR(root_mode) or stat.S_ISLNK(root_mode):
-            raise RuntimeError(
-                "APIS_CHECKPOINT_DENIAL_DIR must be a real directory, not a symlink"
-            )
-        probe = root / f".startup-probe-{os.getpid()}-{time.time_ns()}"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(probe, flags, 0o600)
-        try:
-            os.write(fd, b"probe\n")
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        probe.unlink()
-        dir_flags = os.O_RDONLY
-        if hasattr(os, "O_DIRECTORY"):
-            dir_flags |= os.O_DIRECTORY
-        dir_fd = os.open(root, dir_flags)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-    except RuntimeError:
-        raise
-    except OSError as exc:
-        raise RuntimeError(
-            f"APIS_CHECKPOINT_DENIAL_DIR is unusable: {type(exc).__name__}"
-        ) from exc
-    return root
 
 
 def _valid_checkpoint_denial_marker(marker: Path) -> bool:
@@ -1371,7 +1309,7 @@ def _require_fresh_release_authority(
     task_snapshot: dict,
     notifier: Notifier,
     reason: str,
-) -> bool:
+) -> str | None:
     """Create replacement authority before retiring the stale approval."""
     replacement_id = _file_fresh_checkpoint(
         prior_checkpoint_id=checkpoint_id,
@@ -1387,7 +1325,7 @@ def _require_fresh_release_authority(
             priority=Priority.BLOCKER,
             handler=DAEMON_NAME,
         )
-        return False
+        return None
     retired = require_fresh_checkpoint_approval(
         checkpoint_id, handler=DAEMON_NAME, reason=reason
     )
@@ -1395,7 +1333,67 @@ def _require_fresh_release_authority(
         raise RuntimeError(
             f"checkpoint {checkpoint_id} stale authority could not be retired safely"
         )
-    return True
+    return replacement_id
+
+
+def migrate_checkpoint_authority(
+    checkpoint_id: str, *, notifier: Notifier
+) -> str | None:
+    """Replace one approved unsigned brief with a fresh v2 approval request.
+
+    This is deliberately a migration, not a release: the replacement binds the
+    current complete task and policy revisions in an AAuth-backed observation
+    and remains awaiting_operator until the operator approves that exact state.
+    """
+    checkpoint_record = fetch_checkpoint_record(checkpoint_id)
+    snapshot = _record_snapshot(checkpoint_record)
+    if snapshot is None or read_checkpoint_resolution(snapshot) != "approved":
+        log.error(
+            "[%s] checkpoint %s is not an approved checkpoint",
+            DAEMON_NAME,
+            checkpoint_id,
+        )
+        return None
+    if checkpoint_already_dispatched(snapshot) or _checkpoint_denial_persisted(
+        checkpoint_id
+    ):
+        log.error(
+            "[%s] checkpoint %s is already consumed",
+            DAEMON_NAME,
+            checkpoint_id,
+        )
+        return None
+    if read_authenticated_checkpoint_authorization(checkpoint_id, checkpoint_record):
+        log.error(
+            "[%s] checkpoint %s already has v2 authority",
+            DAEMON_NAME,
+            checkpoint_id,
+        )
+        return None
+    task_id = str(snapshot.get("task_entity_id") or "").strip()
+    task_record = fetch_task_record(task_id) if task_id else None
+    task_snapshot = _record_snapshot(task_record)
+    brief_user_id = fetch_entity_user_id(checkpoint_id)
+    task_user_id = fetch_entity_user_id(task_id) if task_id else None
+    if (
+        task_snapshot is None
+        or not brief_user_id
+        or not task_user_id
+        or brief_user_id != task_user_id
+    ):
+        log.error(
+            "[%s] checkpoint %s lacks matching task and tenant provenance",
+            DAEMON_NAME,
+            checkpoint_id,
+        )
+        return None
+    return _require_fresh_release_authority(
+        checkpoint_id,
+        task_id=task_id,
+        task_snapshot=task_snapshot,
+        notifier=notifier,
+        reason="legacy approval migrated to v2 authority; fresh approval required",
+    )
 
 
 async def handle_checkpoint_brief(
@@ -1560,8 +1558,7 @@ async def handle_checkpoint_brief(
         entity_id, checkpoint_record
     )
     authorization_bound = authorization is not None
-    legacy_release = _legacy_checkpoint_release_authorized(entity_id, task_id)
-    if not authorization_bound and not legacy_release:
+    if not authorization_bound:
         _require_fresh_release_authority(
             entity_id,
             task_id=task_id,
@@ -1570,66 +1567,41 @@ async def handle_checkpoint_brief(
             reason=("checkpoint has no current AAuth-backed authorization observation"),
         )
         return False
-    if legacy_release and not authorization_bound:
-        log.warning(
-            f"[{DAEMON_NAME}] checkpoint {entity_id} is using the bounded "
-            "#1141 keystone migration path"
-        )
 
-    if authorization_bound:
-        auth_action_type = str(authorization.get("action_type") or "").strip().lower()
-        current_policy = resolve_policy_for_agent(safety_skill)
-        current_decision = evaluate_gate(
-            confidence=_read_confidence(task_snapshot),
-            action_type=current_action_type,
-            policy=current_policy,
-            successful_recurrences=_successful_recurrences(task_snapshot),
+    auth_action_type = str(authorization.get("action_type") or "").strip().lower()
+    current_policy = resolve_policy_for_agent(safety_skill)
+    current_decision = evaluate_gate(
+        confidence=_read_confidence(task_snapshot),
+        action_type=current_action_type,
+        policy=current_policy,
+        successful_recurrences=_successful_recurrences(task_snapshot),
+    )
+    exact_authority = (
+        authorization.get("task_entity_id") == task_id
+        and authorization.get("user_id") == brief_user_id == task_user_id
+        and authorization.get("task_revision") == entity_record_digest(task_record)
+        and authorization.get("task_observation_count")
+        == task_record.get("observation_count")
+        and authorization.get("task_last_observation_at")
+        == task_record.get("last_observation_at")
+        and auth_action_type == current_action_type
+        and authorization.get("policy_entity_id") == current_policy.entity_id
+        and authorization.get("policy_revision")
+        == execution_policy_revision(current_policy)
+        and authorization.get("gate_action") == gate_action
+        and authorization.get("blast_radius") == blast_radius
+        and current_decision.action.value == gate_action
+        and current_decision.blast_radius.value == blast_radius
+    )
+    if not exact_authority:
+        _require_fresh_release_authority(
+            entity_id,
+            task_id=task_id,
+            task_snapshot=task_snapshot,
+            notifier=notifier,
+            reason="task or execution policy changed after approval",
         )
-        exact_authority = (
-            authorization.get("task_entity_id") == task_id
-            and authorization.get("user_id") == brief_user_id == task_user_id
-            and authorization.get("task_revision") == entity_record_digest(task_record)
-            and authorization.get("task_observation_count")
-            == task_record.get("observation_count")
-            and authorization.get("task_last_observation_at")
-            == task_record.get("last_observation_at")
-            and auth_action_type == current_action_type
-            and authorization.get("policy_entity_id") == current_policy.entity_id
-            and authorization.get("policy_revision")
-            == execution_policy_revision(current_policy)
-            and authorization.get("gate_action") == gate_action
-            and authorization.get("blast_radius") == blast_radius
-            and current_decision.action.value == gate_action
-            and current_decision.blast_radius.value == blast_radius
-        )
-        if not exact_authority:
-            _require_fresh_release_authority(
-                entity_id,
-                task_id=task_id,
-                task_snapshot=task_snapshot,
-                notifier=notifier,
-                reason="task or execution policy changed after approval",
-            )
-            return False
-
-    if not authorization_bound and current_action_type:
-        # Legacy checkpoints predate the explicit authorization snapshot. Known
-        # fallback actions may recover only when their current radius still
-        # matches the approved radius. Unknown actions are policy divergence,
-        # not proof of NEVER: retire the old authority and ask the live policy
-        # to create a fresh checkpoint non-destructively.
-        current_radius = ExecutionPolicy(
-            entity_id="checkpoint-release-fallback", loaded=False
-        ).blast_radius_for(current_action_type)
-        if current_radius == BlastRadius.NEVER or current_radius.value != blast_radius:
-            _require_fresh_release_authority(
-                entity_id,
-                task_id=task_id,
-                task_snapshot=task_snapshot,
-                notifier=notifier,
-                reason=("legacy checkpoint does not match current task classification"),
-            )
-            return False
+        return False
 
     log.info(
         f"[{DAEMON_NAME}] checkpoint {entity_id} APPROVED — re-dispatching task "
