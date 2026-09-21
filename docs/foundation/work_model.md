@@ -156,18 +156,24 @@ Tasks a batch creates
 (children, detached tasks, tasks extracted from a meeting) enter intake themselves; a child may take
 intake's declared fast path and never skips intake.
 
-**What a task being assembled looks like is open (decision 84, 2026-09-07, on the operator's question).**
-Registered in `conformance.md#the-register-of-open-design-decisions`, argued below.
+**What a task being assembled looks like is ruled (decision 84, 2026-09-21): it is an ordinary intake
+batch, held.** Registered in `conformance.md#the-register-of-open-design-decisions`, argued below.
 
 ### What distinguishes a task being assembled from one intake has not reached
 
-**Open (decision 84, 2026-09-07).** Registered in
-`conformance.md#the-register-of-open-design-decisions`. The rule above makes an unrouted task a task with no
-intake batch, and that one definition covers two situations the design does not currently separate: a task
-with no intake batch **because it is still being written** — several agents each contributing part of it,
-the operator's case — and a task with no intake batch **because intake has not yet picked it up**. Both are
-unrouted. Nothing in the record says which is which, and so nothing says whether the first is finished
-enough to be claimed and executed.
+**Ruled (decision 84, 2026-09-21): a task being assembled is a task whose intake batch exists and is held
+at `classify` on the discovered condition that the task is not yet fully written — not a fourth
+disposition, but the third of the four already listed, `#a-batch-may-hold-on-a-condition-discovered-mid-flight`
+applied to intake's own first step.** Registered in `conformance.md#the-register-of-open-design-decisions`.
+The rule above makes an unrouted task a task with no intake batch, and that one definition covered two
+situations the design did not separate: a task with no intake batch **because it is still being written** —
+several agents each contributing part of it, the operator's case — and a task with no intake batch
+**because intake has not yet picked it up**. Both were unrouted, nothing in the record said which was
+which, and so nothing said whether the first was finished enough to be claimed and executed. The ruling
+closes the gap by moving the first case out of "no intake batch" entirely: an assembling task **has** an
+intake batch, opened the moment it is created exactly as `#intake-is-every-tasks-first-workflow` already
+requires of every task, and that batch's `classify` step is claimed and held rather than closed. Only the
+second case — genuinely unrouted, nobody yet looking at it — keeps the no-intake-batch reading.
 
 **The operator's proposal was a `draft` status**, and a status is disfavoured on three independent grounds,
 none of which touch the need itself:
@@ -184,21 +190,103 @@ none of which touch the need itself:
   a closing verdict writing only a declared value and a terminal value outside the set refused at the
   write. Statuses are how a task ends, not how it is prepared.
 
-**The dispositions, none of them taken here.**
+**The dispositions, argued against each other rather than only against the status the operator proposed.**
+Four were listed and three are rejected here, each at its strongest before the reason it does not win.
 
-- **Nothing.** The absence of an intake batch already is the state, and being assembled is a fact about the
-  assembler rather than about the task. The cost is that the two situations stay indistinguishable to any
-  reader of the record.
-- **An edge, not a status.** A relationship marking a task as under assembly, cleared when intake starts,
-  leaving the task's own fields untouched — the shape invariant 11 prefers, and the one `held`-from-claim
-  already takes.
-- **A held intake batch.** The task enters intake immediately and intake's first step holds on the
-  condition that the task is not yet fully written, using
-  `#a-batch-may-hold-on-a-condition-discovered-mid-flight`, which exists and needs no new record.
-- **A status after all**, accepting the three costs above, and under a word other than `draft`.
+- **Nothing, at its strongest.** The absence of an intake batch already is *a* state, and being assembled is
+  a fact about the assembler rather than about the task — the cheapest possible answer, since it asks the
+  design to add nothing at all, and it is not merely lazy: every other unrouted task already reads this way,
+  so treating the assembling case identically is the reading that adds no special case. It fails on the
+  question the register names explicitly, not on tidiness. Under "nothing," an assembling task *is* a task
+  with no intake batch, which is exactly the claimable, unrouted case `#intake-is-every-tasks-first-workflow`
+  already defines — no lease, no checkpoint, nothing distinguishing it from a task genuinely waiting for
+  intake to arrive. A second agent, or a queue reading for claimable work, cannot tell "half-written" from
+  "ready and unclaimed," and the claim predicate would let either be claimed and executed. That is the cost
+  the section already named, and read against the sub-question the register asks — whether an assembling
+  task is claimable before it is finished — "nothing" answers it wrongly: it would be.
+- **An edge, not a status, at its strongest.** This is the shape invariant 11 structurally prefers on its
+  face: `principles.md#11-state-that-needs-a-watchdog-belongs-in-a-relationship-not-a-field` names exactly this
+  pattern — a lease, a checkpoint's link to its subject, a step's state within a batch — as edges read at
+  time rather than fields a process must clear, and "several agents each contributing part of a task" reads
+  naturally as a relationship between those agents and the task rather than as a property of the task
+  itself. It is real prior art, not invented for this ruling: Claude Projects' *Suggested threads* is
+  external evidence that the shape ships — proposed work a coordinator has assembled but not started,
+  presented as a distinct thing with no status on the underlying unit of work
+  (analysis `ent_48bfa9047aa4489204ca0d1f`, cited as comparative prior art and not as authority — Projects
+  is a shipped system with its own design, not a source this design defers to). It fails on invariant 6, not
+  invariant 11: `#a-batch-may-hold-on-a-condition-discovered-mid-flight` already gives the design a
+  recorded, non-terminal, claim-blocking mechanism for "a step owner has met a condition that is not yet
+  resolved," built for exactly this shape of fact and requiring no new relationship type. A dedicated
+  assembly edge would be a second mechanism doing what a hold already does, the parallel-mechanism failure
+  invariant 6 names, and it does not even settle the claimability question for free: an edge that is not
+  itself a lease or a checkpoint is not read by the claim predicate today
+  (`#what-a-claim-predicate-treats-as-claimable` enumerates lease, checkpoint, and `assigned_to`, closed),
+  so making it block a claim would mean widening that predicate to read a fourth kind of fact — the second
+  home for one question invariant 9 forbids — where the held-batch disposition blocks the claim for free,
+  through the lease the predicate already reads.
+- **A status after all, at its strongest.** Accepting the three costs already stated buys the property none
+  of the other three deliver without qualification: a single stored field any reader can filter on directly,
+  with no edge to traverse and no batch to inspect. Where a status is cheap to add and the three costs are
+  the only objection, this is a defensible trade. It is not the trade here, because the three costs are not
+  merely aesthetic: C1 and invariant 11 name a field a process must keep true (who clears "still being
+  written," and on what event, if not the very intake step the held-batch answer already provides for
+  free); invariant 12 names an actual, present collision with a bound step name, not a hypothetical one; and
+  the status vocabulary's own scope — `open`/terminal, written only by a closing verdict — has no slot for a
+  value that means neither. A status here does not describe a new fact; it duplicates, on the task, a fact
+  the batch and lease already carry once the held-batch disposition exists, which is invariant 9's second
+  home again.
 
-**What is settled, and is not part of this question:** every task enters intake, and a task with no intake
-batch is unrouted. The question is whether the design says anything further about *why* it has none.
+**What is ruled: a held intake batch.** The task enters intake immediately, exactly as
+`#intake-is-every-tasks-first-workflow` already requires of every task without exception — there is no
+delay to invent, because intake already opens on creation. `classify`, intake's first step, is claimed the
+ordinary way, by whichever principal — the first contributing agent, or the role the roster resolves for
+`pm` — reads the task and finds it not yet fully written: names missing, a contribution another agent is
+mid-way through, a description with pieces not yet supplied. That principal does not close the step, and
+does not fail it. It **holds**, exactly under `#a-batch-may-hold-on-a-condition-discovered-mid-flight`: a
+non-blocking finding is recorded naming the condition (what remains to be written, and by whom, where
+known), no verdict is written, and the lease keeps renewing — by the same step owner re-claiming, or by
+whichever contributing agent next touches the task, the way any held step's lease already renews across
+whoever keeps it alive. No new record, no new relationship type, and no new field on the task: the
+mechanism is the one decision 13 already built, for "a condition discovered mid-flight that a step must
+satisfy before its conclusion can be written," and an incomplete task is exactly that kind of condition,
+discovered by the step owner attempting `classify` rather than declared in a workflow's `applies_when`.
+
+**This is not a fourth disposition invented to avoid choosing between the three listed; it is the third one
+named more precisely.** The open section listed "a held intake batch" using
+`#a-batch-may-hold-on-a-condition-discovered-mid-flight` and called it a disposition that "exists and needs
+no new record"; this ruling is that disposition, with the missing piece supplied — which step holds
+(`classify`, intake's first), on what discovered condition (incompleteness, read by the step owner
+attempting to classify a task that is not yet fully written), and what a hold looks like when the batch that
+holds is the task's *own* intake batch and not a later workflow's. Nothing about the hold mechanism changes
+for this use, which is the evidence it generalizes rather than being stretched: the same finding, the same
+renewing lease, the same three bounded ends (the condition resolves and `classify` proceeds; the condition
+owes a principal a decision and a checkpoint is raised; the condition owes nobody a decision and
+`failure_posture.md` rule 5's backoff-then-checkpoint bounds it), unchanged.
+
+**The claimability sub-question, answered directly.** The register names it explicitly: whether an
+assembling task is claimable before it is finished being written. It is not. `#what-a-claim-predicate-treats-as-claimable`
+reads a lease among the three things that remove a task from the claimable pool, and a task whose intake
+batch holds a lease on `classify` is under a held lease by that read — the same "under a held lease" partition
+`#a-task-is-live-when-some-principal-could-claim-it-now` already defines as neither live nor terminal nor
+checkpointed, work being advanced right now rather than work nothing is advancing. No second agent, and no
+later workflow, can claim the task while assembly holds it, without any new clause added to the claim
+predicate: the predicate already refuses a task under a held lease, and an assembling task is exactly that,
+for the ordinary reason a claimed-and-not-yet-closed step already is one.
+
+**What this settles, and what it does not.** Settled: an assembling task has an intake batch from the
+moment it is created, that batch's `classify` step holds rather than closing while the task is incomplete,
+and the task is not claimable for the duration, for the same structural reason any held step is. Not settled,
+and not part of this question: how a contributing agent signals that its portion is done, or how many
+agents' contributions `classify` waits on before resolving the hold — those are a matter of how `classify`
+is executed, which is `workflows.md#intake`'s to state if it ever needs to, not a new mechanism this
+ruling adds.
+
+**What would reopen it.** A demonstrated case where the hold's three bounded ends do not fit
+assembly — where an assembling task genuinely needs to sit unresolved past what
+`failure_posture.md` rule 5's backoff ceiling tolerates before a `rounds_exhausted` checkpoint is the right
+answer, for instance — would be evidence the discovered-condition mechanism does not generalize to this
+use after all, which is what would revisit the choice between the four dispositions rather than merely tune
+this one's parameters.
 
 ### What a claim predicate treats as claimable
 
