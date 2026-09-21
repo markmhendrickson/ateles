@@ -154,6 +154,20 @@ has leaked into the template and belongs in stage 2.
   duplicated, notably `/draft-rendered-page`'s theming, contrast, and mobile
   rules.
 
+**Extending to a site: the page inventory.** A run may cover a full site —
+landing page plus subpages — rather than one page. When it does, `content`
+also carries a PAGE INVENTORY, one entry per page: which pages exist, what
+each is for, and which `rendered_page_template` each uses (a subpage may reuse
+the landing page's template or need its own; state which and why). A template
+used by more than one page must still pass the existing test — usable for a
+second product with a different message — applied per page, not just once for
+the site as a whole.
+
+Each inventory entry also declares the page's **content origin** (see "Where a
+page's content comes from" under Stage 2) — authored repo markdown, a
+generated positioning mirror, or page-specific copy — so stage 2 knows, per
+page, whether it is writing copy or pointing at a source.
+
 Apply the category check above.
 
 ## Stage 2 — CTA and content specification
@@ -177,6 +191,30 @@ Choose the CTA against the INCUMBENT, not in the abstract: the reader is
 already doing something, and the CTA asks them to stop doing it. A CTA chosen
 without reading the incumbent artifact asks for a switch the reader has no
 reason to make.
+
+**CTA across a site.** The existing rule — one primary CTA per page,
+subordinate secondaries — holds per page. On a site, state explicitly in
+`cta.content` how the SAME primary CTA behaves when a visitor can arrive on
+any page, not only the homepage: whether every page repeats the one site-wide
+primary CTA, or a subpage carries its own primary scoped to what that page
+argues (e.g. a docs subpage's CTA differs from the homepage's). Do not invent a
+funnel model to decide this — state the constraint (arrival page is not
+controlled) and record which of the two the run chose and why; the choice is a
+content-specification decision, made here, not improvised per page during the
+build.
+
+**Cross-page consistency is the real risk in a multi-page run, and this stage
+is where it is caught, not the build.** One settled argument (ICP, incumbent,
+chronic/acute pain, category) spans the whole site, but each page makes a
+different CUT of it — a subpage emphasizes one defect, the homepage carries
+the full argument. Before storing each page's specification, check it against
+every other page's specification already written in this run for: a claim one
+page makes that another contradicts, a defect claimed as resolved on one page
+and silently absent on another, or a different chosen incumbent framing per
+page. A specification that inherits the argument restates only the CUT it is
+making, never re-derives the underlying ICP, incumbent, or pain split — each
+page's spec still traces to the same upstream artifacts named in stage 1's
+table, it just selects which parts of them it foregrounds.
 
 **The specification is a separate artifact from the template.** That separation
 is load-bearing: it lets the message change without renegotiating the
@@ -204,6 +242,65 @@ Bind the spec to the upstream decisions:
 - Retrieve `brand_voice` and the relevant `style_guide` and apply them on the
   way in, not as a later editing pass.
 
+### Where a page's content comes from
+
+This is settled, not an open design question for this skill to re-decide: a
+site does not carry two live copies of the same fact. Content has exactly one
+of three origins, and every page in the inventory declares which:
+
+1. **Authored repo markdown** — documentation, foundation docs, explainers.
+   Generic and portable, so it lives in the repo as authored markdown and a
+   site RENDERS it through the site's own design rather than duplicating it
+   into the specification. A page of this kind names the repo path it reads,
+   not the content itself.
+2. **A generated positioning mirror** — ICP, category, competitor verdicts,
+   pain. Positioning is operator-specific, so per the fork test (`if another
+   operator cloning this repo would have to edit code rather than supply an
+   entity, the specifics are in the wrong place` — `docs/forking.md`,
+   `CLAUDE.md`) it is never authored directly into a public repo file. It lives
+   in Neotoma (`target_persona`, `analysis`, `research_finding`, the entities
+   this skill and `/frame-product-argument` already produce) and is PROJECTED
+   into the repo as a generated mirror under `docs/positioning/<product>/`,
+   naming its source entity id — the same projection pattern `render_plan_docs.py`
+   and `render_agent_docs.py` already use for the plan and agent docs. (This
+   projection — `render_positioning_docs.py` — is implemented in open PR #1137
+   as of this writing; treat it as the intended source, not yet as merged, and
+   confirm it has landed before relying on it in a live run.) A page of this
+   kind names the mirror file it reads and the source entity id the mirror's
+   own frontmatter carries — it does not re-type the positioning content into
+   the specification.
+3. **Page-specific copy** — a headline, a CTA label, transitional prose that
+   exists only to make this one page read well. This is the only kind of
+   content this skill actually authors into `specification.content`.
+
+**A page whose content is repo-sourced (origins 1 or 2) does not re-author
+that content in its stage-2 specification.** The specification for such a page
+states which file it renders and how that file's content is presented on the
+page (placement, truncation, pull-quote) — it does not copy the file's
+sentences into `specification.content`. Restating the content is not a
+convenience; it recreates a second copy that can silently drift from the
+source, which is the exact failure this projection model exists to make
+structurally impossible rather than catch on review. It is not hypothetical:
+one live page's anti-profile still excluded a segment a merged decision had
+explicitly retracted, because the page held a hand-copied version of a
+positioning fact instead of rendering the current one.
+
+**Correcting a positioning page's content means correcting the Neotoma entity
+and regenerating the mirror — never editing the page or the mirror file by
+hand.** Same rule the generated mirrors already carry in their own headers.
+
+**Honest limit on enforcement.** The projection's `--check` step is wired into
+`scripts/lint.sh`, which — as of this writing — is invoked by no CI workflow;
+running `--check` is a step a person runs, not a gate anything fails on
+automatically. Treat repo-sourced content as the correct DESIGN to build
+toward, not as something CI currently guarantees stays in sync. State this
+plainly in the stage-4 inventory or stage-5 report if a page's declared origin
+cannot be verified as currently projected.
+
+This section states how a site CONSUMES the reference/positioning split and
+the projection design — it does not re-decide either; both are settled
+elsewhere (`docs/forking.md`, CLAUDE.md's fork test, and PR #1137's design).
+
 ## Stage 3 — Best-practice research
 
 **Entity type: `research_finding`.** Declared: `title`, `subject`, `method`,
@@ -219,6 +316,80 @@ Research two things together, because neither answers the question alone:
 - Best practice for this TYPE of landing page given that CTA. A page whose CTA
   is "install" is a different genre from one whose CTA is "book a call", and
   the genre governs section order, proof placement, and page length.
+
+This stage failed twice on 2026-09-21 in the same shape: both runs substituted
+internal artifacts for research and labelled the substitution — one run's
+`method` said "rather than external web research" with zero URLs in
+`sources`; the other's `method` said "rather than external market research"
+while its `summary` named three companies (Stripe, PostHog, Supabase) as
+evidence, and its own `sources` field admitted this was "observed structural
+pattern rather than a cited external study" — three companies named from
+recollection, never fetched. Naming a source without fetching it reads as
+sourced when it is not, which is worse than saying "no evidence." The four
+steps below exist to close that gap, in this order, and all four are
+mandatory — reasoning from upstream artifacts alone, however well-labelled,
+does not satisfy this stage.
+
+### (a) Read the Neotoma corpus first
+
+Query `competitive_analysis`, `homepage_analysis`, `marketing_analysis`,
+`market_research`, and `content_analysis` for this product and its category
+before doing anything else. Much of the external research this stage needs has
+already been done and stored — re-deriving it from upstream artifacts alone is
+the parallel-mechanism failure this skill's standing rules already forbid
+(`SWARM_PRIOR_ART_CONTRACT`). Cite every corpus entity actually consumed by
+entity id in `sources`, with the date each carries (see (d)).
+
+### (b) The corpus is a FLOOR, not a BOUNDARY
+
+This is the operator's explicit instruction. Neotoma is NOT exhaustive on
+competitors or adjacent offerings, and it cannot tell you what it is missing —
+its absence of a competitor means absence-from-the-corpus, never
+absence-from-the-market. Two concrete, corpus-verifiable reasons this matters:
+
+- **Staleness.** A competitive or homepage analysis several months old, in a
+  category that moves monthly, can be actively wrong by the time this stage
+  runs — not merely dated. Example: an April 2026 Neotoma-corpus analysis of a
+  competitor's memory page recorded that competitor "drifting toward direct";
+  by September 2026 that competitor's homepage had dropped memory-product
+  framing entirely for enterprise-governance positioning, and the specific
+  page the analysis scored (benchmark tables, marketing structure) had become
+  a documentation page with no hero, no CTA, and no benchmark table at all.
+  The corpus entry was not just old, it was no longer true of the live page.
+- **Selection shape.** A corpus assembled from whoever happened to get
+  analysed has a shape nobody chose. It will contain deep coverage of some
+  competitors and none of others that matter now.
+
+So stage 3 MUST also go look externally, every run: fetch actual current
+competitor and adjacent landing pages for this product's category, and check
+whether what the corpus says still holds. Use WebFetch on real URLs and
+WebSearch to find current pages you don't already have a URL for. A stage-3
+run that never leaves Neotoma has not done this stage, regardless of how
+thorough the corpus reading was.
+
+### (c) Every convention asserted needs a fetched source or a preference label
+
+For every best-practice claim the finding makes:
+
+- **Either** fetch the page (or the specific claim's source) and cite the URL
+  in `sources` with the date you fetched it, **or**
+- drop the named example and label the claim a preference — state plainly in
+  `confidence` or `conclusion` that it is unevidenced convention, not
+  established practice.
+
+Naming a company, product, or convention from memory without fetching it is
+never acceptable as a citation, however well-known the example seems. If you
+recall that "OSS dev-tool homepages typically do X," that recollection is the
+hypothesis to go verify in (b), not the finding.
+
+### (d) Record staleness
+
+For every corpus entity consumed in (a) and every external source fetched in
+(b)/(c), record its date (the corpus entity's `analysis_date` /
+`researched_date`, or the fetch date for a live page) next to the citation in
+`sources`. A later reader — including a later run of this same stage — must be
+able to see what was current when this finding was written, so they can judge
+whether to trust it as-is or re-verify.
 
 Put each source in `sources` and be honest in `confidence` about what is
 established versus inferred. A convention with no evidence behind it is a
@@ -382,6 +553,68 @@ The artifact is what passes between steps, which is why every stage stores one
 even when the same agent continues. Running the stages in one agent must not
 become a reason to let one stage pass state to the next in conversation — that
 is the coupling that would make the migration a rewrite.
+
+## Routing a product finding back to the product
+
+Positioning work surfaces two different kinds of finding, and only one of them
+belongs in this skill's own artifacts:
+
+- **A finding about the POSITIONING** — the argument, the copy, which pain
+  leads, how a page is structured. Stays in this skill's artifacts.
+- **A finding about the PRODUCT** — a gap the positioning work exposed in what
+  the product itself does or enforces, usually surfaced by comparing against a
+  competitor's shipped behavior or against the product's own foundation docs.
+  This does NOT stay in a research artifact where nothing downstream reads it.
+  It gets filed as a follow-up, in the same run that found it.
+
+The test: would fixing this change what the PRODUCT does, or only what a page
+SAYS about the product? "The hero leads with the chronic tax instead of the
+acute crisis" changes what a page says — it stays here. "A competitor enforces
+structurally what this product enforces only by prose, and a rule nothing
+enforces is not a control" changes what the product would need to DO — it gets
+filed. Apply this test before closing the run; a product finding left in the
+artifact is a finding that dies there.
+
+**Reuse `/analyze`'s mechanism verbatim — do not build a parallel one.**
+`/analyze` already does exactly this job and is proven: it produces one
+`analysis_finding` per discrete finding (`claim`, `evidence`, `confidence`,
+`kind`), one `task` per follow-up (`description`, `status`, `source: analysis`,
+`repo?`), and one `proposed_github_issue` per repo-touching task warranting a
+public issue (`repo`, `title`, `labels`, `body_redacted`, `confidence`,
+`backed_by_task_index`, `competitive_content_stripped`, `opened_url`), gated by
+a mandatory redaction step and an opt-in public-issue step. Read
+`/analyze`'s Step P (persistence) and Step I (redaction and opt-in issue
+opening) before filing anything here, and use its exact entity types and field
+names. Minting a second `product_finding` type, or re-implementing the
+redaction filter inline, is the parallel-mechanism failure the standing rules
+already name (`SWARM_PRIOR_ART_CONTRACT`) — this skill's job is to detect the
+finding and route it, not to build a second way to file one.
+
+Concretely, when a product finding is identified in this skill's run:
+
+1. **Check for an existing task or issue first**, exactly as `/analyze` does —
+   search `task` and `proposed_github_issue` for the same claim before
+   creating either, so a repeated positioning run does not refile a finding
+   already tracked.
+2. **Store one `analysis_finding`** carrying the claim and its evidence (the
+   competitor source fetched, the foundation-doc line cited), linked
+   `REFERS_TO` the artifact that surfaced it (the `research_finding` or
+   `analysis` this skill just wrote) and to a parent `analysis` if one is
+   already open for this run; create a minimal one if not.
+3. **Store one `task`** for the follow-up, `source: analysis`, `repo` set when
+   the fix is repo-scoped.
+4. **Both repos are PUBLIC.** Before any public issue, strip competitive
+   reasoning and evaluator names using `/analyze`'s redaction filter — cite it,
+   do not restate it. A draft that fails redaction is demoted to an internal
+   `task`, not opened, exactly as `/analyze` demotes it.
+5. **Filing is proposal, not execution.** Public issue opening stays opt-in,
+   exactly as `/analyze` has it (`--open-issues` / `ANALYZE_OPEN_GH_ISSUES=1`).
+   This skill's job ends at a staged `proposed_github_issue`; opening it is a
+   separate, explicit decision.
+
+Report routed product findings in the closing summary, same as any other
+artifact: entity id, whether staged or opened, and which task or issue it
+links to.
 
 ## Scope rules
 
