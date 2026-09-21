@@ -341,6 +341,104 @@ def test_checked_in_ateles_inventory_builds_and_checks(tmp_path):
     assert (tmp_path / "ateles" / "design" / "index.html").exists()
 
 
+@pytest.mark.parametrize(
+    ("product", "routes"),
+    [
+        (
+            "neotoma",
+            (
+                "index.html",
+                "install/index.html",
+                "evaluate/index.html",
+                "compare/index.html",
+            ),
+        ),
+        (
+            "ateles",
+            (
+                "index.html",
+                "design/index.html",
+                "compare/index.html",
+                "status/index.html",
+            ),
+        ),
+    ],
+)
+def test_checked_in_product_sites_build_all_declared_routes(tmp_path, product, routes):
+    assert build_site.build(product, tmp_path) == []
+    assert build_site.check(product, tmp_path) == 0
+    for route in routes:
+        assert (tmp_path / product / route).exists()
+
+
+def test_product_homepages_bind_ambition_first_sequence_and_categories(tmp_path):
+    for product in ("neotoma", "ateles"):
+        assert build_site.build(product, tmp_path) == []
+
+    neotoma = (tmp_path / "neotoma" / "index.html").read_text()
+    ateles = (tmp_path / "ateles" / "index.html").read_text()
+
+    assert (
+        neotoma.index('id="hero"')
+        < neotoma.index('id="failures"')
+        < neotoma.index('id="mechanism"')
+    )
+    assert (
+        ateles.index('id="hero"')
+        < ateles.index('id="failures"')
+        < ateles.index('id="mechanism"')
+    )
+    assert "The system of record for AI agents" in neotoma
+    assert "The distributed-authority operating layer for governed initiative" in ateles
+    assert "agent forgot" not in neotoma.lower()
+    assert "agents forget" not in neotoma.lower()
+
+
+def test_product_identities_render_distinct_signature_devices(tmp_path):
+    for product in ("neotoma", "ateles"):
+        assert build_site.build(product, tmp_path) == []
+
+    neotoma = (tmp_path / "neotoma" / "index.html").read_text()
+    ateles = (tmp_path / "ateles" / "index.html").read_text()
+    neotoma_tokens = json.loads(
+        (_GEN_DIR / "design_tokens" / "neotoma.json").read_text()
+    )
+    ateles_tokens = json.loads((_GEN_DIR / "design_tokens" / "ateles.json").read_text())
+
+    assert neotoma_tokens["_source"]["entity_id"] == "ent_746b1d7c717e7780e7943782"
+    assert ateles_tokens["_source"]["entity_id"] == "ent_9158c8b39e0f437fdb2a86de"
+    assert "record-demo" in neotoma
+    assert "record-old" in neotoma
+    assert "seal-mark" in ateles
+    assert "grant-state" in ateles
+
+
+def test_selected_markdown_heading_must_exist(tmp_repo):
+    repo_root, gen_dir = tmp_repo
+    (repo_root / "README.md").write_text("# Present\n\nBody.\n")
+    _write_inventory(
+        gen_dir,
+        [
+            {
+                "slug": "index",
+                "title": "T",
+                "sections": [
+                    {
+                        "id": "body",
+                        "origin": "authored",
+                        "source": "README.md",
+                        "headings": ["Missing"],
+                    }
+                ],
+            }
+        ],
+    )
+
+    blockers = build_site.build("testproduct", repo_root / "dist" / "site")
+    assert len(blockers) == 1
+    assert "missing headings: Missing" in blockers[0]
+
+
 def test_design_tokens_drive_css_output_no_hardcoded_colors():
     css = tpl.build_css(FIXTURE_TOKENS)
     assert "#900" in css  # the fixture's light accent, not a hardcoded default
@@ -385,8 +483,7 @@ def test_minimal_markdown_rewrites_relative_links_to_declared_source_base():
         link_base="https://github.com/example/project/blob/main/",
     )
     assert (
-        'href="https://github.com/example/project/blob/main/docs/foundation/"'
-        in html
+        'href="https://github.com/example/project/blob/main/docs/foundation/"' in html
     )
 
 
@@ -407,7 +504,9 @@ def test_preview_refuses_to_serve_a_build_with_unresolved_sections(
     def _must_not_serve(*args, **kwargs):
         raise AssertionError("preview server started despite unresolved sections")
 
-    monkeypatch.setattr(preview_server.http.server, "ThreadingHTTPServer", _must_not_serve)
+    monkeypatch.setattr(
+        preview_server.http.server, "ThreadingHTTPServer", _must_not_serve
+    )
     monkeypatch.setattr(
         sys, "argv", ["preview_server.py", "testproduct", "--port", "8143"]
     )

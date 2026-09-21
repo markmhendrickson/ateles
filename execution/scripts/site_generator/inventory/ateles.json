@@ -1,80 +1,133 @@
 {
   "product": "ateles",
   "design_tokens": "design_tokens/ateles.json",
-  "_contract": "One entry per page. Matches the PAGE INVENTORY shape build-landing-page Stage 1 declares on the rendered_page_template.content field (see .claude/skills/build-landing-page/SKILL.md, 'Extending to a site: the page inventory'). Each entry names its rendered_page_template, its content origin (authored | positioning_mirror | page_specific), and the repo-file source(s) build_site.py reads for that origin. The site generator reads ONLY this file plus the files it points at -- never Neotoma at build time.",
+  "_contract": "Four-page product preview. Foundation and positioning content render from repo sources; product-only transitions and CTAs live under content/ateles.",
   "pages": [
     {
       "slug": "index",
       "path": "/",
-      "nav_label": "Home",
-      "title": "Ateles — the distributed-authority operating layer for governed initiative",
-      "meta_description": "Ateles makes authority explicit -- who may act, on whose authority, against which state -- so agents can be held to account for real work.",
+      "nav_label": "Overview",
+      "title": "Ateles — organizational design for trustworthy delegation",
+      "meta_description": "Role-specific agents, explicit authority, high-level context, coordinated execution, and intervention only when necessary.",
       "template": "product_homepage",
       "template_entity_id": "ent_a7132845b99eb265fc85749e",
-      "primary_cta": {
-        "label": "Read the design",
-        "href": "https://github.com/markmhendrickson/ateles",
-        "scope": "site_wide_primary"
-      },
+      "primary_cta": {"label": "Read the design", "href": "/design/", "scope": "site_wide_primary"},
       "sections": [
+        {"id": "hero", "origin": "page_specific", "source": "content/ateles/index/hero.json"},
         {
-          "id": "hero",
-          "origin": "page_specific",
-          "source": "content/ateles/index/hero.json"
-        },
-        {
-          "id": "problem",
+          "id": "failures",
           "origin": "positioning_mirror",
           "source": "docs/positioning/ateles/chronic-acute-pain.md",
           "source_entity_id": "ent_2a29bed8dcacd4b1ff20c6f2",
-          "note": "Renders the lead (acute) pain from the projected chronic/acute pain analysis. This section does not re-author the pain framing -- it presents the mirror's own content per build-landing-page Stage 2's 'Where a page's content comes from' rule."
+          "presentation": "pain_cards",
+          "headings": ["Body"],
+          "eyebrow": "Why session-bound work breaks",
+          "heading": "If you drive every turn, you have not delegated the work.",
+          "lede": "The current way of working keeps the operator inside every loop and makes the loudest session the de facto priority system.",
+          "source_label": "analysis · chronic / acute"
         },
-        {
-          "id": "what-it-is",
-          "origin": "page_specific",
-          "source": "content/ateles/index/what-it-is.json"
-        },
+        {"id": "mechanism", "origin": "page_specific", "source": "content/ateles/index/mechanism.json"},
+        {"id": "priorities", "origin": "page_specific", "source": "content/ateles/index/hierarchy.json"},
         {
           "id": "fit",
           "origin": "positioning_mirror",
-          "source": "docs/positioning/ateles/icp-reconciliation.md",
-          "source_entity_id": "ent_fa1f87fbd3b66e491361dae1",
-          "note": "ICP fit + anti-profile rendered from the current reconciled ICP mirror, never a hand-copied snapshot -- this is the exact page the task's motivating incident (the retracted anti-profile line) concerns."
+          "source": "docs/positioning/ateles/icp-design-sourced.md",
+          "source_entity_id": "ent_b6e066a5d110b8500d3ec8c9",
+          "headings": ["Archetype", "Messaging — bad (anti-profile)", "Ideal entry point"],
+          "eyebrow": "Who it is for—and where the vision goes",
+          "heading": "For the operator building a real organization of agents.",
+          "source_label": "target persona · design-sourced ICP"
         },
-        {
-          "id": "boundary",
-          "origin": "positioning_mirror",
-          "source": "docs/positioning/ateles/incumbent-and-competitor-test.md",
-          "source_entity_id": "ent_f8271efcdb842076a5147929"
-        },
-        {
-          "id": "the-other-half",
-          "origin": "page_specific",
-          "source": "content/ateles/index/the-other-half.json"
-        }
+        {"id": "next", "origin": "page_specific", "source": "content/ateles/index/next.json"},
+        {"id": "sibling", "origin": "page_specific", "source": "content/ateles/index/sibling.json"}
       ]
     },
     {
       "slug": "design",
-      "path": "/design",
+      "path": "/design/",
       "nav_label": "Design",
-      "title": "Ateles — the design (repo README)",
-      "meta_description": "The design of record for Ateles, rendered from the repository README.",
+      "title": "Ateles design — authority, work, and operator attention",
+      "meta_description": "The design of record for Ateles, rendered from the public foundation documents.",
       "template": "reference_doc",
       "template_entity_id": null,
-      "primary_cta": {
-        "label": "Read the design",
-        "href": "https://github.com/markmhendrickson/ateles",
-        "scope": "page_scoped"
-      },
+      "primary_cta": {"label": "View status", "href": "/status/", "scope": "page_scoped"},
       "sections": [
         {
-          "id": "body",
+          "id": "charter",
+          "origin": "authored",
+          "source": "docs/foundation/charter.md",
+          "link_base": "https://github.com/markmhendrickson/ateles/blob/main/",
+          "headings": ["What an operator gets", "The objectives"],
+          "eyebrow": "The charter",
+          "heading": "What trustworthy delegation must deliver.",
+          "source_label": "foundation · charter"
+        },
+        {
+          "id": "planning",
+          "origin": "authored",
+          "source": "docs/foundation/planning_model.md",
+          "link_base": "https://github.com/markmhendrickson/ateles/blob/main/",
+          "headings": ["The invariants"],
+          "eyebrow": "Planning as context",
+          "heading": "A task can read why it matters without inventing an ancestor.",
+          "source_label": "foundation · planning model"
+        }
+      ]
+    },
+    {
+      "slug": "compare",
+      "path": "/compare/",
+      "nav_label": "Compare",
+      "title": "Compare Ateles with agent orchestration and session-bound copilots",
+      "meta_description": "A source-backed boundary between execution orchestration and governed, legitimate action.",
+      "template": "comparison_page",
+      "template_entity_id": "ent_a7132845b99eb265fc85749e",
+      "primary_cta": {"label": "Read the design", "href": "/design/", "scope": "page_scoped"},
+      "sections": [
+        {
+          "id": "comparison",
+          "origin": "positioning_mirror",
+          "source": "docs/positioning/ateles/incumbent-and-competitor-test.md",
+          "source_entity_id": "ent_f8271efcdb842076a5147929",
+          "headings": ["Subject", "Summary", "Conclusion", "Sources"],
+          "eyebrow": "Detailed comparison",
+          "heading": "What coordination frameworks do—and what they leave to the operator.",
+          "lede": "The comparison preserves shipped strengths, corrects claims when competing products move, and keeps Ateles's designed-versus-running boundary explicit.",
+          "source_label": "research finding · competitor test"
+        }
+      ]
+    },
+    {
+      "slug": "status",
+      "path": "/status/",
+      "nav_label": "Status",
+      "title": "Ateles status — vision versus execution",
+      "meta_description": "The long-term vision and the current implementation status, rendered from the repository.",
+      "template": "status_page",
+      "template_entity_id": null,
+      "primary_cta": {"label": "GitHub", "href": "https://github.com/markmhendrickson/ateles", "scope": "page_scoped"},
+      "sections": [
+        {
+          "id": "vision",
           "origin": "authored",
           "source": "README.md",
           "link_base": "https://github.com/markmhendrickson/ateles/blob/main/",
-          "note": "Repo-authored reference content. The site RENDERS this file; it is not copied into a specification. This is content-origin kind 1 (authored repo markdown) per build-landing-page Stage 2's content-origin taxonomy."
-        }
+          "headings": ["Vision and execution status"],
+          "eyebrow": "Vision first, status explicit",
+          "heading": "The product is larger than today's checkout—and the checkout is the authority on what runs.",
+          "source_label": "repository · README"
+        },
+        {
+          "id": "roadmap",
+          "origin": "authored",
+          "source": "docs/foundation/status.md",
+          "link_base": "https://github.com/markmhendrickson/ateles/blob/main/",
+          "headings": ["Roadmap: the vision phases over the foundation"],
+          "eyebrow": "Execution status",
+          "heading": "Each phase says what is designed and what is built.",
+          "source_label": "foundation · status"
+        },
+        {"id": "repository", "origin": "page_specific", "source": "content/ateles/status/cta.json"}
       ]
     }
   ]

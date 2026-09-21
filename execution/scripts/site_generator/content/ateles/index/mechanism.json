@@ -1,0 +1,13 @@
+{
+  "layout": "capabilities",
+  "eyebrow": "Robust organizational design",
+  "headline": "Agents become accountable roles, not interchangeable chat windows.",
+  "lede": "The product is not a smarter router. It is a structure for who may act, what context travels with the work, how work is claimed, and where responsibility stops.",
+  "items": [
+    {"label": "[role:research]", "title": "Roles exist individually and relationally", "body": "An agent is defined by what it does and by the principals, domains, workflows, and other roles it works in relation to.", "terms": "role · roster · principal binding"},
+    {"label": "[blast:bounded]", "title": "Authority is explicit", "body": "Rights name the principal, domain, scope, action, conditions, and time. High-blast actions stop at a checkpoint instead of borrowing the operator's ambient credential.", "terms": "grant · policy · checkpoint"},
+    {"label": "[handoff:pull]", "title": "Work carries high-level context", "body": "Tasks enter declared workflows; eligible agents claim them and read the planning ascent instead of waiting for the operator to narrate every next move.", "terms": "task · batch · lease · hydration"},
+    {"label": "[attention:rare]", "title": "Intervention is the exception", "body": "Safe work advances unattended. The operator sees the decisions only they can make, with the record needed to decide.", "terms": "action gate · sign-off · finding"}
+  ],
+  "status_note": "The single-principal governance substrate is in daily use. Multi-operator ownership, delegated approval, distributed authority, and the full organizational operating system remain planned phases; the repository status is authoritative."
+}

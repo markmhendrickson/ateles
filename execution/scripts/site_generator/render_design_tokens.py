@@ -7,14 +7,9 @@ WHY THIS EXISTS: build_site.py (this directory's generator) must never call
 Neotoma at build time — that is the whole point of the projection model this
 repo already uses for docs/taxonomy.md, docs/agents/*.md, and
 docs/positioning/. A design system is exactly the same shape of problem as
-those: it is corrected in Neotoma by a design agent (see design_system entity
-ent_72e01f1008653b601be1a956, "Neotoma & Ateles Visual System" — corrected at
-least twice already, including a 2026-09-22 reconciliation against drift two
-independent build-landing-page runs had flagged and declined to fix
-unilaterally), so committing its values as hand-authored JSON in this repo
-would recreate the exact drift-is-possible failure the operator ruled against
-today (the Neotoma anti-profile page example in the task brief this script
-was built for).
+those: it is corrected in Neotoma by a design agent, so committing its values
+as hand-authored JSON in this repo would recreate the exact drift-is-possible
+failure the operator ruled against.
 
 So: Neotoma stays canonical for design tokens. This script is the render
 step. The output is a per-product JSON file under design_tokens/, each
@@ -26,13 +21,10 @@ INPUT CONTRACT this generator's OUTPUT satisfies (consumed by build_site.py):
 a JSON object with:
   - _source: {entity_id, entity_type, fetched_at}
   - _observation_ids: {field: observation_id, ...}  (or "unknown")
-  - shared: {spacing_system, border_radius, positioning_principles,
-             anti_patterns, scope}  — tokens declared identical across every
-             product this design_system entity covers
-  - product: {color_palette, type_scale}  — the per-product theme slice for
-             THIS run's product, selected from the entity's per-product keyed
-             fields (see DESIGN_SYSTEM_ENTITY_ID's color_palette/type_scale
-             shape, which nests neotoma/ateles under shared variable names)
+  - identity: {design_system_name, spacing_system, border_radius,
+               positioning_principles, anti_patterns, scope} — the product's
+               own visual argument, not a shared component skeleton
+  - product: {color_palette, type_scale} — the product-specific tokens
 
 The HTTP/env/snapshot plumbing comes from neotoma_mirror_lib.py, the same
 shared implementation used by every other Neotoma-to-repo projection. This
@@ -45,8 +37,8 @@ Usage:
     render_design_tokens.py --check               # check ALL known products
 
 Env: NEOTOMA_BASE_URL, NEOTOMA_BEARER_TOKEN (falls back to
-~/.config/neotoma/.env). ATELES_DESIGN_SYSTEM_ENTITY_ID overrides the default
-entity id below.
+~/.config/neotoma/.env). ATELES_<PRODUCT>_DESIGN_SYSTEM_ENTITY_ID overrides
+the product's canonical entity id below.
 """
 
 from __future__ import annotations
@@ -54,6 +46,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,15 +57,13 @@ OUT_DIR = Path(__file__).resolve().parent / "design_tokens"
 sys.path.insert(0, str(REPO_ROOT / "execution" / "scripts"))
 from neotoma_mirror_lib import load_env, request, unwrap_snapshot  # noqa: E402
 
-# The single design_system entity covering both products (decision recorded
-# on the entity itself 2026-09-22: "this entity remains ONE system covering
-# both products", not two separate entities — spacing/radius are shared,
-# color_palette/type_scale are keyed per-product on the same entity).
-DEFAULT_DESIGN_SYSTEM_ENTITY_ID = "ent_72e01f1008653b601be1a956"
+DEFAULT_DESIGN_SYSTEM_ENTITY_IDS = {
+    "neotoma": "ent_746b1d7c717e7780e7943782",
+    "ateles": "ent_9158c8b39e0f437fdb2a86de",
+}
 
-# Fields read from the entity. Shared fields apply to every product; the two
-# per-product fields are dicts keyed by product slug on the live entity.
-SHARED_FIELDS = (
+IDENTITY_FIELDS = (
+    "design_system_name",
     "scope",
     "spacing_system",
     "border_radius",
@@ -87,19 +78,28 @@ def _observation_ids(provenance: dict, fields) -> dict:
     return {f: provenance.get(f) or "unknown" for f in fields}
 
 
+def _css_ready_type_scale(value: dict | None) -> dict:
+    """Project prose-bearing family fields into valid CSS values.
+
+    The identity records deliberately annotate retained choices with suffixes
+    such as ``(KEPT)``. That note belongs to the entity's rationale, not to a
+    ``font-family`` declaration; leaving it attached makes the whole CSS value
+    invalid and silently falls back to Times.
+    """
+    result = dict(value or {})
+    for key in ("heading_font_family", "body_font_family", "code_font_family"):
+        if isinstance(result.get(key), str):
+            result[key] = re.sub(r"\s+\((?:KEPT|NEW).*$", "", result[key]).strip()
+    return result
+
+
 def render(product: str, base_url: str, token: str, entity_id: str) -> dict:
     entity = request(f"{base_url}/entities/{entity_id}", token)
     snapshot, provenance = unwrap_snapshot(entity)
 
-    shared = {f: snapshot.get(f) for f in SHARED_FIELDS}
-    per_product = {}
-    for f in PER_PRODUCT_FIELDS:
-        val = snapshot.get(f) or {}
-        # These fields carry a shared variable-name list plus per-product
-        # sub-objects (see the entity's own `note`/`shared_variable_names`
-        # keys). Select this product's slice; fall back to the whole object
-        # if the entity is not yet keyed per-product (older shape).
-        per_product[f] = val.get(product, val) if isinstance(val, dict) else val
+    identity = {f: snapshot.get(f) for f in IDENTITY_FIELDS}
+    per_product = {f: snapshot.get(f) for f in PER_PRODUCT_FIELDS}
+    per_product["type_scale"] = _css_ready_type_scale(per_product["type_scale"])
 
     doc = {
         "_source": {
@@ -109,9 +109,9 @@ def render(product: str, base_url: str, token: str, entity_id: str) -> dict:
             "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         },
         "_observation_ids": _observation_ids(
-            provenance, SHARED_FIELDS + PER_PRODUCT_FIELDS
+            provenance, IDENTITY_FIELDS + PER_PRODUCT_FIELDS
         ),
-        "shared": shared,
+        "identity": identity,
         "product": per_product,
     }
     return doc
@@ -160,15 +160,18 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    entity_id = os.environ.get(
-        "ATELES_DESIGN_SYSTEM_ENTITY_ID", DEFAULT_DESIGN_SYSTEM_ENTITY_ID
-    )
     base_url, token = load_env()
 
     products = [args.product] if args.product else list(KNOWN_PRODUCTS)
 
     ok = True
     for product in products:
+        default_entity_id = DEFAULT_DESIGN_SYSTEM_ENTITY_IDS.get(product)
+        if not default_entity_id:
+            print(f"No canonical design-system entity configured for {product}")
+            return 1
+        env_key = f"ATELES_{product.upper()}_DESIGN_SYSTEM_ENTITY_ID"
+        entity_id = os.environ.get(env_key, default_entity_id)
         doc = render(product, base_url, token, entity_id)
         if args.check:
             ok = check(product, doc) and ok

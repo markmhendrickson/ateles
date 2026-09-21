@@ -1,0 +1,10 @@
+{
+  "layout": "comparison_teaser",
+  "eyebrow": "Choose the right boundary",
+  "headline": "Better recall is useful. A record solves a different problem.",
+  "lede": "Retrieval can bring a sentence back. It does not by itself establish which source controls a fact, what correction superseded it, or why two agents disagree.",
+  "items": [
+    {"title": "See the comparison", "body": "Compare Neotoma with prompt files, notes, platform memory, and retrieval-first approaches using the current source-backed positioning record.", "href": "/compare/", "link_label": "Open comparison"},
+    {"title": "Check whether it is for you", "body": "The durable fit is a technically fluent multi-agent operator who wants to own the data without becoming a state-infrastructure engineer.", "href": "/evaluate/", "link_label": "Evaluate fit"}
+  ]
+}
