@@ -172,11 +172,13 @@ several agents each contributing part of it, the operator's case — and a task 
 which, and so nothing said whether the first was finished enough to be claimed and executed. The ruling
 closes the gap by moving the first case out of "no intake batch" entirely: an assembling task **has** an
 intake batch, opened the moment it is created exactly as `#intake-is-every-tasks-first-workflow` already
-requires of every task, and that batch's `classify` step carries a held lease rather than a closing
-verdict. The creation write makes the task, its intake batch, their `ADDRESSED_BY` edge, the `classify`
-lease, and the hold finding readable as one admitted unit; none of those records is readable without the
-others. Only the second case — genuinely unrouted, nobody yet looking at it — keeps the no-intake-batch
-reading.
+requires of every task, and that batch's `classify` step carries an assembly hold finding rather than a
+closing verdict. The creation write makes the task, its intake batch, their `ADDRESSED_BY` edge, and the
+hold finding readable as one admitted unit; none of those records is readable without the others. A lease
+is deliberately not part of that minimum: creation grants no step ownership, and a creator who also
+resolves as the declared `pm` step owner may acquire the `classify` lease only through the ordinary atomic
+claim check. Only the second case — genuinely unrouted, nobody yet looking at it — keeps the
+no-intake-batch reading.
 
 **The operator's proposal was a `draft` status**, and a status is disfavoured on three independent grounds,
 none of which touch the need itself:
@@ -241,22 +243,25 @@ Four were listed and three are rejected here, each at its strongest before the r
 
 **What is ruled: a held intake batch, established at the creation boundary.** The task enters intake
 immediately, exactly as `#intake-is-every-tasks-first-workflow` already requires of every task without
-exception. Where the creating principal knows the task is still being assembled, creation is one admitted
-unit: the task, its intake batch and `ADDRESSED_BY` edge, the creating principal's lease on `classify`, and
-a non-blocking finding naming the incomplete parts are written together and read back together. The record
-admits all of that unit or none of it. A reader therefore cannot observe a half-written task during a gap
-before `classify` is claimed; the held lease is present in the first state in which the task itself is
-readable. This atomic visibility boundary is the part the earlier "claimed the ordinary way" wording
-missed: a later ordinary claim would leave exactly the executable interval the ruling exists to close.
+exception. Where a creator knows the task is still being assembled, creation is one admitted unit: the
+task, its intake batch and `ADDRESSED_BY` edge, and a non-blocking `hold` finding on `classify` naming the
+incomplete parts are written together and read back together. The record admits all of that unit or none
+of it. The finding is the **persistent assembly exclusion**: while it has no `classify` verdict, the task
+is excluded from the ordinary claim pool even when no lease is held. A lease lapse, a holder crash, or a
+lease transfer therefore cannot make incomplete work executable. This atomic visibility boundary closes the
+gap without pretending that creation itself proves who owns intake's first step.
 
-The creating principal does not close `classify`, and does not fail it. It **holds**, exactly under
+Creation and step ownership are separate. The creating principal receives no `classify` lease by being the
+creator. A lease may be included in the same admitted write only when the declaration's `pm` owner role
+resolves to that principal and the ordinary atomic claim check succeeds; otherwise the assembly unit lands
+with no lease and stays excluded until an eligible `pm` step owner claims it. In multi-agent assembly,
+exactly one resolved `pm` step owner may hold that lease; contributors gain no lease or execution privilege
+by touching the task. The holder **holds**, exactly under
 `#a-batch-may-hold-on-a-condition-discovered-mid-flight`: the finding names what remains to be written and
-by whom where known, no verdict is written, and the lease keeps renewing while assembly continues. A later
-contributor does not take over that lease by touching the task; the ordinary claim rule still permits only
-the holder to renew it. If another principal must take over assembly, the current holder returns or lets
-the lease lapse and the successor claims `classify` before contributing. No new record, no new relationship
-type, and no new field on the task are introduced: the records are the ones decision 13 already built, and
-the extra obligation is only that the task and its initial held intake state become visible together.
+by whom where known, no verdict is written, and the lease keeps renewing while assembly continues. On a
+lease transfer or crash may return or lapse the lease, after which another resolved `pm` step owner may claim `classify`,
+but the persistent assembly exclusion stays until that owner can write the verdict that ends the hold. No
+new record, relationship type, or task field is introduced.
 
 **This is not a fourth disposition invented to avoid choosing between the three listed; it is the third one
 named more precisely.** The open section listed "a held intake batch" using
@@ -270,20 +275,20 @@ renewing lease, the same three bounded ends (the condition resolves and `classif
 owes a principal a decision and a checkpoint is raised; the condition owes nobody a decision and
 `failure_posture.md` rule 5's backoff-then-checkpoint bounds it), unchanged.
 
-**The claimability sub-question, answered directly.** The register names it explicitly: whether an
-assembling task is claimable before it is finished being written. It is not. `#what-a-claim-predicate-treats-as-claimable`
-reads a lease among the three things that remove a task from the claimable pool, and a task whose intake
-batch holds a lease on `classify` is under a held lease by that read — the same "under a held lease" partition
-`#a-task-is-live-when-some-principal-could-claim-it-now` already defines as neither live nor terminal nor
-checkpointed, work being advanced right now rather than work nothing is advancing. No second agent, and no
-later workflow, can claim the task while assembly holds it, without any new clause added to the claim
-predicate: the predicate already refuses a task under a held lease, and an assembling task is exactly that,
-for the ordinary reason a claimed-and-not-yet-closed step already is one.
+**The claimability sub-question, answered directly.** An assembling task is not ordinarily claimable before
+it is finished being written. The claim predicate reads the persistent assembly exclusion before its usual
+lease rule. With the exclusion present, it exposes only the open `classify` step to a principal that resolves
+as its declared `pm` step owner; every other task claim is refused. A held lease still excludes every other
+principal in the ordinary way. If it lapses, the same PM-only assembly claim becomes available again, while
+the task remains absent from ordinary intake and successor-workflow pools. Ending assembly means the eligible
+lease holder judges the condition resolved and writes `classify`'s verdict; until that verdict exists the
+finding cannot be ignored, including across crash and lease transfer.
 
 **What this settles, and what it does not.** Settled: an assembling task and its held intake state become
 readable atomically; that batch's `classify` step holds rather than closing while the task is incomplete;
-and the task is not claimable in any readable state during assembly, for the same structural reason any
-held step is. A task created without that unit is the genuinely awaiting-intake case and remains claimable.
+creation grants no lease; and the persistent assembly exclusion survives a missing, returned, transferred,
+or lapsed lease. A task created without that unit is the genuinely awaiting-intake case and remains
+claimable.
 Not settled, and not part of this question: how a contributing agent signals that its portion is done, or
 how many agents' contributions `classify` waits on before resolving the hold — those are a matter of how
 `classify` is executed, which is `workflows.md#intake`'s to state if it ever needs to, not a new mechanism
@@ -298,7 +303,10 @@ this one's parameters.
 
 ### What a claim predicate treats as claimable
 
-Claimable: not terminal, no held lease, and no open checkpoint holding it — every checkpoint whose subject
+Claimable: not terminal, no persistent assembly exclusion, no held lease, and no open checkpoint holding it
+— except that a task under the assembly exclusion exposes its open `classify` step only to a principal that
+resolves as the declaration's `pm` step owner, so assembly can resume without making the task executable;
+every checkpoint whose subject
 is the task holds it from claim, but one: `unclaimed_step` reorders and never holds, so the step it names
 stays claimable by its role (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`); a
 checkpoint on an action holds the action, and the task stays with its lease holder or, on a lapse, is
@@ -1336,7 +1344,8 @@ but a side door, which the model does not have (`#a-task-is-executed-only-throug
 
 Two things the index makes visible that the sources stated apart did not. Sources 4 through 8 are the
 swarm creating work for itself, and one rule governs all of them: the creating principal holds no privilege
-over the task it created (`#a-task-is-executed-only-through-a-workflow`), most created tasks are peers left
+over the task it created (`#a-task-is-executed-only-through-a-workflow`), including no `classify` lease unless
+it independently resolves as the intake declaration's `pm` step owner and passes the claim check; most created tasks are peers left
 to their own intake (6 is the exception, by a recorded edge), and no created task is executed outside a
 workflow. And sources 2, 3, and 9 are the three that turn a **change** into work rather than a
 **decision** — the adapter's fourth outcome at the external boundary, and the intake rule inside the

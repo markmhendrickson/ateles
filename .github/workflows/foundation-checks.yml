@@ -111,6 +111,13 @@ jobs:
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           python3 "$f"
 
+      - name: Decision 84 — persistent assembly exclusion and owner resolution
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_decision_84.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
       # Vocabulary: any Never item from vocabulary.md in foundation prose.
       # Not-for items print as advisory and never fail — that is the script's
       # own contract, not a softening applied here.

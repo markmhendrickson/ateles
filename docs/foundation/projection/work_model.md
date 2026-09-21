@@ -50,7 +50,7 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 ## [What distinguishes a task being assembled from one intake has not reached](../work_model.md#what-distinguishes-a-task-being-assembled-from-one-intake-has-not-reached)
 
-- **WM-14a** — (decision 84): an assembling task first becomes readable together with its intake batch, `ADDRESSED_BY` edge, held `classify` lease, and hold finding; the unit is admitted whole or not at all; a genuinely awaiting-intake task carries none of the assembly unit and stays claimable *[M — effect-shaped acceptance for decision 84; it fails on the creation-time gap a later ordinary claim leaves]*
+- **WM-14a** — (decision 84): an assembling task first becomes readable together with its intake batch, `ADDRESSED_BY` edge, and persistent `classify` hold finding; the unit is admitted whole or not at all; creation grants no lease, and only the declaration-resolved `pm` step owner may claim assembly; the exclusion survives lease lapse, crash, return, and transfer until a `classify` verdict exists; a genuinely awaiting-intake task carries none of the unit and stays claimable *[M — effect-shaped acceptance for decision 84; the persistent-exclusion and creator-ownership mutants prove the rule can fail]*
 
 ## [What a claim predicate treats as claimable](../work_model.md#what-a-claim-predicate-treats-as-claimable)
 
@@ -136,7 +136,7 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 ## [Where tasks come from: every source, indexed](../work_model.md#where-tasks-come-from-every-source-indexed)
 
-- **WM-39** — nine sources, every one ending in a task with no intake batch; the creating principal holds no privilege over the task *[M]*
+- **WM-39** — nine sources; ordinary complete tasks end creation with no intake batch, while decision 84's assembly exception ends creation with its intake batch and persistent hold; the creating principal holds no privilege over either shape *[M]*
 
 ## [An intake rule turns a described change in the record into a task, and nothing else](../work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else)
 

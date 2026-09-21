@@ -329,8 +329,10 @@ invariants 2 and 7.
 
 ## (j) A task created, routed by intake, and entering its successor
 
-A task is created; that is its publication. It has no intake batch, so it is unrouted by that fact, and
-nothing else records it as such. The task enters intake: a batch record opens for it, and the `pm` step
+A complete task is created for ordinary intake; that is its publication. It has no intake batch, so it is
+unrouted by that fact, and nothing else records it as such. (An assembling task is the ruled exception: its
+task, intake batch, edge, and persistent `classify` hold become readable together, and only the declaration's
+resolved `pm` step owner may claim assembly.) The ordinary task enters intake: a batch record opens for it, and the `pm` step
 owner claims each step in turn — a lease on the step, and a verdict to close it: `classify` writes the
 task's `action_type` and, where a named principal is the point, `assigned_to`; `link` attaches the issue
 the task already concerns as an artifact; `dedupe` finds no open duplicate; `prioritize` sets the
@@ -342,7 +344,7 @@ which workflows it has gone through, and no router chose the successor: a step o
 
 ```mermaid
 flowchart TD
-    C[task created: publication] --> U{intake batch exists?}
+    C[complete task created: publication] --> U{intake batch exists?}
     U -->|no: unrouted by that fact| I[task enters intake; batch record opens]
     I --> S1[classify: action_type, assigned_to, parent or children]
     S1 --> S2[link: existing issue attached as artifact]
