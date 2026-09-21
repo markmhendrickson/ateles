@@ -744,14 +744,14 @@ TARGET_HOME: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
-# PROPOSED: rules mined from session transcripts, NOT measured inventory
+# Operator-ruled candidates mined from transcripts, NOT measured inventory
 # ---------------------------------------------------------------------------
 #
-# Everything in this section is a PROPOSAL awaiting an operator ruling, and it
-# is deliberately a static block rather than generated output. The rest of this
-# file is measured: re-run it and the numbers move with the system. These are
-# not. Generating them from a corpus scan would dress a judgement as a
-# measurement, and the counts above must never absorb them.
+# This section records the operator's disposition of the transcript-derived
+# candidates. The rest of the file is measured: re-run it and the numbers move
+# with the system. These do not enter the counts until the accepted rule lands
+# in its authoritative home. Generating the ruling from a corpus scan would
+# dress a judgement as a measurement, so the dispositions stay explicit.
 #
 # Source: genuine operator messages in ~/.claude/projects/*/*.jsonl over the
 # 21 days to 2026-09-19 -- 3,068 transcripts, 10,171 user-role messages, of
@@ -768,49 +768,180 @@ TARGET_HOME: dict[str, str] = {
 # entirely for this reason, and the omission is recorded here rather than
 # hidden.
 
-PROPOSED_SECTION = """## PROPOSED: rules with no home in any store
+@dataclass(frozen=True)
+class RuleRuling:
+    rule: str
+    status: str
+    home: str
+    note: str
 
-**Nothing in this section is counted anywhere above.** The inventory measures what is WRITTEN DOWN. An operator correction given in conversation and never persisted is invisible to it, however many times it was given. This section is the result of reading recent session transcripts for corrections that state a durable rule and then checking each against every store.
 
-It is **not measured inventory**, it is a proposal, and it must not be merged into the counts without an operator ruling. Each entry is marked `PROPOSED`.
+PROPOSAL_RULINGS = {
+    "P1": RuleRuling(
+        "A retraction posted as a COMMENT does not clear an APPROVED review; "
+        "the approval stands until it is formally dismissed",
+        "ACCEPTED",
+        "`docs/foundation/github.md`",
+        "Code-host review semantics belong in the code-host mapping.",
+    ),
+    "P2": RuleRuling(
+        "A prose-matching guard fires on text that names its own rule, so a "
+        "document describing a rule trips the gate that enforces it",
+        "ACCEPTED",
+        "`agent_policy`",
+        "A generic rule for authors and reviewers of guards.",
+    ),
+    "P3": RuleRuling(
+        "Durable work goes to a dispatched agent, never a harness task chip — "
+        "a chip is not an entity, so it is unclaimable and invisible to the swarm",
+        "DUPLICATE",
+        "`agent_policy` (`R-ae9bca`)",
+        "Already captured by the dispatch rule; create no second rule.",
+    ),
+    "P4": RuleRuling(
+        "Monitoring does not end at merge: carry a change through release and "
+        "deployment until it is confirmed live on every instance that needs it",
+        "ACCEPTED",
+        "`agent_policy`",
+        "PR shepherding behaviour; workflow declarations still own their step lists.",
+    ),
+    "P5": RuleRuling(
+        "Request operator review only when technical gates are clear and "
+        "operator approval is the sole remaining gate",
+        "ACCEPTED",
+        "`agent_policy`",
+        "Narrowed by the operator; an earlier request would misstate readiness.",
+    ),
+    "P6": RuleRuling(
+        "Stage a reply at the END of its thread, having first checked the "
+        "external system for the thread's latest message",
+        "ACCEPTED",
+        "`docs/foundation/gmail.md`",
+        "This is the mail adapter's per-thread operation, not a general preference.",
+    ),
+    "P7": RuleRuling(
+        "On resuming an interrupted watcher, import everything that arrived "
+        "during the gap — not only what arrives afterward",
+        "ACCEPTED",
+        "`docs/foundation/adapters.md`",
+        "A watcher resumption invariant shared across import adapters.",
+    ),
+    "P8": RuleRuling(
+        "Check durable storage for an already-imported source before importing it again",
+        "ACCEPTED",
+        "`docs/foundation/adapters.md`",
+        "A source-dedup invariant shared across import adapters.",
+    ),
+    "P9": RuleRuling(
+        "Produce an internal recap for the operator covering the work done, "
+        "distinct from any outward-facing recap",
+        "ACCEPTED",
+        "`task_policy`",
+        "The recap presentation is an operator preference, not public prompt text.",
+    ),
+    "P10": RuleRuling(
+        "Avoid a named stylistic tell in generated prose because it reads as machine-written",
+        "QUARANTINED",
+        "none",
+        "No rule is created until the exact stylistic tell and scope are supplied.",
+    ),
+}
 
-**Method and its limits.** 3,068 transcripts from the 21 days to 2026-09-19; 10,171 user-role messages, 4,806 after filtering out tool results, system-reminders, command blocks, task notifications and agent dispatch prompts; 338 correction-shaped. Each candidate was then searched for across all eight file stores and all three entity types, and **most candidates were rejected at that step because the rule was already captured** — the harness questions tool, elaborating a re-posed decision, HTML email formatting, fixing the swarm rather than routing around it, and linking entities by id are all already stated somewhere. Two of the four examples this work was calibrated against turned out to be present too. Recall is NOT claimed: a correction phrased without an imperative marker is invisible to the filter.
+GENERALIZATION_RULINGS = {
+    "G1": RuleRuling(
+        "Never interpolate untrusted or code-bearing text into a shell command; "
+        "write it to a file and pass the path",
+        "ACCEPTED",
+        "`agent_policy`",
+        "Keep the concrete `--body-file` rule beside the general shell-injection rule.",
+    ),
+    "G2": RuleRuling(
+        "Any deployment step is unverified until read back from the thing that now runs",
+        "DUPLICATE",
+        "`agent_policy` (`R-680852`)",
+        "Fold into the existing read-back rule; preserve the concrete daemon sequence.",
+    ),
+    "G3": RuleRuling(
+        "Any outward, irreversible action needs per-action approval, and approval "
+        "never carries forward",
+        "DUPLICATE",
+        "foundation consent rule (`R-fba8d`)",
+        "Already captured; preserve the concrete Gmail gate and its tests.",
+    ),
+}
 
-**PII.** Session transcripts carry the operator's personal life in quantity. Every rule below is stated generically and no incident's specifics appear. Candidates that could not be generalized without naming a person, vendor, client, health fact or amount were dropped rather than sanitized; one genuine rule about how personal records are structured was dropped for exactly this reason.
 
-### A. Rules stated in conversation and persisted nowhere
+def render_rulings_section() -> str:
+    """Render transcript-derived candidates and their operator dispositions.
 
-| # | PROPOSED rule | Verified absent from | Scope |
-|---|---|---|---|
-| P1 | A retraction posted as a COMMENT does not clear an APPROVED review; the approval stands until it is formally dismissed | 8 file stores, 3 entity types | PR review and merge gating |
-| P2 | A prose-matching guard fires on text that names its own rule, so a document describing a rule trips the gate that enforces it | 8 file stores, 3 entity types | Hook and linter authoring |
-| P3 | Durable work goes to a dispatched agent, never a harness task chip — a chip is not an entity, so it is unclaimable and invisible to the swarm | 8 file stores, 3 entity types | All work dispatch |
-| P4 | Monitoring does not end at merge: carry a change through release and deployment until it is confirmed live on every instance that needs it | 8 file stores, 3 entity types | Release and deploy |
-| P5 | Assign the operator as a reviewer on any PR that is gated on their approval, rather than only naming it in a report | 8 file stores, 3 entity types | PR shepherding |
-| P6 | Stage a reply at the END of its thread, having first checked the external system for the thread's latest message | 8 file stores, 3 entity types | Correspondence |
-| P7 | On resuming an interrupted watcher, import everything that arrived during the gap — not only what arrives afterward | 8 file stores, 3 entity types | Import and monitoring pipelines |
-| P8 | Check durable storage for an already-imported source before importing it again | 8 file stores, 3 entity types | Import pipelines |
-| P9 | Produce an internal recap for the operator covering the work done, distinct from any outward-facing recap | 8 file stores, 3 entity types | Meeting and session processing |
-| P10 | Avoid a named stylistic tell in generated prose because it reads as machine-written | 8 file stores, 3 entity types | All generated writing |
+    This is an appendix to measured inventory, not a second rule store. An
+    accepted row enters the measured counts only after the authoritative home
+    receives it through that home's own governance path.
+    """
+    lines = [
+        "## Operator rulings (2026-09-21) on transcript-derived candidates",
+        "",
+        "**Nothing in this section is counted anywhere above.** The inventory measures "
+        "rules in their authoritative homes. Recording a ruling here does not make an "
+        "accepted rule binding; it records the disposition and destination so the "
+        "governed migration can put it in the one home its audience reads. Duplicate "
+        "rows create no new rule, and quarantined rows have no destination.",
+        "",
+        "**Method and its limits.** 3,068 transcripts from the 21 days to 2026-09-19; "
+        "10,171 user-role messages, 4,806 after filtering tool results, system "
+        "reminders, command blocks, task notifications and agent dispatch prompts; "
+        "338 correction-shaped. Recall is not claimed.",
+        "",
+        "**PII.** Every candidate is generic. Candidates that could not be generalized "
+        "without personal data were dropped rather than sanitized.",
+        "",
+        "### A. Candidate rules and dispositions",
+        "",
+        "| # | Rule as ruled | Disposition | Authoritative home | Reason |",
+        "|---|---|---|---|---|",
+    ]
+    for key, ruling in PROPOSAL_RULINGS.items():
+        lines.append(
+            f"| {key} | {ruling.rule} | **{ruling.status}** | "
+            f"{ruling.home} | {ruling.note} |"
+        )
+    lines.extend(
+        [
+            "",
+            "### B. Generalization dispositions",
+            "",
+            "| # | General rule | Disposition | Authoritative home | Reason |",
+            "|---|---|---|---|---|",
+        ]
+    )
+    for key, ruling in GENERALIZATION_RULINGS.items():
+        lines.append(
+            f"| {key} | {ruling.rule} | **{ruling.status}** | "
+            f"{ruling.home} | {ruling.note} |"
+        )
+    lines.extend(
+        [
+            "",
+            "### C. What this section does not claim",
+            "",
+            "- **Not measured inventory.** Accepted candidates enter the counts only "
+            "after their authoritative home contains them.",
+            "- **Not enforcement.** Each destination's existing gate, review and "
+            "read-back obligations still apply.",
+            "- **Not exhaustive.** The transcript filter misses corrections without "
+            "imperative markers; recall is unknown.",
+        ]
+    )
+    return "\n".join(lines)
 
-`P3` is the clearest case of the gap this section exists to show: it is stated in `CLAUDE.md` as part of the dispatch rule's prose, but as a rule in its own right — the thing a session actually violates — it is nowhere, and the inventory's own `R-ae9bca` cluster is flagged NEEDS-SPLIT partly because of it.
 
-### B. Proposed generalizations of rules stated too narrowly
-
-A rule stated as the fix to one incident binds only that incident. Each row below proposes the principle the narrow rule instances. **Generalizing raises reach and risks losing the actionable specific, so the trade-off is stated per row and the narrow rule is never deleted — the proposal is to state the principle ALONGSIDE it.** This is not applied silently: each needs a ruling.
-
-| # | Narrow rule as stated | Proposed generalization | Trade-off |
-|---|---|---|---|
-| G1 | `R-b5f10c` Pass PR and comment bodies by file, never inline (one statement, one store) | Never interpolate untrusted or code-bearing text into a shell command; write it to a file and pass the path | **Gain:** covers every sink, not just `gh` — the recorded incident had a backtick substitution actually EXECUTE a script, which is a shell-injection class, not a formatting quirk. **Loss:** `--body-file` is a concrete flag a reader can act on; "avoid interpolation" is not. Keep both, or the rule stops being actionable. |
-| G2 | Restart the specific daemons a change touches, then verify from the running process | Any deployment step is unverified until read back from the thing that now runs — process, endpoint, or record | **Gain:** unifies this with the read-back-a-write rule, which is the same principle at a different layer. **Loss:** the daemon rule names `launchctl`, the checkout, and a new pid; the general form names none of them, and the specific sequence is what makes it followable. |
-| G3 | Gmail sends and draft-updates need per-message approval | Any action whose effect leaves the system and cannot be recalled needs per-action approval, and an approval never carries forward to a later action | **Gain:** the Gmail gate's real lesson is that `drafts update` was not recognized AS a send; a general form catches the next unrecognized sink. **Loss:** the Gmail rule is enforced by a hook with a 51-case test suite. A general principle cannot be enforced that way, so generalizing must ADD to the specific rule, never replace it. |
-
-### C. What this section does not claim
-
-- **Not a measurement.** No count above includes these. They are proposals.
-- **Not exhaustive.** The filter keys on imperative markers, so a rule stated without one is invisible. Recall is unknown and not claimed.
-- **Not ruled.** Several may be deliberate non-rules, one-offs the operator would not want bound, or already covered by a rule phrased differently enough that the search missed it. The ruling is the operator's.
-"""
+def strip_volatile_measurement_date(text: str) -> str:
+    """Remove only the run date before comparing generated inventory output."""
+    return re.sub(
+        r"\*\*Measured:\*\* \d{4}-\d{2}-\d{2}",
+        "**Measured:**",
+        text,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -831,7 +962,15 @@ def _portable(path: str) -> str:
     root = str(REPO_ROOT)
     if p.startswith(root + "/"):
         return p[len(root) + 1:]
-    return p.replace(str(Path.home()), "~")
+    p = p.replace(str(Path.home()), "~")
+    # Claude encodes the absolute checkout path into the project directory
+    # name. Redact that segment too: replacing only the home prefix leaves the
+    # operator's username and checkout name in a public generated file.
+    return re.sub(
+        r"^~/\.claude/projects/[^/]+/",
+        "~/.claude/projects/<project>/",
+        p,
+    )
 
 
 def _mtime(p: Path) -> str:
@@ -1621,7 +1760,7 @@ def render(clusters: list[Cluster], stores: list[Store],
       "both compaction hooks.")
     A("")
 
-    A(PROPOSED_SECTION)
+    A(render_rulings_section())
 
     A("## Method, so a re-run means something")
     A("")
@@ -1714,9 +1853,8 @@ def main() -> int:
             print(f"{OUTPUT} does not exist; run without --check", file=sys.stderr)
             return 1
         cur = OUTPUT.read_text()
-        # The generation date changes every run and is not drift.
-        strip = lambda t: re.sub(r"\*\*Generated \d{4}-\d{2}-\d{2}", "**Generated", t)
-        if strip(cur) != strip(out):
+        # The measurement date changes every run and is not corpus drift.
+        if strip_volatile_measurement_date(cur) != strip_volatile_measurement_date(out):
             print("rule inventory is stale — re-run "
                   "execution/scripts/render_rule_inventory.py", file=sys.stderr)
             return 1
