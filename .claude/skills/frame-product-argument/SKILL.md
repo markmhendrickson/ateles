@@ -224,6 +224,68 @@ decision, or blocker — and cite the id or decision key.
 
 Name `/build-landing-page` as the successor when a page is the next step.
 
+## Routing a product finding back to the product
+
+Positioning work surfaces two different kinds of finding, and only one of them
+belongs in this skill's own artifacts:
+
+- **A finding about the POSITIONING** — the argument, the copy, which pain
+  leads, how a page is structured. Stays in this skill's artifacts.
+- **A finding about the PRODUCT** — a gap the positioning work exposed in what
+  the product itself does or enforces, usually surfaced by comparing against a
+  competitor's shipped behavior or against the product's own foundation docs.
+  This does NOT stay in a research artifact where nothing downstream reads it.
+  It gets filed as a follow-up, in the same run that found it.
+
+The test: would fixing this change what the PRODUCT does, or only what a page
+SAYS about the product? "The hero leads with the chronic tax instead of the
+acute crisis" changes what a page says — it stays here. "A competitor enforces
+structurally what this product enforces only by prose, and a rule nothing
+enforces is not a control" changes what the product would need to DO — it gets
+filed. Apply this test before closing the run; a product finding left in the
+artifact is a finding that dies there.
+
+**Reuse `/analyze`'s mechanism verbatim — do not build a parallel one.**
+`/analyze` already does exactly this job and is proven: it produces one
+`analysis_finding` per discrete finding (`claim`, `evidence`, `confidence`,
+`kind`), one `task` per follow-up (`description`, `status`, `source: analysis`,
+`repo?`), and one `proposed_github_issue` per repo-touching task warranting a
+public issue (`repo`, `title`, `labels`, `body_redacted`, `confidence`,
+`backed_by_task_index`, `competitive_content_stripped`, `opened_url`), gated by
+a mandatory redaction step and an opt-in public-issue step. Read
+`/analyze`'s Step P (persistence) and Step I (redaction and opt-in issue
+opening) before filing anything here, and use its exact entity types and field
+names. Minting a second `product_finding` type, or re-implementing the
+redaction filter inline, is the parallel-mechanism failure the standing rules
+already name (`SWARM_PRIOR_ART_CONTRACT`) — this skill's job is to detect the
+finding and route it, not to build a second way to file one.
+
+Concretely, when a product finding is identified in this skill's run:
+
+1. **Check for an existing task or issue first**, exactly as `/analyze` does —
+   search `task` and `proposed_github_issue` for the same claim before
+   creating either, so a repeated positioning run does not refile a finding
+   already tracked.
+2. **Store one `analysis_finding`** carrying the claim and its evidence (the
+   competitor source fetched, the foundation-doc line cited), linked
+   `REFERS_TO` the artifact that surfaced it (the `research_finding` or
+   `analysis` this skill just wrote) and to a parent `analysis` if one is
+   already open for this run; create a minimal one if not.
+3. **Store one `task`** for the follow-up, `source: analysis`, `repo` set when
+   the fix is repo-scoped.
+4. **Both repos are PUBLIC.** Before any public issue, strip competitive
+   reasoning and evaluator names using `/analyze`'s redaction filter — cite it,
+   do not restate it. A draft that fails redaction is demoted to an internal
+   `task`, not opened, exactly as `/analyze` demotes it.
+5. **Filing is proposal, not execution.** Public issue opening stays opt-in,
+   exactly as `/analyze` has it (`--open-issues` / `ANALYZE_OPEN_GH_ISSUES=1`).
+   This skill's job ends at a staged `proposed_github_issue`; opening it is a
+   separate, explicit decision.
+
+Report routed product findings in the closing summary, same as any other
+artifact: entity id, whether staged or opened, and which task or issue it
+links to.
+
 ## Scope rules
 
 - Skill prompts are public and PII-free. Describe the role generically; resolve
