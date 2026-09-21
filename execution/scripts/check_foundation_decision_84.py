@@ -214,6 +214,18 @@ def _without_html_comments(text: str) -> str:
     return re.sub(r"<!--.*?-->", lambda match: _blank(match.group(0)), text, flags=re.S)
 
 
+def _fence_opening(line: str) -> str:
+    match = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+    return match.group(1) if match else ""
+
+
+def _is_fence_closer(line: str, fence_char: str, fence_size: int) -> bool:
+    match = re.fullmatch(r" {0,3}(`{3,}|~{3,})[ \t]*", line.rstrip("\r\n"))
+    return bool(
+        match and match.group(1)[0] == fence_char and len(match.group(1)) >= fence_size
+    )
+
+
 def _active_prose(text: str) -> str:
     """Return same-length Markdown with comments and fenced blocks blanked."""
 
@@ -222,16 +234,16 @@ def _active_prose(text: str) -> str:
     fence_char = ""
     fence_size = 0
     for line in visible.splitlines(keepends=True):
-        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
         if fence_char:
             output.append(_blank(line))
-            if marker and marker.group(1)[0] == fence_char and len(marker.group(1)) >= fence_size:
+            if _is_fence_closer(line, fence_char, fence_size):
                 fence_char = ""
                 fence_size = 0
             continue
+        marker = _fence_opening(line)
         if marker:
-            fence_char = marker.group(1)[0]
-            fence_size = len(marker.group(1))
+            fence_char = marker[0]
+            fence_size = len(marker)
             output.append(_blank(line))
             continue
         output.append(line)
@@ -245,16 +257,16 @@ def _heading_spans(text: str, heading: str) -> list[tuple[int, int]]:
     fence_size = 0
     offset = 0
     for line in visible.splitlines(keepends=True):
-        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
         if fence_char:
-            if marker and marker.group(1)[0] == fence_char and len(marker.group(1)) >= fence_size:
+            if _is_fence_closer(line, fence_char, fence_size):
                 fence_char = ""
                 fence_size = 0
             offset += len(line)
             continue
+        marker = _fence_opening(line)
         if marker:
-            fence_char = marker.group(1)[0]
-            fence_size = len(marker.group(1))
+            fence_char = marker[0]
+            fence_size = len(marker)
             offset += len(line)
             continue
         if re.fullmatch(

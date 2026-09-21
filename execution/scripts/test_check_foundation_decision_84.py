@@ -838,6 +838,49 @@ def test_real_inactive_heading_decoys_are_ignored(
     assert mutate_real_corpus_text(tmp_path, "workflows.md", transform) == []
 
 
+@pytest.mark.parametrize(
+    "opening,pseudo_closer",
+    (
+        ("```markdown", "```not-a-closing-fence"),
+        ("````markdown", "```"),
+        ("~~~~markdown", "~~~"),
+        ("```markdown", "~~~"),
+        ("~~~markdown", "```"),
+        ("~~~markdown", "~~~~ trailing text"),
+        ("```markdown", "    ```"),
+        ("~~~markdown", "    ~~~"),
+    ),
+)
+def test_real_pseudo_fence_closer_cannot_expose_hidden_intake(
+    tmp_path: Path, opening: str, pseudo_closer: str
+) -> None:
+    def transform(text: str) -> str:
+        position = text.index("## intake")
+        hidden = opening + "\n" + pseudo_closer + "\n"
+        return text[:position] + hidden + text[position:]
+
+    problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "opening,longer_closer",
+    (
+        ("```markdown", "````"),
+        ("~~~markdown", "~~~~"),
+    ),
+)
+def test_real_longer_fence_closer_keeps_following_intake_active(
+    tmp_path: Path, opening: str, longer_closer: str
+) -> None:
+    def transform(text: str) -> str:
+        position = text.index("## intake")
+        closed = opening + "\nignored fenced prose\n" + longer_closer + "\n"
+        return text[:position] + closed + text[position:]
+
+    assert mutate_real_corpus_text(tmp_path, "workflows.md", transform) == []
+
+
 def test_wm27_closing_verdict_claim_applied_to_intake_fails(tmp_path: Path) -> None:
     problems = mutate(
         tmp_path,
