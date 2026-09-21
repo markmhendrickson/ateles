@@ -3350,6 +3350,7 @@ class TestGateOwnerIdentity:
                     owns_pending_gate=owns_pending_gate,
                 )
             )
+        assert result.provider == provider
         return result, launched, mock_write_harness
 
     def test_token_env_name_is_per_role(self) -> None:
@@ -3604,7 +3605,7 @@ class TestGateOwnerIdentity:
         ] == "Bearer accipiter-own-token"
 
     def test_codex_gate_owner_with_bearer_and_stock_command_is_refused(
-        self, monkeypatch, tmp_path
+        self, monkeypatch, tmp_path, caplog
     ) -> None:
         """RED before #1087: an unused Claude bearer lets Codex launch."""
         result, launched, mock_write = self._run_provider_case(
@@ -3618,6 +3619,10 @@ class TestGateOwnerIdentity:
         assert "ACCIPITER_NEOTOMA_TOKEN" not in (result.error or "")
         assert launched == []
         mock_write.assert_not_called()
+        assert any(
+            "[apis] accipiter dispatch refused" in record.message
+            for record in caplog.records
+        )
 
     def test_codex_gate_owner_without_token_or_jwk_is_refused(
         self, monkeypatch, tmp_path
