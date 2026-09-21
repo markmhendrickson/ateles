@@ -215,8 +215,13 @@ def _without_html_comments(text: str) -> str:
 
 
 def _fence_opening(line: str) -> str:
-    match = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
-    return match.group(1) if match else ""
+    match = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line.rstrip("\r\n"))
+    if not match:
+        return ""
+    marker, info = match.groups()
+    if marker[0] == "`" and "`" in info:
+        return ""
+    return marker
 
 
 def _is_fence_closer(line: str, fence_char: str, fence_size: int) -> bool:

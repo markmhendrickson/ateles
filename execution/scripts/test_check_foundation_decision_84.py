@@ -881,6 +881,35 @@ def test_real_longer_fence_closer_keeps_following_intake_active(
     assert mutate_real_corpus_text(tmp_path, "workflows.md", transform) == []
 
 
+def test_real_backtick_in_backtick_info_is_not_a_fence_opener(
+    tmp_path: Path,
+) -> None:
+    def transform(text: str) -> str:
+        position = text.index("## intake")
+        pseudo_opener = "```language`not-valid-info\n"
+        return text[:position] + pseudo_opener + text[position:]
+
+    assert mutate_real_corpus_text(tmp_path, "workflows.md", transform) == []
+
+
+@pytest.mark.parametrize(
+    "opening,closer",
+    (
+        ("```markdown valid-info", "```"),
+        ("~~~language `backticks-are-valid-here`", "~~~"),
+    ),
+)
+def test_real_valid_fence_info_strings_remain_inert(
+    tmp_path: Path, opening: str, closer: str
+) -> None:
+    def transform(text: str) -> str:
+        position = text.index("## intake")
+        fenced = opening + "\n## hidden heading\n" + closer + "\n"
+        return text[:position] + fenced + text[position:]
+
+    assert mutate_real_corpus_text(tmp_path, "workflows.md", transform) == []
+
+
 def test_wm27_closing_verdict_claim_applied_to_intake_fails(tmp_path: Path) -> None:
     problems = mutate(
         tmp_path,
