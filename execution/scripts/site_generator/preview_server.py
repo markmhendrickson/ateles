@@ -96,9 +96,13 @@ def main() -> int:
 
         out_dir = build_site.DEFAULT_OUT_DIR
         try:
-            build_site.build(args.product, out_dir)
+            blockers = build_site.build(args.product, out_dir)
         except build_site.BuildBlocker as exc:
-            print(f"BUILD BLOCKED (preview will 404 for missing sections): {exc}")
+            print(f"BUILD BLOCKED — preview not started: {exc}")
+            return 1
+        if blockers:
+            print("BUILD BLOCKED — preview not started")
+            return 1
 
     site_dir = REPO_ROOT / "dist" / "site" / args.product
     if not site_dir.exists():

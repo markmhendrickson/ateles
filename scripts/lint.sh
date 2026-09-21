@@ -194,21 +194,19 @@ else
     echo "  - Skipping tool_allowlist + agent-doc-mirror + positioning-doc-mirror + design-token-mirror checks (NEOTOMA_BASE_URL unset)"
 fi
 
-# Site build drift check (execution/scripts/site_generator/build_site.py).
-# Filesystem-only — no Neotoma call, since the generator itself never reads
-# Neotoma at build time (its whole point is that the site reads repo files).
-# Skipped, not failed, when docs/positioning/ateles/ does not exist yet: that
-# tree is produced by render_positioning_docs.py, which ships in PR #1137
-# (feat/positioning-projection) and is not on main as of this check's
-# authoring — an absent positioning-mirror tree is the expected state until
-# that PR merges, not a build regression. Once it exists, a stale dist/site
-# or an unresolved section fails this check (see build_site.py --check).
-if [ -d "docs/positioning/ateles" ]; then
-    echo "  - Checking ateles site build is in sync with its sources..."
-    python3 execution/scripts/site_generator/build_site.py ateles --check || ERRORS=$((ERRORS + 1))
+# Site build contract (execution/scripts/site_generator/build_site.py).
+# Build into a fresh temporary tree, then make --check compare the generated
+# bytes against a second in-memory render. This catches missing sources,
+# unsupported content origins, non-deterministic output, and check drift
+# without requiring the generated dist/ tree to be committed.
+echo "  - Building and checking the Ateles static site from repo sources..."
+SITE_BUILD_CHECK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ateles-site-check.XXXXXX")"
+if python3 execution/scripts/site_generator/build_site.py ateles --out "$SITE_BUILD_CHECK_DIR"; then
+    python3 execution/scripts/site_generator/build_site.py ateles --check --out "$SITE_BUILD_CHECK_DIR" || ERRORS=$((ERRORS + 1))
 else
-    echo "  - Skipping site build check (docs/positioning/ateles/ absent — needs PR #1137 merged first)"
+    ERRORS=$((ERRORS + 1))
 fi
+rm -rf "$SITE_BUILD_CHECK_DIR"
 
 echo ""
 if [ $ERRORS -eq 0 ]; then

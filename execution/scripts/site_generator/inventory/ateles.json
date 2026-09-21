@@ -6,6 +6,7 @@
     {
       "slug": "index",
       "path": "/",
+      "nav_label": "Home",
       "title": "Ateles — the distributed-authority operating layer for governed initiative",
       "meta_description": "Ateles makes authority explicit -- who may act, on whose authority, against which state -- so agents can be held to account for real work.",
       "template": "product_homepage",
@@ -56,6 +57,7 @@
     {
       "slug": "design",
       "path": "/design",
+      "nav_label": "Design",
       "title": "Ateles — the design (repo README)",
       "meta_description": "The design of record for Ateles, rendered from the repository README.",
       "template": "reference_doc",
@@ -70,6 +72,7 @@
           "id": "body",
           "origin": "authored",
           "source": "README.md",
+          "link_base": "https://github.com/markmhendrickson/ateles/blob/main/",
           "note": "Repo-authored reference content. The site RENDERS this file; it is not copied into a specification. This is content-origin kind 1 (authored repo markdown) per build-landing-page Stage 2's content-origin taxonomy."
         }
       ]

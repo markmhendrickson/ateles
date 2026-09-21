@@ -5,7 +5,7 @@ per-product JSON mirror the static site generator reads at build time.
 
 WHY THIS EXISTS: build_site.py (this directory's generator) must never call
 Neotoma at build time — that is the whole point of the projection model this
-repo already uses for docs/taxonomy.md, docs/agents/*.md, and (per PR #1137)
+repo already uses for docs/taxonomy.md, docs/agents/*.md, and
 docs/positioning/. A design system is exactly the same shape of problem as
 those: it is corrected in Neotoma by a design agent (see design_system entity
 ent_72e01f1008653b601be1a956, "Neotoma & Ateles Visual System" — corrected at
@@ -34,15 +34,10 @@ a JSON object with:
              fields (see DESIGN_SYSTEM_ENTITY_ID's color_palette/type_scale
              shape, which nests neotoma/ateles under shared variable names)
 
-This mirrors neotoma_mirror_lib.py's shape (load_env/request/unwrap_snapshot)
-rather than importing it, because that module lives on PR #1137
-(feat/positioning-projection) and is not yet on main as of this script's
-authoring — see build_site.py's module docstring for how this generator
-handles that PR being unmerged. When #1137 lands, this script's env/HTTP
-helpers should be replaced with an import of neotoma_mirror_lib to avoid two
-copies of the same fetch logic; that consolidation is noted as follow-up, not
-done preemptively here, since importing a module that does not exist on main
-would break this script for anyone running it before #1137 merges.
+The HTTP/env/snapshot plumbing comes from neotoma_mirror_lib.py, the same
+shared implementation used by every other Neotoma-to-repo projection. This
+keeps authentication, retries, and nested snapshot handling from drifting
+between generators.
 
 Usage:
     render_design_tokens.py <product>            # Neotoma -> disk
@@ -60,14 +55,14 @@ import argparse
 import json
 import os
 import sys
-import time
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 OUT_DIR = Path(__file__).resolve().parent / "design_tokens"
+
+sys.path.insert(0, str(REPO_ROOT / "execution" / "scripts"))
+from neotoma_mirror_lib import load_env, request, unwrap_snapshot  # noqa: E402
 
 # The single design_system entity covering both products (decision recorded
 # on the entity itself 2026-09-22: "this entity remains ONE system covering
@@ -88,59 +83,13 @@ PER_PRODUCT_FIELDS = ("color_palette", "type_scale")
 KNOWN_PRODUCTS = ("ateles", "neotoma")
 
 
-def _load_env() -> tuple[str, str]:
-    base_url = os.environ.get("NEOTOMA_BASE_URL", "")
-    token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
-    env_path = Path.home() / ".config" / "neotoma" / ".env"
-    if (not base_url or not token) and env_path.exists():
-        for line in env_path.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            value = value.strip().strip('"').strip("'")
-            if key == "NEOTOMA_BASE_URL" and not base_url:
-                base_url = value
-            elif key == "NEOTOMA_BEARER_TOKEN" and not token:
-                token = value
-    if not base_url:
-        sys.exit("NEOTOMA_BASE_URL not set (env or ~/.config/neotoma/.env)")
-    return base_url.rstrip("/"), token
-
-
-def _request(url: str, token: str, retries: int = 5) -> dict:
-    last = None
-    for _attempt in range(retries):
-        try:
-            req = urllib.request.Request(url)
-            req.add_header("User-Agent", "ateles-neotoma-sync/1.0")
-            if token:
-                req.add_header("Authorization", f"Bearer {token}")
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read().decode())
-        except (urllib.error.URLError, ConnectionError) as exc:
-            last = exc
-            time.sleep(2)
-    raise SystemExit(f"Neotoma unreachable after {retries} tries: {last}")
-
-
-def _unwrap(entity: dict) -> tuple[dict, dict]:
-    snapshot = entity.get("snapshot", entity)
-    if isinstance(snapshot.get("snapshot"), dict):
-        provenance = snapshot.get("provenance") or entity.get("provenance") or {}
-        snapshot = snapshot["snapshot"]
-    else:
-        provenance = entity.get("provenance") or {}
-    return snapshot, provenance
-
-
 def _observation_ids(provenance: dict, fields) -> dict:
     return {f: provenance.get(f) or "unknown" for f in fields}
 
 
 def render(product: str, base_url: str, token: str, entity_id: str) -> dict:
-    entity = _request(f"{base_url}/entities/{entity_id}", token)
-    snapshot, provenance = _unwrap(entity)
+    entity = request(f"{base_url}/entities/{entity_id}", token)
+    snapshot, provenance = unwrap_snapshot(entity)
 
     shared = {f: snapshot.get(f) for f in SHARED_FIELDS}
     per_product = {}
@@ -214,7 +163,7 @@ def main() -> int:
     entity_id = os.environ.get(
         "ATELES_DESIGN_SYSTEM_ENTITY_ID", DEFAULT_DESIGN_SYSTEM_ENTITY_ID
     )
-    base_url, token = _load_env()
+    base_url, token = load_env()
 
     products = [args.product] if args.product else list(KNOWN_PRODUCTS)
 

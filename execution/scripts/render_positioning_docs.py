@@ -184,7 +184,10 @@ STAMPED_FIELDS = {
 # leaking silently.
 # ---------------------------------------------------------------------------
 _EVALUATOR_NAME_MAP = {
+    "Brandon/AIBTC": "an evaluator deployment",
+    "Jacob Cohen": "an evaluator",
     "Jeremiah Lee": "an evaluator",
+    "Sidney Brown": "an evaluator",
     "Simon Bergeron": "an evaluator",
     "Rebecca": "an evaluator",
     "Larry": "an evaluator",
@@ -192,6 +195,7 @@ _EVALUATOR_NAME_MAP = {
     "Jeroen": "an evaluator",
     "Eriks Reks": "an evaluator",
     "Eriks": "an evaluator",
+    "Mark": "the operator",
 }
 # entity_id references to customer_development_note / named-evaluator sources
 # are dropped from rendered "sources"/"source_artifacts" lists (the record
@@ -209,6 +213,9 @@ _PII_ENTITY_IDS = {
     "ent_13b6325f273ce0b002832377",  # Larry, feedback
     "ent_22a0ca680051fabd42c1f537",  # Jeroen van 't Hoff, feedback
     "ent_59e1b896157641f9240f9e86",  # Eriks Reks, feedback
+    "ent_c649232feaf95688b25be6af",  # named evaluator, feedback
+    "ent_1862a583f9ea47cf6b1aa716",  # named evaluator, feedback
+    "ent_ca46eb9e4e3150bb0637eb40",  # named evaluator deployment, feedback
 }
 _PII_SOURCE_MARKERS = ("customer_development_note",)
 
