@@ -152,6 +152,31 @@ observable failure to the hero merely because it is easiest to demonstrate.
 Do not erase pain either: it moves into the adjacent-approach section, where it
 explains why the ambition remains unavailable without this product's design.
 
+## Public-surface translation boundary
+
+The durable source artifacts are allowed to speak the record's internal
+language. They may carry Candidate labels, entity ids and types, repository
+filenames, decision or qualifier keys, citations, analysis narration, and
+implementation bookkeeping because those locators make evidence auditable.
+They are evidence addresses, not automatically audience copy.
+
+A public surface MUST translate the underlying evidence into plain language a
+reader can understand without knowing Neotoma, the repository, or the analysis
+workflow. Unless the requested artifact is explicitly marked as an internal
+review artifact, public copy MUST NOT expose internal references such as
+`Candidate A`, `ent_...`, entity-type names used as labels, `.md` paths,
+snake_case decision or qualifier keys, raw citation scaffolding, or status and
+implementation bookkeeping. Preserve traceability in the source entities,
+source inventory, and generated-source metadata; do not turn provenance into
+reader-facing prose.
+
+This is a translation boundary, not permission to weaken or invent a claim.
+The public statement must preserve the source's meaning and confidence while
+changing its vocabulary and level of detail. Mark the intended surface as
+`public` or `internal review` before stage 1. Only the latter may intentionally
+show raw evidence locators, and its heading must say it is an internal review
+artifact.
+
 ## Stage 1 — Template
 
 **Entity type: `rendered_page_template`.** Declared: `name`, `description`,
@@ -279,6 +304,23 @@ Bind the spec to the upstream decisions:
 - Retrieve `brand_voice` and the relevant `style_guide` and apply them on the
   way in, not as a later editing pass.
 
+### Visual-story plan
+
+For every major claim in every page specification, ask whether a functional
+visual can make the relationship clearer with less prose. Record the claim,
+the candidate form (diagram, flow, timeline, comparison, state transition,
+annotated artifact, or another information graphic), and the decision to use
+text, a visual, or both. A decision to keep prose is valid when the visual
+would add no explanatory value; the assessment is mandatory, the illustration
+is not.
+
+Technical landing pages should prefer semantic HTML/CSS/SVG information
+graphics whose labels and relationships remain selectable, accessible, and
+responsive. Use imagery only when it carries meaning. Decorative illustration
+is not a substitute for explaining a system, sequence, boundary, comparison,
+or proof claim. Every selected visual needs text or an accessible equivalent,
+and it must remain intelligible without animation.
+
 ### Where a page's content comes from
 
 This is settled, not an open design question for this skill to re-decide: a
@@ -306,6 +348,16 @@ of three origins, and every page in the inventory declares which:
    kind names the mirror file it reads and the source entity id the mirror's
    own frontmatter carries — it does not re-type the positioning content into
    the specification.
+   The mirror remains the canonical evidence source, but a PUBLIC page is a
+   projection of that evidence rather than an automatic verbatim rendering.
+   When a mirror contains internal labels, locators, narration, or bookkeeping,
+   the renderer must select and translate the current source into reader
+   language at render time while retaining source pointers in generated
+   metadata. That projection is not a second fact store. Do not solve leakage by
+   deleting audit detail from the source or by creating a hand-maintained copy.
+   If the available generator can only render such a mirror "as-is," stop the
+   public build and route that missing projection as a product finding; never
+   publish the internal artifact unchanged.
 3. **Page-specific copy** — a headline, a CTA label, transitional prose that
    exists only to make this one page read well. This is the only kind of
    content this skill actually authors into `specification.content`.
@@ -650,6 +702,18 @@ stage-4 `gaps` instead. A human had to notice and correct it separately.
   link that correction to the stage-3 finding and read the affected declared
   fields back.
 
+**Public design systems speak reader concepts.** An internal review artifact
+may use raw provenance rails, entity locators, field names, grant micro-formats,
+or implementation vocabulary because inspection is its job. A public design
+system must translate the same underlying distinctions into concepts readers
+recognize — for example source, correction, disagreement, decision, authority,
+coordination, or escalation — without displaying internal ids, schema names,
+field syntax, or compact control codes. Audit both `positioning_principles` and
+`content` for this boundary before applying the system. If an existing public
+system instructs the page to display internal vocabulary, record the mismatch
+in `gaps` and route its correction; do not treat the instruction as valid just
+because it came from a `design_system` entity.
+
 Asset locators bifurcate by path. Do not invent undeclared keys
 (`asset_locators`, `assets`, `logo_paths`), and do NOT use the `asset` entity
 type — despite the name it is a FINANCIAL type (it declares
@@ -698,6 +762,36 @@ then verify:
   is reduced or unavailable; and
 - representative desktop and mobile previews are inspected, including the
   global navigation, typography, overflow, and responsive section order.
+
+### Final public-surface gates
+
+Run these after generation and before presenting any public preview. The gate
+ids and scopes are stable contracts; the prose may be refined without changing
+what must pass.
+
+| Gate id | Scope | Pass condition |
+|---|---|---|
+| `public_translation` | every public route | Claims preserve source meaning and confidence in plain reader language; internal evidence references are absent unless the route is explicitly an internal review artifact. |
+| `public_source_projection` | each public source-derived block | Current source evidence is selected and translated at render time; a mirror containing internal references is never rendered as-is. |
+| `public_design_language` | every public route | Visual language expresses reader-recognizable concepts rather than entity ids, schema or field vocabulary, grant micro-formats, or control syntax. |
+| `audience_read` | every public route | A final reader-altitude pass removes pasted analysis, repeated rationale, and provenance-as-prose while the durable source entities retain the evidence. |
+| `visual_story` | each major claim | The stage-2 visual assessment is resolved; selected diagrams, flows, timelines, comparisons, and other functional visuals replace prose where they communicate better. |
+| `responsive_visual_qa` | every public route at representative desktop and mobile widths | Information graphics, labels, navigation, reading order, overflow, reduced-motion behavior, and accessible equivalents are inspected. |
+| `internal_leakage_scan` | every public route | Built output is scanned for Candidate labels, entity ids/types, repo filenames, decision/qualifier keys, raw citations, analysis narration, and implementation bookkeeping; every hit is removed or justified by an explicit internal-review designation. |
+
+The audience-read pass edits the public projection, not its evidence. Cut a
+paragraph that merely narrates how the analysis was done; keep the claim and
+its confidence grounded in the linked source. Collapse repeated justification
+to the one reason a reader needs. Keep citations, provenance, and full rationale
+in the durable entities and generated metadata where later runs can audit them.
+
+The leakage scan covers assembled HTML and visible text on ALL public routes,
+not only the homepage. Search for obvious locator shapes (for example
+`ent_`, Candidate labels, repo-file extensions, and internal key syntax), then
+inspect remaining source-derived text for less mechanical leakage such as
+analysis narration or implementation status. A zero from a token scan is not
+a pass until the scanner is shown to catch a known positive fixture and the
+reader-altitude review also passes.
 
 This stage makes NO new decisions. If the build needs one, return to the entity
 that owns it, correct that source, read it back, and regenerate. A choice made
