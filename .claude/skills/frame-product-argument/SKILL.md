@@ -194,6 +194,44 @@ distinction leads with the chronic pain, because chronic pain is more relatable
 and easier to write — and it converts worse, because a reader who recognizes a
 tax they already decided to absorb has been given no reason to act today.
 
+**Benefit versus mechanism — apply to both `Chronic:` and `Acute:`.** The
+marker check below only proves a chronic/acute split exists; it does not prove
+either half states a PAIN. A chronic/acute split can be written entirely in
+mechanisms — "there is no reconstructable record of who authorized it" — and
+pass the marker check while still failing to say what that costs the reader.
+State each pain as what it COSTS the reader, with the mechanism as the
+explanation of why it costs that: "there is no X" is a mechanism; "you cannot
+do Y, so you are back to Z" is a cost.
+
+- **Diagnostic:** read the sentence to someone who does not know what the
+  product builds. If it still reads as a complete pain, it is a cost. If it
+  only makes sense once you know the product's architecture, it is a
+  mechanism — rewrite it up a level before it goes in `body`.
+- **A mechanism-led pain narrows the domain, as a side effect of the
+  mechanism being easiest to see in one place.** A real case: an Ateles pain
+  artifact once led with "no reconstructable record of who authorized" a
+  consequential action. That mechanism is most visible in merges and PRs, and
+  the artifact chain built on it produced an ICP skewed toward engineering
+  work — not because the ICP step reasoned narrowly, but because the pain it
+  inherited already had. The corrected pain leads with the cost instead —
+  discovering you cannot trust you would find out if something had gone
+  wrong, so you are back to watching, across any domain an agent acts in —
+  and the record, the checkpoints, and the attributed identity move down to
+  where they belong: the mechanism explaining why that cost is fixable. See
+  `analysis` `ent_2a29bed8dcacd4b1ff20c6f2` for the full before/after.
+- **Where the product's own foundation pins benefits to mechanisms, trace to
+  that pinning rather than inventing a parallel one.** Ateles's own
+  `docs/foundation/charter.md`, "What an operator gets," states the
+  discipline directly: "Each entry names the objective that delivers it. That
+  pinning is what keeps this section honest — a benefit with no objective
+  behind it is a claim the corpus does not carry." The same document lists
+  *"Nothing an agent does is untraceable to whoever it acted for"* as ONE OF
+  FIVE benefits, pinned to objective 2 — not the headline. The headline there
+  is "Your attention is spent on the decisions that need you" (objective 4).
+  Attribution is a mechanism serving that benefit, not the benefit itself; a
+  pain artifact that promotes the mechanism to the lead has inverted the
+  product's own foundation.
+
 **Declared field homes — do not invent others:**
 
 | Payload | Declared field | Shape |
@@ -214,6 +252,17 @@ because it is invisible: it reads exactly like pain that was researched.
 **Read-back:** assert `body` contains all three of `Chronic:`, `Acute:`, and
 `Leads:`, and that `summary` is non-empty. A pain artifact missing the lead
 marker has not made the decision this artifact exists to make.
+
+Marker presence is mechanical and this check enforces it; the
+benefit-versus-mechanism test above is not — it is a prose judgment, not a
+string match, and this skill has no way to fail a run on it the way it fails
+one on a missing marker. Say so rather than claiming the check covers it: a
+run should read `Chronic:` and `Acute:` back and apply the diagnostic by eye
+before closing, and report which reading it gave each half, but a control
+that does not bind is not a control (standing rule: name the thing that
+fails; if nothing fails, you have written documentation). If a later audit
+finds a mechanism-led artifact that passed this skill's checks, that is this
+skill's read-back proving too little, not evidence the artifact was fine.
 
 ## Closing the run
 
