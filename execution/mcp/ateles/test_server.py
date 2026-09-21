@@ -399,17 +399,81 @@ class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
                 },
             },
             {
+                "entity_type": "checkpoint_brief",
+                "snapshot": {
+                    "status": "approved",
+                    "resolved_dispatched": True,
+                    "task_entity_id": "ent_task_1",
+                    "gate_action": "checkpoint_plan_approval",
+                },
+            },
+            {
                 "entity_type": "task",
                 "snapshot": {"status": "routed", "blocked_reason": ""},
             },
         ]
         mock_correct.return_value = True
+        mock_consume.return_value = True
 
         result = await srv._resolve_checkpoint("ent_cp1", "approve")
         self.assertEqual(result["new_status"], "approved")
         self.assertIn("task re-dispatched", result["action_taken"])
         mock_correct.assert_called_once()
         mock_consume.assert_awaited_once()
+
+    @patch("server._consume_checkpoint_resolution")
+    @patch("server._correct")
+    @patch("server._get")
+    async def test_approve_does_not_confirm_failure_or_held_states(
+        self, mock_get, mock_correct, mock_consume
+    ):
+        mock_correct.return_value = True
+        mock_consume.return_value = True
+
+        for status in (
+            "failed",
+            "blocked",
+            "awaiting_approval",
+            "awaiting_input",
+            "declined",
+            "superseded",
+        ):
+            with self.subTest(status=status):
+                mock_get.side_effect = [
+                    {
+                        "entity_type": "checkpoint_brief",
+                        "snapshot": {
+                            "status": "awaiting_operator",
+                            "task_entity_id": "ent_task_1",
+                            "gate_action": "checkpoint_plan_approval",
+                        },
+                    },
+                    {
+                        "entity_type": "checkpoint_brief",
+                        "snapshot": {
+                            "status": "approved",
+                            "task_entity_id": "ent_task_1",
+                            "gate_action": "checkpoint_plan_approval",
+                        },
+                    },
+                    {
+                        "entity_type": "checkpoint_brief",
+                        "snapshot": {
+                            "status": "approved",
+                            "resolved_dispatched": True,
+                            "task_entity_id": "ent_task_1",
+                            "gate_action": "checkpoint_plan_approval",
+                        },
+                    },
+                    {
+                        "entity_type": "task",
+                        "snapshot": {"status": status, "blocked_reason": ""},
+                    },
+                ]
+
+                result = await srv._resolve_checkpoint("ent_cp1", "approve")
+
+                self.assertNotIn("re-dispatched", result["action_taken"])
 
     @patch("server._correct")
     @patch("server._get")

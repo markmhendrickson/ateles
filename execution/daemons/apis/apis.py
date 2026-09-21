@@ -715,6 +715,17 @@ async def dispatch_task(
         reason="" if gate_override else None,
         key_suffix=trigger,
     )
+    if gate_override and not _release_lifecycle_proven(entity_id, TaskStatus.ROUTED):
+        log.warning(
+            f"[{DAEMON_NAME}] approved task {entity_id} did not read back as "
+            "routed with its hold cleared — not spawning"
+        )
+        notifier.send(
+            f"Approved task {entity_id} could not enter routed state — manual recovery needed",
+            priority=Priority.BLOCKER,
+            handler=DAEMON_NAME,
+        )
+        return
 
     # ── Readiness gate (E4) ───────────────────────────────────────────────────
     # Runs BEFORE the execution gate: is the task well-specified enough to start?
@@ -847,6 +858,17 @@ async def dispatch_task(
         entity_id, TaskStatus.EXECUTING, handler=DAEMON_NAME,
         from_status=TaskStatus.ROUTED.value, key_suffix=trigger,
     )
+    if gate_override and not _release_lifecycle_proven(entity_id, TaskStatus.EXECUTING):
+        log.warning(
+            f"[{DAEMON_NAME}] approved task {entity_id} did not read back as "
+            "executing — not spawning"
+        )
+        notifier.send(
+            f"Approved task {entity_id} could not enter executing state — manual recovery needed",
+            priority=Priority.BLOCKER,
+            handler=DAEMON_NAME,
+        )
+        return
 
     # E1/E2: this run's thread. run_key keys it to the attempt so SSE replays reuse
     # it while a genuine retry opens a fresh run.
@@ -943,9 +965,20 @@ async def dispatch_task(
 # ── Checkpoint resolution ───────────────────────────────────────────────────
 
 
+def _release_lifecycle_proven(task_id: str, expected_status: TaskStatus) -> bool:
+    """Read back the lifecycle fields that authorize an approved-task spawn."""
+    snapshot = fetch_task_snapshot(task_id)
+    if snapshot is None:
+        return False
+    return (
+        normalize_status(snapshot.get("status")) == expected_status.value
+        and snapshot.get("blocked_reason") == ""
+    )
+
+
 async def handle_checkpoint_brief(
     entity_id: str, snapshot: dict, notifier: Notifier
-) -> None:
+) -> bool:
     """
     React to a checkpoint_brief the gate raised once the operator resolves it.
 
@@ -966,14 +999,14 @@ async def handle_checkpoint_brief(
             f"[{DAEMON_NAME}] checkpoint_brief {entity_id} still pending "
             f"(status={snapshot.get('status')!r}) — no action"
         )
-        return
+        return False
 
     if checkpoint_already_dispatched(snapshot):
         log.info(
             f"[{DAEMON_NAME}] checkpoint_brief {entity_id} already dispatched "
             f"(resolution={resolution}) — no-op on replay"
         )
-        return
+        return False
 
     task_id = snapshot.get("task_entity_id")
     if not task_id:
@@ -981,7 +1014,7 @@ async def handle_checkpoint_brief(
             f"[{DAEMON_NAME}] checkpoint_brief {entity_id} {resolution} but has no "
             "task_entity_id — cannot act"
         )
-        return
+        return False
 
     title = snapshot.get("title", "(untitled)")
 
@@ -995,7 +1028,7 @@ async def handle_checkpoint_brief(
             priority=Priority.INFO,
             handler=DAEMON_NAME,
         )
-        return
+        return True
 
     # An approval bypasses the execution gate only for the two actions that the
     # gate itself emits for swarm-executable work. `operator_only`, an absent
@@ -1010,7 +1043,7 @@ async def handle_checkpoint_brief(
             f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
             f"gate_action={gate_action!r} — recording resolution without dispatch"
         )
-        return
+        return False
 
     # approved → re-dispatch with the gate bypassed
     task_snapshot = fetch_task_snapshot(task_id)
@@ -1024,7 +1057,7 @@ async def handle_checkpoint_brief(
             priority=Priority.WARN,
             handler=DAEMON_NAME,
         )
-        return
+        return False
 
     brief_user_id = snapshot.get("user_id")
     task_user_id = task_snapshot.get("user_id")
@@ -1033,7 +1066,7 @@ async def handle_checkpoint_brief(
             f"[{DAEMON_NAME}] checkpoint {entity_id} and task {task_id} belong to "
             "different users — not dispatching"
         )
-        return
+        return False
 
     log.info(
         f"[{DAEMON_NAME}] checkpoint {entity_id} APPROVED — re-dispatching task "
@@ -1051,10 +1084,21 @@ async def handle_checkpoint_brief(
             f"[{DAEMON_NAME}] checkpoint {entity_id} could not be stamped as "
             "dispatched — not releasing task"
         )
-        return
+        return False
     await dispatch_task(
         task_id, task_snapshot, trigger="approved", notifier=notifier, gate_override=True
     )
+    final_task = fetch_task_snapshot(task_id)
+    if final_task is None or final_task.get("blocked_reason") != "":
+        return False
+    final_status = normalize_status(final_task.get("status"))
+    if DRY_RUN:
+        return final_status == TaskStatus.ROUTED.value
+    return final_status in {
+        TaskStatus.EXECUTING.value,
+        TaskStatus.VERIFIED.value,
+        TaskStatus.DONE.value,
+    }
 
 
 # ── Event handler ─────────────────────────────────────────────────────────────

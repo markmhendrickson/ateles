@@ -646,7 +646,12 @@ def _entity_type_of(data: dict) -> str:
     return str(data.get("entity_type") or data.get("type") or "").strip().lower()
 
 
-async def _consume_checkpoint_resolution(checkpoint_id: str, snapshot: dict) -> None:
+_RELEASE_CONFIRMED_TASK_STATUSES = frozenset(
+    {"routed", "executing", "verified", "done", "completed", "complete", "finished"}
+)
+
+
+async def _consume_checkpoint_resolution(checkpoint_id: str, snapshot: dict) -> bool:
     """Run the existing Apis checkpoint consumer in-process."""
     daemon_dir = Path(__file__).resolve().parents[2] / "daemons" / "apis"
     if str(daemon_dir) not in sys.path:
@@ -655,7 +660,7 @@ async def _consume_checkpoint_resolution(checkpoint_id: str, snapshot: dict) -> 
     import apis as apis_daemon
 
     notifier = apis_daemon.Notifier.from_neotoma()
-    await apis_daemon.handle_checkpoint_brief(checkpoint_id, snapshot, notifier)
+    return await apis_daemon.handle_checkpoint_brief(checkpoint_id, snapshot, notifier)
 
 
 async def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
@@ -705,15 +710,27 @@ async def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
         # had acted on the approved brief.
         resolved_data = _get(f"/entities/{checkpoint_id}")
         resolved_snap = _snapshot_of(resolved_data or {})
+        released = False
         if (
             resolved_data is not None
             and _entity_type_of(resolved_data) == "checkpoint_brief"
             and str(resolved_snap.get("status", "")).strip().lower() == "approved"
         ):
-            await _consume_checkpoint_resolution(checkpoint_id, resolved_snap)
+            released = await _consume_checkpoint_resolution(checkpoint_id, resolved_snap)
 
-        # Claim a release only when the task itself proves the consumer reached
-        # ROUTED and cleared the old hold reason. A 2xx is not that proof.
+        # Claim a release only when BOTH the checkpoint claim and task lifecycle
+        # read back. A 2xx from either correction is not that proof.
+        consumed_data = _get(f"/entities/{checkpoint_id}")
+        consumed_snap = _snapshot_of(consumed_data or {})
+        stamp_confirmed = (
+            consumed_data is not None
+            and _entity_type_of(consumed_data) == "checkpoint_brief"
+            and (
+                consumed_snap.get("resolved_dispatched") is True
+                or str(consumed_snap.get("resolved_dispatched", "")).strip().lower()
+                in {"true", "1", "yes"}
+            )
+        )
         task_data = _get(f"/entities/{task_id}") if task_id else None
         task_snap = _snapshot_of(task_data or {})
         same_tenant = not (
@@ -722,10 +739,13 @@ async def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
             and resolved_snap.get("user_id") != task_snap.get("user_id")
         )
         if (
-            task_data is not None
+            released
+            and stamp_confirmed
+            and task_data is not None
             and _entity_type_of(task_data) == "task"
             and same_tenant
-            and str(task_snap.get("status", "")).strip().lower() == "routed"
+            and str(task_snap.get("status", "")).strip().lower()
+            in _RELEASE_CONFIRMED_TASK_STATUSES
             and task_snap.get("blocked_reason") == ""
         ):
             action_taken = "approved — task re-dispatched"

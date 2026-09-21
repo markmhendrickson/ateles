@@ -732,6 +732,29 @@ def stamp_checkpoint_dispatched(checkpoint_entity_id: str, *, handler: str) -> b
             timeout=15,
         )
         resp.raise_for_status()
+        # A successful correction response is not proof that the field landed:
+        # Neotoma can accept a write that does not materialize on the entity.
+        # Read the brief itself back before treating the stamp as a replay claim.
+        data = _fetch_entity(checkpoint_entity_id)
+        if data is None:
+            log.warning(
+                "[gating] checkpoint %s stamp could not be read back",
+                checkpoint_entity_id,
+            )
+            return False
+        entity_type = str(
+            data.get("entity_type") or data.get("type") or ""
+        ).strip().lower()
+        snapshot = _snapshot_of(data)
+        if (
+            entity_type != "checkpoint_" + "brief"
+            or not checkpoint_already_dispatched(snapshot)
+        ):
+            log.warning(
+                "[gating] checkpoint %s stamp was not materialized on read-back",
+                checkpoint_entity_id,
+            )
+            return False
         return True
     except Exception as exc:  # noqa: BLE001
         log.warning(

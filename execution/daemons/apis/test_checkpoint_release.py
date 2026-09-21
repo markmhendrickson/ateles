@@ -211,6 +211,94 @@ async def test_failed_stamp_does_not_dispatch(monkeypatch, release_store):
 
 
 @pytest.mark.asyncio
+async def test_unmaterialized_stamp_never_claims_release(monkeypatch, release_store):
+    """A 2xx-like True without a read-back is not a replay claim."""
+    records, brief_id, task_id = release_store
+    monkeypatch.setattr(
+        apis, "stamp_checkpoint_dispatched", lambda checkpoint_id, *, handler: True
+    )
+
+    result = await _resolve(brief_id, "approve")
+
+    assert records[task_id]["snapshot"]["status"] == "routed"
+    assert records[brief_id]["snapshot"]["resolved_dispatched"] is False
+    assert "re-dispatched" not in result["action_taken"]
+
+
+@pytest.mark.asyncio
+async def test_fast_successful_run_is_confirmed_after_reaching_done(
+    monkeypatch, release_store
+):
+    records, brief_id, task_id = release_store
+    monkeypatch.setattr(apis, "DRY_RUN", False)
+    monkeypatch.setattr(apis, "RUN_CONVERSATIONS", False)
+    monkeypatch.setattr(apis, "RUN_EMAIL", False)
+
+    class _Success:
+        ok = True
+        error = None
+        returncode = 0
+
+    async def succeed(*args, **kwargs):
+        return _Success()
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", succeed)
+
+    result = await _resolve(brief_id, "approve")
+
+    assert records[task_id]["snapshot"]["status"] == "done"
+    assert records[task_id]["snapshot"]["blocked_reason"] == ""
+    assert records[brief_id]["snapshot"]["resolved_dispatched"] is True
+    assert "re-dispatched" in result["action_taken"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_write", ["routed", "blocked_reason", "executing"])
+async def test_release_does_not_spawn_until_lifecycle_writes_are_proven(
+    failed_write, monkeypatch, release_store
+):
+    records, brief_id, task_id = release_store
+    task = records[task_id]["snapshot"]
+    spawned: list[str] = []
+
+    def selectively_write(task_entity_id, status, *, reason=None, **kwargs):
+        value = status.value if hasattr(status, "value") else str(status)
+        if failed_write == "routed" and value == "routed":
+            return False
+        if value == "routed":
+            task["status"] = value
+            if failed_write != "blocked_reason" and reason is not None:
+                task["blocked_reason"] = reason
+            return True
+        if failed_write == "executing" and value == "executing":
+            return False
+        task["status"] = value
+        if reason is not None:
+            task["blocked_reason"] = reason
+        return True
+
+    class _Success:
+        ok = True
+        error = None
+        returncode = 0
+
+    async def capture_spawn(skill, entity_id, *args, **kwargs):
+        spawned.append(entity_id)
+        return _Success()
+
+    monkeypatch.setattr(apis, "set_task_status", selectively_write)
+    monkeypatch.setattr(apis, "DRY_RUN", False)
+    monkeypatch.setattr(apis, "RUN_CONVERSATIONS", False)
+    monkeypatch.setattr(apis, "RUN_EMAIL", False)
+    monkeypatch.setattr(apis, "_spawn_harness_skill", capture_spawn)
+
+    result = await _resolve(brief_id, "approve")
+
+    assert spawned == []
+    assert "re-dispatched" not in result["action_taken"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("gate_action", ["operator_only", "", "unrecognized"])
 async def test_non_swarm_gate_actions_never_dispatch(
     gate_action, monkeypatch, release_store

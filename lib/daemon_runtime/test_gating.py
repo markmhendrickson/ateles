@@ -17,6 +17,7 @@ from lib.daemon_runtime.gating import (
     evaluate_gate,
     fetch_task_snapshot,
     read_checkpoint_resolution,
+    stamp_checkpoint_dispatched,
 )
 
 
@@ -662,3 +663,24 @@ def test_checkpoint_task_fetch_fails_closed_on_wrong_or_missing_type(
         },
     )
     assert fetch_task_snapshot("ent_not_task") is None
+
+
+def test_checkpoint_stamp_requires_materialized_readback(monkeypatch):
+    """HTTP success without the field on the entity is not a claimed release."""
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(gating_module.httpx, "post", lambda *args, **kwargs: _Response())
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": "checkpoint_" + "brief",
+            "snapshot": {"resolved_dispatched": False},
+        },
+    )
+
+    assert stamp_checkpoint_dispatched("ent_cp", handler="apis") is False
