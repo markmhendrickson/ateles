@@ -1159,4 +1159,3 @@ So a rule's reach is not whether it is in `CLAUDE.md` but which copy of `CLAUDE.
 - **Divergence** is judged on whether statements bind the same way, not on wording.
 - **Target homes** come from the authority table in `conformance.md` and from nowhere else.
 - Read-only against Neotoma **prod**. Nothing is written to the record.
-

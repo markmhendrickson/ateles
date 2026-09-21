@@ -1,8 +1,11 @@
 """Regression tests for the operator rulings embedded in the rule inventory."""
 
+import contextlib
+import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -417,6 +420,56 @@ class RuleInventoryRulingsTest(unittest.TestCase):
         self.assertEqual(missing, [])
         self.assertEqual(unread, ["agent_policy entities"])
         self.assertNotIn("ClientCodename", json.dumps([missing, unread]))
+
+    def test_incomplete_measurement_names_safe_canonical_roots_recovery_key(
+        self,
+    ) -> None:
+        stores = [
+            inventory.Store(name, "private")
+            for name in inventory.PUBLIC_STORE_NAMES
+        ]
+        target = next(
+            store
+            for store in stores
+            if store.name == "Canonical repository instruction roots"
+        )
+        target.read_ok = False
+        target.read_error = (
+            "/Users/private/ClientCodename token=secret entity=ent_private"
+        )
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(inventory, "read_entities", return_value=([], [])),
+            mock.patch.object(
+                inventory,
+                "read_file_stores",
+                return_value=([], stores),
+            ),
+            mock.patch.object(
+                sys,
+                "argv",
+                ["render_rule_inventory.py", "--require-complete-measurement"],
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = inventory.main()
+
+        message = stderr.getvalue()
+        self.assertEqual(result, 3)
+        self.assertIn("RULE_INVENTORY_CANONICAL_REPOSITORY_ROOTS", message)
+        for private_value in (
+            "/Users/private",
+            "ClientCodename",
+            "secret",
+            "ent_private",
+        ):
+            self.assertNotIn(private_value, message)
+
+    def test_render_has_exactly_one_terminal_newline(self) -> None:
+        rendered = inventory.render([], [], [], [])
+
+        self.assertTrue(rendered.endswith("\n"))
+        self.assertFalse(rendered.endswith("\n\n"))
 
     def test_canonical_repository_instruction_roots_are_measured(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

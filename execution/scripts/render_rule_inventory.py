@@ -1842,6 +1842,11 @@ def build_clusters(statements: list[Statement]) -> tuple[list[Cluster], list[Sta
 # ---------------------------------------------------------------------------
 
 
+def _canonical_generated_text(text: str) -> str:
+    """Return generated Markdown with exactly one terminal newline."""
+    return text.rstrip("\n") + "\n"
+
+
 def render(clusters: list[Cluster], stores: list[Store],
            unclassified: list[Statement], statements: list[Statement]) -> str:
     total_scanned = len(statements)
@@ -2289,8 +2294,7 @@ def render(clusters: list[Cluster], stores: list[Store],
     A("- **Target homes** come from the authority table in `conformance.md` and "
       "from nowhere else.")
     A("- Read-only against Neotoma **prod**. Nothing is written to the record.")
-    A("")
-    return "\n".join(L) + "\n"
+    return _canonical_generated_text("\n".join(L))
 
 
 # ---------------------------------------------------------------------------
@@ -2343,6 +2347,12 @@ def main() -> int:
                 details.append("missing store kinds: " + ", ".join(missing))
             if unread:
                 details.append("unread store kinds: " + ", ".join(unread))
+            canonical_store = "Canonical repository instruction roots"
+            if canonical_store in missing or canonical_store in unread:
+                details.append(
+                    "configure " + CANONICAL_REPOSITORY_ROOTS_ENV
+                    + " on the canonical measurement runner"
+                )
             print(
                 "rule inventory equality unavailable: full measurement is "
                 "incomplete; " + "; ".join(details),
