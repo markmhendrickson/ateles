@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Check that decision 101's ruled shape is registered in data_model.md.
 
-Decision 101 rules that ``principal_binding`` carries credential fields on the
-edge (one edge per credential). Marking the register row **ruled** without
-amending ``data_model.md#relationships`` is false readiness for G17 sequencing:
-the status token would unblock stage-1 registration before a writable shape
-exists. This check binds the two effects.
+Decision 101 rules that the presented-credential variant of
+``principal_binding`` carries credential fields on the edge (one edge per
+credential). Decisions 107-109 admit a second variant of the same relationship
+type: traversal-only ``acts_as``. Marking the register row **ruled** without
+scoping the four fields to the presented variant, or without registering both
+variants in ``data_model.md#relationships``, is false readiness for G17
+sequencing. This check binds those effects.
 
 Stdlib only; registered in ``conformance.md#mechanical-checks-on-this-directory``.
 """
@@ -52,6 +54,8 @@ LEGACY_ENDPOINTS_RE = re.compile(r"agent\s*→\s*principal", re.I)
 LEGACY_MEANING_RE = re.compile(
     r"the principal the agent acts as", re.I
 )
+PRESENTED_VARIANT_RE = re.compile(r"presented(?:-|\s+)credential", re.I)
+ACTS_AS_VARIANT_RE = re.compile(r"acts[-_]as", re.I)
 
 
 class CorpusProblem(Exception):
@@ -124,6 +128,47 @@ def check_data_model_row(path: Path, row_no: int, row_body: str) -> list[str]:
         problems.append(
             f"{path}:{row_no}: decision-101-data-model — principal_binding "
             "row missing kind+value → principal resolution language"
+        )
+    if not PRESENTED_VARIANT_RE.search(row_body) or not ACTS_AS_VARIANT_RE.search(
+        row_body
+    ):
+        problems.append(
+            f"{path}:{row_no}: decision-101-variants — principal_binding "
+            "row must state both admitted variants: presented credential and "
+            "traversal-only acts_as"
+        )
+    return problems
+
+
+def check_variant_scope(
+    conformance_path: Path,
+    row_no: int,
+    status: str,
+    authority_path: Path,
+    heading_no: int,
+    opener: str,
+) -> list[str]:
+    """The four credential fields belong only to the presented variant.
+
+    Decision 107 makes ``acts_as`` a valid second shape with none of the value,
+    issuer, or expiry fields. The decision-101 register row and ruling opener
+    are the two places a universal statement would otherwise contradict that
+    shape while the more detailed paragraphs below remained correct.
+    """
+    problems: list[str] = []
+    if not PRESENTED_VARIANT_RE.search(status) or not ACTS_AS_VARIANT_RE.search(
+        status
+    ):
+        problems.append(
+            f"{conformance_path}:{row_no}: decision-101-variants — ruled "
+            "status must scope the four fields to the presented-credential "
+            "variant and name acts_as as the other admitted variant"
+        )
+    if not PRESENTED_VARIANT_RE.search(opener):
+        problems.append(
+            f"{authority_path}:{heading_no}: decision-101-variants — ruling "
+            "opener must scope the four fields to the presented-credential "
+            "variant, not principal_binding universally"
         )
     return problems
 
@@ -523,6 +568,16 @@ def check(root: Path) -> list[str]:
                         "register row 101 is **ruled**; it opens "
                         f"{opener.strip()[:40]!r}"
                     )
+                problems.extend(
+                    check_variant_scope(
+                        conformance_path,
+                        row_no,
+                        status,
+                        authority_path,
+                        heading_no,
+                        opener,
+                    )
+                )
                 body = authority_ruling_body(authority_text)
                 if body is not None:
                     problems.extend(

@@ -5,7 +5,7 @@
 
 Every rule `data_model.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`data_model.md`](../data_model.md) and are not repeated here (decision 66).
 
-28 rules.
+29 rules.
 
 ## [Concepts](../data_model.md#concepts)
 
@@ -49,3 +49,7 @@ Every rule `data_model.md` owns, one entry each: the rule's own statement from `
 ## [Rendering](../data_model.md#rendering)
 
 - **DM-25** — the rule this heading states *[M (contract; existence is `status.md`'s)]*
+
+## [Whether acyclicity is a property of a relationship type or of the graph](../data_model.md#whether-acyclicity-is-a-property-of-a-relationship-type-or-of-the-graph)
+
+- **DM-31** — (decision 102): every relationship type declares acyclic or cycles-admitted at registration; absence, malformed values, and unknown values are refused; an acyclic type is checked before every relationship write, and unknown check state denies *[M — the missing-declaration and skipped-write-check mutants are planted positives]*

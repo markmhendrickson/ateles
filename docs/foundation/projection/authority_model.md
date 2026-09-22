@@ -5,7 +5,7 @@
 
 Every rule `authority_model.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`authority_model.md`](../authority_model.md) and are not repeated here (decision 66).
 
-21 rules.
+22 rules.
 
 ## [The tuple](../authority_model.md#the-tuple)
 
@@ -54,3 +54,7 @@ Every rule `authority_model.md` owns, one entry each: the rule's own statement f
 ## [Initiative, proposal, reprioritization](../authority_model.md#initiative-proposal-reprioritization)
 
 - **AU-20** — initiative approval is the checkpoint; what stops is a task, confirmed by the owner seat through the checkpoint and read back, proposing a grant capability; a budget attenuates, consumption is derived, and what is metered is per class on the policy; credit is a read model *[M (51 to 54 ruled 2026-09-06 — `authority_model.md#initiative-proposal-reprioritization`)]*
+
+## [What the credential binding carries, and what a check reads to resolve a credential to a principal](../authority_model.md#what-the-credential-binding-carries-and-what-a-check-reads-to-resolve-a-credential-to-a-principal)
+
+- **AU-29** — (decisions 107–109): `acts_as` is traversal-only, agent → operator exactly; it carries no presented value; agent → agent uses `delegation_edge`; an operator never sources acts-as *[M — removing the presentation-kind exclusion or either endpoint check turns this row red]*
