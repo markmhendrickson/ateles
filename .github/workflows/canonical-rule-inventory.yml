@@ -66,6 +66,7 @@ jobs:
         with:
           name: canonical-rule-inventory-inputs
           path: candidate-inputs
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
 

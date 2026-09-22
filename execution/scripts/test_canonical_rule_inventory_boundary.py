@@ -102,6 +102,33 @@ def verify_privileged_boundary(workflow: str) -> None:
         )
 
 
+def verify_candidate_artifact_transfer(workflow: str) -> None:
+    """The curated data tree must cross the artifact boundary intact.
+
+    ``actions/upload-artifact`` excludes hidden files unless callers opt in.
+    Both the manifest that binds the candidate tree and the ``.claude`` rule
+    stores are hidden, so omitting this setting makes every real measurement
+    incomplete even though the packer and validator are individually sound.
+    """
+
+    candidate = job_blocks(workflow)["candidate-inputs"]
+    upload_match = re.search(
+        r"uses:\s*actions/upload-artifact@v4\s*\n"
+        r"\s+with:\s*\n(?P<with>(?:\s{10,}[^\n]*\n?)*)",
+        candidate,
+    )
+    if upload_match is None:
+        raise AssertionError("candidate input artifact upload step is missing")
+    upload_with = upload_match.group("with")
+    if not re.search(r"^\s+path:\s*candidate-inputs\s*$", upload_with, re.M):
+        raise AssertionError("artifact upload is not limited to the curated data tree")
+    hidden_setting = re.search(
+        r"^\s+include-hidden-files:\s*([^\s#]+)", upload_with, re.M
+    )
+    if hidden_setting is None or hidden_setting.group(1).lower() != "true":
+        raise AssertionError("candidate artifact upload excludes hidden inputs")
+
+
 def make_source(root: Path) -> None:
     for relative in sorted(inputs.EXACT_INPUTS):
         path = root / relative
@@ -117,7 +144,24 @@ def make_source(root: Path) -> None:
 
 class WorkflowBoundaryTest(unittest.TestCase):
     def test_real_workflow_has_trusted_code_candidate_data_boundary(self) -> None:
-        verify_privileged_boundary(WORKFLOW.read_text(encoding="utf-8"))
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        verify_privileged_boundary(workflow)
+        verify_candidate_artifact_transfer(workflow)
+
+    def test_candidate_artifact_upload_fails_closed_without_hidden_inputs(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        with self.assertRaisesRegex(AssertionError, "excludes hidden inputs"):
+            verify_candidate_artifact_transfer(
+                workflow.replace("          include-hidden-files: true\n", "", 1)
+            )
+        with self.assertRaisesRegex(AssertionError, "excludes hidden inputs"):
+            verify_candidate_artifact_transfer(
+                workflow.replace(
+                    "          include-hidden-files: true",
+                    "          include-hidden-files: false",
+                    1,
+                )
+            )
 
     def test_planted_candidate_execution_after_checkout_is_rejected(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -153,6 +197,14 @@ class CandidateDataPackerTest(unittest.TestCase):
             make_source(source)
             inputs.package_inputs(source, destination)
             inputs.validate_inputs(destination)
+            packaged = {
+                path.relative_to(destination).as_posix()
+                for path in destination.rglob("*")
+                if path.is_file()
+            }
+            self.assertIn(inputs.MANIFEST, packaged)
+            self.assertIn(".claude/skills/example/SKILL.md", packaged)
+            self.assertIn(".claude/hooks/example.py", packaged)
 
     def test_changed_data_after_packaging_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
