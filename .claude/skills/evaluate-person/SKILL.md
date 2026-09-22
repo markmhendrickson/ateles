@@ -69,14 +69,44 @@ READ:  operator instance + any client instance + Gmail + Slack + Drive + calenda
 WRITE: operator instance ONLY
 ```
 
-Before the first write of the run, state which instance you are writing to and
-confirm it is the operator's. In a session with more than one Neotoma MCP server
-configured, the tool prefix is the only thing distinguishing them — check it, do
-not assume the default is the operator's.
+Before the first write of the run, **probe the write target and assert what it
+actually is**. The tool prefix is a name, and a name is not a behaviour.
 
-**Test:** name the MCP tool prefix used for every write in the run summary. If any
-write used a client prefix, the run is void — the entity must be deleted from the
-client instance and re-created on the operator's.
+This is the same "prove the instrument" discipline §3.1 demands for counts,
+applied to the single most consequential decision in the skill — and it is here
+because the weaker nominal check failed in exactly the way §3.1 exists to
+prevent. On 2026-09-22 `mcp__mcpsrv_neotoma__*` **was** the operator's prefix,
+so a prefix check passed, and `get_authenticated_user` on that same prefix
+returned `storage_backend: "local"` with `sqlite_db:
+/Users/.../data/neotoma.db` — a local SQLite database holding 6 rendered pages
+while the operator's hosted instance held 285. The prefix, the MCP server name,
+the wrapper filename and `NEOTOMA_ENV=production` all said hosted prod; the
+running `neotoma mcp proxy` had been launched without `--downstream-url` and
+fell back to `http://localhost:3080`. Nothing nominal could have revealed that,
+and the run wrote the evaluation where the operator would never look —
+`publish_rendered_page` then returned "rendered_page not found" for an entity
+the hosted REST API served correctly, because the two were different stores.
+
+Procedure, before the first write:
+
+1. Call `get_authenticated_user` (or equivalent) **through the same channel the
+   writes will use**. A probe through a different channel proves nothing about
+   this one.
+2. Assert the returned **storage backend and origin** are the intended instance:
+   `scripts/instance_check.py assert --prefix <p> --intended-origin <url>
+   --probe-json -`.
+3. **If the assertion fails, the run aborts.** Do not write anywhere — not a
+   draft, not a note. A wrong write must afterwards be found and deleted, which
+   is strictly worse than not having started.
+4. Name the **observed** store in the run summary, not the prefix.
+
+An unreadable probe is a failed assertion, not a passing one: a check that
+cannot tell hosted from local is the defect, not a mitigation of it.
+
+**Test:** the run summary names the probed storage backend/origin, and
+`instance_check.py summary` exits zero. If any write used a client prefix, the
+run is void — the entity must be deleted from the client instance and re-created
+on the operator's.
 
 ### 0.2 RGPD Art. 6(1)(f) — this is people-data processing
 
@@ -178,6 +208,41 @@ and confirming it says what the row claims. Record which three.
 **Test:** any evaluation finding must name the expectation row it is measured
 against, and the finding's date must fall inside that row's window. A finding
 that cannot cite a row is an impression and moves to §1.4.
+
+#### 1.3.1 The counterpart table — what the SUBJECT was owed
+
+**Build this at the same time as the expectation table, not afterwards.** An
+expectation table lists what the subject owed. Whether she could meet it almost
+always depended on things she was owed back — an answer, a sign-off, a price, a
+correction of a misunderstanding. Sweep for those explicitly, because no other
+guard in this skill will catch their absence.
+
+| # | What the subject was owed | Owed by | Requested | In force from | To | Delivered | What its absence blocked |
+|---|---|---|---|---|---|---|---|
+
+This is the one gap that passes every other check. §4.3's direction tripwire
+counts corrections to **subject-authored** citations only, so a one-sided
+expectation table never trips it — a run can be materially unfair and clean.
+
+In the dogfood run three owed-to-subject items were decisive: a reference price
+range owed by the CEO, open about six weeks, gating four named leads and every
+referral handoff; a website sign-off owed by two people, requested with a
+24-hour ask, blocking her outreach while outstanding; and a two-month
+misunderstanding about whether she could pull the operator and the CEO into
+conversations, uncorrected until late August and the single largest identified
+cause of the pipeline shortfall. Without the first, the unsent-work finding
+reads as pure negligence. A run that followed this skill literally — build the
+subject-expectation table, test the subject against it — would have produced a
+materially harsher and less accurate evaluation **and passed every check in the
+skill.**
+
+`scripts/reciprocity_check.py owed` records these rows and
+`reciprocity_check.py check` gates on them at §3.3.
+
+**Test:** the counterpart sweep ran and its result is recorded — including when
+the result is "nothing was owed". That is a legitimate answer; not having looked
+is not, and "nothing was owed" is a claim about your sweep before it is a claim
+about the operator, so it names the surfaces searched (§2.3).
 
 ### 1.4 Register the operator's own impressions, separately, up front
 
@@ -283,20 +348,66 @@ Every query is a claim about your tooling before it is a claim about the world.
 The motivating session took Neotoma field counts **before a schema migration** and
 concluded from them.
 
-**No zero, and no surprisingly-low count, is reportable until the query that
-produced it has returned non-zero on a case known to be positive.**
+**No count is reportable until the query that produced it has returned non-zero
+on a case known to be positive — in the same invocation that produced the
+count.**
+
+Three separate requirements, and the last two were added because the first alone
+proved satisfiable by a run that proved nothing:
 
 Procedure, per query:
 
 1. Name a **known-positive case** — an item you have already seen with your own
    eyes that this query must match. Not a hypothetical.
-2. Run the query scoped to that case. It must return the case.
+2. Run the query scoped to that case **in the same run as the count**. It must
+   return the case.
 3. If it does not, the instrument is broken. Fix it and restart the count. Do not
    report the number.
-4. Record the query, the known-positive case, and the result in the instrument log.
+4. Record the run, its anchors and their observed counts, the population
+   searched, and the query in the instrument log.
 
-`scripts/instrument_log.py` records these and refuses to emit a zero that has no
-passing anchor. Every count reaching the page must have a log entry.
+#### 3.1.1 Same run, or it is not an anchor
+
+An anchor proven once and cited for a later count says nothing about the run
+that emitted that count. Four background scans ran in the dogfood; **two were
+broken, and they failed in opposite directions.**
+
+- One reported a name **absent**. Right answer, zero evidence: its input file
+  list was deleted mid-run, so every lookup after the first read a missing path
+  and returned 0. The only thing that exposed it was that the **anchor names
+  collapsed to 0 in the same execution**. Against a true negative it was
+  indistinguishable.
+- One reported the same name present in **all 414 files searched**, and another
+  name **513 times against 414 files**. Wrong answer: `grep -lic | wc -l` emits
+  a line per file including zero-match files, so it counted the file population
+  rather than the matches.
+
+The structural tell on the second was **a match count exceeding the population**
+— impossible by construction. Not that any individual row looked wrong: the
+plausible rows were equally void, because the instrument producing them was
+counting the wrong thing.
+
+#### 3.1.2 The anchor guards every number, not just zeros
+
+D16 was filed as a rule about zeros and the completed evidence widened it. **A
+non-zero is exactly as capable of being fabricated as a zero, and a confident
+wrong non-zero is more likely to be believed.** Two of four runs were wrong;
+without same-run anchors either could have shipped as fact, and the two
+supported opposite findings with equal apparent confidence.
+
+So every count carries a run id, and `instrument_log.py check` refuses:
+
+- a count with no run, or citing a run with no anchor block;
+- a run whose anchors **all** came back zero — the instrument saw nothing it was
+  proven to see, so every number from it is a measurement of the instrument;
+- a run whose anchor count **exceeds the population searched** — void including
+  its plausible rows.
+
+A zero additionally needs one of the §3.2 hazards named as ruled out: a
+well-formed query against an undeclared field returns a true zero.
+
+`scripts/instrument_log.py` records these. Every count reaching the page must
+have a log entry and a live anchor from its own run.
 
 ### 3.2 The four instrument failures to check for by name
 
@@ -316,7 +427,8 @@ Each is live in this stack and each produced a wrong number:
   zero that is an artifact of naming. Enumerate the variants before counting.
 
 **Test:** for every count in the page, the instrument log shows a query, a
-known-positive anchor, and a pass. `instrument_log.py --check` fails otherwise.
+same-run known-positive anchor that came back non-zero, and a pass.
+`instrument_log.py check` fails otherwise.
 
 ### 3.3 Review the corpus against the expectations
 
@@ -329,6 +441,7 @@ window and reach a finding:
 | `verdict` | `met`, `partially met`, `not met`, `insufficient evidence` |
 | `evidence` | Citations. Each resolvable. |
 | `counter_evidence` | Material cutting the other way. **Mandatory field** — if empty, say you looked and found none. |
+| `counterpart_account` | What the subject was owed in the same window, by whom, whether it arrived. **Mandatory on every `not met` and `partially met`** — see below. |
 | `confidence` | With what would raise it |
 
 `insufficient evidence` is a real verdict and must be used rather than rounded to
@@ -338,6 +451,23 @@ failure by the subject.
 **The counter-evidence field is not optional.** A finding with an empty
 counter-evidence field and no statement that it was searched for is incomplete.
 This is the cheapest available guard against motivated reading.
+
+**Every shortfall verdict states what the subject was owed in the same window.**
+`not met` and `partially met` are claims against a person, and a claim against a
+person who was waiting on an input she never got is a claim about the wrong
+party. So each one carries its `counterpart_account` from the §1.3.1 table:
+which counterpart obligations were in force, whether they were delivered, and
+how the verdict accounts for them. Naming an unmet dependency and then scoring
+the subject as if it had been met is the same failure with extra steps.
+
+Where the counterpart sweep genuinely found nothing owed, record that, naming
+the surfaces swept. `met` and `insufficient evidence` are exempt — neither
+asserts a shortfall.
+
+**Test:** `reciprocity_check.py check` exits zero before rendering. It fails a
+shortfall verdict with no counterpart account, a counterpart item cited with no
+`owed` row behind it, and — the case that actually bites — an undelivered
+obligation recorded in the window that the finding does not mention.
 
 ---
 
@@ -366,13 +496,24 @@ finds complaint.
 For **every** citation in the evaluation drawn from material the subject wrote,
 answer these four in writing before the citation may stand:
 
-1. **Who wrote it?** Confirmed from the artifact's own metadata — sender field,
-   file owner, message author — not inferred from content or from where it sits.
+1. **Who SENT it, and who AUTHORED it?** The sender is confirmed from the
+   artifact's own metadata — sender field, file owner, message author — never
+   inferred from content or from where it sits. **Authorship is a separate
+   question, and metadata cannot answer it.** Where the text is machine output
+   the subject relayed — agent output pasted into her channel, a model's
+   diagnosis read aloud while screen-sharing, a generated report forwarded
+   without comment — the metadata says her and the reasoning is not hers.
+   Content inference is the *only* way to catch that, so it is required here
+   rather than forbidden. Name what shows the text is machine-authored.
 2. **What genre is it?** A self-accounting (task list, status update, personal
    notes, a log of one's own commitments), a communication to the operator, a
-   communication to a third party, or a record of someone else's words. **A
-   personal to-do list is a self-accounting, and its default reading is what the
-   author owes — not what the author is owed.**
+   communication to a third party, a record of someone else's words, or
+   **relayed machine output**. **A personal to-do list is a self-accounting, and
+   its default reading is what the author owes — not what the author is owed.**
+   **Relayed machine output is never the subject's own reasoning or her own
+   commitment** — it cannot support a finding against her, and an obligation
+   appearing in it is not one she took on. Cite her own words adopting it, or
+   downgrade the citation to context.
 3. **Who does each named obligation run to and from?** For every item naming a
    person: is that person the one who owes it, or the one it is owed to? A name
    beside a task is ambiguous by construction — it can mean assignee, requester,
@@ -382,6 +523,39 @@ answer these four in writing before the citation may stand:
    inverted reading out. Name the artifact that would settle it. If nothing
    available settles it, the citation is **ambiguous** and cannot support a
    finding — downgrade it to context or drop it.
+5. **How well sourced is the underlying fact?** Grade it `first-hand-documented`
+   (the artifact *is* the fact — a signed PDF, a commit, a transaction record),
+   `corroborated` (a report, independently confirmed — name what confirms it),
+   `single-verbal-report` (someone said it and it was written down), or
+   `unsourced`. **Genre reliability and sourcing reliability are different
+   axes**, and confusing them is how a reliable format launders an unreliable
+   claim. See §4.2.1.
+
+#### 4.2.1 A trustworthy format is not a trustworthy fact
+
+Questions 1–4 are all about authorship and obligation direction. A citation can
+pass every one of them and still be one person's unrecorded say-so.
+
+Live case: "PROPOSAL AND NDA SIGNED" sits in a written Google Sheet. Because it
+is written rather than transcribed, the ASR hazard — "NDA" is usually a
+mistranscription of a similar-sounding product name — does not apply at all; the
+word is certainly the word. All four questions pass. And the Neotoma record of
+the same fact grades it: not corroborated by any document on the instance. It is
+one person's verbal claim, faithfully written down.
+
+**A written artifact is a reliable record of WHAT WAS SAID. It is no evidence
+whatsoever that the thing said is true.** So:
+
+- A claim traceable to a single verbal report is **not corroborated**, however
+  high-trust the format carrying it.
+- **A finding resting on one must say so in its own text**, at the point of the
+  finding — not in a methods appendix. "Reported signed (single verbal report,
+  2026-09-17; no countersigned document located on the instance)" is the shape.
+- Corroboration means an **independent** artifact. The same claim restated by
+  the same person in a second place is one report, not two.
+
+`attribution_check.py` records the sourcing grade alongside the genre and
+refuses a weakly-sourced citation that the finding does not disclose as such.
 
 ### 4.3 The direction test — the systematic-bias tripwire
 
@@ -465,9 +639,33 @@ findings and link the `rendered_page` to it with `REFERS_TO`. Link the evaluatio
 `REFERS_TO` the subject's `contact` entity. Use `strict: true` on the store —
 thin schemas merge heuristically on name collision (`rendered-pages` §8).
 
-**Read back every write** and assert the field you wrote is present with the value
-you wrote. A 2xx is not evidence. Undeclared fields accept writes and read back
-empty.
+**Register the schema first. `evaluation` is not a built-in type.**
+
+This step used to mandate the store without shipping a schema, which made it an
+instruction to trigger the bug the skill warns about two paragraphs down:
+`describe_entity_type('evaluation')` errors on a fresh instance, `/store` accepts
+undeclared fields and routes every one of them to `raw_fragments`, and the
+entity reads back empty. `strict: true` does not help — strict governs entity
+**matching**, not field **declaration**.
+
+So, in order:
+
+1. `describe_entity_type('evaluation')`. If it errors or returns no active
+   schema, register it from `references/evaluation_schema.json` — the declared
+   field list this skill writes against — and re-run `describe_entity_type` to
+   confirm it took.
+2. Store, writing only fields that appear in the schema. A field you need that
+   is not declared is a schema change, not a store argument.
+3. **Read the entity back and assert each field you wrote is present with the
+   value you wrote**, naming them individually. A 2xx is not evidence; neither
+   is `success: true`. Undeclared fields accept writes and read back empty, so
+   the read-back is the only thing that distinguishes a stored evaluation from a
+   discarded one.
+4. If any field reads back missing or empty, it was undeclared. Fix the schema
+   and re-store — do not proceed with a half-written entity.
+
+**Test:** the run summary names the fields asserted on read-back, and the
+`describe_entity_type` result that preceded the store.
 
 ---
 
