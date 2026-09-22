@@ -6,8 +6,8 @@ status: provisional
 source_entity_id: ent_c5f3ebd1800a887a3b405e53
 schema_entity_id: ent_73da44b2d434cbafe5d8ecb9
 observation_ids:
-  asset_inventory: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
-  completeness: 81fd6133-1813-51db-2243-4cbf0045a948
+  asset_inventory: f2284285-de83-5e06-dba8-614a6671f842
+  completeness: f0e1e060-3153-f2d8-6982-191fa0a92935
   downstream_contracts: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
   name: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
   ownership: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
@@ -235,7 +235,7 @@ observation_ids:
 
 ## Asset inventory
 
-- **APPROVED · Typographic Neotoma wordmark** (wordmark): Primary compact identity mark — `inspector/src/assets/neotoma_wordmark.svg`
+- **APPROVED · Typographic Neotoma wordmark** (wordmark): Primary compact identity mark — `execution/scripts/site_generator/assets/neotoma/neotoma-wordmark.svg`
 - **PROVISIONAL · Correction-propagation concept film** (cinematic): Clean provisional hero and later correction-capability section; not the complete graph-first identity — `execution/scripts/site_generator/assets/neotoma/hero-concept.webm`
 - **PROVISIONAL · Correction-propagation MP4 fallback** (cinematic): Fallback encode for provisional film — `execution/scripts/site_generator/assets/neotoma/hero-concept.mp4`
 - **PROVISIONAL · Correction-propagation poster** (poster): Static and reduced-motion fallback for provisional film — `execution/scripts/site_generator/assets/neotoma/hero-concept.avif`
@@ -463,7 +463,6 @@ Overall: **PROVISIONAL**
 ### Missing
 
 - Graph-first cinematic hero and section master set
-- Repo-local public wordmark mirror or explicit cross-repo asset contract
 - Complete foundation-viewer asset production
 - Canonical clear-space and digital/print minimum-size measurements for the Neotoma wordmark
 - Approved symbol-only, lockup, horizontal, stacked, favicon and co-branding Neotoma assets

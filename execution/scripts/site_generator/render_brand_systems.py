@@ -24,6 +24,7 @@ DOC_DIR = REPO_ROOT / "docs" / "brand"
 
 sys.path.insert(0, str(REPO_ROOT / "execution" / "scripts"))
 from neotoma_mirror_lib import load_env, request, unwrap_snapshot  # noqa: E402
+from url_policy import local_asset_url, public_href  # noqa: E402
 
 SCHEMA_ENTITY_ID = "ent_73da44b2d434cbafe5d8ecb9"
 DEFAULT_GUIDELINE_ENTITY_IDS = {
@@ -317,6 +318,11 @@ def validate_brand_system(data: dict, schema: dict | None = None) -> None:
     research = provenance.get("research") or {}
     if not research.get("reviewed_at") or not research.get("sources"):
         raise BrandSystemError("research provenance is incomplete")
+    for source in research.get("sources") or []:
+        if not public_href(source.get("url")):
+            raise BrandSystemError(
+                f"research source {source.get('label')!r} has an unsafe URL"
+            )
     cadence = research.get("review_cadence") or {}
     if not cadence.get("cadence") or cadence.get("status") not in ALLOWED_STATUSES:
         raise BrandSystemError("research review cadence is incomplete")
@@ -365,6 +371,13 @@ def validate_brand_system(data: dict, schema: dict | None = None) -> None:
             raise BrandSystemError(
                 f"public market reference {name!r} exposes an internal identifier"
             )
+        evidence_source = str(evidence.get("source") or "")
+        if evidence_source.startswith(
+            ("http:", "https:", "javascript:")
+        ) and not public_href(evidence_source):
+            raise BrandSystemError(
+                f"market reference {name!r} has an unsafe public evidence URL"
+            )
 
     matrix = provenance.get("differentiation_matrix") or {}
     rows = matrix.get("axes") or []
@@ -398,6 +411,14 @@ def validate_brand_system(data: dict, schema: dict | None = None) -> None:
                 raise BrandSystemError(
                     f"unrecognized item status for {item.get('name') or item.get('consumer')!r}"
                 )
+    for asset in data.get("asset_inventory") or []:
+        public_path = asset.get("public_path")
+        if public_path and not (
+            local_asset_url(public_path) or public_href(public_path)
+        ):
+            raise BrandSystemError(
+                f"brand asset {asset.get('name')!r} has an unsafe public path"
+            )
 
     flattened = json.dumps(data, sort_keys=True).casefold()
     if data["slug"] == "ateles":
