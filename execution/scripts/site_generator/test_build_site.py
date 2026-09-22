@@ -929,6 +929,10 @@ def test_generated_html_shows_product_motifs(tmp_path):
         "history",
     ):
         assert motif.casefold() in neotoma.casefold(), motif
+    # These exact source-backed cues are part of the signed acceptance contract;
+    # near-synonyms must not make the effect test pass.
+    for motif in ("supersession", "REFRESH", "effective time"):
+        assert motif.casefold() in neotoma.casefold(), motif
 
     # Durable organizational cues: Ateles must read as roles coordinating
     # through bounded, temporary handoffs rather than as a persistent graph.
