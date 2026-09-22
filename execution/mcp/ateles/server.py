@@ -32,8 +32,9 @@ Environment (see README.md for the full operator-provisioning table):
                              APIS_GITHUB_TOKEN / GH_TOKEN)
   SWARM_ROSTER_KEY          (default: default)
   APIS_CHECKPOINT_REQUIRED_APPROVER_SUB
-                            (default: ateles@ateles-swarm; its AAuth key must be
-                             available through ATELES_PRIVATE_KEYS_DIR)
+                            (default: ateles@ateles-swarm)
+  APIS_CHECKPOINT_REQUIRED_APPROVER_JKT
+                            (required RFC 7638 key thumbprint; no default)
 
 Transport: stdio (launched by Claude Code as an MCP server subprocess).
 """
@@ -41,6 +42,8 @@ Transport: stdio (launched by Claude Code as an MCP server subprocess).
 from __future__ import annotations
 
 import asyncio
+import base64
+import hmac
 import inspect
 import json
 import logging
@@ -48,10 +51,12 @@ import os
 import re
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from mcp.server import Server
@@ -103,6 +108,20 @@ AGENT_POLICY_OVERRIDES: dict[str, str] = {
         "MONEDULA_POLICY_ID", "ent_c7f81385afbd993db3dd11ff"
     ),
 }
+
+CHECKPOINT_RESOLVER_ISSUER = os.environ.get(
+    "APIS_CHECKPOINT_REQUIRED_APPROVER_ISS", "https://markmhendrickson.com"
+).strip()
+_CHECKPOINT_RESOLUTION_MAX_TTL_SECONDS = 300
+_RESOLVER_SIGNATURE_HEADERS = frozenset(
+    {
+        "signature-key",
+        "signature-input",
+        "signature",
+        "content-digest",
+        "content-type",
+    }
+)
 
 SERVER_INSTRUCTIONS = """\
 You are connected to Ateles. Follow these operating rules:
@@ -162,6 +181,7 @@ def _request(
     *,
     params: dict | None = None,
     body: dict | None = None,
+    encoded_body: bytes | None = None,
     extra_headers: dict[str, str] | None = None,
 ) -> dict | None:
     if not NEOTOMA_BEARER_TOKEN:
@@ -174,13 +194,19 @@ def _request(
         headers = _headers()
         if extra_headers:
             headers.update(extra_headers)
+        request_kwargs: dict[str, Any] = {
+            "headers": headers,
+            "params": params,
+            "timeout": 15,
+        }
+        if encoded_body is not None:
+            request_kwargs["content"] = encoded_body
+        else:
+            request_kwargs["json"] = body
         resp = httpx.request(
             method,
             f"{NEOTOMA_BASE_URL}{path}",
-            headers=headers,
-            params=params,
-            json=body,
-            timeout=15,
+            **request_kwargs,
         )
         resp.raise_for_status()
         _clear_transport_error()
@@ -205,9 +231,19 @@ def _get(path: str, params: dict | None = None) -> dict | None:
 
 
 def _post(
-    path: str, body: dict, *, extra_headers: dict[str, str] | None = None
+    path: str,
+    body: dict,
+    *,
+    extra_headers: dict[str, str] | None = None,
+    encoded_body: bytes | None = None,
 ) -> dict | None:
-    return _request("POST", path, body=body, extra_headers=extra_headers)
+    return _request(
+        "POST",
+        path,
+        body=body,
+        encoded_body=encoded_body,
+        extra_headers=extra_headers,
+    )
 
 
 def _retrieve_page(
@@ -286,6 +322,43 @@ def _snapshot_of(entity: dict) -> dict:
     return snapshot
 
 
+def _correction_body(
+    entity_id: str,
+    entity_type: str,
+    field: str,
+    value: Any,
+    idem_key: str,
+) -> dict[str, Any]:
+    return {
+        "entity_id": entity_id,
+        "entity_type": entity_type,
+        "field": field,
+        "value": value,
+        "idempotency_key": idem_key,
+    }
+
+
+def _canonical_body_bytes(body: dict[str, Any]) -> bytes:
+    from lib.daemon_runtime.checkpoint_protocol import canonical_json_bytes
+
+    return canonical_json_bytes(body)
+
+
+def _resolver_headers(value: object) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    headers = {
+        str(key).strip().lower(): str(header_value).strip()
+        for key, header_value in value.items()
+        if isinstance(key, str) and isinstance(header_value, str)
+    }
+    if set(headers) != _RESOLVER_SIGNATURE_HEADERS or any(
+        not headers[name] for name in _RESOLVER_SIGNATURE_HEADERS
+    ):
+        return None
+    return headers
+
+
 def _correct(
     entity_id: str,
     entity_type: str,
@@ -293,49 +366,176 @@ def _correct(
     value: Any,
     idem_key: str,
     *,
-    required_principal_sub: str | None = None,
+    resolver_aauth_headers: dict[str, str] | None = None,
 ) -> bool:
-    body = {
-        "entity_id": entity_id,
-        "entity_type": entity_type,
-        "field": field,
-        "value": value,
-        "idempotency_key": idem_key,
-    }
+    body = _correction_body(entity_id, entity_type, field, value, idem_key)
+    encoded_body: bytes | None = None
     signed_headers: dict[str, str] | None = None
-    if required_principal_sub is not None:
-        required_sub = str(required_principal_sub).strip()
-        if not required_sub or "@" not in required_sub:
+    if resolver_aauth_headers is not None:
+        signed_headers = _resolver_headers(resolver_aauth_headers)
+        if signed_headers is None:
             return False
-        from lib.daemon_runtime.aauth_signer import AAuthSigner
-
-        signer_name = required_sub.split("@", 1)[0]
-        signer = AAuthSigner.from_key_file(signer_name)
-        if signer.is_stub or signer.sub != required_sub:
-            log.error(
-                "checkpoint resolution signer unavailable or mismatched "
-                "(required=%s actual=%s)",
-                required_sub,
-                signer.sub,
-            )
-            return False
-        signed_headers = signer.headers("POST", "/correct")
-        if not signed_headers.get("X-AAuth-Token"):
-            log.error(
-                "checkpoint resolution signer produced no authenticated token "
-                "for %s",
-                required_sub,
-            )
-            return False
-    result = _post("/correct", body, extra_headers=signed_headers)
+        # Preserve the exact canonical bytes the caller signed. Neotoma's
+        # RFC 9421 verifier authenticates the body again before /correct runs.
+        encoded_body = _canonical_body_bytes(body)
+    result = _post(
+        "/correct",
+        body,
+        extra_headers=signed_headers,
+        encoded_body=encoded_body,
+    )
     return result is not None
 
 
-def _checkpoint_required_approver_sub() -> str:
-    """Read the same approver principal embedded by the checkpoint producer."""
-    from lib.daemon_runtime.gating import CHECKPOINT_REQUIRED_APPROVER_SUB
+def _checkpoint_resolver_authority(
+    checkpoint_id: str, checkpoint_record: dict
+) -> tuple[str, str, str] | None:
+    """Return the authenticated resolver subject, key pin, and tenant."""
+    from lib.daemon_runtime.gating import read_authenticated_checkpoint_authorization
 
-    return CHECKPOINT_REQUIRED_APPROVER_SUB
+    authority = read_authenticated_checkpoint_authorization(
+        checkpoint_id, checkpoint_record
+    )
+    if not isinstance(authority, dict):
+        return None
+    required_sub = str(authority.get("required_approver_sub") or "").strip()
+    required_jkt = str(authority.get("required_approver_jkt") or "").strip()
+    tenant_id = str(authority.get("user_id") or "").strip()
+    snapshot_tenant = str(_snapshot_of(checkpoint_record).get("user_id") or "").strip()
+    if (
+        not required_sub
+        or "@" not in required_sub
+        or not re.fullmatch(r"[A-Za-z0-9_-]{43}", required_jkt)
+        or not tenant_id
+        or snapshot_tenant != tenant_id
+    ):
+        return None
+    return required_sub, required_jkt, tenant_id
+
+
+def _authenticate_checkpoint_resolver(
+    resolver_aauth_headers: object,
+    *,
+    body: bytes,
+    required_principal_sub: str,
+    required_principal_jkt: str,
+) -> dict | None:
+    """Verify the caller's body-bound RFC 9421 request before forwarding it.
+
+    The authority pins both subject and RFC 7638 thumbprint. A self-generated
+    key that merely claims the required subject is therefore rejected. The
+    same headers are forwarded to Neotoma, which independently verifies them
+    and persists the authenticated identity on the immutable observation.
+    """
+    headers = _resolver_headers(resolver_aauth_headers)
+    required_sub = str(required_principal_sub or "").strip()
+    required_jkt = str(required_principal_jkt or "").strip()
+    if (
+        headers is None
+        or not body
+        or not required_sub
+        or not re.fullmatch(r"[A-Za-z0-9_-]{43}", required_jkt)
+        or not CHECKPOINT_RESOLVER_ISSUER
+    ):
+        return None
+    try:
+        import jwt
+
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+        from lib.daemon_runtime.aauth_httpsig import content_digest, jwk_thumbprint
+
+        key_match = re.fullmatch(r'aasig=jwt;jwt="([^"\s]+)"', headers["signature-key"])
+        input_match = re.fullmatch(
+            r'aasig=\("@method" "@authority" "@path" "content-type" '
+            r'"content-digest" "signature-key"\);created=(\d+)',
+            headers["signature-input"],
+        )
+        signature_match = re.fullmatch(
+            r"aasig=:([A-Za-z0-9+/]+={0,2}):", headers["signature"]
+        )
+        if not key_match or not input_match or not signature_match:
+            return None
+        token = key_match.group(1)
+        created = int(input_match.group(1))
+        now = int(time.time())
+        if created > now + 30 or now - created > _CHECKPOINT_RESOLUTION_MAX_TTL_SECONDS:
+            return None
+        expected_digest = content_digest(body)
+        if headers["content-type"] != "application/json" or not hmac.compare_digest(
+            headers["content-digest"], expected_digest
+        ):
+            return None
+
+        header = jwt.get_unverified_header(token)
+        unverified = jwt.decode(token, options={"verify_signature": False})
+        cnf = unverified.get("cnf")
+        public_jwk = cnf.get("jwk") if isinstance(cnf, dict) else None
+        if header.get("typ") != "aa-agent+jwt" or not isinstance(public_jwk, dict):
+            return None
+        key = jwt.PyJWK.from_dict(public_jwk).key
+        claims = jwt.decode(
+            token,
+            key,
+            algorithms=["ES256"],
+            issuer=CHECKPOINT_RESOLVER_ISSUER,
+            options={
+                "require": [
+                    "sub",
+                    "iss",
+                    "iat",
+                    "exp",
+                    "jkt",
+                    "cnf",
+                ]
+            },
+        )
+        issued_at = int(claims["iat"])
+        expires_at = int(claims["exp"])
+        if (
+            issued_at > now + 30
+            or expires_at - issued_at > _CHECKPOINT_RESOLUTION_MAX_TTL_SECONDS
+            or issued_at != created
+        ):
+            return None
+        actual_jkt = jwk_thumbprint(public_jwk)
+        if claims.get("jkt") != actual_jkt or actual_jkt != required_jkt:
+            return None
+        if str(claims.get("sub") or "").strip() != required_sub:
+            return None
+
+        target = urlsplit(f"{NEOTOMA_BASE_URL.rstrip('/')}/correct")
+        signature_params = headers["signature-input"].split("=", 1)[1]
+        signature_base = "\n".join(
+            (
+                '"@method": POST',
+                f'"@authority": {target.netloc}',
+                f'"@path": {target.path or "/"}',
+                f'"content-type": {headers["content-type"]}',
+                f'"content-digest": {headers["content-digest"]}',
+                f'"signature-key": {headers["signature-key"]}',
+                f'"@signature-params": {signature_params}',
+            )
+        ).encode("utf-8")
+        raw_signature = base64.b64decode(signature_match.group(1), validate=True)
+        if len(raw_signature) != 64:
+            return None
+        r = int.from_bytes(raw_signature[:32], "big")
+        s = int.from_bytes(raw_signature[32:], "big")
+        key.verify(
+            encode_dss_signature(r, s),
+            signature_base,
+            ec.ECDSA(hashes.SHA256()),
+        )
+        return claims
+    except Exception as exc:  # noqa: BLE001 — invalid auth always denies
+        log.warning(
+            "checkpoint resolver authentication failed for required principal %s: %s",
+            required_sub,
+            type(exc).__name__,
+        )
+        return None
 
 
 # Tie-break order for equal-length keyword matches, most specific first.
@@ -788,7 +988,11 @@ async def _await_release_acceptance(checkpoint_id: str, snapshot: dict) -> bool:
     return await asyncio.shield(task)
 
 
-async def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
+async def _resolve_checkpoint(
+    checkpoint_id: str,
+    action: str,
+    resolver_aauth_headers: dict[str, str] | None = None,
+) -> dict:
     action_lower = action.strip().lower()
     if action_lower not in ("approve", "reject"):
         return {"error": f"action must be 'approve' or 'reject', got '{action}'"}
@@ -817,34 +1021,103 @@ async def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
             "checkpoint_id": checkpoint_id,
         }
 
+    headers = _resolver_headers(resolver_aauth_headers)
+    if headers is None:
+        return {
+            "error": "authenticated resolver RFC 9421 headers are required",
+            "checkpoint_id": checkpoint_id,
+        }
+    resolver_authority = _checkpoint_resolver_authority(checkpoint_id, data)
+    if resolver_authority is None:
+        return {
+            "error": "checkpoint has no authenticated required-resolver authority",
+            "checkpoint_id": checkpoint_id,
+        }
+    required_principal_sub, required_principal_jkt, checkpoint_user_id = (
+        resolver_authority
+    )
     new_status = "approved" if action_lower == "approve" else "rejected"
     idem_key = f"resolve-checkpoint-{checkpoint_id}-{new_status}"
+    from lib.daemon_runtime.checkpoint_protocol import checkpoint_resolution_body
 
-    required_principal_sub = (
-        _checkpoint_required_approver_sub() if action_lower == "approve" else None
+    correction_body = checkpoint_resolution_body(checkpoint_id, action_lower)
+    resolver = _authenticate_checkpoint_resolver(
+        headers,
+        body=_canonical_body_bytes(correction_body),
+        required_principal_sub=required_principal_sub,
+        required_principal_jkt=required_principal_jkt,
     )
+    if resolver is None:
+        return {
+            "error": "resolver authentication is missing, invalid, or mismatched",
+            "checkpoint_id": checkpoint_id,
+        }
+
     ok = _correct(
         checkpoint_id,
         "checkpoint_brief",
         "status",
         new_status,
         idem_key,
-        required_principal_sub=required_principal_sub,
+        resolver_aauth_headers=headers,
     )
     if not ok:
         return {"error": "failed to correct checkpoint status in Neotoma"}
 
-    task_id = snap.get("task_entity_id")
-    if action_lower == "reject" and task_id:
-        _correct(task_id, "task", "status", "declined", f"decline-swarm-harness-{task_id}")
+    resolved_data = _get(f"/entities/{checkpoint_id}")
+    resolved_snap = _snapshot_of(resolved_data or {})
+    authenticated_resolution = None
+    if resolved_data is not None and _entity_type_of(resolved_data) == "checkpoint_brief":
+        from lib.daemon_runtime.gating import read_authenticated_checkpoint_resolution
 
-    action_taken = "rejected — task marked declined"
+        authenticated_resolution = read_authenticated_checkpoint_resolution(
+            checkpoint_id,
+            resolved_data,
+            required_approver_sub=required_principal_sub,
+            required_approver_jkt=required_principal_jkt,
+            expected_user_id=checkpoint_user_id,
+            expected_resolution=new_status,
+        )
+    if authenticated_resolution is None:
+        return {
+            "error": "checkpoint resolution attribution did not authenticate as the required resolver",
+            "checkpoint_id": checkpoint_id,
+        }
+
+    task_id = snap.get("task_entity_id")
+    action_taken = "rejected — task decline not confirmed by read-back"
+    if action_lower == "reject":
+        # The Apis consumer owns task decline as well as release. It verifies
+        # the immutable rejected observation against the same pinned resolver
+        # identity before changing the task, so no second, differently bound
+        # signature is needed for the task correction.
+        consumed = await _await_release_acceptance(checkpoint_id, resolved_snap)
+        consumed_data = _get(f"/entities/{checkpoint_id}")
+        consumed_snap = _snapshot_of(consumed_data or {})
+        task_data = _get(f"/entities/{task_id}") if task_id else None
+        task_snap = _snapshot_of(task_data or {})
+        stamp_confirmed = (
+            consumed_data is not None
+            and _entity_type_of(consumed_data) == "checkpoint_brief"
+            and (
+                consumed_snap.get("resolved_dispatched") is True
+                or str(consumed_snap.get("resolved_dispatched", "")).strip().lower()
+                in {"true", "1", "yes"}
+            )
+        )
+        if (
+            consumed
+            and stamp_confirmed
+            and task_data is not None
+            and _entity_type_of(task_data) == "task"
+            and str(task_snap.get("status") or "").strip().lower() == "declined"
+        ):
+            action_taken = "rejected — task marked declined"
+
     if action_lower == "approve":
         # Read the write back before releasing anything. The original defect
         # returned success after the correction request even when no consumer
         # had acted on the approved brief.
-        resolved_data = _get(f"/entities/{checkpoint_id}")
-        resolved_snap = _snapshot_of(resolved_data or {})
         released = False
         if (
             resolved_data is not None
@@ -1686,9 +1959,12 @@ TOOLS = [
         description=(
             "Approves or rejects a pending checkpoint_brief by entity ID. Validates "
             "that the checkpoint is awaiting_operator and has not already been "
-            "dispatched. Approval is AAuth-signed as the configured required "
-            "approver principal and releases only when that immutable attribution "
-            "reads back through the existing Apis consumer. operator_only approvals "
+            "dispatched. The caller must supply body-bound RFC 9421 AAuth headers "
+            "signed by the subject and key thumbprint pinned in the checkpoint "
+            "authority. The service forwards that proof without loading the "
+            "resolver's key, and acts only when immutable attribution reads back "
+            "as that exact identity. "
+            "operator_only approvals "
             "record the decision without dispatching an agent. On rejection, also marks the "
             "referenced task as declined."
         ),
@@ -1704,8 +1980,21 @@ TOOLS = [
                     "enum": ["approve", "reject"],
                     "description": "Whether to approve or reject the checkpoint.",
                 },
+                "resolver_aauth_headers": {
+                    "type": "object",
+                    "description": (
+                        "RFC 9421 headers from HttpSigSigner.sign_headers for the "
+                        "canonical POST /correct body described in the runbook."
+                    ),
+                    "properties": {
+                        name: {"type": "string"}
+                        for name in sorted(_RESOLVER_SIGNATURE_HEADERS)
+                    },
+                    "required": sorted(_RESOLVER_SIGNATURE_HEADERS),
+                    "additionalProperties": False,
+                },
             },
-            "required": ["checkpoint_id", "action"],
+            "required": ["checkpoint_id", "action", "resolver_aauth_headers"],
             "additionalProperties": False,
         },
     ),
@@ -1768,7 +2057,7 @@ TOOL_HANDLERS = {
         cursor=args.get("cursor"), limit=args.get("limit")
     ),
     "resolve_checkpoint": lambda args: _resolve_checkpoint(
-        args["checkpoint_id"], args["action"]
+        args["checkpoint_id"], args["action"], args.get("resolver_aauth_headers")
     ),
     "get_gate_status": lambda args: _get_gate_status(
         args["issue_ref"], int(args.get("history_limit", 5) or 5)

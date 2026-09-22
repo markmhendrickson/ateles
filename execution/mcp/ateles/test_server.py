@@ -17,7 +17,9 @@ Run: python execution/mcp/ateles/test_server.py
 from __future__ import annotations
 
 import asyncio
+import base64
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -28,6 +30,72 @@ sys.path.insert(0, str(_HERE))
 import httpx  # noqa: E402
 
 import server as srv  # noqa: E402
+
+
+_TEST_RESOLVER_JKT = "A" * 43
+_DUMMY_RESOLVER_HEADERS = {
+    "signature-key": "caller-proof",
+    "signature-input": "caller-proof",
+    "signature": "caller-proof",
+    "content-digest": "caller-proof",
+    "content-type": "application/json",
+}
+
+
+def _resolver_proof(
+    *,
+    sub: str = "ateles@ateles-swarm",
+    checkpoint_id: str = "ent_cp1",
+    action: str = "approve",
+    ttl_sec: int = 120,
+    now: int | None = None,
+) -> tuple[dict[str, str], str]:
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    from lib.daemon_runtime.aauth_httpsig import (
+        HttpSigSigner,
+        jwk_thumbprint,
+        public_part_of,
+    )
+
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    private_numbers = private_key.private_numbers()
+    numbers = private_numbers.public_numbers
+
+    def b64(value: int) -> str:
+        return base64.urlsafe_b64encode(value.to_bytes(32, "big")).rstrip(b"=").decode()
+
+    private_jwk = {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": b64(numbers.x),
+        "y": b64(numbers.y),
+        "d": b64(private_numbers.private_value),
+        "kid": "resolver-test-key",
+    }
+    status = "approved" if action == "approve" else "rejected"
+    body = srv._correction_body(
+        checkpoint_id,
+        "checkpoint_brief",
+        "status",
+        status,
+        f"resolve-checkpoint-{checkpoint_id}-{status}",
+    )
+    signer = HttpSigSigner(
+        private_jwk=private_jwk,
+        sub=sub,
+        iss=srv.CHECKPOINT_RESOLVER_ISSUER,
+        kid="resolver-test-key",
+        ttl_sec=ttl_sec,
+    )
+    headers = signer.sign_headers(
+        method="POST",
+        url=f"{srv.NEOTOMA_BASE_URL.rstrip('/')}/correct",
+        body=srv._canonical_body_bytes(body),
+        content_type="application/json",
+        now=now,
+    )
+    return headers, jwk_thumbprint(public_part_of(private_jwk))
 
 
 def _set_token(module, value: str) -> None:
@@ -327,6 +395,68 @@ class TestRouteTask(unittest.TestCase):
 
 class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
 
+    def setUp(self):
+        authority = patch(
+            "server._checkpoint_resolver_authority",
+            return_value=("ateles@ateles-swarm", _TEST_RESOLVER_JKT, "tenant-a"),
+        )
+        authenticated = patch(
+            "server._authenticate_checkpoint_resolver",
+            return_value={"sub": "ateles@ateles-swarm"},
+        )
+        readback = patch(
+            "lib.daemon_runtime.gating.read_authenticated_checkpoint_resolution",
+            return_value={"principal_sub": "ateles@ateles-swarm"},
+        )
+        authority.start()
+        authenticated.start()
+        readback.start()
+        self.addCleanup(authority.stop)
+        self.addCleanup(authenticated.stop)
+        self.addCleanup(readback.stop)
+
+    @patch("server._get")
+    async def test_missing_authenticated_resolver_context_cannot_resolve(
+        self, mock_get
+    ):
+        mock_get.return_value = {
+            "entity_type": "checkpoint_brief",
+            "snapshot": {
+                "status": "awaiting_operator",
+                "task_entity_id": "ent_task_1",
+            },
+        }
+
+        result = await srv._resolve_checkpoint(
+            "ent_cp1", "approve", resolver_aauth_headers={}
+        )
+
+        self.assertIn("error", result)
+        self.assertIn("authenticated resolver", result["error"])
+
+    @patch("server._correct")
+    @patch("server._get")
+    async def test_wrong_authenticated_resolver_cannot_write_resolution(
+        self, mock_get, mock_correct
+    ):
+        mock_get.return_value = {
+            "entity_type": "checkpoint_brief",
+            "snapshot": {
+                "status": "awaiting_operator",
+                "task_entity_id": "ent_task_1",
+            },
+        }
+        with patch(
+            "server._authenticate_checkpoint_resolver", return_value=None
+        ):
+            result = await srv._resolve_checkpoint(
+                "ent_cp1", "approve", resolver_aauth_headers=_DUMMY_RESOLVER_HEADERS
+            )
+
+        self.assertIn("error", result)
+        self.assertIn("mismatched", result["error"])
+        mock_correct.assert_not_called()
+
     async def test_invalid_action(self):
         result = await srv._resolve_checkpoint("ent_123", "maybe")
         self.assertIn("error", result)
@@ -345,7 +475,9 @@ class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
             "entity_type": "checkpoint_brief",
             "snapshot": {"status": "approved", "task_entity_id": "ent_task_1"},
         }
-        result = await srv._resolve_checkpoint("ent_cp1", "approve")
+        result = await srv._resolve_checkpoint(
+            "ent_cp1", "approve", _DUMMY_RESOLVER_HEADERS
+        )
         self.assertIn("error", result)
         self.assertIn("not 'awaiting_operator'", result["error"])
 
@@ -359,7 +491,9 @@ class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
                 "task_entity_id": "ent_task_1",
             },
         }
-        result = await srv._resolve_checkpoint("ent_cp1", "approve")
+        result = await srv._resolve_checkpoint(
+            "ent_cp1", "approve", _DUMMY_RESOLVER_HEADERS
+        )
         self.assertIn("error", result)
         self.assertIn("already dispatched", result["error"])
 
@@ -422,7 +556,9 @@ class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
         mock_correct.return_value = True
         mock_consume.return_value = True
 
-        result = await srv._resolve_checkpoint("ent_cp1", "approve")
+        result = await srv._resolve_checkpoint(
+            "ent_cp1", "approve", _DUMMY_RESOLVER_HEADERS
+        )
         self.assertEqual(result["new_status"], "approved")
         self.assertIn("task re-dispatched", result["action_taken"])
         mock_correct.assert_called_once()
@@ -478,26 +614,57 @@ class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
                     },
                 ]
 
-                result = await srv._resolve_checkpoint("ent_cp1", "approve")
+                result = await srv._resolve_checkpoint(
+                    "ent_cp1", "approve", _DUMMY_RESOLVER_HEADERS
+                )
 
                 self.assertNotIn("re-dispatched", result["action_taken"])
 
+    @patch("server._consume_checkpoint_resolution")
     @patch("server._correct")
     @patch("server._get")
-    async def test_reject_marks_task_declined(self, mock_get, mock_correct):
-        mock_get.return_value = {
-            "entity_type": "checkpoint_brief",
-            "snapshot": {
-                "status": "awaiting_operator",
-                "task_entity_id": "ent_task_1",
+    async def test_reject_marks_task_declined(
+        self, mock_get, mock_correct, mock_consume
+    ):
+        mock_get.side_effect = [
+            {
+                "entity_type": "checkpoint_brief",
+                "snapshot": {
+                    "status": "awaiting_operator",
+                    "task_entity_id": "ent_task_1",
+                },
             },
-        }
+            {
+                "entity_type": "checkpoint_brief",
+                "snapshot": {
+                    "status": "rejected",
+                    "task_entity_id": "ent_task_1",
+                },
+            },
+            {
+                "entity_type": "checkpoint_brief",
+                "snapshot": {
+                    "status": "rejected",
+                    "resolved_dispatched": True,
+                    "task_entity_id": "ent_task_1",
+                },
+            },
+            {"entity_type": "task", "snapshot": {"status": "declined"}},
+        ]
         mock_correct.return_value = True
+        mock_consume.return_value = True
 
-        result = await srv._resolve_checkpoint("ent_cp1", "reject")
+        result = await srv._resolve_checkpoint(
+            "ent_cp1", "reject", _DUMMY_RESOLVER_HEADERS
+        )
         self.assertEqual(result["new_status"], "rejected")
         self.assertIn("task marked declined", result["action_taken"])
-        self.assertEqual(mock_correct.call_count, 2)
+        mock_correct.assert_called_once()
+        self.assertEqual(
+            mock_correct.call_args.kwargs["resolver_aauth_headers"],
+            _DUMMY_RESOLVER_HEADERS,
+        )
+        mock_consume.assert_awaited_once()
 
     @patch("server._correct")
     @patch("server._get")
@@ -511,9 +678,103 @@ class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
         }
         mock_correct.return_value = False
 
-        result = await srv._resolve_checkpoint("ent_cp1", "approve")
+        result = await srv._resolve_checkpoint(
+            "ent_cp1", "approve", _DUMMY_RESOLVER_HEADERS
+        )
         self.assertIn("error", result)
         self.assertIn("failed to correct", result["error"])
+
+
+class TestCheckpointResolverAuthentication(unittest.TestCase):
+
+    def test_verifier_process_does_not_load_resolver_private_keys(self):
+        source = Path(srv.__file__).read_text()
+        self.assertNotIn("load_http_sig_signer", source)
+        self.assertNotIn("ATELES_PRIVATE_KEYS_DIR", source)
+        self.assertNotIn("checkpoint_resolution import", source)
+
+    def test_required_principal_can_authenticate_exact_resolution(self):
+        headers, jkt = _resolver_proof()
+        body = srv._canonical_body_bytes(
+            srv._correction_body(
+                "ent_cp1",
+                "checkpoint_brief",
+                "status",
+                "approved",
+                "resolve-checkpoint-ent_cp1-approved",
+            )
+        )
+        claims = srv._authenticate_checkpoint_resolver(
+            headers,
+            body=body,
+            required_principal_sub="ateles@ateles-swarm",
+            required_principal_jkt=jkt,
+        )
+
+        self.assertIsNotNone(claims)
+        self.assertEqual(claims["sub"], "ateles@ateles-swarm")
+
+    def test_wrong_principal_key_or_body_binding_is_rejected(self):
+        valid_headers, valid_jkt = _resolver_proof()
+        wrong_sub_headers, wrong_sub_jkt = _resolver_proof(
+            sub="other@ateles-swarm"
+        )
+        body = srv._canonical_body_bytes(
+            srv._correction_body(
+                "ent_cp1",
+                "checkpoint_brief",
+                "status",
+                "approved",
+                "resolve-checkpoint-ent_cp1-approved",
+            )
+        )
+        cases = (
+            (wrong_sub_headers, body, "ateles@ateles-swarm", wrong_sub_jkt),
+            (valid_headers, body, "ateles@ateles-swarm", "B" * 43),
+            (
+                valid_headers,
+                body.replace(b'"approved"', b'"rejected"'),
+                "ateles@ateles-swarm",
+                valid_jkt,
+            ),
+        )
+        for headers, signed_body, required_sub, required_jkt in cases:
+            with self.subTest(required_sub=required_sub, required_jkt=required_jkt):
+                self.assertIsNone(
+                    srv._authenticate_checkpoint_resolver(
+                        headers,
+                        body=signed_body,
+                        required_principal_sub=required_sub,
+                        required_principal_jkt=required_jkt,
+                    )
+                )
+
+    def test_expired_future_or_excessive_lifetime_is_rejected(self):
+        body = srv._canonical_body_bytes(
+            srv._correction_body(
+                "ent_cp1",
+                "checkpoint_brief",
+                "status",
+                "approved",
+                "resolve-checkpoint-ent_cp1-approved",
+            )
+        )
+        now = int(time.time())
+        cases = (
+            _resolver_proof(now=now - 301),
+            _resolver_proof(now=now + 31),
+            _resolver_proof(now=now, ttl_sec=301),
+        )
+        for headers, jkt in cases:
+            with self.subTest(signature_input=headers["signature-input"]):
+                self.assertIsNone(
+                    srv._authenticate_checkpoint_resolver(
+                        headers,
+                        body=body,
+                        required_principal_sub="ateles@ateles-swarm",
+                        required_principal_jkt=jkt,
+                    )
+                )
 
 
 class TestGracefulDegradation(unittest.TestCase):
@@ -806,67 +1067,40 @@ class TestNeotomaEndpoints(unittest.TestCase):
         self.assertEqual(body["idempotency_key"], "idem-1")
 
     @patch("server._post")
-    def test_checkpoint_approval_correction_is_signed_by_required_principal(
+    def test_checkpoint_resolution_forwards_callers_authenticated_proof(
         self, mock_post
     ):
-        class _Signer:
-            is_stub = False
-            sub = "ateles@ateles-swarm"
-
-            def headers(self, method, path):
-                return {"X-AAuth-Token": "signed-approval"}
-
         mock_post.return_value = {"ok": True}
-        with patch(
-            "lib.daemon_runtime.aauth_signer.AAuthSigner.from_key_file",
-            return_value=_Signer(),
-        ) as signer_loader:
-            ok = srv._correct(
+        ok = srv._correct(
+            "ent_cp",
+            "checkpoint_brief",
+            "status",
+            "approved",
+            "idem-approval",
+            resolver_aauth_headers=_DUMMY_RESOLVER_HEADERS,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            mock_post.call_args.kwargs["extra_headers"], _DUMMY_RESOLVER_HEADERS
+        )
+        self.assertEqual(
+            mock_post.call_args.kwargs["encoded_body"],
+            srv._canonical_body_bytes(mock_post.call_args.args[1]),
+        )
+
+    @patch("server._post")
+    def test_checkpoint_resolution_refuses_empty_caller_proof(self, mock_post):
+        self.assertFalse(
+            srv._correct(
                 "ent_cp",
                 "checkpoint_brief",
                 "status",
                 "approved",
                 "idem-approval",
-                required_principal_sub="ateles@ateles-swarm",
+                resolver_aauth_headers={},
             )
-
-        self.assertTrue(ok)
-        signer_loader.assert_called_once_with("ateles")
-        self.assertEqual(
-            mock_post.call_args.kwargs["extra_headers"]["X-AAuth-Token"],
-            "signed-approval",
         )
-
-    @patch("server._post")
-    def test_checkpoint_approval_correction_refuses_missing_or_wrong_signer(
-        self, mock_post
-    ):
-        class _Signer:
-            def __init__(self, *, sub, is_stub):
-                self.sub = sub
-                self.is_stub = is_stub
-
-            def headers(self, method, path):
-                return {"X-AAuth-Token": "must-not-be-used"}
-
-        for signer in (
-            _Signer(sub="ateles@ateles-swarm", is_stub=True),
-            _Signer(sub="other@ateles-swarm", is_stub=False),
-        ):
-            with self.subTest(sub=signer.sub, is_stub=signer.is_stub), patch(
-                "lib.daemon_runtime.aauth_signer.AAuthSigner.from_key_file",
-                return_value=signer,
-            ):
-                self.assertFalse(
-                    srv._correct(
-                        "ent_cp",
-                        "checkpoint_brief",
-                        "status",
-                        "approved",
-                        "idem-approval",
-                        required_principal_sub="ateles@ateles-swarm",
-                    )
-                )
         mock_post.assert_not_called()
 
     def test_single_entity_fetch_uses_entities_id_path(self):
@@ -1005,10 +1239,11 @@ class TestToolSchemas(unittest.TestCase):
         rt = next(t for t in srv.TOOLS if t.name == "route_task")
         self.assertIn("task_description", rt.inputSchema["required"])
 
-    def test_resolve_checkpoint_requires_both_params(self):
+    def test_resolve_checkpoint_requires_all_authority_params(self):
         rc = next(t for t in srv.TOOLS if t.name == "resolve_checkpoint")
         self.assertIn("checkpoint_id", rc.inputSchema["required"])
         self.assertIn("action", rc.inputSchema["required"])
+        self.assertIn("resolver_aauth_headers", rc.inputSchema["required"])
 
     def test_all_handlers_registered(self):
         for tool in srv.TOOLS:

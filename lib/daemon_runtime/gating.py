@@ -49,8 +49,10 @@ import logging
 import os
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 
 import httpx
 
@@ -647,6 +649,29 @@ _TRUSTED_AAUTH_TIERS = frozenset({"software", "operator_attested", "hardware"})
 CHECKPOINT_REQUIRED_APPROVER_SUB = os.environ.get(
     "APIS_CHECKPOINT_REQUIRED_APPROVER_SUB", "ateles@ateles-swarm"
 ).strip()
+CHECKPOINT_REQUIRED_APPROVER_JKT = os.environ.get(
+    "APIS_CHECKPOINT_REQUIRED_APPROVER_JKT", ""
+).strip()
+
+
+def _checkpoint_producer_http_signer(handler: str):
+    """Load only the checkpoint producer's existing RFC 9421 JWK."""
+    from .aauth_httpsig import load_http_sig_signer
+
+    keys_dir = Path(
+        os.environ.get(
+            "ATELES_PRIVATE_KEYS_DIR",
+            str(Path(__file__).resolve().parents[3] / "ateles-private" / "keys"),
+        )
+    )
+    producer_sub = f"{str(handler).strip().lower()}@ateles-swarm"
+    return load_http_sig_signer(
+        keys_dir / f"{str(handler).strip().lower()}.jwk.json",
+        expected_sub=producer_sub,
+        issuer=os.environ.get(
+            "APIS_CHECKPOINT_PRODUCER_ISS", "https://markmhendrickson.com"
+        ),
+    )
 
 
 def build_checkpoint_authorization_envelope(
@@ -657,6 +682,7 @@ def build_checkpoint_authorization_envelope(
     action_type: str,
     user_id: str,
     required_approver_sub: str = CHECKPOINT_REQUIRED_APPROVER_SUB,
+    required_approver_jkt: str = CHECKPOINT_REQUIRED_APPROVER_JKT,
 ) -> str:
     """Serialize the exact task and policy revisions shown for approval."""
     payload = {
@@ -668,6 +694,10 @@ def build_checkpoint_authorization_envelope(
         "task_last_observation_at": task_record.get("last_observation_at"),
         "user_id": str(user_id),
         "required_approver_sub": str(required_approver_sub).strip(),
+        # A subject name alone is self-asserted by an AAuth agent token. Pin
+        # the RFC 7638 thumbprint as well so a newly generated key cannot claim
+        # the configured resolver's name and manufacture release authority.
+        "required_approver_jkt": str(required_approver_jkt).strip(),
         "action_type": str(action_type).strip().lower(),
         "policy_entity_id": policy.entity_id,
         "policy_revision": execution_policy_revision(policy),
@@ -734,6 +764,12 @@ def read_authenticated_checkpoint_authorization(
         return None
     if payload.get("producer") != "apis@ateles-swarm":
         return None
+    required_sub = str(payload.get("required_approver_sub") or "").strip()
+    required_jkt = str(payload.get("required_approver_jkt") or "").strip()
+    if not required_sub or "@" not in required_sub or not re.fullmatch(
+        r"[A-Za-z0-9_-]{43}", required_jkt
+    ):
+        return None
     return payload
 
 
@@ -742,9 +778,11 @@ def read_authenticated_checkpoint_resolution(
     checkpoint_record: dict,
     *,
     required_approver_sub: str,
+    required_approver_jkt: str,
     expected_user_id: str,
+    expected_resolution: str = "approved",
 ) -> dict | None:
-    """Read an approval only from its authenticated principal observation.
+    """Read a resolution only from its authenticated principal observation.
 
     The checkpoint snapshot's ``status`` is reducer output and therefore says
     only what value won, not who supplied it.  Release authority comes from the
@@ -753,11 +791,18 @@ def read_authenticated_checkpoint_resolution(
     an approval.
     """
     required_sub = str(required_approver_sub or "").strip()
+    required_jkt = str(required_approver_jkt or "").strip()
     tenant_id = str(expected_user_id or "").strip()
-    if not required_sub or not tenant_id:
+    expected = str(expected_resolution or "").strip().lower()
+    if (
+        not required_sub
+        or not re.fullmatch(r"[A-Za-z0-9_-]{43}", required_jkt)
+        or not tenant_id
+        or expected not in {"approved", "rejected"}
+    ):
         return None
     snapshot = _snapshot_of(checkpoint_record)
-    if read_checkpoint_resolution(snapshot) != "approved":
+    if read_checkpoint_resolution(snapshot) != expected:
         return None
     provenance = checkpoint_record.get("provenance")
     if not isinstance(provenance, dict):
@@ -777,7 +822,7 @@ def read_authenticated_checkpoint_resolution(
         return None
     fields = observation.get("fields")
     auth = observation.get("provenance")
-    if not isinstance(fields, dict) or read_checkpoint_resolution(fields) != "approved":
+    if not isinstance(fields, dict) or read_checkpoint_resolution(fields) != expected:
         return None
     if str(observation.get("user_id") or "").strip() != tenant_id:
         return None
@@ -785,7 +830,7 @@ def read_authenticated_checkpoint_resolution(
         return None
     if (
         str(auth.get("agent_sub") or "").strip() != required_sub
-        or not auth.get("agent_thumbprint")
+        or str(auth.get("agent_thumbprint") or "").strip() != required_jkt
         or auth.get("attribution_tier") not in _TRUSTED_AAUTH_TIERS
     ):
         return None
@@ -793,7 +838,7 @@ def read_authenticated_checkpoint_resolution(
         "principal_sub": required_sub,
         "observation_id": observation_id,
         "attribution_tier": auth.get("attribution_tier"),
-        "agent_thumbprint": auth.get("agent_thumbprint"),
+        "agent_thumbprint": required_jkt,
     }
 
 
@@ -819,6 +864,17 @@ def write_checkpoint_brief(
     """
     if not NEOTOMA_BEARER_TOKEN:
         log.warning("[gating] no bearer token — checkpoint_brief not persisted")
+        return None
+
+    # The fallback policy keeps ordinary classification available; it is not
+    # authoritative enough to mint an approval artifact.  Otherwise a stable
+    # hash of ``loaded=False`` turns Indeterminate into approvable authority.
+    if policy is not None and not policy.loaded:
+        log.error(
+            "[gating] execution policy %s is not loaded — refusing to create "
+            "checkpoint authority",
+            policy.entity_id or "(fallback)",
+        )
         return None
 
     body = {
@@ -859,8 +915,14 @@ def write_checkpoint_brief(
             task_record.get("entity_id") != task_entity_id
             or str(task_record.get("entity_type", "")).strip().lower() != "task"
             or not user_id
+            or not CHECKPOINT_REQUIRED_APPROVER_SUB
+            or not re.fullmatch(
+                r"[A-Za-z0-9_-]{43}", CHECKPOINT_REQUIRED_APPROVER_JKT
+            )
         ):
-            log.warning("[gating] incomplete task provenance for checkpoint authority")
+            log.warning(
+                "[gating] incomplete task or resolver provenance for checkpoint authority"
+            )
             return None
         encoded_authorization = build_checkpoint_authorization_envelope(
             task_record=task_record,
@@ -868,6 +930,8 @@ def write_checkpoint_brief(
             decision=decision,
             action_type=normalized_action,
             user_id=user_id,
+            required_approver_sub=CHECKPOINT_REQUIRED_APPROVER_SUB,
+            required_approver_jkt=CHECKPOINT_REQUIRED_APPROVER_JKT,
         )
         body["entities"][0]["body"] = encoded_authorization
         expected_authorization = json.loads(encoded_authorization)
@@ -875,20 +939,28 @@ def write_checkpoint_brief(
         body["idempotency_key"] += f"-{idempotency_context}"
     try:
         headers = {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}
+        encoded_request_body: bytes | None = None
         if authorization_expected:
-            from .aauth_signer import AAuthSigner
-
-            signer = AAuthSigner.from_key_file(handler)
-            if signer.is_stub:
-                log.error("[gating] no AAuth signer for checkpoint authorization")
-                return None
-            headers.update(signer.headers("POST", "/store"))
-        resp = httpx.post(
-            f"{NEOTOMA_BASE_URL}/store",
-            headers=headers,
-            json=body,
-            timeout=15,
-        )
+            signer = _checkpoint_producer_http_signer(handler)
+            encoded_request_body = _canonical_json(body).encode("utf-8")
+            headers.update(
+                signer.sign_headers(
+                    method="POST",
+                    url=f"{NEOTOMA_BASE_URL.rstrip('/')}/store",
+                    body=encoded_request_body,
+                    content_type="application/json",
+                )
+            )
+        store_url = f"{NEOTOMA_BASE_URL.rstrip('/')}/store"
+        if encoded_request_body is None:
+            resp = httpx.post(store_url, headers=headers, json=body, timeout=15)
+        else:
+            resp = httpx.post(
+                store_url,
+                headers=headers,
+                content=encoded_request_body,
+                timeout=15,
+            )
         resp.raise_for_status()
         data = resp.json()
         ents = data.get("entities") or []

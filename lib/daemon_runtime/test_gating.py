@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 
 from lib.daemon_runtime import gating as gating_module
@@ -23,6 +25,33 @@ from lib.daemon_runtime.gating import (
     stamp_checkpoint_dispatched,
     write_checkpoint_brief,
 )
+
+
+def _http_signer():
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    from lib.daemon_runtime.aauth_httpsig import HttpSigSigner
+
+    private = ec.generate_private_key(ec.SECP256R1()).private_numbers()
+
+    def b64u(value: int) -> str:
+        return base64.urlsafe_b64encode(value.to_bytes(32, "big")).rstrip(b"=").decode()
+
+    jwk = {
+        "kty": "EC",
+        "crv": "P-256",
+        "d": b64u(private.private_value),
+        "x": b64u(private.public_numbers.x),
+        "y": b64u(private.public_numbers.y),
+        "sub": "apis@ateles-swarm",
+        "kid": "test-apis-key",
+    }
+    return HttpSigSigner(
+        private_jwk=jwk,
+        sub="apis@ateles-swarm",
+        iss="https://markmhendrickson.com",
+        kid="test-apis-key",
+    )
 
 
 def _default() -> ExecutionPolicy:
@@ -851,13 +880,12 @@ def test_fresh_approval_transition_requires_exact_readback(
 
 def test_checkpoint_brief_carries_authenticated_immutable_authority(monkeypatch):
     monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(
+        gating_module, "CHECKPOINT_REQUIRED_APPROVER_JKT", "A" * 43
+    )
     posted: list[dict] = []
-
-    class _Signer:
-        is_stub = False
-
-        def headers(self, method, path):
-            return {"X-AAuth-Token": "signed"}
+    posted_content: list[bytes] = []
+    posted_headers: list[dict[str, str]] = []
 
     class _Response:
         def raise_for_status(self):
@@ -867,14 +895,16 @@ def test_checkpoint_brief_carries_authenticated_immutable_authority(monkeypatch)
             return {"entities": [{"entity_id": "ent_cp"}]}
 
     def post(*args, **kwargs):
-        posted.append(kwargs["json"])
+        posted_content.append(kwargs["content"])
+        posted.append(gating_module.json.loads(kwargs["content"]))
+        posted_headers.append(kwargs["headers"])
         return _Response()
 
     monkeypatch.setattr(gating_module.httpx, "post", post)
-    from lib.daemon_runtime import aauth_signer
-
     monkeypatch.setattr(
-        aauth_signer.AAuthSigner, "from_key_file", lambda handler: _Signer()
+        gating_module,
+        "_checkpoint_producer_http_signer",
+        lambda handler: _http_signer(),
     )
     monkeypatch.setattr(
         gating_module,
@@ -919,7 +949,7 @@ def test_checkpoint_brief_carries_authenticated_immutable_authority(monkeypatch)
         "last_observation_at": "2026-09-21T00:00:00Z",
         "snapshot": {"title": "Bounded work", "status": "awaiting_approval"},
     }
-    policy = _default()
+    policy = ExecutionPolicy(entity_id="default", loaded=True)
     decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
 
     brief_id = write_checkpoint_brief(
@@ -943,14 +973,22 @@ def test_checkpoint_brief_carries_authenticated_immutable_authority(monkeypatch)
     assert authority["version"] == 2
     assert authority["task_entity_id"] == "ent_task"
     assert authority["required_approver_sub"] == "ateles@ateles-swarm"
+    assert authority["required_approver_jkt"] == "A" * 43
     assert authority["task_revision"] == gating_module.entity_record_digest(task_record)
     assert authority["policy_revision"] == gating_module.execution_policy_revision(
         policy
     )
+    assert {"signature", "signature-input", "signature-key"}.issubset(posted_headers[0])
+    assert "X-AAuth-Token" not in posted_headers[0]
+    assert posted_headers[0]["content-digest"]
+    assert posted_content[0] == gating_module._canonical_json(posted[0]).encode()
 
 
 def test_checkpoint_brief_requires_authorization_snapshot_readback(monkeypatch):
     monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(
+        gating_module, "CHECKPOINT_REQUIRED_APPROVER_JKT", "A" * 43
+    )
 
     class _Response:
         def raise_for_status(self):
@@ -963,16 +1001,10 @@ def test_checkpoint_brief_requires_authorization_snapshot_readback(monkeypatch):
         gating_module.httpx, "post", lambda *args, **kwargs: _Response()
     )
 
-    class _Signer:
-        is_stub = False
-
-        def headers(self, method, path):
-            return {"X-AAuth-Token": "signed"}
-
-    from lib.daemon_runtime import aauth_signer
-
     monkeypatch.setattr(
-        aauth_signer.AAuthSigner, "from_key_file", lambda handler: _Signer()
+        gating_module,
+        "_checkpoint_producer_http_signer",
+        lambda handler: _http_signer(),
     )
     monkeypatch.setattr(
         gating_module,
@@ -982,8 +1014,9 @@ def test_checkpoint_brief_requires_authorization_snapshot_readback(monkeypatch):
             "snapshot": {"authorization_action_type": "local_edit"},
         },
     )
+    policy = ExecutionPolicy(entity_id="default", loaded=True)
     decision = evaluate_gate(
-        confidence=0.3, action_type="local_edit", policy=_default()
+        confidence=0.3, action_type="local_edit", policy=policy
     )
     task_record = {
         "entity_id": "ent_task",
@@ -1003,10 +1036,93 @@ def test_checkpoint_brief_requires_authorization_snapshot_readback(monkeypatch):
             user_id="tenant-a",
             action_type="local_edit",
             task_record=task_record,
-            policy=_default(),
+            policy=policy,
         )
         is None
     )
+
+
+def test_checkpoint_authority_is_not_created_from_unloaded_policy(monkeypatch):
+    """The persistence sink must reject fallback-policy authority."""
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    posted: list[dict] = []
+
+    def fail_if_posted(*args, **kwargs):
+        posted.append(kwargs.get("json") or {})
+        raise AssertionError("unloaded policy must not reach the checkpoint store")
+
+    monkeypatch.setattr(gating_module.httpx, "post", fail_if_posted)
+    policy = ExecutionPolicy(entity_id="fallback", loaded=False)
+    decision = evaluate_gate(
+        confidence=0.3,
+        action_type="local_edit",
+        policy=policy,
+    )
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 1,
+        "last_observation_at": "2026-09-22T00:00:00Z",
+        "snapshot": {"status": "awaiting_approval"},
+    }
+
+    assert (
+        write_checkpoint_brief(
+            task_entity_id="ent_task",
+            decision=decision,
+            title="Fallback policy must not authorize",
+            plan_summary="Policy was unavailable.",
+            handler="apis",
+            user_id="tenant-a",
+            action_type="local_edit",
+            task_record=task_record,
+            policy=policy,
+        )
+        is None
+    )
+    assert posted == []
+
+
+def test_checkpoint_authority_is_not_created_without_resolver_key_pin(monkeypatch):
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(gating_module, "CHECKPOINT_REQUIRED_APPROVER_JKT", "")
+    posted: list[dict] = []
+
+    def fail_if_posted(*args, **kwargs):
+        posted.append(kwargs.get("json") or {})
+        raise AssertionError("missing resolver key pin must not reach the store")
+
+    monkeypatch.setattr(gating_module.httpx, "post", fail_if_posted)
+    policy = ExecutionPolicy(entity_id="default", loaded=True)
+    decision = evaluate_gate(
+        confidence=0.3,
+        action_type="local_edit",
+        policy=policy,
+    )
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 1,
+        "last_observation_at": "2026-09-22T00:00:00Z",
+        "snapshot": {"status": "awaiting_approval"},
+    }
+
+    assert (
+        write_checkpoint_brief(
+            task_entity_id="ent_task",
+            decision=decision,
+            title="Missing resolver key pin",
+            plan_summary="Resolver identity is incomplete.",
+            handler="apis",
+            user_id="tenant-a",
+            action_type="local_edit",
+            task_record=task_record,
+            policy=policy,
+        )
+        is None
+    )
+    assert posted == []
 
 
 @pytest.mark.parametrize("tamper", ["protected_field", "producer", "body"])
@@ -1028,6 +1144,7 @@ def test_authenticated_checkpoint_authority_rejects_mutable_or_untrusted_state(
         decision=decision,
         action_type="local_edit",
         user_id="tenant-a",
+        required_approver_jkt="A" * 43,
     )
     fields = {
         "body": encoded,
@@ -1084,6 +1201,7 @@ def test_authenticated_checkpoint_authority_rejects_mutable_or_untrusted_state(
         ("missing_status_provenance", None),
         ("unreadable_observation", None),
         ("mismatched_principal", None),
+        ("mismatched_key", None),
         ("untrusted_tier", None),
         ("wrong_status", None),
         ("wrong_tenant", None),
@@ -1104,7 +1222,7 @@ def test_checkpoint_resolution_requires_authenticated_matching_principal(
         "user_id": "tenant-a",
         "provenance": {
             "agent_sub": "ateles@ateles-swarm",
-            "agent_thumbprint": "operator-interface-key",
+            "agent_thumbprint": "A" * 43,
             "attribution_tier": "software",
         },
     }
@@ -1115,6 +1233,8 @@ def test_checkpoint_resolution_requires_authenticated_matching_principal(
         observations = []
     elif mode == "mismatched_principal":
         observation["provenance"]["agent_sub"] = "other@ateles-swarm"
+    elif mode == "mismatched_key":
+        observation["provenance"]["agent_thumbprint"] = "B" * 43
     elif mode == "untrusted_tier":
         observation["provenance"]["attribution_tier"] = "unverified_client"
     elif mode == "wrong_status":
@@ -1132,6 +1252,7 @@ def test_checkpoint_resolution_requires_authenticated_matching_principal(
         "ent_cp",
         record,
         required_approver_sub="ateles@ateles-swarm",
+        required_approver_jkt="A" * 43,
         expected_user_id="tenant-a",
     )
 

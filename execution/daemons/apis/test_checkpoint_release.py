@@ -67,7 +67,12 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     evaluate_gate,
 )
 
+TEST_RESOLVER_JKT = "A" * 43
+
 CHECKPOINT_TYPE = "checkpoint_" + "brief"
+REAL_READ_AUTHENTICATED_RESOLUTION = (
+    gating_module.read_authenticated_checkpoint_resolution
+)
 
 
 class _Notifier:
@@ -78,9 +83,23 @@ class _Notifier:
         self.sent.append(message)
 
 
-async def _resolve(checkpoint_id: str, action: str) -> dict:
+async def _resolve(
+    checkpoint_id: str,
+    action: str,
+    resolver_aauth_headers: dict[str, str] | None = None,
+) -> dict:
     """Accept both the old sync shape and the fixed async implementation."""
-    result = server._resolve_checkpoint(checkpoint_id, action)
+    if resolver_aauth_headers is None:
+        resolver_aauth_headers = {
+            "signature-key": "caller-proof",
+            "signature-input": "caller-proof",
+            "signature": "caller-proof",
+            "content-digest": "caller-proof",
+            "content-type": "application/json",
+        }
+    result = server._resolve_checkpoint(
+        checkpoint_id, action, resolver_aauth_headers=resolver_aauth_headers
+    )
     if inspect.isawaitable(result):
         return await result
     return result
@@ -164,6 +183,20 @@ def release_store(monkeypatch, tmp_path):
 
     monkeypatch.setattr(server, "_get", get)
     monkeypatch.setattr(server, "_correct", correct)
+    monkeypatch.setattr(
+        server,
+        "_checkpoint_resolver_authority",
+        lambda checkpoint_id, record: (
+            "ateles@ateles-swarm",
+            TEST_RESOLVER_JKT,
+            "tenant-a",
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "_authenticate_checkpoint_resolver",
+        lambda *args, **kwargs: {"sub": "ateles@ateles-swarm"},
+    )
     monkeypatch.setattr(apis, "fetch_task_snapshot", fetch_task)
     monkeypatch.setattr(
         apis,
@@ -203,6 +236,7 @@ def release_store(monkeypatch, tmp_path):
         decision=decision,
         action_type="local_edit",
         user_id="tenant-a",
+        required_approver_jkt=TEST_RESOLVER_JKT,
     )
     authority = json.loads(encoded_authority)
     records[brief_id]["snapshot"]["body"] = encoded_authority
@@ -217,16 +251,28 @@ def release_store(monkeypatch, tmp_path):
     )
 
     def read_matching_approval(
-        checkpoint_id, record, *, required_approver_sub, expected_user_id
+        checkpoint_id,
+        record,
+        *,
+        required_approver_sub,
+        required_approver_jkt,
+        expected_user_id,
+        expected_resolution="approved",
     ):
         assert checkpoint_id == brief_id
         assert required_approver_sub == "ateles@ateles-swarm"
+        assert required_approver_jkt == TEST_RESOLVER_JKT
         assert expected_user_id == "tenant-a"
         return {
             "principal_sub": "ateles@ateles-swarm",
             "observation_id": "obs-approval",
         }
 
+    monkeypatch.setattr(
+        gating_module,
+        "read_authenticated_checkpoint_resolution",
+        read_matching_approval,
+    )
     monkeypatch.setattr(
         apis,
         "read_authenticated_checkpoint_resolution",
@@ -235,6 +281,11 @@ def release_store(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda skill: policy)
     monkeypatch.setattr(apis, "set_task_status", set_status)
+    monkeypatch.setattr(
+        apis,
+        "mark_task_declined",
+        lambda entity_id, **kwargs: set_status(entity_id, "declined"),
+    )
     monkeypatch.setattr(apis, "stamp_checkpoint_dispatched", stamp)
     monkeypatch.setattr(
         apis,
@@ -283,7 +334,7 @@ async def test_unattributed_approval_never_reaches_gate_override(
             "user_id": "tenant-a",
             "provenance": {
                 "agent_sub": "ateles@ateles-swarm",
-                "agent_thumbprint": "operator-interface-key",
+                    "agent_thumbprint": TEST_RESOLVER_JKT,
                 "attribution_tier": "software",
             },
         }
@@ -303,7 +354,7 @@ async def test_unattributed_approval_never_reaches_gate_override(
     monkeypatch.setattr(
         apis,
         "read_authenticated_checkpoint_resolution",
-        gating_module.read_authenticated_checkpoint_resolution,
+        REAL_READ_AUTHENTICATED_RESOLUTION,
     )
     monkeypatch.setattr(
         gating_module,
@@ -318,6 +369,138 @@ async def test_unattributed_approval_never_reaches_gate_override(
     assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
     assert brief["resolved_dispatched"] is False
     assert brief["status"] == "approved_requires_fresh_approval"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resolver_failure", ["missing", "mismatched"])
+async def test_unattributed_rejection_never_declines_task(
+    resolver_failure, monkeypatch, release_store
+):
+    """The reject consumer is a task-decline sink and authenticates its caller."""
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "rejected"
+    records[brief_id]["provenance"] = {"status": "obs-rejection"}
+    observations = [
+        {
+            "id": "obs-rejection",
+            "fields": {"status": "rejected"},
+            "user_id": "tenant-a",
+            "provenance": {
+                "agent_sub": "ateles@ateles-swarm",
+                    "agent_thumbprint": TEST_RESOLVER_JKT,
+                "attribution_tier": "software",
+            },
+        }
+    ]
+    if resolver_failure == "missing":
+        records[brief_id]["provenance"] = {}
+    else:
+        observations[0]["provenance"]["agent_sub"] = "other@ateles-swarm"
+    declines: list[str] = []
+
+    monkeypatch.setattr(
+        apis,
+        "read_authenticated_checkpoint_resolution",
+        REAL_READ_AUTHENTICATED_RESOLUTION,
+    )
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity_observations",
+        lambda checkpoint_id: observations,
+    )
+    monkeypatch.setattr(
+        apis,
+        "mark_task_declined",
+        lambda entity_id, **kwargs: declines.append(entity_id) or True,
+    )
+
+    consumed = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert consumed is False
+    assert declines == []
+    assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+async def test_authenticated_rejection_declines_task(
+    monkeypatch, release_store
+):
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "rejected"
+    records[brief_id]["provenance"] = {"status": "obs-rejection"}
+    observations = [
+        {
+            "id": "obs-rejection",
+            "fields": {"status": "rejected"},
+            "user_id": "tenant-a",
+            "provenance": {
+                "agent_sub": "ateles@ateles-swarm",
+                    "agent_thumbprint": TEST_RESOLVER_JKT,
+                "attribution_tier": "software",
+            },
+        }
+    ]
+
+    monkeypatch.setattr(
+        apis,
+        "read_authenticated_checkpoint_resolution",
+        REAL_READ_AUTHENTICATED_RESOLUTION,
+    )
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity_observations",
+        lambda checkpoint_id: observations,
+    )
+
+    def decline(entity_id, **kwargs):
+        records[entity_id]["snapshot"]["status"] = "declined"
+        return True
+
+    monkeypatch.setattr(apis, "mark_task_declined", decline)
+
+    consumed = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert consumed is True
+    assert records[task_id]["snapshot"]["status"] == "declined"
+
+
+@pytest.mark.asyncio
+async def test_unloaded_current_policy_never_reaches_gate_override(
+    monkeypatch, release_store
+):
+    """A fallback policy cannot authorize the take even after approval."""
+    records, brief_id, task_id = release_store
+    fallback = ExecutionPolicy(
+        entity_id="default",
+        low_blast_action_types=frozenset({"local_edit"}),
+        high_blast_action_types=frozenset(),
+        loaded=False,
+    )
+    _bind_v2_authorization(
+        monkeypatch,
+        records,
+        brief_id,
+        task_id,
+        action_type="local_edit",
+        policy=fallback,
+    )
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "approved"
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+    assert brief["resolved_dispatched"] is False
 
 
 def _authorization_digest(
@@ -367,6 +550,7 @@ def _bind_v2_authorization(
         decision=decision,
         action_type=action_type,
         user_id="tenant-a",
+        required_approver_jkt=TEST_RESOLVER_JKT,
     )
     authority = json.loads(encoded)
     brief = records[brief_id]["snapshot"]

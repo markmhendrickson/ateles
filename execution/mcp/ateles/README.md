@@ -55,6 +55,7 @@ and confirm the tool reports unknown-with-reason.
 |---|---|---|
 | `NEOTOMA_BEARER_TOKEN` | all Neotoma-backed tools | Loaded from `~/.config/neotoma/.env` by the wrapper |
 | `NEOTOMA_BEARER_TOKEN_PROD` | all Neotoma-backed tools | **Promoted over the local token whenever `NEOTOMA_BASE_URL` is remote.** The shared env file's `NEOTOMA_BEARER_TOKEN` is local-scoped and 401s against prod, so without this the server connects and every call fails auth |
+| `APIS_CHECKPOINT_REQUIRED_APPROVER_JKT` | checkpoint creation and resolution | RFC 7638 thumbprint of the resolver key. There is no default: missing or malformed configuration refuses authority creation and resolution. Configure the same value for the checkpoint producer, Apis consumer, and MCP server. |
 
 ### Required for queue visibility
 
@@ -67,7 +68,8 @@ and confirm the tool reports unknown-with-reason.
 | Variable | Default | Effect |
 |---|---|---|
 | `NEOTOMA_BASE_URL` | `https://neotoma.markmhendrickson.com` | Neotoma instance; a local/loopback host disables prod-token promotion |
-| `APIS_CHECKPOINT_REQUIRED_APPROVER_SUB` | `ateles@ateles-swarm` | AAuth principal allowed to approve execution checkpoints. Its matching private key must be available under `ATELES_PRIVATE_KEYS_DIR`; missing or mismatched signing material refuses the approval write. |
+| `APIS_CHECKPOINT_REQUIRED_APPROVER_SUB` | `ateles@ateles-swarm` | AAuth subject allowed to resolve execution checkpoints. The MCP service never loads this principal's private key. |
+| `APIS_CHECKPOINT_PRODUCER_ISS` | `https://markmhendrickson.com` | Issuer placed in the Apis producer's RFC 9421 agent token. The producer loads only `apis.jwk.json`; it never loads the resolver key. |
 | `APIS_RESUME_REPOSITORIES` | `<owner>/ateles,<owner>/neotoma` | Repos scanned for pipeline markers (mirrors the dispatcher's own key) |
 | `APIS_MAX_CONCURRENT_ISSUE_PIPELINES` | `3` | Reported as `slot_capacity` |
 | `ATELES_LOG_DIR` | `~/Library/Logs/ateles` | Where `get_dispatch_health` reads `apis.log` |
@@ -85,7 +87,7 @@ The wrapper reads `~/.config/neotoma/.env` itself (the path is overridable with
 ## Environment
 
 The server needs `mcp`, `httpx`, `cryptography`, and `PyJWT`. The latter two
-sign approval corrections as the required AAuth principal. The repo-root `.venv` used by the daemons does
+verify caller-signed approval and rejection corrections. The repo-root `.venv` used by the daemons does
 **not** carry `mcp`; `.mcp-venv` does, and is what CI builds in
 `.github/workflows/ateles-tests.yml`. The wrapper prefers `.mcp-venv`,
 deliberately does not fall back to `.venv` (that would reintroduce a silent
@@ -97,6 +99,33 @@ uv venv .mcp-venv && VIRTUAL_ENV=.mcp-venv uv pip install -r execution/mcp/atele
 
 The `mcp<2` pin is deliberate: 2.0 renamed `Tool.inputSchema` and removed
 `Server.list_tools`, both of which this server still uses.
+
+## Resolving a checkpoint
+
+`resolve_checkpoint` does not possess the resolver's private key. A separate
+trusted caller uses
+`lib.daemon_runtime.checkpoint_resolution.sign_checkpoint_resolution` with the
+existing resolver JWK path, expected subject, issuer, and the JKT derived from
+that key's public companion. The helper signs the exact compact, sorted
+`POST <NEOTOMA_BASE_URL>/correct` body in memory and returns the five
+`resolver_aauth_headers`; it never prints or forwards the private JWK. The body
+fields are:
+
+```json
+{"entity_id":"<checkpoint>","entity_type":"checkpoint_brief","field":"status","idempotency_key":"resolve-checkpoint-<checkpoint>-<approved-or-rejected>","value":"<approved-or-rejected>"}
+```
+
+The server verifies the HTTP signature, exact body, short lifetime, subject,
+and pinned key thumbprint before forwarding the correction. Neotoma verifies
+the same RFC 9421 signature before writing and records the resolver identity on
+the immutable status observation. Apis checks that observation again before
+either releasing or declining the linked task. Missing policy state, resolver
+headers, key pin, or authenticated read-back leaves the task held.
+
+Checkpoint creation uses the same RFC 9421 wire mechanism for `POST /store`,
+but a different key: Apis loads only its existing `apis.jwk.json`, signs the
+exact canonical store bytes, and requires authenticated creation-observation
+read-back. The resolver key remains outside both Apis and the MCP server.
 
 ## Tests
 

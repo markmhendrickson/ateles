@@ -52,6 +52,12 @@ Environment variables:
   APIS_CHECKPOINT_REQUIRED_APPROVER_SUB
                               AAuth subject whose signed status observation may
                               release a checkpoint (default: ateles@ateles-swarm)
+  APIS_CHECKPOINT_REQUIRED_APPROVER_JKT
+                              Required RFC 7638 thumbprint for that resolver;
+                              missing configuration mints no release authority
+  APIS_CHECKPOINT_PRODUCER_ISS
+                              Issuer for Apis's RFC 9421 checkpoint-creation
+                              proof (default: https://markmhendrickson.com)
   ATELES_REPO_PATH            Local path to ateles clone (default: ~/repos/ateles)
 
 Task reconciliation sweep (ateles#586 — see task_reconciler.py):
@@ -1467,12 +1473,49 @@ async def handle_checkpoint_brief(
     title = snapshot.get("title", "(untitled)")
 
     if resolution == "rejected":
-        mark_task_declined(
+        authorization = read_authenticated_checkpoint_authorization(
+            entity_id, checkpoint_record
+        )
+        brief_user_id = fetch_entity_user_id(entity_id)
+        task_user_id = fetch_entity_user_id(task_id)
+        required_approver_sub = str(
+            (authorization or {}).get("required_approver_sub") or ""
+        ).strip()
+        required_approver_jkt = str(
+            (authorization or {}).get("required_approver_jkt") or ""
+        ).strip()
+        authenticated_rejection = read_authenticated_checkpoint_resolution(
+            entity_id,
+            checkpoint_record,
+            required_approver_sub=required_approver_sub,
+            required_approver_jkt=required_approver_jkt,
+            expected_user_id=str(brief_user_id or ""),
+            expected_resolution="rejected",
+        )
+        if (
+            authorization is None
+            or not brief_user_id
+            or not task_user_id
+            or brief_user_id != task_user_id
+            or authenticated_rejection is None
+        ):
+            log.warning(
+                f"[{DAEMON_NAME}] checkpoint {entity_id} rejection lacks "
+                "authenticated resolver authority — task remains held"
+            )
+            _deny_checkpoint_release(
+                entity_id,
+                reason="rejection lacks authenticated required-resolver authority",
+            )
+            return False
+        if not mark_task_declined(
             task_id,
             reason=f"operator rejected checkpoint {entity_id}",
             handler=DAEMON_NAME,
-        )
-        stamp_checkpoint_dispatched(entity_id, handler=DAEMON_NAME)
+        ):
+            return False
+        if not stamp_checkpoint_dispatched(entity_id, handler=DAEMON_NAME):
+            return False
         notifier.send(
             f"Checkpoint rejected: {title[:70]}\n  task={task_id} declined",
             priority=Priority.INFO,
@@ -1574,6 +1617,18 @@ async def handle_checkpoint_brief(
 
     auth_action_type = str(authorization.get("action_type") or "").strip().lower()
     current_policy = resolve_policy_for_agent(safety_skill)
+    if not current_policy.loaded:
+        _require_fresh_release_authority(
+            entity_id,
+            task_id=task_id,
+            task_snapshot=task_snapshot,
+            notifier=notifier,
+            reason=(
+                "authoritative execution policy is unavailable; fallback policy "
+                "cannot release authority"
+            ),
+        )
+        return False
     current_decision = evaluate_gate(
         confidence=_read_confidence(task_snapshot),
         action_type=current_action_type,
@@ -1610,10 +1665,14 @@ async def handle_checkpoint_brief(
     required_approver_sub = str(
         authorization.get("required_approver_sub") or ""
     ).strip()
+    required_approver_jkt = str(
+        authorization.get("required_approver_jkt") or ""
+    ).strip()
     approval = read_authenticated_checkpoint_resolution(
         entity_id,
         checkpoint_record,
         required_approver_sub=required_approver_sub,
+        required_approver_jkt=required_approver_jkt,
         expected_user_id=brief_user_id,
     )
     if approval is None:
