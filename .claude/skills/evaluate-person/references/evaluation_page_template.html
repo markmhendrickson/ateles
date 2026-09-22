@@ -1,0 +1,249 @@
+<!--
+  Standardized evaluation page template for the `evaluate-person` skill (step 4/5).
+
+  ONE structure across everyone evaluated; specialize only by role and objectives.
+  Fill the {{PLACEHOLDERS}} and delete the guidance comments. Do not reorder the
+  sections -- the order IS the short-then-long requirement of step 5.
+
+  CSS is the house visual standard from the `rendered-pages` skill: shadcn slate,
+  monochrome with a single amber accent, system sans, pure-CSS theme toggle, and
+  the trailing !important overrides that stop the host template leaking white
+  tables and code blocks into dark mode.
+
+  Mechanics that bite, all from `rendered-pages`:
+    - publish_rendered_page on an existing entity ONLY mints a token. To change
+      content use correct(entity_id, field: "html_body", ...).
+    - Publish can return success while discarding the body. curl the share URL
+      and check the byte count (~1845 == empty) plus distinctive strings.
+    - Scripts never run (sandboxed iframe, no allow-scripts). CSS-only only.
+    - No external stylesheets; Google Fonts are CSP-blocked.
+
+  Evaluation-specific, from SKILL.md 0.3:
+    - ZERO cross-links. No hub, no markdown view, no other entity. Standalone.
+    - The audience line in the footer is mandatory.
+    - Section 7 (method and coverage) is mandatory -- an evaluation that does not
+      show its method cannot be audited by the person it judges.
+-->
+<style>
+:root{
+  --bg:#ffffff; --panel:#f9fafb; --ink:#0b1220; --muted:#64748b;
+  --line:#e5e9f0; --accent:#b45309; --accent2:#0b1220;
+  --code:#f1f5f9; --callout-bg:#f9fafb; --callout-bd:#e5e9f0; --on-accent:#ffffff;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0f172a; --panel:#1e293b; --ink:#f1f5f9; --muted:#94a3b8;
+    --line:#26334a; --accent:#fbbf24; --accent2:#f1f5f9;
+    --code:#1e293b; --callout-bg:#1e293b; --callout-bd:#26334a; --on-accent:#0f172a;
+  }
+}
+body:has(#tw-light:checked){
+  --bg:#ffffff; --panel:#f9fafb; --ink:#0b1220; --muted:#64748b;
+  --line:#e5e9f0; --accent:#b45309; --accent2:#0b1220;
+  --code:#f1f5f9; --callout-bg:#f9fafb; --callout-bd:#e5e9f0; --on-accent:#ffffff;
+}
+body:has(#tw-dark:checked){
+  --bg:#0f172a; --panel:#1e293b; --ink:#f1f5f9; --muted:#94a3b8;
+  --line:#26334a; --accent:#fbbf24; --accent2:#f1f5f9;
+  --code:#1e293b; --callout-bg:#1e293b; --callout-bd:#26334a; --on-accent:#0f172a;
+}
+html{color-scheme:light dark}
+body{background:var(--bg);color:var(--ink);
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+  font-size:16px;line-height:1.75;margin:0}
+.wrap{max-width:760px;margin:0 auto;padding:48px 24px 96px}
+h1,h2,h3{font-weight:500;letter-spacing:-0.01em;line-height:1.3}
+h1{font-size:1.9rem;margin:0 0 6px}
+h2{font-size:1.25rem;margin:44px 0 12px;padding-top:20px;border-top:1px solid var(--line)}
+h3{font-size:1rem;margin:28px 0 8px}
+.kicker{color:var(--muted);font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;margin:0 0 10px}
+.meta{color:var(--muted);font-size:.88rem;margin:0 0 4px}
+.lede{font-size:1.05rem;color:var(--ink)}
+.callout{background:var(--callout-bg);border:1px solid var(--callout-bd);
+  border-radius:.5rem;padding:14px 18px;margin:20px 0}
+.callout.accent{border-left:3px solid var(--accent)}
+table{border-collapse:collapse;width:100%;margin:18px 0;font-size:.92rem}
+th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+th{background:var(--panel);font-weight:500}
+code{background:var(--code);padding:1px 5px;border-radius:3px;font-size:.88em;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+pre{background:var(--code);border:1px solid var(--line);border-radius:.5rem;
+  padding:14px;max-width:100%;overflow-x:auto;font-size:12px;line-height:1.6}
+pre code{background:none;padding:0}
+a{color:var(--accent2);text-decoration:none;border-bottom:1px solid currentColor;border-radius:2px}
+ul,ol{padding-left:22px}
+li{margin:6px 0}
+.verdict{display:inline-block;font-size:.78rem;padding:2px 9px;border-radius:999px;
+  border:1px solid var(--line);background:var(--panel);color:var(--muted);
+  text-transform:uppercase;letter-spacing:.05em;font-weight:500}
+.verdict.met{border-color:var(--accent);color:var(--accent)}
+.verdict.notmet{border-color:var(--ink);color:var(--ink)}
+.finding{border:1px solid var(--line);border-radius:.5rem;padding:16px 20px;margin:18px 0;
+  background:var(--panel)}
+.finding h3{margin-top:0}
+.sources{color:var(--muted);font-size:.86rem;border-top:1px solid var(--line);
+  margin-top:12px;padding-top:10px}
+.foot{color:var(--muted);font-size:.86rem;border-top:1px solid var(--line);
+  margin-top:56px;padding-top:18px}
+.audience{border:1px solid var(--accent);border-radius:.5rem;padding:10px 14px;
+  margin:0 0 14px;font-size:.88rem}
+.tw-toggle{position:fixed;top:12px;right:12px;display:flex;gap:2px;z-index:50;
+  background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:3px}
+.tw-toggle input{position:absolute;opacity:0;pointer-events:none}
+.tw-toggle label{font-size:.72rem;color:var(--muted);padding:3px 9px;border-radius:999px;cursor:pointer}
+.tw-toggle input:checked + label{background:var(--bg);color:var(--ink)}
+@media (max-width:520px){
+  .wrap{padding:32px 16px 72px}
+  pre{font-size:11px;padding:10px}
+  table{font-size:.84rem}
+  .tw-toggle{position:static;margin:0 auto 18px;width:max-content}
+}
+/* Host-template overrides -- MUST stay last. See rendered-pages section 4. */
+th,td{border-color:var(--line)!important;color:var(--ink)!important}
+th{background:var(--panel)!important}
+pre,pre code,code{background:var(--code)!important;color:var(--ink)!important}
+a{color:var(--accent2)!important}
+</style>
+
+<form class="tw-toggle" aria-label="Theme">
+<input type="radio" name="tw" id="tw-system" checked><label for="tw-system">◐ System</label>
+<input type="radio" name="tw" id="tw-light"><label for="tw-light">☀ Light</label>
+<input type="radio" name="tw" id="tw-dark"><label for="tw-dark">☾ Dark</label>
+</form>
+
+<div class="wrap">
+
+<!-- ============ 1. HEADER ============ -->
+<p class="kicker">Performance evaluation</p>
+<h1>{{SUBJECT_NAME}}</h1>
+<p class="meta">{{ROLE}} · {{ENGAGEMENT_BASIS}}</p>
+<p class="meta">Evaluation window {{WINDOW_FROM}} – {{WINDOW_TO}} · Requested by {{REQUESTER}} · Prepared {{DATE}}</p>
+
+<!-- ============ 2. KEY TAKEAWAYS ============
+     At most five. Each ONE sentence. Each links down to its evidence with a
+     plain #anchor (in-page anchors are fine; they are not cross-links). -->
+<h2>Key takeaways</h2>
+<ol>
+  <li>{{TAKEAWAY_1}} <a href="#f1">Evidence</a></li>
+  <li>{{TAKEAWAY_2}} <a href="#f2">Evidence</a></li>
+  <li>{{TAKEAWAY_3}} <a href="#f3">Evidence</a></li>
+</ol>
+
+<!-- ============ 3. OVERVIEW ============
+     Three short paragraphs. MUST stand alone: a reader who stops here has the
+     actual conclusion, not a teaser. -->
+<h2>Overview</h2>
+<p class="lede">{{OVERVIEW_PARA_1}}</p>
+<p>{{OVERVIEW_PARA_2}}</p>
+<p>{{OVERVIEW_PARA_3}}</p>
+
+<!-- ============ 4. EXPECTATIONS ============
+     The SKILL.md 1.3 table. Every row carries a resolvable source and a window.
+     A finding may only be measured against a row whose window contains it. -->
+<h2>What was expected</h2>
+<p>Expectations are listed as they were actually set, with the window each was in
+force. Explicit expectations were communicated to {{SUBJECT_FIRST_NAME}};
+implicit ones are the ordinary professional standard for the role.</p>
+<table>
+<thead><tr><th>#</th><th>Expectation</th><th>Class</th><th>Source</th><th>In force</th></tr></thead>
+<tbody>
+  <tr><td>E1</td><td>{{EXPECTATION}}</td><td>Explicit</td><td>{{SOURCE}}</td><td>{{FROM}} – {{TO}}</td></tr>
+  <tr><td>E2</td><td>{{EXPECTATION}}</td><td>Implicit</td><td>{{SOURCE}}</td><td>{{FROM}} – {{TO}}</td></tr>
+</tbody>
+</table>
+<!-- Include this block ONLY if unstated hopes were found. Deleting it is fine;
+     misrepresenting an unstated hope as an expectation is not. -->
+<div class="callout">
+<p><strong>Expected but never communicated.</strong> {{UNSTATED_HOPES}} These were
+not put to {{SUBJECT_FIRST_NAME}} and are not used as a basis for any finding
+below. They are recorded because they shaped impressions.</p>
+</div>
+
+<!-- ============ 5. FINDINGS ============
+     One block per expectation. Counter-evidence is a MANDATORY field: if empty,
+     say you looked and found none. Negative findings carry a surface citation
+     from `sweep_manifest.py cite`. -->
+<h2>Findings</h2>
+
+<div class="finding" id="f1">
+<h3>E1 — {{EXPECTATION_SHORT}} <span class="verdict met">{{VERDICT}}</span></h3>
+<p>{{FINDING_NARRATIVE}}</p>
+<p><strong>Evidence.</strong> {{EVIDENCE_WITH_CITATIONS}}</p>
+<p><strong>Counter-evidence.</strong> {{COUNTER_EVIDENCE_OR_SEARCHED_AND_FOUND_NONE}}</p>
+<p class="sources">Confidence: {{CONFIDENCE}}. {{WHAT_WOULD_RAISE_IT}}</p>
+</div>
+
+<div class="finding" id="f2">
+<h3>E2 — {{EXPECTATION_SHORT}} <span class="verdict notmet">{{VERDICT}}</span></h3>
+<p>{{FINDING_NARRATIVE}}</p>
+<p><strong>Evidence.</strong> {{EVIDENCE_WITH_CITATIONS}}</p>
+<p><strong>Counter-evidence.</strong> {{COUNTER_EVIDENCE_OR_SEARCHED_AND_FOUND_NONE}}</p>
+<!-- A negative finding MUST carry its surface citation. Generate with:
+     sweep_manifest.py cite --path M --surfaces gmail,slack,drive -->
+<p class="sources">{{SURFACE_CITATION}}</p>
+</div>
+
+<!-- ============ 6. OPERATOR IMPRESSIONS TESTED ============
+     Registered BEFORE the sweep (SKILL.md 1.4), resolved at 4.4. This table is
+     frequently the most valuable output on the page. A contradicted impression
+     is reported plainly -- softening it defeats the purpose of the step. -->
+<h2>Prior impressions, tested</h2>
+<p>These were recorded before the corpus was read, so the evidence could test
+them rather than be selected by them.</p>
+<table>
+<thead><tr><th>Impression</th><th>Result</th><th>What the evidence shows</th></tr></thead>
+<tbody>
+  <tr><td>{{IMPRESSION}}</td><td>{{SUPPORTED_CONTRADICTED_UNSUPPORTED}}</td><td>{{EVIDENCE}}</td></tr>
+</tbody>
+</table>
+
+<!-- ============ 7. METHOD AND COVERAGE (MANDATORY) ============ -->
+<h2>How this was built</h2>
+
+<h3>Surfaces swept</h3>
+<p>Every surface searched, with how many items matched and how many were read.
+A surface marked <em>partial</em> or <em>unreachable</em> bounds what this
+evaluation can conclude.</p>
+{{SWEEP_MANIFEST_TABLE}}<!-- sweep_manifest.py render --format html -->
+
+<h3>Counts and how they were validated</h3>
+<p>Each count below was anchored against a case known to be positive before the
+number was trusted, so a zero reports the world rather than the query.</p>
+{{INSTRUMENT_LOG_TABLE}}<!-- instrument_log.py render --format html -->
+
+<h3>Attribution of {{SUBJECT_FIRST_NAME}}'s own material</h3>
+<p>Every citation drawn from material {{SUBJECT_FIRST_NAME}} wrote was re-derived
+for authorship, genre, and the direction each named obligation runs — a task list
+of one's own commitments reads very like a complaint, and the difference is
+carried by genre rather than by wording.</p>
+{{ATTRIBUTION_TABLE}}<!-- attribution_check.py render --format html -->
+<div class="callout accent">
+<p><strong>Direction check.</strong> {{CORRECTION_DIRECTION_SUMMARY}}</p>
+</div>
+
+<h3>Open ambiguities</h3>
+<p>Citations that could not be resolved, and the artifact that would settle each.
+None of these supports a finding above.</p>
+<ul><li>{{AMBIGUITY}} — would be settled by {{DISTINGUISHER}}</li></ul>
+
+<h3>Revisions</h3>
+<p>Challenges raised by {{REQUESTER}} and how each resolved.</p>
+<table>
+<thead><tr><th>Date</th><th>Challenge</th><th>Resolution</th></tr></thead>
+<tbody><tr><td>{{DATE}}</td><td>{{CHALLENGE}}</td><td>{{STANDS_CHANGED_OR_AMBIGUOUS}}</td></tr></tbody>
+</table>
+
+<!-- ============ 8. FOOTER ============ -->
+<div class="foot">
+<div class="audience">
+<strong>Who this is for.</strong> {{AUDIENCE_LINE}}. This link is a bearer
+credential: anyone holding it can open this page. Do not forward it beyond the
+named audience.
+</div>
+<p>Prepared {{DATE}}{{REVISION_NOTE}}. Personal data here is processed under RGPD
+Art. 6(1)(f) for the purpose of managing this working relationship, minimized to
+what bears on it. {{SUBJECT_FIRST_NAME}} may request access to or object to this
+processing at any time.</p>
+</div>
+
+</div>
