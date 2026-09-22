@@ -201,6 +201,16 @@ jobs:
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           python3 "$f"
 
+      # Decision 115: binds the ruled register row to the two-grain inventory,
+      # mechanism-specific decisions, existing recurring-review mechanisms,
+      # scoped reconciliation, and the conformance rows that can fail on each.
+      - name: Decision 115 — agent inventory and lifecycle rule is complete
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_decision_115.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
   foundation-tests:
     name: foundation binding tests
     runs-on: ubuntu-latest
