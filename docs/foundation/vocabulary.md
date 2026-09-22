@@ -224,10 +224,13 @@ The task's own transition vocabulary is `created` plus its status; [lease](#leas
 **Not for:** published as a separate state; routed, claimed, or released as task transitions.
 
 ### claimable
-**Definition:** the derived property of a [task](#task) whose status is not terminal, on which no [lease](#lease) is
-held, which no open [checkpoint](#checkpoint) holds from claim (every task-subject [reason class](#reason-class) but
-`unclaimed_step` — `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`), and whose
-`assigned_to` is unset or names the [principal](#principal) about to [claim](#claim).
+**Definition:** the derived property of a [task](#task) whose status is not terminal, which carries no unresolved
+persistent assembly exclusion, on which no [lease](#lease) is held, which no open [checkpoint](#checkpoint) holds
+from claim (every task-subject [reason class](#reason-class) but `unclaimed_step` —
+`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`), and whose `assigned_to` is unset or names the
+[principal](#principal) about to [claim](#claim). An unresolved persistent assembly exclusion has one narrow
+exception: only its open [`classify` step](#step) is claimable, and only by the principal that resolves as the
+[intake](#intake) declaration's [`pm` step owner](#step-owner); it exposes no ordinary task claim.
 **See:** [`work_model.md#what-a-claim-predicate-treats-as-claimable`](work_model.md#what-a-claim-predicate-treats-as-claimable).
 **Never:** `blocked` as a stored [task](#task) status (retired: see [Retired names](#retired-names)). The
 ordinary verb and adjective are untouched — a [step](#step) blocked on its owner, a blocked claim, a change

@@ -18,7 +18,8 @@ Amendment history: `revisions.md#work_modelmd`.
 
 State how work is created, taken, executed, and returned: pull-only delivery; assignment as eligibility;
 claim and lease as one primitive (lease as relationship); liveness derived at read time; no assignment
-log; a task carries only status and edges; intake is every task's first workflow; tasks go through
+log; a task carries only status and edges; intake is every workflow-entering task's first workflow, while
+an aggregate parent remains outside claim and enters none; tasks go through
 workflows in batches, are attached to and detached from them, and nest under parents; a batch is opened
 by a closing verdict naming a successor and goes through exactly one workflow; a batch may hold on a
 condition discovered mid-flight, and may depend on a task it created, under its held lease and with no held
@@ -147,27 +148,39 @@ the redo it calls for is a new task through intake
 
 ### Intake is every task's first workflow
 
-Every task enters intake before any other workflow (`workflows.md#intake`): `classify`, `link`,
-`dedupe`, `prioritize`, `route` (closing verdict names one successor, none, or operator-only). An
-unrouted task is a task with no intake batch — no separate unrouted state. `link` attaches what the task
+Every workflow-entering task enters intake before any other workflow (`workflows.md#intake`): at creation it atomically opens
+the intake batch and writes the `ADDRESSED_BY` edge, then `classify`, `link`, `dedupe`, `prioritize`, and
+`route` run (the closing verdict names one successor, none, or operator-only). An unrouted task is one whose
+intake batch has no closing `route` verdict — no separate unrouted state. `link` attaches what the task
 names, a record in the record and an external one alike, and nothing on relevance alone; what a step needs
 beyond that is hydration's, per step (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`).
-Tasks a batch creates
+The aggregate parent described under `#parent-and-child-tasks` is the deliberate exception: it is a
+grouping that is not claimable, never enters a workflow, and therefore has no intake batch. Tasks a batch creates
 (children, detached tasks, tasks extracted from a meeting) enter intake themselves; a child may take
 intake's declared fast path and never skips intake.
 
-**What a task being assembled looks like is open (decision 84, 2026-09-07, on the operator's question).**
-Registered in `conformance.md#the-register-of-open-design-decisions`, argued below.
+**What a task being assembled looks like is ruled (decision 84, 2026-09-21): it is an ordinary intake
+batch, held.** Registered in `conformance.md#the-register-of-open-design-decisions`, argued below.
 
 ### What distinguishes a task being assembled from one intake has not reached
 
-**Open (decision 84, 2026-09-07).** Registered in
-`conformance.md#the-register-of-open-design-decisions`. The rule above makes an unrouted task a task with no
-intake batch, and that one definition covers two situations the design does not currently separate: a task
-with no intake batch **because it is still being written** — several agents each contributing part of it,
-the operator's case — and a task with no intake batch **because intake has not yet picked it up**. Both are
-unrouted. Nothing in the record says which is which, and so nothing says whether the first is finished
-enough to be claimed and executed.
+**Ruled (decision 84, 2026-09-21): a workflow-entering task being assembled is a task whose intake batch exists and is held
+at `classify` on the discovered condition that the task is not yet fully written — not a fourth
+disposition, but the third of the four already listed, `#a-batch-may-hold-on-a-condition-discovered-mid-flight`
+applied to intake's own first step.** Registered in `conformance.md#the-register-of-open-design-decisions`.
+Before the ruling, the open question treated both an assembling task and one whose intake owner had not begun
+classification as
+having no intake batch. That premise conflicted with the already-settled creation boundary: **every
+workflow-entering task's
+intake batch opens at creation**. The distinction is therefore not whether the batch exists. An ordinary
+workflow-entering task's creation write makes the task, its intake batch, and their `ADDRESSED_BY` edge readable as one admitted
+unit, and its open `classify` step is eligible for the ordinary claim path. An assembling task's same atomic
+unit additionally carries an assembly hold finding on `classify`, naming what is incomplete. None of that
+assembly unit is readable without the rest. A lease is deliberately not part of either minimum: creation
+grants no step ownership, and a creator who also
+resolves as the declared `pm` step owner may acquire the `classify` lease only through the ordinary atomic
+claim check. Thus both shapes are already in intake and unrouted until `route` closes; only the assembly
+shape carries the persistent exclusion that withholds ordinary claims.
 
 **The operator's proposal was a `draft` status**, and a status is disfavoured on three independent grounds,
 none of which touch the need itself:
@@ -184,25 +197,120 @@ none of which touch the need itself:
   a closing verdict writing only a declared value and a terminal value outside the set refused at the
   write. Statuses are how a task ends, not how it is prepared.
 
-**The dispositions, none of them taken here.**
+**The dispositions, argued against each other rather than only against the status the operator proposed.**
+Four were listed and three are rejected here, each at its strongest before the reason it does not win.
 
-- **Nothing.** The absence of an intake batch already is the state, and being assembled is a fact about the
-  assembler rather than about the task. The cost is that the two situations stay indistinguishable to any
-  reader of the record.
-- **An edge, not a status.** A relationship marking a task as under assembly, cleared when intake starts,
-  leaving the task's own fields untouched — the shape invariant 11 prefers, and the one `held`-from-claim
-  already takes.
-- **A held intake batch.** The task enters intake immediately and intake's first step holds on the
-  condition that the task is not yet fully written, using
-  `#a-batch-may-hold-on-a-condition-discovered-mid-flight`, which exists and needs no new record.
-- **A status after all**, accepting the three costs above, and under a word other than `draft`.
+- **Nothing, at its strongest.** The open intake batch already makes the task unrouted, and being assembled is
+  a fact about the assembler rather than about the task — the cheapest possible answer, since it asks the
+  design to add nothing at all, and it is not merely lazy: every ordinary unrouted task already reads this way,
+  so treating the assembling case identically is the reading that adds no special case. It fails on the
+  question the register names explicitly, not on tidiness. Under "nothing," an assembling task has the same
+  task + intake batch + `ADDRESSED_BY` unit as an ordinary task and no assembly finding, which is exactly the
+  claimable case `#intake-is-every-tasks-first-workflow` already defines — no lease, no checkpoint, nothing
+  distinguishing it from a complete task waiting for an intake owner to claim `classify`. A second agent, or
+  a queue reading for claimable work, cannot tell "half-written" from
+  "ready and unclaimed," and the claim predicate would let either be claimed and executed. That is the cost
+  the section already named, and read against the sub-question the register asks — whether an assembling
+  task is claimable before it is finished — "nothing" answers it wrongly: it would be.
+- **An edge, not a status, at its strongest.** This is the shape invariant 11 structurally prefers on its
+  face: `principles.md#11-state-that-needs-a-watchdog-belongs-in-a-relationship-not-a-field` names exactly this
+  pattern — a lease, a checkpoint's link to its subject, a step's state within a batch — as edges read at
+  time rather than fields a process must clear, and "several agents each contributing part of a task" reads
+  naturally as a relationship between those agents and the task rather than as a property of the task
+  itself. It is real prior art, not invented for this ruling: Claude Projects' *Suggested threads* is
+  external evidence that the shape ships — proposed work a coordinator has assembled but not started,
+  presented as a distinct thing with no status on the underlying unit of work
+  (analysis `ent_48bfa9047aa4489204ca0d1f`, cited as comparative prior art and not as authority — Projects
+  is a shipped system with its own design, not a source this design defers to). It fails on invariant 6, not
+  invariant 11: `#a-batch-may-hold-on-a-condition-discovered-mid-flight` already gives the design a
+  recorded, non-terminal, claim-blocking mechanism for "a step owner has met a condition that is not yet
+  resolved," built for exactly this shape of fact and requiring no new relationship type. A dedicated
+  assembly edge would be a second mechanism doing what a hold already does, the parallel-mechanism failure
+  invariant 6 names, and it does not even settle the claimability question for free: an edge that is not
+  itself a lease or a checkpoint is not read by the claim predicate today
+  (`#what-a-claim-predicate-treats-as-claimable` enumerates lease, checkpoint, and `assigned_to`, closed),
+  so making it block a claim would mean widening that predicate to read a fourth kind of fact — the second
+  home for one question invariant 9 forbids — where the held-batch disposition blocks the claim for free,
+  through the lease the predicate already reads.
+- **A status after all, at its strongest.** Accepting the three costs already stated buys the property none
+  of the other three deliver without qualification: a single stored field any reader can filter on directly,
+  with no edge to traverse and no batch to inspect. Where a status is cheap to add and the three costs are
+  the only objection, this is a defensible trade. It is not the trade here, because the three costs are not
+  merely aesthetic: C1 and invariant 11 name a field a process must keep true (who clears "still being
+  written," and on what event, if not the very intake step the held-batch answer already provides for
+  free); invariant 12 names an actual, present collision with a bound step name, not a hypothetical one; and
+  the status vocabulary's own scope — `open`/terminal, written only by a closing verdict — has no slot for a
+  value that means neither. A status here does not describe a new fact; it duplicates, on the task, a fact
+  the batch and lease already carry once the held-batch disposition exists, which is invariant 9's second
+  home again.
 
-**What is settled, and is not part of this question:** every task enters intake, and a task with no intake
-batch is unrouted. The question is whether the design says anything further about *why* it has none.
+**What is ruled: a held intake batch, established at the creation boundary.** The workflow-entering task enters intake
+immediately, exactly as `#intake-is-every-tasks-first-workflow` already requires of every claimable peer
+task. This leaves the aggregate-parent exemption intact: that grouping remains outside claim, never enters
+a workflow, and has no intake batch. Where a creator knows the workflow-entering task is still being assembled, creation is one admitted unit: the
+task, its intake batch and `ADDRESSED_BY` edge, and a non-blocking `hold` finding on `classify` naming the
+incomplete parts are written together and read back together. The record admits all of that unit or none
+of it. The finding is the **persistent assembly exclusion**: while it has no `classify` verdict, the task
+is excluded from the ordinary claim pool even when no lease is held. A lease lapse, a holder crash, or a
+lease transfer therefore cannot make incomplete work executable. This atomic visibility boundary closes the
+gap without pretending that creation itself proves who owns intake's first step.
+
+Creation and step ownership are separate. The creating principal receives no `classify` lease by being the
+creator. A lease may be included in the same admitted write only when the declaration's `pm` owner role
+resolves to that principal and the ordinary atomic claim check succeeds; otherwise the assembly unit lands
+with no lease and stays excluded until an eligible `pm` step owner claims it. In multi-agent assembly,
+exactly one resolved `pm` step owner may hold that lease; contributors gain no lease or execution privilege
+by touching the task. The holder **holds**, exactly under
+`#a-batch-may-hold-on-a-condition-discovered-mid-flight`: the finding names what remains to be written and
+by whom where known, no verdict is written, and the lease keeps renewing while assembly continues. On a
+lease transfer the holder returns the lease; after a crash it may lapse. Another resolved `pm` step owner may then claim `classify`,
+but the persistent assembly exclusion stays until that owner can write the verdict that ends the hold. No
+new record, relationship type, or task field is introduced.
+
+**This is not a fourth disposition invented to avoid choosing between the three listed; it is the third one
+named more precisely.** The open section listed "a held intake batch" using
+`#a-batch-may-hold-on-a-condition-discovered-mid-flight` and called it a disposition that "exists and needs
+no new record"; this ruling is that disposition, with the missing piece supplied — which step holds
+(`classify`, intake's first), on what discovered condition (incompleteness, read by the step owner
+attempting to classify a task that is not yet fully written), and what a hold looks like when the batch that
+holds is the task's *own* intake batch and not a later workflow's. Nothing about the hold mechanism changes
+for this use, which is the evidence it generalizes rather than being stretched: the same finding, the same
+renewing lease, the same three bounded ends (the condition resolves and `classify` proceeds; the condition
+owes a principal a decision and a checkpoint is raised; the condition owes nobody a decision and
+`failure_posture.md` rule 5's backoff-then-checkpoint bounds it), unchanged.
+
+**The claimability sub-question, answered directly.** An assembling task is not ordinarily claimable before
+it is finished being written. The claim predicate reads the persistent assembly exclusion before its usual
+lease rule. With the exclusion present, it exposes only the open `classify` step to a principal that resolves
+as its declared `pm` step owner; every other task claim is refused. A held lease still excludes every other
+principal in the ordinary way. If it lapses, the same PM-only assembly claim becomes available again, while
+the task remains absent from ordinary intake and successor-workflow pools. Ending assembly means the eligible
+lease holder judges the condition resolved and writes `classify`'s verdict; until that verdict exists the
+finding cannot be ignored, including across crash and lease transfer.
+
+**What this settles, and what it does not.** Settled: every workflow-entering task becomes readable atomically with its intake
+batch and `ADDRESSED_BY` edge; an assembling task adds the creator-time finding to that same unit, and that
+batch's `classify` step holds rather than closing while the task is incomplete. Creation grants no lease,
+and the persistent assembly exclusion survives a missing, returned, transferred, or lapsed lease. An
+ordinary task lacks only that finding and remains claimable through intake's usual owner resolution.
+Not settled, and not part of this question: how a contributing agent signals that its portion is done, or
+how many agents' contributions `classify` waits on before resolving the hold — those are a matter of how
+`classify` is executed, which is `workflows.md#intake`'s to state if it ever needs to, not a new mechanism
+this ruling adds.
+
+**What would reopen it.** A demonstrated case where the hold's three bounded ends do not fit
+assembly — where an assembling task genuinely needs to sit unresolved past what
+`failure_posture.md` rule 5's backoff ceiling tolerates before a `rounds_exhausted` checkpoint is the right
+answer, for instance — would be evidence the discovered-condition mechanism does not generalize to this
+use after all, which is what would revisit the choice between the four dispositions rather than merely tune
+this one's parameters.
 
 ### What a claim predicate treats as claimable
 
-Claimable: not terminal, no held lease, and no open checkpoint holding it — every checkpoint whose subject
+Claimable: not terminal, no persistent assembly exclusion, no held lease, and no open checkpoint holding it
+— except that a task under the assembly exclusion exposes its open `classify` step only to a principal that
+resolves as the declaration's `pm` step owner, so assembly can resume without making the task executable;
+every checkpoint whose subject
 is the task holds it from claim, but one: `unclaimed_step` reorders and never holds, so the step it names
 stays claimable by its role (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`); a
 checkpoint on an action holds the action, and the task stays with its lease holder or, on a lapse, is
@@ -220,28 +328,35 @@ record already carries onto `open` or terminal, permanently. Live status distrib
 ### A task is live when some principal could claim it now
 
 **The ruling.** A task is **live** when it is [claimable](vocabulary.md#claimable) by some principal: not
-terminal, no lease held on it, and no open checkpoint holding it from claim. "Live" names no new property.
-It is the claimable predicate above read over the whole backlog rather than from one principal's seat —
-existentially, over every principal, instead of the 1:1 "is this mine" a claim asks.
+terminal, no lease held on it, no open checkpoint holding it from claim, and no unresolved persistent assembly
+exclusion — except that the exclusion exposes only its open `classify` step, only to the principal that resolves
+as the intake declaration's `pm` step owner. "Live" names no new property. It is the claimable predicate above
+read over the whole backlog rather than from one principal's seat — existentially, over every principal, instead
+of the 1:1 "is this mine" a claim asks.
 
-**What the predicate partitions the backlog into.** A backlog partitions on it into exactly three parts,
-because a task fails to be claimable for exactly three reasons and each is a different thing to have
-happened. It is **live** — claimable now by some principal. Or it is **under a held lease** — nonterminal,
-claimable by nobody because a principal already took it, which is not work nothing is advancing but work
-being advanced right now. Or it is **finished or held** — terminal, or held from claim by an open
-checkpoint that says by what. Nothing else is a fourth case, and there is no state a task can occupy that
-this read cannot classify. The middle part is why the partition is three parts and not two: a task under a
-held lease is neither live nor terminal nor checkpointed, and a partition stated as live-and-the-rest with
-the rest described as terminal-or-checkpointed loses every actively executing task in the gap between its
-two halves.
+**What the predicate partitions the backlog into.** A backlog partitions on it into exactly three operational
+parts. It is **live** — claimable now by some principal. A task under an unresolved persistent assembly exclusion
+is live only for the narrow `classify` claim by the intake declaration's resolved `pm` step owner; it never enters
+an ordinary claim pool. Or it is **under a held lease** — nonterminal, claimable by nobody because a principal
+already took it, which is not work nothing is advancing but work being advanced right now. Or it is **finished or
+held** — terminal, held from claim by an open checkpoint that says by what, or excluded from ordinary claim by an
+unresolved persistent assembly exclusion when no eligible PM-only `classify` claim is open. The four refusal
+grounds — terminal status, held lease, checkpoint, and assembly exclusion — therefore produce three operational
+parts: terminal, checkpointed, and excluded work share the last part because none is work an ordinary queue may
+hand out. Nothing else is a fourth case, and there is no state a task can occupy that this read cannot classify.
+The middle part is why the partition is three parts and not two: a task under a held lease is neither live nor in
+the finished-or-held decision part, and a partition stated as live-and-the-rest without distinguishing execution
+loses every actively executing task in the gap between its two halves.
 
 A queue reading for work to hand out reads the first part alone, and that is the read *live* is for. The
 other two are distinguished because they answer different questions and lead to different acts: a task
-under a held lease needs nothing done to it and resolves itself when the lease is returned or lapses (a
-lapsed lease is not a held one, so the task is live again with no process acting —
-`vocabulary.md#lease`), whereas a terminal task is done and a checkpointed one is the operator's decision
-queue. Collapsing the second into the third would report executing work as held and put it in front of the
-operator; collapsing it into the first would hand out work another principal is already executing.
+under a held lease needs nothing done to it and resolves itself when the lease is returned or lapses (a lapsed
+lease is not a held one, so an otherwise claimable task is live again with no process acting —
+`vocabulary.md#lease`), whereas a terminal task is done, a checkpointed one is the operator's decision queue, and
+an assembling task remains excluded from ordinary claim while exposing only its PM-only `classify` claim. A lease
+lapse never removes that persistent exclusion. Collapsing the second into the third would report executing work
+as held and put it in front of the operator; collapsing it into the first would hand out work another principal
+is already executing.
 
 **Why claimability and not the alternatives.** *Has an open checkpoint* is exact and matches the record,
 but it says nothing about a task that is merely unclaimed: an unheld, uncheckpointed task and a task
@@ -251,8 +366,9 @@ stored liveness flag — it is state that needs a process to keep it true, and t
 it is the one that died. Claimability is what "live" already means to a queue, and it is derived at read
 time from what the record carries, so nothing maintains it (principle 11). The word follows the corpus's
 existing use of *live* for the one batch of a chain and the one instance of a recurring task
-(`#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next`): in each case the live one
-is the one that is not terminal and not held, read and never stored.
+(`#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next`): in each case the live one is the
+one that is not terminal and not held by a lease, checkpoint, or persistent assembly exclusion, apart from the
+exclusion's narrow PM-only `classify` claim; the property is read and never stored.
 
 **No term is minted for it** (principle 12). `claimable` is the term, defined once in
 `vocabulary.md#claimable` and argued once above; *live* is that predicate's reading over a pool, the way
@@ -407,7 +523,7 @@ only when an action inside it reaches the action gate, which resolves `operator_
 
 ### A task is executed only through a workflow
 
-There is no path by which a task is executed outside a workflow. Every task enters intake, and intake's
+There is no path by which a task is executed outside a workflow. Every workflow-entering task enters intake, and intake's
 closing verdict names the successor workflow it goes to, or none, or operator-only; whatever it does
 after that, it does inside a batch going through a declared workflow, with that workflow's steps, step
 owners, and verdicts. The design offers no side door: no status a principal sets that means "done
@@ -715,8 +831,8 @@ batch to come into existence, which tasks are in it, and which workflow it goes 
 by a mechanism the model already has, and stating them together is what stops the answer being re-derived
 differently at each call site.
 
-**A batch comes into existence at one of two moments, and at no other: a task's creation, which opens its
-intake batch, and a closing verdict naming a successor, which opens the successor's.** Two causes, both
+**A batch comes into existence at one of two moments, and at no other: every workflow-entering task's creation, which opens its
+intake batch at creation, and a closing verdict naming a successor, which opens the successor's.** Two causes, both
 recorded, and no third. Intake's `route` step closes on a verdict naming one successor workflow, none,
 or operator-only; every later batch closes the same way (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`).
 Where a successor is named, the batch for it opens and carries a `FOLLOWS` edge back to the batch that
@@ -726,13 +842,16 @@ work to group. The one batch with no predecessor is a task's intake batch, opene
 which is the universal entry (`#intake-is-every-tasks-first-workflow`, above) and the reason every chain
 has a first link.
 
-The consequence worth naming: a batch is always opened **by a principal's recorded conclusion**, never by a
-process acting on its own reading of the record. The verdict names the successor, so the decision has an
-author, a timestamp, and a reason, and a reader asking why these tasks are in this workflow is answered by
-a conclusion rather than by inferring what some sweeper's predicate must have matched.
+The consequence worth naming has two forms, not one. An intake batch opens in the admitted creation unit of
+the workflow-entering task, without a predecessor verdict. Every successor batch is opened **by a principal's
+recorded conclusion**, never by a process acting on its own reading of the record. That closing verdict names
+the successor, so the decision has an author, a timestamp, and a reason, and a reader asking why these tasks
+are in that later workflow is answered by a conclusion rather than by inferring what some sweeper's predicate
+must have matched.
 
-**A batch's tasks are the tasks the closing verdict carried, and grouping beyond that is a step's
-judgement, recorded as one.** The default is the simple one: the tasks attached to the closing batch move
+**A successor batch's tasks are the tasks the closing verdict carried; an intake batch carries the one task
+whose creation opened it, and grouping beyond either is a step's judgement, recorded as one.** The default is
+the simple one: the tasks attached to the closing batch move
 together into the successor, and a batch of one stays a batch of one. Two operations change a task set,
 both already defined and both edges (principle 11): **detach**, which ends a task's `ADDRESSED_BY` edge and
 opens a new batch for it from the first step of its workflow, and **attach**, which writes that edge. What
@@ -747,8 +866,9 @@ verdicts already written on it, which is exactly why the judgement is a recorded
 against a task set that did not include it, and a step owner who attaches is asserting that they still
 hold. Where that assertion is not safe, the task is its own batch.
 
-**The workflow is chosen once, by the verdict that names the successor, from the declared list.** The
-choice is not open-ended: `workflow.successors` names the workflows a closing batch's tasks may enter, and
+**The workflow is fixed once: `intake` by the task-creation contract for an intake batch, and for every
+successor batch by the verdict that names it from the declared list.** The successor choice is not open-ended:
+`workflow.successors` names the workflows a closing batch's tasks may enter, and
 the closing verdict selects exactly one from that list or none. So the workflow for a batch is fixed
 before the batch opens, by a named principal, bounded by a declaration that was reviewed when it was
 written. There is no run-time selection inside the batch, no re-selection, and no workflow chosen by
@@ -770,7 +890,7 @@ The three questions and their one answer each, with the paths the rules above ex
 
 ```mermaid
 flowchart TD
-    CR["task created"] --> IB["its intake batch opens: the one batch with no predecessor"]
+    CR["workflow-entering task created"] --> IB["its intake batch opens without a predecessor verdict"]
     IB --> CS["closing verdict of a batch"]
     CS --> SEL{"does it name a successor?"}
     SEL -->|"none"| END["the task's chain ends"]
@@ -787,8 +907,8 @@ flowchart TD
     X4["a label an external system carries"] -.->|"chooses no workflow"| W
 ```
 
-Every arrow into a batch is a principal's recorded conclusion; every dotted one is a path the rules above
-close.
+The arrow into intake is the task's admitted creation unit; every arrow into a successor batch is a
+principal's recorded conclusion. Every dotted arrow is a path the rules above close.
 
 **What this deliberately does not do is let batch formation key on anything discovered later.** A
 declaration's conditional may turn only on a property of the task set at intake, never on a label an
@@ -828,24 +948,37 @@ no conclusion is written until the condition resolves; the rule that a conclusio
 (`vocabulary.md#condition`) is untouched, because a hold is the absence of a conclusion, not a conclusion with a
 clause.
 
-**There is no held state, no waiting value, and no field on the batch or the task.** A held step is read
-from the record as every other claimed step is: a held lease on the step, a finding on it naming an unmet
-condition, and no verdict. That derivation is what principle 11 asks for — a stored hold would need a
+**There is no held state, no waiting value, and no field on the batch or the task.** Ordinarily, a held step
+is read from the record as every other claimed step is: a held lease on the step, a finding on it naming an
+unmet condition, and no verdict. That derivation is what principle 11 asks for — a stored hold would need a
 process to clear it, and a step owner that died would leave it asserting a hold nobody holds, where the lease
-lapses on its own and the step is claimable again with no process acting. It is also why a hold is not a
+lapses on its own and the step is claimable again with no process acting.
+
+**Decision 84's assembly exception starts one boundary earlier.** Its creator-time finding is admitted with
+the task, intake batch, and `ADDRESSED_BY` edge before a step owner or held lease exists. In that exact
+shape, the finding with no `classify` verdict derives the persistent assembly exclusion; it does not assert
+that an absent holder is holding. When the declaration-resolved `pm` step owner holds the `classify` lease,
+the ordinary three-part read above also says the step is holding. When that lease lapses, the active hold
+ends and `classify` becomes claimable again only to an eligible `pm` step owner, but the finding and its
+persistent assembly exclusion survive the lease lapse and still refuse every ordinary claim. Only the
+`classify` verdict clears that exclusion. This is also why a hold is not a
 second waiting mechanism beside the checkpoint (principle 6), which was the cost the open question weighed:
 the checkpoint is still the only mechanism by which a principal is asked for a decision, a hold asks nobody
 anything, and a reader finding held steps uses the same read that finds any claimed step — there is no hold
 queue to consume or to neglect (principle 1). The distinction between a declared condition and a discovered
 one is only **when it is recorded**: `applies_when` is written on the declaration and evaluated when the step
-would open (`gates_and_workflows.md#declaration-batch-projection`); a discovered condition is written on the
-batch by the step owner at the moment it is met. Both are conditions on a step, and neither is a status. The
+would open (`gates_and_workflows.md#declaration-batch-projection`); a discovered condition is ordinarily
+written on the batch by the step owner at the moment it is met. The assembly exception is written by the
+creator at admission because waiting for a step owner would publish the incomplete task without its
+exclusion; the atomic-unit and exact-`classify` checks refuse that creator-time authorship anywhere else.
+All are conditions on a step, and none is a status. The
 declared case is therefore not a second mechanism: a step whose close condition names an arrival from outside
 the swarm — a reply, a confirmation, the operator's decision — holds exactly as a discovered condition holds,
 and the bound it holds under is the `hold_bound` its declaration carries
 (`gates_and_workflows.md#declaration-batch-projection`).
 
-**A hold is bounded, and it is bounded by mechanisms that already exist.** Three ends, no new one. Where the
+**An ordinary lease-bearing hold is bounded, and it is bounded by mechanisms that already exist.** Three
+ends, no new one. Where the
 condition **resolves** — the re-quote arrives, the read returns, the task completes — the step owner reads
 that from the record and signs or blocks on its own judgement; the hold ends because the verdict is written.
 Where the condition **owes a principal a decision** — the re-quote is outside what was consented to, the
@@ -856,9 +989,11 @@ condition **owes nobody a decision and does not resolve**, the hold is a deferra
 rule 5 already bounds every deferral: backoff between re-evaluations, a ceiling, and at the ceiling one
 checkpoint on the task with reason `rounds_exhausted`, carrying the finding so the operator is told what the
 step was waiting on rather than asked to diagnose it. A step owner that stops renewing lets the lease lapse,
-the step is claimable again, and repeated lapse raises `repeated_lapse` — so a hold whose holder has died is
-not a hold, it is a lapsed lease, and the design already knows what to do with one. **No hold ends by elapsed
-time into a pass**: the ends above are a verdict, a checkpoint, or a lapse, never a clearance
+the step is claimable again, and repeated lapse raises `repeated_lapse` — so an ordinary hold whose holder
+has died is not an active hold, it is a lapsed lease, and the design already knows what to do with one. For
+decision 84's assembly exception, lapse likewise ends the active lease-bearing hold, while the creator-time
+finding stays and continues its PM-only persistent exclusion until `classify` has a verdict. **No active hold
+ends by elapsed time into a pass**: the ends above are a verdict, a checkpoint, or a lapse, never a clearance
 (`failure_posture.md#repeated-lapse-raises-a-checkpoint`).
 
 **Why not the alternative.** The other answer was that a step owner who cannot sign either raises a
@@ -1010,9 +1145,12 @@ a live one. Work needing two workflows at once is split into child tasks, one pe
 
 ### Parent and child tasks
 
-Children `PART_OF` a parent (at most one parent). Parent completion is derived from children's terminal
-states. Children go through workflows independently. A parent never enters a workflow — it is a
-grouping, and a batch carries tasks that are executed, which a parent never is.
+Children `PART_OF` an aggregate parent (at most one parent). Parent completion is derived from children's
+terminal states. Children go through workflows independently. An **aggregate parent task is not claimable,
+never enters a workflow, and has no intake batch or `ADDRESSED_BY` edge** — it is a grouping, and a batch
+carries tasks that are executed, which an aggregate parent never is. This is the deliberate exception to
+the workflow-entry creation rule; every child and every other workflow-entering peer task still opens its
+intake batch atomically at creation.
 
 **A task's one `PART_OF` edge targets its parent task or a planning record, and the records above it are
 its ascent.** The same edge, with the same one-parent rule, relates a task to the plan it is under and a
@@ -1221,10 +1359,13 @@ through workflows in batches — and each way a task comes to exist is stated wh
 creates it is argued. That leaves a reader who asks "in how many ways can work enter this swarm" reading
 eight documents. This section is the index, in the register's style
 (`conformance.md#the-register-of-open-design-decisions`): one line per source, pointing at the home that
-argues it, and restating nothing (principle 9). It is complete in one sense by construction — every source
-below ends in the same place, a task with no intake batch, which is the universal entry
-(`#intake-is-every-tasks-first-workflow`) — and a source that does not end there is not a source of tasks
-but a side door, which the model does not have (`#a-task-is-executed-only-through-a-workflow`).
+argues it, and restating nothing (principle 9). It is complete in one sense by construction: every source
+below that creates a workflow-entering peer task ends in the same place, a task with its intake batch opened
+atomically at creation, which is the universal workflow entry
+(`#intake-is-every-tasks-first-workflow`) — and a source of executable work that does not end there is a side
+door, which the model does not have (`#a-task-is-executed-only-through-a-workflow`). The one
+task-shaped exception is an aggregate parent: it is a grouping that is not claimable rather than executable work, so
+it has children from the same indexed sources but no intake batch of its own.
 
 | # | Source | What creates the task | Home |
 |---|---|---|---|
@@ -1240,7 +1381,8 @@ but a side door, which the model does not have (`#a-task-is-executed-only-throug
 
 Two things the index makes visible that the sources stated apart did not. Sources 4 through 8 are the
 swarm creating work for itself, and one rule governs all of them: the creating principal holds no privilege
-over the task it created (`#a-task-is-executed-only-through-a-workflow`), most created tasks are peers left
+over the task it created (`#a-task-is-executed-only-through-a-workflow`), including no `classify` lease unless
+it independently resolves as the intake declaration's `pm` step owner and passes the claim check; most created tasks are peers left
 to their own intake (6 is the exception, by a recorded edge), and no created task is executed outside a
 workflow. And sources 2, 3, and 9 are the three that turn a **change** into work rather than a
 **decision** — the adapter's fourth outcome at the external boundary, and the intake rule inside the
@@ -1276,7 +1418,7 @@ One task per rule per change, never more. The created task refers to the entity 
 an entity in the record (gap G12, which this section makes load-bearing and does not close) — and its
 provenance names the rule and the identifier of the change, which is the idempotency key of the write
 (`data_model.md#record-conventions`), so a change delivered twice fires a rule once. The task's intake
-batch opens on its creation as every task's does (`#how-a-batch-is-formed-and-what-chooses-its-workflow`),
+batch opens on its creation as every workflow-entering task's does (`#how-a-batch-is-formed-and-what-chooses-its-workflow`),
 and that is the only sense in which a rule opens anything. A rule never opens a batch of its own, never
 attaches a task to an open batch, never names a workflow, and never takes an action: the first two are the
 sweeper's predicate that section closes, the third is routing by a matcher, and the fourth is an effect no

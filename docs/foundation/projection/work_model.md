@@ -5,7 +5,7 @@
 
 Every rule `work_model.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`work_model.md`](../work_model.md) and are not repeated here (decision 66).
 
-53 rules.
+54 rules.
 
 ## [Pull is the only delivery; assignment constrains eligibility](../work_model.md#pull-is-the-only-delivery-assignment-constrains-eligibility)
 
@@ -45,8 +45,12 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 ## [Intake is every task's first workflow](../work_model.md#intake-is-every-tasks-first-workflow)
 
-- **WM-13** — the rule this heading states *[M]*
-- **WM-14** — the same: a child may take intake's fast path and never skips intake *[M]*
+- **WM-13** — every workflow-entering task atomically gets one intake batch and `ADDRESSED_BY` at creation; an aggregate parent gets neither and is not claimable *[M]*
+- **WM-14** — the same: every workflow-entering child task may take intake's fast path and never skips intake *[M]*
+
+## [What distinguishes a task being assembled from one intake has not reached](../work_model.md#what-distinguishes-a-task-being-assembled-from-one-intake-has-not-reached)
+
+- **WM-14a** — (decision 84): every workflow-entering task atomically gets its intake batch and `ADDRESSED_BY` at creation; assembly adds the persistent `classify` hold; creation grants no lease; only the declaration-resolved `pm` step owner may claim it; the exclusion survives lapse, crash, return, and transfer; an ordinary task lacks the hold and stays claimable *[M — effect-shaped; persistent-exclusion and creator-ownership mutants prove failure]*
 
 ## [What a claim predicate treats as claimable](../work_model.md#what-a-claim-predicate-treats-as-claimable)
 
@@ -68,7 +72,7 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 ## [A task is executed only through a workflow](../work_model.md#a-task-is-executed-only-through-a-workflow)
 
 - **WM-20** — the rule this heading states *[M]*
-- **WM-21** — the same: a daemon's task enters intake like any other *[M]*
+- **WM-21** — the same: every daemon-created workflow-entering task enters intake with its intake batch at creation *[M]*
 
 ## [Changing the swarm is work, and it goes through a workflow like any other](../work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other)
 
@@ -85,21 +89,21 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 ## [How a batch is formed, and what chooses its workflow](../work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow)
 
-- **WM-27** — opened only by a closing verdict *[M]*
+- **WM-27** — an intake batch opens at workflow-entering task creation without a predecessor verdict; every successor batch is opened only by a closing verdict *[M]*
 - **WM-28** — the same: attach part-way is a step owner's judgement in a verdict; the task inherits the verdicts *[M (U-25 closed)]*
 - **WM-29** — the same: the workflow is fixed at open *[M]*
 - **WM-30** — the same: a daemon noticing eligible tasks, an adapter on an event, a sweeper, a label — none opens a batch or chooses a workflow *[M]*
 
 ## [A batch may hold on a condition discovered mid-flight](../work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight)
 
-- **WM-31** — a hold is a finding naming the condition, no verdict, the lease renewed; no held state and no field *[M (X-14 closed)]*
-- **WM-31a** — the same: a hold ends by verdict, checkpoint, or lapse, never by elapsed time into a pass; a hold owing nobody a decision is a rule-5 deferral *[M (`hold_bound`; U-20 closed)]*
+- **WM-31** — an ordinary active hold is a finding naming the condition, no verdict, and a renewed lease; no held state and no field. Decision 84's assembly exception admits its creator-time `classify` finding before any owner or lease, and that finding derives the persistent exclusion rather than falsely asserting an active holder *[M (X-14 closed; decision 84 assembly exception)]*
+- **WM-31a** — the same: an ordinary active hold ends by verdict, checkpoint, or lapse, never by elapsed time into a pass; a hold owing nobody a decision is a rule-5 deferral. Under the assembly exception, lapse ends only the active hold: the finding's exclusion survives lapse, ordinary claims remain refused, the PM-only `classify` claim reopens, and only its verdict clears the exclusion *[M (`hold_bound`; U-20 closed; decision 84 assembly exception)]*
 
 ## [A batch may depend on a task it created](../work_model.md#a-batch-may-depend-on-a-task-it-created)
 
 - **WM-32** — a `DEPENDS_ON` edge, never a field; the verdict is refused while it is unended and the task non-terminal; ending it is a recorded act *[M]*
 - **WM-32a** — the same: a cycle is refused at write and at attach; one found later escalates every batch in it as `dependency_cycle` *[M — the cross-type walk is the writer's (X-15), so the mutant is a writer that skips it]*
-- **WM-32b** — the same: `DEPENDS_ON` is not on the chain; the created task is a peer with its own intake and its own priority *[M]*
+- **WM-32b** — the same: a created workflow-entering peer task has its own intake batch at creation and priority; `DEPENDS_ON` is not its chain *[M]*
 
 ## [Artifacts are records a batch leaves, never its subject](../work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject)
 
@@ -111,11 +115,11 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 ## [Parent and child tasks](../work_model.md#parent-and-child-tasks)
 
-- **WM-35** — the rule this heading states *[M]*
+- **WM-35** — an aggregate parent is not claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY`; its children are workflow-entering tasks *[M]*
 
 ## [A recurring task is one live instance, and its completion creates the next](../work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next)
 
-- **WM-35a** — one live instance, never zero and never two; the closing verdict creates the next, `FOLLOWS` task to task, the rule copied *[M]*
+- **WM-35a** — one live workflow-entering instance, never zero and never two; the closing verdict creates the next workflow-entering task with its intake batch at creation, `FOLLOWS` task to task, and the rule copied *[M]*
 - **WM-35b** — the same: `due_date` is computed from the schedule, never from completion; a missed point is owed unless the rule says otherwise *[M]*
 - **WM-35c** — the same: no series entity, count, or live marker; the rule lives on the instance; ending the series is a correction to the live instance's rule; postponing is a `due_date` correction and creates nothing *[M]*
 - **WM-35d** — the same: a stopped series is one overdue instance, and its batch reaches the queue *[M]*
@@ -132,7 +136,7 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 ## [Where tasks come from: every source, indexed](../work_model.md#where-tasks-come-from-every-source-indexed)
 
-- **WM-39** — nine sources, every one ending in a task with no intake batch; the creating principal holds no privilege over the task *[M]*
+- **WM-39** — every workflow-entering peer task from all nine sources gets its intake batch and `ADDRESSED_BY` at creation; an aggregate parent is not claimable and gets neither; decision 84's assembly exception adds the hold, and only the declared `pm` step owner gets a lease *[M]*
 
 ## [An intake rule turns a described change in the record into a task, and nothing else](../work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else)
 

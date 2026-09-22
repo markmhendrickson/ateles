@@ -118,10 +118,13 @@ is declared.
 **Purpose:** turn a created task into a routed one: classified, linked to the records it concerns,
 deduplicated, prioritized, and handed to exactly one successor workflow, to none, or to the operator.
 
-**Entry condition:** a task exists in the record and has no intake batch. Creation is publication
-(`work_model.md#the-transition-vocabulary`), so every task meets this condition once, at creation, and no
-task meets it twice. A task with no intake batch is by that fact unrouted; there is no separate unrouted
-state (`work_model.md#intake-is-every-tasks-first-workflow`).
+**Entry condition:** every workflow-entering task enters with its intake batch and `ADDRESSED_BY` edge admitted atomically at
+creation. Creation is publication (`work_model.md#the-transition-vocabulary`), so this boundary is crossed
+once and no workflow-entering task enters intake twice. The aggregate parent is the explicit exception: it
+is not claimable, never enters a workflow, and has no intake batch. Decision 84's assembly exception differs
+only by adding the persistent
+`classify` hold finding to that same creation unit. A task is unrouted while its intake batch has no closing
+`route` verdict; there is no separate unrouted state (`work_model.md#intake-is-every-tasks-first-workflow`).
 
 **Steps**
 
@@ -1025,7 +1028,9 @@ that the field is dropped and the prose is kept; it does not touch what the pros
 
 ## What no workflow in this document does
 
-None lets a task that has no intake batch enter it, except intake itself. None names two successors.
+None admits a workflow-entering task without its intake batch; the aggregate parent is not claimable and enters
+no workflow at all. None lets an assembling task enter another workflow while
+decision 84's persistent hold stands. None names two successors.
 None takes a step on an issue or a pull request rather than on the batch's tasks. None takes an outward
 effect outside the action gate, none carries a second gate beside it, and none raises task-level failure
 anywhere but the checkpoint queue.
