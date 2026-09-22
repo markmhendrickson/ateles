@@ -1,0 +1,277 @@
+{
+  "$defs": {
+    "asset_item": {
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "preview": {
+          "enum": [
+            "image",
+            "video",
+            "mark",
+            "none"
+          ]
+        },
+        "public_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "approved",
+            "provisional",
+            "missing",
+            "retired"
+          ]
+        },
+        "use": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "status",
+        "use",
+        "source",
+        "repository_path"
+      ],
+      "type": "object"
+    },
+    "status_item": {
+      "additionalProperties": true,
+      "properties": {
+        "guidance": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "approved",
+            "provisional",
+            "missing",
+            "retired"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "guidance",
+        "source"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:ateles:brand-system:1.0.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Canonical expression contract. Neotoma owns instances; repository files are generated mirrors; public brand pages are read-only viewers.",
+  "properties": {
+    "asset_inventory": {
+      "items": {
+        "$ref": "#/$defs/asset_item"
+      },
+      "type": "array"
+    },
+    "completeness": {
+      "additionalProperties": true,
+      "required": [
+        "overall_status",
+        "dimensions",
+        "missing_items"
+      ],
+      "type": "object"
+    },
+    "downstream_contracts": {
+      "items": {
+        "additionalProperties": true,
+        "properties": {
+          "consumer": {
+            "type": "string"
+          },
+          "contract": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "approved",
+              "provisional",
+              "missing",
+              "retired"
+            ]
+          }
+        },
+        "required": [
+          "consumer",
+          "contract",
+          "status"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "name": {
+      "type": "string"
+    },
+    "ownership": {
+      "additionalProperties": true,
+      "required": [
+        "owner_role",
+        "approval_role",
+        "maintenance"
+      ],
+      "type": "object"
+    },
+    "phrases": {
+      "items": {
+        "$ref": "#/$defs/status_item"
+      },
+      "type": "array"
+    },
+    "positioning": {
+      "additionalProperties": true,
+      "required": [
+        "category",
+        "hero_headline",
+        "hero_support",
+        "product_promise",
+        "audience"
+      ],
+      "type": "object"
+    },
+    "product": {
+      "type": "string"
+    },
+    "production_specs": {
+      "additionalProperties": true,
+      "required": [
+        "cinematic",
+        "still_and_reduced_motion",
+        "delivery"
+      ],
+      "type": "object"
+    },
+    "provenance": {
+      "additionalProperties": true,
+      "required": [
+        "canonical_storage",
+        "sources",
+        "boundary"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "scope": {
+      "additionalProperties": true,
+      "required": [
+        "owns",
+        "does_not_own"
+      ],
+      "type": "object"
+    },
+    "slug": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "approved",
+        "provisional",
+        "missing",
+        "retired"
+      ]
+    },
+    "terminology": {
+      "items": {
+        "$ref": "#/$defs/status_item"
+      },
+      "type": "array"
+    },
+    "updated_at": {
+      "type": "string"
+    },
+    "visibility": {
+      "enum": [
+        "private_source",
+        "public"
+      ]
+    },
+    "visual_concepts": {
+      "items": {
+        "$ref": "#/$defs/status_item"
+      },
+      "type": "array"
+    },
+    "visual_styles": {
+      "additionalProperties": true,
+      "required": [
+        "symbol",
+        "palette",
+        "typography",
+        "material",
+        "light",
+        "camera",
+        "motion",
+        "composition",
+        "anti_patterns"
+      ],
+      "type": "object"
+    },
+    "voice": {
+      "additionalProperties": true,
+      "required": [
+        "attributes",
+        "rules",
+        "grammar"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "name",
+    "product",
+    "slug",
+    "schema_version",
+    "status",
+    "visibility",
+    "ownership",
+    "scope",
+    "positioning",
+    "phrases",
+    "terminology",
+    "voice",
+    "visual_styles",
+    "visual_concepts",
+    "asset_inventory",
+    "production_specs",
+    "provenance",
+    "downstream_contracts",
+    "completeness",
+    "updated_at"
+  ],
+  "title": "Reusable product brand system",
+  "type": "object"
+}

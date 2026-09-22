@@ -1,7 +1,7 @@
 {
   "layout": "network_hero",
-  "category": "The operating system for agent organizations",
-  "headline": "The operating system for agent organizations.",
+  "category": "The operating system for agentic organizations",
+  "headline": "The operating system for agentic organizations.",
   "body": "Give agents distinct roles, bounded authority, and shared direction—so the organization keeps moving without constant supervision.",
   "primary_cta": {"label": "Read the design", "href": "/design/"},
   "secondary_cta": {"label": "Compare approaches", "href": "/compare/"},

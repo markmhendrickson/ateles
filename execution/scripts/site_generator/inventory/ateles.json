@@ -8,7 +8,7 @@
       "path": "/",
       "nav_label": "Overview",
       "title": "Ateles — organizational design for trustworthy delegation",
-      "meta_description": "The operating system for agent organizations: distinct roles, coordinated work, bounded authority, and accountable action.",
+      "meta_description": "The operating system for agentic organizations: distinct roles, coordinated work, bounded authority, and accountable action.",
       "template": "product_homepage",
       "template_entity_id": "ent_a7132845b99eb265fc85749e",
       "primary_cta": {"label": "Read the design", "href": "/design/", "scope": "site_wide_primary"},
@@ -100,6 +100,19 @@
           "lede": "The comparison preserves shipped strengths, corrects claims when competing products move, and keeps Ateles's designed-versus-running boundary explicit.",
           "source_label": "research finding · competitor test"
         }
+      ]
+    },
+    {
+      "slug": "brand",
+      "path": "/brand/",
+      "nav_label": "Brand",
+      "title": "Ateles brand system — expression, assets, and production",
+      "meta_description": "The approved and provisional copy, visual, cinematic, and asset system for Ateles.",
+      "template": "brand_system_viewer",
+      "template_entity_id": null,
+      "primary_cta": {"label": "Read the design", "href": "/design/", "scope": "page_scoped"},
+      "sections": [
+        {"id": "brand-system", "origin": "brand_system", "source": "brand_systems/ateles.json"}
       ]
     },
     {

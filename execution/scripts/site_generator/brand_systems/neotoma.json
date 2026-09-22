@@ -1,0 +1,474 @@
+{
+  "_observation_ids": {
+    "asset_inventory": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "completeness": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "downstream_contracts": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "name": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "ownership": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "phrases": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "positioning": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "product": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "production_specs": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "provenance": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "schema_version": "unknown",
+    "scope": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "slug": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "status": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "terminology": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "updated_at": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "visibility": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "visual_concepts": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "visual_styles": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "voice": "915b31d0-fb4a-1ab4-250b-e8ae484f9552"
+  },
+  "_source": {
+    "entity_id": "ent_c5f3ebd1800a887a3b405e53",
+    "entity_type": "brand_guideline",
+    "fetched_at": "2026-09-22T10:58:25+00:00",
+    "product": "neotoma",
+    "schema_entity_id": "ent_73da44b2d434cbafe5d8ecb9"
+  },
+  "asset_inventory": [
+    {
+      "kind": "wordmark",
+      "name": "Typographic Neotoma wordmark",
+      "preview": "none",
+      "public_path": "https://github.com/markmhendrickson/neotoma/blob/main/inspector/src/assets/neotoma_wordmark.svg",
+      "repository_path": "inspector/src/assets/neotoma_wordmark.svg",
+      "source": "Neotoma Inspector",
+      "status": "approved",
+      "use": "Primary compact identity mark"
+    },
+    {
+      "kind": "cinematic",
+      "name": "Correction-propagation concept film",
+      "preview": "video",
+      "public_path": "/assets/neotoma/hero-concept.webm",
+      "repository_path": "execution/scripts/site_generator/assets/neotoma/hero-concept.webm",
+      "source": "ent_9444da0c7dea895c182fe098",
+      "status": "provisional",
+      "use": "Clean provisional hero and later correction-capability section; not the complete graph-first identity"
+    },
+    {
+      "kind": "cinematic",
+      "name": "Correction-propagation MP4 fallback",
+      "preview": "none",
+      "public_path": "/assets/neotoma/hero-concept.mp4",
+      "repository_path": "execution/scripts/site_generator/assets/neotoma/hero-concept.mp4",
+      "source": "ent_9444da0c7dea895c182fe098",
+      "status": "provisional",
+      "use": "Fallback encode for provisional film"
+    },
+    {
+      "kind": "poster",
+      "name": "Correction-propagation poster",
+      "preview": "image",
+      "public_path": "/assets/neotoma/hero-concept.avif",
+      "repository_path": "execution/scripts/site_generator/assets/neotoma/hero-concept.avif",
+      "source": "ent_9444da0c7dea895c182fe098",
+      "status": "provisional",
+      "use": "Static and reduced-motion fallback for provisional film"
+    },
+    {
+      "kind": "cinematic",
+      "name": "Graph-first hero film",
+      "preview": "none",
+      "public_path": null,
+      "repository_path": null,
+      "source": "ent_9444da0c7dea895c182fe098",
+      "status": "missing",
+      "use": "Primary cinematic takeover showing the persistent graph plus create, retrieve, and update operations"
+    }
+  ],
+  "completeness": {
+    "dimensions": [
+      {
+        "name": "positioning",
+        "status": "approved"
+      },
+      {
+        "name": "phrases",
+        "status": "approved"
+      },
+      {
+        "name": "terminology",
+        "status": "approved"
+      },
+      {
+        "name": "voice",
+        "status": "approved"
+      },
+      {
+        "name": "visual_style",
+        "status": "approved"
+      },
+      {
+        "name": "asset_inventory",
+        "status": "provisional"
+      },
+      {
+        "name": "cinematic_production",
+        "status": "provisional"
+      },
+      {
+        "name": "provenance",
+        "status": "approved"
+      },
+      {
+        "name": "downstream_contracts",
+        "status": "provisional"
+      }
+    ],
+    "missing_items": [
+      "Graph-first cinematic hero and section master set",
+      "Repo-local public wordmark mirror or explicit cross-repo asset contract",
+      "Complete foundation-viewer asset production"
+    ],
+    "overall_status": "provisional"
+  },
+  "downstream_contracts": [
+    {
+      "consumer": "Human repository guide",
+      "contract": "Generated at docs/brand/neotoma.md; never hand-edit.",
+      "status": "approved"
+    },
+    {
+      "consumer": "Machine site contract",
+      "contract": "Generated at execution/scripts/site_generator/brand_systems/neotoma.json and validated against schema.v1.json.",
+      "status": "approved"
+    },
+    {
+      "consumer": "Design tokens",
+      "contract": "Palette and typography derive from this instance or the same render transaction; product visual design_system remains an upstream source until cutover.",
+      "status": "provisional"
+    },
+    {
+      "consumer": "Product site",
+      "contract": "The /brand/ route renders this machine contract as a read-only viewer and public-safe projection.",
+      "status": "approved"
+    },
+    {
+      "consumer": "Cinematic production",
+      "contract": "Prompts inherit shared/product rules here; shot briefs record only concept-specific deltas.",
+      "status": "approved"
+    },
+    {
+      "consumer": "Application marks",
+      "contract": "UI marks and wordmarks must pass the persistent-graph and anti-pattern contract.",
+      "status": "provisional"
+    }
+  ],
+  "name": "Neotoma canonical brand system",
+  "ownership": {
+    "approval_role": "Product owner for category and brand promise; designated design review for visual execution",
+    "maintenance": "Correct the canonical Neotoma brand_guideline, rerun the repository renderer, and commit both human and machine mirrors together.",
+    "owner_role": "Product owner"
+  },
+  "phrases": [
+    {
+      "guidance": "Exact outward category and hero headline; keep the definite article.",
+      "name": "The system of record for AI agents.",
+      "source": "ent_73226bffbccbd1ff7ff04e49",
+      "status": "approved"
+    },
+    {
+      "guidance": "Hero support and compact product promise.",
+      "name": "Persistent, connected context agents can create, retrieve, and update\u2014with provenance intact.",
+      "source": "ent_4b68f28aaa1a6a6c22ed299b",
+      "status": "approved"
+    },
+    {
+      "guidance": "Compact implementation posture; use where the execution boundary matters.",
+      "name": "Open-source. Local-first. Deterministic.",
+      "source": "ent_73226bffbccbd1ff7ff04e49",
+      "status": "approved"
+    },
+    {
+      "guidance": "Never use: it hands the category to retrieval vendors and misstates the failure as recall rather than absent authoritative record.",
+      "name": "Your agents forget. Neotoma makes them remember.",
+      "source": "operator decision",
+      "status": "retired"
+    },
+    {
+      "guidance": "Portfolio editorial framing, not category or hero headline.",
+      "name": "Agents cannot own work they cannot verify.",
+      "source": "product strategy plan",
+      "status": "provisional"
+    }
+  ],
+  "positioning": {
+    "audience": "Technically fluent operators who will install and connect local agent infrastructure but do not want to build a state layer from scratch.",
+    "category": "The system of record for AI agents.",
+    "hero_headline": "The system of record for AI agents.",
+    "hero_support": "Persistent, connected context agents can create, retrieve, and update\u2014with provenance intact.",
+    "product_promise": "A durable shared record graph where agents can establish, retrieve, and correct consequential state without erasing provenance or prior versions.",
+    "sibling_role": "Neotoma answers what was true; Ateles answers who was authorized."
+  },
+  "product": "Neotoma",
+  "production_specs": {
+    "cinematic": {
+      "palette_and_material": "Warm archival paper, deep ink, teal record continuity, amber only for correction or supersession, archival glass/vellum/mineral materials.",
+      "prohibitions": [
+        "destructive overwrite",
+        "vanishing history",
+        "disconnected floating cards",
+        "database cylinder, cloud, brain, or generic AI glow",
+        "generated text, UI, faces, hands, or avatars",
+        "correction as the entire brand story"
+      ],
+      "semantics": "A durable record graph receives distinct create, retrieve, and update operations while provenance, relationships, and prior state remain intact; correction propagates without erasing history."
+    },
+    "delivery": {
+      "behavior": [
+        "muted",
+        "autoplay",
+        "playsinline",
+        "loop",
+        "preload=metadata",
+        "lazy-load non-hero media"
+      ],
+      "hero": "One silent 8-second 4:3 master, 720p or better, with H.264 and VP9/AV1 web encodes; each hero asset under 1.8 MB.",
+      "responsive": "Provide 16:9 desktop and art-directed 9:16 mobile crops without losing the semantic beat.",
+      "sections": "Five-to-six-second silent 16:9 masters or still-led micro-loops; target under 900 KB per moving web asset and under 150 KB per AVIF poster."
+    },
+    "still_and_reduced_motion": {
+      "accessibility": [
+        "No meaning only in motion",
+        "DOM text remains text, never generated into imagery",
+        "Maintain readable copy-safe negative space and AA contrast",
+        "Use descriptive figure labels for non-decorative visuals"
+      ],
+      "requirement": "The poster and reduced-motion state must communicate the complete adjacent claim without relying on movement."
+    }
+  },
+  "provenance": {
+    "boundary": "This entity owns expression. Product capability and foundation truth remain in product/foundation sources. Repository docs and JSON are generated mirrors; /brand/ is a viewer; concept-film records may only add shot-specific deltas.",
+    "canonical_storage": "Neotoma brand_guideline entity",
+    "evidence_visibility": "Machine mirrors retain entity and observation IDs. Public brand pages translate provenance into human-readable source labels and never expose internal IDs.",
+    "sources": [
+      {
+        "entity_id": "ent_73226bffbccbd1ff7ff04e49",
+        "label": "Neotoma product profile",
+        "status": "approved"
+      },
+      {
+        "entity_id": "ent_746b1d7c717e7780e7943782",
+        "label": "Neotoma visual identity",
+        "status": "approved"
+      },
+      {
+        "entity_id": "ent_4b68f28aaa1a6a6c22ed299b",
+        "label": "Neotoma homepage specification",
+        "status": "approved"
+      },
+      {
+        "entity_id": "ent_72e01f1008653b601be1a956",
+        "label": "Shared structural design system",
+        "status": "approved"
+      },
+      {
+        "entity_id": "ent_9444da0c7dea895c182fe098",
+        "label": "Cinematic production plan",
+        "status": "provisional"
+      }
+    ]
+  },
+  "schema_version": "1.0",
+  "scope": {
+    "does_not_own": [
+      "Product capabilities or roadmap truth",
+      "Foundation architecture",
+      "Page information architecture and calls to action",
+      "Shot-specific concept-film deltas",
+      "Shared UI component structure"
+    ],
+    "owns": [
+      "Public copy voice and grammar",
+      "Approved phrases and terminology",
+      "Primary and secondary symbols",
+      "Palette and typography",
+      "Material, light, camera, motion, and composition",
+      "Cinematic and still production requirements",
+      "Brand asset acceptance and anti-patterns"
+    ]
+  },
+  "slug": "neotoma",
+  "status": "provisional",
+  "terminology": [
+    {
+      "guidance": "Single category noun and authority claim: the designated place where agent-generated state is settled.",
+      "name": "system of record",
+      "source": "ent_73226bffbccbd1ff7ff04e49",
+      "status": "approved"
+    },
+    {
+      "guidance": "A durable typed claim or object with source, version, and relationships.",
+      "name": "record",
+      "source": "ent_746b1d7c717e7780e7943782",
+      "status": "approved"
+    },
+    {
+      "guidance": "Who or what supplied a value and how its current state relates to earlier versions.",
+      "name": "provenance",
+      "source": "ent_746b1d7c717e7780e7943782",
+      "status": "approved"
+    },
+    {
+      "guidance": "A new current version that retains prior state; one behavior in the graph, not the whole identity.",
+      "name": "correction",
+      "source": "ent_746b1d7c717e7780e7943782",
+      "status": "approved"
+    },
+    {
+      "guidance": "Concrete agent operations over persistent records; show all three in graph-first hero media.",
+      "name": "create, retrieve, update",
+      "source": "ent_4b68f28aaa1a6a6c22ed299b",
+      "status": "approved"
+    },
+    {
+      "guidance": "Do not use as the category; it collapses authority, correction, and relationships into recall.",
+      "name": "agent memory",
+      "source": "operator decision",
+      "status": "retired"
+    },
+    {
+      "guidance": "Retired as outward category noun; may remain only as an architectural invariant in foundation material.",
+      "name": "state layer",
+      "source": "product strategy plan",
+      "status": "retired"
+    }
+  ],
+  "updated_at": "2026-09-22",
+  "visibility": "private_source",
+  "visual_concepts": [
+    {
+      "guidance": "Records and relationships survive across tools, sessions, retrieval, and update.",
+      "name": "Persistent graph",
+      "source": "ent_746b1d7c717e7780e7943782",
+      "status": "approved"
+    },
+    {
+      "guidance": "Distinct agent operations must be legible without generated labels or UI overlays.",
+      "name": "Create, retrieve, and update",
+      "source": "ent_4b68f28aaa1a6a6c22ed299b",
+      "status": "approved"
+    },
+    {
+      "guidance": "Current and prior layers remain visible and connected.",
+      "name": "Version lineage and correction",
+      "source": "ent_746b1d7c717e7780e7943782",
+      "status": "approved"
+    },
+    {
+      "guidance": "Source relationships and unresolved claims remain inspectable until review settles the current view.",
+      "name": "Provenance and disagreement",
+      "source": "ent_746b1d7c717e7780e7943782",
+      "status": "approved"
+    },
+    {
+      "guidance": "Required primary film must combine the whole persistent graph with agent operations rather than dramatizing correction alone.",
+      "name": "Graph-first cinematic replacement",
+      "source": "ent_9444da0c7dea895c182fe098",
+      "status": "missing"
+    }
+  ],
+  "visual_styles": {
+    "anti_patterns": [
+      "Never expose internal record IDs, entity types, field or decision keys, code-call names, repository filenames, phase bookkeeping, or agent instructions on a public page.",
+      "Do not paste research analysis, source citations, or implementation-review notes into public prose. Keep detailed evidence in linked source artifacts and translate it into a short reader-facing proof statement.",
+      "Do not turn the provenance rail into developer marginalia. Every visible label must be understandable to a cold external reader without product-internal vocabulary.",
+      "Do not spread the correction color as a general accent; reserve it for a superseded value or correction event.",
+      "Do not rely on animation to communicate source, version, correction, disagreement, or refresh; reduced-motion and static views must remain complete.",
+      "Do not diverge shared structural tokens from Ateles without a product reason; the products remain siblings through spacing, restraint, and hierarchy.",
+      "Do not reuse the Neotoma app or Inspector palette. Public product pages keep their distinct paper, ink, teal, and correction system."
+    ],
+    "camera": "Locked or slow macro dolly with layered parallax that reveals lineage and relationship depth while persistent geometry stays registered.",
+    "composition": "Cinematic graph fields dominate, with calm copy-safe negative space. Supporting diagrams may clarify lineage and mechanism but do not replace cinematic identity.",
+    "light": "Soft museum darkness, raking daylight, restrained volumetric dust; the graph feels durable rather than digital vapor.",
+    "material": "Archival glass, translucent vellum, engraved paper fiber, mineral record tiles, and fine tensioned teal paths.",
+    "motion": "Create adds a durable object and relationship; retrieve selectively illuminates without changing state; update adds a current layer while the prior layer remains visible.",
+    "palette": {
+      "dark": {
+        "accent": "#6fd9bd",
+        "accent_2": "#8fe6cd",
+        "accent_wash": "#122019",
+        "correction": "#d9a441",
+        "ink": "#e9ede9",
+        "ink_2": "#c3ccc6",
+        "ink_3": "#9fb0a8",
+        "line": "#26332c",
+        "on_accent": "#0f1613",
+        "paper": "#0f1613",
+        "paper_2": "#151f1b"
+      },
+      "light": {
+        "accent": "#1f6f5c",
+        "accent_2": "#2f8a72",
+        "accent_wash": "#e7ede7",
+        "correction": "#8a5a10",
+        "ink": "#14201c",
+        "ink_2": "#3c4a44",
+        "ink_3": "#5b6a63",
+        "line": "#ddd6c4",
+        "on_accent": "#f6f3ea",
+        "paper": "#f6f3ea",
+        "paper_2": "#efece1"
+      },
+      "rationale": "Paper/ink metaphor (not a generic accent-on-white SaaS scheme): a record's oldest technology is the page. Teal retained as seed hue from the current live palette (evolutionary, not a rebrand) but restructured. 'correction' is a NEW semantic color role, reserved exclusively for showing a superseded value struck through beside its replacement (signature move 4) \u2014 never reused as a UI accent, so it stays unambiguous.",
+      "wcag_aa_verified_2026_09_21": {
+        "accent_on_paper_dark": "10.78:1",
+        "accent_on_paper_light": "5.43:1",
+        "correction_on_paper_dark": "9.02:1",
+        "correction_on_paper_light": "5.98:1",
+        "ink_on_paper_dark": "15.51:1",
+        "ink_on_paper_light": "15.10:1",
+        "method": "relative-luminance WCAG contrast formula computed directly (python), all 10 pairs exceed 4.5:1 AA-normal-text threshold, none borderline",
+        "muted_on_paper_dark": "8.08:1",
+        "muted_on_paper_light": "5.13:1",
+        "on_accent_on_accent_dark_button_text": "10.78:1",
+        "on_accent_on_accent_light_button_text": "5.43:1"
+      }
+    },
+    "symbol": {
+      "guidance": "Typed records and durable relationships remain connected to sources, prior versions, and distinct agent operations.",
+      "name": "Persistent record graph",
+      "secondary": "Correction, disagreement, and refresh are events within the graph, not replacement symbols.",
+      "status": "approved"
+    },
+    "typography": {
+      "body_font_family": "Inter, system-ui, -apple-system, 'Segoe UI', sans-serif (KEPT)",
+      "code_font_family": "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace (KEPT as family; assigned to public record labels)",
+      "google_fonts_licence": "All three (Fraunces, Inter, JetBrains Mono) are free, open-license Google Fonts already loaded via the current font mechanism; no licensing action is needed.",
+      "heading_font_family": "Fraunces, Georgia, 'Times New Roman', serif (KEPT from current live page)",
+      "rationale": "Family kept deliberately: research checked 2026-09-21 (fontsinuse.com/typefaces/171187/jetbrains-mono and designmd.app/library/fraunces-typography) supports Fraunces as a warm editorial face and JetBrains Mono as a credible technical companion. Their public roles are distinct: Fraunces gives durable statements a sense of permanence; JetBrains Mono carries short, plain-language record labels such as source, date, version, correction, and status. It must not display internal IDs, schema names, field keys, mechanism calls, or repo filenames."
+    }
+  },
+  "voice": {
+    "attributes": [
+      "precise",
+      "calm",
+      "durable",
+      "epistemically honest",
+      "specific",
+      "reader-facing"
+    ],
+    "avoid": [
+      "forgot or remember framing",
+      "internal entity and schema vocabulary",
+      "database or memory-product clich\u00e9s",
+      "analysis narration and inline citations",
+      "claims that correction is the entire product"
+    ],
+    "grammar": [
+      "Use agents as concrete actors that create, retrieve, and update.",
+      "Use current, prior, sourced, corrected, and reviewed as reader-recognizable state language.",
+      "Prefer one declarative claim followed by one compact explanation."
+    ],
+    "rules": [
+      "Lead with authoritative shared record, not fear of forgetting.",
+      "Explain truth over time through source, version, correction, disagreement, refresh, and continuity.",
+      "Use short proof statements and concrete agent operations.",
+      "State boundaries honestly: retrieval is useful but is not record authority."
+    ]
+  }
+}

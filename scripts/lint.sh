@@ -190,8 +190,16 @@ if [ -n "$NEOTOMA_BASE_URL" ]; then
     # "informational" means here).
     echo "  - Checking design-token mirror is in sync with Neotoma (informational)..."
     python3 execution/scripts/site_generator/render_design_tokens.py --check || true
+
+    # Brand-system mirrors are canonical-input projections, not hand-authored
+    # site content. Unlike the older informational mirrors above, this contract
+    # is binding from its first commit: a stale schema, human guide, or machine
+    # contract fails lint. CI binds the same files offline through
+    # test_render_brand_systems.py, including known-positive invalid fixtures.
+    echo "  - Checking brand-system mirrors are in sync with Neotoma..."
+    python3 execution/scripts/site_generator/render_brand_systems.py --check || ERRORS=$((ERRORS + 1))
 else
-    echo "  - Skipping tool_allowlist + agent-doc-mirror + positioning-doc-mirror + design-token-mirror checks (NEOTOMA_BASE_URL unset)"
+    echo "  - Skipping live Neotoma mirror checks (NEOTOMA_BASE_URL unset); offline brand-schema tests still bind in CI"
 fi
 
 # Site build contract (execution/scripts/site_generator/build_site.py).
