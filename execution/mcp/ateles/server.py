@@ -61,6 +61,16 @@ from mcp.types import (
     Tool,
 )
 
+# This server is intentionally launched as a file (``python server.py``) by
+# both the production wrapper and its blocking CI lane.  In that call shape
+# Python places only this directory on ``sys.path``; repository packages such
+# as ``lib.daemon_runtime`` are otherwise unavailable.  Approval signing now
+# reuses the shared AAuth implementation, so make the repository root explicit
+# before any checkpoint action can import it.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 log = logging.getLogger("ateles")
 
 # Keep release-acceptance work alive if the MCP caller times out or cancels.
