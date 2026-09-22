@@ -15,6 +15,7 @@ import hashlib
 import html
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 FOUNDATION_DIR = Path("docs/foundation")
@@ -422,18 +423,63 @@ def _rendered_heading_title(title: str) -> str:
     """Normalize the inline forms that render the same ATX heading text."""
 
     rendered, replacements = _replace_inline_tokens(title)
-    emphasis_patterns = (
-        re.compile(r"(?<!\*)(?P<run>\*{1,3})(?=\S)(?P<body>.*?\S)(?P=run)(?!\*)"),
-        re.compile(r"(?<![\w_])(?P<run>_{1,3})(?=\S)(?P<body>.*?\S)(?P=run)(?![\w_])"),
-    )
-    previous = None
-    while previous != rendered:
-        previous = rendered
-        for pattern in emphasis_patterns:
-            rendered = pattern.sub(lambda match: match.group("body"), rendered)
+    rendered = _without_balanced_emphasis(rendered)
     for token, value in replacements.items():
         rendered = rendered.replace(token, value)
     return rendered
+
+
+def _without_balanced_emphasis(text: str) -> str:
+    """Remove only whole, balanced CommonMark-like emphasis delimiter runs."""
+
+    runs = list(re.finditer(r"\*+|_+", text))
+    stack: list[tuple[int, str, int]] = []
+    matched: set[int] = set()
+
+    def punctuation(char: str) -> bool:
+        return bool(char) and unicodedata.category(char)[0] in {"P", "S"}
+
+    for index, run in enumerate(runs):
+        marker = run.group(0)
+        char = marker[0]
+        before = text[run.start() - 1] if run.start() else ""
+        after = text[run.end()] if run.end() < len(text) else ""
+        before_whitespace = not before or before.isspace()
+        after_whitespace = not after or after.isspace()
+        before_punctuation = punctuation(before)
+        after_punctuation = punctuation(after)
+        left_flanking = not after_whitespace and (
+            not after_punctuation or before_whitespace or before_punctuation
+        )
+        right_flanking = not before_whitespace and (
+            not before_punctuation or after_whitespace or after_punctuation
+        )
+        if char == "_":
+            can_open = left_flanking and (not right_flanking or before_punctuation)
+            can_close = right_flanking and (not left_flanking or after_punctuation)
+        else:
+            can_open = left_flanking
+            can_close = right_flanking
+
+        paired = False
+        if can_close and stack:
+            opening_index, opening_char, opening_size = stack[-1]
+            if opening_char == char and opening_size == len(marker):
+                stack.pop()
+                matched.update((opening_index, index))
+                paired = True
+        if can_open and not paired:
+            stack.append((index, char, len(marker)))
+
+    output: list[str] = []
+    cursor = 0
+    for index, run in enumerate(runs):
+        output.append(text[cursor : run.start()])
+        if index not in matched:
+            output.append(run.group(0))
+        cursor = run.end()
+    output.append(text[cursor:])
+    return "".join(output)
 
 
 def _heading_spans(text: str, heading: str) -> list[tuple[int, int]]:

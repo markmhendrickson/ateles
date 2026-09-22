@@ -1222,6 +1222,8 @@ def test_real_duplicate_intake_heading_with_trailing_whitespace_is_ambiguous(
     (
         "## int&#97;ke\n",
         "## in*tak*e\n",
+        "## **intake**\n",
+        "## _intake_\n",
         "## `intake`\n",
     ),
 )
@@ -1232,6 +1234,18 @@ def test_real_rendered_equivalent_intake_heading_is_ambiguous(
         return text + "\n" + duplicate + "Contradictory duplicate.\n"
 
     problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_real_malformed_emphasis_heading_is_not_canonical_intake(
+    tmp_path: Path,
+) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "workflows.md",
+        "## intake\n",
+        "## **in***take***\n",
+    )
     assert any("intake-workflow-atomic-entry" in problem for problem in problems)
 
 
