@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
 import sys
 from collections.abc import Callable
+from itertools import product
 from pathlib import Path
 
 import pytest
@@ -1247,6 +1249,50 @@ def test_real_malformed_emphasis_heading_is_not_canonical_intake(
         "## **in***take***\n",
     )
     assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_real_commonmark_equivalent_overlapping_heading_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    def transform(text: str) -> str:
+        return text + "\n## ***in**take*\nContradictory duplicate.\n"
+
+    problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_real_commonmark_distinct_overlapping_heading_is_not_canonical(
+    tmp_path: Path,
+) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "workflows.md",
+        "## intake\n",
+        "## ***in**ta**ke***\n",
+    )
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_rendered_heading_title_matches_frozen_commonmark_delimiter_matrix() -> None:
+    """Match CommonMark 0.30 over mixed delimiter runs around three chunks.
+
+    The expected digest was produced with commonmark.py 0.9.1's AST text nodes,
+    an independent implementation of the CommonMark 0.30 delimiter algorithm.
+    Including the source in each row makes false-positive and false-negative
+    changes observable instead of merely comparing the multiset of titles.
+    """
+
+    rows: list[str] = []
+    delimiter_runs = ("", "*", "**", "***", "_", "__", "___")
+    for before, after_in, after_ta, after_ke in product(delimiter_runs, repeat=4):
+        source = f"{before}in{after_in}ta{after_ta}ke{after_ke}"
+        rendered = decision_84._rendered_heading_title(source)
+        rows.append(f"{source}\0{rendered}\n")
+
+    assert len(rows) == 2_401
+    assert hashlib.sha256("".join(rows).encode()).hexdigest() == (
+        "afbbfa76733f83240d8d26ed0d620562a062ec8a3d515e04acf3654e8c1acb7c"
+    )
 
 
 @pytest.mark.parametrize(

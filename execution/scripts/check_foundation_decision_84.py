@@ -430,16 +430,52 @@ def _rendered_heading_title(title: str) -> str:
 
 
 def _without_balanced_emphasis(text: str) -> str:
-    """Remove only whole, balanced CommonMark-like emphasis delimiter runs."""
+    """Remove exactly the delimiter characters CommonMark uses as emphasis.
+
+    This is the bounded ``*``/``_`` delimiter-stack algorithm from CommonMark
+    0.30's emphasis processing.  Heading-title equivalence is a security
+    boundary here: merely pairing whole runs both misses rendered-equivalent
+    headings and can erase delimiter residue that remains visible.
+    """
+
+    class _Delimiter:
+        __slots__ = (
+            "can_close",
+            "can_open",
+            "char",
+            "consumed_end",
+            "consumed_start",
+            "count",
+            "next",
+            "original_count",
+            "previous",
+            "run",
+        )
+
+        def __init__(
+            self,
+            run: re.Match[str],
+            can_open: bool,
+            can_close: bool,
+        ) -> None:
+            self.run = run
+            self.char = run.group(0)[0]
+            self.count = len(run.group(0))
+            self.original_count = self.count
+            self.can_open = can_open
+            self.can_close = can_close
+            self.consumed_start = 0
+            self.consumed_end = 0
+            self.previous: _Delimiter | None = None
+            self.next: _Delimiter | None = None
 
     runs = list(re.finditer(r"\*+|_+", text))
-    stack: list[tuple[int, str, int]] = []
-    matched: set[int] = set()
+    delimiters: list[_Delimiter] = []
 
     def punctuation(char: str) -> bool:
         return bool(char) and unicodedata.category(char)[0] in {"P", "S"}
 
-    for index, run in enumerate(runs):
+    for run in runs:
         marker = run.group(0)
         char = marker[0]
         before = text[run.start() - 1] if run.start() else ""
@@ -461,22 +497,73 @@ def _without_balanced_emphasis(text: str) -> str:
             can_open = left_flanking
             can_close = right_flanking
 
-        paired = False
-        if can_close and stack:
-            opening_index, opening_char, opening_size = stack[-1]
-            if opening_char == char and opening_size == len(marker):
-                stack.pop()
-                matched.update((opening_index, index))
-                paired = True
-        if can_open and not paired:
-            stack.append((index, char, len(marker)))
+        delimiter = _Delimiter(run, can_open, can_close)
+        if delimiters:
+            delimiter.previous = delimiters[-1]
+            delimiters[-1].next = delimiter
+        delimiters.append(delimiter)
+
+    def remove(delimiter: _Delimiter) -> None:
+        if delimiter.previous is not None:
+            delimiter.previous.next = delimiter.next
+        if delimiter.next is not None:
+            delimiter.next.previous = delimiter.previous
+
+    openers_bottom: dict[str, _Delimiter | None] = {"*": None, "_": None}
+    closer = delimiters[0] if delimiters else None
+    while closer is not None:
+        if not closer.can_close:
+            closer = closer.next
+            continue
+
+        opener = closer.previous
+        opener_found = False
+        odd_match = False
+        while opener is not None and opener is not openers_bottom[closer.char]:
+            odd_match = (
+                (closer.can_open or opener.can_close)
+                and closer.original_count % 3 != 0
+                and (opener.original_count + closer.original_count) % 3 == 0
+            )
+            if opener.char == closer.char and opener.can_open and not odd_match:
+                opener_found = True
+                break
+            opener = opener.previous
+
+        old_closer = closer
+        if not opener_found:
+            closer = closer.next
+            if not odd_match:
+                openers_bottom[old_closer.char] = old_closer.previous
+                if not old_closer.can_open:
+                    remove(old_closer)
+            continue
+
+        assert opener is not None
+        use_delimiters = 2 if closer.count >= 2 and opener.count >= 2 else 1
+        opener.count -= use_delimiters
+        closer.count -= use_delimiters
+        opener.consumed_end += use_delimiters
+        closer.consumed_start += use_delimiters
+
+        # Delimiters inside the newly formed emphasis node remain visible but
+        # no longer participate in matches outside that node.
+        opener.next = closer
+        closer.previous = opener
+        if opener.count == 0:
+            remove(opener)
+        if closer.count == 0:
+            next_closer = closer.next
+            remove(closer)
+            closer = next_closer
 
     output: list[str] = []
     cursor = 0
-    for index, run in enumerate(runs):
+    for delimiter in delimiters:
+        run = delimiter.run
         output.append(text[cursor : run.start()])
-        if index not in matched:
-            output.append(run.group(0))
+        end = len(run.group(0)) - delimiter.consumed_end
+        output.append(run.group(0)[delimiter.consumed_start : end])
         cursor = run.end()
     output.append(text[cursor:])
     return "".join(output)
