@@ -116,6 +116,13 @@
         "best_practices_to_adopt": {
           "type": "array"
         },
+        "brand_rule_class": {
+          "enum": [
+            "table_stakes",
+            "adapted_convention",
+            "distinctive_brand_territory"
+          ]
+        },
         "confidence": {
           "enum": [
             "high",
@@ -183,13 +190,6 @@
             "gap"
           ]
         },
-        "territory": {
-          "enum": [
-            "table_stakes",
-            "adapted_convention",
-            "distinctive_brand_territory"
-          ]
-        },
         "visibility": {
           "enum": [
             "public_safe",
@@ -209,7 +209,7 @@
         "differentiation_implication",
         "adopted_rule",
         "rejected_pattern",
-        "territory",
+        "brand_rule_class",
         "confidence",
         "support",
         "status",
@@ -247,10 +247,10 @@
       "type": "object"
     }
   },
-  "$id": "urn:ateles:brand-system:1.1.0",
+  "$id": "urn:ateles:brand-system:1.2.0",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Canonical expression contract with explicit intent, complete state-aware logo and typography systems, research and market-learning provenance, differentiation tests, accessibility requirements, and a fail-closed upstream-regeneration gate that prevents provisional hypotheses from presenting as approved guidance.",
+  "description": "Canonical expression contract with explicit intent, current competitive and aesthetic evidence, one original provisional territory with rejected alternatives and convergence tests, complete state-aware logo and typography systems, accessibility requirements, and a fail-closed approval gate.",
   "properties": {
     "asset_inventory": {
       "items": {
@@ -471,6 +471,64 @@
           },
           "type": "array"
         },
+        "regeneration_chain": {
+          "additionalProperties": false,
+          "properties": {
+            "sampling_rationale": {
+              "type": "string"
+            },
+            "source_artifacts": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "stages": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "evidence": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "enum": [
+                      "complete",
+                      "settled",
+                      "provisional_review",
+                      "pending",
+                      "blocked"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "status",
+                  "evidence"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "status": {
+              "enum": [
+                "in_progress",
+                "awaiting_approval",
+                "approved",
+                "blocked"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "stages",
+            "sampling_rationale",
+            "source_artifacts"
+          ],
+          "type": "object"
+        },
         "regeneration_gate": {
           "additionalProperties": false,
           "properties": {
@@ -517,7 +575,8 @@
         "regeneration_gate",
         "research",
         "market_reference_ledger",
-        "differentiation_matrix"
+        "differentiation_matrix",
+        "regeneration_chain"
       ],
       "type": "object"
     },
@@ -567,6 +626,103 @@
     "visual_styles": {
       "additionalProperties": true,
       "properties": {
+        "aesthetic_territory": {
+          "additionalProperties": false,
+          "properties": {
+            "camera_motion": {
+              "type": "string"
+            },
+            "convergence_tests": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "reference": {
+                    "type": "string"
+                  },
+                  "test": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "reference",
+                  "test"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "identity": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "originality_basis": {
+              "type": "string"
+            },
+            "palette_material_light": {
+              "type": "string"
+            },
+            "product_truth": {
+              "type": "string"
+            },
+            "rejected_alternatives": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "reason"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "scope_statement": {
+              "type": "string"
+            },
+            "source_artifact": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "approved",
+                "provisional",
+                "missing",
+                "retired"
+              ]
+            },
+            "summary": {
+              "type": "string"
+            },
+            "typography_layout": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "name",
+            "summary",
+            "product_truth",
+            "identity",
+            "palette_material_light",
+            "typography_layout",
+            "camera_motion",
+            "rejected_alternatives",
+            "convergence_tests",
+            "originality_basis",
+            "source_artifact",
+            "scope_statement"
+          ],
+          "type": "object"
+        },
         "logo_system": {
           "additionalProperties": false,
           "properties": {
@@ -721,7 +877,8 @@
         "composition",
         "anti_patterns",
         "logo_system",
-        "typography_system"
+        "typography_system",
+        "aesthetic_territory"
       ],
       "type": "object"
     },
@@ -757,6 +914,6 @@
     "completeness",
     "updated_at"
   ],
-  "title": "Reusable product brand system v1.1",
+  "title": "Reusable product brand system v1.2",
   "type": "object"
 }

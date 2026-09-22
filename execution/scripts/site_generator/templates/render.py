@@ -646,9 +646,26 @@ def _status_badge(status: str) -> str:
 def _public_anti_pattern(value: str) -> str:
     """Translate internal enforcement language into reader-facing guidance."""
     lower = value.casefold()
-    if any(term in lower for term in ("record ids", "entity types", "field or decision keys", "repository filenames", "phase bookkeeping", "agent instructions")):
+    if any(
+        term in lower
+        for term in (
+            "record ids",
+            "entity types",
+            "field or decision keys",
+            "repository filenames",
+            "phase bookkeeping",
+            "agent instructions",
+        )
+    ):
         return "Keep internal implementation vocabulary and operational bookkeeping off public surfaces."
-    if any(term in lower for term in ("research analysis", "source citations", "implementation-review notes")):
+    if any(
+        term in lower
+        for term in (
+            "research analysis",
+            "source citations",
+            "implementation-review notes",
+        )
+    ):
         return "Use concise reader-facing claims; keep working notes and evidence in their source records."
     return value
 
@@ -664,13 +681,21 @@ def _public_downstream_contract(item: dict) -> dict:
         "Cinematic production": "Production briefs inherit these shared and product-specific rules.",
         "Application marks": "Application identity must pass the product symbol and anti-pattern contract.",
     }
-    return {**item, "contract": replacements.get(consumer, "Derived from the canonical brand system.")}
+    return {
+        **item,
+        "contract": replacements.get(
+            consumer, "Derived from the canonical brand system."
+        ),
+    }
 
 
 def _public_gate_text(value: object) -> str:
     """Translate canonical bookkeeping language for a public review surface."""
-    return str(value or "").replace(
+    public = str(value or "").replace(
         "category_definition", "approved category definition"
+    )
+    return re.sub(
+        r"\s+(?:in|from)\s+ent_[0-9a-f]{12,}", " in the canonical record", public
     )
 
 
@@ -678,12 +703,14 @@ def _brand_items(items: list[dict], *, include_source: bool = False) -> str:
     visible = [item for item in items if item.get("status") != "retired"]
     return "".join(
         '<article class="brand-item">'
-        f'{_status_badge(item.get("status"))}'
-        f'<h3>{_esc(str(item.get("name") or item.get("consumer") or "").replace("_", " "))}</h3>'
-        f'<p>{_esc(item.get("guidance") or item.get("contract") or item.get("use"))}</p>'
+        f"{_status_badge(item.get('status'))}"
+        f"<h3>{_esc(str(item.get('name') or item.get('consumer') or '').replace('_', ' '))}</h3>"
+        f"<p>{_esc(item.get('guidance') or item.get('contract') or item.get('use'))}</p>"
         + (
             f'<p class="small muted">Source: {_esc(item.get("source"))}</p>'
-            if include_source and item.get("source") and not str(item.get("source")).startswith("ent_")
+            if include_source
+            and item.get("source")
+            and not str(item.get("source")).startswith("ent_")
             else ""
         )
         + "</article>"
@@ -721,7 +748,7 @@ def _render_brand_system(product: str, data: dict) -> str:
         '<article class="brand-item">'
         + _brand_asset_preview(item)
         + _status_badge(item.get("status"))
-        + f'<h3>{_esc(item.get("name"))}</h3><p>{_esc(item.get("use"))}</p>'
+        + f"<h3>{_esc(item.get('name'))}</h3><p>{_esc(item.get('use'))}</p>"
         + (
             f'<a href="{_esc(item["public_path"])}">Open asset</a>'
             if item.get("public_path") and item.get("status") != "missing"
@@ -742,12 +769,12 @@ def _render_brand_system(product: str, data: dict) -> str:
         if isinstance(value, str) and value.startswith("#")
     )
     source_labels = "".join(
-        f'<span>{_esc(source.get("label"))} · {_esc(source.get("status"))}</span>'
+        f"<span>{_esc(source.get('label'))} · {_esc(source.get('status'))}</span>"
         for source in provenance.get("sources") or []
     )
     intent_cards = "".join(
         '<article class="brand-item">'
-        f'<h3>{_esc(label)}</h3><p>{_esc(value)}</p></article>'
+        f"<h3>{_esc(label)}</h3><p>{_esc(value)}</p></article>"
         for label, value in (
             ("Core idea", intent["core_idea"]),
             ("Functional truth", intent["functional_truth"]),
@@ -766,51 +793,58 @@ def _render_brand_system(product: str, data: dict) -> str:
     )
     logo_variants = "".join(
         '<article class="brand-item">'
-        f'{_status_badge(item.get("status"))}'
-        f'<h3>{_esc(key.replace("_", " "))}</h3><p>{_esc(item.get("use"))}</p>'
+        f"{_status_badge(item.get('status'))}"
+        f"<h3>{_esc(key.replace('_', ' '))}</h3><p>{_esc(item.get('use'))}</p>"
         "</article>"
         for key, item in logo["variants"].items()
     )
     logo_rules = "".join(
         '<article class="brand-item">'
-        f'{_status_badge(item.get("status"))}'
-        f'<h3>{_esc(key.replace("_", " "))}</h3><p>{_esc(item.get("guidance"))}</p>'
+        f"{_status_badge(item.get('status'))}"
+        f"<h3>{_esc(key.replace('_', ' '))}</h3><p>{_esc(item.get('guidance'))}</p>"
         "</article>"
         for key, item in logo.items()
-        if key in {"clear_space", "minimum_size", "background_rules", "colorway_rules", "co_branding"}
+        if key
+        in {
+            "clear_space",
+            "minimum_size",
+            "background_rules",
+            "colorway_rules",
+            "co_branding",
+        }
     )
     type_roles = "".join(
         '<article class="brand-item">'
-        f'{_status_badge(item.get("status"))}'
-        f'<h3>{_esc(key)} · {_esc(item.get("name"))}</h3><p>{_esc(item.get("use"))}</p>'
+        f"{_status_badge(item.get('status'))}"
+        f"<h3>{_esc(key)} · {_esc(item.get('name'))}</h3><p>{_esc(item.get('use'))}</p>"
         "</article>"
         for key, item in typography["roles"].items()
     )
     type_tokens = "".join(
         "<tr>"
-        f'<td>{_esc(item.get("token"))}<br>{_status_badge(item.get("status"))}</td>'
-        f'<td>{_esc(item.get("family"))}</td><td>{_esc(item.get("size"))}</td>'
-        f'<td>{_esc(item.get("line_height"))}</td><td>{_esc(item.get("measure"))}</td>'
-        f'<td>{_esc(item.get("casing"))}</td></tr>'
+        f"<td>{_esc(item.get('token'))}<br>{_status_badge(item.get('status'))}</td>"
+        f"<td>{_esc(item.get('family'))}</td><td>{_esc(item.get('size'))}</td>"
+        f"<td>{_esc(item.get('line_height'))}</td><td>{_esc(item.get('measure'))}</td>"
+        f"<td>{_esc(item.get('casing'))}</td></tr>"
         for item in typography["hierarchy"]
     )
     access_cards = "".join(
         '<article class="brand-item">'
-        f'{_status_badge(item.get("status"))}'
-        f'<h3>{_esc(key.replace("_", " "))}</h3><p>{_esc(item.get("requirement"))}</p>'
+        f"{_status_badge(item.get('status'))}"
+        f"<h3>{_esc(key.replace('_', ' '))}</h3><p>{_esc(item.get('requirement'))}</p>"
         "</article>"
         for key, item in production["accessibility"].items()
     )
     gate_cards = "".join(
         '<article class="brand-item">'
-        f'{_status_badge(item.get("status"))}'
-        f'<h3>{_esc(item.get("name", "").replace("_", " "))}</h3><p>{_esc(_public_gate_text(item.get("evidence")))}</p>'
+        f"{_status_badge(item.get('status'))}"
+        f"<h3>{_esc(item.get('name', '').replace('_', ' '))}</h3><p>{_esc(_public_gate_text(item.get('evidence')))}</p>"
         "</article>"
         for item in generation_gate["predicates"]
     )
     research_links = "".join(
         '<article class="brand-item">'
-        f'<h3>{_esc(item.get("label"))}</h3><p>{_esc(item.get("informs"))}</p>'
+        f"<h3>{_esc(item.get('label'))}</h3><p>{_esc(item.get('informs'))}</p>"
         f'<a href="{_esc(item.get("url"))}">Review official guidance</a>'
         f'<p class="small muted">Checked {_esc(item.get("checked_at"))}</p></article>'
         for item in provenance["research"]["sources"]
@@ -824,39 +858,52 @@ def _render_brand_system(product: str, data: dict) -> str:
     ]
     market_rows = "".join(
         "<tr>"
-        f'<td>{_esc(item["referenced_product"])}<br><span class="small muted">{_esc(item["relationship"].replace("_", " "))} · {_esc(item["territory"].replace("_", " "))}</span></td>'
+        f'<td>{_esc(item["referenced_product"])}<br><span class="small muted">{_esc(item["relationship"].replace("_", " "))} · {_esc(item["brand_rule_class"].replace("_", " "))}</span></td>'
         + (
             f'<td><a href="{_esc(item["evidence"]["source"])}">Dated evidence</a><br>{_esc(item["evidence"]["observed_at"])}</td>'
             if str(item["evidence"]["source"]).startswith("https://")
-            else f'<td>Dated synthesis<br>{_esc(item["evidence"]["observed_at"])}</td>'
+            else f"<td>Dated synthesis<br>{_esc(item['evidence']['observed_at'])}</td>"
         )
-        + f'<td><strong>Observed:</strong> {_esc(item["observed_fact"])}<br><strong>Inference:</strong> {_esc(item["derived_learning"].removeprefix("Inference: "))}</td>'
-        f'<td>{_esc("; ".join(item["best_practices_to_adopt"]))}</td>'
-        f'<td>{_esc("; ".join(item["bad_practices_to_avoid"]))}</td>'
-        f'<td>{_esc(item["differentiation_implication"])}</td></tr>'
+        + f"<td><strong>Observed:</strong> {_esc(item['observed_fact'])}<br><strong>Inference:</strong> {_esc(item['derived_learning'].removeprefix('Inference: '))}</td>"
+        f"<td>{_esc('; '.join(item['best_practices_to_adopt']))}</td>"
+        f"<td>{_esc('; '.join(item['bad_practices_to_avoid']))}</td>"
+        f"<td>{_esc(item['differentiation_implication'])}</td></tr>"
         for item in public_references
     )
     matrix_rows = "".join(
         "<tr>"
-        f'<td>{_esc(item["axis"].replace("_", " "))}</td>'
-        f'<td>{_esc(item["ateles"])}<br><span class="small muted">{_esc(item["ateles_territory"].replace("_", " "))}</span></td>'
-        f'<td>{_esc(item["neotoma"])}<br><span class="small muted">{_esc(item["neotoma_territory"].replace("_", " "))}</span></td>'
-        f'<td>{_esc(item["convergence_test"])}</td></tr>'
+        f"<td>{_esc(item['axis'].replace('_', ' '))}</td>"
+        f'<td>{_esc(item["ateles"])}<br><span class="small muted">{_esc(item["ateles_brand_rule_class"].replace("_", " "))}</span></td>'
+        f'<td>{_esc(item["neotoma"])}<br><span class="small muted">{_esc(item["neotoma_brand_rule_class"].replace("_", " "))}</span></td>'
+        f"<td>{_esc(item['convergence_test'])}</td></tr>"
         for item in provenance["differentiation_matrix"]["axes"]
+    )
+    territory = styles["aesthetic_territory"]
+    rejected_territories = "".join(
+        f"<li><strong>{_esc(item['name'])}</strong> — {_esc(item['reason'])}</li>"
+        for item in territory["rejected_alternatives"]
+    )
+    convergence_tests = "".join(
+        f"<li><strong>{_esc(item['reference'])}</strong> — {_esc(item['test'])}</li>"
+        for item in territory["convergence_tests"]
     )
     dimensions = _brand_items(completeness.get("dimensions") or [])
     missing = "".join(
-        f'<li>{_esc(item)}</li>' for item in completeness.get("missing_items") or []
+        f"<li>{_esc(item)}</li>" for item in completeness.get("missing_items") or []
     )
     contracts = _brand_items(
-        [_public_downstream_contract(item) for item in data.get("downstream_contracts") or []]
+        [
+            _public_downstream_contract(item)
+            for item in data.get("downstream_contracts") or []
+        ]
     )
-    return f'''<section class="wrap brand-system-page" id="brand-system">
+    return f"""<section class="wrap brand-system-page" id="brand-system">
 <div class="brand-system-intro"><div><p class="eyebrow">Brand system · {_esc(data.get("schema_version"))}</p><h1>{_esc(positioning["category"])}</h1><p class="lede">{_esc(positioning["hero_support"])}</p></div><aside class="brand-summary">{_status_badge(completeness.get("overall_status"))}<h2>One source, visible state.</h2><p>This page is a public-safe viewer of the canonical brand system. Approved, provisional, and missing elements remain distinct.</p></aside></div>
-<aside class="brand-item brand-gate-blocked brand-regeneration-notice"><span class="brand-status brand-status-provisional">Provisional evidence</span><h2>Not an approved brand baseline.</h2><p>The category-to-brand chain is being rerun from current evidence. No page or film should treat this guidance as final until category and brand approval are complete.</p><p>The next gate is the operator’s category-noun choice after reviewing the current evidence.</p></aside>
+<aside class="brand-item brand-gate-blocked brand-regeneration-notice"><span class="brand-status brand-status-provisional">Provisional review</span><h2>Not an approved brand baseline.</h2><p>The category and product argument are settled; current competitive and aesthetic evidence has produced one original aesthetic territory for review. No page or film should treat this guidance as final until the complete brand system is approved.</p><p>The next gate is operator approval or revision of this provisional brand system.</p></aside>
 <figure class="section-visual brand-foundation-map" aria-label="The canonical brand system flows from expression rules to approved assets and downstream use"><div class="brand-foundation-step"><span class="eyebrow">01 · Define</span><strong>Words and visual meaning</strong></div><div class="brand-foundation-step"><span class="eyebrow">02 · Produce</span><strong>Assets with explicit state</strong></div><div class="brand-foundation-step"><span class="eyebrow">03 · Derive</span><strong>Consistent public surfaces</strong></div></figure>
 <div class="brand-group"><header><h2>Brand intent</h2><p>The idea, truth, feeling, and evidence every expression must preserve.</p></header><div class="brand-grid">{intent_cards}</div><div class="brand-grid"><article class="brand-item"><h3>Intended perceptions</h3><ul>{intended}</ul></article><article class="brand-item"><h3>Forbidden perceptions</h3><ul>{forbidden}</ul></article></div><h3>Proof cues</h3><ul class="brand-rule-list brand-intent-proof">{intent_proof}</ul></div>
 <div class="brand-group"><header><h2>Voice and language</h2><p>{_esc(positioning["product_promise"])}</p></header><div class="brand-grid">{phrases}{terms}</div><h3>Writing rules</h3><ul class="brand-rule-list">{rules}</ul></div>
+<div class="brand-group"><header><h2>Recommended aesthetic territory</h2><p>This is an internal creative platform subordinate to the settled category—not an alternate category noun, public headline, or tagline. Alternatives and convergence risks remain explicit.</p></header><article class="brand-item">{_status_badge(territory["status"])}<h3>{_esc(territory["name"])}</h3><p class="lede">{_esc(territory["summary"])}</p><p><strong>Scope:</strong> {_esc(territory["scope_statement"])}</p><p><strong>Product truth:</strong> {_esc(territory["product_truth"])}</p><p><strong>Identity:</strong> {_esc(territory["identity"])}</p><p><strong>Palette, material, and light:</strong> {_esc(territory["palette_material_light"])}</p><p><strong>Typography and layout:</strong> {_esc(territory["typography_layout"])}</p><p><strong>Camera and motion:</strong> {_esc(territory["camera_motion"])}</p><p><strong>Originality basis:</strong> {_esc(territory["originality_basis"])}</p></article><div class="brand-grid"><article class="brand-item"><h3>Rejected aesthetic alternatives</h3><ul>{rejected_territories}</ul></article><article class="brand-item"><h3>Aesthetic convergence tests</h3><ul>{convergence_tests}</ul></article></div></div>
 <div class="brand-group"><header><h2>Visual system</h2><p>{_esc(styles["symbol"]["guidance"])}</p></header><div class="brand-palette">{swatches}</div><div class="brand-grid">{concepts}</div><p class="lede"><strong>Material:</strong> {_esc(styles["material"])} <strong>Light:</strong> {_esc(styles["light"])} <strong>Camera:</strong> {_esc(styles["camera"])} <strong>Motion:</strong> {_esc(styles["motion"])}</p></div>
 <div class="brand-group"><header><h2>Logo system</h2><p>Every required variant and application rule remains visibly approved, provisional, or missing. Unknown measurements are not invented.</p></header><div class="brand-grid">{logo_variants}</div><h3>Application rules</h3><div class="brand-grid">{logo_rules}</div></div>
 <div class="brand-group"><header><h2>Typography system</h2><p>Expressive, productive, and technical type have different jobs inside one responsive hierarchy.</p></header><div class="brand-grid">{type_roles}</div><div class="table-scroll"><table class="brand-table"><thead><tr><th>Token</th><th>Role</th><th>Size</th><th>Line height</th><th>Measure</th><th>Casing</th></tr></thead><tbody>{type_tokens}</tbody></table></div></div>
@@ -865,12 +912,12 @@ def _render_brand_system(product: str, data: dict) -> str:
 <div class="brand-group"><header><h2>Accessibility</h2><p>Brand expression must remain perceivable, semantic, scalable, and complete without motion.</p></header><div class="brand-grid">{access_cards}</div></div>
 <div class="brand-group"><header><h2>Cinematic generation gate</h2><p>{_esc(generation_gate["rule"])}</p></header><article class="brand-item brand-gate-blocked">{_status_badge(generation_gate["status"])}<h3>Generation allowed: {_esc(str(generation_gate["generation_allowed"]).lower())}</h3><p>Every predicate must be approved and read back before production resumes.</p></article><div class="brand-grid">{gate_cards}</div></div>
 <div class="brand-group"><header><h2>Do not drift here</h2><p>These constraints preserve the product's meaning as the system evolves.</p></header><ul class="brand-rule-list">{anti_patterns}</ul></div>
-<div class="brand-group"><header><h2>Research and review</h2><p>{_esc(provenance["research"]["review_cadence"]["cadence"])} Principles are translated into this product's own expression, never copied as a recognizable aesthetic.</p></header><div class="brand-grid">{research_links}</div></div>
+<div class="brand-group"><header><h2>Research and review</h2><p>{_esc(provenance["research"]["review_cadence"]["cadence"])} Principles are translated into this product's own expression, never copied as a recognizable aesthetic.</p><p><strong>Sampling rationale:</strong> {_esc(provenance["regeneration_chain"]["sampling_rationale"])}</p></header><div class="brand-grid">{research_links}</div></div>
 <div class="brand-group"><header><h2>Market-reference learning ledger</h2><p>Evidence, observed fact, inference, adopted principle, rejected pattern, and distinctiveness remain separate.</p></header><div class="table-scroll"><table class="brand-table"><thead><tr><th>Reference</th><th>Evidence</th><th>Observation → inference</th><th>Adopt</th><th>Avoid</th><th>Differentiate</th></tr></thead><tbody>{market_rows}</tbody></table></div></div>
 <div class="brand-group"><header><h2>Cross-product differentiation</h2><p>{_esc(provenance["differentiation_matrix"]["principle"])}</p></header><div class="table-scroll"><table class="brand-table"><thead><tr><th>Axis</th><th>Ateles</th><th>Neotoma</th><th>Convergence test</th></tr></thead><tbody>{matrix_rows}</tbody></table></div></div>
 <div class="brand-group"><header><h2>Completeness and provenance</h2><p>Expression is canonical in the product brand record; capabilities and foundation truth remain in their own sources.</p></header><div class="brand-grid">{dimensions}</div><h3>Still missing</h3><ul>{missing}</ul><h3>Source families</h3><div class="brand-source-list">{source_labels}</div></div>
 <div class="brand-group"><header><h2>Downstream contracts</h2><p>Each consumer derives from this system instead of becoming a parallel source of truth.</p></header><div class="brand-grid">{contracts}</div></div>
-</section>'''
+</section>"""
 
 
 def _render_page_specific(product: str, page: dict, section_id: str, data: dict) -> str:

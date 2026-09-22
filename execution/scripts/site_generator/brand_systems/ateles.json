@@ -1,15 +1,15 @@
 {
   "_observation_ids": {
     "asset_inventory": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
-    "completeness": "e132f7d7-b83e-190c-c9c1-c07c009a1abd",
+    "completeness": "63417972-dbc2-ddab-63dd-1a3befdcc8cc",
     "downstream_contracts": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
     "name": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
     "ownership": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
-    "phrases": "6415e511-9755-aa96-ca67-a77da3d26f7a",
+    "phrases": "05cf0304-9640-6f15-32a0-b7c2aff5a033",
     "positioning": "9a5bd8d2-1d6a-a389-c527-db3bc197218a",
     "product": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
-    "production_specs": "eb38f955-8867-8a83-bb3d-9a53b6d1484a",
-    "provenance": "084f41bb-451f-4d26-a2d4-4cf493688b7c",
+    "production_specs": "50984e28-3dbf-5754-14db-553bd9f76b60",
+    "provenance": "b50ae57a-ef5a-946b-a7ce-4443080fae53",
     "schema_version": "unknown",
     "scope": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
     "slug": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
@@ -18,13 +18,13 @@
     "updated_at": "48f5b97b-6fe4-5f4d-0a28-a95305fc9c8e",
     "visibility": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
     "visual_concepts": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
-    "visual_styles": "bb943b7c-a125-7855-7d57-46f332898e19",
+    "visual_styles": "ec75f024-ef9b-a5ee-dae7-edf1c63c5a9e",
     "voice": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d"
   },
   "_source": {
     "entity_id": "ent_bada69d5cbb1f27bf82bb86b",
     "entity_type": "brand_guideline",
-    "fetched_at": "2026-09-22T15:01:38+00:00",
+    "fetched_at": "2026-09-22T16:03:49+00:00",
     "product": "ateles",
     "schema_entity_id": "ent_73da44b2d434cbafe5d8ecb9"
   },
@@ -120,7 +120,7 @@
       },
       {
         "name": "visual_style",
-        "status": "approved"
+        "status": "provisional"
       },
       {
         "name": "asset_inventory",
@@ -152,7 +152,7 @@
       },
       {
         "name": "research_provenance",
-        "status": "provisional"
+        "status": "approved"
       },
       {
         "name": "accessibility",
@@ -165,6 +165,10 @@
       {
         "name": "differentiation_matrix",
         "status": "provisional"
+      },
+      {
+        "name": "aesthetic_territory",
+        "status": "provisional"
       }
     ],
     "missing_items": [
@@ -174,9 +178,8 @@
       "Canonical clear-space and digital/print minimum-size measurements for final Ateles exports",
       "Approved horizontal, stacked, monochrome, reversed, favicon and co-branding Ateles assets",
       "Final type weight/style inventory and owner-approved research cadence",
-      "Full category-to-aesthetic regeneration and operator approval",
-      "Current live aesthetic/UI benchmark with sampling rationale and captured evidence",
-      "Approved original aesthetic territory and contradiction audit"
+      "Operator approval or revision of the complete provisional brand system and its original aesthetic territory",
+      "Final contradiction audit against the section copy-to-visual production matrix"
     ],
     "overall_status": "provisional"
   },
@@ -220,9 +223,9 @@
   },
   "phrases": [
     {
-      "guidance": "Exact outward category and hero headline; keep the definite article.",
+      "guidance": "Exact settled outward category and hero headline; brand-system expression remains provisional until final operator approval.",
       "name": "The operating system for agentic organizations.",
-      "source": "ent_f79f82c13b90a9d6439623db",
+      "source": "ent_97504a9c5762e37842d07436",
       "status": "provisional"
     },
     {
@@ -344,13 +347,18 @@
       "generation_allowed": false,
       "predicates": [
         {
-          "evidence": "Current intent is a provisional hypothesis pending full-chain regeneration.",
+          "evidence": "A complete product-truth-grounded intent draft exists and awaits operator approval with the whole brand system.",
           "name": "brand_intent",
           "status": "blocked"
         },
         {
-          "evidence": "No category_definition exists; current category language is a candidate until the operator reviews the define-category artifact.",
-          "name": "copy_system",
+          "evidence": "Exact outward category was selected by the operator and read back in ent_97504a9c5762e37842d07436.",
+          "name": "category_language",
+          "status": "approved"
+        },
+        {
+          "evidence": "Terminology and voice rules exist, but the regenerated copy system remains part of the pending whole-brand approval.",
+          "name": "phrases_terminology_voice",
           "status": "blocked"
         },
         {
@@ -359,12 +367,12 @@
           "status": "provisional"
         },
         {
-          "evidence": "Palette and materiality are approved; the expanded typography weight/style system remains provisional.",
+          "evidence": "Palette, materiality, and type-role draft is complete; final typography inventory and whole-brand approval remain open.",
           "name": "palette_materiality_typography",
           "status": "blocked"
         },
         {
-          "evidence": "Current cinematic grammar is provisional pending the approved original aesthetic territory.",
+          "evidence": "One original motion/cinematography territory is synthesized from current live evidence and awaits operator approval.",
           "name": "motion_cinematography",
           "status": "blocked"
         },
@@ -374,7 +382,7 @@
           "status": "approved"
         },
         {
-          "evidence": "Current ledger and differentiation matrix are provisional seeds pending live aesthetic/UI benchmarking.",
+          "evidence": "Current dated market-reference learnings and convergence tests are complete but await operator review.",
           "name": "market_learning_and_differentiation",
           "status": "blocked"
         },
@@ -392,13 +400,11 @@
       "rule": "Do not submit, regenerate, or resume cinematic media production until every predicate is approved and read back from the canonical records. Final logo exports may remain a separate asset task only when no logo appears in-frame.",
       "status": "blocked",
       "unresolved": [
-        "Provisional copy items and final copy-to-visual approval",
+        "Operator approval or revision of the complete provisional brand system",
         "Film-facing logo application-rule approval",
-        "Final typography weight/style approval",
-        "Recorded contradiction-free audit between brand guide and production brief",
-        "Full upstream category-to-aesthetic regeneration task ent_8c834a37087f9471fd8b0c05",
-        "Operator category choice after noun-count and competitor-claim review",
-        "Approved original aesthetic territory from current live benchmark evidence"
+        "Final typography weight/style inventory",
+        "Approved section-by-section copy-to-visual matrix",
+        "Recorded contradiction-free audit between the approved brand guide and production brief"
       ]
     },
     "still_and_reduced_motion": {
@@ -418,59 +424,59 @@
       "axes": [
         {
           "ateles": "Operating system for agentic organizations",
-          "ateles_territory": "distinctive_brand_territory",
+          "ateles_brand_rule_class": "distinctive_brand_territory",
           "axis": "category_language",
           "convergence_test": "Fail if both collapse into generic agent infrastructure.",
           "neotoma": "System of record for AI agents",
-          "neotoma_territory": "distinctive_brand_territory"
+          "neotoma_brand_rule_class": "distinctive_brand_territory"
         },
         {
           "ateles": "Edge-free swarm with temporary handoffs",
-          "ateles_territory": "distinctive_brand_territory",
+          "ateles_brand_rule_class": "distinctive_brand_territory",
           "axis": "symbol_metaphor",
           "convergence_test": "Fail if Ateles gains permanent edges or Neotoma loses durable relationships.",
           "neotoma": "Persistent typed record graph",
-          "neotoma_territory": "distinctive_brand_territory"
+          "neotoma_brand_rule_class": "distinctive_brand_territory"
         },
         {
           "ateles": "Warm paper, rust signals, restrained grant green; ceramic and metal",
-          "ateles_territory": "adapted_convention",
+          "ateles_brand_rule_class": "adapted_convention",
           "axis": "palette_materiality",
           "convergence_test": "Fail if both become generic dark AI glow or share one accent logic.",
           "neotoma": "Archival paper, teal continuity, amber correction; vellum, glass and mineral record tiles",
-          "neotoma_territory": "distinctive_brand_territory"
+          "neotoma_brand_rule_class": "distinctive_brand_territory"
         },
         {
           "ateles": "Geometric expressive headings, humanist productive body, operational mono labels",
-          "ateles_territory": "adapted_convention",
+          "ateles_brand_rule_class": "adapted_convention",
           "axis": "typography",
           "convergence_test": "Fail if type roles or examples become interchangeable.",
           "neotoma": "Editorial serif headings, neutral productive body, provenance mono labels",
-          "neotoma_territory": "adapted_convention"
+          "neotoma_brand_rule_class": "adapted_convention"
         },
         {
           "ateles": "Autonomous members align, signal, hand off, pause locally and continue",
-          "ateles_territory": "distinctive_brand_territory",
+          "ateles_brand_rule_class": "distinctive_brand_territory",
           "axis": "motion_cinematography",
           "convergence_test": "Fail if both read as a permanent network or generic node pulses.",
           "neotoma": "Graph remains registered while create, retrieve and update change state with history intact",
-          "neotoma_territory": "distinctive_brand_territory"
+          "neotoma_brand_rule_class": "distinctive_brand_territory"
         },
         {
           "ateles": "Organizational, decisive, bounded and forward-moving",
-          "ateles_territory": "distinctive_brand_territory",
+          "ateles_brand_rule_class": "distinctive_brand_territory",
           "axis": "voice",
           "convergence_test": "Fail if either adopts generic AI optimism or interchangeable infrastructure prose.",
           "neotoma": "Precise, calm, durable and epistemically honest",
-          "neotoma_territory": "distinctive_brand_territory"
+          "neotoma_brand_rule_class": "distinctive_brand_territory"
         },
         {
           "ateles": "Roles, authority, claim/lease, escalation and accountable continuation",
-          "ateles_territory": "distinctive_brand_territory",
+          "ateles_brand_rule_class": "distinctive_brand_territory",
           "axis": "proof_style",
           "convergence_test": "Fail if proof becomes feature lists without product-truth mechanisms.",
           "neotoma": "Typed records, provenance, version history, disagreement and correction",
-          "neotoma_territory": "distinctive_brand_territory"
+          "neotoma_brand_rule_class": "distinctive_brand_territory"
         }
       ],
       "principle": "Adopt principles only; never copy a reference brand's recognizable expression.",
@@ -479,75 +485,75 @@
     "evidence_visibility": "Machine mirrors retain entity and observation IDs. Public brand pages translate provenance into human-readable source labels and never expose internal IDs.",
     "market_reference_ledger": [
       {
-        "adopted_rule": "Use explicit durable state and inspectable transitions.",
+        "adopted_rule": "Make durable execution and intervention legible.",
         "bad_practices_to_avoid": [
-          "Do not make a graph scheduler the organization."
+          "Do not make permanent graph topology or routing lines the organization."
         ],
         "best_practices_to_adopt": [
-          "Use explicit durable state and inspectable transitions."
+          "Make durable execution and intervention legible."
         ],
+        "brand_rule_class": "distinctive_brand_territory",
         "confidence": "high",
-        "derived_learning": "Inference: Persistence and routing do not alone express a standing accountable organization.",
-        "differentiation_implication": "Ateles must add roles, bounded authority, claims and accountability rather than resemble orchestration.",
+        "derived_learning": "Inference: Runtime persistence and routing are table stakes, but permanent graph topology does not express a standing accountable organization.",
+        "differentiation_implication": "Ateles must show distinct members, bounded authority, accountable claims and temporary handoffs with paths that disappear.",
         "evidence": {
-          "observed_at": "2026-09-21",
-          "source": "https://docs.langchain.com/oss/python/langgraph/persistence"
+          "observed_at": "2026-09-22",
+          "source": "https://www.langchain.com/langgraph"
         },
-        "observed_fact": "Persists graph execution state and routes work through graph topology.",
+        "observed_fact": "The current official page presents an agent runtime and low-level orchestration framework using a near-black field and permanent flowing-line topology.",
         "referenced_product": "LangGraph",
-        "rejected_pattern": "Do not make a graph scheduler the organization.",
+        "rejected_pattern": "Permanent graph topology and routing lines.",
         "relationship": "competitor",
         "status": "provisional",
         "support": "direct",
-        "territory": "distinctive_brand_territory",
         "visibility": "public_safe"
       },
       {
-        "adopted_rule": "Make roles and responsibilities understandable.",
+        "adopted_rule": "Use human materiality and decisive cinematic scale.",
         "bad_practices_to_avoid": [
-          "Avoid manager-centric delegation and generic team-of-agents theater."
+          "Do not copy editorial italics, coral gradients, or manager-led crew theater."
         ],
         "best_practices_to_adopt": [
-          "Make roles and responsibilities understandable."
+          "Use human materiality and decisive cinematic scale."
         ],
+        "brand_rule_class": "distinctive_brand_territory",
         "confidence": "high",
-        "derived_learning": "Inference: A crew metaphor can still read as centrally pushed execution.",
-        "differentiation_implication": "The swarm must show autonomous members, accountable claims and temporary handoffs.",
+        "derived_learning": "Inference: Human warmth and cinematic scale help infrastructure feel consequential, but build/runtime and crew framing still risk transient, manager-led execution.",
+        "differentiation_implication": "Show a persistent agentic organization whose members claim and hand off work under bounded authority.",
         "evidence": {
-          "observed_at": "2026-09-21",
-          "source": "https://docs.crewai.com/en/concepts/memory"
+          "observed_at": "2026-09-22",
+          "source": "https://www.crewai.com/"
         },
-        "observed_fact": "Presents crews, agents, tasks and unified memory inside centrally executed workflows.",
+        "observed_fact": "The current official site presents an enterprise agent build-and-runtime layer through a large atmospheric coral panel, editorial display type, and embedded product media.",
         "referenced_product": "CrewAI",
-        "rejected_pattern": "Avoid manager-centric delegation and generic team-of-agents theater.",
+        "rejected_pattern": "Manager-led crew theater and recognizable coral/editorial expression.",
         "relationship": "competitor",
         "status": "provisional",
         "support": "direct",
-        "territory": "distinctive_brand_territory",
         "visibility": "public_safe"
       },
       {
-        "adopted_rule": "Preserve continuity and clear actor roles.",
+        "adopted_rule": "Keep actor boundaries and events inspectable.",
         "bad_practices_to_avoid": [
-          "Avoid chat bubbles, speaker rings and central selectors."
+          "Avoid chat-team diagrams and event buses as the public identity."
         ],
         "best_practices_to_adopt": [
-          "Preserve continuity and clear actor roles."
+          "Keep actor boundaries and events inspectable."
         ],
+        "brand_rule_class": "distinctive_brand_territory",
         "confidence": "high",
-        "derived_learning": "Inference: Recoverable conversation state is not a standing organization.",
-        "differentiation_implication": "Center mission-to-task authority and accountability, not conversation routing.",
+        "derived_learning": "Inference: Distributed message exchange and team state do not by themselves establish standing roles, authority, accountable claims, or mission continuity.",
+        "differentiation_implication": "Ateles must make legitimate action and durable organizational responsibility visible.",
         "evidence": {
-          "observed_at": "2026-09-21",
-          "source": "https://microsoft.github.io/autogen/stable//user-guide/agentchat-user-guide/tutorial/state.html"
+          "observed_at": "2026-09-22",
+          "source": "https://microsoft.github.io/autogen/dev/"
         },
-        "observed_fact": "Documents serializable agent/team state and manager-selected speakers.",
+        "observed_fact": "Current official documentation presents event-driven distributed agents and multi-agent application patterns.",
         "referenced_product": "AutoGen",
-        "rejected_pattern": "Avoid chat bubbles, speaker rings and central selectors.",
+        "rejected_pattern": "Chat-team diagrams and event-bus identity.",
         "relationship": "competitor",
         "status": "provisional",
         "support": "direct",
-        "territory": "distinctive_brand_territory",
         "visibility": "public_safe"
       },
       {
@@ -558,6 +564,7 @@
         "best_practices_to_adopt": [
           "Keep durable context available to work."
         ],
+        "brand_rule_class": "adapted_convention",
         "confidence": "high",
         "derived_learning": "Inference: Context continuity does not by itself establish distinct principals or pull-based claims.",
         "differentiation_implication": "Make identity, authority and work ownership visible.",
@@ -571,7 +578,6 @@
         "relationship": "adjacent_benchmark",
         "status": "provisional",
         "support": "synthesized",
-        "territory": "adapted_convention",
         "visibility": "public_safe"
       },
       {
@@ -582,6 +588,7 @@
         "best_practices_to_adopt": [
           "Use named roles to clarify specialization."
         ],
+        "brand_rule_class": "distinctive_brand_territory",
         "confidence": "high",
         "derived_learning": "Inference: Delegated subagents differ from independently eligible members claiming leased work.",
         "differentiation_implication": "Show autonomy through fitness, claims, leases and accountable continuation.",
@@ -595,7 +602,6 @@
         "relationship": "adjacent_benchmark",
         "status": "provisional",
         "support": "direct",
-        "territory": "distinctive_brand_territory",
         "visibility": "public_safe"
       },
       {
@@ -606,6 +612,7 @@
         "best_practices_to_adopt": [
           "Make attribution clear."
         ],
+        "brand_rule_class": "distinctive_brand_territory",
         "confidence": "high",
         "derived_learning": "Inference: Independent principals provide a meaningful authority distinction.",
         "differentiation_implication": "Identity and bounded authority are visible brand structure.",
@@ -619,19 +626,129 @@
         "relationship": "adjacent_benchmark",
         "status": "provisional",
         "support": "direct",
-        "territory": "distinctive_brand_territory",
+        "visibility": "public_safe"
+      },
+      {
+        "adopted_rule": "Use decisive scale, disciplined negative space, and concrete proof.",
+        "bad_practices_to_avoid": [
+          "Do not copy monochrome UI-first expression or reduce Ateles to a work-tracking screen."
+        ],
+        "best_practices_to_adopt": [
+          "Use decisive scale, disciplined negative space, and concrete proof."
+        ],
+        "brand_rule_class": "adapted_convention",
+        "confidence": "high",
+        "derived_learning": "Inference: Decisive hierarchy, restraint, and direct proof signal modern product confidence without requiring decorative density.",
+        "differentiation_implication": "Ateles should keep cinematic organizational motion primary and use interface proof only where it demonstrates authority and accountability.",
+        "evidence": {
+          "observed_at": "2026-09-22",
+          "source": "https://linear.app/"
+        },
+        "observed_fact": "The current site uses austere dark space, oversized neutral type, sparse chrome, and large real-interface proof to support a system-for-teams-and-agents claim.",
+        "referenced_product": "Linear",
+        "rejected_pattern": "Monochrome UI-first work-tracking identity.",
+        "relationship": "adjacent_benchmark",
+        "status": "provisional",
+        "support": "direct",
+        "visibility": "public_safe"
+      },
+      {
+        "adopted_rule": "Keep the promise simple and support it with recognizable proof.",
+        "bad_practices_to_avoid": [
+          "Do not copy workspace UI or imply that shared pages create an organization."
+        ],
+        "best_practices_to_adopt": [
+          "Keep the promise simple and support it with recognizable proof."
+        ],
+        "brand_rule_class": "adapted_convention",
+        "confidence": "high",
+        "derived_learning": "Inference: A simple promise plus recognizable proof lowers education tax, but workspace imagery does not express delegated authority.",
+        "differentiation_implication": "Ateles must visualize autonomy, role identity, temporary handoffs, and bounded escalation beyond workspace collaboration.",
+        "evidence": {
+          "observed_at": "2026-09-22",
+          "source": "https://www.notion.com/product"
+        },
+        "observed_fact": "The current product page uses oversized straightforward type, a bright white field, one colored action cue, customer proof, and large interface imagery for teams-and-agents work.",
+        "referenced_product": "Notion",
+        "rejected_pattern": "Workspace UI as proof of organization.",
+        "relationship": "complement",
+        "status": "provisional",
+        "support": "direct",
         "visibility": "public_safe"
       }
     ],
+    "regeneration_chain": {
+      "sampling_rationale": "Direct competitors (LangGraph, CrewAI, AutoGen), complements/adjacent systems (Notion), and a contemporary craft benchmark (Linear) were sampled from current official surfaces; permanent-graph and central-controller expressions were treated as explicit anti-exemplars.",
+      "source_artifacts": [
+        "ent_97504a9c5762e37842d07436",
+        "ent_fd64f687e7e1bf5711c6de2b",
+        "ent_f8271efcdb842076a5147929",
+        "ent_2a29bed8dcacd4b1ff20c6f2",
+        "ent_2ef24658c391519b5f01ea14",
+        "ent_9bae18b46d70d678e496ecb6",
+        "ent_810de1deab0bc282128089fd"
+      ],
+      "stages": [
+        {
+          "evidence": "Operator voice memo and settled symbolic, category, copy, and page-production decisions were consumed as sourced inputs.",
+          "name": "operator_inputs_and_settled_decisions",
+          "status": "complete"
+        },
+        {
+          "evidence": "Exact outward category settled by ent_97504a9c5762e37842d07436.",
+          "name": "define_category",
+          "status": "settled"
+        },
+        {
+          "evidence": "Target persona, incumbent, and chronic/acute pain artifacts were re-read and updated without duplication.",
+          "name": "frame_product_argument",
+          "status": "complete"
+        },
+        {
+          "evidence": "Current official claim audit stored in ent_2ef24658c391519b5f01ea14.",
+          "name": "competitive_research",
+          "status": "complete"
+        },
+        {
+          "evidence": "Current official live-page benchmark stored in ent_9bae18b46d70d678e496ecb6.",
+          "name": "aesthetic_ui_benchmark",
+          "status": "complete"
+        },
+        {
+          "evidence": "One recommendation, rejected alternatives, and convergence tests stored in ent_810de1deab0bc282128089fd.",
+          "name": "original_aesthetic_territory",
+          "status": "provisional_review"
+        },
+        {
+          "evidence": "Canonical brand record, repository mirrors, and review pages are regenerated from the full chain.",
+          "name": "brand_system_draft",
+          "status": "provisional_review"
+        },
+        {
+          "evidence": "Required before public-copy application or cinematic production.",
+          "name": "operator_brand_approval",
+          "status": "pending"
+        }
+      ],
+      "status": "awaiting_approval"
+    },
     "regeneration_gate": {
-      "next_gate": "Operator chooses the category noun after the define-category review artifacts are presented.",
-      "reason": "The expanded guide is preserved as provisional evidence and hypotheses. It is not an approved baseline until category, argument, current competitive and aesthetic research, one original territory, and operator approval are complete.",
+      "next_gate": "Operator approves or revises the complete provisional brand system; no public-copy or cinematic application occurs before that ruling.",
+      "reason": "Category and product argument are settled; current competitive and aesthetic evidence plus one original aesthetic territory are complete. The whole regenerated brand system remains provisional until the operator approves or revises it.",
       "skill_id": "ent_94218851b815696f6cea86dc",
       "status": "blocked",
       "task_id": "ent_8c834a37087f9471fd8b0c05",
       "zero_category_definitions_verified": "2026-09-22"
     },
     "research": {
+      "benchmark": {
+        "aesthetic_artifact": "ent_9bae18b46d70d678e496ecb6",
+        "competitive_artifact": "ent_2ef24658c391519b5f01ea14",
+        "sampled_at": "2026-09-22",
+        "sampling_rationale": "Direct competitors (LangGraph, CrewAI, AutoGen), complements/adjacent systems (Notion), and a contemporary craft benchmark (Linear) were sampled from current official surfaces; permanent-graph and central-controller expressions were treated as explicit anti-exemplars.",
+        "status": "provisional",
+        "territory_artifact": "ent_810de1deab0bc282128089fd"
+      },
       "review_cadence": {
         "cadence": "Quarterly review proposed; exact cadence awaits owner approval.",
         "status": "provisional",
@@ -715,6 +832,22 @@
           "rationale": "Adopt the governing principle, never the source brand's recognizable expression.",
           "status": "approved",
           "url": "https://styleguide.mailchimp.com/voice-and-tone/"
+        },
+        {
+          "checked_at": "2026-09-22",
+          "informs": "direct-competitor category and orchestration convergence test",
+          "label": "Ateles current competitive claim audit",
+          "rationale": "Observed fact is separated from inference in the canonical research artifact.",
+          "status": "provisional",
+          "url": "https://www.langchain.com/langgraph"
+        },
+        {
+          "checked_at": "2026-09-22",
+          "informs": "hierarchy, negative space, proof discipline, and anti-copy test",
+          "label": "Ateles current aesthetic benchmark",
+          "rationale": "Adopt only principles; the recommended expression is grounded in Ateles product truth.",
+          "status": "provisional",
+          "url": "https://linear.app/"
         }
       ]
     },
@@ -846,6 +979,55 @@
     }
   ],
   "visual_styles": {
+    "aesthetic_territory": {
+      "camera_motion": "Slow orbital or lateral camera; independent paths align, claim, hand off, pause locally at a checkpoint, release, and resume. The meaning remains legible in the still state.",
+      "convergence_tests": [
+        {
+          "reference": "Neotoma",
+          "test": "Fail if edges persist after handoff, a central graph appears, or provenance/version imagery dominates."
+        },
+        {
+          "reference": "LangGraph and AutoGen",
+          "test": "Fail if topology, routing, chat exchange, or event buses become the organizing visual."
+        },
+        {
+          "reference": "CrewAI",
+          "test": "Fail if the scene reads as a manager assigning a temporary crew."
+        },
+        {
+          "reference": "Linear and Notion",
+          "test": "Adopt restraint and proof discipline only; fail if Ateles becomes monochrome UI-first software."
+        }
+      ],
+      "identity": "Organization is the promise; swarm is the symbol; governance and authority are the structure; the seal is only a secondary authorization or completion marker. Members retain distinct shape, surface, and path. No permanent edges or central hub.",
+      "name": "Coordinated agency in motion",
+      "originality_basis": "Distinctiveness comes from product truth\u2014member identity, bounded authority, accountable work ownership, temporary handoff, escalation, and continuation\u2014not arbitrary novelty.",
+      "palette_material_light": "Warm paper and deep ink; rust for coordination; grant green only at bounded authorization; ceramic, patinated metal, woven paper, shallow atmospheric depth, and warm directional light.",
+      "product_truth": "Ateles turns multiple agent actors into a standing agentic organization through persistent roles, bounded authority, accountable claims and leases, mission-to-task priority, escalation, and continued action.",
+      "rejected_alternatives": [
+        {
+          "name": "Governance seal as primary",
+          "reason": "Too narrow and static; retain only as a secondary state marker."
+        },
+        {
+          "name": "Permanent network graph",
+          "reason": "Collapses Ateles into Neotoma and orchestration topology."
+        },
+        {
+          "name": "Agent command center",
+          "reason": "Implies central control and generic dashboard software."
+        },
+        {
+          "name": "Polished crew theater",
+          "reason": "Risks transient manager-led casting rather than durable roles and accountability."
+        }
+      ],
+      "scope_statement": "Internal creative platform subordinate to the settled category \u201cThe operating system for agentic organizations.\u201d It is not an alternate category noun, public headline, or tagline.",
+      "source_artifact": "ent_810de1deab0bc282128089fd",
+      "status": "provisional",
+      "summary": "An edge-free abstract swarm of differentiated semi-autonomous members organizes around shared purpose through proximity, orientation, temporary signals, and short-lived handoffs.",
+      "typography_layout": "Geometric expressive headings, humanist productive copy, and short public operational labels; cinematic fields dominate with concise text in a protected safe zone."
+    },
     "anti_patterns": [
       "Do not use the seal as Ateles's logo, hero object, or primary metaphor. It is only a secondary state marker for a concrete authorization, commitment, approval, or completed checkpoint.",
       "Do not literalize \u201cswarm\u201d with monkeys, spiders, insects, hives, honeycombs, or mascot clusters. Show a living collective through abstract named roles and relationships.",

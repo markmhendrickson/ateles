@@ -71,6 +71,18 @@ DIFFERENTIATION_AXES = {
     "voice",
     "proof_style",
 }
+GENERATION_GATE_PREDICATES = {
+    "brand_intent",
+    "category_language",
+    "phrases_terminology_voice",
+    "symbol_and_logo_for_film",
+    "palette_materiality_typography",
+    "motion_cinematography",
+    "accessibility_static_equivalence",
+    "market_learning_and_differentiation",
+    "section_copy_to_visual_matrix",
+    "brand_brief_consistency",
+}
 REQUIRED_SECTIONS = (
     "name",
     "product",
@@ -188,6 +200,33 @@ def validate_brand_system(data: dict, schema: dict | None = None) -> None:
     ):
         raise BrandSystemError("typography responsive rules are incomplete")
 
+    territory = styles.get("aesthetic_territory") or {}
+    required_territory = {
+        "status",
+        "name",
+        "scope_statement",
+        "summary",
+        "product_truth",
+        "identity",
+        "palette_material_light",
+        "typography_layout",
+        "camera_motion",
+        "rejected_alternatives",
+        "convergence_tests",
+        "originality_basis",
+        "source_artifact",
+    }
+    if required_territory - set(territory):
+        raise BrandSystemError("original aesthetic territory is incomplete")
+    if territory.get("status") not in ALLOWED_STATUSES:
+        raise BrandSystemError("original aesthetic territory has an invalid status")
+    if not territory.get("rejected_alternatives") or not territory.get(
+        "convergence_tests"
+    ):
+        raise BrandSystemError(
+            "original aesthetic territory needs rejected alternatives and convergence tests"
+        )
+
     accessibility = (data.get("production_specs") or {}).get("accessibility") or {}
     if ACCESSIBILITY_CHECKS - set(accessibility):
         raise BrandSystemError("accessibility requirements are incomplete")
@@ -196,7 +235,7 @@ def validate_brand_system(data: dict, schema: dict | None = None) -> None:
             raise BrandSystemError(f"accessibility check {name!r} is incomplete")
     generation_gate = (data.get("production_specs") or {}).get("generation_gate") or {}
     predicates = generation_gate.get("predicates") or []
-    if len(predicates) != 9:
+    if {item.get("name") for item in predicates} != GENERATION_GATE_PREDICATES:
         raise BrandSystemError("cinematic generation gate must define all predicates")
     if any(
         item.get("status") not in {"approved", "provisional", "missing", "blocked"}
@@ -213,6 +252,25 @@ def validate_brand_system(data: dict, schema: dict | None = None) -> None:
         raise BrandSystemError("cinematic generation gate cannot fail open")
 
     provenance = data.get("provenance") or {}
+    regeneration_chain = provenance.get("regeneration_chain") or {}
+    required_chain_stages = {
+        "operator_inputs_and_settled_decisions",
+        "define_category",
+        "frame_product_argument",
+        "competitive_research",
+        "aesthetic_ui_benchmark",
+        "original_aesthetic_territory",
+        "brand_system_draft",
+        "operator_brand_approval",
+    }
+    if {
+        item.get("name") for item in regeneration_chain.get("stages") or []
+    } != required_chain_stages:
+        raise BrandSystemError("brand regeneration chain is incomplete")
+    if not regeneration_chain.get("sampling_rationale") or not regeneration_chain.get(
+        "source_artifacts"
+    ):
+        raise BrandSystemError("brand regeneration chain lacks rationale or evidence")
     regeneration_gate = provenance.get("regeneration_gate") or {}
     required_regeneration_fields = {
         "status",
@@ -312,7 +370,7 @@ def validate_brand_system(data: dict, schema: dict | None = None) -> None:
     rows = matrix.get("axes") or []
     if {row.get("axis") for row in rows} != DIFFERENTIATION_AXES:
         raise BrandSystemError("differentiation matrix must cover all seven axes")
-    territory_key = f"{data['slug']}_territory"
+    territory_key = f"{data['slug']}_brand_rule_class"
     distinctive = sum(
         row.get(territory_key) == "distinctive_brand_territory" for row in rows
     )
@@ -343,7 +401,10 @@ def validate_brand_system(data: dict, schema: dict | None = None) -> None:
 
     flattened = json.dumps(data, sort_keys=True).casefold()
     if data["slug"] == "ateles":
-        if "the distributed-authority operating layer for governed initiative" in flattened:
+        if (
+            "the distributed-authority operating layer for governed initiative"
+            in flattened
+        ):
             retired = [
                 item
                 for item in data.get("phrases", [])
@@ -352,7 +413,9 @@ def validate_brand_system(data: dict, schema: dict | None = None) -> None:
             ]
             if not retired or retired[0].get("status") != "retired":
                 raise BrandSystemError("superseded Ateles category is not retired")
-        symbol = json.dumps((data.get("visual_styles") or {}).get("symbol") or {}).casefold()
+        symbol = json.dumps(
+            (data.get("visual_styles") or {}).get("symbol") or {}
+        ).casefold()
         if "swarm" not in symbol or "no central hub or permanent edges" not in symbol:
             raise BrandSystemError("Ateles symbol must be an edge-free swarm")
     else:
@@ -361,7 +424,12 @@ def validate_brand_system(data: dict, schema: dict | None = None) -> None:
         guidance = str(symbol_data.get("guidance") or "").casefold()
         if "persistent record graph" not in symbol or not all(
             concept in guidance
-            for concept in ("records", "relationships", "prior versions", "agent operations")
+            for concept in (
+                "records",
+                "relationships",
+                "prior versions",
+                "agent operations",
+            )
         ):
             raise BrandSystemError("Neotoma symbol must be a persistent record graph")
         if any(
@@ -518,6 +586,36 @@ def render_markdown(contract: dict) -> str:
             "",
             "## Visual system",
             "",
+            f"### Recommended aesthetic territory · {_status(styles['aesthetic_territory']['status'])}",
+            "",
+            f"**{styles['aesthetic_territory']['name']}** — {styles['aesthetic_territory']['summary']}",
+            "",
+            f"- **Scope:** {styles['aesthetic_territory']['scope_statement']}",
+            f"- **Product truth:** {styles['aesthetic_territory']['product_truth']}",
+            f"- **Identity:** {styles['aesthetic_territory']['identity']}",
+            f"- **Palette, material, and light:** {styles['aesthetic_territory']['palette_material_light']}",
+            f"- **Typography and layout:** {styles['aesthetic_territory']['typography_layout']}",
+            f"- **Camera and motion:** {styles['aesthetic_territory']['camera_motion']}",
+            f"- **Originality basis:** {styles['aesthetic_territory']['originality_basis']}",
+            "",
+            "#### Rejected alternatives",
+            "",
+            *_bullets(
+                [
+                    f"{item['name']} — {item['reason']}"
+                    for item in styles["aesthetic_territory"]["rejected_alternatives"]
+                ]
+            ),
+            "",
+            "#### Convergence tests",
+            "",
+            *_bullets(
+                [
+                    f"{item['reference']} — {item['test']}"
+                    for item in styles["aesthetic_territory"]["convergence_tests"]
+                ]
+            ),
+            "",
             f"- **Primary symbol:** {styles['symbol']['name']} — {styles['symbol']['guidance']}",
             f"- **Secondary symbol:** {styles['symbol']['secondary']}",
             f"- **Material:** {styles['material']}",
@@ -639,6 +737,7 @@ def render_markdown(contract: dict) -> str:
             "",
             f"- **Reviewed:** {provenance['research']['reviewed_at']}",
             f"- **Cadence · {_status(provenance['research']['review_cadence']['status'])}:** {provenance['research']['review_cadence']['cadence']}",
+            f"- **Sampling rationale:** {provenance['regeneration_chain']['sampling_rationale']}",
             "",
         ]
     )
@@ -659,7 +758,7 @@ def render_markdown(contract: dict) -> str:
             [
                 f"### {item['referenced_product']} · {item['relationship']}",
                 "",
-                f"- **State:** {_status(item['status'])}; {item['confidence']} confidence; {item['territory'].replace('_', ' ')}; {item['visibility']}",
+                f"- **State:** {_status(item['status'])}; {item['confidence']} confidence; {item['brand_rule_class'].replace('_', ' ')}; {item['visibility']}",
                 f"- **Evidence:** {source_label} ({evidence['observed_at']})",
                 f"- **Observed fact:** {item['observed_fact']}",
                 f"- **Derived learning:** {item['derived_learning']}",
@@ -675,8 +774,8 @@ def render_markdown(contract: dict) -> str:
             [
                 f"### {item['axis'].replace('_', ' ')}",
                 "",
-                f"- **Ateles · {item['ateles_territory'].replace('_', ' ')}:** {item['ateles']}",
-                f"- **Neotoma · {item['neotoma_territory'].replace('_', ' ')}:** {item['neotoma']}",
+                f"- **Ateles · {item['ateles_brand_rule_class'].replace('_', ' ')}:** {item['ateles']}",
+                f"- **Neotoma · {item['neotoma_brand_rule_class'].replace('_', ' ')}:** {item['neotoma']}",
                 f"- **Convergence test:** {item['convergence_test']}",
                 "",
             ]
@@ -704,13 +803,15 @@ def render_markdown(contract: dict) -> str:
     )
     for item in completeness.get("dimensions") or []:
         lines.append(f"- {_status(item['status'])} · {item['name']}")
-    lines.extend(["", "### Missing", "", *_bullets(completeness.get("missing_items") or []), ""])
+    lines.extend(
+        ["", "### Missing", "", *_bullets(completeness.get("missing_items") or []), ""]
+    )
     return "\n".join(lines)
 
 
 def _schema_document(snapshot: dict) -> dict:
     schema = _as_json_object(snapshot.get("content"), "schema content")
-    if schema.get("$id") != "urn:ateles:brand-system:1.1.0":
+    if schema.get("$id") != "urn:ateles:brand-system:1.2.0":
         raise BrandSystemError("unexpected brand schema identifier")
     return schema
 
@@ -770,7 +871,9 @@ def check_all(schema: dict, contracts: dict[str, dict]) -> bool:
     for product, contract in contracts.items():
         json_path = OUT_DIR / f"{product}.json"
         doc_path = DOC_DIR / f"{product}.md"
-        if not json_path.exists() or _normalized(json.loads(json_path.read_text())) != _normalized(contract):
+        if not json_path.exists() or _normalized(
+            json.loads(json_path.read_text())
+        ) != _normalized(contract):
             print(f"DRIFT: brand_systems/{product}.json differs from Neotoma")
             ok = False
         if not doc_path.exists() or doc_path.read_text() != render_markdown(contract):
