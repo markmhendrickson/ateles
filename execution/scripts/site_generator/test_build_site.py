@@ -1173,6 +1173,11 @@ def test_brand_route_projects_complete_public_safe_contract(tmp_path, product):
         "Brand intent",
         "Voice and language",
         "Visual system",
+        "Recommended aesthetic territory",
+        "Rejected aesthetic alternatives",
+        "Aesthetic convergence tests",
+        "internal creative platform subordinate to the settled category",
+        "not an alternate category noun, public headline, or tagline",
         "Logo system",
         "Typography system",
         "Assets",
@@ -1180,7 +1185,8 @@ def test_brand_route_projects_complete_public_safe_contract(tmp_path, product):
         "Accessibility",
         "Cinematic generation gate",
         "Not an approved brand baseline.",
-        "The category-to-brand chain is being rerun from current evidence.",
+        "The category and product argument are settled",
+        "operator approval or revision of this provisional brand system",
         "Market-reference learning ledger",
         "Cross-product differentiation",
         "Observed:",
@@ -1206,9 +1212,19 @@ def test_brand_route_projects_complete_public_safe_contract(tmp_path, product):
 def test_brand_route_internal_leakage_validator_catches_known_positive(tmp_path):
     assert build_site.build("ateles", tmp_path) == []
     document = (tmp_path / "ateles" / "brand" / "index.html").read_text()
-    leaked = document.replace("One source, visible state.", "Entity ent_deadbeef1234567890")
+    leaked = document.replace(
+        "One source, visible state.", "Entity ent_deadbeef1234567890"
+    )
     blockers = build_site._public_copy_leaks(Path("brand/index.html"), leaked)
     assert any("entity id" in blocker for blocker in blockers)
+
+
+def test_brand_gate_projection_strips_internal_entity_ids():
+    projected = tpl._public_gate_text(
+        "Exact category was read back in ent_deadbeef1234567890."
+    )
+    assert projected == "Exact category was read back in the canonical record."
+    assert "ent_" not in projected
 
 
 def test_design_tokens_drive_css_output_no_hardcoded_colors():
