@@ -54,6 +54,169 @@
       ],
       "type": "object"
     },
+    "logo_variant": {
+      "additionalProperties": true,
+      "properties": {
+        "backgrounds": {
+          "type": "array"
+        },
+        "export_formats": {
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source_asset": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_format": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "enum": [
+            "approved",
+            "provisional",
+            "missing",
+            "retired"
+          ]
+        },
+        "use": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "use",
+        "source_asset",
+        "source_format",
+        "export_formats",
+        "backgrounds"
+      ],
+      "type": "object"
+    },
+    "market_reference": {
+      "additionalProperties": false,
+      "properties": {
+        "adopted_rule": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bad_practices_to_avoid": {
+          "type": "array"
+        },
+        "best_practices_to_adopt": {
+          "type": "array"
+        },
+        "confidence": {
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "derived_learning": {
+          "type": "string"
+        },
+        "differentiation_implication": {
+          "type": "string"
+        },
+        "evidence": {
+          "additionalProperties": false,
+          "properties": {
+            "observed_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "observed_at"
+          ],
+          "type": "object"
+        },
+        "observed_fact": {
+          "type": "string"
+        },
+        "referenced_product": {
+          "type": "string"
+        },
+        "rejected_pattern": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "relationship": {
+          "enum": [
+            "competitor",
+            "complement",
+            "incumbent",
+            "adjacent_benchmark"
+          ]
+        },
+        "status": {
+          "enum": [
+            "approved",
+            "provisional",
+            "missing",
+            "retired"
+          ]
+        },
+        "support": {
+          "enum": [
+            "direct",
+            "synthesized",
+            "gap"
+          ]
+        },
+        "territory": {
+          "enum": [
+            "table_stakes",
+            "adapted_convention",
+            "distinctive_brand_territory"
+          ]
+        },
+        "visibility": {
+          "enum": [
+            "public_safe",
+            "internal_review",
+            "confidential"
+          ]
+        }
+      },
+      "required": [
+        "referenced_product",
+        "relationship",
+        "evidence",
+        "observed_fact",
+        "derived_learning",
+        "best_practices_to_adopt",
+        "bad_practices_to_avoid",
+        "differentiation_implication",
+        "adopted_rule",
+        "rejected_pattern",
+        "territory",
+        "confidence",
+        "support",
+        "status",
+        "visibility"
+      ],
+      "type": "object"
+    },
     "status_item": {
       "additionalProperties": true,
       "properties": {
@@ -84,10 +247,10 @@
       "type": "object"
     }
   },
-  "$id": "urn:ateles:brand-system:1.0.0",
+  "$id": "urn:ateles:brand-system:1.1.0",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Canonical expression contract. Neotoma owns instances; repository files are generated mirrors; public brand pages are read-only viewers.",
+  "description": "Canonical expression contract with explicit intent, complete state-aware logo and typography systems, research and market-learning provenance, differentiation tests, accessibility requirements, and a fail-closed upstream-regeneration gate that prevents provisional hypotheses from presenting as approved guidance.",
   "properties": {
     "asset_inventory": {
       "items": {
@@ -152,12 +315,60 @@
     },
     "positioning": {
       "additionalProperties": true,
+      "properties": {
+        "intent": {
+          "additionalProperties": false,
+          "properties": {
+            "core_idea": {
+              "type": "string"
+            },
+            "emotional_outcome": {
+              "type": "string"
+            },
+            "forbidden_perceptions": {
+              "type": "array"
+            },
+            "functional_truth": {
+              "type": "string"
+            },
+            "intended_perceptions": {
+              "type": "array"
+            },
+            "proof_cues": {
+              "type": "array"
+            },
+            "sibling_distinction": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "approved",
+                "provisional",
+                "missing",
+                "retired"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "core_idea",
+            "functional_truth",
+            "emotional_outcome",
+            "intended_perceptions",
+            "forbidden_perceptions",
+            "proof_cues",
+            "sibling_distinction"
+          ],
+          "type": "object"
+        }
+      },
       "required": [
         "category",
         "hero_headline",
         "hero_support",
         "product_promise",
-        "audience"
+        "audience",
+        "intent"
       ],
       "type": "object"
     },
@@ -166,19 +377,147 @@
     },
     "production_specs": {
       "additionalProperties": true,
+      "properties": {
+        "accessibility": {
+          "additionalProperties": false,
+          "properties": {
+            "contrast": {
+              "type": "object"
+            },
+            "images_of_text": {
+              "type": "object"
+            },
+            "reduced_motion_static_equivalence": {
+              "type": "object"
+            },
+            "relative_sizing": {
+              "type": "object"
+            },
+            "semantic_headings": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "contrast",
+            "images_of_text",
+            "semantic_headings",
+            "relative_sizing",
+            "reduced_motion_static_equivalence"
+          ],
+          "type": "object"
+        },
+        "generation_gate": {
+          "additionalProperties": false,
+          "properties": {
+            "approval_owner": {
+              "type": "string"
+            },
+            "generation_allowed": {
+              "type": "boolean"
+            },
+            "predicates": {
+              "items": {
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "rule": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "approved",
+                "provisional",
+                "missing",
+                "blocked"
+              ]
+            },
+            "unresolved": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "status",
+            "generation_allowed",
+            "approval_owner",
+            "rule",
+            "predicates",
+            "unresolved"
+          ],
+          "type": "object"
+        }
+      },
       "required": [
         "cinematic",
         "still_and_reduced_motion",
-        "delivery"
+        "delivery",
+        "accessibility",
+        "generation_gate"
       ],
       "type": "object"
     },
     "provenance": {
       "additionalProperties": true,
+      "properties": {
+        "differentiation_matrix": {
+          "type": "object"
+        },
+        "market_reference_ledger": {
+          "items": {
+            "$ref": "#/$defs/market_reference"
+          },
+          "type": "array"
+        },
+        "regeneration_gate": {
+          "additionalProperties": false,
+          "properties": {
+            "next_gate": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "skill_id": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "blocked",
+                "approved"
+              ]
+            },
+            "task_id": {
+              "type": "string"
+            },
+            "zero_category_definitions_verified": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "next_gate",
+            "task_id",
+            "skill_id",
+            "zero_category_definitions_verified"
+          ],
+          "type": "object"
+        },
+        "research": {
+          "type": "object"
+        }
+      },
       "required": [
         "canonical_storage",
         "sources",
-        "boundary"
+        "boundary",
+        "regeneration_gate",
+        "research",
+        "market_reference_ledger",
+        "differentiation_matrix"
       ],
       "type": "object"
     },
@@ -227,6 +566,150 @@
     },
     "visual_styles": {
       "additionalProperties": true,
+      "properties": {
+        "logo_system": {
+          "additionalProperties": false,
+          "properties": {
+            "background_rules": {
+              "type": "object"
+            },
+            "clear_space": {
+              "type": "object"
+            },
+            "co_branding": {
+              "type": "object"
+            },
+            "colorway_rules": {
+              "type": "object"
+            },
+            "export_formats": {
+              "type": "array"
+            },
+            "minimum_size": {
+              "type": "object"
+            },
+            "misuse_rules": {
+              "type": "array"
+            },
+            "source_formats": {
+              "type": "array"
+            },
+            "variants": {
+              "additionalProperties": false,
+              "properties": {
+                "application": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "favicon": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "horizontal": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "lockup": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "monochrome": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "primary_mark": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "reversed": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "small_scale": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "stacked": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "symbol_only": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "wordmark": {
+                  "$ref": "#/$defs/logo_variant"
+                }
+              },
+              "required": [
+                "primary_mark",
+                "wordmark",
+                "lockup",
+                "symbol_only",
+                "horizontal",
+                "stacked",
+                "monochrome",
+                "reversed",
+                "small_scale",
+                "favicon",
+                "application"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "variants",
+            "clear_space",
+            "minimum_size",
+            "background_rules",
+            "colorway_rules",
+            "co_branding",
+            "source_formats",
+            "export_formats",
+            "misuse_rules"
+          ],
+          "type": "object"
+        },
+        "typography_system": {
+          "additionalProperties": false,
+          "properties": {
+            "examples": {
+              "type": "array"
+            },
+            "fallbacks": {
+              "type": "object"
+            },
+            "forbidden_use": {
+              "type": "array"
+            },
+            "hierarchy": {
+              "type": "array"
+            },
+            "licensing": {
+              "type": "object"
+            },
+            "responsive": {
+              "type": "object"
+            },
+            "roles": {
+              "type": "object"
+            },
+            "status": {
+              "enum": [
+                "approved",
+                "provisional",
+                "missing",
+                "retired"
+              ]
+            },
+            "weights_styles": {
+              "type": "array"
+            }
+          },
+          "required": [
+            "status",
+            "roles",
+            "hierarchy",
+            "weights_styles",
+            "responsive",
+            "fallbacks",
+            "licensing",
+            "examples",
+            "forbidden_use"
+          ],
+          "type": "object"
+        }
+      },
       "required": [
         "symbol",
         "palette",
@@ -236,7 +719,9 @@
         "camera",
         "motion",
         "composition",
-        "anti_patterns"
+        "anti_patterns",
+        "logo_system",
+        "typography_system"
       ],
       "type": "object"
     },
@@ -272,6 +757,6 @@
     "completeness",
     "updated_at"
   ],
-  "title": "Reusable product brand system",
+  "title": "Reusable product brand system v1.1",
   "type": "object"
 }

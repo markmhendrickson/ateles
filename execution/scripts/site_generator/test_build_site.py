@@ -1032,7 +1032,7 @@ def _launch_chromium(playwright):
     return playwright.chromium.launch(headless=True, **options)
 
 
-def test_eight_routes_have_no_document_overflow_at_390px(tmp_path):
+def test_all_routes_have_no_document_overflow_at_390px(tmp_path):
     for product in ("neotoma", "ateles"):
         assert build_site.build(product, tmp_path) == []
 
@@ -1054,8 +1054,8 @@ def test_eight_routes_have_no_document_overflow_at_390px(tmp_path):
             )
 
             routes = {
-                "neotoma": ("/", "/install/", "/evaluate/", "/compare/"),
-                "ateles": ("/", "/design/", "/compare/", "/status/"),
+                "neotoma": ("/", "/install/", "/evaluate/", "/compare/", "/brand/"),
+                "ateles": ("/", "/design/", "/compare/", "/status/", "/brand/"),
             }
             for product, product_routes in routes.items():
                 with _serve_directory(tmp_path / product) as base_url:
@@ -1170,10 +1170,24 @@ def test_brand_route_projects_complete_public_safe_contract(tmp_path, product):
     assert build_site.build(product, tmp_path) == []
     document = (tmp_path / product / "brand" / "index.html").read_text()
     for marker in (
+        "Brand intent",
         "Voice and language",
         "Visual system",
+        "Logo system",
+        "Typography system",
         "Assets",
         "Cinematic grammar",
+        "Accessibility",
+        "Cinematic generation gate",
+        "Not an approved brand baseline.",
+        "The category-to-brand chain is being rerun from current evidence.",
+        "Market-reference learning ledger",
+        "Cross-product differentiation",
+        "Observed:",
+        "Inference:",
+        "Adopt",
+        "Avoid",
+        "Differentiate",
         "Do not drift here",
         "Completeness and provenance",
         "Downstream contracts",
