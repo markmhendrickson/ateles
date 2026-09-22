@@ -1835,6 +1835,24 @@ def _token_for_repo(repo: str) -> str:
     )
 
 
+@dataclass(frozen=True)
+class ReviewBindingReceipt:
+    """Read-back proof that a binding GitHub review landed as intended."""
+
+    review_id: str
+    reviewer_login: str
+    commit_id: str
+    state: str
+
+    def proves_approval(self, *, head_sha: str) -> bool:
+        return (
+            self.reviewer_login.casefold()
+            == agent_github_login("vanellus").casefold()
+            and self.commit_id == _normalise_full_sha(head_sha)
+            and self.state == "APPROVED"
+        )
+
+
 @dataclass
 class DispatchConfig:
     neotoma_base_url: str = os.environ.get(
@@ -4532,7 +4550,7 @@ class SwarmDispatcher:
         #     review state as an APPROVE that proceeds. Best-effort: a failure
         #     here must not change the routing decision below, which remains
         #     driven by the parsed verdict.
-        await self._emit_formal_review(
+        binding_receipt = await self._emit_formal_review(
             trigger, verdict, vanellus_result.stdout, reviewed_head=aggregation_head
         )
 
@@ -4567,12 +4585,37 @@ class SwarmDispatcher:
             )
             return
 
+        # A clear model verdict is not a merge-readiness control until GitHub
+        # confirms that the distinct Vanellus principal posted an APPROVED
+        # review against the exact head the panel judged.  A missing token,
+        # same-principal identity, rejected POST, stale head, or mismatched
+        # readback all hold here.  Routing blockers remains independent above.
+        if not (
+            binding_receipt
+            and binding_receipt.proves_approval(head_sha=aggregation_head)
+        ):
+            log.error(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: clear "
+                "panel verdict lacks a verified exact-head APPROVED receipt "
+                "from the distinct Vanellus principal — merge readiness held"
+            )
+            if await self._claim_escalation(trigger, "binding-review-unverified"):
+                self.notifier.send(
+                    f"PR {trigger.repository}#{trigger.number}: the panel is "
+                    "clear, but GitHub did not confirm an exact-head APPROVED "
+                    "review from the dedicated Vanellus identity. Merge "
+                    "readiness is held closed.",
+                    priority=Priority.OPERATOR_DECISION,
+                    handler=DAEMON_NAME,
+                )
+            return
+
         await self._gate_merge_readiness(trigger, parent, panel)
 
     async def _emit_formal_review(
         self, t: SwarmTrigger, verdict: str | None, body: str,
         *, reviewed_head: str | None = None,
-    ) -> str | None:
+    ) -> ReviewBindingReceipt | None:
         """Post the aggregated panel verdict as a native GitHub Review.
 
         This is ateles#241: the swarm's verdicts previously existed only as prose
@@ -4584,27 +4627,22 @@ class SwarmDispatcher:
         routinely fail their own `gh` calls, and of the lens agents only Vanellus
         and Waxwing even hold `gh pr review` grants.
 
-        Best-effort — returns the review id on success, else None. NEVER raises:
-        the routing decision in `_handle_pr` is driven by the parsed verdict, and
-        a GitHub hiccup must not change which branch runs.
+        Binding events (APPROVE / REQUEST_CHANGES) require the dedicated
+        ``VANELLUS_AGENT_PAT``.  The dispatcher verifies that token's login,
+        verifies it differs from the immutable PR author, verifies the live PR
+        head still equals the panel-reviewed head, posts that exact commit_id,
+        then reads the created review back and checks reviewer, commit, and
+        state.  Only that readback produces a :class:`ReviewBindingReceipt`.
 
-        Two failures are expected and handled quietly rather than as errors:
-        - 422 "Can not approve your own pull request" — the swarm authored the PR
-          and is reviewing under the same identity. Falls back to COMMENT so the
-          verdict still lands. Resolves once per-agent accounts (#109) ship.
-        - 422 on a closed/merged PR — a race between the panel and a merge.
+        Best-effort for routing — returns None on any failure and never raises.
+        A blocking verdict still routes findings, but a clear verdict cannot
+        enter merge-readiness without a verified APPROVED receipt.
         """
         # ateles#595: the body, not the self-reported token, is the authority on
         # whether this review blocks. A `**COMMENT**` above a `[BLOCKING]`
         # finding must reach reviewDecision as REQUEST_CHANGES.
         event = verdict_to_review_event(verdict, body=body)
         ref = f"{t.repository}#{t.number}"
-
-        if not _token_for_repo(t.repository) and not self.config.github_token:
-            log.warning(
-                f"[{DAEMON_NAME}] no GitHub token — formal review skipped for {ref}"
-            )
-            return None
 
         url = f"https://api.github.com/repos/{t.repository}/pulls/{t.number}/reviews"
         # GitHub rejects a bodyless REQUEST_CHANGES/COMMENT (only APPROVE may be
@@ -4628,61 +4666,136 @@ class SwarmDispatcher:
             return None
         payload = {"event": event, "body": text[:65000], "commit_id": head_sha}
 
-        async def _post(p: dict) -> httpx.Response:
-            async with httpx.AsyncClient(timeout=30) as client:
-                return await client.post(
-                    url, json=p, headers=self._github_headers(t.repository)
+        binding_event = event in {
+            _REVIEW_EVENT_APPROVE,
+            _REVIEW_EVENT_REQUEST_CHANGES,
+        }
+        if binding_event:
+            token = os.environ.get("VANELLUS_AGENT_PAT", "")
+            if not token:
+                log.error(
+                    f"[{DAEMON_NAME}] VANELLUS_AGENT_PAT unset — binding "
+                    f"formal review {event} skipped for {ref}; shared-token "
+                    "fallback is forbidden"
                 )
-
-        try:
-            resp = await _post(payload)
-            downgraded = False
-            if resp.status_code == 422 and event != _REVIEW_EVENT_COMMENT:
-                # Self-review or otherwise-unacceptable event: degrade to COMMENT
-                # so the verdict is still recorded, and say so plainly.
-                detail = (resp.text or "")[:200]
-                downgraded = True
+                return None
+        else:
+            token = _token_for_repo(t.repository) or self.config.github_token
+            if not token:
                 log.warning(
-                    f"[{DAEMON_NAME}] formal review {event} rejected on {ref} "
-                    f"(422) — retrying as COMMENT: {detail}"
+                    f"[{DAEMON_NAME}] no GitHub token — formal review skipped "
+                    f"for {ref}"
                 )
-                resp = await _post({**payload, "event": _REVIEW_EVENT_COMMENT})
-                # A COMMENT does NOT set reviewDecision, so the PR reads as
-                # "never reviewed" forever and no gate can ever be satisfied.
-                # GitHub refuses REQUEST_CHANGES/APPROVE on your own PR, so when
-                # the authoring token and the reviewing token are the same
-                # identity every verdict silently becomes non-binding. Measured
-                # 2026-09-01: 11 of 15 unreviewed open ateles PRs are
-                # ateles-agent reviewing ateles-agent, and 28 such downgrades
-                # appear in apis.log. Only a distinct reviewer identity fixes
-                # this, so page the operator instead of burying it in a WARNING.
-                if await self._claim_escalation(t, "self-review-422"):
-                    self.notifier.send(
-                        f"PR {ref}: GitHub refused the `{event}` review "
-                        f"({detail[:120]}), so it was recorded as a non-binding "
-                        "COMMENT and the PR still reads as never-reviewed. The "
-                        "review gate cannot be satisfied until the reviewing "
-                        "token is a DIFFERENT GitHub identity from the PR "
-                        "author. Merge held.",
-                        priority=Priority.OPERATOR_DECISION,
-                        handler=DAEMON_NAME,
+                return None
+
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                if binding_event:
+                    identity_resp = await client.get(
+                        "https://api.github.com/user", headers=headers
                     )
-            resp.raise_for_status()
-            review_id = resp.json().get("id")
-            # Report what actually landed, not what was attempted — the old log
-            # said "posted formal GitHub review REQUEST_CHANGES" even when the
-            # request had been downgraded to an inert COMMENT.
-            landed = _REVIEW_EVENT_COMMENT if downgraded else event
-            log.info(
-                f"[{DAEMON_NAME}] posted formal GitHub review {landed} on {ref} "
-                f"(id={review_id}, verdict={verdict}"
-                f"{', DOWNGRADED from ' + event + ' — non-binding' if downgraded else ''})"
-            )
-            return str(review_id) if review_id is not None else None
+                    identity_resp.raise_for_status()
+                    reviewer_login = str(
+                        (identity_resp.json() or {}).get("login") or ""
+                    )
+                    expected_login = agent_github_login("vanellus")
+                    if reviewer_login.casefold() != expected_login.casefold():
+                        raise RuntimeError(
+                            "VANELLUS_AGENT_PAT resolved to unexpected login "
+                            f"{reviewer_login!r}; expected {expected_login!r}"
+                        )
+
+                    pr_resp = await client.get(
+                        f"https://api.github.com/repos/{t.repository}/pulls/"
+                        f"{t.number}",
+                        headers=headers,
+                    )
+                    pr_resp.raise_for_status()
+                    pr = pr_resp.json() or {}
+                    live_head = _normalise_full_sha(
+                        str((pr.get("head") or {}).get("sha") or "")
+                    )
+                    pr_author = str((pr.get("user") or {}).get("login") or "")
+                    if live_head != head_sha:
+                        raise RuntimeError(
+                            f"PR head changed from reviewed {head_sha[:12]} to "
+                            f"{live_head[:12] or 'unreadable'}"
+                        )
+                    if not pr_author:
+                        raise RuntimeError("PR author could not be read")
+                    if reviewer_login.casefold() == pr_author.casefold():
+                        raise RuntimeError(
+                            f"reviewer {reviewer_login!r} is the PR author; "
+                            "binding self-review refused"
+                        )
+
+                resp = await client.post(url, json=payload, headers=headers)
+                if resp.status_code >= 400:
+                    detail = (resp.text or "")[:240]
+                    raise RuntimeError(f"HTTP {resp.status_code}: {detail}")
+                review_id = (resp.json() or {}).get("id")
+                if not binding_event:
+                    log.info(
+                        f"[{DAEMON_NAME}] posted formal GitHub review {event} "
+                        f"on {ref} (id={review_id}, verdict={verdict})"
+                    )
+                    return None
+                if review_id is None:
+                    raise RuntimeError("GitHub review response omitted id")
+
+                readback_resp = await client.get(
+                    f"{url}/{review_id}", headers=headers
+                )
+                readback_resp.raise_for_status()
+                readback = readback_resp.json() or {}
+                actual_login = str(
+                    (readback.get("user") or {}).get("login") or ""
+                )
+                actual_commit = _normalise_full_sha(
+                    str(readback.get("commit_id") or "")
+                )
+                actual_state = str(readback.get("state") or "").upper()
+                expected_state = (
+                    "APPROVED"
+                    if event == _REVIEW_EVENT_APPROVE
+                    else "CHANGES_REQUESTED"
+                )
+                if actual_login.casefold() != reviewer_login.casefold():
+                    raise RuntimeError(
+                        "review readback principal mismatch: "
+                        f"{actual_login!r} != {reviewer_login!r}"
+                    )
+                if actual_commit != head_sha:
+                    raise RuntimeError(
+                        "review readback commit mismatch: "
+                        f"{actual_commit!r} != {head_sha!r}"
+                    )
+                if actual_state != expected_state:
+                    raise RuntimeError(
+                        "review readback state mismatch: "
+                        f"{actual_state!r} != {expected_state!r}"
+                    )
+                receipt = ReviewBindingReceipt(
+                    review_id=str(review_id),
+                    reviewer_login=actual_login,
+                    commit_id=actual_commit,
+                    state=actual_state,
+                )
+                log.info(
+                    f"[{DAEMON_NAME}] verified binding GitHub review {event} "
+                    f"on {ref} (id={review_id}, reviewer={actual_login}, "
+                    f"commit={actual_commit[:12]}, state={actual_state})"
+                )
+                return receipt
         except Exception as exc:
-            # Never fail the handler on a review-post problem.
+            # Never change blocker routing because GitHub posting failed. The
+            # clear path independently requires the receipt and therefore holds.
             log.warning(
-                f"[{DAEMON_NAME}] formal review post failed on {ref} "
+                f"[{DAEMON_NAME}] binding formal review post failed on {ref} "
                 f"({event}): {exc}"
             )
             return None

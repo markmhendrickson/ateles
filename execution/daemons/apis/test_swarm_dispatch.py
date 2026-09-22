@@ -34,6 +34,7 @@ from swarm_dispatch import (
     _SWARM_RUN_CMD,
     _VANELLUS_COMMENT_MARKER,
     DispatchConfig,
+    ReviewBindingReceipt,
     SwarmDispatcher,
     _agent_prompt_instruction,
     _is_bot_author,
@@ -827,7 +828,8 @@ def test_signed_off_head_pinning_fails_closed_on_stale_or_missing_commit():
 
 
 def _pr_dispatcher_with_stubs(
-    monkeypatch, *, vanellus_stdout, calls, auto_merge=False
+    monkeypatch, *, vanellus_stdout, calls, auto_merge=False,
+    binding_receipt=True,
 ):
     """Dispatcher whose _handle_pr reaches the verdict branch, then records
     which downstream path (_route_blocking_findings vs _gate_merge_readiness)
@@ -873,7 +875,16 @@ def _pr_dispatcher_with_stubs(
         # COMMENT here while GitHub received REQUEST_CHANGES — the stub silently
         # hid the very disagreement these tests exist to catch.
         calls.append(("review", verdict_to_review_event(verdict, body=body)))
-        return "rev-1"
+        if not binding_receipt:
+            return None
+        event = verdict_to_review_event(verdict, body=body)
+        state = "APPROVED" if event == "APPROVE" else "CHANGES_REQUESTED"
+        return ReviewBindingReceipt(
+            review_id="rev-1",
+            reviewer_login="markmhendrickson-ateles-vanellus",
+            commit_id="a" * 40,
+            state=state,
+        )
 
     async def fake_persist(self, *a, **k):
         calls.append(("persist_head", k.get("reviewed_head")))
@@ -938,6 +949,21 @@ def test_handle_pr_clear_verdict_gates_readiness(monkeypatch):
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert ("gate", None) in calls
     assert not any(c[0] == "route" for c in calls)
+
+
+def test_handle_pr_clear_verdict_without_verified_approval_holds_readiness(monkeypatch):
+    """A clear model verdict is prose until GitHub readback proves an exact-head
+    APPROVED review by the distinct Vanellus principal."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch,
+        vanellus_stdout="**APPROVE**\nlgtm",
+        calls=calls,
+        binding_receipt=False,
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("review", "APPROVE") in calls
+    assert ("gate", None) not in calls
 
 
 def test_handle_pr_emits_formal_review_on_blocking_path(monkeypatch):
@@ -7618,12 +7644,21 @@ def test_unreadable_head_sha_does_not_invent_a_failure(monkeypatch):
     assert not any("without pushing any commit" in m for m in notifier.sent)
 
 
-# ── self-review 422 downgrade is loud, not silent ───────────────────────────
+# ── distinct-principal binding review ───────────────────────────────────────
 
 
-def _emit_review_with_422(monkeypatch, caplog, *, first_status):
-    """Drive _emit_formal_review where the first POST returns `first_status`
-    and any retry succeeds. Returns (notifier, log_text)."""
+def _emit_binding_review(
+    monkeypatch,
+    caplog,
+    *,
+    post_status=200,
+    reviewer="markmhendrickson-ateles-vanellus",
+    author="someone",
+    live_head="a" * 40,
+    readback_state="CHANGES_REQUESTED",
+    verdict="request_changes",
+):
+    """Drive the binding native-review path without a live credential."""
     posts = []
 
     class _Resp:
@@ -7646,54 +7681,149 @@ def _emit_review_with_422(monkeypatch, caplog, *, first_status):
         async def __aexit__(self, *a):
             return False
 
+        async def get(self, url, headers=None, **kwargs):
+            if url.endswith("/user"):
+                return _Resp(200, {"login": reviewer})
+            if url.endswith("/pulls/87"):
+                return _Resp(
+                    200,
+                    {"head": {"sha": live_head}, "user": {"login": author}},
+                )
+            if url.endswith("/reviews/999"):
+                return _Resp(
+                    200,
+                    {
+                        "id": 999,
+                        "user": {"login": reviewer},
+                        "commit_id": live_head,
+                        "state": readback_state,
+                    },
+                )
+            raise AssertionError(f"unexpected GET {url}")
+
         async def post(self, url, headers=None, **kwargs):
             posts.append((kwargs.get("json") or {}).get("event"))
-            if len(posts) == 1:
-                return _Resp(
-                    first_status,
-                    text='["Review Can not request changes on your own pull request"]',
-                )
-            return _Resp(200)
+            return _Resp(
+                post_status,
+                text=(
+                    '["Review Can not request changes on your own pull request"]'
+                    if post_status == 422
+                    else ""
+                ),
+            )
 
     monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", lambda **kw: _Client())
-
-    async def fake_claim(self, trigger, kind):
-        return True
-
-    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+    monkeypatch.setenv("VANELLUS_AGENT_PAT", "test-vanellus-token")
 
     notifier = _StubNotifier()
     d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="tok"))
     with caplog.at_level(logging.INFO):
-        asyncio.run(
-            d._emit_formal_review(_trigger(), "request_changes", "panel findings")
+        receipt = asyncio.run(
+            d._emit_formal_review(
+                _trigger(author=author), verdict, "panel findings"
+            )
         )
-    return notifier, caplog.text, posts
+    return receipt, notifier, caplog.text, posts
 
 
-def test_self_review_422_escalates_and_logs_the_downgrade(monkeypatch, caplog):
-    """ateles-agent reviewing an ateles-agent PR: GitHub refuses the verdict,
-    it becomes a non-binding COMMENT, and reviewDecision stays empty forever —
-    11 of 15 unreviewed open PRs on 2026-09-01. That must page the operator,
-    and the log must not claim a REQUEST_CHANGES landed."""
-    notifier, log_text, posts = _emit_review_with_422(
-        monkeypatch, caplog, first_status=422
+def test_binding_review_requires_dedicated_vanellus_token(monkeypatch):
+    monkeypatch.delenv("VANELLUS_AGENT_PAT", raising=False)
+    posts = []
+
+    class _Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **k):
+            posts.append(k)
+            raise AssertionError("binding review must not use a shared token")
+
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", lambda **kw: _Client())
+    d = SwarmDispatcher(
+        _StubNotifier(), DispatchConfig(neotoma_token="", github_token="shared")
     )
-    assert posts[0] == "REQUEST_CHANGES" and posts[1] == "COMMENT"
-    assert any("DIFFERENT GitHub identity" in m for m in notifier.sent), notifier.sent
-    assert Priority.OPERATOR_DECISION in notifier.priorities
-    assert "DOWNGRADED" in log_text
-    assert "posted formal GitHub review COMMENT" in log_text
-
-
-def test_accepted_review_does_not_escalate_or_claim_a_downgrade(monkeypatch, caplog):
-    """The happy path stays quiet and reports the event that actually landed."""
-    notifier, log_text, posts = _emit_review_with_422(
-        monkeypatch, caplog, first_status=200
+    receipt = asyncio.run(
+        d._emit_formal_review(_trigger(), "approve", "**APPROVE**")
     )
+    assert receipt is None
+    assert posts == []
+
+
+def test_binding_review_rejects_same_pr_author(monkeypatch, caplog):
+    receipt, _notifier, log_text, posts = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        reviewer="markmhendrickson-ateles-vanellus",
+        author="markmhendrickson-ateles-vanellus",
+    )
+    assert receipt is None
+    assert posts == []
+    assert "PR author" in log_text
+
+
+def test_binding_review_422_is_not_downgraded_to_comment(monkeypatch, caplog):
+    receipt, _notifier, log_text, posts = _emit_binding_review(
+        monkeypatch, caplog, post_status=422
+    )
+    assert receipt is None
+    assert posts == ["REQUEST_CHANGES"]
+    assert "COMMENT" not in posts
+    assert "binding formal review post failed" in log_text
+
+
+def test_accepted_binding_review_returns_exact_readback_receipt(monkeypatch, caplog):
+    receipt, notifier, log_text, posts = _emit_binding_review(monkeypatch, caplog)
     assert posts == ["REQUEST_CHANGES"]
     assert notifier.sent == []
-    assert "DOWNGRADED" not in log_text
+    assert receipt is not None
+    assert receipt.review_id == "999"
+    assert receipt.reviewer_login == "markmhendrickson-ateles-vanellus"
+    assert receipt.commit_id == "a" * 40
+    assert receipt.state == "CHANGES_REQUESTED"
+    assert "verified binding GitHub review" in log_text
+
+
+def test_binding_review_rejects_stale_live_head(monkeypatch, caplog):
+    receipt, _notifier, log_text, posts = _emit_binding_review(
+        monkeypatch, caplog, live_head="b" * 40
+    )
+    assert receipt is None
+    assert posts == []
+    assert "head changed" in log_text
+
+
+def test_binding_approve_receipt_proves_exact_head_approval(monkeypatch, caplog):
+    receipt, _notifier, _log_text, posts = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        verdict="approve",
+        readback_state="APPROVED",
+    )
+    assert posts == ["APPROVE"]
+    assert receipt is not None
+    assert receipt.proves_approval(head_sha="a" * 40)
+
+
+def test_binding_review_rejects_wrong_readback_state(monkeypatch, caplog):
+    receipt, _notifier, log_text, posts = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        verdict="approve",
+        readback_state="COMMENTED",
+    )
+    assert posts == ["APPROVE"]
+    assert receipt is None
+    assert "state mismatch" in log_text
+
+
+def test_binding_review_rejects_unexpected_token_identity(monkeypatch, caplog):
+    receipt, _notifier, log_text, posts = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        reviewer="ateles-agent",
+    )
+    assert receipt is None
+    assert posts == []
+    assert "unexpected login" in log_text
 
 
 # ── parent-issue link resolution (ateles#434 / #613 / #300) ─────────────────
