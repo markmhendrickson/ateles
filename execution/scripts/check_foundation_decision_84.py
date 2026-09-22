@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import re
 import sys
 from pathlib import Path
@@ -35,6 +36,9 @@ VOCABULARY_CLAIMABLE_SECTION_SHA256 = (
 )
 LIVE_MODEL_SECTION_SHA256 = (
     "9c5bee6f7c856c94426ce3866af4aedbe67284a42a2770b41b1afac8b901fa57"
+)
+SCENARIO_J_SECTION_SHA256 = (
+    "eb9ad8dc0777c4cc1d9d1a9ee5ea7ac84a1bcb9fb304d27f69cccf5e538d89e6"
 )
 HOLD_MODEL_SECTION_SHA256 = (
     "f14d9ba6700ea67fedd13ca47cfd680d9da667f852be0adfc48959b33997c1e7"
@@ -253,6 +257,21 @@ def _is_fence_closer(line: str, fence_char: str, fence_size: int) -> bool:
     )
 
 
+def _raw_html_block_opening(line: str) -> str:
+    """Return a CommonMark type-1 raw HTML block tag, if this line opens one."""
+
+    match = re.match(
+        r"^ {0,3}<(?P<tag>pre|script|style|textarea)(?:[ \t]|>|$)",
+        line.rstrip("\r\n"),
+        re.I,
+    )
+    return match.group("tag").lower() if match else ""
+
+
+def _raw_html_block_closes(line: str, tag: str) -> bool:
+    return bool(re.search(rf"</{re.escape(tag)}>", line, re.I))
+
+
 def _mask_html_comments(line: str, in_comment: bool) -> tuple[str, bool]:
     """Blank HTML comments on one line while preserving offsets and newlines."""
 
@@ -285,10 +304,11 @@ def _mask_html_comments(line: str, in_comment: bool) -> tuple[str, bool]:
 
 
 def _without_html_comments(text: str) -> str:
-    """Blank active HTML comments without treating fenced content as comments."""
+    """Blank active comments/raw HTML while preserving fenced source and offsets."""
 
     output: list[str] = []
     in_comment = False
+    raw_html_tag = ""
     fence_char = ""
     fence_size = 0
     for line in text.splitlines(keepends=True):
@@ -298,12 +318,23 @@ def _without_html_comments(text: str) -> str:
                 fence_char = ""
                 fence_size = 0
             continue
+        if raw_html_tag:
+            output.append(_blank(line))
+            if _raw_html_block_closes(line, raw_html_tag):
+                raw_html_tag = ""
+            continue
         if not in_comment:
             marker = _fence_opening(line)
             if marker:
                 fence_char = marker[0]
                 fence_size = len(marker)
                 output.append(line)
+                continue
+            raw_html_tag = _raw_html_block_opening(line)
+            if raw_html_tag:
+                output.append(_blank(line))
+                if _raw_html_block_closes(line, raw_html_tag):
+                    raw_html_tag = ""
                 continue
         visible, in_comment = _mask_html_comments(line, in_comment)
         output.append(visible)
@@ -334,12 +365,83 @@ def _active_prose(text: str) -> str:
     return "".join(output)
 
 
+def _replace_inline_tokens(text: str) -> tuple[str, dict[str, str]]:
+    """Protect code spans, escapes, and entities from emphasis parsing."""
+
+    replacements: dict[str, str] = {}
+
+    def protect(value: str) -> str:
+        token = f"\ue000{len(replacements)}\ue001"
+        replacements[token] = value
+        return token
+
+    output: list[str] = []
+    cursor = 0
+    runs = list(re.finditer(r"`+", text))
+    run_index = 0
+    while run_index < len(runs):
+        opening = runs[run_index]
+        output.append(text[cursor : opening.start()])
+        closing_index = run_index + 1
+        while closing_index < len(runs):
+            closing = runs[closing_index]
+            if len(closing.group(0)) == len(opening.group(0)):
+                content = text[opening.end() : closing.start()]
+                content = re.sub(r"[ \t\r\n]+", " ", content)
+                if (
+                    len(content) >= 2
+                    and content.startswith(" ")
+                    and content.endswith(" ")
+                    and content.strip(" ")
+                ):
+                    content = content[1:-1]
+                output.append(protect(content))
+                cursor = closing.end()
+                run_index = closing_index + 1
+                break
+            closing_index += 1
+        else:
+            output.append(opening.group(0))
+            cursor = opening.end()
+            run_index += 1
+    output.append(text[cursor:])
+    protected = "".join(output)
+
+    punctuation = r"[!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~]"
+    protected = re.sub(
+        rf"\\({punctuation})", lambda match: protect(match.group(1)), protected
+    )
+    entity = re.compile(r"&(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]+);")
+    protected = entity.sub(
+        lambda match: protect(html.unescape(match.group(0))), protected
+    )
+    return protected, replacements
+
+
+def _rendered_heading_title(title: str) -> str:
+    """Normalize the inline forms that render the same ATX heading text."""
+
+    rendered, replacements = _replace_inline_tokens(title)
+    emphasis_patterns = (
+        re.compile(r"(?<!\*)(?P<run>\*{1,3})(?=\S)(?P<body>.*?\S)(?P=run)(?!\*)"),
+        re.compile(r"(?<![\w_])(?P<run>_{1,3})(?=\S)(?P<body>.*?\S)(?P=run)(?![\w_])"),
+    )
+    previous = None
+    while previous != rendered:
+        previous = rendered
+        for pattern in emphasis_patterns:
+            rendered = pattern.sub(lambda match: match.group("body"), rendered)
+    for token, value in replacements.items():
+        rendered = rendered.replace(token, value)
+    return rendered
+
+
 def _heading_spans(text: str, heading: str) -> list[tuple[int, int]]:
     expected = re.fullmatch(r"(#{1,6})[ \t]+(.+)", heading)
     if not expected:
         return []
     level = len(expected.group(1))
-    title = expected.group(2)
+    title = _rendered_heading_title(expected.group(2))
     return [
         (start, end)
         for candidate_level, candidate_title, start, end in _active_headings(text)
@@ -360,7 +462,12 @@ def _active_headings(text: str) -> list[tuple[int, str, int, int]]:
         )
         if match:
             headings.append(
-                (len(match.group(1)), match.group(2), offset, offset + len(line))
+                (
+                    len(match.group(1)),
+                    _rendered_heading_title(match.group(2)),
+                    offset,
+                    offset + len(line),
+                )
             )
         offset += len(line)
     return headings
@@ -569,6 +676,11 @@ def check(root: Path) -> list[str]:
         "## (j) A task created, routed by intake, and entering its successor",
         "## What the scenarios do not show",
     )
+    scenario_j_owner = _owning_heading_section(
+        texts["scenarios.md"],
+        "(j) A task created, routed by intake, and entering its successor",
+        "What the scenarios do not show",
+    )
     batch_formation_owner = _owning_heading_section(
         texts["work_model.md"],
         "How a batch is formed, and what chooses its workflow",
@@ -620,6 +732,11 @@ def check(root: Path) -> list[str]:
         "live-model",
         live_model_owner,
         LIVE_MODEL_SECTION_SHA256,
+    )
+    problems += _require_exact_section_digest(
+        "scenario-workflow-entry",
+        scenario_j_owner,
+        SCENARIO_J_SECTION_SHA256,
     )
     universal_surfaces = {
         "intake-model": intake_model,

@@ -87,6 +87,7 @@ def write_corpus(root: Path) -> None:
         if name in {
             "conformance_suite.md",
             "data_model.md",
+            "scenarios.md",
             "vocabulary.md",
             "work_model.md",
             "workflows.md",
@@ -221,7 +222,7 @@ def test_retired_scenario_no_batch_diagram_fails(tmp_path: Path) -> None:
     problems = mutate(
         tmp_path,
         "scenarios.md",
-        "C[task and intake batch created atomically] --> I[intake batch: unrouted with no route verdict]",
+        "C[task + intake batch + ADDRESSED_BY admitted atomically] --> I[intake batch: unrouted while no closing route verdict]",
         "C[task created] --> U{intake batch exists?}\n"
         "U -->|no: unrouted by that fact| I[task enters intake; batch record opens]",
     )
@@ -934,6 +935,53 @@ def test_real_comment_fence_precedence_cannot_expose_hidden_intake(
     assert any("intake-workflow-atomic-entry" in problem for problem in problems)
 
 
+@pytest.mark.parametrize("tag", ("pre", "SCRIPT", "style", "textarea"))
+def test_real_raw_html_block_cannot_hide_intake(tmp_path: Path, tag: str) -> None:
+    def transform(text: str) -> str:
+        start = text.index("## intake\n")
+        end = text.index("\n", text.index("## feature\n", start)) + 1
+        return (
+            text[:start]
+            + f"<{tag}>\n"
+            + text[start:end]
+            + f"</{tag.lower()}>\n"
+            + text[end:]
+        )
+
+    problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "name,marker,label",
+    (
+        ("conformance.md", "| 84 |", "register"),
+        ("conformance_suite.md", "| WM-14a |", "wm-14a"),
+    ),
+)
+def test_real_raw_html_block_cannot_hide_table_row(
+    tmp_path: Path, name: str, marker: str, label: str
+) -> None:
+    def transform(text: str) -> str:
+        start = text.index(marker)
+        end = text.index("\n", start) + 1
+        return text[:start] + "<pre>\n" + text[start:end] + "</pre>\n" + text[end:]
+
+    problems = mutate_real_corpus_text(tmp_path, name, transform)
+    assert any(label in problem for problem in problems)
+
+
+def test_closed_raw_html_block_before_intake_keeps_intake_active(
+    tmp_path: Path,
+) -> None:
+    def transform(text: str) -> str:
+        position = text.index("## intake")
+        prefix = "<pre>\n## hidden heading\n</pre>\n\n"
+        return text[:position] + prefix + text[position:]
+
+    assert mutate_real_corpus_text(tmp_path, "workflows.md", transform) == []
+
+
 @pytest.mark.parametrize(
     "name,marker,label",
     (
@@ -1169,6 +1217,68 @@ def test_real_duplicate_intake_heading_with_trailing_whitespace_is_ambiguous(
     assert any("intake-workflow-atomic-entry" in problem for problem in problems)
 
 
+@pytest.mark.parametrize(
+    "duplicate",
+    (
+        "## int&#97;ke\n",
+        "## in*tak*e\n",
+        "## `intake`\n",
+    ),
+)
+def test_real_rendered_equivalent_intake_heading_is_ambiguous(
+    tmp_path: Path, duplicate: str
+) -> None:
+    def transform(text: str) -> str:
+        return text + "\n" + duplicate + "Contradictory duplicate.\n"
+
+    problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "distinct",
+    (
+        "## intake##\n",
+        "## in\\*take\n",
+        "## in_take\n",
+    ),
+)
+def test_real_rendered_distinct_intake_heading_is_not_ambiguous(
+    tmp_path: Path, distinct: str
+) -> None:
+    def transform(text: str) -> str:
+        return text + "\n" + distinct + "Distinct heading.\n"
+
+    assert mutate_real_corpus_text(tmp_path, "workflows.md", transform) == []
+
+
+def test_real_scenario_canonical_body_inside_fence_cannot_mask_contradiction(
+    tmp_path: Path,
+) -> None:
+    def transform(text: str) -> str:
+        heading = (
+            "## (j) A task created, routed by intake, and entering its successor\n"
+        )
+        start = text.index(heading) + len(heading)
+        end = text.index("## What the scenarios do not show", start)
+        original = text[start:end]
+        contradiction = (
+            "\nA workflow-entering task may be published before any intake batch "
+            "exists, and any creator may claim it.\n\n"
+        )
+        return (
+            text[:start]
+            + contradiction
+            + "~~~~markdown\n"
+            + original
+            + "~~~~\n\n"
+            + text[end:]
+        )
+
+    problems = mutate_real_corpus_text(tmp_path, "scenarios.md", transform)
+    assert any("scenario-workflow-entry" in problem for problem in problems)
+
+
 def test_real_claimable_vocabulary_assembly_exclusion_mutant_fails(
     tmp_path: Path,
 ) -> None:
@@ -1209,8 +1319,8 @@ def test_scenario_intake_predecessor_node_must_be_defined(tmp_path: Path) -> Non
     problems = mutate(
         tmp_path,
         "scenarios.md",
-        "C[task and intake batch created atomically] --> I[intake batch: unrouted with no route verdict]",
-        "C[task and intake batch created atomically] --> U[unrouted with no route verdict]",
+        "C[task + intake batch + ADDRESSED_BY admitted atomically] --> I[intake batch: unrouted while no closing route verdict]",
+        "C[task + intake batch + ADDRESSED_BY admitted atomically] --> U[unrouted with no route verdict]",
     )
     assert any("scenario-intake-node" in problem for problem in problems)
 
