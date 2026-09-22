@@ -31,6 +31,9 @@ Environment (see README.md for the full operator-provisioning table):
   GITHUB_TOKEN              (required for queue visibility; also accepts
                              APIS_GITHUB_TOKEN / GH_TOKEN)
   SWARM_ROSTER_KEY          (default: default)
+  APIS_CHECKPOINT_REQUIRED_APPROVER_SUB
+                            (default: ateles@ateles-swarm; its AAuth key must be
+                             available through ATELES_PRIVATE_KEYS_DIR)
 
 Transport: stdio (launched by Claude Code as an MCP server subprocess).
 """
@@ -143,7 +146,14 @@ def _describe_transport_error() -> str | None:
     return _last_transport_error
 
 
-def _request(method: str, path: str, *, params: dict | None = None, body: dict | None = None) -> dict | None:
+def _request(
+    method: str,
+    path: str,
+    *,
+    params: dict | None = None,
+    body: dict | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> dict | None:
     if not NEOTOMA_BEARER_TOKEN:
         _record_transport_error(
             "no_token", method, path,
@@ -151,10 +161,13 @@ def _request(method: str, path: str, *, params: dict | None = None, body: dict |
         )
         return None
     try:
+        headers = _headers()
+        if extra_headers:
+            headers.update(extra_headers)
         resp = httpx.request(
             method,
             f"{NEOTOMA_BASE_URL}{path}",
-            headers=_headers(),
+            headers=headers,
             params=params,
             json=body,
             timeout=15,
@@ -181,8 +194,10 @@ def _get(path: str, params: dict | None = None) -> dict | None:
     return _request("GET", path, params=params)
 
 
-def _post(path: str, body: dict) -> dict | None:
-    return _request("POST", path, body=body)
+def _post(
+    path: str, body: dict, *, extra_headers: dict[str, str] | None = None
+) -> dict | None:
+    return _request("POST", path, body=body, extra_headers=extra_headers)
 
 
 def _retrieve_page(
@@ -261,7 +276,15 @@ def _snapshot_of(entity: dict) -> dict:
     return snapshot
 
 
-def _correct(entity_id: str, entity_type: str, field: str, value: Any, idem_key: str) -> bool:
+def _correct(
+    entity_id: str,
+    entity_type: str,
+    field: str,
+    value: Any,
+    idem_key: str,
+    *,
+    required_principal_sub: str | None = None,
+) -> bool:
     body = {
         "entity_id": entity_id,
         "entity_type": entity_type,
@@ -269,8 +292,40 @@ def _correct(entity_id: str, entity_type: str, field: str, value: Any, idem_key:
         "value": value,
         "idempotency_key": idem_key,
     }
-    result = _post("/correct", body)
+    signed_headers: dict[str, str] | None = None
+    if required_principal_sub is not None:
+        required_sub = str(required_principal_sub).strip()
+        if not required_sub or "@" not in required_sub:
+            return False
+        from lib.daemon_runtime.aauth_signer import AAuthSigner
+
+        signer_name = required_sub.split("@", 1)[0]
+        signer = AAuthSigner.from_key_file(signer_name)
+        if signer.is_stub or signer.sub != required_sub:
+            log.error(
+                "checkpoint resolution signer unavailable or mismatched "
+                "(required=%s actual=%s)",
+                required_sub,
+                signer.sub,
+            )
+            return False
+        signed_headers = signer.headers("POST", "/correct")
+        if not signed_headers.get("X-AAuth-Token"):
+            log.error(
+                "checkpoint resolution signer produced no authenticated token "
+                "for %s",
+                required_sub,
+            )
+            return False
+    result = _post("/correct", body, extra_headers=signed_headers)
     return result is not None
+
+
+def _checkpoint_required_approver_sub() -> str:
+    """Read the same approver principal embedded by the checkpoint producer."""
+    from lib.daemon_runtime.gating import CHECKPOINT_REQUIRED_APPROVER_SUB
+
+    return CHECKPOINT_REQUIRED_APPROVER_SUB
 
 
 # Tie-break order for equal-length keyword matches, most specific first.
@@ -755,7 +810,17 @@ async def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
     new_status = "approved" if action_lower == "approve" else "rejected"
     idem_key = f"resolve-checkpoint-{checkpoint_id}-{new_status}"
 
-    ok = _correct(checkpoint_id, "checkpoint_brief", "status", new_status, idem_key)
+    required_principal_sub = (
+        _checkpoint_required_approver_sub() if action_lower == "approve" else None
+    )
+    ok = _correct(
+        checkpoint_id,
+        "checkpoint_brief",
+        "status",
+        new_status,
+        idem_key,
+        required_principal_sub=required_principal_sub,
+    )
     if not ok:
         return {"error": "failed to correct checkpoint status in Neotoma"}
 
@@ -1611,9 +1676,10 @@ TOOLS = [
         description=(
             "Approves or rejects a pending checkpoint_brief by entity ID. Validates "
             "that the checkpoint is awaiting_operator and has not already been "
-            "dispatched. Approval releases only swarm-executable plan checkpoints "
-            "through the existing Apis consumer; operator_only approvals record the "
-            "decision without dispatching an agent. On rejection, also marks the "
+            "dispatched. Approval is AAuth-signed as the configured required "
+            "approver principal and releases only when that immutable attribution "
+            "reads back through the existing Apis consumer. operator_only approvals "
+            "record the decision without dispatching an agent. On rejection, also marks the "
             "referenced task as declined."
         ),
         inputSchema={

@@ -60,6 +60,7 @@ if importlib.util.find_spec("mcp") is None:
 
 import apis  # noqa: E402
 import server  # noqa: E402
+from lib.daemon_runtime import gating as gating_module  # noqa: E402
 from lib.daemon_runtime.gating import (  # noqa: E402
     ExecutionPolicy,
     build_checkpoint_authorization_envelope,
@@ -127,7 +128,7 @@ def release_store(monkeypatch, tmp_path):
     def get(path, params=None):
         return records.get(path.rsplit("/", 1)[-1])
 
-    def correct(entity_id, entity_type, field, value, idempotency_key):
+    def correct(entity_id, entity_type, field, value, idempotency_key, **_kwargs):
         record = records.get(entity_id)
         if record is None or record["entity_type"] != entity_type:
             return False
@@ -214,6 +215,24 @@ def release_store(monkeypatch, tmp_path):
             else None
         ),
     )
+
+    def read_matching_approval(
+        checkpoint_id, record, *, required_approver_sub, expected_user_id
+    ):
+        assert checkpoint_id == brief_id
+        assert required_approver_sub == "ateles@ateles-swarm"
+        assert expected_user_id == "tenant-a"
+        return {
+            "principal_sub": "ateles@ateles-swarm",
+            "observation_id": "obs-approval",
+        }
+
+    monkeypatch.setattr(
+        apis,
+        "read_authenticated_checkpoint_resolution",
+        read_matching_approval,
+        raising=False,
+    )
     monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda skill: policy)
     monkeypatch.setattr(apis, "set_task_status", set_status)
     monkeypatch.setattr(apis, "stamp_checkpoint_dispatched", stamp)
@@ -242,6 +261,63 @@ def release_store(monkeypatch, tmp_path):
     monkeypatch.setattr(apis._activity, "started", lambda message: _Job())
 
     return records, brief_id, task_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "approval_failure",
+    ["missing", "unreadable", "mismatched"],
+)
+async def test_unattributed_approval_never_reaches_gate_override(
+    approval_failure, monkeypatch, release_store
+):
+    """The actual override sink must fail closed on approval attribution."""
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "approved"
+    records[brief_id]["provenance"] = {"status": "obs-approval"}
+    observations = [
+        {
+            "id": "obs-approval",
+            "fields": {"status": "approved"},
+            "user_id": "tenant-a",
+            "provenance": {
+                "agent_sub": "ateles@ateles-swarm",
+                "agent_thumbprint": "operator-interface-key",
+                "attribution_tier": "software",
+            },
+        }
+    ]
+    if approval_failure == "missing":
+        records[brief_id]["provenance"] = {}
+    elif approval_failure == "unreadable":
+        observations = []
+    else:
+        observations[0]["provenance"]["agent_sub"] = "other@ateles-swarm"
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+    monkeypatch.setattr(
+        apis,
+        "read_authenticated_checkpoint_resolution",
+        gating_module.read_authenticated_checkpoint_resolution,
+    )
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity_observations",
+        lambda checkpoint_id: observations,
+    )
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+    assert brief["resolved_dispatched"] is False
+    assert brief["status"] == "approved_requires_fresh_approval"
 
 
 def _authorization_digest(

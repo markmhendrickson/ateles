@@ -942,6 +942,7 @@ def test_checkpoint_brief_carries_authenticated_immutable_authority(monkeypatch)
     )
     assert authority["version"] == 2
     assert authority["task_entity_id"] == "ent_task"
+    assert authority["required_approver_sub"] == "ateles@ateles-swarm"
     assert authority["task_revision"] == gating_module.entity_record_digest(task_record)
     assert authority["policy_revision"] == gating_module.execution_policy_revision(
         policy
@@ -1074,3 +1075,64 @@ def test_authenticated_checkpoint_authority_rejects_mutable_or_untrusted_state(
         gating_module.read_authenticated_checkpoint_authorization("ent_cp", record)
         is None
     )
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("matching", "ateles@ateles-swarm"),
+        ("missing_status_provenance", None),
+        ("unreadable_observation", None),
+        ("mismatched_principal", None),
+        ("untrusted_tier", None),
+        ("wrong_status", None),
+        ("wrong_tenant", None),
+    ],
+)
+def test_checkpoint_resolution_requires_authenticated_matching_principal(
+    monkeypatch, mode, expected
+):
+    record = {
+        "entity_id": "ent_cp",
+        "entity_type": "checkpoint_" + "brief",
+        "snapshot": {"status": "approved"},
+        "provenance": {"status": "obs-approval"},
+    }
+    observation = {
+        "id": "obs-approval",
+        "fields": {"status": "approved"},
+        "user_id": "tenant-a",
+        "provenance": {
+            "agent_sub": "ateles@ateles-swarm",
+            "agent_thumbprint": "operator-interface-key",
+            "attribution_tier": "software",
+        },
+    }
+    observations = [observation]
+    if mode == "missing_status_provenance":
+        record["provenance"] = {}
+    elif mode == "unreadable_observation":
+        observations = []
+    elif mode == "mismatched_principal":
+        observation["provenance"]["agent_sub"] = "other@ateles-swarm"
+    elif mode == "untrusted_tier":
+        observation["provenance"]["attribution_tier"] = "unverified_client"
+    elif mode == "wrong_status":
+        observation["fields"]["status"] = "rejected"
+    elif mode == "wrong_tenant":
+        observation["user_id"] = "tenant-b"
+
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity_observations",
+        lambda entity_id: observations,
+    )
+
+    result = gating_module.read_authenticated_checkpoint_resolution(
+        "ent_cp",
+        record,
+        required_approver_sub="ateles@ateles-swarm",
+        expected_user_id="tenant-a",
+    )
+
+    assert (result or {}).get("principal_sub") == expected

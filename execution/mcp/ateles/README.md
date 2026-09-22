@@ -67,6 +67,7 @@ and confirm the tool reports unknown-with-reason.
 | Variable | Default | Effect |
 |---|---|---|
 | `NEOTOMA_BASE_URL` | `https://neotoma.markmhendrickson.com` | Neotoma instance; a local/loopback host disables prod-token promotion |
+| `APIS_CHECKPOINT_REQUIRED_APPROVER_SUB` | `ateles@ateles-swarm` | AAuth principal allowed to approve execution checkpoints. Its matching private key must be available under `ATELES_PRIVATE_KEYS_DIR`; missing or mismatched signing material refuses the approval write. |
 | `APIS_RESUME_REPOSITORIES` | `<owner>/ateles,<owner>/neotoma` | Repos scanned for pipeline markers (mirrors the dispatcher's own key) |
 | `APIS_MAX_CONCURRENT_ISSUE_PIPELINES` | `3` | Reported as `slot_capacity` |
 | `ATELES_LOG_DIR` | `~/Library/Logs/ateles` | Where `get_dispatch_health` reads `apis.log` |
@@ -83,14 +84,15 @@ The wrapper reads `~/.config/neotoma/.env` itself (the path is overridable with
 
 ## Environment
 
-The server needs `mcp` + `httpx`. The repo-root `.venv` used by the daemons does
+The server needs `mcp`, `httpx`, `cryptography`, and `PyJWT`. The latter two
+sign approval corrections as the required AAuth principal. The repo-root `.venv` used by the daemons does
 **not** carry `mcp`; `.mcp-venv` does, and is what CI builds in
 `.github/workflows/ateles-tests.yml`. The wrapper prefers `.mcp-venv`,
 deliberately does not fall back to `.venv` (that would reintroduce a silent
 no-tools start), and bootstraps a missing venv with CI's own recipe:
 
 ```bash
-uv venv .mcp-venv && VIRTUAL_ENV=.mcp-venv uv pip install "mcp>=1.1.0,<2" httpx
+uv venv .mcp-venv && VIRTUAL_ENV=.mcp-venv uv pip install -r execution/mcp/ateles/requirements.txt
 ```
 
 The `mcp<2` pin is deliberate: 2.0 renamed `Tool.inputSchema` and removed

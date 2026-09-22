@@ -49,6 +49,9 @@ Environment variables:
   APIS_DISPATCH_TIMEOUT       Per-dispatch timeout in seconds (default: 1800)
   APIS_CHECKPOINT_DENIAL_DIR  Required absolute shared-state directory for
                               durable replay-denial markers
+  APIS_CHECKPOINT_REQUIRED_APPROVER_SUB
+                              AAuth subject whose signed status observation may
+                              release a checkpoint (default: ateles@ateles-swarm)
   ATELES_REPO_PATH            Local path to ateles clone (default: ~/repos/ateles)
 
 Task reconciliation sweep (ateles#586 — see task_reconciler.py):
@@ -201,6 +204,7 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     fetch_task_snapshot,
     mark_task_declined,
     read_authenticated_checkpoint_authorization,
+    read_authenticated_checkpoint_resolution,
     read_checkpoint_resolution,
     require_fresh_checkpoint_approval,
     stamp_checkpoint_dispatched,
@@ -1600,6 +1604,28 @@ async def handle_checkpoint_brief(
             task_snapshot=task_snapshot,
             notifier=notifier,
             reason="task or execution policy changed after approval",
+        )
+        return False
+
+    required_approver_sub = str(
+        authorization.get("required_approver_sub") or ""
+    ).strip()
+    approval = read_authenticated_checkpoint_resolution(
+        entity_id,
+        checkpoint_record,
+        required_approver_sub=required_approver_sub,
+        expected_user_id=brief_user_id,
+    )
+    if approval is None:
+        _require_fresh_release_authority(
+            entity_id,
+            task_id=task_id,
+            task_snapshot=task_snapshot,
+            notifier=notifier,
+            reason=(
+                "approval attribution is missing, unreadable, untrusted, or "
+                "does not match the required approver principal"
+            ),
         )
         return False
 

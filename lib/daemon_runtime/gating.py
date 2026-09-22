@@ -644,6 +644,9 @@ def evaluate_gate(
 
 CHECKPOINT_AUTHORIZATION_VERSION = 2
 _TRUSTED_AAUTH_TIERS = frozenset({"software", "operator_attested", "hardware"})
+CHECKPOINT_REQUIRED_APPROVER_SUB = os.environ.get(
+    "APIS_CHECKPOINT_REQUIRED_APPROVER_SUB", "ateles@ateles-swarm"
+).strip()
 
 
 def build_checkpoint_authorization_envelope(
@@ -653,6 +656,7 @@ def build_checkpoint_authorization_envelope(
     decision: GateDecision,
     action_type: str,
     user_id: str,
+    required_approver_sub: str = CHECKPOINT_REQUIRED_APPROVER_SUB,
 ) -> str:
     """Serialize the exact task and policy revisions shown for approval."""
     payload = {
@@ -663,6 +667,7 @@ def build_checkpoint_authorization_envelope(
         "task_observation_count": task_record.get("observation_count"),
         "task_last_observation_at": task_record.get("last_observation_at"),
         "user_id": str(user_id),
+        "required_approver_sub": str(required_approver_sub).strip(),
         "action_type": str(action_type).strip().lower(),
         "policy_entity_id": policy.entity_id,
         "policy_revision": execution_policy_revision(policy),
@@ -730,6 +735,66 @@ def read_authenticated_checkpoint_authorization(
     if payload.get("producer") != "apis@ateles-swarm":
         return None
     return payload
+
+
+def read_authenticated_checkpoint_resolution(
+    checkpoint_id: str,
+    checkpoint_record: dict,
+    *,
+    required_approver_sub: str,
+    expected_user_id: str,
+) -> dict | None:
+    """Read an approval only from its authenticated principal observation.
+
+    The checkpoint snapshot's ``status`` is reducer output and therefore says
+    only what value won, not who supplied it.  Release authority comes from the
+    immutable observation named by that field's provenance.  Missing,
+    unreadable, untrusted, cross-tenant, or wrong-principal attribution is not
+    an approval.
+    """
+    required_sub = str(required_approver_sub or "").strip()
+    tenant_id = str(expected_user_id or "").strip()
+    if not required_sub or not tenant_id:
+        return None
+    snapshot = _snapshot_of(checkpoint_record)
+    if read_checkpoint_resolution(snapshot) != "approved":
+        return None
+    provenance = checkpoint_record.get("provenance")
+    if not isinstance(provenance, dict):
+        return None
+    observation_id = provenance.get("status")
+    if not isinstance(observation_id, str) or not observation_id:
+        return None
+    observation = next(
+        (
+            item
+            for item in _fetch_entity_observations(checkpoint_id)
+            if item.get("id") == observation_id
+        ),
+        None,
+    )
+    if not isinstance(observation, dict):
+        return None
+    fields = observation.get("fields")
+    auth = observation.get("provenance")
+    if not isinstance(fields, dict) or read_checkpoint_resolution(fields) != "approved":
+        return None
+    if str(observation.get("user_id") or "").strip() != tenant_id:
+        return None
+    if not isinstance(auth, dict):
+        return None
+    if (
+        str(auth.get("agent_sub") or "").strip() != required_sub
+        or not auth.get("agent_thumbprint")
+        or auth.get("attribution_tier") not in _TRUSTED_AAUTH_TIERS
+    ):
+        return None
+    return {
+        "principal_sub": required_sub,
+        "observation_id": observation_id,
+        "attribution_tier": auth.get("attribution_tier"),
+        "agent_thumbprint": auth.get("agent_thumbprint"),
+    }
 
 
 def write_checkpoint_brief(

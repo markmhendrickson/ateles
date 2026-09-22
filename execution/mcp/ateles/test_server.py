@@ -805,6 +805,70 @@ class TestNeotomaEndpoints(unittest.TestCase):
         self.assertEqual(body["field"], "status")
         self.assertEqual(body["idempotency_key"], "idem-1")
 
+    @patch("server._post")
+    def test_checkpoint_approval_correction_is_signed_by_required_principal(
+        self, mock_post
+    ):
+        class _Signer:
+            is_stub = False
+            sub = "ateles@ateles-swarm"
+
+            def headers(self, method, path):
+                return {"X-AAuth-Token": "signed-approval"}
+
+        mock_post.return_value = {"ok": True}
+        with patch(
+            "lib.daemon_runtime.aauth_signer.AAuthSigner.from_key_file",
+            return_value=_Signer(),
+        ) as signer_loader:
+            ok = srv._correct(
+                "ent_cp",
+                "checkpoint_brief",
+                "status",
+                "approved",
+                "idem-approval",
+                required_principal_sub="ateles@ateles-swarm",
+            )
+
+        self.assertTrue(ok)
+        signer_loader.assert_called_once_with("ateles")
+        self.assertEqual(
+            mock_post.call_args.kwargs["extra_headers"]["X-AAuth-Token"],
+            "signed-approval",
+        )
+
+    @patch("server._post")
+    def test_checkpoint_approval_correction_refuses_missing_or_wrong_signer(
+        self, mock_post
+    ):
+        class _Signer:
+            def __init__(self, *, sub, is_stub):
+                self.sub = sub
+                self.is_stub = is_stub
+
+            def headers(self, method, path):
+                return {"X-AAuth-Token": "must-not-be-used"}
+
+        for signer in (
+            _Signer(sub="ateles@ateles-swarm", is_stub=True),
+            _Signer(sub="other@ateles-swarm", is_stub=False),
+        ):
+            with self.subTest(sub=signer.sub, is_stub=signer.is_stub), patch(
+                "lib.daemon_runtime.aauth_signer.AAuthSigner.from_key_file",
+                return_value=signer,
+            ):
+                self.assertFalse(
+                    srv._correct(
+                        "ent_cp",
+                        "checkpoint_brief",
+                        "status",
+                        "approved",
+                        "idem-approval",
+                        required_principal_sub="ateles@ateles-swarm",
+                    )
+                )
+        mock_post.assert_not_called()
+
     def test_single_entity_fetch_uses_entities_id_path(self):
         with patch("server._request", return_value={}) as mock_request:
             srv._get("/entities/ent_abc")
