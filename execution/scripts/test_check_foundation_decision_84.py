@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import re
 import shutil
 import sys
@@ -1273,26 +1272,67 @@ def test_real_commonmark_distinct_overlapping_heading_is_not_canonical(
     assert any("intake-workflow-atomic-entry" in problem for problem in problems)
 
 
-def test_rendered_heading_title_matches_frozen_commonmark_delimiter_matrix() -> None:
-    """Match CommonMark 0.30 over mixed delimiter runs around three chunks.
+def test_real_inline_token_mixed_equivalent_heading_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    def transform(text: str) -> str:
+        return text + "\n## ***`in`**`ta`**ke***\nContradictory duplicate.\n"
 
-    The expected digest was produced with commonmark.py 0.9.1's AST text nodes,
-    an independent implementation of the CommonMark 0.30 delimiter algorithm.
-    Including the source in each row makes false-positive and false-negative
-    changes observable instead of merely comparing the multiset of titles.
-    """
+    problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
 
-    rows: list[str] = []
-    delimiter_runs = ("", "*", "**", "***", "_", "__", "___")
-    for before, after_in, after_ta, after_ke in product(delimiter_runs, repeat=4):
-        source = f"{before}in{after_in}ta{after_ta}ke{after_ke}"
-        rendered = decision_84._rendered_heading_title(source)
-        rows.append(f"{source}\0{rendered}\n")
 
-    assert len(rows) == 2_401
-    assert hashlib.sha256("".join(rows).encode()).hexdigest() == (
-        "afbbfa76733f83240d8d26ed0d620562a062ec8a3d515e04acf3654e8c1acb7c"
+def test_real_inline_token_mixed_distinct_heading_is_not_canonical(
+    tmp_path: Path,
+) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "workflows.md",
+        "## intake\n",
+        "## `in`*`ta`*ke\n",
     )
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_heading_projection_covers_broad_inline_decoration_matrix() -> None:
+    """Every reviewed marker/entity/code/escape mixture is fail-closed."""
+
+    delimiter_runs = (
+        ("",)
+        + tuple("*" * size for size in range(1, 8))
+        + tuple("_" * size for size in range(1, 8))
+    )
+    chunk_variants = (
+        ("in", "ta", "ke"),
+        ("`in`", "`ta`", "ke"),
+        ("i&#110;", "t&#97;", "k&#101;"),
+        ("i\\*n", "t\\_a", "k\\`e"),
+        ("`in`", "t&#97;", "k\\*e"),
+    )
+    count = 0
+    for count, (before, after_in, after_ta, after_ke) in enumerate(
+        product(delimiter_runs, repeat=4),
+        start=1,
+    ):
+        first, second, third = chunk_variants[count % len(chunk_variants)]
+        source = f"{before}{first}{after_in}{second}{after_ta}{third}{after_ke}"
+        assert decision_84._heading_projection(source) == "intake"
+
+    assert count == 50_625
+
+
+@pytest.mark.parametrize(
+    "title",
+    (
+        "feature",
+        "Intake exceptions",
+        "Batch-opening exceptions",
+        "What the scenarios do not show",
+        "intact",
+    ),
+)
+def test_heading_projection_leaves_unrelated_titles_distinct(title: str) -> None:
+    assert decision_84._heading_projection(title) != "intake"
 
 
 @pytest.mark.parametrize(
@@ -1303,13 +1343,14 @@ def test_rendered_heading_title_matches_frozen_commonmark_delimiter_matrix() -> 
         "## in_take\n",
     ),
 )
-def test_real_rendered_distinct_intake_heading_is_not_ambiguous(
+def test_real_decorated_intake_heading_is_conservatively_ambiguous(
     tmp_path: Path, distinct: str
 ) -> None:
     def transform(text: str) -> str:
         return text + "\n" + distinct + "Distinct heading.\n"
 
-    assert mutate_real_corpus_text(tmp_path, "workflows.md", transform) == []
+    problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
 
 
 def test_real_scenario_canonical_body_inside_fence_cannot_mask_contradiction(

@@ -15,7 +15,6 @@ import hashlib
 import html
 import re
 import sys
-import unicodedata
 from pathlib import Path
 
 FOUNDATION_DIR = Path("docs/foundation")
@@ -366,207 +365,18 @@ def _active_prose(text: str) -> str:
     return "".join(output)
 
 
-def _replace_inline_tokens(text: str) -> tuple[str, dict[str, str]]:
-    """Protect code spans, escapes, and entities from emphasis parsing."""
+def _heading_projection(title: str) -> str:
+    """Return a conservative ambiguity key for a protected heading.
 
-    replacements: dict[str, str] = {}
-
-    def protect(value: str) -> str:
-        token = f"\ue000{len(replacements)}\ue001"
-        replacements[token] = value
-        return token
-
-    output: list[str] = []
-    cursor = 0
-    runs = list(re.finditer(r"`+", text))
-    run_index = 0
-    while run_index < len(runs):
-        opening = runs[run_index]
-        output.append(text[cursor : opening.start()])
-        closing_index = run_index + 1
-        while closing_index < len(runs):
-            closing = runs[closing_index]
-            if len(closing.group(0)) == len(opening.group(0)):
-                content = text[opening.end() : closing.start()]
-                content = re.sub(r"[ \t\r\n]+", " ", content)
-                if (
-                    len(content) >= 2
-                    and content.startswith(" ")
-                    and content.endswith(" ")
-                    and content.strip(" ")
-                ):
-                    content = content[1:-1]
-                output.append(protect(content))
-                cursor = closing.end()
-                run_index = closing_index + 1
-                break
-            closing_index += 1
-        else:
-            output.append(opening.group(0))
-            cursor = opening.end()
-            run_index += 1
-    output.append(text[cursor:])
-    protected = "".join(output)
-
-    punctuation = r"[!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~]"
-    protected = re.sub(
-        rf"\\({punctuation})", lambda match: protect(match.group(1)), protected
-    )
-    entity = re.compile(r"&(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]+);")
-    protected = entity.sub(
-        lambda match: protect(html.unescape(match.group(0))), protected
-    )
-    return protected, replacements
-
-
-def _rendered_heading_title(title: str) -> str:
-    """Normalize the inline forms that render the same ATX heading text."""
-
-    rendered, replacements = _replace_inline_tokens(title)
-    rendered = _without_balanced_emphasis(rendered)
-    for token, value in replacements.items():
-        rendered = rendered.replace(token, value)
-    return rendered
-
-
-def _without_balanced_emphasis(text: str) -> str:
-    """Remove exactly the delimiter characters CommonMark uses as emphasis.
-
-    This is the bounded ``*``/``_`` delimiter-stack algorithm from CommonMark
-    0.30's emphasis processing.  Heading-title equivalence is a security
-    boundary here: merely pairing whole runs both misses rendered-equivalent
-    headings and can erase delimiter residue that remains visible.
+    Protected headings must still occur literally.  This projection is used
+    only to reject a second, decorated same-level heading that could denote the
+    protected title after entity, code-span, escape, or emphasis rendering.  It
+    deliberately accepts false-positive ambiguity rather than attempting a
+    partial CommonMark inline parser at a fail-closed boundary.
     """
 
-    class _Delimiter:
-        __slots__ = (
-            "can_close",
-            "can_open",
-            "char",
-            "consumed_end",
-            "consumed_start",
-            "count",
-            "next",
-            "original_count",
-            "previous",
-            "run",
-        )
-
-        def __init__(
-            self,
-            run: re.Match[str],
-            can_open: bool,
-            can_close: bool,
-        ) -> None:
-            self.run = run
-            self.char = run.group(0)[0]
-            self.count = len(run.group(0))
-            self.original_count = self.count
-            self.can_open = can_open
-            self.can_close = can_close
-            self.consumed_start = 0
-            self.consumed_end = 0
-            self.previous: _Delimiter | None = None
-            self.next: _Delimiter | None = None
-
-    runs = list(re.finditer(r"\*+|_+", text))
-    delimiters: list[_Delimiter] = []
-
-    def punctuation(char: str) -> bool:
-        return bool(char) and unicodedata.category(char)[0] in {"P", "S"}
-
-    for run in runs:
-        marker = run.group(0)
-        char = marker[0]
-        before = text[run.start() - 1] if run.start() else ""
-        after = text[run.end()] if run.end() < len(text) else ""
-        before_whitespace = not before or before.isspace()
-        after_whitespace = not after or after.isspace()
-        before_punctuation = punctuation(before)
-        after_punctuation = punctuation(after)
-        left_flanking = not after_whitespace and (
-            not after_punctuation or before_whitespace or before_punctuation
-        )
-        right_flanking = not before_whitespace and (
-            not before_punctuation or after_whitespace or after_punctuation
-        )
-        if char == "_":
-            can_open = left_flanking and (not right_flanking or before_punctuation)
-            can_close = right_flanking and (not left_flanking or after_punctuation)
-        else:
-            can_open = left_flanking
-            can_close = right_flanking
-
-        delimiter = _Delimiter(run, can_open, can_close)
-        if delimiters:
-            delimiter.previous = delimiters[-1]
-            delimiters[-1].next = delimiter
-        delimiters.append(delimiter)
-
-    def remove(delimiter: _Delimiter) -> None:
-        if delimiter.previous is not None:
-            delimiter.previous.next = delimiter.next
-        if delimiter.next is not None:
-            delimiter.next.previous = delimiter.previous
-
-    openers_bottom: dict[str, _Delimiter | None] = {"*": None, "_": None}
-    closer = delimiters[0] if delimiters else None
-    while closer is not None:
-        if not closer.can_close:
-            closer = closer.next
-            continue
-
-        opener = closer.previous
-        opener_found = False
-        odd_match = False
-        while opener is not None and opener is not openers_bottom[closer.char]:
-            odd_match = (
-                (closer.can_open or opener.can_close)
-                and closer.original_count % 3 != 0
-                and (opener.original_count + closer.original_count) % 3 == 0
-            )
-            if opener.char == closer.char and opener.can_open and not odd_match:
-                opener_found = True
-                break
-            opener = opener.previous
-
-        old_closer = closer
-        if not opener_found:
-            closer = closer.next
-            if not odd_match:
-                openers_bottom[old_closer.char] = old_closer.previous
-                if not old_closer.can_open:
-                    remove(old_closer)
-            continue
-
-        assert opener is not None
-        use_delimiters = 2 if closer.count >= 2 and opener.count >= 2 else 1
-        opener.count -= use_delimiters
-        closer.count -= use_delimiters
-        opener.consumed_end += use_delimiters
-        closer.consumed_start += use_delimiters
-
-        # Delimiters inside the newly formed emphasis node remain visible but
-        # no longer participate in matches outside that node.
-        opener.next = closer
-        closer.previous = opener
-        if opener.count == 0:
-            remove(opener)
-        if closer.count == 0:
-            next_closer = closer.next
-            remove(closer)
-            closer = next_closer
-
-    output: list[str] = []
-    cursor = 0
-    for delimiter in delimiters:
-        run = delimiter.run
-        output.append(text[cursor : run.start()])
-        end = len(run.group(0)) - delimiter.consumed_end
-        output.append(run.group(0)[delimiter.consumed_start : end])
-        cursor = run.end()
-    output.append(text[cursor:])
-    return "".join(output)
+    decoded = html.unescape(title)
+    return "".join(char.casefold() for char in decoded if char.isalnum())
 
 
 def _heading_spans(text: str, heading: str) -> list[tuple[int, int]]:
@@ -574,12 +384,17 @@ def _heading_spans(text: str, heading: str) -> list[tuple[int, int]]:
     if not expected:
         return []
     level = len(expected.group(1))
-    title = _rendered_heading_title(expected.group(2))
-    return [
-        (start, end)
-        for candidate_level, candidate_title, start, end in _active_headings(text)
-        if candidate_level == level and candidate_title == title
+    title = expected.group(2)
+    candidates = [entry for entry in _active_headings(text) if entry[0] == level]
+    exact = [entry for entry in candidates if entry[1] == title]
+    ambiguous = [
+        entry
+        for entry in candidates
+        if _heading_projection(entry[1]) == _heading_projection(title)
     ]
+    if len(exact) != 1 or len(ambiguous) != 1:
+        return []
+    return [(exact[0][2], exact[0][3])]
 
 
 def _active_headings(text: str) -> list[tuple[int, str, int, int]]:
@@ -597,7 +412,7 @@ def _active_headings(text: str) -> list[tuple[int, str, int, int]]:
             headings.append(
                 (
                     len(match.group(1)),
-                    _rendered_heading_title(match.group(2)),
+                    match.group(2),
                     offset,
                     offset + len(line),
                 )
@@ -623,6 +438,20 @@ def _owning_heading_section(text: str, heading: str, end_heading: str) -> str:
     start_index, start = starts[0]
     end_index, end = ends[0]
     if end_index <= start_index or end[0] != start[0]:
+        return ""
+    start_ambiguity = [
+        entry
+        for entry in headings
+        if entry[0] == start[0]
+        and _heading_projection(entry[1]) == _heading_projection(heading)
+    ]
+    end_ambiguity = [
+        entry
+        for entry in headings
+        if entry[0] == end[0]
+        and _heading_projection(entry[1]) == _heading_projection(end_heading)
+    ]
+    if len(start_ambiguity) != 1 or len(end_ambiguity) != 1:
         return ""
     following = [
         candidate
