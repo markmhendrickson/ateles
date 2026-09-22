@@ -334,6 +334,12 @@ def content_digest(entities: list[dict]) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:12]
 
 
+def finding_id(lens: str, head_sha: str, summary: str) -> str:
+    """Return a stable content-derived identifier for one review finding."""
+    digest = content_digest([lens, head_sha[:12], summary])[:8]
+    return f"{lens}-{digest}"
+
+
 # Phrases that mark a line as the agent narrating ABOUT its section rather than
 # being the section content. Matched case-insensitively at line start.
 _NARRATION_PREFIXES: tuple[str, ...] = (
@@ -1838,7 +1844,7 @@ class DispatchConfig:
     github_token: str = os.environ.get("GITHUB_TOKEN", "") or os.environ.get(
         "ATELES_AGENT_PAT", ""
     )
-    panel_max: int = int(os.environ.get("APIS_PANEL_MAX", "4"))
+    panel_max: int = int(os.environ.get("APIS_PANEL_MAX", "6"))
     auto_merge: bool = os.environ.get("APIS_AUTONOMY_AUTO_MERGE", "0") == "1"
     dry_run: bool = os.environ.get("APIS_DRY_RUN", "0") == "1"
     # Auto-build handoff (rollout safety): when ON, a fully-assembled spec whose
@@ -2974,6 +2980,12 @@ class SwarmDispatcher:
             base_ref=(pr.get("base") or {}).get("ref", ""),
             head_sha=(pr.get("head") or {}).get("sha", ""),
         )
+        reviewed_head = _normalise_full_sha(trigger.head_sha or "")
+        if not reviewed_head:
+            raise RuntimeError(
+                f"refusing to re-dispatch lens '{lens_name}' without a "
+                "verified full PR head SHA"
+            )
 
         # The qa lens authors and runs an eval, so it needs a writable checkout;
         # every other lens is diff-only. Same treatment as the panel loop.
@@ -3019,8 +3031,18 @@ class SwarmDispatcher:
         # failure this sweep exists to fix.
         captured = [(lens.lens, result.stdout)]
         agents_by_lens = {lens.lens: lens.agent}
-        await self._persist_panel_reviews(trigger, captured, agents_by_lens)
-        await self._post_missing_panel_comments(trigger, captured, agents_by_lens)
+        await self._persist_panel_reviews(
+            trigger,
+            captured,
+            agents_by_lens,
+            reviewed_head=reviewed_head,
+        )
+        await self._post_missing_panel_comments(
+            trigger,
+            captured,
+            agents_by_lens,
+            reviewed_head=reviewed_head,
+        )
 
     async def resume_missing_lens_reviews(self, repositories: list[str]) -> dict:
         """Re-dispatch a lens that never answered on an otherwise-clear panel.
@@ -4248,7 +4270,17 @@ class SwarmDispatcher:
                 "merge stays gated)"
             )
 
-        review_head = await self._pr_head_sha(trigger)
+        review_head = _normalise_full_sha((await self._pr_head_sha(trigger)) or "")
+        if not review_head:
+            await self._handle_panel_session_limit(
+                trigger,
+                parent,
+                "panel",
+                "",
+                "",
+                reason="PR head could not be verified before review",
+            )
+            return
 
         # 2. Assemble the review panel (neotoma#1640): pre-registered agents
         #    from the parent issue ∪ diff-surface matches ∪ downstream lenses.
@@ -4332,9 +4364,17 @@ class SwarmDispatcher:
         #     from the PR comments).
         if reviews:
             agents_by_lens = {p.lens: p.agent for p in panel}
-            await self._persist_panel_reviews(trigger, reviews, agents_by_lens)
+            await self._persist_panel_reviews(
+                trigger,
+                reviews,
+                agents_by_lens,
+                reviewed_head=review_head,
+            )
             await self._post_missing_panel_comments(
-                trigger, reviews, agents_by_lens
+                trigger,
+                reviews,
+                agents_by_lens,
+                reviewed_head=review_head,
             )
 
         if failed_lenses:
@@ -4386,7 +4426,9 @@ class SwarmDispatcher:
         # 4. Vanellus aggregates panel verdicts. Merge is operator-gated
         #    unless APIS_AUTONOMY_AUTO_MERGE=1 (ateles#80 guardrail).
         aggregation_started_at = datetime.now(timezone.utc)
-        aggregation_head = await self._pr_head_sha(trigger)
+        aggregation_head = _normalise_full_sha(
+            (await self._pr_head_sha(trigger)) or ""
+        )
         if not review_head or aggregation_head != review_head:
             await self._handle_panel_session_limit(
                 trigger, parent, "panel", "", "",
@@ -4512,7 +4554,13 @@ class SwarmDispatcher:
         #     a `[BLOCKING]` finding block the PR on GitHub while the dispatcher
         #     told the operator it was merge-ready.
         if review_blocks_merge(verdict, vanellus_result.stdout):
-            await self._route_blocking_findings(trigger, parent, reviews, verdict)
+            await self._route_blocking_findings(
+                trigger,
+                parent,
+                reviews,
+                verdict,
+                reviewed_head=review_head,
+            )
             return
 
         await self._gate_merge_readiness(trigger, parent, panel)
@@ -4815,12 +4863,52 @@ class SwarmDispatcher:
             )
             return True
 
+    async def _blocking_findings_from_reviewed_head_comments(
+        self,
+        trigger: SwarmTrigger,
+        reviewed_head: str,
+    ) -> dict[str, list[ReviewFinding]]:
+        """Recover structured blockers only from the head the panel reviewed."""
+        head = _normalise_full_sha(reviewed_head)
+        if not head:
+            log.error(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                "refusing blocker recovery without a verified reviewed head"
+            )
+            return {}
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._all_issue_comments(
+                    trigger.repository, trigger.number, client
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] reviewed-head comment scan failed for "
+                f"{trigger.repository}#{trigger.number}: {exc}"
+            )
+            return {}
+
+        by_lens: dict[str, list[ReviewFinding]] = {}
+        for comment in comments:
+            body = comment.get("body") or ""
+            for lens in {item.lens for item in LENSES}:
+                if not lens_comment_satisfies_presence(
+                    body, lens, head_sha=head
+                ):
+                    continue
+                for finding in parse_findings(body, lens=lens):
+                    if finding.blocking:
+                        by_lens.setdefault(lens, []).append(finding)
+        return by_lens
+
     async def _route_blocking_findings(
         self,
         trigger: SwarmTrigger,
         parent: int | None,
         reviews: list[tuple[str, str]],
         verdict: str | None,
+        *,
+        reviewed_head: str = "",
     ) -> None:
         """Route panel blocking findings back for an automatic fix (bounded).
 
@@ -4839,6 +4927,11 @@ class SwarmDispatcher:
             for f in parse_findings(text, lens=lens):
                 if f.blocking:
                     by_lens.setdefault(lens, []).append(f)
+
+        if not by_lens:
+            by_lens = await self._blocking_findings_from_reviewed_head_comments(
+                trigger, reviewed_head
+            )
 
         if not by_lens and verdict == "blocked":
             # BLOCKED without content findings means a process precondition was
@@ -8200,10 +8293,12 @@ class SwarmDispatcher:
 
     # ── Neotoma helpers ──────────────────────────────────────────────────────
 
-    async def _store_entities(self, entities: list[dict], idempotency_key: str) -> None:
+    async def _store_entities(
+        self, entities: list[dict], idempotency_key: str
+    ) -> dict | None:
         if not self.config.neotoma_token:
             log.warning(f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN unset — store skipped")
-            return
+            return None
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
@@ -8214,8 +8309,10 @@ class SwarmDispatcher:
                     },
                 )
                 resp.raise_for_status()
+                return resp.json() if resp.content else {}
         except Exception as exc:
             log.error(f"[{DAEMON_NAME}] Neotoma store failed ({idempotency_key}): {exc}")
+            return None
 
     async def _log_harness_event(self, t: SwarmTrigger) -> None:
         entities = [
@@ -8229,6 +8326,28 @@ class SwarmDispatcher:
                 "occurred_at": datetime.now(timezone.utc).isoformat(),
             }
         ]
+        if t.is_pr:
+            parent_number = self._parent_issue_number(t.body, t.repository)
+            pull_request: dict = {
+                "entity_type": "pull_request",
+                "repository": t.repository,
+                "number": t.number,
+                "provider": "github",
+                "url": t.html_url,
+                "title": t.title,
+                "state": "open",
+                "status": "open",
+                "head_ref": t.head_ref,
+                "base_ref": t.base_ref,
+                "author_login": t.author,
+            }
+            head_sha = _normalise_full_sha(t.head_sha or "")
+            if head_sha:
+                pull_request["head_sha"] = head_sha
+            if parent_number:
+                pull_request["closes_issue_number"] = parent_number
+                pull_request["parent_issue_number"] = parent_number
+            entities.append(pull_request)
         await self._store_entities(
             entities,
             idempotency_key=(
@@ -8242,11 +8361,98 @@ class SwarmDispatcher:
         t: SwarmTrigger,
         reviews: list[tuple[str, str]],
         agents_by_lens: dict[str, str] | None = None,
+        *,
+        reviewed_head: str = "",
     ) -> None:
-        """Store each captured panel review as a harness_event so the review
-        text survives even when the panelist could not post its PR comment."""
+        """Persist exact-head ``pr_review`` records plus dispatch audit rows.
+
+        The caller supplies the pre-panel live head. This method never derives
+        identity from the webhook payload or performs a later live-head read:
+        either would let a delayed webhook or mid-panel push attach the review
+        to a commit the panel did not inspect.
+        """
         agents_by_lens = agents_by_lens or {}
-        entities = [
+        sha = _normalise_full_sha(reviewed_head)
+        now = datetime.now(timezone.utc).isoformat()
+
+        if sha:
+            priors = await self._prior_live_reviews(
+                t, [lens for lens, _ in reviews], sha
+            )
+            entities: list[dict] = []
+            for lens, text in reviews:
+                findings = parse_findings(text, lens=lens)
+                blocking = [finding for finding in findings if finding.blocking]
+                non_blocking = [
+                    finding for finding in findings if not finding.blocking
+                ]
+
+                def shape(finding: ReviewFinding) -> dict:
+                    key = f"{finding.category}: {finding.summary}"
+                    return {
+                        "id": finding_id(lens, sha, key),
+                        "category": finding.category,
+                        "summary": finding.summary,
+                        "files": finding.files,
+                    }
+
+                prior = priors.get(lens)
+                prior_round = (
+                    (prior or {}).get("snapshot", {}).get("review_round") or 0
+                )
+                shaped_blocking = [shape(finding) for finding in blocking]
+                shaped_non_blocking = [
+                    shape(finding) for finding in non_blocking
+                ]
+                entities.append(
+                    {
+                        "entity_type": "pr_review",
+                        "repository": t.repository,
+                        "pr_number": t.number,
+                        "pr_title": t.title,
+                        "review_lens": lens,
+                        "reviewer_agent": agents_by_lens.get(lens, ""),
+                        "head_sha": sha,
+                        "verdict": parse_review_verdict(text) or "unparseable",
+                        "status": "live",
+                        "review_round": prior_round + 1,
+                        "content": text,
+                        "blocking_findings": shaped_blocking,
+                        "nonblocking_findings": shaped_non_blocking,
+                        "finding_ids": [
+                            item["id"]
+                            for item in (*shaped_blocking, *shaped_non_blocking)
+                        ],
+                        "generated_by": agents_by_lens.get(lens, DAEMON_NAME),
+                        "generated_at": now,
+                    }
+                )
+
+            digest_basis = [
+                {key: value for key, value in entity.items() if key != "generated_at"}
+                for entity in entities
+            ]
+            store_result = await self._store_entities(
+                entities,
+                idempotency_key=(
+                    f"pr-review-{t.repository}-{t.number}-{sha[:12]}-"
+                    f"{content_digest(digest_basis)}"
+                ),
+            )
+            await self._supersede_prior_reviews(
+                t,
+                [entity["review_lens"] for entity in entities],
+                sha,
+                priors=priors,
+                new_ids_by_lens=self._new_pr_review_ids_by_lens(entities, store_result),
+            )
+        elif reviews:
+            log.error(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: refusing to "
+                "persist pr_review rows without a verified pre-panel head"
+            )
+
+        audit = [
             {
                 "entity_type": "harness_event",
                 "event_type": "github.panel_review",
@@ -8257,23 +8463,169 @@ class SwarmDispatcher:
                 "delivery_id": t.delivery_id,
                 "lens": lens,
                 "content": text,
-                "occurred_at": datetime.now(timezone.utc).isoformat(),
+                "occurred_at": now,
             }
             for lens, text in reviews
         ]
         await self._store_entities(
-            entities,
+            audit,
             idempotency_key=(
                 f"panel-reviews-{t.repository}-{t.number}-"
-                f"{t.delivery_id}-{content_digest(entities)}"
+                f"{t.delivery_id}-{content_digest(audit)}"
             ),
         )
+
+    async def _neotoma_post(self, path: str, payload: dict) -> dict | None:
+        """POST to Neotoma and return the decoded response when available."""
+        if not self.config.neotoma_token:
+            log.warning(
+                f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN unset — {path} skipped"
+            )
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    f"{self.config.neotoma_base_url}/{path}",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {self.config.neotoma_token}"},
+                )
+                response.raise_for_status()
+                return response.json() if response.content else {}
+        except Exception as exc:
+            log.warning(f"[{DAEMON_NAME}] Neotoma {path} failed: {exc}")
+            return None
+
+    async def _matching_prior_reviews(
+        self,
+        t: SwarmTrigger,
+        lenses: list[str],
+        current_sha: str,
+    ) -> list[dict]:
+        """Return prior live reviews for this PR and lens set at other heads."""
+        data = await self._neotoma_post(
+            "entities/query",
+            {
+                "entity_type": "pr_review",
+                "snapshot_filters": {
+                    "repository": {"op": "eq", "value": t.repository},
+                    "pr_number": {"op": "eq", "value": t.number},
+                },
+                "limit": 200,
+                "include_snapshots": True,
+            },
+        )
+        if not data:
+            return []
+        matches: list[dict] = []
+        for entity in data.get("entities", []):
+            snapshot = entity.get("snapshot") or {}
+            if (
+                snapshot.get("repository") != t.repository
+                or str(snapshot.get("pr_number")) != str(t.number)
+                or snapshot.get("review_lens") not in lenses
+                or snapshot.get("head_sha") == current_sha
+                or snapshot.get("status") == "superseded"
+            ):
+                continue
+            if entity.get("entity_id"):
+                matches.append(entity)
+        return matches
+
+    async def _prior_live_reviews(
+        self,
+        t: SwarmTrigger,
+        lenses: list[str],
+        current_sha: str,
+    ) -> dict[str, dict]:
+        """Map each lens to its prior live review for round seeding."""
+        by_lens: dict[str, dict] = {}
+        for entity in await self._matching_prior_reviews(t, lenses, current_sha):
+            lens = (entity.get("snapshot") or {}).get("review_lens")
+            if lens:
+                by_lens[lens] = entity
+        return by_lens
+
+    @staticmethod
+    def _new_pr_review_ids_by_lens(
+        entities: list[dict], store_result: dict | None
+    ) -> dict[str, str]:
+        """Map each review lens to the entity id returned by ``/store``."""
+        if not store_result:
+            return {}
+        by_index = {
+            result.get("observation_index"): result.get("entity_id")
+            for result in store_result.get("entities", [])
+            if result.get("entity_id")
+        }
+        return {
+            entity["review_lens"]: by_index[index]
+            for index, entity in enumerate(entities)
+            if index in by_index
+        }
+
+    async def _supersede_prior_reviews(
+        self,
+        t: SwarmTrigger,
+        lenses: list[str],
+        current_sha: str,
+        *,
+        priors: dict[str, dict] | None = None,
+        new_ids_by_lens: dict[str, str] | None = None,
+    ) -> None:
+        """Demote prior-head reviews and link their replacements."""
+        prior_entities = (
+            list(priors.values())
+            if priors is not None
+            else await self._matching_prior_reviews(t, lenses, current_sha)
+        )
+        new_ids_by_lens = new_ids_by_lens or {}
+        for entity in prior_entities:
+            snapshot = entity.get("snapshot") or {}
+            entity_id = entity.get("entity_id", "")
+            if not entity_id:
+                continue
+            await self._neotoma_post(
+                "correct",
+                {
+                    "entity_id": entity_id,
+                    "entity_type": "pr_review",
+                    "field": "status",
+                    "value": "superseded",
+                    "idempotency_key": (
+                        f"pr-review-supersede-{entity_id}-{current_sha[:12]}"
+                    ),
+                },
+            )
+            await self._neotoma_post(
+                "correct",
+                {
+                    "entity_id": entity_id,
+                    "entity_type": "pr_review",
+                    "field": "superseded_by",
+                    "value": current_sha,
+                    "idempotency_key": (
+                        f"pr-review-superseded-by-{entity_id}-{current_sha[:12]}"
+                    ),
+                },
+            )
+            new_id = new_ids_by_lens.get(snapshot.get("review_lens"))
+            if new_id:
+                await self._neotoma_post(
+                    "create_relationship",
+                    {
+                        "source_entity_id": new_id,
+                        "target_entity_id": entity_id,
+                        "relationship_type": "SUPERSEDES",
+                    },
+                )
 
     async def _post_missing_panel_comments(
         self,
         t: SwarmTrigger,
         reviews: list[tuple[str, str]],
         agents_by_lens: dict[str, str] | None = None,
+        *,
+        reviewed_head: str = "",
     ) -> None:
         """Backfill `review:<lens>` PR comments the panelists failed to post.
 
@@ -8301,9 +8653,13 @@ class SwarmDispatcher:
                 bodies = [c.get("body", "") for c in resp.json()]
                 captured = dict(reviews)
                 agents = agents_by_lens or {}
-                head_sha = _normalise_full_sha(t.head_sha)
+                head_sha = _normalise_full_sha(reviewed_head)
                 if not head_sha:
-                    head_sha = _normalise_full_sha((await self._pr_head_sha(t)) or "")
+                    head_sha = _normalise_full_sha(t.head_sha)
+                if not head_sha:
+                    head_sha = _normalise_full_sha(
+                        (await self._pr_head_sha(t)) or ""
+                    )
                 if not head_sha:
                     log.warning(
                         f"[{DAEMON_NAME}] current head unavailable — fallback "

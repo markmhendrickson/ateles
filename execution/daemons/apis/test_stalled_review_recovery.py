@@ -229,7 +229,14 @@ def _stalled_recovery_dispatcher(monkeypatch, *, vanellus_stdout):
     async def fake_persist(self, *a, **k):  # noqa: ANN001
         return None
 
-    async def fake_route(self, trigger, parent, reviews, verdict):  # noqa: ANN001
+    async def fake_route(
+        self,
+        trigger,
+        parent,
+        reviews,
+        verdict,
+        **kwargs,  # noqa: ANN001
+    ):
         return None
 
     async def fake_gate(self, trigger, parent, panel):  # noqa: ANN001

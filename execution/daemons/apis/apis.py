@@ -61,7 +61,7 @@ Task reconciliation sweep (ateles#586 — see task_reconciler.py):
 GitHub trigger layer (ateles#80 — see github_gateway.py / swarm_dispatch.py):
   APIS_GITHUB_WEBHOOK_SECRET  HMAC secret for the GitHub webhook
   APIS_GITHUB_WEBHOOK_PORT    Webhook listen port (default: 8742)
-  APIS_PANEL_MAX              Max review panelists per PR (default: 4)
+  APIS_PANEL_MAX              Max review panelists per PR (default: 6)
   APIS_AUTONOMY_AUTO_MERGE    "1" lets Vanellus merge without operator approval
                               (default: 0 — blocking checkpoint_brief instead)
   GITHUB_TOKEN                Token for changed-files / issue-comment reads

@@ -125,6 +125,164 @@ def test_content_digest_changes_when_content_changes():
     assert content_digest(a) != content_digest(b)
 
 
+def test_pr_harness_event_also_upserts_canonical_pull_request(monkeypatch):
+    stored = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.append((entities, idempotency_key))
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    trigger = _trigger(
+        body="Closes #1141.",
+        head_ref="fix/checkpoint-release",
+        base_ref="main",
+    )
+    asyncio.run(SwarmDispatcher(_StubNotifier(), _config())._log_harness_event(trigger))
+
+    entities, _ = stored[0]
+    pull_request = next(
+        entity for entity in entities if entity["entity_type"] == "pull_request"
+    )
+    assert pull_request["repository"] == "owner/repo"
+    assert pull_request["number"] == 87
+    assert pull_request["head_sha"] == "a" * 40
+    assert pull_request["parent_issue_number"] == 1141
+
+
+def test_panel_reviews_use_verified_pre_panel_head_not_stale_trigger(monkeypatch):
+    stored = []
+    superseded = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.append((entities, idempotency_key))
+        return {
+            "entities": [
+                {"observation_index": index, "entity_id": f"ent_{index}"}
+                for index, _ in enumerate(entities)
+            ]
+        }
+
+    async def no_priors(self, trigger, lenses, current_sha):
+        return {}
+
+    async def fake_supersede(
+        self, trigger, lenses, current_sha, *, priors=None, new_ids_by_lens=None
+    ):
+        superseded.append((current_sha, new_ids_by_lens))
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_prior_live_reviews", no_priors)
+    monkeypatch.setattr(SwarmDispatcher, "_supersede_prior_reviews", fake_supersede)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    reviewed_head = "b" * 40
+    asyncio.run(
+        dispatcher._persist_panel_reviews(
+            _trigger(head_sha="a" * 40),
+            [("security", "**REQUEST_CHANGES**\n[BLOCKING] auth: pin producer")],
+            {"security": "falco"},
+            reviewed_head=reviewed_head,
+        )
+    )
+
+    reviews = stored[0][0]
+    assert reviews[0]["entity_type"] == "pr_review"
+    assert reviews[0]["head_sha"] == reviewed_head
+    assert reviews[0]["review_round"] == 1
+    assert superseded == [(reviewed_head, {"security": "ent_0"})]
+
+
+def test_panel_reviews_without_verified_head_fail_closed(monkeypatch, caplog):
+    stored = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    with caplog.at_level("ERROR"):
+        asyncio.run(
+            dispatcher._persist_panel_reviews(
+                _trigger(),
+                [("qa", "**APPROVE**")],
+                {"qa": "phoenicurus"},
+                reviewed_head="",
+            )
+        )
+
+    assert not [row for row in stored if row["entity_type"] == "pr_review"]
+    assert [row["entity_type"] for row in stored] == ["harness_event"]
+    assert "refusing to persist pr_review" in caplog.text
+
+
+def test_reviewed_head_blocker_recovery_ignores_stale_webhook_head(monkeypatch):
+    reviewed_head = "b" * 40
+    stale_head = "a" * 40
+
+    async def fake_comments(self, repository, number, client):
+        return [
+            {
+                "body": (
+                    f"<!-- review:security commit={stale_head} -->\n"
+                    "review:security\n**REQUEST_CHANGES**\n"
+                    "[BLOCKING] stale: wrong head"
+                )
+            },
+            {
+                "body": (
+                    f"<!-- review:security commit={reviewed_head} -->\n"
+                    "review:security\n**REQUEST_CHANGES**\n"
+                    "[BLOCKING] auth: pin producer JKT"
+                )
+            },
+        ]
+
+    monkeypatch.setattr(SwarmDispatcher, "_all_issue_comments", fake_comments)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    recovered = asyncio.run(
+        dispatcher._blocking_findings_from_reviewed_head_comments(
+            _trigger(head_sha=stale_head), reviewed_head
+        )
+    )
+    assert [finding.summary for finding in recovered["security"]] == [
+        "pin producer JKT"
+    ]
+
+
+def test_supersede_prior_review_writes_status_pointer_and_edge(monkeypatch):
+    calls = []
+
+    async def fake_post(self, path, payload):
+        calls.append((path, payload))
+        return {}
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    prior = {
+        "entity_id": "ent_prior",
+        "snapshot": {"review_lens": "qa", "head_sha": "a" * 40},
+    }
+    asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
+            _trigger(),
+            ["qa"],
+            "b" * 40,
+            priors={"qa": prior},
+            new_ids_by_lens={"qa": "ent_new"},
+        )
+    )
+    assert [(path, payload.get("field")) for path, payload in calls[:2]] == [
+        ("correct", "status"),
+        ("correct", "superseded_by"),
+    ]
+    assert calls[2] == (
+        "create_relationship",
+        {
+            "source_entity_id": "ent_new",
+            "target_entity_id": "ent_prior",
+            "relationship_type": "SUPERSEDES",
+        },
+    )
+
+
 # ── parse_gate_verdict ──────────────────────────────────────────────────────
 
 
@@ -442,7 +600,8 @@ def _pr_dispatcher_with_stubs(
     async def fake_changed_files(self, trigger):
         return ["src/x.ts"]
 
-    async def fake_route(self, trigger, parent, reviews, verdict):
+    async def fake_route(self, trigger, parent, reviews, verdict, **kwargs):
+        calls.append(("route_head", kwargs.get("reviewed_head")))
         calls.append(("route", verdict))
 
     async def fake_gate(self, trigger, parent, panel):
@@ -464,6 +623,7 @@ def _pr_dispatcher_with_stubs(
         return "rev-1"
 
     async def fake_persist(self, *a, **k):
+        calls.append(("persist_head", k.get("reviewed_head")))
         return None
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
@@ -495,6 +655,26 @@ def test_handle_pr_blocking_verdict_routes_findings(monkeypatch):
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert ("route", "request_changes") in calls
     assert ("gate", None) not in calls
+
+
+def test_handle_pr_threads_one_live_head_through_persistence_and_recovery(
+    monkeypatch,
+):
+    calls = []
+    live_head = "b" * 40
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch,
+        vanellus_stdout="**REQUEST_CHANGES**\n1 blocking",
+        calls=calls,
+    )
+    monkeypatch.setattr(
+        d, "_pr_head_sha", lambda trigger: _async_return(live_head)
+    )
+    asyncio.run(
+        d._handle_pr(_trigger(body="Closes #80.", head_sha="a" * 40))
+    )
+    assert ("persist_head", live_head) in calls
+    assert ("route_head", live_head) in calls
 
 
 def test_handle_pr_clear_verdict_gates_readiness(monkeypatch):
@@ -583,7 +763,7 @@ def _gate_blocked_dispatcher(monkeypatch, *, calls, auto_rereview):
     async def fake_changed_files(self, trigger):
         return ["src/x.ts"]
 
-    async def fake_route(self, trigger, parent, reviews, verdict):
+    async def fake_route(self, trigger, parent, reviews, verdict, **kwargs):
         calls.append(("route", verdict))
 
     async def fake_gate(self, trigger, parent, panel):
@@ -2589,10 +2769,10 @@ def test_confirm_gates_clear_on_pr_comment_retriggers_pr_pipeline(monkeypatch):
     async def fake_store(self, entities, idempotency_key):
         pass
 
-    async def fake_post_missing(self, t, reviews, agents_by_lens):
+    async def fake_post_missing(self, t, reviews, agents_by_lens, **kwargs):
         pass
 
-    async def fake_persist(self, t, reviews, agents_by_lens):
+    async def fake_persist(self, t, reviews, agents_by_lens, **kwargs):
         pass
 
     async def fake_merge_checkpoint(self, t, parent, lenses):
@@ -3096,10 +3276,10 @@ def test_github_trigger_pr_pipeline_passes_contract(monkeypatch):
     async def fake_store(self, entities, idempotency_key):
         pass
 
-    async def fake_post_missing(self, t, reviews, agents_by_lens):
+    async def fake_post_missing(self, t, reviews, agents_by_lens, **kwargs):
         pass
 
-    async def fake_persist(self, t, reviews, agents_by_lens):
+    async def fake_persist(self, t, reviews, agents_by_lens, **kwargs):
         pass
 
     async def fake_merge_checkpoint(self, t, parent, lenses):
@@ -4808,8 +4988,8 @@ def test_handle_pr_calls_vanellus_fallback_after_run(monkeypatch):
     async def fake_changed_files(self, t): return []
     async def fake_preregistered(self, repo, number): return {}
     async def fake_store(self, entities, idempotency_key): pass
-    async def fake_post_missing(self, t, reviews, agents_by_lens): pass
-    async def fake_persist(self, t, reviews, agents_by_lens): pass
+    async def fake_post_missing(self, t, reviews, agents_by_lens, **kwargs): pass
+    async def fake_persist(self, t, reviews, agents_by_lens, **kwargs): pass
     async def fake_merge_checkpoint(self, t, parent, lenses): pass
 
     monkeypatch.setattr(SwarmDispatcher, "_changed_files", fake_changed_files)
@@ -6484,7 +6664,7 @@ def test_handle_pr_reports_successful_and_failed_lenses(monkeypatch):
     persisted = []
     deferred = {}
 
-    async def fake_persist(self, trigger, reviews, agents):
+    async def fake_persist(self, trigger, reviews, agents, **kwargs):
         persisted.extend(reviews)
 
     async def fake_deferral(self, *args, **kwargs):
