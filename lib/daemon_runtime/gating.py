@@ -652,6 +652,7 @@ CHECKPOINT_REQUIRED_APPROVER_SUB = os.environ.get(
 CHECKPOINT_REQUIRED_APPROVER_JKT = os.environ.get(
     "APIS_CHECKPOINT_REQUIRED_APPROVER_JKT", ""
 ).strip()
+CHECKPOINT_PRODUCER_JKT = os.environ.get("APIS_CHECKPOINT_PRODUCER_JKT", "").strip()
 
 
 def _checkpoint_producer_http_signer(handler: str):
@@ -683,11 +684,16 @@ def build_checkpoint_authorization_envelope(
     user_id: str,
     required_approver_sub: str = CHECKPOINT_REQUIRED_APPROVER_SUB,
     required_approver_jkt: str = CHECKPOINT_REQUIRED_APPROVER_JKT,
+    producer_jkt: str | None = None,
 ) -> str:
     """Serialize the exact task and policy revisions shown for approval."""
+    resolved_producer_jkt = (
+        CHECKPOINT_PRODUCER_JKT if producer_jkt is None else str(producer_jkt).strip()
+    )
     payload = {
         "version": CHECKPOINT_AUTHORIZATION_VERSION,
         "producer": "apis@ateles-swarm",
+        "producer_jkt": resolved_producer_jkt,
         "task_entity_id": str(task_record.get("entity_id") or ""),
         "task_revision": entity_record_digest(task_record),
         "task_observation_count": task_record.get("observation_count"),
@@ -750,9 +756,11 @@ def read_authenticated_checkpoint_authorization(
         return None
     if not isinstance(auth, dict):
         return None
+    expected_producer_jkt = str(CHECKPOINT_PRODUCER_JKT or "").strip()
     if (
-        auth.get("agent_sub") != "apis@ateles-swarm"
-        or not auth.get("agent_thumbprint")
+        not re.fullmatch(r"[A-Za-z0-9_-]{43}", expected_producer_jkt)
+        or auth.get("agent_sub") != "apis@ateles-swarm"
+        or str(auth.get("agent_thumbprint") or "").strip() != expected_producer_jkt
         or auth.get("attribution_tier") not in _TRUSTED_AAUTH_TIERS
     ):
         return None
@@ -762,12 +770,17 @@ def read_authenticated_checkpoint_authorization(
         return None
     if not isinstance(payload, dict) or payload.get("version") != 2:
         return None
-    if payload.get("producer") != "apis@ateles-swarm":
+    if (
+        payload.get("producer") != "apis@ateles-swarm"
+        or str(payload.get("producer_jkt") or "").strip() != expected_producer_jkt
+    ):
         return None
     required_sub = str(payload.get("required_approver_sub") or "").strip()
     required_jkt = str(payload.get("required_approver_jkt") or "").strip()
-    if not required_sub or "@" not in required_sub or not re.fullmatch(
-        r"[A-Za-z0-9_-]{43}", required_jkt
+    if (
+        not required_sub
+        or "@" not in required_sub
+        or not re.fullmatch(r"[A-Za-z0-9_-]{43}", required_jkt)
     ):
         return None
     return payload
@@ -916,12 +929,12 @@ def write_checkpoint_brief(
             or str(task_record.get("entity_type", "")).strip().lower() != "task"
             or not user_id
             or not CHECKPOINT_REQUIRED_APPROVER_SUB
-            or not re.fullmatch(
-                r"[A-Za-z0-9_-]{43}", CHECKPOINT_REQUIRED_APPROVER_JKT
-            )
+            or not re.fullmatch(r"[A-Za-z0-9_-]{43}", CHECKPOINT_REQUIRED_APPROVER_JKT)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{43}", CHECKPOINT_PRODUCER_JKT)
         ):
             log.warning(
-                "[gating] incomplete task or resolver provenance for checkpoint authority"
+                "[gating] incomplete task, producer, or resolver provenance for "
+                "checkpoint authority"
             )
             return None
         encoded_authorization = build_checkpoint_authorization_envelope(
@@ -932,6 +945,7 @@ def write_checkpoint_brief(
             user_id=user_id,
             required_approver_sub=CHECKPOINT_REQUIRED_APPROVER_SUB,
             required_approver_jkt=CHECKPOINT_REQUIRED_APPROVER_JKT,
+            producer_jkt=CHECKPOINT_PRODUCER_JKT,
         )
         body["entities"][0]["body"] = encoded_authorization
         expected_authorization = json.loads(encoded_authorization)
@@ -942,6 +956,12 @@ def write_checkpoint_brief(
         encoded_request_body: bytes | None = None
         if authorization_expected:
             signer = _checkpoint_producer_http_signer(handler)
+            if signer.thumbprint != CHECKPOINT_PRODUCER_JKT:
+                log.error(
+                    "[gating] checkpoint producer JWK does not match the configured "
+                    "RFC 7638 thumbprint — refusing to create authority"
+                )
+                return None
             encoded_request_body = _canonical_json(body).encode("utf-8")
             headers.update(
                 signer.sign_headers(

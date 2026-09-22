@@ -55,6 +55,10 @@ Environment variables:
   APIS_CHECKPOINT_REQUIRED_APPROVER_JKT
                               Required RFC 7638 thumbprint for that resolver;
                               missing configuration mints no release authority
+  APIS_CHECKPOINT_PRODUCER_JKT
+                              Required RFC 7638 thumbprint of apis.jwk.json;
+                              missing or mismatched configuration mints no
+                              checkpoint authority
   APIS_CHECKPOINT_PRODUCER_ISS
                               Issuer for Apis's RFC 9421 checkpoint-creation
                               proof (default: https://markmhendrickson.com)

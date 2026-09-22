@@ -56,6 +56,7 @@ and confirm the tool reports unknown-with-reason.
 | `NEOTOMA_BEARER_TOKEN` | all Neotoma-backed tools | Loaded from `~/.config/neotoma/.env` by the wrapper |
 | `NEOTOMA_BEARER_TOKEN_PROD` | all Neotoma-backed tools | **Promoted over the local token whenever `NEOTOMA_BASE_URL` is remote.** The shared env file's `NEOTOMA_BEARER_TOKEN` is local-scoped and 401s against prod, so without this the server connects and every call fails auth |
 | `APIS_CHECKPOINT_REQUIRED_APPROVER_JKT` | checkpoint creation and resolution | RFC 7638 thumbprint of the resolver key. There is no default: missing or malformed configuration refuses authority creation and resolution. Configure the same value for the checkpoint producer, Apis consumer, and MCP server. |
+| `APIS_CHECKPOINT_PRODUCER_JKT` | checkpoint creation and authorization read-back | RFC 7638 thumbprint derived from the public members of the existing `apis.jwk.json`. There is no default: missing configuration, a different signing key, or a creation observation attributed to any other key refuses authority. Configure the same value for the Apis producer, Apis consumer, and MCP server. |
 
 ### Required for queue visibility
 
@@ -124,8 +125,12 @@ headers, key pin, or authenticated read-back leaves the task held.
 
 Checkpoint creation uses the same RFC 9421 wire mechanism for `POST /store`,
 but a different key: Apis loads only its existing `apis.jwk.json`, signs the
-exact canonical store bytes, and requires authenticated creation-observation
-read-back. The resolver key remains outside both Apis and the MCP server.
+exact canonical store bytes, proves that key's RFC 7638 thumbprint equals
+`APIS_CHECKPOINT_PRODUCER_JKT`, records the pin inside the immutable authority
+envelope, and requires the creation observation's authenticated subject and
+thumbprint to match on read-back. A merely non-empty or otherwise trusted key
+does not qualify. The resolver key remains outside both Apis and the MCP
+server.
 
 ## Tests
 

@@ -35,6 +35,8 @@ Environment (see README.md for the full operator-provisioning table):
                             (default: ateles@ateles-swarm)
   APIS_CHECKPOINT_REQUIRED_APPROVER_JKT
                             (required RFC 7638 key thumbprint; no default)
+  APIS_CHECKPOINT_PRODUCER_JKT
+                            (required RFC 7638 Apis key thumbprint; no default)
 
 Transport: stdio (launched by Claude Code as an MCP server subprocess).
 """

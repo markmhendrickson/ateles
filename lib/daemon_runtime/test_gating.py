@@ -880,8 +880,10 @@ def test_fresh_approval_transition_requires_exact_readback(
 
 def test_checkpoint_brief_carries_authenticated_immutable_authority(monkeypatch):
     monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(gating_module, "CHECKPOINT_REQUIRED_APPROVER_JKT", "A" * 43)
+    signer = _http_signer()
     monkeypatch.setattr(
-        gating_module, "CHECKPOINT_REQUIRED_APPROVER_JKT", "A" * 43
+        gating_module, "CHECKPOINT_PRODUCER_JKT", signer.thumbprint, raising=False
     )
     posted: list[dict] = []
     posted_content: list[bytes] = []
@@ -904,7 +906,7 @@ def test_checkpoint_brief_carries_authenticated_immutable_authority(monkeypatch)
     monkeypatch.setattr(
         gating_module,
         "_checkpoint_producer_http_signer",
-        lambda handler: _http_signer(),
+        lambda handler: signer,
     )
     monkeypatch.setattr(
         gating_module,
@@ -936,7 +938,7 @@ def test_checkpoint_brief_carries_authenticated_immutable_authority(monkeypatch)
                 "user_id": "tenant-a",
                 "provenance": {
                     "agent_sub": "apis@ateles-swarm",
-                    "agent_thumbprint": "thumbprint",
+                    "agent_thumbprint": signer.thumbprint,
                     "attribution_tier": "software",
                 },
             }
@@ -974,6 +976,7 @@ def test_checkpoint_brief_carries_authenticated_immutable_authority(monkeypatch)
     assert authority["task_entity_id"] == "ent_task"
     assert authority["required_approver_sub"] == "ateles@ateles-swarm"
     assert authority["required_approver_jkt"] == "A" * 43
+    assert authority["producer_jkt"] == signer.thumbprint
     assert authority["task_revision"] == gating_module.entity_record_digest(task_record)
     assert authority["policy_revision"] == gating_module.execution_policy_revision(
         policy
@@ -984,11 +987,153 @@ def test_checkpoint_brief_carries_authenticated_immutable_authority(monkeypatch)
     assert posted_content[0] == gating_module._canonical_json(posted[0]).encode()
 
 
+@pytest.mark.parametrize("configured_producer_jkt", ["", "B" * 43])
+def test_checkpoint_brief_refuses_unpinned_producer_key(
+    monkeypatch, configured_producer_jkt
+):
+    """The real /store sink must not accept an unpinned Apis signing key."""
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(gating_module, "CHECKPOINT_REQUIRED_APPROVER_JKT", "A" * 43)
+    monkeypatch.setattr(
+        gating_module,
+        "CHECKPOINT_PRODUCER_JKT",
+        configured_producer_jkt,
+        raising=False,
+    )
+    signer = _http_signer()
+    monkeypatch.setattr(
+        gating_module, "_checkpoint_producer_http_signer", lambda handler: signer
+    )
+    posted: list[bytes] = []
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"entities": []}
+
+    def post(*args, **kwargs):
+        posted.append(kwargs["content"])
+        return _Response()
+
+    monkeypatch.setattr(gating_module.httpx, "post", post)
+    policy = ExecutionPolicy(entity_id="default", loaded=True)
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 1,
+        "last_observation_at": "2026-09-22T00:00:00Z",
+        "snapshot": {"status": "awaiting_approval"},
+    }
+
+    assert (
+        write_checkpoint_brief(
+            task_entity_id="ent_task",
+            decision=decision,
+            title="Producer identity must be pinned",
+            plan_summary="Do not mint authority with an unexpected producer key.",
+            handler="apis",
+            user_id="tenant-a",
+            action_type="local_edit",
+            task_record=task_record,
+            policy=policy,
+        )
+        is None
+    )
+    assert posted == []
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("matching", True),
+        ("missing", False),
+        ("wrong", False),
+        ("trusted_other", False),
+        ("wrong_envelope", False),
+    ],
+)
+def test_checkpoint_authorization_requires_expected_producer_jkt(
+    monkeypatch, mode, expected
+):
+    """Stored creation authority is valid only for the configured Apis JKT."""
+    producer_jkt = "P" * 43
+    monkeypatch.setattr(
+        gating_module, "CHECKPOINT_PRODUCER_JKT", producer_jkt, raising=False
+    )
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 2,
+        "last_observation_at": "2026-09-22T00:00:00Z",
+        "snapshot": {"status": "awaiting_approval"},
+    }
+    policy = ExecutionPolicy(entity_id="default", loaded=True)
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+    payload = gating_module.json.loads(
+        gating_module.build_checkpoint_authorization_envelope(
+            task_record=task_record,
+            policy=policy,
+            decision=decision,
+            action_type="local_edit",
+            user_id="tenant-a",
+            required_approver_jkt="A" * 43,
+        )
+    )
+    payload["producer_jkt"] = "Q" * 43 if mode == "wrong_envelope" else producer_jkt
+    encoded = gating_module._canonical_json(payload)
+    fields = {
+        "body": encoded,
+        "task_entity_id": "ent_task",
+        "policy_entity_id": decision.policy_id,
+        "blast_radius": decision.blast_radius.value,
+        "gate_action": decision.action.value,
+        "handler": "apis",
+    }
+    provenance = {field: "obs-create" for field in fields}
+    auth = {
+        "agent_sub": "apis@ateles-swarm",
+        "agent_thumbprint": producer_jkt,
+        "attribution_tier": "software",
+    }
+    if mode == "missing":
+        auth.pop("agent_thumbprint")
+    elif mode == "wrong":
+        auth["agent_thumbprint"] = "W" * 43
+    elif mode == "trusted_other":
+        auth["agent_thumbprint"] = "T" * 43
+        auth["attribution_tier"] = "operator_attested"
+    record = {
+        "entity_id": "ent_cp",
+        "entity_type": "checkpoint_" + "brief",
+        "snapshot": fields,
+        "provenance": provenance,
+    }
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity_observations",
+        lambda entity_id: [
+            {
+                "id": "obs-create",
+                "fields": fields,
+                "user_id": "tenant-a",
+                "provenance": auth,
+            }
+        ],
+    )
+
+    authority = gating_module.read_authenticated_checkpoint_authorization(
+        "ent_cp", record
+    )
+
+    assert (authority is not None) is expected
+
+
 def test_checkpoint_brief_requires_authorization_snapshot_readback(monkeypatch):
     monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
-    monkeypatch.setattr(
-        gating_module, "CHECKPOINT_REQUIRED_APPROVER_JKT", "A" * 43
-    )
+    monkeypatch.setattr(gating_module, "CHECKPOINT_REQUIRED_APPROVER_JKT", "A" * 43)
 
     class _Response:
         def raise_for_status(self):
@@ -1015,9 +1160,7 @@ def test_checkpoint_brief_requires_authorization_snapshot_readback(monkeypatch):
         },
     )
     policy = ExecutionPolicy(entity_id="default", loaded=True)
-    decision = evaluate_gate(
-        confidence=0.3, action_type="local_edit", policy=policy
-    )
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
     task_record = {
         "entity_id": "ent_task",
         "entity_type": "task",
@@ -1129,6 +1272,8 @@ def test_checkpoint_authority_is_not_created_without_resolver_key_pin(monkeypatc
 def test_authenticated_checkpoint_authority_rejects_mutable_or_untrusted_state(
     monkeypatch, tamper
 ):
+    producer_jkt = "P" * 43
+    monkeypatch.setattr(gating_module, "CHECKPOINT_PRODUCER_JKT", producer_jkt)
     task_record = {
         "entity_id": "ent_task",
         "entity_type": "task",
@@ -1145,6 +1290,7 @@ def test_authenticated_checkpoint_authority_rejects_mutable_or_untrusted_state(
         action_type="local_edit",
         user_id="tenant-a",
         required_approver_jkt="A" * 43,
+        producer_jkt=producer_jkt,
     )
     fields = {
         "body": encoded,
@@ -1157,7 +1303,7 @@ def test_authenticated_checkpoint_authority_rejects_mutable_or_untrusted_state(
     provenance = {field: "obs-create" for field in fields}
     auth = {
         "agent_sub": "apis@ateles-swarm",
-        "agent_thumbprint": "thumbprint",
+        "agent_thumbprint": producer_jkt,
         "attribution_tier": "software",
     }
     if tamper == "protected_field":
