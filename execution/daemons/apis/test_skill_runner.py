@@ -3637,53 +3637,19 @@ class TestGateOwnerIdentity:
         assert launched == []
         mock_write.assert_not_called()
 
-    def test_codex_gate_owner_stock_path_binds_role_proxy_and_launches(
+    def test_codex_gate_owner_signer_env_without_proxy_args_is_refused(
         self, monkeypatch, tmp_path
     ) -> None:
-        """The supported path must construct the transport the guard requires.
-
-        RED on the audited PR head: the stock command has no Neotoma proxy
-        binding, so the guard refuses before launching even with the role JWK.
-        """
-        monkeypatch.setenv("NEOTOMA_AAUTH_SUB", "ambient-wrong-sub")
-        monkeypatch.setenv("NEOTOMA_AAUTH_PRIVATE_JWK_PATH", "/ambient/wrong.jwk")
-        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN_PROD", "ambient-prod-bearer")
-        monkeypatch.setenv("MCP_PROXY_BEARER_TOKEN", "ambient-proxy-bearer")
-
-        result, launched, _ = self._run_provider_case(
+        result, launched, mock_write = self._run_provider_case(
             monkeypatch=monkeypatch,
             tmp_path=tmp_path,
             provider="codex",
             role_jwk=True,
         )
-
-        assert result.ok
-        assert len(launched) == 1
-        cmd, kwargs, _ = launched[0]
-        assert "--ignore-user-config" in cmd
-        assert (
-            'mcp_servers.neotoma.args=["mcp", "proxy", "--aauth", "--fail-closed"]'
-            in cmd
-        )
-        assert any(
-            value.startswith("mcp_servers.neotoma.command=") for value in cmd
-        )
-        assert (
-            'mcp_servers.neotoma.tools.correct.approval_mode="approve"' in cmd
-        )
-        child_env = kwargs["env"]
-        assert child_env["NEOTOMA_AAUTH_SUB"] == "accipiter@ateles-swarm"
-        assert child_env["NEOTOMA_AAUTH_PRIVATE_JWK_PATH"].endswith(
-            "/accipiter.jwk.json"
-        )
-        assert child_env["MCP_PROXY_AAUTH"] == "1"
-        assert child_env["MCP_PROXY_FAIL_CLOSED"] == "1"
-        assert child_env["MCP_PROXY_DOWNSTREAM_URL"] == (
-            "https://neotoma.example.com/mcp"
-        )
-        assert "MCP_PROXY_BEARER_TOKEN" not in child_env
-        assert "NEOTOMA_BEARER_TOKEN" not in child_env
-        assert "NEOTOMA_BEARER_TOKEN_PROD" not in child_env
+        assert not result.ok
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
+        assert launched == []
+        mock_write.assert_not_called()
 
     def test_codex_gate_owner_proxy_args_and_role_jwk_is_not_refused(
         self, monkeypatch, tmp_path
@@ -3701,6 +3667,34 @@ class TestGateOwnerIdentity:
         )
         assert result.ok
         assert len(launched) == 1
+        assert launched[0][1]["env"]["NEOTOMA_AAUTH_PRIVATE_JWK_PATH"] == str(
+            tmp_path / "keys" / "accipiter.jwk.json"
+        )
+        assert (
+            launched[0][1]["env"]["NEOTOMA_AAUTH_SUB"]
+            == "accipiter@ateles-swarm"
+        )
+
+    def test_codex_gate_owner_trailing_proxy_override_is_refused(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """The effective (last) Codex config must be the exact safe transport."""
+        result, launched, mock_write = self._run_provider_case(
+            monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            provider="codex",
+            role_jwk=True,
+            command_extra=[
+                "-c",
+                'mcp_servers.neotoma.args=["mcp", "proxy", "--aauth", "--fail-closed"]',
+                "-c",
+                'mcp_servers.neotoma.args=["mcp", "proxy"]',
+            ],
+        )
+        assert not result.ok
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
+        assert launched == []
+        mock_write.assert_not_called()
 
     def test_codex_gate_owner_proxy_args_without_jwk_is_refused(
         self, monkeypatch, tmp_path
@@ -3759,6 +3753,42 @@ class TestGateOwnerIdentity:
         assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
         assert launched == []
         mock_write.assert_not_called()
+
+    @pytest.mark.parametrize("mutated_field", ["jwk_path", "subject"])
+    def test_codex_gate_owner_mutated_attribution_is_refused(
+        self, monkeypatch, tmp_path, mutated_field
+    ) -> None:
+        keys_dir = tmp_path / "keys"
+        keys_dir.mkdir()
+        expected_jwk = keys_dir / "accipiter.jwk.json"
+        expected_jwk.write_text("{}", encoding="utf-8")
+        monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", str(keys_dir))
+        subprocess_env = {
+            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH": str(expected_jwk),
+            "NEOTOMA_AAUTH_SUB": "accipiter@ateles-swarm",
+        }
+        if mutated_field == "jwk_path":
+            subprocess_env["NEOTOMA_AAUTH_PRIVATE_JWK_PATH"] = str(
+                keys_dir / "other.jwk.json"
+            )
+        else:
+            subprocess_env["NEOTOMA_AAUTH_SUB"] = "other@ateles-swarm"
+
+        err = skill_runner.gate_owner_transport_identity_error(
+            role="accipiter",
+            provider="codex",
+            cmd=[
+                "codex",
+                "-c",
+                'mcp_servers.neotoma.args=["mcp", "proxy", "--aauth", "--fail-closed"]',
+            ],
+            subprocess_env=subprocess_env,
+            agent_def=_make_def(
+                name="accipiter", aauth_sub="accipiter@ateles-swarm"
+            ),
+        )
+        assert err is not None
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in err
 
     def test_cursor_gate_owner_with_own_bearer_is_refused(
         self, monkeypatch, tmp_path

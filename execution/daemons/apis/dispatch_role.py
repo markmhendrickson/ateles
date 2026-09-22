@@ -39,7 +39,6 @@ USAGE
         [--cwd /path/to/worktree] \\
         [--timeout 600] \\
         [--task-entity-id ent_...] \\
-        [--owns-pending-gate] \\
         [--json]
 
 ``--provider`` pins the run to one adapter, bypassing weighted selection but
@@ -195,7 +194,6 @@ async def dispatch(
     cwd: str | None = None,
     timeout: int | None = None,
     task_entity_id: str = "",
-    owns_pending_gate: bool = False,
 ) -> SkillResult:
     """Dispatch one piece of work to a named role via the harness router.
 
@@ -216,7 +214,6 @@ async def dispatch(
         timeout=timeout,
         cwd=cwd,
         provider=provider,
-        owns_pending_gate=owns_pending_gate,
     )
 
 
@@ -438,14 +435,6 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
-        "--owns-pending-gate",
-        action="store_true",
-        help=(
-            "Require a provider transport that presents the role's own Neotoma "
-            "identity, for work that must clear a pending gate."
-        ),
-    )
-    parser.add_argument(
         "--json",
         action="store_true",
         help="Emit the full result as JSON on stdout instead of raw agent output.",
@@ -562,7 +551,6 @@ def main(argv: list[str] | None = None) -> int:
                 cwd=args.cwd,
                 timeout=args.timeout,
                 task_entity_id=args.task_entity_id,
-                owns_pending_gate=args.owns_pending_gate,
             )
         )
     except BaseException as exc:  # noqa: BLE001 — see above
