@@ -7,24 +7,24 @@ source_entity_id: ent_c5f3ebd1800a887a3b405e53
 schema_entity_id: ent_73da44b2d434cbafe5d8ecb9
 observation_ids:
   asset_inventory: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
-  completeness: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
+  completeness: 9c7483fd-5c44-7750-0948-3e57ea7147d3
   downstream_contracts: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
   name: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
   ownership: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
-  phrases: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
-  positioning: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
+  phrases: b55ae2cf-777e-61be-0c36-34205adbcb6f
+  positioning: 9869c944-acfd-457d-299b-6ff4e1f5d740
   product: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
-  production_specs: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
-  provenance: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
+  production_specs: af3efd85-9551-0372-e40f-12b0e726563a
+  provenance: c86d9541-6a3e-18a6-b4b7-6bb2748bf223
   schema_version: unknown
   scope: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
   slug: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
   status: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
   terminology: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
-  updated_at: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
+  updated_at: 941fd113-446d-be68-ea04-027b02dc9b59
   visibility: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
   visual_concepts: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
-  visual_styles: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
+  visual_styles: 0cabde55-cb93-5171-152d-4d17b7dd163f
   voice: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
 ---
 
@@ -32,12 +32,48 @@ observation_ids:
 
 > Neotoma is canonical. This document is a generated human mirror; correct the source entity and rerun the renderer rather than editing this file.
 
+## Review status
+
+- **State:** BLOCKED
+- **Why:** The expanded guide is preserved as provisional evidence and hypotheses. It is not an approved baseline until category, argument, current competitive and aesthetic research, one original territory, and operator approval are complete.
+- **Next gate:** Operator chooses the category noun after the define-category review artifacts are presented.
+- **Rule:** This provisional evidence is not an approved brand baseline. No page or film may treat it as final until category and brand approval are complete.
+
 ## Positioning
 
 - **Category:** The system of record for AI agents.
 - **Hero support:** Persistent, connected context agents can create, retrieve, and update—with provenance intact.
 - **Product promise:** A durable shared record graph where agents can establish, retrieve, and correct consequential state without erasing provenance or prior versions.
 - **Audience:** Technically fluent operators who will install and connect local agent infrastructure but do not want to build a state layer from scratch.
+
+## Brand intent
+
+- **Core idea:** Shared truth persists and evolves without erasing history.
+- **Functional truth:** A durable typed graph lets agents create, retrieve and update connected records while provenance, relationships, prior versions and disagreement remain inspectable.
+- **Emotional outcome:** Confidence that consequential state can be verified, shared and corrected.
+- **Sibling distinction:** Neotoma preserves what is true and how it changed; Ateles governs who can act.
+
+### Intended perceptions
+
+- Authoritative shared record
+- Durable truth over time
+- Connected context across tools
+- Precise and epistemically honest
+
+### Forbidden perceptions
+
+- Memory chatbot
+- Retrieval cache
+- Agent directory
+- Database dashboard
+- Destructive overwrite
+
+### Proof cues
+
+- Persistent typed records and relationships
+- Distinct create, retrieve and update
+- Current and prior layers
+- Sources, disagreement and refresh
 
 ## Voice and copy
 
@@ -73,8 +109,8 @@ observation_ids:
 
 ## Phrases
 
-- **APPROVED:** The system of record for AI agents. — Exact outward category and hero headline; keep the definite article. (source: ent_73226bffbccbd1ff7ff04e49)
-- **APPROVED:** Persistent, connected context agents can create, retrieve, and update—with provenance intact. — Hero support and compact product promise. (source: ent_4b68f28aaa1a6a6c22ed299b)
+- **PROVISIONAL:** The system of record for AI agents. — Exact outward category and hero headline; keep the definite article. (source: ent_73226bffbccbd1ff7ff04e49)
+- **PROVISIONAL:** Persistent, connected context agents can create, retrieve, and update—with provenance intact. — Hero support and compact product promise. (source: ent_4b68f28aaa1a6a6c22ed299b)
 - **APPROVED:** Open-source. Local-first. Deterministic. — Compact implementation posture; use where the execution boundary matters. (source: ent_73226bffbccbd1ff7ff04e49)
 - **RETIRED:** Your agents forget. Neotoma makes them remember. — Never use: it hands the category to retrieval vendors and misstates the failure as recall rather than absent authoritative record. (source: operator decision)
 - **PROVISIONAL:** Agents cannot own work they cannot verify. — Portfolio editorial framing, not category or hero headline. (source: product strategy plan)
@@ -117,6 +153,59 @@ observation_ids:
 - **APPROVED · Provenance and disagreement:** Source relationships and unresolved claims remain inspectable until review settles the current view.
 - **MISSING · Graph-first cinematic replacement:** Required primary film must combine the whole persistent graph with agent operations rather than dramatizing correction alone.
 
+## Logo system
+
+- **APPROVED · primary mark — Neotoma typographic mark:** Primary compact identity. (source: `inspector/src/assets/neotoma_wordmark.svg`; exports: SVG)
+- **APPROVED · wordmark — Neotoma wordmark:** Named identity. (source: `inspector/src/assets/neotoma_wordmark.svg`; exports: SVG)
+- **MISSING · lockup — Graph symbol + wordmark lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
+- **MISSING · symbol only — Persistent record-graph symbol:** Required before this placement is approved. (source: `not produced`; exports: not produced)
+- **MISSING · horizontal — Horizontal lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
+- **MISSING · stacked — Stacked lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
+- **MISSING · monochrome — Monochrome variant:** One-color reproduction. (source: `not produced`; exports: not produced)
+- **MISSING · reversed — Reversed variant:** Dark or photographic fields. (source: `not produced`; exports: not produced)
+- **PROVISIONAL · small scale — Small-scale variant:** Requires tested legibility threshold. (source: `not produced`; exports: not produced)
+- **MISSING · favicon — Favicon:** Required before this placement is approved. (source: `not produced`; exports: not produced)
+- **PROVISIONAL · application — Application mark:** Align Inspector/application marks with persistent-graph semantics. (source: `not produced`; exports: not produced)
+
+- **Clear space · MISSING:** Define and test an exclusion zone from final geometry; no product measurement is approved.
+- **Minimum size · MISSING:** Test final exports; no numerical threshold is approved.
+- **Backgrounds · PROVISIONAL:** Use quiet archival-paper or deep-ink fields; avoid busy graph fields.
+- **Colorways · PROVISIONAL:** Ink or teal may identify; amber remains reserved for correction.
+- **Co-branding · MISSING:** Define peer-brand spacing, hierarchy, dividers and approval before use.
+
+### Logo misuse
+
+- Do not stretch, rotate, crop, mask, outline, shadow or redraw the mark.
+- Do not replace the identity with a database, brain, cloud, correction stamp or disconnected cards.
+- Never approve a variant without a traceable source asset and reviewed export.
+
+## Typography system
+
+- **APPROVED · expressive:** Fraunces — Durable shared-truth statements.
+- **APPROVED · productive:** Inter — Body, navigation and sustained reading.
+- **APPROVED · technical:** JetBrains Mono — Short source, version, correction and status labels.
+
+### Hierarchy and tokens
+
+- **PROVISIONAL · display:** expressive; clamp(2.8rem, 7vw, 5.8rem); line-height 0.98; measure 13ch; sentence case
+- **PROVISIONAL · section_heading:** expressive; clamp(2rem, 4vw, 3.6rem); line-height 1.02; measure 18ch; sentence case
+- **PROVISIONAL · body:** productive; 16px base; line-height 1.62; measure target 60–70 characters; sentence case
+- **PROVISIONAL · label:** technical; 0.72rem reference; line-height normal; measure short labels only; uppercase only for brief state labels
+
+### Responsive rules
+
+- **Sizing:** Use rem-based clamp scales and preserve reflow.
+- **Line height:** Generous for body; tight display leading only when legible.
+- **Measure:** Target 60–70 characters and never exceed 80 without review.
+- **Casing:** Sentence case; uppercase only for short tracked labels.
+
+### Forbidden typography
+
+- No body copy as images.
+- No sustained all-caps prose.
+- No unlicensed or unrecorded typefaces.
+- No internal IDs, schemas, field keys, calls or repo paths.
+
 ## Asset inventory
 
 - **APPROVED · Typographic Neotoma wordmark** (wordmark): Primary compact identity mark — `inspector/src/assets/neotoma_wordmark.svg`
@@ -133,6 +222,22 @@ observation_ids:
 - **Responsive:** Provide 16:9 desktop and art-directed 9:16 mobile crops without losing the semantic beat.
 - **Reduced motion:** The poster and reduced-motion state must communicate the complete adjacent claim without relying on movement.
 
+### Cinematic generation gate
+
+- **State:** BLOCKED
+- **Generation allowed:** false
+- **Rule:** Do not submit, regenerate, or resume cinematic media production until every predicate is approved and read back from the canonical records. Final logo exports may remain a separate asset task only when no logo appears in-frame.
+
+- **BLOCKED · brand intent:** Current intent is a provisional hypothesis pending full-chain regeneration.
+- **BLOCKED · copy system:** No category_definition exists; current category language is a candidate until the operator reviews the define-category artifact.
+- **PROVISIONAL · symbol and logo for film:** Symbol and metaphor are approved; final exported logo variants are not required in-frame, but film-facing logo application rules still await final approval.
+- **BLOCKED · palette materiality typography:** Palette and materiality are approved; the expanded typography weight/style system remains provisional.
+- **BLOCKED · motion cinematography:** Current cinematic grammar is provisional pending the approved original aesthetic territory.
+- **APPROVED · accessibility static equivalence:** Contrast, semantic text, reduced-motion and static-equivalence rules are approved.
+- **BLOCKED · market learning and differentiation:** Current ledger and differentiation matrix are provisional seeds pending live aesthetic/UI benchmarking.
+- **BLOCKED · section copy to visual matrix:** The section-by-section production matrix exists in the cinematic task but remains under operator review.
+- **BLOCKED · brand brief consistency:** A final contradiction audit between the brand guide and page production brief has not yet been recorded as clear.
+
 ### Cinematic prohibitions
 
 - destructive overwrite
@@ -141,6 +246,135 @@ observation_ids:
 - database cylinder, cloud, brain, or generic AI glow
 - generated text, UI, faces, hands, or avatars
 - correction as the entire brand story
+
+## Accessibility
+
+- **APPROVED · contrast:** Meet WCAG contrast for text and meaningful graphics in every approved colorway; media copy needs a tested safe field.
+- **APPROVED · images of text:** Use semantic text; only essential logotypes may be images of text and need accessible names.
+- **APPROVED · semantic headings:** Use one H1 and ordered semantic headings; size never substitutes for level.
+- **APPROVED · relative sizing:** Use relative responsive sizing and preserve resize/reflow without two-dimensional page scrolling.
+- **APPROVED · reduced motion static equivalence:** Honor reduced motion and provide a static state carrying every meaning expressed by motion.
+
+## Research provenance and review
+
+- **Reviewed:** 2026-09-22
+- **Cadence · PROVISIONAL:** Quarterly review proposed; exact cadence awaits owner approval.
+
+- [OpenAI Design Guidelines](https://openai.com/brand/) — clear space, approved variants, misuse and co-branding (2026-09-22)
+- [UK Space Agency branding guidelines](https://www.gov.uk/government/publications/uk-space-agency-communications-resources/branding-guidelines) — exclusion zones, minimum sizes, backgrounds, co-branding and readable line length (2026-09-22)
+- [Atlassian design foundations](https://atlassian.design/foundations) — tokens as source of truth and accessible logo, typography and motion foundations (2026-09-22)
+- [IBM Carbon typography](https://carbondesignsystem.com/elements/typography/style-strategies/) — productive and expressive type roles (2026-09-22)
+- [IBM Carbon motion](https://carbondesignsystem.com/elements/motion/overview/) — purposeful productive and expressive motion (2026-09-22)
+- [W3C WCAG 2.1](https://www.w3.org/TR/WCAG21/) — contrast, images of text, relative sizing and reflow (2026-09-22)
+- [W3C accessibility principles](https://www.w3.org/WAI/fundamentals/accessibility-principles/) — static alternatives and perceivable content (2026-09-22)
+- [Mailchimp brand style guide](https://mailchimp.com/resources/tips-to-create-your-brands-style-guide/) — vision, audience, personality, values and a living guide (2026-09-22)
+- [Mailchimp voice and tone](https://styleguide.mailchimp.com/voice-and-tone/) — stable voice with context-dependent tone (2026-09-22)
+
+## Market-reference learning ledger
+
+### Mem0 · competitor
+
+- **State:** PROVISIONAL; high confidence; distinctive brand territory; public_safe
+- **Evidence:** `docs/positioning/neotoma/incumbent.md` (2026-09-21)
+- **Observed fact:** The incumbent analysis identifies retrieval-memory vendors as plausible answers to recall complaints.
+- **Derived learning:** Inference: Forgetting language hands the category to recall products.
+- **Best practice to adopt:** Make retained context useful across work.
+- **Bad practice to avoid:** Avoid generic memory, remembering and recall framing.
+- **Differentiation implication:** Neotoma must lead with authoritative typed record, provenance and correction.
+
+### Zep · competitor
+
+- **State:** PROVISIONAL; high confidence; distinctive brand territory; public_safe
+- **Evidence:** `docs/positioning/neotoma/incumbent.md` (2026-09-21)
+- **Observed fact:** The analysis tests copy against vendors positioned around retrieval and memory.
+- **Derived learning:** Inference: Distinction depends on the kind and authority of state, not better retrieval.
+- **Best practice to adopt:** Make retrieval fast and useful.
+- **Bad practice to avoid:** Avoid vector-search glow, memory streams and recall scores.
+- **Differentiation implication:** Show typed records, field provenance, prior versions and inspectable corrections.
+
+### Platform-native memory · incumbent
+
+- **State:** PROVISIONAL; high confidence; distinctive brand territory; public_safe
+- **Evidence:** `docs/positioning/neotoma/incumbent.md` (2026-09-21)
+- **Observed fact:** Research describes platform memory as opaque, single-tool and unavailable as a shared write surface.
+- **Derived learning:** Inference: Shared authority across tools matters more than personal recollection.
+- **Best practice to adopt:** Reduce repeated context entry.
+- **Bad practice to avoid:** Avoid one assistant's memory vault or an agent directory.
+- **Differentiation implication:** Depict a shared graph multiple agents create, retrieve and update.
+
+### Notion, Airtable and markdown · incumbent
+
+- **State:** PROVISIONAL; high confidence; adapted convention; public_safe
+- **Evidence:** `docs/positioning/neotoma/incumbent.md` (2026-09-21)
+- **Observed fact:** Research identifies human-edited databases and flat files whose structure degrades under agent writes.
+- **Derived learning:** Inference: Familiar document materials help, but must be joined to typed structure and durable correction.
+- **Best practice to adopt:** Use familiar readable record materials.
+- **Bad practice to avoid:** Avoid a prettier cabinet, grid or loose pile of notes.
+- **Differentiation implication:** Combine archival materiality with persistent graph and version lineage.
+
+### Re-prompting and copy-paste · incumbent
+
+- **State:** PROVISIONAL; high confidence; distinctive brand territory; public_safe
+- **Evidence:** `docs/positioning/neotoma/incumbent.md` (2026-09-21)
+- **Observed fact:** Research identifies manual re-prompting with no durable shared commitment point.
+- **Derived learning:** Inference: The emotional outcome is confidence in settled context, not token savings.
+- **Best practice to adopt:** Keep interaction legible and direct.
+- **Bad practice to avoid:** Avoid chat-history montages and productivity clichés.
+- **Differentiation implication:** Show one shared record persisting across agents and tools.
+
+### Custom Postgres and MCP stacks · complement
+
+- **State:** PROVISIONAL; high confidence; adapted convention; public_safe
+- **Evidence:** `docs/positioning/neotoma/incumbent.md` (2026-09-21)
+- **Observed fact:** Research treats homegrown stacks as advanced validation, not the durable audience's primary incumbent.
+- **Derived learning:** Inference: Technical precision must remain reader-facing rather than infrastructure theater.
+- **Best practice to adopt:** Preserve rigorous data contracts and interoperability.
+- **Bad practice to avoid:** Avoid database cylinders, schemas-as-brand and implementation-first identity.
+- **Differentiation implication:** Pair precise records and provenance with accessible language.
+
+## Cross-product differentiation matrix
+
+### category language
+
+- **Ateles · distinctive brand territory:** Operating system for agentic organizations
+- **Neotoma · distinctive brand territory:** System of record for AI agents
+- **Convergence test:** Fail if both collapse into generic agent infrastructure.
+
+### symbol metaphor
+
+- **Ateles · distinctive brand territory:** Edge-free swarm with temporary handoffs
+- **Neotoma · distinctive brand territory:** Persistent typed record graph
+- **Convergence test:** Fail if Ateles gains permanent edges or Neotoma loses durable relationships.
+
+### palette materiality
+
+- **Ateles · adapted convention:** Warm paper, rust signals, restrained grant green; ceramic and metal
+- **Neotoma · distinctive brand territory:** Archival paper, teal continuity, amber correction; vellum, glass and mineral record tiles
+- **Convergence test:** Fail if both become generic dark AI glow or share one accent logic.
+
+### typography
+
+- **Ateles · adapted convention:** Geometric expressive headings, humanist productive body, operational mono labels
+- **Neotoma · adapted convention:** Editorial serif headings, neutral productive body, provenance mono labels
+- **Convergence test:** Fail if type roles or examples become interchangeable.
+
+### motion cinematography
+
+- **Ateles · distinctive brand territory:** Autonomous members align, signal, hand off, pause locally and continue
+- **Neotoma · distinctive brand territory:** Graph remains registered while create, retrieve and update change state with history intact
+- **Convergence test:** Fail if both read as a permanent network or generic node pulses.
+
+### voice
+
+- **Ateles · distinctive brand territory:** Organizational, decisive, bounded and forward-moving
+- **Neotoma · distinctive brand territory:** Precise, calm, durable and epistemically honest
+- **Convergence test:** Fail if either adopts generic AI optimism or interchangeable infrastructure prose.
+
+### proof style
+
+- **Ateles · distinctive brand territory:** Roles, authority, claim/lease, escalation and accountable continuation
+- **Neotoma · distinctive brand territory:** Typed records, provenance, version history, disagreement and correction
+- **Convergence test:** Fail if proof becomes feature lists without product-truth mechanisms.
 
 ## Provenance and downstream use
 
@@ -157,8 +391,8 @@ This entity owns expression. Product capability and foundation truth remain in p
 
 Overall: **PROVISIONAL**
 
-- APPROVED · positioning
-- APPROVED · phrases
+- PROVISIONAL · positioning
+- PROVISIONAL · phrases
 - APPROVED · terminology
 - APPROVED · voice
 - APPROVED · visual_style
@@ -166,9 +400,22 @@ Overall: **PROVISIONAL**
 - PROVISIONAL · cinematic_production
 - APPROVED · provenance
 - PROVISIONAL · downstream_contracts
+- PROVISIONAL · brand_intent
+- PROVISIONAL · logo_system
+- PROVISIONAL · typography_system
+- PROVISIONAL · research_provenance
+- APPROVED · accessibility
+- PROVISIONAL · market_reference_ledger
+- PROVISIONAL · differentiation_matrix
 
 ### Missing
 
 - Graph-first cinematic hero and section master set
 - Repo-local public wordmark mirror or explicit cross-repo asset contract
 - Complete foundation-viewer asset production
+- Canonical clear-space and digital/print minimum-size measurements for the Neotoma wordmark
+- Approved symbol-only, lockup, horizontal, stacked, favicon and co-branding Neotoma assets
+- Final type weight/style inventory and owner-approved research cadence
+- Full category-to-aesthetic regeneration and operator approval
+- Current live aesthetic/UI benchmark with sampling rationale and captured evidence
+- Approved original aesthetic territory and contradiction audit

@@ -32,6 +32,45 @@ DEFAULT_GUIDELINE_ENTITY_IDS = {
 }
 KNOWN_PRODUCTS = tuple(DEFAULT_GUIDELINE_ENTITY_IDS)
 ALLOWED_STATUSES = {"approved", "provisional", "missing", "retired"}
+LOGO_VARIANTS = {
+    "primary_mark",
+    "wordmark",
+    "lockup",
+    "symbol_only",
+    "horizontal",
+    "stacked",
+    "monochrome",
+    "reversed",
+    "small_scale",
+    "favicon",
+    "application",
+}
+LOGO_RULES = {
+    "clear_space",
+    "minimum_size",
+    "background_rules",
+    "colorway_rules",
+    "co_branding",
+    "source_formats",
+    "export_formats",
+    "misuse_rules",
+}
+ACCESSIBILITY_CHECKS = {
+    "contrast",
+    "images_of_text",
+    "semantic_headings",
+    "relative_sizing",
+    "reduced_motion_static_equivalence",
+}
+DIFFERENTIATION_AXES = {
+    "category_language",
+    "symbol_metaphor",
+    "palette_materiality",
+    "typography",
+    "motion_cinematography",
+    "voice",
+    "proof_style",
+}
 REQUIRED_SECTIONS = (
     "name",
     "product",
@@ -92,20 +131,197 @@ def validate_brand_system(data: dict, schema: dict | None = None) -> None:
         raise BrandSystemError(f"unsupported product slug: {data.get('slug')!r}")
 
     positioning = data.get("positioning") or {}
-    expected_category = {
+    current_category_projection = {
         "ateles": "The operating system for agentic organizations.",
         "neotoma": "The system of record for AI agents.",
     }[data["slug"]]
-    if positioning.get("category") != expected_category:
+    if positioning.get("category") != current_category_projection:
         raise BrandSystemError(
-            f"{data['slug']} category drift: expected {expected_category!r}"
+            f"{data['slug']} category drift: expected current provisional projection "
+            f"{current_category_projection!r}"
         )
-    if positioning.get("hero_headline") != expected_category:
+    if positioning.get("hero_headline") != current_category_projection:
         raise BrandSystemError(
-            f"{data['slug']} hero headline must equal the settled category"
+            f"{data['slug']} hero headline must equal the current provisional "
+            "category projection"
+        )
+    intent = positioning.get("intent") or {}
+    required_intent = {
+        "status",
+        "core_idea",
+        "functional_truth",
+        "emotional_outcome",
+        "intended_perceptions",
+        "forbidden_perceptions",
+        "proof_cues",
+        "sibling_distinction",
+    }
+    if required_intent - set(intent):
+        raise BrandSystemError("brand intent is incomplete")
+
+    styles = data.get("visual_styles") or {}
+    logo = styles.get("logo_system") or {}
+    variants = logo.get("variants") or {}
+    if LOGO_VARIANTS - set(variants):
+        raise BrandSystemError("logo variants are incomplete")
+    if LOGO_RULES - set(logo):
+        raise BrandSystemError("logo rules are incomplete")
+    for key, variant in variants.items():
+        status = variant.get("status")
+        if status not in ALLOWED_STATUSES:
+            raise BrandSystemError(f"unrecognized logo status for {key!r}")
+        if status == "approved" and (
+            not variant.get("source_asset") or not variant.get("export_formats")
+        ):
+            raise BrandSystemError(
+                f"approved logo variant {key!r} needs a source asset and export"
+            )
+
+    typography = styles.get("typography_system") or {}
+    roles = typography.get("roles") or {}
+    if {"expressive", "productive", "technical"} - set(roles):
+        raise BrandSystemError("typography roles are incomplete")
+    if not typography.get("hierarchy") or not typography.get("weights_styles"):
+        raise BrandSystemError("typography hierarchy and weights/styles are required")
+    if {"sizing", "line_height", "measure", "casing"} - set(
+        typography.get("responsive") or {}
+    ):
+        raise BrandSystemError("typography responsive rules are incomplete")
+
+    accessibility = (data.get("production_specs") or {}).get("accessibility") or {}
+    if ACCESSIBILITY_CHECKS - set(accessibility):
+        raise BrandSystemError("accessibility requirements are incomplete")
+    for name, check in accessibility.items():
+        if check.get("status") not in ALLOWED_STATUSES or not check.get("requirement"):
+            raise BrandSystemError(f"accessibility check {name!r} is incomplete")
+    generation_gate = (data.get("production_specs") or {}).get("generation_gate") or {}
+    predicates = generation_gate.get("predicates") or []
+    if len(predicates) != 9:
+        raise BrandSystemError("cinematic generation gate must define all predicates")
+    if any(
+        item.get("status") not in {"approved", "provisional", "missing", "blocked"}
+        or not item.get("name")
+        or not item.get("evidence")
+        for item in predicates
+    ):
+        raise BrandSystemError("cinematic generation gate predicate is incomplete")
+    if generation_gate.get("generation_allowed") and (
+        generation_gate.get("status") != "approved"
+        or any(item["status"] != "approved" for item in predicates)
+        or generation_gate.get("unresolved")
+    ):
+        raise BrandSystemError("cinematic generation gate cannot fail open")
+
+    provenance = data.get("provenance") or {}
+    regeneration_gate = provenance.get("regeneration_gate") or {}
+    required_regeneration_fields = {
+        "status",
+        "reason",
+        "next_gate",
+        "task_id",
+        "skill_id",
+        "zero_category_definitions_verified",
+    }
+    if required_regeneration_fields - set(regeneration_gate):
+        raise BrandSystemError("brand regeneration gate is incomplete")
+    if regeneration_gate.get("status") == "blocked" and (
+        data.get("status") != "provisional"
+        or (data.get("completeness") or {}).get("overall_status") != "provisional"
+        or generation_gate.get("generation_allowed")
+    ):
+        raise BrandSystemError(
+            "blocked brand regeneration cannot present an approved or generation-ready baseline"
+        )
+    if regeneration_gate.get("status") == "blocked":
+        dimension_statuses = {
+            item.get("name"): item.get("status")
+            for item in (data.get("completeness") or {}).get("dimensions") or []
+        }
+        if any(
+            dimension_statuses.get(name) != "provisional"
+            for name in ("positioning", "phrases")
+        ):
+            raise BrandSystemError(
+                "blocked brand regeneration must mark positioning and phrases provisional"
+            )
+        category_phrase = next(
+            (
+                item
+                for item in data.get("phrases") or []
+                if item.get("name") == current_category_projection
+            ),
+            None,
+        )
+        if not category_phrase or category_phrase.get("status") != "provisional":
+            raise BrandSystemError(
+                "blocked brand regeneration must keep the category phrase provisional"
+            )
+    research = provenance.get("research") or {}
+    if not research.get("reviewed_at") or not research.get("sources"):
+        raise BrandSystemError("research provenance is incomplete")
+    cadence = research.get("review_cadence") or {}
+    if not cadence.get("cadence") or cadence.get("status") not in ALLOWED_STATUSES:
+        raise BrandSystemError("research review cadence is incomplete")
+
+    market_references = provenance.get("market_reference_ledger") or []
+    if not market_references:
+        raise BrandSystemError("market-reference learning ledger is empty")
+    for item in market_references:
+        name = item.get("referenced_product") or "unnamed reference"
+        evidence = item.get("evidence") or {}
+        if not str(evidence.get("source") or "").strip():
+            raise BrandSystemError(f"market reference {name!r} has no evidence source")
+        observation = str(item.get("observed_fact") or "").strip()
+        inference = str(item.get("derived_learning") or "").strip()
+        if not observation or not inference or observation == inference:
+            raise BrandSystemError(
+                f"market reference {name!r} must separate observation and inference"
+            )
+        if not inference.startswith("Inference:"):
+            raise BrandSystemError(
+                f"market reference {name!r} must explicitly label its inference"
+            )
+        for key in (
+            "best_practices_to_adopt",
+            "bad_practices_to_avoid",
+        ):
+            if not item.get(key):
+                raise BrandSystemError(f"market reference {name!r} lacks {key}")
+        if not item.get("differentiation_implication"):
+            raise BrandSystemError(
+                f"market reference {name!r} lacks a distinctiveness test"
+            )
+        if item.get("status") == "approved" and not evidence.get("observed_at"):
+            raise BrandSystemError(f"approved market reference {name!r} is undated")
+        if item.get("status") == "approved" and item.get("support") == "gap":
+            raise BrandSystemError(f"approved market reference {name!r} is unsupported")
+        if item.get("visibility") not in {
+            "public_safe",
+            "internal_review",
+            "confidential",
+        }:
+            raise BrandSystemError(f"market reference {name!r} lacks visibility")
+        if item.get("visibility") == "public_safe" and str(
+            evidence.get("source")
+        ).startswith("ent_"):
+            raise BrandSystemError(
+                f"public market reference {name!r} exposes an internal identifier"
+            )
+
+    matrix = provenance.get("differentiation_matrix") or {}
+    rows = matrix.get("axes") or []
+    if {row.get("axis") for row in rows} != DIFFERENTIATION_AXES:
+        raise BrandSystemError("differentiation matrix must cover all seven axes")
+    territory_key = f"{data['slug']}_territory"
+    distinctive = sum(
+        row.get(territory_key) == "distinctive_brand_territory" for row in rows
+    )
+    if distinctive < 4:
+        raise BrandSystemError(
+            "brand needs several product-grounded distinctiveness choices"
         )
 
-    boundary = str((data.get("provenance") or {}).get("boundary") or "")
+    boundary = str(provenance.get("boundary") or "")
     for phrase in ("This entity owns expression", "generated mirrors", "viewer"):
         if phrase.casefold() not in boundary.casefold():
             raise BrandSystemError(f"source boundary is missing {phrase!r}")
@@ -207,6 +423,10 @@ def render_markdown(contract: dict) -> str:
     styles = contract["visual_styles"]
     production = contract["production_specs"]
     completeness = contract["completeness"]
+    intent = positioning["intent"]
+    logo = styles["logo_system"]
+    typography = styles["typography_system"]
+    provenance = contract["provenance"]
     lines = [
         "<!-- GENERATED by execution/scripts/site_generator/render_brand_systems.py; DO NOT EDIT. -->",
         "---",
@@ -229,12 +449,38 @@ def render_markdown(contract: dict) -> str:
             "",
             "> Neotoma is canonical. This document is a generated human mirror; correct the source entity and rerun the renderer rather than editing this file.",
             "",
+            "## Review status",
+            "",
+            f"- **State:** {_status(provenance['regeneration_gate']['status'])}",
+            f"- **Why:** {provenance['regeneration_gate']['reason']}",
+            f"- **Next gate:** {provenance['regeneration_gate']['next_gate']}",
+            "- **Rule:** This provisional evidence is not an approved brand baseline. No page or film may treat it as final until category and brand approval are complete.",
+            "",
             "## Positioning",
             "",
             f"- **Category:** {positioning['category']}",
             f"- **Hero support:** {positioning['hero_support']}",
             f"- **Product promise:** {positioning['product_promise']}",
             f"- **Audience:** {positioning['audience']}",
+            "",
+            "## Brand intent",
+            "",
+            f"- **Core idea:** {intent['core_idea']}",
+            f"- **Functional truth:** {intent['functional_truth']}",
+            f"- **Emotional outcome:** {intent['emotional_outcome']}",
+            f"- **Sibling distinction:** {intent['sibling_distinction']}",
+            "",
+            "### Intended perceptions",
+            "",
+            *_bullets(intent.get("intended_perceptions") or []),
+            "",
+            "### Forbidden perceptions",
+            "",
+            *_bullets(intent.get("forbidden_perceptions") or []),
+            "",
+            "### Proof cues",
+            "",
+            *_bullets(intent.get("proof_cues") or []),
             "",
             "## Voice and copy",
             "",
@@ -292,6 +538,56 @@ def render_markdown(contract: dict) -> str:
         lines.append(
             f"- **{_status(item['status'])} · {item['name']}:** {item['guidance']}"
         )
+    lines.extend(["", "## Logo system", ""])
+    for key, item in logo["variants"].items():
+        source_asset = item.get("source_asset") or "not produced"
+        exports = ", ".join(item.get("export_formats") or []) or "not produced"
+        lines.append(
+            f"- **{_status(item['status'])} · {key.replace('_', ' ')} — {item['name']}:** "
+            f"{item['use']} (source: `{source_asset}`; exports: {exports})"
+        )
+    lines.extend(
+        [
+            "",
+            f"- **Clear space · {_status(logo['clear_space']['status'])}:** {logo['clear_space']['guidance']}",
+            f"- **Minimum size · {_status(logo['minimum_size']['status'])}:** {logo['minimum_size']['guidance']}",
+            f"- **Backgrounds · {_status(logo['background_rules']['status'])}:** {logo['background_rules']['guidance']}",
+            f"- **Colorways · {_status(logo['colorway_rules']['status'])}:** {logo['colorway_rules']['guidance']}",
+            f"- **Co-branding · {_status(logo['co_branding']['status'])}:** {logo['co_branding']['guidance']}",
+            "",
+            "### Logo misuse",
+            "",
+            *_bullets(logo.get("misuse_rules") or []),
+            "",
+            "## Typography system",
+            "",
+        ]
+    )
+    for key, role in typography["roles"].items():
+        lines.append(
+            f"- **{_status(role['status'])} · {key}:** {role['name']} — {role['use']}"
+        )
+    lines.extend(["", "### Hierarchy and tokens", ""])
+    for item in typography["hierarchy"]:
+        lines.append(
+            f"- **{_status(item['status'])} · {item['token']}:** {item['family']}; "
+            f"{item['size']}; line-height {item['line_height']}; measure {item['measure']}; {item['casing']}"
+        )
+    lines.extend(
+        [
+            "",
+            "### Responsive rules",
+            "",
+            f"- **Sizing:** {typography['responsive']['sizing']}",
+            f"- **Line height:** {typography['responsive']['line_height']}",
+            f"- **Measure:** {typography['responsive']['measure']}",
+            f"- **Casing:** {typography['responsive']['casing']}",
+            "",
+            "### Forbidden typography",
+            "",
+            *_bullets(typography.get("forbidden_use") or []),
+        ]
+    )
     lines.extend(["", "## Asset inventory", ""])
     for item in contract["asset_inventory"]:
         repository = item.get("repository_path") or "not produced"
@@ -309,13 +605,87 @@ def render_markdown(contract: dict) -> str:
             f"- **Responsive:** {production['delivery']['responsive']}",
             f"- **Reduced motion:** {production['still_and_reduced_motion']['requirement']}",
             "",
+            "### Cinematic generation gate",
+            "",
+            f"- **State:** {_status(production['generation_gate']['status'])}",
+            f"- **Generation allowed:** {str(production['generation_gate']['generation_allowed']).lower()}",
+            f"- **Rule:** {production['generation_gate']['rule']}",
+            "",
+        ]
+    )
+    for item in production["generation_gate"]["predicates"]:
+        lines.append(
+            f"- **{_status(item['status'])} · {item['name'].replace('_', ' ')}:** {item['evidence']}"
+        )
+    lines.extend(
+        [
+            "",
             "### Cinematic prohibitions",
             "",
             *_bullets(production["cinematic"].get("prohibitions") or []),
             "",
+            "## Accessibility",
+            "",
+        ]
+    )
+    for name, check in production["accessibility"].items():
+        lines.append(
+            f"- **{_status(check['status'])} · {name.replace('_', ' ')}:** {check['requirement']}"
+        )
+    lines.extend(
+        [
+            "",
+            "## Research provenance and review",
+            "",
+            f"- **Reviewed:** {provenance['research']['reviewed_at']}",
+            f"- **Cadence · {_status(provenance['research']['review_cadence']['status'])}:** {provenance['research']['review_cadence']['cadence']}",
+            "",
+        ]
+    )
+    for item in provenance["research"]["sources"]:
+        lines.append(
+            f"- [{item['label']}]({item['url']}) — {item['informs']} ({item['checked_at']})"
+        )
+    lines.extend(["", "## Market-reference learning ledger", ""])
+    for item in provenance["market_reference_ledger"]:
+        evidence = item["evidence"]
+        source_value = evidence["source"]
+        source_label = (
+            f"[{source_value}]({source_value})"
+            if source_value.startswith("https://")
+            else f"`{source_value}`"
+        )
+        lines.extend(
+            [
+                f"### {item['referenced_product']} · {item['relationship']}",
+                "",
+                f"- **State:** {_status(item['status'])}; {item['confidence']} confidence; {item['territory'].replace('_', ' ')}; {item['visibility']}",
+                f"- **Evidence:** {source_label} ({evidence['observed_at']})",
+                f"- **Observed fact:** {item['observed_fact']}",
+                f"- **Derived learning:** {item['derived_learning']}",
+                f"- **Best practice to adopt:** {'; '.join(item['best_practices_to_adopt'])}",
+                f"- **Bad practice to avoid:** {'; '.join(item['bad_practices_to_avoid'])}",
+                f"- **Differentiation implication:** {item['differentiation_implication']}",
+                "",
+            ]
+        )
+    lines.extend(["## Cross-product differentiation matrix", ""])
+    for item in provenance["differentiation_matrix"]["axes"]:
+        lines.extend(
+            [
+                f"### {item['axis'].replace('_', ' ')}",
+                "",
+                f"- **Ateles · {item['ateles_territory'].replace('_', ' ')}:** {item['ateles']}",
+                f"- **Neotoma · {item['neotoma_territory'].replace('_', ' ')}:** {item['neotoma']}",
+                f"- **Convergence test:** {item['convergence_test']}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
             "## Provenance and downstream use",
             "",
-            f"{contract['provenance']['boundary']}",
+            f"{provenance['boundary']}",
             "",
         ]
     )
@@ -340,7 +710,7 @@ def render_markdown(contract: dict) -> str:
 
 def _schema_document(snapshot: dict) -> dict:
     schema = _as_json_object(snapshot.get("content"), "schema content")
-    if schema.get("$id") != "urn:ateles:brand-system:1.0.0":
+    if schema.get("$id") != "urn:ateles:brand-system:1.1.0":
         raise BrandSystemError("unexpected brand schema identifier")
     return schema
 

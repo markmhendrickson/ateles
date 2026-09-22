@@ -7,24 +7,24 @@ source_entity_id: ent_bada69d5cbb1f27bf82bb86b
 schema_entity_id: ent_73da44b2d434cbafe5d8ecb9
 observation_ids:
   asset_inventory: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
-  completeness: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
+  completeness: e132f7d7-b83e-190c-c9c1-c07c009a1abd
   downstream_contracts: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
   name: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
   ownership: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
-  phrases: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
-  positioning: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
+  phrases: 6415e511-9755-aa96-ca67-a77da3d26f7a
+  positioning: 9a5bd8d2-1d6a-a389-c527-db3bc197218a
   product: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
-  production_specs: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
-  provenance: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
+  production_specs: eb38f955-8867-8a83-bb3d-9a53b6d1484a
+  provenance: 084f41bb-451f-4d26-a2d4-4cf493688b7c
   schema_version: unknown
   scope: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
   slug: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
   status: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
   terminology: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
-  updated_at: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
+  updated_at: 48f5b97b-6fe4-5f4d-0a28-a95305fc9c8e
   visibility: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
   visual_concepts: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
-  visual_styles: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
+  visual_styles: bb943b7c-a125-7855-7d57-46f332898e19
   voice: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
 ---
 
@@ -32,12 +32,48 @@ observation_ids:
 
 > Neotoma is canonical. This document is a generated human mirror; correct the source entity and rerun the renderer rather than editing this file.
 
+## Review status
+
+- **State:** BLOCKED
+- **Why:** The expanded guide is preserved as provisional evidence and hypotheses. It is not an approved baseline until category, argument, current competitive and aesthetic research, one original territory, and operator approval are complete.
+- **Next gate:** Operator chooses the category noun after the define-category review artifacts are presented.
+- **Rule:** This provisional evidence is not an approved brand baseline. No page or film may treat it as final until category and brand approval are complete.
+
 ## Positioning
 
 - **Category:** The operating system for agentic organizations.
 - **Hero support:** Give agents distinct roles, bounded authority, and shared direction—so the organization keeps moving without constant supervision.
 - **Product promise:** A standing agentic organization that can keep coordinated work moving without constant supervision.
 - **Audience:** Operators delegating consequential work to multiple AI agents while retaining explicit authority, priorities, escalation, and accountability.
+
+## Brand intent
+
+- **Core idea:** A swarm becomes an organization without surrendering member identity and judgement.
+- **Functional truth:** Distinct agent roles coordinate through bounded authority, accountable claims, temporary handoffs, escalation and mission-to-task structure.
+- **Emotional outcome:** Confident delegation without constant supervision.
+- **Sibling distinction:** Ateles governs who can act and how work is coordinated; Neotoma preserves what is true.
+
+### Intended perceptions
+
+- Standing agentic organization
+- Distinct responsible roles
+- Coordinated autonomy
+- Governed accountable motion
+
+### Forbidden perceptions
+
+- Generic orchestration
+- Central controller
+- Anonymous neural mesh
+- Literal hive or insects
+- Seal as brand
+
+### Proof cues
+
+- Distinct roles and shapes
+- Temporary signals and handoffs
+- Bounded local checkpoint
+- Visible purpose, authority and accountability
 
 ## Voice and copy
 
@@ -73,8 +109,8 @@ observation_ids:
 
 ## Phrases
 
-- **APPROVED:** The operating system for agentic organizations. — Exact outward category and hero headline; keep the definite article. (source: ent_f79f82c13b90a9d6439623db)
-- **APPROVED:** Give agents distinct roles, bounded authority, and shared direction—so the organization keeps moving without constant supervision. — Hero support; use once near the category headline. (source: ent_c1fe64b279327d7882c39571)
+- **PROVISIONAL:** The operating system for agentic organizations. — Exact outward category and hero headline; keep the definite article. (source: ent_f79f82c13b90a9d6439623db)
+- **PROVISIONAL:** Give agents distinct roles, bounded authority, and shared direction—so the organization keeps moving without constant supervision. — Hero support; use once near the category headline. (source: ent_c1fe64b279327d7882c39571)
 - **APPROVED:** Delegate outcomes, not every next step. — Section-level mechanism principle only; do not repeat in the hero. (source: ent_c1fe64b279327d7882c39571)
 - **PROVISIONAL:** Agents are cheap. Organizations are not. — Editorial framing, not category or hero headline. (source: ent_9444da0c7dea895c182fe098)
 - **RETIRED:** The distributed-authority operating layer for governed initiative. — Superseded category; must fail public-copy validation. (source: operator decision)
@@ -120,6 +156,59 @@ observation_ids:
 - **APPROVED · Mission-to-task priority inheritance:** Show purpose narrowing into current work without turning the organization into a permanent graph.
 - **MISSING · Swarm-first cinematic replacement:** Required primary film must preserve edge-free swarm semantics.
 
+## Logo system
+
+- **PROVISIONAL · primary mark — Abstract swarm mark:** Primary compact identity. (source: `execution/scripts/site_generator/templates/render.py#_brand_mark`; exports: not produced)
+- **PROVISIONAL · wordmark — Ateles wordmark:** Named identity. (source: `not produced`; exports: not produced)
+- **PROVISIONAL · lockup — Swarm + wordmark lockup:** Navigation identity; spacing measurement remains missing. (source: `not produced`; exports: not produced)
+- **PROVISIONAL · symbol only — Abstract swarm symbol:** Compact use after small-scale review. (source: `not produced`; exports: not produced)
+- **MISSING · horizontal — Horizontal lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
+- **MISSING · stacked — Stacked lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
+- **MISSING · monochrome — Monochrome variant:** One-color reproduction. (source: `not produced`; exports: not produced)
+- **MISSING · reversed — Reversed variant:** Dark or photographic fields. (source: `not produced`; exports: not produced)
+- **PROVISIONAL · small scale — Small-scale variant:** Requires tested legibility threshold. (source: `not produced`; exports: not produced)
+- **MISSING · favicon — Favicon:** Required before this placement is approved. (source: `not produced`; exports: not produced)
+- **PROVISIONAL · application — Application mark:** Align current application mark with the edge-free swarm. (source: `not produced`; exports: not produced)
+
+- **Clear space · MISSING:** Define and test an exclusion zone from final geometry; no product measurement is approved.
+- **Minimum size · MISSING:** Test final exports; no numerical threshold is approved.
+- **Backgrounds · PROVISIONAL:** Use calm warm-paper or deep-ink fields; avoid busy imagery.
+- **Colorways · PROVISIONAL:** Rust may coordinate; grant green is reserved for authorization state.
+- **Co-branding · MISSING:** Define peer-brand spacing, hierarchy, dividers and approval before use.
+
+### Logo misuse
+
+- Do not stretch, rotate, crop, mask, outline, shadow or redraw the mark.
+- Do not add permanent edges, a central hub, literal insects, honeycomb or the seal as primary symbol.
+- Never approve a variant without a traceable source asset and reviewed export.
+
+## Typography system
+
+- **APPROVED · expressive:** Space Grotesk — Purpose and organization statements.
+- **APPROVED · productive:** Source Sans 3 — Body, navigation and sustained reading.
+- **APPROVED · technical:** IBM Plex Mono — Short role, scope, handoff and status labels.
+
+### Hierarchy and tokens
+
+- **PROVISIONAL · display:** expressive; clamp(2.8rem, 7vw, 5.8rem); line-height 0.98; measure 13ch; sentence case
+- **PROVISIONAL · section_heading:** expressive; clamp(2rem, 4vw, 3.6rem); line-height 1.02; measure 18ch; sentence case
+- **PROVISIONAL · body:** productive; 16px base; line-height 1.62; measure target 60–70 characters; sentence case
+- **PROVISIONAL · label:** technical; 0.72rem reference; line-height normal; measure short labels only; uppercase only for brief state labels
+
+### Responsive rules
+
+- **Sizing:** Use rem-based clamp scales and preserve reflow.
+- **Line height:** Generous for body; tight display leading only when legible.
+- **Measure:** Target 60–70 characters and never exceed 80 without review.
+- **Casing:** Sentence case; uppercase only for short tracked labels.
+
+### Forbidden typography
+
+- No body copy as images.
+- No sustained all-caps prose.
+- No unlicensed or unrecorded typefaces.
+- No internal scope syntax, IDs, decision keys or phases.
+
 ## Asset inventory
 
 - **APPROVED · Public-site swarm mark** (symbol): Navigation and small identity placements — `execution/scripts/site_generator/templates/render.py`
@@ -138,6 +227,22 @@ observation_ids:
 - **Responsive:** Provide 16:9 desktop and art-directed 9:16 mobile crops without losing the semantic beat.
 - **Reduced motion:** The poster and reduced-motion state must communicate the complete adjacent claim without relying on movement.
 
+### Cinematic generation gate
+
+- **State:** BLOCKED
+- **Generation allowed:** false
+- **Rule:** Do not submit, regenerate, or resume cinematic media production until every predicate is approved and read back from the canonical records. Final logo exports may remain a separate asset task only when no logo appears in-frame.
+
+- **BLOCKED · brand intent:** Current intent is a provisional hypothesis pending full-chain regeneration.
+- **BLOCKED · copy system:** No category_definition exists; current category language is a candidate until the operator reviews the define-category artifact.
+- **PROVISIONAL · symbol and logo for film:** Symbol and metaphor are approved; final exported logo variants are not required in-frame, but film-facing logo application rules still await final approval.
+- **BLOCKED · palette materiality typography:** Palette and materiality are approved; the expanded typography weight/style system remains provisional.
+- **BLOCKED · motion cinematography:** Current cinematic grammar is provisional pending the approved original aesthetic territory.
+- **APPROVED · accessibility static equivalence:** Contrast, semantic text, reduced-motion and static-equivalence rules are approved.
+- **BLOCKED · market learning and differentiation:** Current ledger and differentiation matrix are provisional seeds pending live aesthetic/UI benchmarking.
+- **BLOCKED · section copy to visual matrix:** The section-by-section production matrix exists in the cinematic task but remains under operator review.
+- **BLOCKED · brand brief consistency:** A final contradiction audit between the brand guide and page production brief has not yet been recorded as clear.
+
 ### Cinematic prohibitions
 
 - permanent edges
@@ -146,6 +251,135 @@ observation_ids:
 - literal insects, monkeys, spiders, robots, hives, or honeycomb
 - seal as hero or logo
 - generated text or UI
+
+## Accessibility
+
+- **APPROVED · contrast:** Meet WCAG contrast for text and meaningful graphics in every approved colorway; media copy needs a tested safe field.
+- **APPROVED · images of text:** Use semantic text; only essential logotypes may be images of text and need accessible names.
+- **APPROVED · semantic headings:** Use one H1 and ordered semantic headings; size never substitutes for level.
+- **APPROVED · relative sizing:** Use relative responsive sizing and preserve resize/reflow without two-dimensional page scrolling.
+- **APPROVED · reduced motion static equivalence:** Honor reduced motion and provide a static state carrying every meaning expressed by motion.
+
+## Research provenance and review
+
+- **Reviewed:** 2026-09-22
+- **Cadence · PROVISIONAL:** Quarterly review proposed; exact cadence awaits owner approval.
+
+- [OpenAI Design Guidelines](https://openai.com/brand/) — clear space, approved variants, misuse and co-branding (2026-09-22)
+- [UK Space Agency branding guidelines](https://www.gov.uk/government/publications/uk-space-agency-communications-resources/branding-guidelines) — exclusion zones, minimum sizes, backgrounds, co-branding and readable line length (2026-09-22)
+- [Atlassian design foundations](https://atlassian.design/foundations) — tokens as source of truth and accessible logo, typography and motion foundations (2026-09-22)
+- [IBM Carbon typography](https://carbondesignsystem.com/elements/typography/style-strategies/) — productive and expressive type roles (2026-09-22)
+- [IBM Carbon motion](https://carbondesignsystem.com/elements/motion/overview/) — purposeful productive and expressive motion (2026-09-22)
+- [W3C WCAG 2.1](https://www.w3.org/TR/WCAG21/) — contrast, images of text, relative sizing and reflow (2026-09-22)
+- [W3C accessibility principles](https://www.w3.org/WAI/fundamentals/accessibility-principles/) — static alternatives and perceivable content (2026-09-22)
+- [Mailchimp brand style guide](https://mailchimp.com/resources/tips-to-create-your-brands-style-guide/) — vision, audience, personality, values and a living guide (2026-09-22)
+- [Mailchimp voice and tone](https://styleguide.mailchimp.com/voice-and-tone/) — stable voice with context-dependent tone (2026-09-22)
+
+## Market-reference learning ledger
+
+### LangGraph · competitor
+
+- **State:** PROVISIONAL; high confidence; distinctive brand territory; public_safe
+- **Evidence:** [https://docs.langchain.com/oss/python/langgraph/persistence](https://docs.langchain.com/oss/python/langgraph/persistence) (2026-09-21)
+- **Observed fact:** Persists graph execution state and routes work through graph topology.
+- **Derived learning:** Inference: Persistence and routing do not alone express a standing accountable organization.
+- **Best practice to adopt:** Use explicit durable state and inspectable transitions.
+- **Bad practice to avoid:** Do not make a graph scheduler the organization.
+- **Differentiation implication:** Ateles must add roles, bounded authority, claims and accountability rather than resemble orchestration.
+
+### CrewAI · competitor
+
+- **State:** PROVISIONAL; high confidence; distinctive brand territory; public_safe
+- **Evidence:** [https://docs.crewai.com/en/concepts/memory](https://docs.crewai.com/en/concepts/memory) (2026-09-21)
+- **Observed fact:** Presents crews, agents, tasks and unified memory inside centrally executed workflows.
+- **Derived learning:** Inference: A crew metaphor can still read as centrally pushed execution.
+- **Best practice to adopt:** Make roles and responsibilities understandable.
+- **Bad practice to avoid:** Avoid manager-centric delegation and generic team-of-agents theater.
+- **Differentiation implication:** The swarm must show autonomous members, accountable claims and temporary handoffs.
+
+### AutoGen · competitor
+
+- **State:** PROVISIONAL; high confidence; distinctive brand territory; public_safe
+- **Evidence:** [https://microsoft.github.io/autogen/stable//user-guide/agentchat-user-guide/tutorial/state.html](https://microsoft.github.io/autogen/stable//user-guide/agentchat-user-guide/tutorial/state.html) (2026-09-21)
+- **Observed fact:** Documents serializable agent/team state and manager-selected speakers.
+- **Derived learning:** Inference: Recoverable conversation state is not a standing organization.
+- **Best practice to adopt:** Preserve continuity and clear actor roles.
+- **Bad practice to avoid:** Avoid chat bubbles, speaker rings and central selectors.
+- **Differentiation implication:** Center mission-to-task authority and accountability, not conversation routing.
+
+### Claude Projects · adjacent_benchmark
+
+- **State:** PROVISIONAL; high confidence; adapted convention; public_safe
+- **Evidence:** `docs/positioning/ateles/incumbent-and-competitor-test.md` (2026-09-21)
+- **Observed fact:** Provides persistent workspace context and operator-directed sessions.
+- **Derived learning:** Inference: Context continuity does not by itself establish distinct principals or pull-based claims.
+- **Best practice to adopt:** Keep durable context available to work.
+- **Bad practice to avoid:** Avoid project folders or one assistant persona as the organization.
+- **Differentiation implication:** Make identity, authority and work ownership visible.
+
+### ChatGPT Work and Codex subagents · adjacent_benchmark
+
+- **State:** PROVISIONAL; high confidence; distinctive brand territory; public_safe
+- **Evidence:** [https://learn.chatgpt.com/codex/agent-configuration/subagents](https://learn.chatgpt.com/codex/agent-configuration/subagents) (2026-09-21)
+- **Observed fact:** A parent selects and spawns configured subagents.
+- **Derived learning:** Inference: Delegated subagents differ from independently eligible members claiming leased work.
+- **Best practice to adopt:** Use named roles to clarify specialization.
+- **Bad practice to avoid:** Avoid parent-and-workers hub-and-spoke imagery.
+- **Differentiation implication:** Show autonomy through fitness, claims, leases and accountable continuation.
+
+### Grok Bot · adjacent_benchmark
+
+- **State:** PROVISIONAL; high confidence; distinctive brand territory; public_safe
+- **Evidence:** [https://docs.x.ai/grok-bot/security](https://docs.x.ai/grok-bot/security) (2026-09-21)
+- **Observed fact:** Bots act as the signed-in member rather than holding independent identity and credentials.
+- **Derived learning:** Inference: Independent principals provide a meaningful authority distinction.
+- **Best practice to adopt:** Make attribution clear.
+- **Bad practice to avoid:** Avoid shared-bearer or anonymous-assistant identity.
+- **Differentiation implication:** Identity and bounded authority are visible brand structure.
+
+## Cross-product differentiation matrix
+
+### category language
+
+- **Ateles · distinctive brand territory:** Operating system for agentic organizations
+- **Neotoma · distinctive brand territory:** System of record for AI agents
+- **Convergence test:** Fail if both collapse into generic agent infrastructure.
+
+### symbol metaphor
+
+- **Ateles · distinctive brand territory:** Edge-free swarm with temporary handoffs
+- **Neotoma · distinctive brand territory:** Persistent typed record graph
+- **Convergence test:** Fail if Ateles gains permanent edges or Neotoma loses durable relationships.
+
+### palette materiality
+
+- **Ateles · adapted convention:** Warm paper, rust signals, restrained grant green; ceramic and metal
+- **Neotoma · distinctive brand territory:** Archival paper, teal continuity, amber correction; vellum, glass and mineral record tiles
+- **Convergence test:** Fail if both become generic dark AI glow or share one accent logic.
+
+### typography
+
+- **Ateles · adapted convention:** Geometric expressive headings, humanist productive body, operational mono labels
+- **Neotoma · adapted convention:** Editorial serif headings, neutral productive body, provenance mono labels
+- **Convergence test:** Fail if type roles or examples become interchangeable.
+
+### motion cinematography
+
+- **Ateles · distinctive brand territory:** Autonomous members align, signal, hand off, pause locally and continue
+- **Neotoma · distinctive brand territory:** Graph remains registered while create, retrieve and update change state with history intact
+- **Convergence test:** Fail if both read as a permanent network or generic node pulses.
+
+### voice
+
+- **Ateles · distinctive brand territory:** Organizational, decisive, bounded and forward-moving
+- **Neotoma · distinctive brand territory:** Precise, calm, durable and epistemically honest
+- **Convergence test:** Fail if either adopts generic AI optimism or interchangeable infrastructure prose.
+
+### proof style
+
+- **Ateles · distinctive brand territory:** Roles, authority, claim/lease, escalation and accountable continuation
+- **Neotoma · distinctive brand territory:** Typed records, provenance, version history, disagreement and correction
+- **Convergence test:** Fail if proof becomes feature lists without product-truth mechanisms.
 
 ## Provenance and downstream use
 
@@ -162,8 +396,8 @@ This entity owns expression. Product capability and roadmap truth remain in prod
 
 Overall: **PROVISIONAL**
 
-- APPROVED · positioning
-- APPROVED · phrases
+- PROVISIONAL · positioning
+- PROVISIONAL · phrases
 - APPROVED · terminology
 - APPROVED · voice
 - APPROVED · visual_style
@@ -171,9 +405,22 @@ Overall: **PROVISIONAL**
 - PROVISIONAL · cinematic_production
 - APPROVED · provenance
 - PROVISIONAL · downstream_contracts
+- PROVISIONAL · brand_intent
+- PROVISIONAL · logo_system
+- PROVISIONAL · typography_system
+- PROVISIONAL · research_provenance
+- APPROVED · accessibility
+- PROVISIONAL · market_reference_ledger
+- PROVISIONAL · differentiation_matrix
 
 ### Missing
 
 - Swarm-first cinematic hero and section master set
 - Application core-and-satellites mark alignment
 - Complete foundation-viewer asset production
+- Canonical clear-space and digital/print minimum-size measurements for final Ateles exports
+- Approved horizontal, stacked, monochrome, reversed, favicon and co-branding Ateles assets
+- Final type weight/style inventory and owner-approved research cadence
+- Full category-to-aesthetic regeneration and operator approval
+- Current live aesthetic/UI benchmark with sampling rationale and captured evidence
+- Approved original aesthetic territory and contradiction audit

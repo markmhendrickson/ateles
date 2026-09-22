@@ -33,16 +33,26 @@ def test_checked_in_contracts_validate_and_render_complete_human_mirrors(
     renderer.validate_brand_system(contract, schema)
     document = renderer.render_markdown(contract)
     for heading in (
+        "## Review status",
         "## Positioning",
+        "## Brand intent",
         "## Voice and copy",
         "## Visual system",
+        "## Logo system",
+        "## Typography system",
         "## Asset inventory",
         "## Production contract",
+        "### Cinematic generation gate",
+        "## Accessibility",
+        "## Research provenance and review",
+        "## Market-reference learning ledger",
+        "## Cross-product differentiation matrix",
         "## Provenance and downstream use",
         "## Completeness",
     ):
         assert heading in document
     assert "Neotoma is canonical" in document
+    assert "not an approved brand baseline" in document
     assert "/Users/" not in document
 
 
@@ -97,6 +107,137 @@ def test_validator_rejects_known_positive_neotoma_symbol_and_copy_drift(schema):
     )
     with pytest.raises(renderer.BrandSystemError, match="persistent record graph"):
         renderer.validate_brand_system(transient, schema)
+
+
+def test_validator_rejects_missing_brand_intent(schema, contract):
+    broken = copy.deepcopy(contract)
+    broken["positioning"].pop("intent")
+    with pytest.raises(renderer.BrandSystemError, match="brand intent"):
+        renderer.validate_brand_system(broken, schema)
+
+
+def test_validator_rejects_missing_logo_variant_and_rule(schema, contract):
+    broken = copy.deepcopy(contract)
+    broken["visual_styles"]["logo_system"]["variants"].pop("favicon")
+    with pytest.raises(renderer.BrandSystemError, match="logo variants"):
+        renderer.validate_brand_system(broken, schema)
+
+    broken = copy.deepcopy(contract)
+    broken["visual_styles"]["logo_system"].pop("clear_space")
+    with pytest.raises(renderer.BrandSystemError, match="logo rules"):
+        renderer.validate_brand_system(broken, schema)
+
+
+def test_validator_rejects_invented_logo_approval(schema, contract):
+    broken = copy.deepcopy(contract)
+    broken["visual_styles"]["logo_system"]["variants"]["favicon"].update(
+        status="approved", source_asset=None
+    )
+    with pytest.raises(renderer.BrandSystemError, match="approved logo variant"):
+        renderer.validate_brand_system(broken, schema)
+
+
+def test_validator_rejects_typography_role_gap(schema, contract):
+    broken = copy.deepcopy(contract)
+    broken["visual_styles"]["typography_system"]["roles"].pop("productive")
+    with pytest.raises(renderer.BrandSystemError, match="typography roles"):
+        renderer.validate_brand_system(broken, schema)
+
+
+def test_validator_rejects_accessibility_gap(schema, contract):
+    broken = copy.deepcopy(contract)
+    broken["production_specs"]["accessibility"].pop("images_of_text")
+    with pytest.raises(renderer.BrandSystemError, match="accessibility"):
+        renderer.validate_brand_system(broken, schema)
+
+
+def test_validator_rejects_fail_open_cinematic_generation_gate(schema, contract):
+    broken = copy.deepcopy(contract)
+    broken["production_specs"]["generation_gate"]["generation_allowed"] = True
+    with pytest.raises(renderer.BrandSystemError, match="cannot fail open"):
+        renderer.validate_brand_system(broken, schema)
+
+
+def test_validator_rejects_missing_or_misrepresented_regeneration_gate(
+    schema, contract
+):
+    broken = copy.deepcopy(contract)
+    broken["provenance"].pop("regeneration_gate")
+    with pytest.raises(renderer.BrandSystemError, match="regeneration gate"):
+        renderer.validate_brand_system(broken, schema)
+
+    broken = copy.deepcopy(contract)
+    broken["status"] = "approved"
+    with pytest.raises(renderer.BrandSystemError, match="approved or generation-ready"):
+        renderer.validate_brand_system(broken, schema)
+
+    broken = copy.deepcopy(contract)
+    broken["completeness"]["overall_status"] = "approved"
+    with pytest.raises(renderer.BrandSystemError, match="approved or generation-ready"):
+        renderer.validate_brand_system(broken, schema)
+
+    broken = copy.deepcopy(contract)
+    next(
+        item
+        for item in broken["completeness"]["dimensions"]
+        if item["name"] == "positioning"
+    )["status"] = "approved"
+    with pytest.raises(renderer.BrandSystemError, match="positioning and phrases"):
+        renderer.validate_brand_system(broken, schema)
+
+    broken = copy.deepcopy(contract)
+    category = broken["positioning"]["category"]
+    next(item for item in broken["phrases"] if item["name"] == category)[
+        "status"
+    ] = "approved"
+    with pytest.raises(renderer.BrandSystemError, match="category phrase provisional"):
+        renderer.validate_brand_system(broken, schema)
+
+
+def test_validator_rejects_market_reference_evidence_and_inference_errors(
+    schema, contract
+):
+    broken = copy.deepcopy(contract)
+    broken["provenance"]["market_reference_ledger"][0]["evidence"]["source"] = ""
+    with pytest.raises(renderer.BrandSystemError, match="evidence source"):
+        renderer.validate_brand_system(broken, schema)
+
+    broken = copy.deepcopy(contract)
+    item = broken["provenance"]["market_reference_ledger"][0]
+    item["derived_learning"] = item["observed_fact"]
+    with pytest.raises(renderer.BrandSystemError, match="observation and inference"):
+        renderer.validate_brand_system(broken, schema)
+
+    broken = copy.deepcopy(contract)
+    item = broken["provenance"]["market_reference_ledger"][0]
+    item["evidence"]["observed_at"] = None
+    item["status"] = "approved"
+    with pytest.raises(renderer.BrandSystemError, match="undated"):
+        renderer.validate_brand_system(broken, schema)
+
+    broken = copy.deepcopy(contract)
+    item = broken["provenance"]["market_reference_ledger"][0]
+    item["support"] = "gap"
+    item["status"] = "approved"
+    with pytest.raises(renderer.BrandSystemError, match="unsupported"):
+        renderer.validate_brand_system(broken, schema)
+
+
+def test_every_market_reference_has_learning_and_brands_remain_distinct(schema, contract):
+    renderer.validate_brand_system(contract, schema)
+    for item in contract["provenance"]["market_reference_ledger"]:
+        assert item["observed_fact"]
+        assert item["derived_learning"].startswith("Inference:")
+        assert item["best_practices_to_adopt"]
+        assert item["bad_practices_to_avoid"]
+        assert item["differentiation_implication"]
+    matrix = contract["provenance"]["differentiation_matrix"]
+    assert len(matrix["axes"]) == 7
+    distinctive = sum(
+        row[f"{contract['slug']}_territory"] == "distinctive_brand_territory"
+        for row in matrix["axes"]
+    )
+    assert distinctive >= 4
 
 
 def test_renderer_check_is_deterministic_except_fetch_timestamp(schema, contract):
