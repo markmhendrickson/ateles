@@ -170,8 +170,14 @@ def test_panel_reviews_use_verified_pre_panel_head_not_stale_trigger(monkeypatch
     ):
         superseded.append((current_sha, new_ids_by_lens))
 
+    async def fake_confirm(self, trigger, entities, store_result, reviewed_head):
+        return self._new_pr_review_ids_by_lens(entities, store_result)
+
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
     monkeypatch.setattr(SwarmDispatcher, "_prior_live_reviews", no_priors)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_confirmed_new_pr_review_ids_by_lens", fake_confirm
+    )
     monkeypatch.setattr(SwarmDispatcher, "_supersede_prior_reviews", fake_supersede)
     dispatcher = SwarmDispatcher(_StubNotifier(), _config())
     reviewed_head = "b" * 40
@@ -189,6 +195,172 @@ def test_panel_reviews_use_verified_pre_panel_head_not_stale_trigger(monkeypatch
     assert reviews[0]["head_sha"] == reviewed_head
     assert reviews[0]["review_round"] == 1
     assert superseded == [(reviewed_head, {"security": "ent_0"})]
+
+
+def test_panel_reviews_seed_round_from_max_of_all_live_priors(monkeypatch):
+    stored = []
+    superseded = []
+    reviewed_head = "b" * 40
+    priors = {
+        "qa": [
+            {
+                "entity_id": "ent_round_7",
+                "snapshot": {"review_lens": "qa", "review_round": 7},
+            },
+            {
+                "entity_id": "ent_round_3",
+                "snapshot": {"review_lens": "qa", "review_round": 3},
+            },
+        ]
+    }
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.append(entities)
+        return {"entities": [{"observation_index": 0, "entity_id": "ent_new"}]}
+
+    async def fake_priors(self, trigger, lenses, current_sha):
+        return priors
+
+    async def fake_confirm(self, trigger, entities, store_result, reviewed_head):
+        return {"qa": "ent_new"}
+
+    async def fake_supersede(
+        self, trigger, lenses, current_sha, *, priors=None, new_ids_by_lens=None
+    ):
+        superseded.append((priors, new_ids_by_lens))
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_prior_live_reviews", fake_priors)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_confirmed_new_pr_review_ids_by_lens", fake_confirm
+    )
+    monkeypatch.setattr(SwarmDispatcher, "_supersede_prior_reviews", fake_supersede)
+
+    asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_panel_reviews(
+            _trigger(),
+            [("qa", "**APPROVE**")],
+            {"qa": "phoenicurus"},
+            reviewed_head=reviewed_head,
+        )
+    )
+
+    assert stored[0][0]["review_round"] == 8
+    assert superseded == [(priors, {"qa": "ent_new"})]
+
+
+def test_replacement_ids_require_exact_head_live_readback(monkeypatch):
+    reviewed_head = "b" * 40
+    entities = [
+        {"review_lens": "qa"},
+        {"review_lens": "security"},
+    ]
+    store_result = {
+        "entities": [
+            {"observation_index": 0, "entity_id": "ent_qa_new"},
+            {"observation_index": 1, "entity_id": "ent_security_new"},
+        ]
+    }
+
+    async def fake_post(self, path, payload):
+        assert path == "entities/query"
+        return {
+            "entities": [
+                {
+                    "entity_id": "ent_qa_new",
+                    "snapshot": {
+                        "repository": "owner/repo",
+                        "pr_number": 87,
+                        "review_lens": "qa",
+                        "head_sha": reviewed_head,
+                        "status": "live",
+                    },
+                },
+                {
+                    "entity_id": "ent_security_new",
+                    "snapshot": {
+                        "repository": "owner/repo",
+                        "pr_number": 87,
+                        "review_lens": "security",
+                        # Wrong-head readback must not authorize supersession.
+                        "head_sha": "c" * 40,
+                        "status": "live",
+                    },
+                },
+            ]
+        }
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._confirmed_new_pr_review_ids_by_lens(
+            _trigger(), entities, store_result, reviewed_head
+        )
+    )
+
+    assert confirmed == {"qa": "ent_qa_new"}
+
+
+def test_failed_replacement_store_leaves_all_prior_reviews_live(monkeypatch):
+    corrections = []
+    prior = {
+        "entity_id": "ent_prior",
+        "snapshot": {"review_lens": "qa", "review_round": 2},
+    }
+
+    async def failed_store(self, entities, idempotency_key):
+        return None
+
+    async def fake_priors(self, trigger, lenses, current_sha):
+        return {"qa": [prior]}
+
+    async def fake_post(self, path, payload):
+        corrections.append((path, payload))
+        return {}
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", failed_store)
+    monkeypatch.setattr(SwarmDispatcher, "_prior_live_reviews", fake_priors)
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+
+    asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_panel_reviews(
+            _trigger(),
+            [("qa", "**APPROVE**")],
+            {"qa": "phoenicurus"},
+            reviewed_head="b" * 40,
+        )
+    )
+
+    assert corrections == []
+
+
+def test_panelist_prompt_uses_verified_pre_panel_head_not_stale_trigger():
+    stale_head = "a" * 40
+    reviewed_head = "b" * 40
+
+    prompt = SwarmDispatcher._panelist_prompt(
+        _trigger(head_sha=stale_head),
+        _sample_lens(),
+        "",
+        reviewed_head=reviewed_head,
+    )
+
+    assert f"<!-- review:qa commit={reviewed_head} -->" in prompt
+    assert f"<!-- review:qa commit={stale_head} -->" not in prompt
+
+
+def test_vanellus_prompt_uses_verified_pre_panel_head_not_stale_trigger():
+    stale_head = "a" * 40
+    reviewed_head = "b" * 40
+
+    prompt = SwarmDispatcher._vanellus_prompt(
+        _trigger(head_sha=stale_head),
+        parent=80,
+        lenses=["security"],
+        reviewed_head=reviewed_head,
+    )
+
+    assert f"<!-- vanellus-aggregation commit={reviewed_head} -->" in prompt
+    assert f"<!-- vanellus-aggregation commit={stale_head} -->" not in prompt
 
 
 def test_panel_reviews_without_verified_head_fail_closed(monkeypatch, caplog):
@@ -265,7 +437,7 @@ def test_supersede_prior_review_writes_status_pointer_and_edge(monkeypatch):
             _trigger(),
             ["qa"],
             "b" * 40,
-            priors={"qa": prior},
+            priors={"qa": [prior]},
             new_ids_by_lens={"qa": "ent_new"},
         )
     )
@@ -281,6 +453,87 @@ def test_supersede_prior_review_writes_status_pointer_and_edge(monkeypatch):
             "relationship_type": "SUPERSEDES",
         },
     )
+
+
+def test_supersede_prior_reviews_requires_confirmed_replacement_id(monkeypatch):
+    calls = []
+
+    async def fake_post(self, path, payload):
+        calls.append((path, payload))
+        return {}
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    prior = {
+        "entity_id": "ent_prior",
+        "snapshot": {"review_lens": "qa", "head_sha": "a" * 40},
+    }
+
+    asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
+            _trigger(),
+            ["qa"],
+            "b" * 40,
+            priors={"qa": [prior]},
+            new_ids_by_lens={},
+        )
+    )
+
+    assert calls == []
+
+
+def test_supersede_prior_reviews_demotes_every_live_row_for_confirmed_lens(
+    monkeypatch,
+):
+    calls = []
+
+    async def fake_post(self, path, payload):
+        calls.append((path, payload))
+        return {}
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    qa_priors = [
+        {
+            "entity_id": "ent_qa_round_7",
+            "snapshot": {"review_lens": "qa", "review_round": 7},
+        },
+        {
+            "entity_id": "ent_qa_round_3",
+            "snapshot": {"review_lens": "qa", "review_round": 3},
+        },
+    ]
+    security_prior = {
+        "entity_id": "ent_security_round_4",
+        "snapshot": {"review_lens": "security", "review_round": 4},
+    }
+
+    asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
+            _trigger(),
+            ["qa", "security"],
+            "b" * 40,
+            priors={"qa": qa_priors, "security": [security_prior]},
+            # A partial replacement response confirms QA only. Security must
+            # remain live until its own replacement is durably read back.
+            new_ids_by_lens={"qa": "ent_qa_new"},
+        )
+    )
+
+    corrected_ids = [
+        payload["entity_id"] for path, payload in calls if path == "correct"
+    ]
+    assert corrected_ids == [
+        "ent_qa_round_3",
+        "ent_qa_round_3",
+        "ent_qa_round_7",
+        "ent_qa_round_7",
+    ]
+    assert "ent_security_round_4" not in corrected_ids
+    relationship_targets = [
+        payload["target_entity_id"]
+        for path, payload in calls
+        if path == "create_relationship"
+    ]
+    assert relationship_targets == ["ent_qa_round_3", "ent_qa_round_7"]
 
 
 # ── parse_gate_verdict ──────────────────────────────────────────────────────
@@ -607,7 +860,7 @@ def _pr_dispatcher_with_stubs(
     async def fake_gate(self, trigger, parent, panel):
         calls.append(("gate", None))
 
-    async def fake_post_missing_vanellus(self, trigger, result):
+    async def fake_post_missing_vanellus(self, trigger, result, **kwargs):
         return None
 
     async def fake_emit_review(self, trigger, verdict, body, **kwargs):
@@ -4901,6 +5154,27 @@ def test_vanellus_fallback_posts_when_comment_missing(monkeypatch):
     )
 
 
+def test_vanellus_fallback_uses_verified_head_not_stale_trigger(monkeypatch):
+    client = _FakeHttpxClientForVanellus(existing_bodies=[])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    stale_head = "a" * 40
+    reviewed_head = "b" * 40
+
+    asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._post_missing_vanellus_comment(
+            _trigger(head_sha=stale_head),
+            SkillResult("vanellus", True, 0, "**APPROVE**", ""),
+            reviewed_head=reviewed_head,
+        )
+    )
+
+    assert len(client.post_calls) == 1
+    posted_body = client.post_calls[0]["json"]["body"]
+    assert f"<!-- vanellus-aggregation commit={reviewed_head} -->" in posted_body
+    assert f"<!-- vanellus-aggregation commit={stale_head} -->" not in posted_body
+
+
 def test_vanellus_fallback_skips_when_comment_already_present(monkeypatch):
     """When Vanellus's comment IS present, no duplicate is posted."""
     existing_body = compose_vanellus_fallback_comment(
@@ -4964,21 +5238,27 @@ def test_vanellus_fallback_non_fatal_when_post_raises(monkeypatch):
 
 def test_handle_pr_calls_vanellus_fallback_after_run(monkeypatch):
     """_handle_pr must call _post_missing_vanellus_comment after the Vanellus run."""
-    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40))
+    stale_head = "a" * 40
+    reviewed_head = "b" * 40
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_pr_head_sha",
+        lambda self, t: _async_return(reviewed_head),
+    )
 
     fallback_calls: list[tuple] = []
-    skill_calls: list[str] = []
+    skill_calls: list[tuple[str, str]] = []
 
     async def fake_run_skill(skill, prompt, **kwargs):
-        skill_calls.append(skill)
+        skill_calls.append((skill, prompt))
         if skill == "lanius":
             return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
         if skill == "vanellus":
             return SkillResult(skill, True, 0, "VERDICT: all clear.", "")
         return SkillResult(skill, True, 0, "ok", "")
 
-    async def fake_vanellus_fallback(self, t, result):
-        fallback_calls.append((t.number, result.stdout))
+    async def fake_vanellus_fallback(self, t, result, **kwargs):
+        fallback_calls.append((t.number, result.stdout, kwargs.get("reviewed_head")))
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(
@@ -5000,14 +5280,23 @@ def test_handle_pr_calls_vanellus_fallback_after_run(monkeypatch):
     monkeypatch.setattr(SwarmDispatcher, "_store_merge_checkpoint", fake_merge_checkpoint)
 
     dispatcher = SwarmDispatcher(_StubNotifier(), _config())
-    asyncio.run(dispatcher._handle_pr(_trigger()))
+    asyncio.run(dispatcher._handle_pr(_trigger(head_sha=stale_head)))
 
     assert len(fallback_calls) == 1, (
         f"_post_missing_vanellus_comment must be called exactly once; got {fallback_calls}"
     )
-    pr_number, captured_stdout = fallback_calls[0]
+    pr_number, captured_stdout, fallback_head = fallback_calls[0]
     assert pr_number == 87
     assert captured_stdout == "VERDICT: all clear."
+    assert fallback_head == reviewed_head
+    review_prompts = [
+        prompt for skill, prompt in skill_calls if skill not in {"lanius", "vanellus"}
+    ]
+    assert review_prompts
+    assert all(f"commit={reviewed_head}" in prompt for prompt in review_prompts)
+    vanellus_prompt = next(prompt for skill, prompt in skill_calls if skill == "vanellus")
+    assert f"commit={reviewed_head}" in vanellus_prompt
+    assert f"commit={stale_head}" not in vanellus_prompt
 
 
 # ── QE3: eval-authoring affordance — PR-branch worktree ───────────────────────

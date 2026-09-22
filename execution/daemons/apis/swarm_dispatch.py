@@ -4321,6 +4321,7 @@ class SwarmDispatcher:
                         has_worktree=bool(qa_worktree),
                         owns_pending_gate=lens.lens in pending_gates,
                         changed_files=changed_files,
+                        reviewed_head=review_head,
                     ),
                     github_token=_token_for_agent_on_repo(
                         lens.agent, trigger.repository
@@ -4448,6 +4449,7 @@ class SwarmDispatcher:
                 # review path (above) is correct, but that fail-open must not
                 # propagate into merge AUTHORIZATION language.
                 pending_gates=pending_gates,
+                reviewed_head=review_head,
             ),
             github_token=_token_for_agent_on_repo("vanellus", trigger.repository),
             include_github_contract=True,
@@ -4491,7 +4493,9 @@ class SwarmDispatcher:
         # 4b. Dispatcher fallback: if Vanellus's own gh comment did not land
         #     on the PR, post the captured stdout ourselves (mirrors
         #     _post_missing_panel_comments for the aggregation step).
-        await self._post_missing_vanellus_comment(trigger, vanellus_result)
+        await self._post_missing_vanellus_comment(
+            trigger, vanellus_result, reviewed_head=review_head
+        )
 
         # 5. Act on the verdict — this is the loop closure. Previously the
         #    dispatcher filed a merge checkpoint here UNCONDITIONALLY, ignoring
@@ -7909,6 +7913,7 @@ class SwarmDispatcher:
         has_worktree: bool = False,
         owns_pending_gate: bool = False,
         changed_files: list[str] | None = None,
+        reviewed_head: str | None = None,
     ) -> str:
         """Build a lens panelist's prompt.
 
@@ -8059,8 +8064,11 @@ class SwarmDispatcher:
                         t.body, where="the PR body"
                     )
         _panelist_role = f"{lens.lens} lens panelist"
-        lens_marker = compose_lens_review_marker(lens.lens, t.head_sha)
-        if not t.head_sha:
+        marker_head = _normalise_full_sha(
+            reviewed_head if reviewed_head is not None else t.head_sha
+        )
+        lens_marker = compose_lens_review_marker(lens.lens, marker_head)
+        if not marker_head:
             lens_marker = f"<!-- review:{lens.lens} commit=<full40hex> -->"
         if is_provisioned(lens.agent):
             comment_identity_block = (
@@ -8121,6 +8129,7 @@ class SwarmDispatcher:
         reviews: list[tuple[str, str]] | None = None,
         auto_merge: bool = False,
         pending_gates: set[str] | None = None,
+        reviewed_head: str | None = None,
     ) -> str:
         # The captured lens reviews are embedded INLINE below so the aggregator
         # never has to re-fetch them via `gh`. Vanellus runs diff-only
@@ -8134,8 +8143,11 @@ class SwarmDispatcher:
             )
         else:
             panel_block = "(no panel lens reviews captured — GHA baseline only)"
-        marker = compose_aggregation_marker(t.head_sha)
-        if not t.head_sha:
+        marker_head = _normalise_full_sha(
+            reviewed_head if reviewed_head is not None else t.head_sha
+        )
+        marker = compose_aggregation_marker(marker_head)
+        if not marker_head:
             marker = "<!-- vanellus-aggregation commit=<full40hex> -->"
         return (
             "Invoke the vanellus agent per your appended system prompt.\n\n"
@@ -8396,9 +8408,9 @@ class SwarmDispatcher:
                         "files": finding.files,
                     }
 
-                prior = priors.get(lens)
-                prior_round = (
-                    (prior or {}).get("snapshot", {}).get("review_round") or 0
+                prior_round = max(
+                    (self._prior_review_sort_key(prior)[0] for prior in priors.get(lens, [])),
+                    default=0,
                 )
                 shaped_blocking = [shape(finding) for finding in blocking]
                 shaped_non_blocking = [
@@ -8439,12 +8451,15 @@ class SwarmDispatcher:
                     f"{content_digest(digest_basis)}"
                 ),
             )
+            confirmed_ids = await self._confirmed_new_pr_review_ids_by_lens(
+                t, entities, store_result, sha
+            )
             await self._supersede_prior_reviews(
                 t,
                 [entity["review_lens"] for entity in entities],
                 sha,
                 priors=priors,
-                new_ids_by_lens=self._new_pr_review_ids_by_lens(entities, store_result),
+                new_ids_by_lens=confirmed_ids,
             )
         elif reviews:
             log.error(
@@ -8536,14 +8551,35 @@ class SwarmDispatcher:
         t: SwarmTrigger,
         lenses: list[str],
         current_sha: str,
-    ) -> dict[str, dict]:
-        """Map each lens to its prior live review for round seeding."""
-        by_lens: dict[str, dict] = {}
+    ) -> dict[str, list[dict]]:
+        """Map each lens to every prior live review, deterministically ordered.
+
+        Multiple live rows are a repair condition, not a reason to discard all
+        but whichever row the query happened to return last.  Keeping the full
+        set lets review rounds seed from the maximum and lets a successful
+        replacement demote every stale live row.
+        """
+        by_lens: dict[str, list[dict]] = {}
         for entity in await self._matching_prior_reviews(t, lenses, current_sha):
             lens = (entity.get("snapshot") or {}).get("review_lens")
             if lens:
-                by_lens[lens] = entity
+                by_lens.setdefault(lens, []).append(entity)
+        for entities in by_lens.values():
+            entities.sort(key=self._prior_review_sort_key)
         return by_lens
+
+    @staticmethod
+    def _prior_review_sort_key(entity: dict) -> tuple[int, str, str]:
+        snapshot = entity.get("snapshot") or {}
+        try:
+            review_round = int(snapshot.get("review_round") or 0)
+        except (TypeError, ValueError):
+            review_round = 0
+        return (
+            review_round,
+            str(snapshot.get("generated_at") or ""),
+            str(entity.get("entity_id") or entity.get("id") or ""),
+        )
 
     @staticmethod
     def _new_pr_review_ids_by_lens(
@@ -8563,26 +8599,109 @@ class SwarmDispatcher:
             if index in by_index
         }
 
+    async def _confirmed_new_pr_review_ids_by_lens(
+        self,
+        t: SwarmTrigger,
+        entities: list[dict],
+        store_result: dict | None,
+        reviewed_head: str,
+    ) -> dict[str, str]:
+        """Return replacement IDs only after exact-head durable read-back.
+
+        A successful HTTP response is not evidence that Neotoma stored the
+        declared fields.  Superseding the prior live review is destructive to
+        the gate, so each lens remains untouched unless the entity ID returned
+        by ``/store`` can be read back with the expected PR, lens, head and live
+        status.
+        """
+        stored_ids = self._new_pr_review_ids_by_lens(entities, store_result)
+        if not stored_ids:
+            log.error(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: pr_review store "
+                "returned no replacement entity ids; prior reviews remain live"
+            )
+            return {}
+
+        data = await self._neotoma_post(
+            "entities/query",
+            {
+                "entity_type": "pr_review",
+                "snapshot_filters": {
+                    "repository": {"op": "eq", "value": t.repository},
+                    "pr_number": {"op": "eq", "value": t.number},
+                },
+                "limit": 200,
+                "include_snapshots": True,
+            },
+        )
+        if not data:
+            log.error(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: pr_review "
+                "read-back failed; prior reviews remain live"
+            )
+            return {}
+
+        expected_head = _normalise_full_sha(reviewed_head)
+        confirmed: dict[str, str] = {}
+        expected_by_id = {entity_id: lens for lens, entity_id in stored_ids.items()}
+        for row in data.get("entities", []):
+            entity_id = str(row.get("entity_id") or row.get("id") or "")
+            lens = expected_by_id.get(entity_id)
+            if not lens:
+                continue
+            snapshot = row.get("snapshot") or {}
+            if (
+                snapshot.get("repository") == t.repository
+                and str(snapshot.get("pr_number")) == str(t.number)
+                and snapshot.get("review_lens") == lens
+                and _normalise_full_sha(snapshot.get("head_sha") or "")
+                == expected_head
+                and snapshot.get("status") == "live"
+            ):
+                confirmed[lens] = entity_id
+
+        missing = sorted(set(stored_ids) - set(confirmed))
+        if missing:
+            log.error(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: pr_review "
+                f"read-back did not confirm replacement lens(es) {missing}; "
+                "their prior reviews remain live"
+            )
+        return confirmed
+
     async def _supersede_prior_reviews(
         self,
         t: SwarmTrigger,
         lenses: list[str],
         current_sha: str,
         *,
-        priors: dict[str, dict] | None = None,
+        priors: dict[str, list[dict]] | None = None,
         new_ids_by_lens: dict[str, str] | None = None,
     ) -> None:
-        """Demote prior-head reviews and link their replacements."""
-        prior_entities = (
-            list(priors.values())
-            if priors is not None
-            else await self._matching_prior_reviews(t, lenses, current_sha)
-        )
+        """Demote every prior row only for durably confirmed replacements."""
+        if priors is not None:
+            prior_entities = [
+                entity
+                for lens in sorted(priors)
+                for entity in sorted(
+                    priors[lens], key=self._prior_review_sort_key
+                )
+            ]
+        else:
+            prior_entities = sorted(
+                await self._matching_prior_reviews(t, lenses, current_sha),
+                key=lambda entity: (
+                    str((entity.get("snapshot") or {}).get("review_lens") or ""),
+                    self._prior_review_sort_key(entity),
+                ),
+            )
         new_ids_by_lens = new_ids_by_lens or {}
         for entity in prior_entities:
             snapshot = entity.get("snapshot") or {}
             entity_id = entity.get("entity_id", "")
-            if not entity_id:
+            lens = snapshot.get("review_lens")
+            new_id = new_ids_by_lens.get(lens)
+            if not entity_id or not new_id:
                 continue
             await self._neotoma_post(
                 "correct",
@@ -8608,16 +8727,14 @@ class SwarmDispatcher:
                     ),
                 },
             )
-            new_id = new_ids_by_lens.get(snapshot.get("review_lens"))
-            if new_id:
-                await self._neotoma_post(
-                    "create_relationship",
-                    {
-                        "source_entity_id": new_id,
-                        "target_entity_id": entity_id,
-                        "relationship_type": "SUPERSEDES",
-                    },
-                )
+            await self._neotoma_post(
+                "create_relationship",
+                {
+                    "source_entity_id": new_id,
+                    "target_entity_id": entity_id,
+                    "relationship_type": "SUPERSEDES",
+                },
+            )
 
     async def _post_missing_panel_comments(
         self,
@@ -9001,6 +9118,8 @@ class SwarmDispatcher:
         self,
         t: SwarmTrigger,
         result: SkillResult,
+        *,
+        reviewed_head: str | None = None,
     ) -> None:
         """Post Vanellus's aggregated verdict as a PR comment when its own gh
         call failed to land it (mirrors _post_missing_panel_comments for the
@@ -9042,8 +9161,10 @@ class SwarmDispatcher:
                 )
                 resp.raise_for_status()
                 bodies = [c.get("body", "") for c in resp.json()]
-                head_sha = _normalise_full_sha(t.head_sha)
-                if not head_sha:
+                head_sha = _normalise_full_sha(
+                    reviewed_head if reviewed_head is not None else t.head_sha
+                )
+                if not head_sha and reviewed_head is None:
                     head_sha = _normalise_full_sha((await self._pr_head_sha(t)) or "")
                 if not head_sha:
                     log.warning(
