@@ -755,6 +755,7 @@ def test_checked_in_ateles_inventory_builds_and_checks(tmp_path):
                 "install/index.html",
                 "evaluate/index.html",
                 "compare/index.html",
+                "brand/index.html",
             ),
         ),
         (
@@ -763,6 +764,7 @@ def test_checked_in_ateles_inventory_builds_and_checks(tmp_path):
                 "index.html",
                 "design/index.html",
                 "compare/index.html",
+                "brand/index.html",
                 "status/index.html",
             ),
         ),
@@ -795,7 +797,7 @@ def test_product_homepages_bind_ambition_first_sequence_and_categories(tmp_path)
         < ateles.index('id="mechanism"')
     )
     assert "The system of record for AI agents" in neotoma
-    assert "The operating system for agent organizations" in ateles
+    assert "The operating system for agentic organizations" in ateles
     assert "agent forgot" not in neotoma.lower()
     assert "agents forget" not in neotoma.lower()
 
@@ -844,7 +846,9 @@ def test_product_identities_render_distinct_signature_devices(tmp_path):
     assert "<video" in neotoma
     assert "<video" not in ateles
     assert (tmp_path / "neotoma/assets/neotoma/hero-concept.webm").exists()
-    assert not (tmp_path / "ateles/assets/ateles/hero-concept.webm").exists()
+    # The exploratory Ateles film is available for review on /brand/ while
+    # remaining disabled in the hero; inventory does not imply promotion.
+    assert (tmp_path / "ateles/assets/ateles/hero-concept.webm").exists()
     assert "prefers-reduced-motion: reduce" in neotoma
     assert ".concept-film-media, .concept-film-overlay { display: none; }" in neotoma
     assert "The system of record for AI agents." in neotoma
@@ -853,7 +857,7 @@ def test_product_identities_render_distinct_signature_devices(tmp_path):
         in neotoma
     )
     assert "Delegate more than a session can hold." not in neotoma
-    assert "The operating system for agent organizations." in ateles
+    assert "The operating system for agentic organizations." in ateles
     assert (
         "Give agents distinct roles, bounded authority, and shared direction—so the organization keeps moving without constant supervision."
         in ateles
@@ -957,7 +961,7 @@ def test_product_routes_reject_disclosure_components_and_keep_named_links(tmp_pa
     for product in ("neotoma", "ateles"):
         assert build_site.build(product, tmp_path) == []
         pages = sorted((tmp_path / product).rglob("*.html"))
-        assert len(pages) == 4
+        assert len(pages) == 5
         for page in pages:
             document = page.read_text()
             assert "<details" not in document.casefold(), page
@@ -1159,6 +1163,38 @@ def test_checked_in_public_routes_have_no_internal_leakage(tmp_path, product):
     assert blockers == []
     for rel, document in rendered.items():
         assert build_site._public_copy_leaks(rel, document) == []
+
+
+@pytest.mark.parametrize("product", ("ateles", "neotoma"))
+def test_brand_route_projects_complete_public_safe_contract(tmp_path, product):
+    assert build_site.build(product, tmp_path) == []
+    document = (tmp_path / product / "brand" / "index.html").read_text()
+    for marker in (
+        "Voice and language",
+        "Visual system",
+        "Assets",
+        "Cinematic grammar",
+        "Do not drift here",
+        "Completeness and provenance",
+        "Downstream contracts",
+        "brand-status-approved",
+        "brand-status-provisional",
+        "brand-status-missing",
+    ):
+        assert marker in document
+    assert "ent_" not in document
+    assert "repository_path" not in document
+    assert "README.md" not in document
+    assert "<details" not in document.casefold()
+    assert build_site._public_copy_leaks(Path("brand/index.html"), document) == []
+
+
+def test_brand_route_internal_leakage_validator_catches_known_positive(tmp_path):
+    assert build_site.build("ateles", tmp_path) == []
+    document = (tmp_path / "ateles" / "brand" / "index.html").read_text()
+    leaked = document.replace("One source, visible state.", "Entity ent_deadbeef1234567890")
+    blockers = build_site._public_copy_leaks(Path("brand/index.html"), leaked)
+    assert any("entity id" in blocker for blocker in blockers)
 
 
 def test_design_tokens_drive_css_output_no_hardcoded_colors():

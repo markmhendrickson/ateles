@@ -92,6 +92,19 @@
       ]
     },
     {
+      "slug": "brand",
+      "path": "/brand/",
+      "nav_label": "Brand",
+      "title": "Neotoma brand system — expression, assets, and production",
+      "meta_description": "The approved and provisional copy, visual, cinematic, and asset system for Neotoma.",
+      "template": "brand_system_viewer",
+      "template_entity_id": null,
+      "primary_cta": {"label": "Install", "href": "/install/", "scope": "page_scoped"},
+      "sections": [
+        {"id": "brand-system", "origin": "brand_system", "source": "brand_systems/neotoma.json"}
+      ]
+    },
+    {
       "slug": "compare",
       "path": "/compare/",
       "nav_label": "Compare",

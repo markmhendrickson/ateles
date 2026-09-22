@@ -174,6 +174,26 @@ body:has(#tw-light:checked) .tw-toggle label[for="tw-light"], body:has(#tw-dark:
 body:has(#tw-light:checked) {{ {_css_vars(light)} color-scheme: light; }} body:has(#tw-dark:checked) {{ {_css_vars(dark)} color-scheme: dark; }}
 footer {{ border-top: 1px solid var(--line); padding-block: 42px; }} .footer-in {{ display: flex; justify-content: space-between; gap: 30px; flex-wrap: wrap; }}
 .footer-noun {{ max-width: 44ch; color: var(--ink-2); }} .flinks {{ display: flex; gap: 18px; flex-wrap: wrap; font-size: .86rem; }}
+.brand-system-page {{ padding-block: clamp(70px, 9vw, 118px); }}
+.brand-system-intro {{ display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(280px, .7fr); gap: clamp(30px, 6vw, 80px); align-items: end; }}
+.brand-system-intro h1 {{ max-width: 15ch; }}
+.brand-foundation-map {{ min-height: 300px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin-top: clamp(48px, 7vw, 82px); background: var(--line); }}
+.brand-foundation-step {{ display: grid; align-content: end; min-height: 280px; padding: clamp(22px, 4vw, 42px); background: var(--paper-2); }} .brand-foundation-step strong {{ display: block; margin-top: 10px; font-family: var(--heading); font-size: clamp(1.4rem, 3vw, 2.5rem); line-height: 1; }}
+.brand-summary {{ padding: 24px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper-2); }}
+.brand-status {{ display: inline-flex; align-items: center; gap: 8px; padding: 5px 10px; border: 1px solid currentColor; border-radius: 999px; color: var(--ink-3); font-family: var(--mono); font-size: .65rem; letter-spacing: .07em; text-transform: uppercase; }}
+.brand-status::before {{ content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }}
+.brand-status-approved {{ color: var(--grant, var(--accent)); }} .brand-status-provisional {{ color: var(--accent); }} .brand-status-missing {{ color: var(--revoked, var(--correction, var(--accent))); }}
+.brand-group {{ margin-top: clamp(58px, 8vw, 100px); }} .brand-group > header {{ display: grid; grid-template-columns: .55fr 1.45fr; gap: 28px; margin-bottom: 30px; align-items: baseline; }}
+.brand-group > header p {{ color: var(--ink-2); max-width: 64ch; }}
+.brand-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 16px; }}
+.brand-item {{ min-width: 0; padding: 22px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper-2); }}
+.brand-item h3 {{ margin: 12px 0 10px; }} .brand-item p {{ color: var(--ink-2); }}
+.brand-asset-preview {{ aspect-ratio: 16/10; margin: -22px -22px 20px; overflow: hidden; border-bottom: 1px solid var(--line); border-radius: var(--radius) var(--radius) 0 0; background: var(--paper); }}
+.brand-asset-preview :is(img,video) {{ display: block; width: 100%; height: 100%; object-fit: cover; }}
+.brand-palette {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }}
+.brand-swatch {{ min-height: 112px; display: flex; align-items: end; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--swatch); color: var(--swatch-label); font-family: var(--mono); font-size: .66rem; }}
+.brand-rule-list {{ columns: 2 260px; column-gap: 34px; padding-left: 1.2rem; }} .brand-rule-list li {{ break-inside: avoid; margin-bottom: 12px; color: var(--ink-2); }}
+.brand-source-list {{ display: flex; flex-wrap: wrap; gap: 10px; }} .brand-source-list span {{ padding: 8px 11px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink-2); font-size: .82rem; }}
 
 /* Neotoma: a persistent graph with visible provenance and history. */
 .takeover-hero {{ position: relative; min-height: min(850px, calc(100svh - 68px)); display: grid; align-items: center; overflow: hidden; isolation: isolate; padding: clamp(60px, 8vw, 110px) max(20px, calc((100vw - var(--maxw)) / 2 + clamp(20px, 4vw, 56px))); }}
@@ -241,6 +261,8 @@ footer {{ border-top: 1px solid var(--line); padding-block: 42px; }} .footer-in 
   .pain-grid, .product-ateles .capability-list {{ grid-template-columns: 1fr; }}
   .hierarchy {{ grid-template-columns: 1fr; }} .hierarchy-item {{ border-right: 0; border-bottom: 1px solid var(--line); text-align: left; }} .hierarchy-item:last-child {{ border-bottom: 0; }}
   .flow-step {{ border-right: 0; border-bottom: 1px solid var(--line); }} .flow-step:last-child {{ border-bottom: 0; }} .flow-step:not(:last-child)::after {{ content: "↓"; right: 50%; top: auto; bottom: -12px; transform: translateX(50%); }}
+  .brand-system-intro, .brand-group > header {{ grid-template-columns: 1fr; }}
+  .brand-foundation-map {{ grid-template-columns: 1fr; }} .brand-foundation-step {{ min-height: 180px; }}
 }}
 @media (max-width: 620px) {{
   .nav-in {{ padding-inline: 16px; }} .nav-links {{ gap: 14px; }} .tw-toggle {{ display: none; }}
@@ -612,6 +634,121 @@ def _render_comparison(page: dict, product: str, section_id: str, data: dict) ->
     return f'<section class="wrap visual-section" id="{_esc(section_id)}">{_section_intro(product, section_id, data)}{evidence}</section>'
 
 
+def _status_badge(status: str) -> str:
+    normalized = str(status or "missing").casefold()
+    return f'<span class="brand-status brand-status-{_esc(normalized)}">{_esc(normalized)}</span>'
+
+
+def _public_anti_pattern(value: str) -> str:
+    """Translate internal enforcement language into reader-facing guidance."""
+    lower = value.casefold()
+    if any(term in lower for term in ("record ids", "entity types", "field or decision keys", "repository filenames", "phase bookkeeping", "agent instructions")):
+        return "Keep internal implementation vocabulary and operational bookkeeping off public surfaces."
+    if any(term in lower for term in ("research analysis", "source citations", "implementation-review notes")):
+        return "Use concise reader-facing claims; keep working notes and evidence in their source records."
+    return value
+
+
+def _public_downstream_contract(item: dict) -> dict:
+    """Project implementation paths into a stable reader-facing contract."""
+    consumer = item.get("consumer") or "Downstream consumer"
+    replacements = {
+        "Human repository guide": "Generated from the canonical record; never hand-edit.",
+        "Machine site contract": "Generated and validated against the versioned schema.",
+        "Design tokens": "Palette and typography derive from the canonical visual system.",
+        "Product site": "The brand route is a read-only, public-safe viewer.",
+        "Cinematic production": "Production briefs inherit these shared and product-specific rules.",
+        "Application marks": "Application identity must pass the product symbol and anti-pattern contract.",
+    }
+    return {**item, "contract": replacements.get(consumer, "Derived from the canonical brand system.")}
+
+
+def _brand_items(items: list[dict], *, include_source: bool = False) -> str:
+    visible = [item for item in items if item.get("status") != "retired"]
+    return "".join(
+        '<article class="brand-item">'
+        f'{_status_badge(item.get("status"))}'
+        f'<h3>{_esc(str(item.get("name") or item.get("consumer") or "").replace("_", " "))}</h3>'
+        f'<p>{_esc(item.get("guidance") or item.get("contract") or item.get("use"))}</p>'
+        + (
+            f'<p class="small muted">Source: {_esc(item.get("source"))}</p>'
+            if include_source and item.get("source") and not str(item.get("source")).startswith("ent_")
+            else ""
+        )
+        + "</article>"
+        for item in visible
+    )
+
+
+def _brand_asset_preview(item: dict) -> str:
+    public_path = item.get("public_path")
+    preview = item.get("preview")
+    if not public_path or item.get("status") == "missing":
+        return ""
+    if preview == "video":
+        return f'<div class="brand-asset-preview"><video controls muted playsinline preload="metadata" aria-label="{_esc(item.get("name"))}"><source src="{_esc(public_path)}"></video></div>'
+    if preview == "image":
+        return f'<div class="brand-asset-preview"><img src="{_esc(public_path)}" loading="lazy" alt="{_esc(item.get("name"))}"></div>'
+    return ""
+
+
+def _render_brand_system(product: str, data: dict) -> str:
+    positioning = data["positioning"]
+    voice = data["voice"]
+    styles = data["visual_styles"]
+    production = data["production_specs"]
+    completeness = data["completeness"]
+    phrases = _brand_items(data.get("phrases") or [])
+    terms = _brand_items(data.get("terminology") or [])
+    concepts = _brand_items(data.get("visual_concepts") or [])
+    assets = "".join(
+        '<article class="brand-item">'
+        + _brand_asset_preview(item)
+        + _status_badge(item.get("status"))
+        + f'<h3>{_esc(item.get("name"))}</h3><p>{_esc(item.get("use"))}</p>'
+        + (
+            f'<a href="{_esc(item["public_path"])}">Open asset</a>'
+            if item.get("public_path") and item.get("status") != "missing"
+            else ""
+        )
+        + "</article>"
+        for item in data.get("asset_inventory") or []
+    )
+    anti_patterns = "".join(
+        f"<li>{_esc(_public_anti_pattern(value))}</li>"
+        for value in dict.fromkeys(styles.get("anti_patterns") or [])
+    )
+    rules = "".join(f"<li>{_esc(value)}</li>" for value in voice.get("rules") or [])
+    palette = styles.get("palette", {}).get("light", {})
+    swatches = "".join(
+        f'<div class="brand-swatch" style="--swatch:{_esc(value)};--swatch-label:{"#fff" if key in {"ink", "ink_2", "accent"} else "#111"}">{_esc(key.replace("_", " "))}<br>{_esc(value)}</div>'
+        for key, value in palette.items()
+        if isinstance(value, str) and value.startswith("#")
+    )
+    source_labels = "".join(
+        f'<span>{_esc(source.get("label"))} · {_esc(source.get("status"))}</span>'
+        for source in data.get("provenance", {}).get("sources") or []
+    )
+    dimensions = _brand_items(completeness.get("dimensions") or [])
+    missing = "".join(
+        f'<li>{_esc(item)}</li>' for item in completeness.get("missing_items") or []
+    )
+    contracts = _brand_items(
+        [_public_downstream_contract(item) for item in data.get("downstream_contracts") or []]
+    )
+    return f'''<section class="wrap brand-system-page" id="brand-system">
+<div class="brand-system-intro"><div><p class="eyebrow">Brand system · {_esc(data.get("schema_version"))}</p><h1>{_esc(positioning["category"])}</h1><p class="lede">{_esc(positioning["hero_support"])}</p></div><aside class="brand-summary">{_status_badge(completeness.get("overall_status"))}<h2>One source, visible state.</h2><p>This page is a public-safe viewer of the canonical brand system. Approved, provisional, and missing elements remain distinct.</p></aside></div>
+<figure class="section-visual brand-foundation-map" aria-label="The canonical brand system flows from expression rules to approved assets and downstream use"><div class="brand-foundation-step"><span class="eyebrow">01 · Define</span><strong>Words and visual meaning</strong></div><div class="brand-foundation-step"><span class="eyebrow">02 · Produce</span><strong>Assets with explicit state</strong></div><div class="brand-foundation-step"><span class="eyebrow">03 · Derive</span><strong>Consistent public surfaces</strong></div></figure>
+<div class="brand-group"><header><h2>Voice and language</h2><p>{_esc(positioning["product_promise"])}</p></header><div class="brand-grid">{phrases}{terms}</div><h3>Writing rules</h3><ul class="brand-rule-list">{rules}</ul></div>
+<div class="brand-group"><header><h2>Visual system</h2><p>{_esc(styles["symbol"]["guidance"])}</p></header><div class="brand-palette">{swatches}</div><div class="brand-grid">{concepts}</div><p class="lede"><strong>Material:</strong> {_esc(styles["material"])} <strong>Light:</strong> {_esc(styles["light"])} <strong>Camera:</strong> {_esc(styles["camera"])} <strong>Motion:</strong> {_esc(styles["motion"])}</p></div>
+<div class="brand-group"><header><h2>Assets</h2><p>Every asset carries an explicit acceptance state and intended use.</p></header><div class="brand-grid">{assets}</div></div>
+<div class="brand-group"><header><h2>Cinematic grammar</h2><p>{_esc(production["cinematic"]["semantics"])}</p></header><div class="brand-grid"><article class="brand-item"><h3>Delivery</h3><p>{_esc(production["delivery"]["hero"])}</p><p>{_esc(production["delivery"]["responsive"])}</p></article><article class="brand-item"><h3>Still and reduced motion</h3><p>{_esc(production["still_and_reduced_motion"]["requirement"])}</p></article></div></div>
+<div class="brand-group"><header><h2>Do not drift here</h2><p>These constraints preserve the product's meaning as the system evolves.</p></header><ul class="brand-rule-list">{anti_patterns}</ul></div>
+<div class="brand-group"><header><h2>Completeness and provenance</h2><p>Expression is canonical in the product brand record; capabilities and foundation truth remain in their own sources.</p></header><div class="brand-grid">{dimensions}</div><h3>Still missing</h3><ul>{missing}</ul><h3>Source families</h3><div class="brand-source-list">{source_labels}</div></div>
+<div class="brand-group"><header><h2>Downstream contracts</h2><p>Each consumer derives from this system instead of becoming a parallel source of truth.</p></header><div class="brand-grid">{contracts}</div></div>
+</section>'''
+
+
 def _render_page_specific(product: str, page: dict, section_id: str, data: dict) -> str:
     layout = data.get("layout", section_id)
     if layout == "hero":
@@ -643,6 +780,8 @@ def _render_section(product: str, page: dict, section_id: str, resolved: dict) -
     if not resolved["_resolved"]:
         return f'<section class="wrap" id="{_esc(section_id)}"><div class="blocker">BLOCKED — {_esc(resolved["_blocker"])}</div></section>'
     if "data" in resolved:
+        if resolved.get("origin") == "brand_system":
+            return _render_brand_system(product, resolved["data"])
         return _render_page_specific(product, page, section_id, resolved["data"])
     if resolved["origin"] in ("authored", "positioning_mirror"):
         return _render_source_section(product, page, section_id, resolved)
@@ -711,7 +850,7 @@ def render_page(
     noun = (
         "The system of record for AI agents."
         if product == "neotoma"
-        else "The operating system for agent organizations."
+        else "The operating system for agentic organizations."
     )
     identity = "the record" if product == "neotoma" else "the swarm"
     brand_mark = _brand_mark(product)
