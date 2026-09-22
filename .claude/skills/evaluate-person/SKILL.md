@@ -622,15 +622,113 @@ Section order is fixed (this is step 5's short-then-long requirement):
 1. **Header** — subject, role, evaluation window, who requested it, date.
 2. **Key takeaways** — at most five, each one sentence, each linking down to its
    evidence.
-3. **Overview** — three short paragraphs. Readable alone.
-4. **Expectations** — the §1.3 table.
-5. **Findings** — one block per expectation, with verdict, evidence, counter-evidence.
-6. **Operator impressions tested** — the §1.4/§4.4 table.
-7. **Method and coverage** — sweep manifest, instrument log, attribution check.
-8. **Footer** — audience line, generation date, revision note.
+3. **Feedback to deliver** — §5.1a. What must actually be said.
+4. **Discussion topics** — §5.1b. What is genuinely open.
+5. **Overview** — three short paragraphs. Readable alone.
+6. **Expectations** — the §1.3 table.
+7. **Findings** — one block per expectation, with verdict, evidence, counter-evidence.
+8. **Operator impressions tested** — the §1.4/§4.4 table.
+9. **Method and coverage** — sweep manifest, instrument log, attribution check.
+10. **Footer** — audience line, generation date, revision note.
 
-Sections 1–3 must stand alone: a reader who stops after the overview should have
+Sections 1–5 must stand alone: a reader who stops after the overview should have
 the evaluation's actual conclusion, not a teaser.
+
+### 5.1a Feedback to deliver — what must actually be said
+
+The six sections this template originally carried were **all retrospective** —
+what happened, and how well we know it. None of them said what to *do* with it.
+The motivating use case was being asked to give a colleague's 90-day review: the
+evaluation answers "what is true" and leaves "what do I actually say" to be
+derived by hand, which is the manual step this workflow exists to remove.
+
+So this section holds the small number of things that must actually be said to
+the subject. It sits immediately after Key takeaways because it is the most
+actionable content on the page, and every item links **down** because it is also
+the most derived — inferences on inferences. Short-then-long still holds: these
+are short pointers into the long evidence, not standalone assertions.
+
+**Voice — write the substance, not the script.** Each item is a **neutral point
+the operator will phrase themselves**. Not a scripted sentence, not a quotable
+line, not the operator's voice. A performance review is spoken aloud, and
+pre-written phrasing either sounds unlike them or gets discarded, which wastes
+the section. Write the substance to convey plus what it rests on:
+
+> **Yes.** Four items she logged as two weeks late and blocking you, closed
+> since / not closed.
+>
+> **No.** "I want to talk about some things that slipped."
+
+Rules, each gated by `scripts/deliverable_check.py`:
+
+- **An item may only cite a citation that survived the §4 attribution checks.**
+  Nothing gets delivered that the evidence layer would not support. An
+  `ambiguous` final reading, an `unresolved` obligation direction, or a
+  `relayed-machine-output` genre disqualifies the citation from carrying an item
+  — it could not support a finding, so it certainly cannot be said to her face.
+- **Ordered by what the subject can act on, not by severity.** A severe finding
+  she can do nothing about belongs in Findings, or in §5.1b if the decision is
+  someone else's.
+- **Every item whose finding is a shortfall carries its counterpart account**
+  (D14). If the shortfall was partly caused by something the subject was
+  **owed**, the item says so in the same breath, so it lands as a shared problem
+  rather than as pure fault. The account is not re-typed here: the gate reads it
+  from the existing `counterpart_account` machinery in `reciprocity_check.py`,
+  by expectation id, so one table serves both gates and the two cannot drift.
+- **Each item links down to the finding it derives from** — an in-page `#anchor`,
+  which is not a cross-link (§0.3).
+
+**Test:** `deliverable_check.py check --path D --attribution A --reciprocity R`
+exits zero before the page is rendered, with the attribution and reciprocity
+ledgers passed in. Run it after `attribution_check.py check` and
+`reciprocity_check.py check`, never instead of them.
+
+### 5.1b Discussion topics — what is genuinely open
+
+Genuinely open questions. **These are NOT feedback and must never be rendered as
+such.**
+
+They are exactly three things: where the evaluation reached `insufficient
+evidence`; where two readings both fit the evidence; and where a decision is
+owed **to** the subject rather than by them.
+
+**The separation is the whole point.** Collapsing the two sections produces the
+exact failure this skill was built to prevent — open questions delivered as
+criticisms. The same fact takes both shapes and only one of them is honest:
+
+> **Feedback:** "You've been ignoring the scoring model."
+>
+> **Discussion topic:** "Our scoring penalises the contacts you're strongest in
+> — what should we do about that?"
+
+Same fact, different act. The first is a judgement about her conduct, and it is
+only deliverable if the evidence layer supports it. The second is a question
+about a system, and it is open precisely because the evidence does not settle
+who is right. A future run will be tempted to merge them, because both are
+"things to raise in the meeting" — do not. `deliverable_check.py` rejects an
+item in this section phrased as a criticism rather than as a question, and
+rejects a `kind` outside the three above.
+
+### 5.1c Both sections render with their interrogation state
+
+§5.1a and §5.1b are the **most likely content on the page to be wrong before the
+§6 interrogation loop has run** — they are inferences built on findings that
+have not yet been challenged.
+
+So **render them with a visible "not yet interrogated" state rather than
+omitting them.** A draft stays usable that way, and nobody mistakes an
+unchallenged recommendation for a settled one. Omission is not the safe option:
+it hides the section that the reader most needs, and a reader who does not see it
+cannot know it was withheld.
+
+The page already carries a top-level "Draft: interrogation step not yet run"
+banner. **These two sections carry their own inline marker as well**, because
+someone may scroll straight to them and never see the top of the page. Flip both
+to the `interrogation ok` state only once §6.3's exit condition is met.
+
+`deliverable_check.py interrogation --path D --state not-yet-interrogated|interrogated`
+records it and `render` emits the marker; `check` fails when the state is
+missing or unrecognized.
 
 ### 5.2 Where it is stored
 
@@ -711,6 +809,14 @@ challenge raised has a recorded resolution. Then re-run the §0.2 sensitive scan
 and the `rendered-pages` pre-share verification sweep, confirm the audience line
 still matches who the link is going to, and hand over the link.
 
+Before that hand-over, **re-derive §5.1a and §5.1b against the findings as they
+now stand** — a finding that moved under challenge may have been carrying a
+feedback item that no longer holds, and the item does not update itself. Then
+flip the interrogation state (`deliverable_check.py interrogation --path D
+--state interrogated`) and re-render both sections so their inline markers say
+so. A page still showing "not yet interrogated" after the loop has closed
+understates its own reliability, which is the cheaper error but is still wrong.
+
 Sending it to anyone is the operator's approval, per turn, per recipient.
 
 ---
@@ -725,6 +831,9 @@ Every run of this skill ends with:
 - Instrument log: how many counts, how many anchored, any instrument found broken.
 - Attribution check: citations checked, corrections made, direction table, tripwire
   result.
+- Deliverable gate: how many feedback items and discussion topics, how many
+  shortfall items and whether each carries its counterpart account, and the
+  interrogation state both sections rendered with.
 - Operator impressions: how many supported, contradicted, unsupported.
 - Sensitive scan: clean or blocked.
 - Open ambiguities — citations that could not be resolved and the artifact that

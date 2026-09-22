@@ -21,8 +21,22 @@
   Evaluation-specific, from SKILL.md 0.3:
     - ZERO cross-links. No hub, no markdown view, no other entity. Standalone.
     - The audience line in the footer is mandatory.
-    - Section 7 (method and coverage) is mandatory -- an evaluation that does not
+    - Section 9 (method and coverage) is mandatory -- an evaluation that does not
       show its method cannot be audited by the person it judges.
+
+  Evaluation-specific, from SKILL.md 5.1a / 5.1b:
+    - Sections 3 and 4 (Feedback to deliver, Discussion topics) are the most
+      ACTIONABLE content and so sit high, and the most DERIVED content -- so
+      every item links DOWN to the finding it comes from. Short-then-long still
+      holds: short pointers into the long evidence, not standalone assertions.
+    - They are also the most likely thing on the page to be wrong before the
+      step-6 interrogation loop has run, so each carries its own INLINE
+      "not yet interrogated" marker as well as the page-top draft banner.
+      Render them marked; do not omit them.
+    - Never collapse the two. Feedback is a judgement about conduct; a
+      discussion topic is an open question. Merging them delivers open
+      questions as criticisms, which is the failure this skill exists to
+      prevent. deliverable_check.py gates both.
 -->
 <style>
 :root{
@@ -87,6 +101,14 @@ li{margin:6px 0}
   margin-top:56px;padding-top:18px}
 .audience{border:1px solid var(--accent);border-radius:.5rem;padding:10px 14px;
   margin:0 0 14px;font-size:.88rem}
+/* The interrogation marker on the two DERIVED sections. Inline, not only in the
+   page-top draft banner: someone may scroll straight here. */
+.interrogation{border:1px solid var(--accent);border-left:3px solid var(--accent);
+  border-radius:.5rem;padding:10px 14px;margin:0 0 16px;font-size:.88rem;
+  background:var(--callout-bg)}
+.interrogation.ok{border-color:var(--line);border-left-color:var(--line);
+  color:var(--muted)}
+.rests{color:var(--muted)}
 .tw-toggle{position:fixed;top:12px;right:12px;display:flex;gap:2px;z-index:50;
   background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:3px}
 .tw-toggle input{position:absolute;opacity:0;pointer-events:none}
@@ -129,7 +151,73 @@ a{color:var(--accent2)!important}
   <li>{{TAKEAWAY_3}} <a href="#f3">Evidence</a></li>
 </ol>
 
-<!-- ============ 3. OVERVIEW ============
+<!-- ============ 3. FEEDBACK TO DELIVER ============
+     SKILL.md 5.1a. The small number of things that must actually be SAID to the
+     subject. High on the page because it is the most actionable content; every
+     item links DOWN because it is the most derived.
+
+     VOICE -- operator decision, do not deviate. These are NEUTRAL POINTS THE
+     OPERATOR WILL PHRASE THEMSELVES. Not scripted sentences, not quotable
+     lines, not the operator's voice: a review is spoken aloud, and pre-written
+     phrasing either sounds unlike them or gets discarded. Each item is the
+     substance plus what it rests on --
+        "Four items she logged as two weeks late and blocking you, closed since
+         / not closed"
+     and never
+        "I want to talk about some things that slipped."
+
+     Gated by deliverable_check.py:
+       - an item may only cite a citation that survived the section 4 checks;
+       - every item whose finding is a shortfall carries its counterpart
+         account, read from reciprocity_check.py's ledger (D14) -- what she was
+         OWED, in the same breath, so it lands as a shared problem;
+       - ordered by what the subject can act on, NOT by severity.
+     Generate with: deliverable_check.py render --format html -->
+<h2>Feedback to deliver</h2>
+<!-- MANDATORY while step 6 has not run. Keep this inline marker even though the
+     page already carries a top-level draft banner: someone may scroll straight
+     here. Replace with class="interrogation ok" once the loop has run. -->
+<p class="interrogation draft">Not yet interrogated. These two sections are
+derived from the findings below and have not been challenged by the step-6
+interrogation loop, which is where an unchallenged inference usually breaks.
+Treat them as a draft of what to say, not as settled.</p>
+<ol>
+  <li id="fb1">{{FEEDBACK_SUBSTANCE}} <span class="rests">Rests on:
+    {{WHAT_IT_RESTS_ON}}.</span> <a href="#f1">Evidence</a></li>
+  <!-- A shortfall item states, in the same breath, what she was owed. -->
+  <li id="fb2">{{FEEDBACK_SUBSTANCE}} <span class="rests">Rests on:
+    {{WHAT_IT_RESTS_ON}}; {{COUNTERPART_ACCOUNT}}.</span>
+    <a href="#f2">Evidence</a></li>
+</ol>
+
+<!-- ============ 4. DISCUSSION TOPICS ============
+     SKILL.md 5.1b. Genuinely OPEN questions. These are NOT feedback and must
+     never be rendered as such.
+
+     They are: where the evaluation reached `insufficient evidence`; where two
+     readings both fit the evidence; and where a decision is owed TO the subject
+     rather than by them.
+
+     The separation is the whole point. Collapsing the two sections produces the
+     exact failure this skill was built to prevent -- open questions delivered
+     as criticisms:
+        "You've been ignoring the scoring model"                    = FEEDBACK
+        "Our scoring penalises the contacts you're strongest in --
+         what should we do about that?"                     = DISCUSSION TOPIC
+     Same fact, different act. deliverable_check.py rejects an item here that is
+     phrased as a criticism rather than a question. -->
+<h2>Discussion topics</h2>
+<p class="meta">Open questions, not feedback. Each is open because the evidence
+does not settle it, or because the decision is not {{SUBJECT_FIRST_NAME}}'s to
+make.</p>
+<p class="interrogation draft">Not yet interrogated. See above — these are
+derived from findings the step-6 loop has not yet challenged.</p>
+<ol>
+  <li id="dt1">{{OPEN_QUESTION}} <span class="rests">Open because:
+    {{WHY_IT_IS_OPEN}}.</span> <a href="#f3">Evidence</a></li>
+</ol>
+
+<!-- ============ 5. OVERVIEW ============
      Three short paragraphs. MUST stand alone: a reader who stops here has the
      actual conclusion, not a teaser. -->
 <h2>Overview</h2>
@@ -137,7 +225,7 @@ a{color:var(--accent2)!important}
 <p>{{OVERVIEW_PARA_2}}</p>
 <p>{{OVERVIEW_PARA_3}}</p>
 
-<!-- ============ 4. EXPECTATIONS ============
+<!-- ============ 6. EXPECTATIONS ============
      The SKILL.md 1.3 table. Every row carries a resolvable source and a window.
      A finding may only be measured against a row whose window contains it. -->
 <h2>What was expected</h2>
@@ -159,7 +247,7 @@ not put to {{SUBJECT_FIRST_NAME}} and are not used as a basis for any finding
 below. They are recorded because they shaped impressions.</p>
 </div>
 
-<!-- ============ 5. FINDINGS ============
+<!-- ============ 7. FINDINGS ============
      One block per expectation. Counter-evidence is a MANDATORY field: if empty,
      say you looked and found none. Negative findings carry a surface citation
      from `sweep_manifest.py cite`. -->
@@ -183,7 +271,7 @@ below. They are recorded because they shaped impressions.</p>
 <p class="sources">{{SURFACE_CITATION}}</p>
 </div>
 
-<!-- ============ 6. OPERATOR IMPRESSIONS TESTED ============
+<!-- ============ 8. OPERATOR IMPRESSIONS TESTED ============
      Registered BEFORE the sweep (SKILL.md 1.4), resolved at 4.4. This table is
      frequently the most valuable output on the page. A contradicted impression
      is reported plainly -- softening it defeats the purpose of the step. -->
@@ -197,7 +285,7 @@ them rather than be selected by them.</p>
 </tbody>
 </table>
 
-<!-- ============ 7. METHOD AND COVERAGE (MANDATORY) ============ -->
+<!-- ============ 9. METHOD AND COVERAGE (MANDATORY) ============ -->
 <h2>How this was built</h2>
 
 <h3>Surfaces swept</h3>
@@ -233,7 +321,7 @@ None of these supports a finding above.</p>
 <tbody><tr><td>{{DATE}}</td><td>{{CHALLENGE}}</td><td>{{STANDS_CHANGED_OR_AMBIGUOUS}}</td></tr></tbody>
 </table>
 
-<!-- ============ 8. FOOTER ============ -->
+<!-- ============ 10. FOOTER ============ -->
 <div class="foot">
 <div class="audience">
 <strong>Who this is for.</strong> {{AUDIENCE_LINE}}. This link is a bearer

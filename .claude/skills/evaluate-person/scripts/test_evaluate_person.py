@@ -53,6 +53,106 @@ What each test looked like red (verified by mutating the guard and re-running):
       prescribed effect-only replacement also trips -- which would make the
       blocker unclearable and train the operator to ignore it.
 
+The two DERIVED sections (SKILL.md 5.1a/5.1b/5.1c) were added afterwards and
+verified the same way -- 29 mutations, each applied to the shipped guard, the
+named test observed RED, the file restored and hash-compared byte-identical.
+Each mutation is the plausible shortcut, not a strawman:
+
+  test_item_citing_a_failed_attribution_is_rejected
+      RED with the attribution-ledger lookup removed, and again with only the
+      ambiguous-reading branch disabled: an item whose citation section 4
+      marked unresolvable gets SAID to the subject, where she cannot audit it.
+
+  test_item_citing_relayed_machine_output_is_rejected
+      RED with the genre branch disabled: D5 at the delivery layer -- she sent
+      the agent's output, she did not author it, and it comes back to her as
+      her own commitment.
+
+  test_item_citing_nothing_in_the_ledger_is_rejected
+      RED when an unknown citation is treated as clean -- fail-open on the
+      field carrying the safety meaning.
+
+  test_shortfall_item_without_counterpart_account_is_rejected
+      RED with _counterpart_failures() skipped: the reciprocity gate forces a
+      shortfall FINDING to account for what she was owed but says nothing
+      about what is SAID, so the bare shortfall reaches her face while every
+      other gate in the skill passes. This is the one that matters most.
+
+  test_shortfall_item_with_no_matching_finding_is_rejected
+      RED when a missing reciprocity row reads as "nothing to check".
+
+  test_scripted_operator_voice_is_rejected
+      RED with the voice check disabled: the skill emits quotable lines in the
+      operator's voice, the one output he ruled out.
+
+  test_item_without_a_finding_anchor_is_rejected
+  test_topic_without_an_anchor_is_rejected
+      RED when an item may stand alone -- short-WITHOUT-long at the top of the
+      page, the failure the section order prevents everywhere else.
+
+  test_item_without_what_the_subject_can_act_on_is_rejected
+      RED when actionability is optional: the section refills with severe
+      findings she can do nothing about, i.e. Findings with a new heading.
+
+  test_criticism_in_the_topics_section_is_rejected
+      RED with the criticism detector removed AND with it reduced to a
+      punctuation check: "You've been ignoring the scoring model?" ships under
+      "Discussion topics". No other guard can see this -- attribution checks
+      the EVIDENCE, reciprocity checks the ACCOUNT, neither looks at the
+      speech act.
+
+  test_why_did_you_construction_is_rejected
+      RED on the punctuation-only detector: an accusation in interrogative
+      form ends in a question mark and passes by shape.
+
+  test_the_operators_own_good_example_passes
+      RED when the detector is widened to fire on second-person address: the
+      operator's own good example is blocked, the gate gets switched off, and
+      then the bad example ships too. The converse test, and the more
+      important of the pair.
+
+  test_a_statement_is_not_a_discussion_topic
+      RED when a declarative may sit in this section -- a verdict the subject
+      is expected to accept, which is feedback by another route.
+
+  test_kind_outside_the_three_open_sources_is_rejected
+      RED with --kind made free text: the section becomes a place to put
+      anything the run would rather not defend as a finding.
+
+  test_missing_interrogation_state_is_rejected
+      RED with `setdefault` restored in _load() (a real hole found by writing
+      this test -- the shipped code defaulted the state and the gate never saw
+      it missing), and again with the state validation disabled.
+
+  test_uninterrogated_render_carries_the_inline_marker
+      RED when render() emits only the section bodies: a reader jumping
+      straight to "Feedback to deliver" sees no sign it is a draft.
+
+  test_interrogated_state_clears_the_draft_marker
+      RED when the marker is unconditional -- a closed loop that still reads
+      "not yet interrogated" understates its own reliability.
+
+  test_empty_deliverable_sections_are_rejected
+      RED when both may be silently empty: the skill renders the six
+      retrospective sections it always did, and reports OK.
+
+  test_new_sections_sit_between_takeaways_and_overview
+      RED with the sections appended at the END, which is the path of least
+      resistance for a template edit and puts the most actionable content
+      below the method appendix.
+
+  test_both_sections_carry_an_inline_interrogation_marker
+      RED when only the page-top banner marks the draft state.
+
+  test_every_deliverable_item_links_down_to_a_finding
+      RED with one item's #anchor removed.
+
+  DeliverableSkillProseTests (four)
+      RED when SKILL.md states the rule without the worked example, drops the
+      voice decision, calls the interrogation marker optional, or stops naming
+      the gate script. A guard the prose does not describe is one an agent
+      routes around.
+
 Run:  python3 test_evaluate_person.py        (stdlib unittest, no deps)
 """
 
@@ -72,6 +172,7 @@ ATTR = HERE / "attribution_check.py"
 SENS = HERE / "sensitive_scan.py"
 INST = HERE / "instance_check.py"
 RECIP = HERE / "reciprocity_check.py"
+DELIV = HERE / "deliverable_check.py"
 
 
 def run(script: Path, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
@@ -393,12 +494,21 @@ class TemplateTests(unittest.TestCase):
 
     TPL = HERE.parent / "references" / "evaluation_page_template.html"
 
-    def test_template_exists_and_has_all_eight_sections(self) -> None:
+    def test_template_exists_and_has_every_section(self) -> None:
+        """Renumbered when 5.1a/5.1b added Feedback to deliver and Discussion
+        topics at positions 3 and 4. Every section this assertion originally
+        named is still asserted, under its new number -- the list gained two
+        entries and lost none.
+
+        Section ORDER is asserted separately, and more strictly, by
+        DeliverableTemplateTests.
+        """
         body = self.TPL.read_text()
-        for marker in ("1. HEADER", "2. KEY TAKEAWAYS", "3. OVERVIEW",
-                       "4. EXPECTATIONS", "5. FINDINGS",
-                       "6. OPERATOR IMPRESSIONS TESTED",
-                       "7. METHOD AND COVERAGE", "8. FOOTER"):
+        for marker in ("1. HEADER", "2. KEY TAKEAWAYS", "3. FEEDBACK TO DELIVER",
+                       "4. DISCUSSION TOPICS", "5. OVERVIEW",
+                       "6. EXPECTATIONS", "7. FINDINGS",
+                       "8. OPERATOR IMPRESSIONS TESTED",
+                       "9. METHOD AND COVERAGE", "10. FOOTER"):
             self.assertIn(marker, body, f"template missing section: {marker}")
 
     def test_template_has_no_cross_links(self) -> None:
@@ -1030,6 +1140,516 @@ class SkillProseTests(unittest.TestCase):
     def test_same_run_anchor_rule_is_documented(self) -> None:
         self.assertIn("same invocation", self.BODY.lower())
         self.assertIn("population", self.BODY.lower())
+
+
+
+# ===================================================================
+# The two DERIVED output sections (SKILL.md 5.1a / 5.1b / 5.1c).
+#
+# The template's six sections were all RETROSPECTIVE -- what happened,
+# and how well we know it. Nothing said what to DO with it, so the
+# operator derived "what do I actually say" by hand: exactly the manual
+# step this workflow exists to remove.
+#
+# Each test below was verified RED by mutating the new guard, observing
+# the failure, restoring, and re-running to a byte-identical file. What
+# the mutation was, and what it let through, is recorded on each test.
+# ===================================================================
+
+
+class FeedbackToDeliverTests(unittest.TestCase):
+    """SKILL.md 5.1a -- an item may only cite evidence that survived section 4,
+    and a shortfall item must carry its counterpart account."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        d = Path(self.tmp.name)
+        self.path = str(d / "deliverable.json")
+        self.attr = str(d / "attr.json")
+        self.recip = str(d / "recip.json")
+        run(DELIV, "interrogation", "--path", self.path,
+            "--state", "not-yet-interrogated")
+
+    # --- helpers -------------------------------------------------------
+    def _fb(self, *, iid: str = "FB1", substance: str | None = None,
+            rests_on: str = "todo.md line 12; her status note of 2026-03-06",
+            anchor: str | None = "f8", shortfall: bool = False,
+            expectation: str | None = "E8", citations: str | None = None,
+            actionable: str | None = "re-baseline the list weekly"):
+        args = ["feedback", "--path", self.path, "--id", iid,
+                "--substance", substance or (
+                    "four items she logged as two weeks late and blocking you, "
+                    "closed since / not closed"),
+                "--rests-on", rests_on]
+        if anchor:
+            args += ["--finding-anchor", anchor]
+        if shortfall:
+            args += ["--shortfall"]
+        if expectation:
+            args += ["--expectation", expectation]
+        if citations:
+            args += ["--citations", citations]
+        if actionable:
+            args += ["--actionable-by-subject", actionable]
+        return run(DELIV, *args)
+
+    def _citation(self, name: str, *, final: str = "subject-at-fault",
+                  direction: str = "subject-owes-operator",
+                  genre: str = "self-accounting"):
+        return run(ATTR, "add", "--path", self.attr, "--citation", name,
+                   "--author-confirmed-by", "file owner metadata",
+                   "--genre", genre, "--sourcing", "first-hand-documented",
+                   "--obligation-direction", direction,
+                   "--convention", "other items name the person owed",
+                   "--opposite-reading", "a complaint that Mark is late",
+                   "--distinguisher", "her weekly status note of 2026-03-06",
+                   "--initial-reading", "subject-at-fault",
+                   "--final-reading", final)
+
+    def _recip_shortfall(self, *, accounted: bool = True):
+        run(RECIP, "owed", "--path", self.recip, "--expectation", "E8",
+            "--item", "reference price range", "--owed-by", "CEO",
+            "--requested-on", "2026-08-05", "--in-force-from", "2026-08-05",
+            "--delivered", "no", "--blocking", "four named leads")
+        args = ["finding", "--path", self.recip, "--expectation", "E8",
+                "--verdict", "not met"]
+        if accounted:
+            args += ["--counterpart-items", "reference price range",
+                     "--accounted", "verdict downgraded: the input never arrived"]
+        return run(RECIP, *args)
+
+    def _check(self):
+        return run(DELIV, "check", "--path", self.path,
+                   "--attribution", self.attr, "--reciprocity", self.recip)
+
+    # --- tests ---------------------------------------------------------
+    def test_item_citing_a_failed_attribution_is_rejected(self) -> None:
+        """THE first gate: nothing gets DELIVERED that the evidence layer would
+        not support.
+
+        An ambiguous citation already may not support a finding (4.2 q4). Saying
+        it to the subject's face is strictly worse than printing it, because she
+        cannot audit the page mid-conversation.
+
+        RED when _failures() does not consult the attribution ledger: the item
+        renders, the operator reads it aloud in a performance review, and the
+        citation behind it is one the skill's own section 4 marked unresolvable.
+        """
+        self._citation("slack D0BE 2026-09-11 11:55", final="ambiguous",
+                       direction="unresolved")
+        self._fb(citations="slack D0BE 2026-09-11 11:55")
+        r = self._check()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("final reading is", r.stderr)
+        self.assertIn("may not support a finding", r.stderr)
+
+    def test_item_citing_relayed_machine_output_is_rejected(self) -> None:
+        """D5 again, at the delivery layer. She SENT the agent's output; she did
+        not author it, so it is neither her reasoning nor her commitment.
+
+        RED when the genre check stops at the attribution ledger and is not
+        re-applied here: crediting her with an agent's analysis is a
+        misattribution, and delivering it back to her as feedback compounds it.
+        """
+        self._citation("slack D0BE 2026-09-11 11:55",
+                       genre="relayed-machine-output", final="no-fault")
+        self._fb(citations="slack D0BE 2026-09-11 11:55")
+        r = self._check()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("she did not author it", r.stderr)
+
+    def test_item_citing_nothing_in_the_ledger_is_rejected(self) -> None:
+        """A citation with no attribution row never went through section 4 at
+        all. RED when an unknown citation is treated as clean by default --
+        fail-open on the field that carries the safety meaning is the failure
+        CLAUDE.md names by name."""
+        self._fb(citations="an email nobody re-derived")
+        r = self._check()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no row in the attribution ledger", r.stderr)
+
+    def test_shortfall_item_without_counterpart_account_is_rejected(self) -> None:
+        """D14 at the delivery layer -- the case that actually bites.
+
+        The reciprocity gate already forces a shortfall FINDING to account for
+        what she was owed. It says nothing about what is SAID. So a run could
+        record "the reference price range never arrived, so the verdict is
+        downgraded" in the findings and then deliver the bare shortfall to her
+        face, where the account is the whole difference between a shared problem
+        and an accusation.
+
+        RED when _counterpart_failures() is not consulted: the item ships and
+        every other gate in the skill passes, because each one is looking at a
+        different artifact.
+        """
+        self._recip_shortfall(accounted=False)
+        self._fb(shortfall=True)
+        r = self._check()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no counterpart account", r.stderr)
+        self.assertIn("shared problem", r.stderr)
+
+    def test_shortfall_item_with_no_matching_finding_is_rejected(self) -> None:
+        """Feedback may only cite a finding that EXISTS and survived its gates.
+
+        RED when a missing reciprocity row reads as "nothing to check": the
+        item then asserts a shortfall the findings layer never reached.
+        """
+        self._fb(shortfall=True, expectation="E99")
+        r = self._check()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no shortfall finding recorded", r.stderr)
+
+    def test_shortfall_item_reads_the_account_from_the_reciprocity_ledger(self) -> None:
+        """The account is READ from D14's machinery, not re-typed here.
+
+        Two copies of the same table drift, and "a comment claiming two
+        constants match is not a mechanism that keeps them matching". RED if
+        this gate grows its own counterpart field: the run then satisfies it
+        with a sentence that no `owed` row backs.
+        """
+        self._recip_shortfall(accounted=True)
+        self._fb(shortfall=True)
+        r = self._check()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("DELIVERABLE OK", r.stdout)
+
+    def test_scripted_operator_voice_is_rejected(self) -> None:
+        """Operator decision: items are NEUTRAL POINTS HE PHRASES HIMSELF.
+
+        A review is spoken aloud. Pre-written phrasing either sounds unlike him
+        or gets discarded, and a section that gets discarded is a section that
+        was not built.
+
+        RED when the substance field accepts anything: the skill emits
+        quotable lines, which is the one output the operator said not to
+        produce.
+        """
+        r = self._fb(substance="I want to talk about some things that slipped")
+        self.assertEqual(r.returncode, 0)
+        r = self._check()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("scripted sentence", r.stderr)
+
+    def test_item_without_a_finding_anchor_is_rejected(self) -> None:
+        """These sections are the most DERIVED content on the page, so every
+        item must link down. RED when an item may stand alone: a standalone
+        assertion at the top of the page is exactly the short-WITHOUT-long
+        failure the template's order exists to prevent."""
+        self._fb(anchor=None)
+        r = self._check()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no finding anchor", r.stderr)
+
+    def test_item_without_what_the_subject_can_act_on_is_rejected(self) -> None:
+        """Ordered by what the subject can act on, not by severity. RED when
+        actionability is optional: the section fills with severe findings she
+        can do nothing about, which is the Findings section with a new heading.
+        """
+        self._fb(actionable=None)
+        r = self._check()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("what the subject can act on", r.stderr)
+
+    def test_clean_item_with_surviving_citation_passes(self) -> None:
+        """A gate that blocks legitimate runs gets switched off, which is worse
+        than no gate."""
+        self._citation("todo.md line 12")
+        self._fb(citations="todo.md line 12")
+        r = self._check()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class DiscussionTopicTests(unittest.TestCase):
+    """SKILL.md 5.1b -- open questions, never rendered as feedback.
+
+    Collapsing the two sections produces the exact failure this skill was built
+    to prevent: open questions delivered as criticisms.
+
+        "You've been ignoring the scoring model"                   = FEEDBACK
+        "Our scoring penalises the contacts you're strongest in --
+         what should we do about that?"                   = DISCUSSION TOPIC
+
+    Same fact, different act.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = str(Path(self.tmp.name) / "deliverable.json")
+        run(DELIV, "interrogation", "--path", self.path,
+            "--state", "not-yet-interrogated")
+
+    def _topic(self, question: str, *, iid: str = "DT1",
+               kind: str = "two-readings", anchor: str | None = "f4",
+               why: str | None = "two readings both fit the evidence"):
+        args = ["topic", "--path", self.path, "--id", iid,
+                "--question", question, "--kind", kind]
+        if anchor:
+            args += ["--finding-anchor", anchor]
+        if why:
+            args += ["--why-open", why]
+        return run(DELIV, *args)
+
+    def _check(self):
+        return run(DELIV, "check", "--path", self.path)
+
+    def test_criticism_in_the_topics_section_is_rejected(self) -> None:
+        """THE separation gate, in the operator's own example.
+
+        RED when _criticism_hits() is not consulted: "you've been ignoring the
+        scoring model?" ships under the heading "Discussion topics", and the
+        subject is handed a verdict dressed as an invitation. That is the
+        failure the section split exists to prevent, and no other guard in the
+        skill can see it -- attribution checks the EVIDENCE, reciprocity checks
+        the ACCOUNT, and neither looks at the speech act.
+        """
+        r = self._topic("You've been ignoring the scoring model?")
+        self.assertEqual(r.returncode, 0)
+        r = self._check()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("phrased as a criticism", r.stderr)
+        self.assertIn("Same fact, different act", r.stderr)
+
+    def test_why_did_you_construction_is_rejected(self) -> None:
+        """An accusation in interrogative form still ends in a question mark, so
+        a naive "does it end in ?" check passes it.
+
+        RED when the detector tests only punctuation: "why didn't you flag the
+        blocker?" reads as an open question by shape and as an accusation by
+        content, which is the most likely way a future run smuggles feedback in.
+        """
+        self._topic("Why didn't you flag the blocker sooner?")
+        r = self._check()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("accusation in interrogative form", r.stderr)
+
+    def test_the_operators_own_good_example_passes(self) -> None:
+        """The counterpart of the test above, and the more important of the two.
+
+        RED when the detector is broad enough to fire on a legitimate topic that
+        merely addresses the subject in the second person. A gate with false
+        positives on the good example gets switched off, and then the bad
+        example ships too.
+        """
+        self._topic("Our scoring penalises the contacts you're strongest in -- "
+                    "what should we do about that?",
+                    kind="scoring-disagreement")
+        r = self._check()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_statement_is_not_a_discussion_topic(self) -> None:
+        """RED when a declarative sentence may sit in this section: a statement
+        under this heading reads as a verdict the subject is expected to accept,
+        which is feedback by another route."""
+        self._topic("The scoring model does not fit her book of contacts.")
+        r = self._check()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not phrased as a question", r.stderr)
+
+    def test_kind_outside_the_three_open_sources_is_rejected(self) -> None:
+        """A topic is open because the evidence was insufficient, because two
+        readings fit, or because the decision is owed TO her. Anything else is a
+        finding wearing a question mark.
+
+        RED when --kind is a free-text field: the section becomes a place to put
+        anything the run would rather not defend as a finding.
+        """
+        r = self._topic("What should we do about the pipeline?",
+                        kind="general-concern")
+        self.assertEqual(r.returncode, 2, "argparse must reject an unknown kind")
+
+    def test_topic_without_an_anchor_is_rejected(self) -> None:
+        self._topic("What should the reference price be?",
+                    kind="decision-owed-to-subject", anchor=None)
+        r = self._check()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no finding anchor", r.stderr)
+
+    def test_topic_must_say_why_it_is_open(self) -> None:
+        self._topic("What should the reference price be?",
+                    kind="decision-owed-to-subject", why=None)
+        r = self._check()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("why the question is open", r.stderr)
+
+
+class InterrogationStateTests(unittest.TestCase):
+    """SKILL.md 5.1c -- both sections render with a VISIBLE state.
+
+    These are inferences built on findings step 6 has not yet challenged, so
+    they are the likeliest thing on the page to be wrong. The remedy is a
+    visible marker, NOT omission: a draft stays usable, and nobody mistakes an
+    unchallenged recommendation for a settled one.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = str(Path(self.tmp.name) / "deliverable.json")
+        run(DELIV, "topic", "--path", self.path, "--id", "DT1",
+            "--question", "What should the reference price be?",
+            "--kind", "decision-owed-to-subject", "--finding-anchor", "f4",
+            "--why-open", "the decision is the CEO's, not hers")
+
+    def test_missing_interrogation_state_is_rejected(self) -> None:
+        """RED when the state may be absent: the sections render with no marker
+        at all, and an unchallenged recommendation reads as a settled one --
+        which is worse than not rendering them, because it is invisible."""
+        import json as _json
+        p = Path(self.path)
+        data = _json.loads(p.read_text())
+        del data["interrogation_state"]
+        p.write_text(_json.dumps(data))
+        r = run(DELIV, "check", "--path", self.path)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("must be explicit and visible", r.stderr)
+        self.assertIn("Omitting them is not the remedy", r.stderr)
+
+    def test_uninterrogated_render_carries_the_inline_marker(self) -> None:
+        """The page already has a top-level draft banner. These sections carry
+        their OWN inline marker because someone may scroll straight to them.
+
+        RED when render() emits only the section bodies: the reader who jumps to
+        "Feedback to deliver" from a table of contents sees no indication that
+        it is a draft.
+        """
+        r = run(DELIV, "render", "--path", self.path, "--format", "html")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Not yet interrogated", r.stdout)
+        # BOTH sections, not just the first.
+        self.assertEqual(r.stdout.count("interrogation draft"), 2)
+        self.assertIn('id="feedback-to-deliver"', r.stdout)
+        self.assertIn('id="discussion-topics"', r.stdout)
+
+    def test_interrogated_state_clears_the_draft_marker(self) -> None:
+        """A page still saying "not yet interrogated" after the loop closed
+        understates its own reliability -- the cheaper error, still wrong."""
+        run(DELIV, "interrogation", "--path", self.path, "--state", "interrogated")
+        r = run(DELIV, "render", "--path", self.path, "--format", "html")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Not yet interrogated", r.stdout)
+        self.assertEqual(r.stdout.count("interrogation ok"), 2)
+
+    def test_empty_deliverable_sections_are_rejected(self) -> None:
+        """RED when both sections may be silently empty: the skill then renders
+        the six retrospective sections it always did and the gap this change
+        exists to close is still open, with a gate that reports OK."""
+        empty = str(Path(self.tmp.name) / "empty.json")
+        run(DELIV, "interrogation", "--path", empty,
+            "--state", "not-yet-interrogated")
+        r = run(DELIV, "check", "--path", empty)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("neither feedback items nor discussion topics", r.stderr)
+
+
+class DeliverableTemplateTests(unittest.TestCase):
+    """The template must actually carry both sections, in the right place."""
+
+    TPL = HERE.parent / "references" / "evaluation_page_template.html"
+
+    def test_template_has_both_new_sections_in_ten_section_order(self) -> None:
+        """RED before the template change: the gate and the prose exist but the
+        render target has nowhere to put them, so a run following the skill
+        hand-rolls the section and the standardization is lost."""
+        body = self.TPL.read_text()
+        for marker in ("1. HEADER", "2. KEY TAKEAWAYS", "3. FEEDBACK TO DELIVER",
+                       "4. DISCUSSION TOPICS", "5. OVERVIEW", "6. EXPECTATIONS",
+                       "7. FINDINGS", "8. OPERATOR IMPRESSIONS TESTED",
+                       "9. METHOD AND COVERAGE", "10. FOOTER"):
+            self.assertIn(marker, body, f"template missing section: {marker}")
+
+    def test_new_sections_sit_between_takeaways_and_overview(self) -> None:
+        """Placement is load-bearing: most actionable, so high on the page.
+
+        RED when they are appended at the end (the path of least resistance for
+        a template edit): the most actionable content lands below the method
+        appendix, where the operator preparing for a review will not read it.
+        """
+        body = self.TPL.read_text()
+        take = body.index("<h2>Key takeaways</h2>")
+        fb = body.index("<h2>Feedback to deliver</h2>")
+        dt = body.index("<h2>Discussion topics</h2>")
+        ov = body.index("<h2>Overview</h2>")
+        self.assertLess(take, fb)
+        self.assertLess(fb, dt)
+        self.assertLess(dt, ov)
+
+    def test_both_sections_carry_an_inline_interrogation_marker(self) -> None:
+        """Count only RENDERED occurrences -- guidance lives in HTML comments
+        and must not satisfy the assertion.
+
+        RED when only the page-top banner marks the draft state: someone
+        scrolling straight to either section sees an unmarked recommendation.
+        """
+        import re
+        rendered = re.sub(r"<!--.*?-->", "", self.TPL.read_text(), flags=re.S)
+        self.assertEqual(rendered.count('class="interrogation draft"'), 2)
+        self.assertEqual(rendered.count("Not yet interrogated"), 2)
+
+    def test_every_deliverable_item_links_down_to_a_finding(self) -> None:
+        """Short-then-long: these are short pointers into the long evidence.
+
+        RED when an item ships without its #anchor -- a standalone assertion at
+        the top of the page, which is the failure the section order prevents
+        everywhere else.
+        """
+        import re
+        rendered = re.sub(r"<!--.*?-->", "", self.TPL.read_text(), flags=re.S)
+        block = rendered[rendered.index("<h2>Feedback to deliver</h2>"):
+                         rendered.index("<h2>Overview</h2>")]
+        items = re.findall(r"<li[^>]*>.*?</li>", block, flags=re.S)
+        self.assertGreaterEqual(len(items), 3)
+        for it in items:
+            self.assertRegex(it, r'href="#f\d+"',
+                             "every deliverable item must link down to a finding")
+
+    def test_template_still_has_no_cross_links(self) -> None:
+        """The new sections must not reintroduce what 0.3 forbids."""
+        body = self.TPL.read_text()
+        self.assertNotIn("/entities/", body)
+        self.assertNotIn("/markdown", body)
+
+
+class DeliverableSkillProseTests(unittest.TestCase):
+    """A guard the prose does not describe is one an agent routes around."""
+
+    BODY = " ".join((HERE.parent / "SKILL.md").read_text().split())
+
+    def test_both_sections_are_documented_with_the_gate(self) -> None:
+        self.assertIn("Feedback to deliver", self.BODY)
+        self.assertIn("Discussion topics", self.BODY)
+        self.assertIn("deliverable_check.py", self.BODY)
+
+    def test_the_voice_decision_is_stated(self) -> None:
+        """RED when the prose only says "write the feedback": a future run
+        produces quotable lines in the operator's voice, which is the one
+        output he ruled out."""
+        self.assertIn("neutral point", self.BODY.lower())
+        self.assertIn("phrase themselves", self.BODY.lower())
+        self.assertIn("spoken aloud", self.BODY.lower())
+
+    def test_the_separation_is_written_down_with_the_example(self) -> None:
+        """The prose must carry the worked example, because a future run WILL be
+        tempted to merge the two sections -- both are "things to raise in the
+        meeting".
+
+        RED when the distinction is asserted but not illustrated: an abstract
+        rule about speech acts does not survive contact with a real finding.
+        """
+        self.assertIn("ignoring the scoring model", self.BODY)
+        self.assertIn("what should we do about that", self.BODY)
+        self.assertIn("Same fact, different act", self.BODY)
+
+    def test_counterpart_account_is_reused_not_reinvented(self) -> None:
+        self.assertIn("counterpart account", self.BODY.lower())
+        self.assertIn("reciprocity_check.py", self.BODY)
+
+    def test_interrogation_state_is_rendered_not_omitted(self) -> None:
+        self.assertIn("not yet interrogated", self.BODY.lower())
+        self.assertIn("Omission is not the safe option", self.BODY)
+
 
 
 if __name__ == "__main__":
