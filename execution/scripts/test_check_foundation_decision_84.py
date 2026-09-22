@@ -1294,6 +1294,24 @@ def test_real_inline_token_mixed_distinct_heading_is_not_canonical(
     assert any("intake-workflow-atomic-entry" in problem for problem in problems)
 
 
+@pytest.mark.parametrize(
+    "duplicate",
+    (
+        "## [intake](https://example.test)\n",
+        "## <em>intake</em>\n",
+        '## in<span data-kind="middle">tak</span>e\n',
+    ),
+)
+def test_real_link_or_inline_html_intake_heading_is_ambiguous(
+    tmp_path: Path, duplicate: str
+) -> None:
+    def transform(text: str) -> str:
+        return text + "\n" + duplicate + "Contradictory duplicate.\n"
+
+    problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
 def test_heading_projection_covers_broad_inline_decoration_matrix() -> None:
     """Every reviewed marker/entity/code/escape mixture is fail-closed."""
 
@@ -1324,11 +1342,38 @@ def test_heading_projection_covers_broad_inline_decoration_matrix() -> None:
 @pytest.mark.parametrize(
     "title",
     (
+        "[intake](https://example.test/path_(nested))",
+        "[intake][reference]",
+        "[intake][]",
+        '![intake](image.png "title")',
+        "[in[ta]ke](https://example.test)",
+        "<em>intake</em>",
+        "<EM CLASS='focus'>intake</EM>",
+        "in<span data-text='a>b'>tak</span>e",
+        "in<!-- hidden -->take",
+        "in</em>take",
+    ),
+)
+def test_heading_projection_ignores_non_visible_link_and_html_syntax(
+    title: str,
+) -> None:
+    assert decision_84._heading_projection(title) == "intake"
+
+
+@pytest.mark.parametrize(
+    "title",
+    (
         "feature",
         "Intake exceptions",
+        "[Intake exceptions](https://example.test)",
         "Batch-opening exceptions",
         "What the scenarios do not show",
         "intact",
+        "[intact](https://example.test)",
+        "<https://example.test/intake>",
+        "<intake@example.test>",
+        "<em intake",
+        "[intake](https://example.test",
     ),
 )
 def test_heading_projection_leaves_unrelated_titles_distinct(title: str) -> None:

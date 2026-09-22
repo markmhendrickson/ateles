@@ -15,6 +15,7 @@ import hashlib
 import html
 import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 FOUNDATION_DIR = Path("docs/foundation")
@@ -365,6 +366,69 @@ def _active_prose(text: str) -> str:
     return "".join(output)
 
 
+def _matching_inline_delimiter(
+    text: str, start: int, opening: str, closing: str
+) -> int | None:
+    """Return the matching delimiter, respecting nesting and escapes."""
+
+    depth = 0
+    cursor = start
+    while cursor < len(text):
+        char = text[cursor]
+        if char == "\\" and cursor + 1 < len(text):
+            cursor += 2
+            continue
+        if char == opening:
+            depth += 1
+        elif char == closing:
+            depth -= 1
+            if depth == 0:
+                return cursor
+        cursor += 1
+    return None
+
+
+def _without_markdown_link_targets(text: str) -> str:
+    """Keep label text while omitting complete inline/reference targets."""
+
+    output: list[str] = []
+    cursor = 0
+    while cursor < len(text):
+        if text[cursor] == "\\" and cursor + 1 < len(text):
+            output.append(text[cursor : cursor + 2])
+            cursor += 2
+            continue
+        if text[cursor] != "[":
+            output.append(text[cursor])
+            cursor += 1
+            continue
+        label_end = _matching_inline_delimiter(text, cursor, "[", "]")
+        if label_end is None:
+            output.append(text[cursor])
+            cursor += 1
+            continue
+        output.append(_without_markdown_link_targets(text[cursor + 1 : label_end]))
+        cursor = label_end + 1
+        if cursor < len(text) and text[cursor] in "([":
+            opening = text[cursor]
+            closing = ")" if opening == "(" else "]"
+            target_end = _matching_inline_delimiter(text, cursor, opening, closing)
+            if target_end is not None:
+                cursor = target_end + 1
+    return "".join(output)
+
+
+class _HeadingTextParser(HTMLParser):
+    """Collect visible-ish fragment text while ignoring HTML syntax."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+
 def _heading_projection(title: str) -> str:
     """Return a conservative ambiguity key for a protected heading.
 
@@ -375,7 +439,10 @@ def _heading_projection(title: str) -> str:
     partial CommonMark inline parser at a fail-closed boundary.
     """
 
-    decoded = html.unescape(title)
+    parser = _HeadingTextParser()
+    parser.feed(_without_markdown_link_targets(title))
+    parser.close()
+    decoded = html.unescape("".join(parser.parts))
     return "".join(char.casefold() for char in decoded if char.isalnum())
 
 
