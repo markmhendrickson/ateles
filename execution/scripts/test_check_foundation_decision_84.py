@@ -1304,6 +1304,7 @@ def test_real_inline_token_mixed_distinct_heading_is_not_canonical(
         "## prefix-intake-suffix\n",
         "## [route](https://example.test/intake)\n",
         '## <span data-rule="intake">route</span>\n',
+        "## in[ta](https://x.test)ke\n",
     ),
 )
 def test_real_link_or_inline_html_intake_heading_is_ambiguous(
@@ -1384,6 +1385,38 @@ def test_heading_ambiguity_is_monotonic_over_raw_source(title: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "insertions",
+    (
+        (
+            "[x](https://example.test)",
+            "<span>x</span>",
+            "&#120;",
+            "`x`",
+            "\\*",
+        ),
+        (
+            "prefix",
+            '<i data-key="noise">x</i>',
+            "httpsxexample",
+            "[noise][reference]",
+            "_suffix_",
+        ),
+    ),
+)
+def test_heading_ambiguity_catches_insertions_between_every_protected_character(
+    insertions: tuple[str, ...],
+) -> None:
+    title = (
+        "".join(
+            char + insertion
+            for char, insertion in zip("intak", insertions, strict=True)
+        )
+        + "e"
+    )
+    assert decision_84._heading_is_ambiguous(title, "intake")
+
+
+@pytest.mark.parametrize(
     "title",
     (
         "feature",
@@ -1401,6 +1434,38 @@ def test_heading_ambiguity_is_monotonic_over_raw_source(title: str) -> None:
 )
 def test_heading_ambiguity_leaves_unrelated_titles_distinct(title: str) -> None:
     assert not decision_84._heading_is_ambiguous(title, "intake")
+
+
+@pytest.mark.parametrize(
+    "filename,protected",
+    (
+        ("workflows.md", "intake"),
+        (
+            "work_model.md",
+            "What distinguishes a task being assembled from one intake has not reached",
+        ),
+        ("work_model.md", "What a claim predicate treats as claimable"),
+        (
+            "scenarios.md",
+            "(j) A task created, routed by intake, and entering its successor",
+        ),
+    ),
+)
+def test_live_same_level_heading_corpus_has_no_projection_false_positive(
+    filename: str, protected: str
+) -> None:
+    headings = decision_84._active_headings(
+        (REPO_ROOT / "docs" / "foundation" / filename).read_text()
+    )
+    exact = [entry for entry in headings if entry[1] == protected]
+    assert len(exact) == 1
+    level = exact[0][0]
+    ambiguous = [
+        entry[1]
+        for entry in headings
+        if entry[0] == level and decision_84._heading_is_ambiguous(entry[1], protected)
+    ]
+    assert ambiguous == [protected]
 
 
 @pytest.mark.parametrize(

@@ -381,10 +381,10 @@ def _heading_projection(title: str) -> str:
     """Normalize the complete raw heading source without parsing Markdown.
 
     The projection is monotonic: adding a link target, title, attribute, or
-    other syntax cannot hide a protected-title substring.  That intentionally
-    rejects some unrelated decorated headings whose non-visible syntax names a
-    protected title; false-positive ambiguity is safer at this boundary than a
-    partial Markdown parser.
+    other syntax cannot hide a protected-title ordered subsequence.  That
+    intentionally rejects some unrelated decorated headings whose non-visible
+    syntax names a protected title; false-positive ambiguity is safer at this
+    boundary than a partial Markdown parser.
     """
 
     decoded = html.unescape(title)
@@ -401,11 +401,25 @@ def _visible_html_projection(title: str) -> str:
     return "".join(char.casefold() for char in decoded if char.isalnum())
 
 
+def _is_ordered_subsequence(needle: str, haystack: str) -> bool:
+    if not needle:
+        return False
+    position = 0
+    for char in haystack:
+        if char == needle[position]:
+            position += 1
+            if position == len(needle):
+                return True
+    return False
+
+
 def _heading_is_ambiguous(candidate: str, protected: str) -> bool:
     protected_projection = _heading_projection(protected)
-    return protected_projection in _heading_projection(
-        candidate
-    ) or protected_projection in _visible_html_projection(candidate)
+    return _is_ordered_subsequence(
+        protected_projection, _heading_projection(candidate)
+    ) or _is_ordered_subsequence(
+        protected_projection, _visible_html_projection(candidate)
+    )
 
 
 def _heading_spans(text: str, heading: str) -> list[tuple[int, int]]:
