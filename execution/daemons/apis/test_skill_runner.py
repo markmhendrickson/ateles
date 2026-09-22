@@ -3675,8 +3675,12 @@ class TestGateOwnerIdentity:
             == "accipiter@ateles-swarm"
         )
 
+    @pytest.mark.parametrize(
+        "trailing_value",
+        ['["mcp", "proxy"]', "not-json"],
+    )
     def test_codex_gate_owner_trailing_proxy_override_is_refused(
-        self, monkeypatch, tmp_path
+        self, monkeypatch, tmp_path, trailing_value
     ) -> None:
         """The effective (last) Codex config must be the exact safe transport."""
         result, launched, mock_write = self._run_provider_case(
@@ -3688,7 +3692,7 @@ class TestGateOwnerIdentity:
                 "-c",
                 'mcp_servers.neotoma.args=["mcp", "proxy", "--aauth", "--fail-closed"]',
                 "-c",
-                'mcp_servers.neotoma.args=["mcp", "proxy"]',
+                f"mcp_servers.neotoma.args={trailing_value}",
             ],
         )
         assert not result.ok
