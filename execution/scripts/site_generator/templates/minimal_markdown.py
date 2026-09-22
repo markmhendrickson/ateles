@@ -23,6 +23,8 @@ import html
 import re
 from urllib.parse import urljoin, urlparse
 
+from url_policy import public_href
+
 _INLINE_CODE = re.compile(r"`([^`]+)`")
 _BOLD = re.compile(r"\*\*([^*]+)\*\*")
 _ITALIC = re.compile(r"(?<!\*)\*([^*]+)\*(?!\*)")
@@ -37,9 +39,15 @@ _RULE = re.compile(r"^\s*(?:---+|___+|\*\*\*+)\s*$")
 
 def _resolved_href(href: str, link_base: str | None) -> str:
     parsed = urlparse(href)
-    if not link_base or parsed.scheme or parsed.netloc or href.startswith(("#", "/")):
-        return href
-    return urljoin(link_base, href)
+    resolved = (
+        href
+        if not link_base
+        or parsed.scheme
+        or parsed.netloc
+        or href.startswith(("#", "/"))
+        else urljoin(link_base, href)
+    )
+    return public_href(resolved) or "#"
 
 
 def _inline(text: str, link_base: str | None = None) -> str:
@@ -136,11 +144,7 @@ def to_html(markdown_text: str, link_base: str | None = None) -> str:
             )
             continue
 
-        if (
-            "|" in line
-            and i + 1 < len(lines)
-            and _TABLE_DIVIDER.match(lines[i + 1])
-        ):
+        if "|" in line and i + 1 < len(lines) and _TABLE_DIVIDER.match(lines[i + 1]):
             flush_blocks()
             headers = _table_cells(line)
             i += 2
@@ -148,9 +152,7 @@ def to_html(markdown_text: str, link_base: str | None = None) -> str:
             while i < len(lines) and "|" in lines[i] and lines[i].strip():
                 rows.append(_table_cells(lines[i]))
                 i += 1
-            head = "".join(
-                f"<th>{_inline(cell, link_base)}</th>" for cell in headers
-            )
+            head = "".join(f"<th>{_inline(cell, link_base)}</th>" for cell in headers)
             body = "".join(
                 "<tr>"
                 + "".join(f"<td>{_inline(cell, link_base)}</td>" for cell in row)

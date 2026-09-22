@@ -118,6 +118,7 @@ DEFAULT_OUT_DIR = REPO_ROOT / "dist" / "site"
 
 sys.path.insert(0, str(GEN_DIR))
 from templates import render as tpl  # noqa: E402
+from url_policy import local_asset_url, public_href  # noqa: E402
 
 
 class BuildBlocker(Exception):
@@ -316,14 +317,8 @@ def _attach_concept_film(data: dict) -> str | None:
     asset = brief.get("asset") or {}
     for field in ("video_src", "fallback_src", "poster_src"):
         value = asset.get(field) or ""
-        if value:
-            source_path = PurePosixPath(value)
-            if (
-                not value.startswith("/assets/")
-                or ".." in source_path.parts
-                or source_path.name == ""
-            ):
-                return f"concept film brief {brief_rel} has invalid {field}"
+        if value and not local_asset_url(value):
+            return f"concept film brief {brief_rel} has invalid {field}"
     if asset.get("enabled_in_hero") is False:
         for field in ("video_src", "fallback_src", "poster_src"):
             asset[field] = ""
@@ -354,12 +349,8 @@ def _attach_concept_film(data: dict) -> str | None:
                     f"concept film brief {brief_rel} has {repository_field} "
                     f"without {public_field}"
                 )
-            public_path = PurePosixPath(public_value)
-            if (
-                not public_value.startswith("/assets/")
-                or ".." in public_path.parts
-                or public_path.name == ""
-            ):
+            safe_public = local_asset_url(public_value)
+            if not safe_public:
                 return f"concept film brief {brief_rel} has invalid {public_field}"
             if repository_path.stat().st_size > max_bytes:
                 return (
@@ -439,17 +430,13 @@ def _collect_concept_assets(inventory: dict) -> tuple[dict[Path, bytes], list[st
                 continue
             if not repository_path.exists():
                 continue
-            if not public_value.startswith("/assets/"):
+            safe_public = local_asset_url(public_value)
+            if not safe_public:
                 blockers.append(
                     f"concept film brief {brief_rel} has invalid {public_field}"
                 )
                 continue
-            public_path = PurePosixPath(public_value)
-            if ".." in public_path.parts or public_path.name == "":
-                blockers.append(
-                    f"concept film brief {brief_rel} has invalid {public_field}"
-                )
-                continue
+            public_path = PurePosixPath(safe_public)
             if (
                 isinstance(max_bytes, int)
                 and repository_path.stat().st_size > max_bytes
@@ -476,17 +463,18 @@ def _collect_brand_assets(product: str) -> tuple[dict[Path, bytes], list[str]]:
         public_value = item.get("public_path")
         if not repository_value or not public_value:
             continue
-        if not public_value.startswith("/assets/"):
+        local_value = local_asset_url(public_value)
+        if not local_value:
             # External source links remain links on the viewer; they are not
             # local build assets to copy into the generated tree.
+            if public_href(public_value):
+                continue
+            blockers.append(f"brand asset has invalid public path: {public_value}")
             continue
         repository_path = (REPO_ROOT / repository_value).resolve()
-        public_path = PurePosixPath(public_value)
+        public_path = PurePosixPath(local_value)
         if not repository_path.is_relative_to(REPO_ROOT.resolve()):
             blockers.append(f"brand asset escapes repository: {repository_value}")
-            continue
-        if not public_value.startswith("/assets/") or ".." in public_path.parts:
-            blockers.append(f"brand asset has invalid public path: {public_value}")
             continue
         if not repository_path.exists():
             if item.get("status") == "approved":

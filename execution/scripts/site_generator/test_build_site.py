@@ -1213,6 +1213,101 @@ def test_brand_route_projects_complete_public_safe_contract(tmp_path, product):
     assert build_site._public_copy_leaks(Path("brand/index.html"), document) == []
 
 
+@pytest.mark.parametrize(
+    ("product", "families"),
+    (
+        ("ateles", ("Space Grotesk", "Source Sans 3", "IBM Plex Mono")),
+        ("neotoma", ("Fraunces", "Inter", "JetBrains Mono")),
+    ),
+)
+def test_brand_route_renders_judgeable_visual_specimens(tmp_path, product, families):
+    assert build_site.build(product, tmp_path) == []
+    document = (tmp_path / product / "brand" / "index.html").read_text()
+    assert 'data-review-shell="neutral-v1"' in document
+    assert f'data-candidate-brand="{product}"' in document
+    for token in ("display", "section_heading", "body", "label"):
+        specimen = re.search(
+            rf'<article[^>]+data-brand-specimen="typography-{token}"[^>]+>',
+            document,
+        )
+        assert specimen, token
+        assert "font-family:" in specimen.group(0)
+        assert "font-size:" in specimen.group(0)
+        assert "line-height:" in specimen.group(0)
+    for family in families:
+        assert f'data-font-family="{family}"' in document
+    assert document.count("data-brand-swatch=") >= 20
+    assert 'data-palette-theme="light"' in document
+    assert 'data-palette-theme="dark"' in document
+    for marker in (
+        "data-material-specimen=",
+        "data-story-frame=",
+        "data-reduced-motion-equivalent",
+        'data-voice-sample="forbidden"',
+        'data-voice-sample="preferred"',
+        'data-accessibility-specimen="contrast"',
+        'data-accessibility-specimen="reflow"',
+        'data-accessibility-specimen="reduced-motion"',
+    ):
+        assert marker in document
+
+
+def test_brand_routes_share_neutral_chrome_and_scope_candidate_styles(tmp_path):
+    documents = {}
+    for product in ("ateles", "neotoma"):
+        assert build_site.build(product, tmp_path) == []
+        documents[product] = (tmp_path / product / "brand" / "index.html").read_text()
+    styles = {
+        product: re.search(r"<style>(.*?)</style>", document, re.DOTALL).group(1)
+        for product, document in documents.items()
+    }
+    assert styles["ateles"] == styles["neotoma"]
+    assert "#f4f4f2" in styles["ateles"]
+    assert "Space Grotesk" not in styles["ateles"]
+    assert "Fraunces" not in styles["neotoma"]
+    candidate_colors = {
+        "ateles": ("#8a3b1f", "#f7f4ee"),
+        "neotoma": ("#1f6f5c", "#f6f3ea"),
+    }
+    for product, document in documents.items():
+        start = document.index('<div class="candidate-brand-canvas"')
+        end = document.index(
+            '</div>\n<figure class="section-visual brand-foundation-map"', start
+        )
+        outside = document[:start] + document[end:]
+        for color in candidate_colors[product]:
+            assert color in document[start:end]
+            assert color not in outside
+
+
+@pytest.mark.parametrize("product", ("ateles", "neotoma"))
+def test_missing_logo_variants_are_placeholders_not_fabricated(tmp_path, product):
+    assert build_site.build(product, tmp_path) == []
+    document = (tmp_path / product / "brand" / "index.html").read_text()
+    placeholders = re.findall(
+        r'<div class="brand-logo-placeholder" data-logo-state="missing">(.*?)</div>',
+        document,
+        re.DOTALL,
+    )
+    assert placeholders
+    assert all("<svg" not in value and "<img" not in value for value in placeholders)
+    if product == "ateles":
+        assert 'data-logo-variant="primary_mark"' in document
+        assert 'aria-label="Ateles swarm mark"' in document
+    else:
+        assert 'src="/assets/neotoma/neotoma-wordmark.svg"' in document
+
+
+def test_public_url_policy_rejects_active_and_encoded_traversal_urls():
+    from url_policy import local_asset_url, public_href
+
+    assert public_href("javascript:alert(1)") is None
+    assert public_href("http://example.com") is None
+    assert public_href("https://example.com/path") == "https://example.com/path"
+    assert local_asset_url("/assets/%2e%2e/private.txt") is None
+    assert local_asset_url("/assets/film.webm") == "/assets/film.webm"
+
+
 def test_brand_route_internal_leakage_validator_catches_known_positive(tmp_path):
     assert build_site.build("ateles", tmp_path) == []
     document = (tmp_path / "ateles" / "brand" / "index.html").read_text()
@@ -1277,6 +1372,12 @@ def test_minimal_markdown_rewrites_relative_links_to_declared_source_base():
     assert (
         'href="https://github.com/example/project/blob/main/docs/foundation/"' in html
     )
+
+
+def test_minimal_markdown_fails_closed_on_unsafe_links():
+    html = mdlib.to_html("[unsafe](javascript:alert(1))")
+    assert 'href="#"' in html
+    assert "javascript:" not in html
 
 
 def test_preview_refuses_to_serve_a_build_with_unresolved_sections(

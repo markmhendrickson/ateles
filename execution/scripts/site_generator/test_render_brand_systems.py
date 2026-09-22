@@ -273,6 +273,25 @@ def test_every_market_reference_has_learning_and_brands_remain_distinct(
     assert distinctive >= 4
 
 
+def test_validator_rejects_unsafe_public_urls(schema, contract):
+    broken = copy.deepcopy(contract)
+    broken["provenance"]["research"]["sources"][0]["url"] = "javascript:alert(1)"
+    with pytest.raises(renderer.BrandSystemError, match="unsafe URL"):
+        renderer.validate_brand_system(broken, schema)
+
+    broken = copy.deepcopy(contract)
+    broken["asset_inventory"][0]["public_path"] = "/assets/%2e%2e/private.txt"
+    with pytest.raises(renderer.BrandSystemError, match="unsafe public path"):
+        renderer.validate_brand_system(broken, schema)
+
+    broken = copy.deepcopy(contract)
+    broken["provenance"]["market_reference_ledger"][0]["evidence"]["source"] = (
+        "http://example.com/evidence"
+    )
+    with pytest.raises(renderer.BrandSystemError, match="unsafe public evidence URL"):
+        renderer.validate_brand_system(broken, schema)
+
+
 def test_renderer_check_is_deterministic_except_fetch_timestamp(schema, contract):
     later = copy.deepcopy(contract)
     later["_source"]["fetched_at"] = "2099-01-01T00:00:00+00:00"
