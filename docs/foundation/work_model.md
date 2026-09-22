@@ -328,28 +328,35 @@ record already carries onto `open` or terminal, permanently. Live status distrib
 ### A task is live when some principal could claim it now
 
 **The ruling.** A task is **live** when it is [claimable](vocabulary.md#claimable) by some principal: not
-terminal, no lease held on it, and no open checkpoint holding it from claim. "Live" names no new property.
-It is the claimable predicate above read over the whole backlog rather than from one principal's seat —
-existentially, over every principal, instead of the 1:1 "is this mine" a claim asks.
+terminal, no lease held on it, no open checkpoint holding it from claim, and no unresolved persistent assembly
+exclusion — except that the exclusion exposes only its open `classify` step, only to the principal that resolves
+as the intake declaration's `pm` step owner. "Live" names no new property. It is the claimable predicate above
+read over the whole backlog rather than from one principal's seat — existentially, over every principal, instead
+of the 1:1 "is this mine" a claim asks.
 
-**What the predicate partitions the backlog into.** A backlog partitions on it into exactly three parts,
-because a task fails to be claimable for exactly three reasons and each is a different thing to have
-happened. It is **live** — claimable now by some principal. Or it is **under a held lease** — nonterminal,
-claimable by nobody because a principal already took it, which is not work nothing is advancing but work
-being advanced right now. Or it is **finished or held** — terminal, or held from claim by an open
-checkpoint that says by what. Nothing else is a fourth case, and there is no state a task can occupy that
-this read cannot classify. The middle part is why the partition is three parts and not two: a task under a
-held lease is neither live nor terminal nor checkpointed, and a partition stated as live-and-the-rest with
-the rest described as terminal-or-checkpointed loses every actively executing task in the gap between its
-two halves.
+**What the predicate partitions the backlog into.** A backlog partitions on it into exactly three operational
+parts. It is **live** — claimable now by some principal. A task under an unresolved persistent assembly exclusion
+is live only for the narrow `classify` claim by the intake declaration's resolved `pm` step owner; it never enters
+an ordinary claim pool. Or it is **under a held lease** — nonterminal, claimable by nobody because a principal
+already took it, which is not work nothing is advancing but work being advanced right now. Or it is **finished or
+held** — terminal, held from claim by an open checkpoint that says by what, or excluded from ordinary claim by an
+unresolved persistent assembly exclusion when no eligible PM-only `classify` claim is open. The four refusal
+grounds — terminal status, held lease, checkpoint, and assembly exclusion — therefore produce three operational
+parts: terminal, checkpointed, and excluded work share the last part because none is work an ordinary queue may
+hand out. Nothing else is a fourth case, and there is no state a task can occupy that this read cannot classify.
+The middle part is why the partition is three parts and not two: a task under a held lease is neither live nor in
+the finished-or-held decision part, and a partition stated as live-and-the-rest without distinguishing execution
+loses every actively executing task in the gap between its two halves.
 
 A queue reading for work to hand out reads the first part alone, and that is the read *live* is for. The
 other two are distinguished because they answer different questions and lead to different acts: a task
-under a held lease needs nothing done to it and resolves itself when the lease is returned or lapses (a
-lapsed lease is not a held one, so the task is live again with no process acting —
-`vocabulary.md#lease`), whereas a terminal task is done and a checkpointed one is the operator's decision
-queue. Collapsing the second into the third would report executing work as held and put it in front of the
-operator; collapsing it into the first would hand out work another principal is already executing.
+under a held lease needs nothing done to it and resolves itself when the lease is returned or lapses (a lapsed
+lease is not a held one, so an otherwise claimable task is live again with no process acting —
+`vocabulary.md#lease`), whereas a terminal task is done, a checkpointed one is the operator's decision queue, and
+an assembling task remains excluded from ordinary claim while exposing only its PM-only `classify` claim. A lease
+lapse never removes that persistent exclusion. Collapsing the second into the third would report executing work
+as held and put it in front of the operator; collapsing it into the first would hand out work another principal
+is already executing.
 
 **Why claimability and not the alternatives.** *Has an open checkpoint* is exact and matches the record,
 but it says nothing about a task that is merely unclaimed: an unheld, uncheckpointed task and a task
@@ -359,8 +366,9 @@ stored liveness flag — it is state that needs a process to keep it true, and t
 it is the one that died. Claimability is what "live" already means to a queue, and it is derived at read
 time from what the record carries, so nothing maintains it (principle 11). The word follows the corpus's
 existing use of *live* for the one batch of a chain and the one instance of a recurring task
-(`#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next`): in each case the live one
-is the one that is not terminal and not held, read and never stored.
+(`#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next`): in each case the live one is the
+one that is not terminal and not held by a lease, checkpoint, or persistent assembly exclusion, apart from the
+exclusion's narrow PM-only `classify` claim; the property is read and never stored.
 
 **No term is minted for it** (principle 12). `claimable` is the term, defined once in
 `vocabulary.md#claimable` and argued once above; *live* is that predicate's reading over a pool, the way

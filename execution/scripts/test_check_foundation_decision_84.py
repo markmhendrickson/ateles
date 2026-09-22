@@ -17,6 +17,7 @@ import check_foundation_decision_84 as decision_84  # noqa: E402
 
 CORPUS = {
     "conformance.md": "| 84 | question | pointer | dependency | **ruled**: every workflow-entering task gets an intake batch; an aggregate parent is exempt; persistent assembly exclusion survives a lapsed lease; creation grants no lease; only the `pm` step owner claims |\n",
+    "vocabulary.md": "### claimable\nClaimable excludes an unresolved persistent assembly exclusion except for its PM-only classify claim.\n### terminal\nTerminal.\n",
     "work_model.md": "### Intake is every task's first workflow\nEvery workflow-entering task's intake batch opens at creation; an aggregate parent task never enters a workflow and has no intake batch.\n### What distinguishes a task being assembled from one intake has not reached\nFor a workflow-entering task: persistent assembly exclusion; lease lapse; creation grants no lease; the declared `pm` step owner; multi-agent assembly. The creating principal receives no `classify` lease by being the creator. Contributors gain no lease or execution privilege.\n### What a claim predicate treats as claimable\nThe assembly exclusion exposes its open `classify` step only to a principal that resolves as the declaration's `pm` step owner.\n### A task is live when some principal could claim it now\n### How a batch is formed, and what chooses its workflow\nEvery workflow-entering task has an intake batch on creation; an assembling task adds a persistent classify hold. The consequence worth naming has two forms, not one. An intake batch opens in the admitted creation unit of the workflow-entering task, without a predecessor verdict. Every successor batch is opened by a closing verdict.\n**A successor batch's tasks are chosen by its verdict.**\n### A batch may hold on a condition discovered mid-flight\nThe assembly exception admits its creator-time finding before a step owner or held lease exists; its persistent assembly exclusion survives the lease lapse.\n### A batch may depend on a task it created\n### Parent and child tasks\nAn **aggregate parent task is not claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY` edge** — it is a grouping, and a batch carries tasks that are executed, which an aggregate parent never is.\n### A recurring task is one live instance, and its completion creates the next\n### Where tasks come from: every source, indexed\nEvery workflow-entering task source ends at the universal workflow entry: a task with its intake batch at creation; an aggregate parent is the exception.\n### An intake rule turns a described change in the record into a task, and nothing else\n",
     "data_model.md": "| task | every workflow-entering task | intake batch at creation; aggregate parent has none |\nA creator-time assembly finding is a persistent assembly exclusion that survives lease lapse and exposes only the declaration-resolved `pm` owner.\n",
     "workflows.md": "## intake\n**Entry condition:** every workflow-entering task enters with its intake batch and `ADDRESSED_BY` edge admitted atomically at creation. An aggregate parent never enters a workflow; decision 84's assembly exception adds a persistent `classify` hold.\n## feature\nEvery workflow-entering task is mentioned here too, but this section cannot satisfy intake's contract.\n",
@@ -86,6 +87,7 @@ def write_corpus(root: Path) -> None:
         if name in {
             "conformance_suite.md",
             "data_model.md",
+            "vocabulary.md",
             "work_model.md",
             "workflows.md",
         }:
@@ -1131,6 +1133,66 @@ def test_real_valid_fence_info_strings_remain_inert(
         return text[:position] + fenced + text[position:]
 
     assert mutate_real_corpus_text(tmp_path, "workflows.md", transform) == []
+
+
+def test_real_intake_heading_with_trailing_whitespace_remains_active(
+    tmp_path: Path,
+) -> None:
+    problems = mutate_real_corpus(
+        tmp_path,
+        "workflows.md",
+        "## intake\n",
+        "## intake\t  \n",
+    )
+    assert problems == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    (
+        "## intake   \n",
+        "## intake\t  \r\n",
+        "## intake ###\t  \r\n",
+    ),
+)
+def test_active_heading_normalizes_legal_trailing_whitespace(line: str) -> None:
+    assert decision_84._active_headings(line)[0][:2] == (2, "intake")
+
+
+def test_real_duplicate_intake_heading_with_trailing_whitespace_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    def transform(text: str) -> str:
+        return text + "\n## intake ##\t  \nContradictory duplicate.\n"
+
+    problems = mutate_real_corpus_text(tmp_path, "workflows.md", transform)
+    assert any("intake-workflow-atomic-entry" in problem for problem in problems)
+
+
+def test_real_claimable_vocabulary_assembly_exclusion_mutant_fails(
+    tmp_path: Path,
+) -> None:
+    problems = mutate_real_corpus_normalized(
+        tmp_path,
+        "vocabulary.md",
+        "whose status is not terminal",
+        "whose status is not terminal; despite the exclusion below, every assembling "
+        "task remains ordinarily claimable",
+    )
+    assert any("claimable-vocabulary" in problem for problem in problems)
+
+
+def test_real_live_partition_assembly_exclusion_mutant_fails(
+    tmp_path: Path,
+) -> None:
+    problems = mutate_real_corpus_normalized(
+        tmp_path,
+        "work_model.md",
+        "A task is **live** when it is [claimable](vocabulary.md#claimable) by some principal",
+        "A task is **live** when it is [claimable](vocabulary.md#claimable) by some "
+        "principal; despite the exclusion below, every assembling task remains live",
+    )
+    assert any("live-model" in problem for problem in problems)
 
 
 def test_wm27_closing_verdict_claim_applied_to_intake_fails(tmp_path: Path) -> None:

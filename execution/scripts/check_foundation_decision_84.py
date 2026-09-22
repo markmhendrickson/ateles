@@ -30,6 +30,12 @@ DIRECT_MODEL_SECTION_SHA256 = (
 CLAIM_MODEL_SECTION_SHA256 = (
     "3d2ff563b78ecab399c0e58448817807686fa95762f4c5790cd358a2bbc2b59c"
 )
+VOCABULARY_CLAIMABLE_SECTION_SHA256 = (
+    "aa9167b69df90282181b167fe6b5d237baf93f33ca24eebdbd97b5c2c81e3d1e"
+)
+LIVE_MODEL_SECTION_SHA256 = (
+    "9c5bee6f7c856c94426ce3866af4aedbe67284a42a2770b41b1afac8b901fa57"
+)
 HOLD_MODEL_SECTION_SHA256 = (
     "f14d9ba6700ea67fedd13ca47cfd680d9da667f852be0adfc48959b33997c1e7"
 )
@@ -349,7 +355,7 @@ def _active_headings(text: str) -> list[tuple[int, str, int, int]]:
     offset = 0
     for line in active.splitlines(keepends=True):
         match = re.fullmatch(
-            r" {0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+[ \t]*)?",
+            r" {0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*",
             line.rstrip("\r\n"),
         )
         if match:
@@ -465,6 +471,7 @@ def check(root: Path) -> list[str]:
     fdir = root / FOUNDATION_DIR
     names = (
         "conformance.md",
+        "vocabulary.md",
         "work_model.md",
         "data_model.md",
         "workflows.md",
@@ -513,6 +520,16 @@ def check(root: Path) -> list[str]:
         texts["work_model.md"],
         "What a claim predicate treats as claimable",
         "A task is live when some principal could claim it now",
+    )
+    vocabulary_claimable_owner = _owning_heading_section(
+        texts["vocabulary.md"],
+        "claimable",
+        "terminal",
+    )
+    live_model_owner = _owning_heading_section(
+        texts["work_model.md"],
+        "A task is live when some principal could claim it now",
+        "Priority orders the claimable pool; it does not enter it",
     )
     batch_formation = _heading_section(
         texts["work_model.md"],
@@ -593,6 +610,16 @@ def check(root: Path) -> list[str]:
         "claim-model",
         claim_model_owner,
         CLAIM_MODEL_SECTION_SHA256,
+    )
+    problems += _require_exact_section_digest(
+        "claimable-vocabulary",
+        vocabulary_claimable_owner,
+        VOCABULARY_CLAIMABLE_SECTION_SHA256,
+    )
+    problems += _require_exact_section_digest(
+        "live-model",
+        live_model_owner,
+        LIVE_MODEL_SECTION_SHA256,
     )
     universal_surfaces = {
         "intake-model": intake_model,
