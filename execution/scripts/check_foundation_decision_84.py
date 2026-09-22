@@ -366,58 +366,6 @@ def _active_prose(text: str) -> str:
     return "".join(output)
 
 
-def _matching_inline_delimiter(
-    text: str, start: int, opening: str, closing: str
-) -> int | None:
-    """Return the matching delimiter, respecting nesting and escapes."""
-
-    depth = 0
-    cursor = start
-    while cursor < len(text):
-        char = text[cursor]
-        if char == "\\" and cursor + 1 < len(text):
-            cursor += 2
-            continue
-        if char == opening:
-            depth += 1
-        elif char == closing:
-            depth -= 1
-            if depth == 0:
-                return cursor
-        cursor += 1
-    return None
-
-
-def _without_markdown_link_targets(text: str) -> str:
-    """Keep label text while omitting complete inline/reference targets."""
-
-    output: list[str] = []
-    cursor = 0
-    while cursor < len(text):
-        if text[cursor] == "\\" and cursor + 1 < len(text):
-            output.append(text[cursor : cursor + 2])
-            cursor += 2
-            continue
-        if text[cursor] != "[":
-            output.append(text[cursor])
-            cursor += 1
-            continue
-        label_end = _matching_inline_delimiter(text, cursor, "[", "]")
-        if label_end is None:
-            output.append(text[cursor])
-            cursor += 1
-            continue
-        output.append(_without_markdown_link_targets(text[cursor + 1 : label_end]))
-        cursor = label_end + 1
-        if cursor < len(text) and text[cursor] in "([":
-            opening = text[cursor]
-            closing = ")" if opening == "(" else "]"
-            target_end = _matching_inline_delimiter(text, cursor, opening, closing)
-            if target_end is not None:
-                cursor = target_end + 1
-    return "".join(output)
-
-
 class _HeadingTextParser(HTMLParser):
     """Collect visible-ish fragment text while ignoring HTML syntax."""
 
@@ -430,20 +378,34 @@ class _HeadingTextParser(HTMLParser):
 
 
 def _heading_projection(title: str) -> str:
-    """Return a conservative ambiguity key for a protected heading.
+    """Normalize the complete raw heading source without parsing Markdown.
 
-    Protected headings must still occur literally.  This projection is used
-    only to reject a second, decorated same-level heading that could denote the
-    protected title after entity, code-span, escape, or emphasis rendering.  It
-    deliberately accepts false-positive ambiguity rather than attempting a
-    partial CommonMark inline parser at a fail-closed boundary.
+    The projection is monotonic: adding a link target, title, attribute, or
+    other syntax cannot hide a protected-title substring.  That intentionally
+    rejects some unrelated decorated headings whose non-visible syntax names a
+    protected title; false-positive ambiguity is safer at this boundary than a
+    partial Markdown parser.
     """
 
+    decoded = html.unescape(title)
+    return "".join(char.casefold() for char in decoded if char.isalnum())
+
+
+def _visible_html_projection(title: str) -> str:
+    """Retain the prior fail-closed coverage for text split by HTML tags."""
+
     parser = _HeadingTextParser()
-    parser.feed(_without_markdown_link_targets(title))
+    parser.feed(title)
     parser.close()
     decoded = html.unescape("".join(parser.parts))
     return "".join(char.casefold() for char in decoded if char.isalnum())
+
+
+def _heading_is_ambiguous(candidate: str, protected: str) -> bool:
+    protected_projection = _heading_projection(protected)
+    return protected_projection in _heading_projection(
+        candidate
+    ) or protected_projection in _visible_html_projection(candidate)
 
 
 def _heading_spans(text: str, heading: str) -> list[tuple[int, int]]:
@@ -455,9 +417,7 @@ def _heading_spans(text: str, heading: str) -> list[tuple[int, int]]:
     candidates = [entry for entry in _active_headings(text) if entry[0] == level]
     exact = [entry for entry in candidates if entry[1] == title]
     ambiguous = [
-        entry
-        for entry in candidates
-        if _heading_projection(entry[1]) == _heading_projection(title)
+        entry for entry in candidates if _heading_is_ambiguous(entry[1], title)
     ]
     if len(exact) != 1 or len(ambiguous) != 1:
         return []
@@ -509,14 +469,12 @@ def _owning_heading_section(text: str, heading: str, end_heading: str) -> str:
     start_ambiguity = [
         entry
         for entry in headings
-        if entry[0] == start[0]
-        and _heading_projection(entry[1]) == _heading_projection(heading)
+        if entry[0] == start[0] and _heading_is_ambiguous(entry[1], heading)
     ]
     end_ambiguity = [
         entry
         for entry in headings
-        if entry[0] == end[0]
-        and _heading_projection(entry[1]) == _heading_projection(end_heading)
+        if entry[0] == end[0] and _heading_is_ambiguous(entry[1], end_heading)
     ]
     if len(start_ambiguity) != 1 or len(end_ambiguity) != 1:
         return ""

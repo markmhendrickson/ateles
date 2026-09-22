@@ -1298,8 +1298,12 @@ def test_real_inline_token_mixed_distinct_heading_is_not_canonical(
     "duplicate",
     (
         "## [intake](https://example.test)\n",
+        '## [intake](https://example.test "title ) extra")\n',
         "## <em>intake</em>\n",
         '## in<span data-kind="middle">tak</span>e\n',
+        "## prefix-intake-suffix\n",
+        "## [route](https://example.test/intake)\n",
+        '## <span data-rule="intake">route</span>\n',
     ),
 )
 def test_real_link_or_inline_html_intake_heading_is_ambiguous(
@@ -1354,30 +1358,49 @@ def test_heading_projection_covers_broad_inline_decoration_matrix() -> None:
         "in</em>take",
     ),
 )
-def test_heading_projection_ignores_non_visible_link_and_html_syntax(
+def test_heading_ambiguity_covers_link_and_html_syntax(
     title: str,
 ) -> None:
-    assert decision_84._heading_projection(title) == "intake"
+    assert decision_84._heading_is_ambiguous(title, "intake")
 
 
 @pytest.mark.parametrize(
     "title",
     (
-        "feature",
+        "prefix-intake-suffix",
+        "[route](https://example.test/intake)",
+        '[route](https://example.test "intake title")',
+        '<span data-rule="intake">route</span>',
         "Intake exceptions",
         "[Intake exceptions](https://example.test)",
-        "Batch-opening exceptions",
-        "What the scenarios do not show",
-        "intact",
-        "[intact](https://example.test)",
         "<https://example.test/intake>",
         "<intake@example.test>",
         "<em intake",
         "[intake](https://example.test",
     ),
 )
-def test_heading_projection_leaves_unrelated_titles_distinct(title: str) -> None:
-    assert decision_84._heading_projection(title) != "intake"
+def test_heading_ambiguity_is_monotonic_over_raw_source(title: str) -> None:
+    assert decision_84._heading_is_ambiguous(title, "intake")
+
+
+@pytest.mark.parametrize(
+    "title",
+    (
+        "feature",
+        "Triage exceptions",
+        "[Triage exceptions](https://example.test)",
+        "Batch-opening exceptions",
+        "What the scenarios do not show",
+        "intact",
+        "[intact](https://example.test)",
+        "<https://example.test/route>",
+        "<route@example.test>",
+        "<em route",
+        "[route](https://example.test",
+    ),
+)
+def test_heading_ambiguity_leaves_unrelated_titles_distinct(title: str) -> None:
+    assert not decision_84._heading_is_ambiguous(title, "intake")
 
 
 @pytest.mark.parametrize(
