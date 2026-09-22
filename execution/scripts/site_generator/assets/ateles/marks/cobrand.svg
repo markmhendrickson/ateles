@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 280 64" role="img" aria-labelledby="t d" fill="none">
+  <title id="t">Ateles co-branding review lockup</title>
+  <desc id="d">Provisional peer co-brand spacing: Ateles lockup, divider, peer placeholder.</desc>
+  
+  <g color="#1a1a1a">
+  <svg x="0" y="0" width="64" height="64" viewBox="0 0 64 64">
+  <!-- Differentiated roles; equal visual weight; no hub; no connecting edges -->
+  <circle cx="18" cy="22" r="7" fill="none" stroke="currentColor" stroke-width="2.2"/>
+  <rect x="34" y="14" width="14" height="12" rx="3" fill="none" stroke="currentColor" stroke-width="2.2"/>
+  <path d="M50 40 L58 54 H42 Z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
+  <path d="M28 40 L36 48 L28 56 L20 48 Z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
+  <rect x="10" y="40" width="12" height="12" rx="6" fill="none" stroke="currentColor" stroke-width="2.2"/>
+</svg>
+  <g transform="translate(72 0)">  <text x="0" y="40" font-family="Space Grotesk, Inter, system-ui, sans-serif" font-size="26" font-weight="600" letter-spacing="-0.4" fill="#1a1a1a">ateles</text></g>
+  <line x1="168" y1="18" x2="168" y2="46" stroke="#1a1a1a" stroke-width="1.5" opacity="0.45"/>
+  <text x="184" y="40" font-family="Inter, system-ui, sans-serif" font-size="22" font-weight="500" fill="#1a1a1a" opacity="0.55">Peer</text>
+  </g>
+</svg>

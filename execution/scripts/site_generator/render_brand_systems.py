@@ -477,9 +477,10 @@ def render_contract(
     entity_schema_version: str = "1.0",
 ) -> dict:
     data = {field: snapshot.get(field) for field in REQUIRED_SECTIONS}
-    # The entity API may serialize the entity-schema version as numeric 1.0;
-    # the brand contract keeps it as the schema's declared string value.
-    data["schema_version"] = str(entity_schema_version)
+    # Brand-document schema_version (always "1.0" for this contract) lives on the
+    # snapshot when present. Do not confuse it with the Neotoma entity-type
+    # schema_version on the API payload (which may be 1.1.0+).
+    data["schema_version"] = str(snapshot.get("schema_version") or "1.0")
     doc = {
         "_source": {
             "entity_id": entity_id,

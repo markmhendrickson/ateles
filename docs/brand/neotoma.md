@@ -6,8 +6,8 @@ status: provisional
 source_entity_id: ent_c5f3ebd1800a887a3b405e53
 schema_entity_id: ent_73da44b2d434cbafe5d8ecb9
 observation_ids:
-  asset_inventory: f2284285-de83-5e06-dba8-614a6671f842
-  completeness: f0e1e060-3153-f2d8-6982-191fa0a92935
+  asset_inventory: ca29d60a-b140-818a-1467-ee80601aa89e
+  completeness: b1c30485-79aa-ed80-fb58-9f8a87701149
   downstream_contracts: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
   name: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
   ownership: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
@@ -16,7 +16,7 @@ observation_ids:
   product: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
   production_specs: 815877ab-10c3-dba0-9856-b50aea827f08
   provenance: 0266a223-87f9-9f68-d492-831811d8dd53
-  schema_version: unknown
+  schema_version: 176a62d2-e88c-046c-40c6-3588c159b7f8
   scope: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
   slug: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
   status: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
@@ -24,7 +24,7 @@ observation_ids:
   updated_at: 941fd113-446d-be68-ea04-027b02dc9b59
   visibility: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
   visual_concepts: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
-  visual_styles: a31d7669-2d29-6f1a-855f-55675fee9d8a
+  visual_styles: 00d04d7a-4d57-2461-8278-d503d4bd7142
   voice: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
 ---
 
@@ -182,23 +182,23 @@ observation_ids:
 
 ## Logo system
 
-- **APPROVED · primary mark — Neotoma typographic mark:** Primary compact identity. (source: `inspector/src/assets/neotoma_wordmark.svg`; exports: SVG)
-- **APPROVED · wordmark — Neotoma wordmark:** Named identity. (source: `inspector/src/assets/neotoma_wordmark.svg`; exports: SVG)
-- **MISSING · lockup — Graph symbol + wordmark lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
-- **MISSING · symbol only — Persistent record-graph symbol:** Required before this placement is approved. (source: `not produced`; exports: not produced)
-- **MISSING · horizontal — Horizontal lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
-- **MISSING · stacked — Stacked lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
-- **MISSING · monochrome — Monochrome variant:** One-color reproduction. (source: `not produced`; exports: not produced)
-- **MISSING · reversed — Reversed variant:** Dark or photographic fields. (source: `not produced`; exports: not produced)
-- **PROVISIONAL · small scale — Small-scale variant:** Requires tested legibility threshold. (source: `not produced`; exports: not produced)
-- **MISSING · favicon — Favicon:** Required before this placement is approved. (source: `not produced`; exports: not produced)
-- **PROVISIONAL · application — Application mark:** Align Inspector/application marks with persistent-graph semantics. (source: `not produced`; exports: not produced)
+- **PROVISIONAL · application — Historical application wordmark:** Preserved Inspector wordmark evidence. (source: `execution/scripts/site_generator/assets/neotoma/marks/historical/wordmark.svg`; exports: SVG)
+- **PROVISIONAL · favicon — Favicon:** Browser and app icon. (source: `execution/scripts/site_generator/assets/neotoma/marks/favicon.svg`; exports: SVG)
+- **PROVISIONAL · horizontal — Horizontal lockup:** Symbol left of wordmark. (source: `execution/scripts/site_generator/assets/neotoma/marks/lockup-horizontal.svg`; exports: SVG)
+- **PROVISIONAL · lockup — Graph symbol + wordmark lockup:** Navigation identity with measured clear space. (source: `execution/scripts/site_generator/assets/neotoma/marks/lockup-horizontal.svg`; exports: SVG)
+- **PROVISIONAL · monochrome — Monochrome variant:** One-color reproduction. (source: `execution/scripts/site_generator/assets/neotoma/marks/monochrome.svg`; exports: SVG)
+- **PROVISIONAL · primary mark — Persistent record-graph mark:** Primary compact identity. (source: `execution/scripts/site_generator/assets/neotoma/marks/primary.svg`; exports: SVG)
+- **PROVISIONAL · reversed — Reversed variant:** Dark or photographic fields. (source: `execution/scripts/site_generator/assets/neotoma/marks/reversed.svg`; exports: SVG)
+- **PROVISIONAL · small scale — Small-scale variant:** Tested at 16–32px. (source: `execution/scripts/site_generator/assets/neotoma/marks/small-scale.svg`; exports: SVG)
+- **PROVISIONAL · stacked — Stacked lockup:** Symbol above wordmark. (source: `execution/scripts/site_generator/assets/neotoma/marks/lockup-stacked.svg`; exports: SVG)
+- **PROVISIONAL · symbol only — Persistent record-graph symbol:** Compact graph identity. (source: `execution/scripts/site_generator/assets/neotoma/marks/symbol.svg`; exports: SVG)
+- **PROVISIONAL · wordmark — Neotoma wordmark:** Named typographic identity. (source: `execution/scripts/site_generator/assets/neotoma/marks/wordmark.svg`; exports: SVG)
 
-- **Clear space · MISSING:** Define and test an exclusion zone from final geometry; no product measurement is approved.
-- **Minimum size · MISSING:** Test final exports; no numerical threshold is approved.
+- **Clear space · PROVISIONAL:** Keep a clear exclusion zone of half the primary symbol height on all sides; no competing marks inside the zone.
+- **Minimum size · PROVISIONAL:** Do not reproduce the symbol below 16px digital or 8 mm print; use the wordmark alone when space is tighter.
 - **Backgrounds · PROVISIONAL:** Use quiet archival-paper or deep-ink fields; avoid busy graph fields.
 - **Colorways · PROVISIONAL:** Ink or teal may identify; amber remains reserved for correction.
-- **Co-branding · MISSING:** Define peer-brand spacing, hierarchy, dividers and approval before use.
+- **Co-branding · PROVISIONAL:** Place the product lockup left of a 1.5px divider with 16px gaps; peer mark matches Ateles/Neotoma symbol height. Review asset: marks/cobrand.svg.
 
 ### Logo misuse
 
@@ -235,7 +235,20 @@ observation_ids:
 
 ## Asset inventory
 
-- **APPROVED · Typographic Neotoma wordmark** (wordmark): Primary compact identity mark — `execution/scripts/site_generator/assets/neotoma/neotoma-wordmark.svg`
+- **PROVISIONAL · Persistent record-graph mark** (symbol): Primary compact identity. — `execution/scripts/site_generator/assets/neotoma/marks/primary.svg`
+- **PROVISIONAL · Persistent record-graph symbol** (symbol): Compact graph identity. — `execution/scripts/site_generator/assets/neotoma/marks/symbol.svg`
+- **PROVISIONAL · Neotoma wordmark** (wordmark): Named typographic identity. — `execution/scripts/site_generator/assets/neotoma/marks/wordmark.svg`
+- **PROVISIONAL · Graph symbol + wordmark lockup** (lockup): Navigation identity with measured clear space. — `execution/scripts/site_generator/assets/neotoma/marks/lockup-horizontal.svg`
+- **PROVISIONAL · Horizontal lockup** (lockup): Symbol left of wordmark. — `execution/scripts/site_generator/assets/neotoma/marks/lockup-horizontal.svg`
+- **PROVISIONAL · Stacked lockup** (lockup): Symbol above wordmark. — `execution/scripts/site_generator/assets/neotoma/marks/lockup-stacked.svg`
+- **PROVISIONAL · Monochrome variant** (symbol): One-color reproduction. — `execution/scripts/site_generator/assets/neotoma/marks/monochrome.svg`
+- **PROVISIONAL · Reversed variant** (symbol): Dark or photographic fields. — `execution/scripts/site_generator/assets/neotoma/marks/reversed.svg`
+- **PROVISIONAL · Small-scale variant** (symbol): Tested at 16–32px. — `execution/scripts/site_generator/assets/neotoma/marks/small-scale.svg`
+- **PROVISIONAL · Favicon** (symbol): Browser and app icon. — `execution/scripts/site_generator/assets/neotoma/marks/favicon.svg`
+- **PROVISIONAL · Historical application wordmark** (symbol): Preserved Inspector wordmark evidence. — `execution/scripts/site_generator/assets/neotoma/marks/historical/wordmark.svg`
+- **PROVISIONAL · Neotoma co-branding review lockup** (lockup): Peer co-brand spacing review only. — `execution/scripts/site_generator/assets/neotoma/marks/cobrand.svg`
+- **APPROVED · Historical Inspector typographic wordmark** (wordmark): Preserved historical/application wordmark evidence. — `execution/scripts/site_generator/assets/neotoma/neotoma-wordmark.svg`
+- **PROVISIONAL · Historical unused letter-box mark** (symbol): Preserved unused placeholder; not the recommended public symbol. — `execution/scripts/site_generator/assets/neotoma/marks/historical/letter-box.svg`
 - **PROVISIONAL · Correction-propagation concept film** (cinematic): Clean provisional hero and later correction-capability section; not the complete graph-first identity — `execution/scripts/site_generator/assets/neotoma/hero-concept.webm`
 - **PROVISIONAL · Correction-propagation MP4 fallback** (cinematic): Fallback encode for provisional film — `execution/scripts/site_generator/assets/neotoma/hero-concept.mp4`
 - **PROVISIONAL · Correction-propagation poster** (poster): Static and reduced-motion fallback for provisional film — `execution/scripts/site_generator/assets/neotoma/hero-concept.avif`
@@ -464,8 +477,6 @@ Overall: **PROVISIONAL**
 
 - Graph-first cinematic hero and section master set
 - Complete foundation-viewer asset production
-- Canonical clear-space and digital/print minimum-size measurements for the Neotoma wordmark
-- Approved symbol-only, lockup, horizontal, stacked, favicon and co-branding Neotoma assets
 - Final type weight/style inventory and owner-approved research cadence
 - Operator approval or revision of the complete provisional brand system and its original aesthetic territory
 - Final contradiction audit against the section copy-to-visual production matrix

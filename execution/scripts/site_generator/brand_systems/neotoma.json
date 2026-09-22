@@ -1,7 +1,7 @@
 {
   "_observation_ids": {
-    "asset_inventory": "f2284285-de83-5e06-dba8-614a6671f842",
-    "completeness": "f0e1e060-3153-f2d8-6982-191fa0a92935",
+    "asset_inventory": "ca29d60a-b140-818a-1467-ee80601aa89e",
+    "completeness": "b1c30485-79aa-ed80-fb58-9f8a87701149",
     "downstream_contracts": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
     "name": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
     "ownership": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
@@ -10,7 +10,7 @@
     "product": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
     "production_specs": "815877ab-10c3-dba0-9856-b50aea827f08",
     "provenance": "0266a223-87f9-9f68-d492-831811d8dd53",
-    "schema_version": "unknown",
+    "schema_version": "176a62d2-e88c-046c-40c6-3588c159b7f8",
     "scope": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
     "slug": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
     "status": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
@@ -18,26 +18,156 @@
     "updated_at": "941fd113-446d-be68-ea04-027b02dc9b59",
     "visibility": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
     "visual_concepts": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
-    "visual_styles": "a31d7669-2d29-6f1a-855f-55675fee9d8a",
+    "visual_styles": "00d04d7a-4d57-2461-8278-d503d4bd7142",
     "voice": "915b31d0-fb4a-1ab4-250b-e8ae484f9552"
   },
   "_source": {
     "entity_id": "ent_c5f3ebd1800a887a3b405e53",
     "entity_type": "brand_guideline",
-    "fetched_at": "2026-09-22T16:49:29+00:00",
+    "fetched_at": "2026-09-22T20:17:26+00:00",
     "product": "neotoma",
     "schema_entity_id": "ent_73da44b2d434cbafe5d8ecb9"
   },
   "asset_inventory": [
     {
+      "kind": "symbol",
+      "name": "Persistent record-graph mark",
+      "preview": "image",
+      "public_path": "/assets/neotoma/marks/primary.svg",
+      "repository_path": "execution/scripts/site_generator/assets/neotoma/marks/primary.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Primary compact identity."
+    },
+    {
+      "kind": "symbol",
+      "name": "Persistent record-graph symbol",
+      "preview": "image",
+      "public_path": "/assets/neotoma/marks/symbol.svg",
+      "repository_path": "execution/scripts/site_generator/assets/neotoma/marks/symbol.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Compact graph identity."
+    },
+    {
       "kind": "wordmark",
-      "name": "Typographic Neotoma wordmark",
+      "name": "Neotoma wordmark",
+      "preview": "image",
+      "public_path": "/assets/neotoma/marks/wordmark.svg",
+      "repository_path": "execution/scripts/site_generator/assets/neotoma/marks/wordmark.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Named typographic identity."
+    },
+    {
+      "kind": "lockup",
+      "name": "Graph symbol + wordmark lockup",
+      "preview": "image",
+      "public_path": "/assets/neotoma/marks/lockup-horizontal.svg",
+      "repository_path": "execution/scripts/site_generator/assets/neotoma/marks/lockup-horizontal.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Navigation identity with measured clear space."
+    },
+    {
+      "kind": "lockup",
+      "name": "Horizontal lockup",
+      "preview": "image",
+      "public_path": "/assets/neotoma/marks/lockup-horizontal.svg",
+      "repository_path": "execution/scripts/site_generator/assets/neotoma/marks/lockup-horizontal.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Symbol left of wordmark."
+    },
+    {
+      "kind": "lockup",
+      "name": "Stacked lockup",
+      "preview": "image",
+      "public_path": "/assets/neotoma/marks/lockup-stacked.svg",
+      "repository_path": "execution/scripts/site_generator/assets/neotoma/marks/lockup-stacked.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Symbol above wordmark."
+    },
+    {
+      "kind": "symbol",
+      "name": "Monochrome variant",
+      "preview": "image",
+      "public_path": "/assets/neotoma/marks/monochrome.svg",
+      "repository_path": "execution/scripts/site_generator/assets/neotoma/marks/monochrome.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "One-color reproduction."
+    },
+    {
+      "kind": "symbol",
+      "name": "Reversed variant",
+      "preview": "image",
+      "public_path": "/assets/neotoma/marks/reversed.svg",
+      "repository_path": "execution/scripts/site_generator/assets/neotoma/marks/reversed.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Dark or photographic fields."
+    },
+    {
+      "kind": "symbol",
+      "name": "Small-scale variant",
+      "preview": "image",
+      "public_path": "/assets/neotoma/marks/small-scale.svg",
+      "repository_path": "execution/scripts/site_generator/assets/neotoma/marks/small-scale.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Tested at 16\u201332px."
+    },
+    {
+      "kind": "symbol",
+      "name": "Favicon",
+      "preview": "image",
+      "public_path": "/assets/neotoma/marks/favicon.svg",
+      "repository_path": "execution/scripts/site_generator/assets/neotoma/marks/favicon.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Browser and app icon."
+    },
+    {
+      "kind": "symbol",
+      "name": "Historical application wordmark",
+      "preview": "image",
+      "public_path": "/assets/neotoma/marks/historical/wordmark.svg",
+      "repository_path": "execution/scripts/site_generator/assets/neotoma/marks/historical/wordmark.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Preserved Inspector wordmark evidence."
+    },
+    {
+      "kind": "lockup",
+      "name": "Neotoma co-branding review lockup",
+      "preview": "image",
+      "public_path": "/assets/neotoma/marks/cobrand.svg",
+      "repository_path": "execution/scripts/site_generator/assets/neotoma/marks/cobrand.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Peer co-brand spacing review only."
+    },
+    {
+      "kind": "wordmark",
+      "name": "Historical Inspector typographic wordmark",
       "preview": "image",
       "public_path": "/assets/neotoma/neotoma-wordmark.svg",
       "repository_path": "execution/scripts/site_generator/assets/neotoma/neotoma-wordmark.svg",
-      "source": "Neotoma Inspector canonical asset; exact repository mirror",
+      "source": "inspector/src/assets/neotoma_wordmark.svg",
       "status": "approved",
-      "use": "Primary compact identity mark"
+      "use": "Preserved historical/application wordmark evidence."
+    },
+    {
+      "kind": "symbol",
+      "name": "Historical unused letter-box mark",
+      "preview": "image",
+      "public_path": "/assets/neotoma/marks/historical/letter-box.svg",
+      "repository_path": "execution/scripts/site_generator/assets/neotoma/marks/historical/letter-box.svg",
+      "source": "inspector/src/assets/neotoma_mark.svg",
+      "status": "provisional",
+      "use": "Preserved unused placeholder; not the recommended public symbol."
     },
     {
       "kind": "cinematic",
@@ -154,8 +284,6 @@
     "missing_items": [
       "Graph-first cinematic hero and section master set",
       "Complete foundation-viewer asset production",
-      "Canonical clear-space and digital/print minimum-size measurements for the Neotoma wordmark",
-      "Approved symbol-only, lockup, horizontal, stacked, favicon and co-branding Neotoma assets",
       "Final type weight/style inventory and owner-approved research cadence",
       "Operator approval or revision of the complete provisional brand system and its original aesthetic territory",
       "Final contradiction audit against the section copy-to-visual production matrix"
@@ -1020,13 +1148,13 @@
         "status": "provisional"
       },
       "clear_space": {
-        "guidance": "Define and test an exclusion zone from final geometry; no product measurement is approved.",
-        "measurement": null,
-        "status": "missing"
+        "guidance": "Keep a clear exclusion zone of half the primary symbol height on all sides; no competing marks inside the zone.",
+        "measurement": "0.5 \u00d7 primary-symbol height (8 units on the 64-unit artboard; 16px around a 32px render)",
+        "status": "provisional"
       },
       "co_branding": {
-        "guidance": "Define peer-brand spacing, hierarchy, dividers and approval before use.",
-        "status": "missing"
+        "guidance": "Place the product lockup left of a 1.5px divider with 16px gaps; peer mark matches Ateles/Neotoma symbol height. Review asset: marks/cobrand.svg.",
+        "status": "provisional"
       },
       "colorway_rules": {
         "guidance": "Ink or teal may identify; amber remains reserved for correction.",
@@ -1036,10 +1164,10 @@
         "SVG"
       ],
       "minimum_size": {
-        "digital": null,
-        "guidance": "Test final exports; no numerical threshold is approved.",
-        "print": null,
-        "status": "missing"
+        "digital": "16px favicon / 24px UI symbol / 120px lockup width",
+        "guidance": "Do not reproduce the symbol below 16px digital or 8 mm print; use the wordmark alone when space is tighter.",
+        "print": "8 mm symbol height / 25 mm lockup width",
+        "status": "provisional"
       },
       "misuse_rules": [
         "Do not stretch, rotate, crop, mask, outline, shadow or redraw the mark.",
@@ -1052,47 +1180,60 @@
       "variants": {
         "application": {
           "backgrounds": [],
-          "export_formats": [],
-          "name": "Application mark",
-          "source_asset": null,
-          "source_format": null,
+          "export_formats": [
+            "SVG"
+          ],
+          "name": "Historical application wordmark",
+          "source_asset": "execution/scripts/site_generator/assets/neotoma/marks/historical/wordmark.svg",
+          "source_format": "SVG",
           "status": "provisional",
-          "use": "Align Inspector/application marks with persistent-graph semantics."
+          "use": "Preserved Inspector wordmark evidence."
         },
         "favicon": {
           "backgrounds": [],
-          "export_formats": [],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Favicon",
-          "source_asset": null,
-          "source_format": null,
-          "status": "missing",
-          "use": "Required before this placement is approved."
+          "source_asset": "execution/scripts/site_generator/assets/neotoma/marks/favicon.svg",
+          "source_format": "SVG",
+          "status": "provisional",
+          "use": "Browser and app icon."
         },
         "horizontal": {
           "backgrounds": [],
-          "export_formats": [],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Horizontal lockup",
-          "source_asset": null,
-          "source_format": null,
-          "status": "missing",
-          "use": "Required before this placement is approved."
+          "source_asset": "execution/scripts/site_generator/assets/neotoma/marks/lockup-horizontal.svg",
+          "source_format": "SVG",
+          "status": "provisional",
+          "use": "Symbol left of wordmark."
         },
         "lockup": {
           "backgrounds": [],
-          "export_formats": [],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Graph symbol + wordmark lockup",
-          "source_asset": null,
-          "source_format": null,
-          "status": "missing",
-          "use": "Required before this placement is approved."
+          "source_asset": "execution/scripts/site_generator/assets/neotoma/marks/lockup-horizontal.svg",
+          "source_format": "SVG",
+          "status": "provisional",
+          "use": "Navigation identity with measured clear space."
         },
         "monochrome": {
-          "backgrounds": [],
-          "export_formats": [],
+          "backgrounds": [
+            "light neutral",
+            "dark neutral"
+          ],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Monochrome variant",
-          "source_asset": null,
-          "source_format": null,
-          "status": "missing",
+          "source_asset": "execution/scripts/site_generator/assets/neotoma/marks/monochrome.svg",
+          "source_format": "SVG",
+          "status": "provisional",
           "use": "One-color reproduction."
         },
         "primary_mark": {
@@ -1103,47 +1244,58 @@
           "export_formats": [
             "SVG"
           ],
-          "name": "Neotoma typographic mark",
-          "source_asset": "inspector/src/assets/neotoma_wordmark.svg",
+          "name": "Persistent record-graph mark",
+          "source_asset": "execution/scripts/site_generator/assets/neotoma/marks/primary.svg",
           "source_format": "SVG",
-          "status": "approved",
+          "status": "provisional",
           "use": "Primary compact identity."
         },
         "reversed": {
-          "backgrounds": [],
-          "export_formats": [],
+          "backgrounds": [
+            "light neutral",
+            "dark neutral"
+          ],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Reversed variant",
-          "source_asset": null,
-          "source_format": null,
-          "status": "missing",
+          "source_asset": "execution/scripts/site_generator/assets/neotoma/marks/reversed.svg",
+          "source_format": "SVG",
+          "status": "provisional",
           "use": "Dark or photographic fields."
         },
         "small_scale": {
           "backgrounds": [],
-          "export_formats": [],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Small-scale variant",
-          "source_asset": null,
-          "source_format": null,
+          "source_asset": "execution/scripts/site_generator/assets/neotoma/marks/small-scale.svg",
+          "source_format": "SVG",
           "status": "provisional",
-          "use": "Requires tested legibility threshold."
+          "use": "Tested at 16\u201332px."
         },
         "stacked": {
           "backgrounds": [],
-          "export_formats": [],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Stacked lockup",
-          "source_asset": null,
-          "source_format": null,
-          "status": "missing",
-          "use": "Required before this placement is approved."
+          "source_asset": "execution/scripts/site_generator/assets/neotoma/marks/lockup-stacked.svg",
+          "source_format": "SVG",
+          "status": "provisional",
+          "use": "Symbol above wordmark."
         },
         "symbol_only": {
           "backgrounds": [],
-          "export_formats": [],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Persistent record-graph symbol",
-          "source_asset": null,
-          "source_format": null,
-          "status": "missing",
-          "use": "Required before this placement is approved."
+          "source_asset": "execution/scripts/site_generator/assets/neotoma/marks/symbol.svg",
+          "source_format": "SVG",
+          "status": "provisional",
+          "use": "Compact graph identity."
         },
         "wordmark": {
           "backgrounds": [
@@ -1154,10 +1306,10 @@
             "SVG"
           ],
           "name": "Neotoma wordmark",
-          "source_asset": "inspector/src/assets/neotoma_wordmark.svg",
+          "source_asset": "execution/scripts/site_generator/assets/neotoma/marks/wordmark.svg",
           "source_format": "SVG",
-          "status": "approved",
-          "use": "Named identity."
+          "status": "provisional",
+          "use": "Named typographic identity."
         }
       }
     },
