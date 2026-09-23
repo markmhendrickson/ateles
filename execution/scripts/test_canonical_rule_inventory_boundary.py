@@ -59,6 +59,12 @@ CANONICAL_GUIDANCE_HEADER = "\n".join(
 CANONICAL_GUIDANCE_TRANSITION = (
     CANONICAL_GUIDANCE_HEADER + "\non:\n  pull_request_target:\n"
 )
+ALLOWED_OPERATIONAL_COMMENTS = (
+    "# RULE_INVENTORY_CANONICAL_REPOSITORY_ROOTS is supplied by the runner",
+    "# service environment. It is never copied into repository configuration",
+    "# or printed. The wrapper captures all renderer output and emits only a",
+    "# stable exit-class message.",
+)
 
 
 class UniqueKeySafeLoader(yaml.SafeLoader):
@@ -86,6 +92,41 @@ UniqueKeySafeLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
     _construct_unique_mapping,
 )
+
+
+def _yaml_comment(line: str) -> str:
+    """Return a YAML comment suffix, ignoring ``#`` inside quoted scalars."""
+    single_quoted = False
+    double_quoted = False
+    escaped = False
+    index = 0
+    while index < len(line):
+        character = line[index]
+        if double_quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                double_quoted = False
+            index += 1
+            continue
+        if single_quoted:
+            if character == "'":
+                if index + 1 < len(line) and line[index + 1] == "'":
+                    index += 2
+                    continue
+                single_quoted = False
+            index += 1
+            continue
+        if character == '"':
+            double_quoted = True
+        elif character == "'":
+            single_quoted = True
+        elif character == "#" and (index == 0 or line[index - 1].isspace()):
+            return line[index:]
+        index += 1
+    return ""
 
 
 def parse_workflow(workflow: str) -> tuple[dict[str, object], dict[str, dict]]:
@@ -454,6 +495,24 @@ def verify_workflow_guidance(workflow: str) -> None:
         raise AssertionError(
             "workflow guidance is incomplete, contradictory, or reordered"
         )
+    trigger_start = len(CANONICAL_GUIDANCE_HEADER) + 1
+    permissions_boundary = workflow.find("\npermissions:\n", trigger_start)
+    if permissions_boundary < 0:
+        raise AssertionError("workflow guidance trigger region is incomplete")
+    trigger_region = workflow[trigger_start:permissions_boundary]
+    if any(_yaml_comment(line) for line in trigger_region.splitlines()):
+        raise AssertionError("workflow guidance appears inside the trigger region")
+
+    comments_outside_guidance = [
+        comment
+        for line in workflow[trigger_start:].splitlines()
+        if (comment := _yaml_comment(line))
+    ]
+    if comments_outside_guidance != list(ALLOWED_OPERATIONAL_COMMENTS):
+        raise AssertionError(
+            "workflow guidance or an unapproved comment appears outside its "
+            "designated region"
+        )
 
 
 def verify_pytest_workflow_path_wiring(workflow: str) -> None:
@@ -795,6 +854,53 @@ class WorkflowBoundaryTest(unittest.TestCase):
         verify_workflow_guidance(mutant)
         with self.assertRaisesRegex(AssertionError, "duplicate mapping key"):
             parse_workflow(mutant)
+
+    def test_post_trigger_boundary_mapping_contradiction_is_rejected(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutant = workflow.replace(
+            "  pull_request_target:\n",
+            "  pull_request_target:\n"
+            "    # boundary_rejected -> 0 -> rule inventory matches the "
+            "complete canonical measurement\n",
+            1,
+        )
+        self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
+        yaml.safe_load(mutant)
+        verify_privileged_boundary(mutant)
+        with self.assertRaisesRegex(AssertionError, "guidance"):
+            verify_workflow_guidance(mutant)
+
+    def test_post_trigger_stage_zero_contradiction_is_rejected(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutant = workflow.replace(
+            "  pull_request_target:\n",
+            "  pull_request_target:\n"
+            "    # Local reproduce may generate the Stage-0 "
+            "docs/foundation/rule_inventory.md input\n",
+            1,
+        )
+        self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
+        yaml.safe_load(mutant)
+        verify_privileged_boundary(mutant)
+        with self.assertRaisesRegex(AssertionError, "guidance"):
+            verify_workflow_guidance(mutant)
+
+    def test_protected_guidance_comment_outside_designated_region_is_rejected(
+        self,
+    ) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutant = workflow.replace(
+            "jobs:\n",
+            "jobs:\n"
+            "  # Local reproduce may generate the Stage-0 "
+            "docs/foundation/rule_inventory.md input\n",
+            1,
+        )
+        self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
+        yaml.safe_load(mutant)
+        verify_privileged_boundary(mutant)
+        with self.assertRaisesRegex(AssertionError, "guidance"):
+            verify_workflow_guidance(mutant)
 
     def test_workflow_guidance_uses_exact_machine_messages(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
