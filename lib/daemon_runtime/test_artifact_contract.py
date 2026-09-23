@@ -101,6 +101,30 @@ def test_parse_github_ref_happy_and_invalid():
     bare = parse_github_ref("#42", dispatch_repo=None)
     assert isinstance(bare, InvalidRef)
 
+    anchored = parse_github_ref("#42", dispatch_repo=repo)
+    assert isinstance(anchored, ParsedRef)
+    assert anchored.canonical == f"{repo}#42"
+
+
+def test_short_sha_is_a_ref_attempt_not_prose():
+    """The distinction decides which cause code the operator sees.
+
+    An abbreviated SHA answered the right question unverifiably
+    (`invalid_ref_shape` with no repo to anchor it); prose answered a different
+    question (`wrong_body_for_dispatch`). Reading one as the other sends the
+    operator looking in the wrong place.
+    """
+    assert looks_like_pr_or_commit_ref("a1b2c3d")
+    assert infer_body_shape("a1b2c3d") == "pr_or_commit"
+
+    unanchored = parse_github_ref("a1b2c3d", dispatch_repo=None)
+    assert isinstance(unanchored, InvalidRef)
+    assert unanchored.code == "invalid_ref_shape"
+
+    anchored = parse_github_ref("a1b2c3d", dispatch_repo="markmhendrickson/ateles")
+    assert isinstance(anchored, ParsedRef) and anchored.kind == "sha"
+    assert anchored.sha == "a1b2c3d"
+
 
 def test_body_shape_for_dispatch_cicada():
     assert body_shape_for_dispatch(role="cicada", dispatch_mode=None) == frozenset(
