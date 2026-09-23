@@ -82,6 +82,9 @@ ATTENDED [APPROVE-1A2B3C4D]
 SKIP [APPROVE-9F8E7D6C]
 ```
 
+Each marked line authorizes or skips only that match; other matches for the
+same handler stay blocked until their own line.
+
 Bare `ATTENDED` without a marker on a multi-item set is unrecognized — no
 payment executes; one deduped in-thread correction explains the accepted form.
 

@@ -1157,6 +1157,7 @@ def main() -> bool:
     # Now the guard scopes to the calendar fetch, and one-offs are evaluated
     # on every ~15-minute tick.
     calendar_done = _check_already_ran_today()
+    calendar_fetch_ok = False
     if calendar_done:
         log.info("Calendar leg already ran today — one-off profiles only.")
         events: list | None = []
@@ -1193,13 +1194,13 @@ def main() -> bool:
             # invoice is due. Recurring payments are skipped this tick (no
             # events to attend-gate against), one-offs continue below.
             events = []
+            calendar_fetch_ok = False
         else:
-            # Calendar fetch succeeded — claim the day so concurrent launchd
-            # re-launches (and later ticks) skip the calendar leg. The outage
-            # (if any) is over too: release the dedupe key so a FUTURE
-            # failure reports again instead of staying silently suppressed by
-            # a stale key (ateles#1127).
-            _mark_ran_today()
+            # Fetch succeeded. Defer the daily claim until we know whether any
+            # calendar payments still need consent (email replies arrive on a
+            # later tick). Claiming here made later ticks see events=[] and
+            # clear consent state before the operator replied (ateles#1178).
+            calendar_fetch_ok = True
             _clear_notify_dedupe(_CALENDAR_FETCH_DEDUPE_KEY)
 
     # Find triggered handlers from calendar
@@ -1211,6 +1212,9 @@ def main() -> bool:
 
     if triggered:
         log.info(f"Triggered handlers: {[h.name for h, _ in triggered]}")
+    elif calendar_fetch_ok:
+        # Successful fetch, nothing calendar-triggered — claim the day now.
+        _mark_ran_today()
 
     # Fetch due payment tasks from Neotoma, scoped to profile-linked task IDs only.
     due_tasks = fetch_due_payment_tasks(all_handlers)
@@ -1313,8 +1317,19 @@ def main() -> bool:
         )
         return False
 
+    if channel == "telegram" and calendar_fetch_ok:
+        # Break-glass polls in the same tick — claim the calendar leg now
+        # (email path defers the claim until consent is terminal).
+        _mark_ran_today()
+
     if channel == "email":
-        from consent_email import request_and_collect
+        from consent_email import (
+            clear_consent_state,
+            load_executed_tokens,
+            match_key,
+            record_executed_tokens,
+            request_and_collect,
+        )
 
         consent = request_and_collect(
             triggered,
@@ -1355,58 +1370,76 @@ def main() -> bool:
                 dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
                 email_eligible=True,
             )
+            # Leave day unclaimed so the next tick retries send/read.
             return False
 
-        approved = consent.approved
-        if not approved and not consent.skipped:
-            # Awaiting / partial hold — fail-closed, clean-ish run (not channel dead).
+        already_executed = load_executed_tokens()
+        all_results = []
+        newly_executed: set[str] = set()
+        for item in consent.pending_items:
+            key = match_key(item)
+            label = f"{item.handler_name}:{item.match_id or 'solo'}"
+            if key not in consent.approved:
+                if key in consent.skipped:
+                    log.info(f"Skipping {label} (operator SKIP).")
+                else:
+                    log.info(f"Holding {label} (awaiting_approval).")
+                continue
+            if key in already_executed:
+                log.info(f"Already executed {label} — at-most-once skip.")
+                continue
+            handler = item.handler
+            match = item.match
+            log.info(f"Executing {label} payment...")
+            _job = (
+                _activity.started(f"executing {handler.name} payment")
+                if _activity
+                else None
+            )
+            try:
+                result = handler.execute(match)
+                all_results.append((handler, result))
+                newly_executed.add(key)
+                log.info(f"{label} result: {result}")
+                if _job:
+                    _job.finished(f"{handler.name} payment executed")
+            except Exception as _exc:
+                if _job:
+                    _job.failed(
+                        f"{handler.name} payment error: {type(_exc).__name__}"
+                    )
+                raise
+
+        if newly_executed:
+            record_executed_tokens(newly_executed)
+            _reset_gate_failure_streak()
+            _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
+
+        still_open = bool(consent.awaiting) or bool(consent.blocked)
+        if still_open:
             log.info(
                 f"Email consent: awaiting={sorted(consent.awaiting)} "
-                f"skipped={sorted(consent.skipped)} blocked={sorted(consent.blocked)} "
-                f"— no execute this tick."
+                f"skipped={sorted(consent.skipped)} "
+                f"approved={sorted(consent.approved)} "
+                f"executed_this_tick={len(newly_executed)} "
+                f"— calendar leg stays unclaimed for later ticks."
             )
             return not strandings
 
-        if not approved:
+        # Every match is terminal (approved or skipped). Claim the day and
+        # clear the fingerprint so a future pending set can re-email.
+        _mark_ran_today()
+        clear_consent_state()
+        _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
+        if not consent.approved and not newly_executed and not already_executed:
             log.info(
-                f"Email consent: all skipped or held "
+                f"Email consent: all skipped "
                 f"(skipped={sorted(consent.skipped)}) — no execute."
             )
-            _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
-            return not strandings
-
-        _reset_gate_failure_streak()
-        _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
-        log.info(f"Email consent approved handlers: {approved}")
-
-        all_results = []
-        for handler, matches in triggered:
-            if handler.name not in approved:
-                log.info(f"Skipping {handler.name} (not approved).")
-                continue
-            for match in matches:
-                log.info(f"Executing {handler.name} payment...")
-                _job = (
-                    _activity.started(f"executing {handler.name} payment")
-                    if _activity
-                    else None
-                )
-                try:
-                    result = handler.execute(match)
-                    all_results.append((handler, result))
-                    log.info(f"{handler.name} result: {result}")
-                    if _job:
-                        _job.finished(f"{handler.name} payment executed")
-                except Exception as _exc:
-                    if _job:
-                        _job.failed(
-                            f"{handler.name} payment error: {type(_exc).__name__}"
-                        )
-                    raise
-        if not all_results:
-            log.info("Email consent: no payments executed.")
-            return not strandings
-        log.info("Monedula email-consent run complete.")
+        elif not all_results and not newly_executed:
+            log.info("Email consent: no new payments executed this tick.")
+        else:
+            log.info("Monedula email-consent run complete.")
         return not strandings
 
     # channel == "telegram" — break-glass path (unchanged attendance phrases)

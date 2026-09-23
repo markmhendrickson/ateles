@@ -51,7 +51,12 @@ class PendingItem:
 
 @dataclass
 class ConsentEmailResult:
-    """Per-handler states plus aggregate reason and execute sets for ``main()``."""
+    """Per-match (token) states plus aggregate reason and execute sets for ``main()``.
+
+    Keys in ``states`` / ``approved`` / ``skipped`` / ``blocked`` / ``awaiting``
+    are ``PendingItem.token`` values — one identity per marked mail line, not
+    per handler. Multi-match handlers therefore authorize siblings independently.
+    """
 
     states: dict[str, HandlerState] = field(default_factory=dict)
     reason_code: str | None = None
@@ -61,6 +66,12 @@ class ConsentEmailResult:
     awaiting: set[str] = field(default_factory=set)
     send_count: int = 0
     channel_ok: bool = True
+    pending_items: list[PendingItem] = field(default_factory=list)
+
+
+def match_key(item: PendingItem) -> str:
+    """Stable identity shared by mail markers and the execute loop."""
+    return item.token
 
 
 def _load_mark(path: Path) -> dict:
@@ -71,14 +82,50 @@ def _load_mark(path: Path) -> dict:
         return {}
 
 
-def _save_mark(path: Path, fingerprint: str, sent_at: float) -> None:
-    path.write_text(
-        json.dumps(
-            {"fingerprint": fingerprint, "sent_at": sent_at},
-            indent=2,
-            sort_keys=True,
-        )
-    )
+def _save_mark(
+    path: Path,
+    fingerprint: str,
+    sent_at: float,
+    *,
+    executed: list[str] | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "fingerprint": fingerprint,
+        "sent_at": sent_at,
+    }
+    if executed is not None:
+        payload["executed"] = sorted(set(executed))
+    else:
+        prior = _load_mark(path)
+        prior_exec = prior.get("executed")
+        if isinstance(prior_exec, list) and prior.get("fingerprint") == fingerprint:
+            payload["executed"] = sorted({str(x) for x in prior_exec})
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def load_executed_tokens(path: Path | None = None) -> set[str]:
+    """Tokens already paid for the current pending-set fingerprint."""
+    mark = _load_mark(path or STATE_FILE)
+    raw = mark.get("executed")
+    if not isinstance(raw, list):
+        return set()
+    return {str(x) for x in raw}
+
+
+def record_executed_tokens(
+    tokens: set[str],
+    *,
+    state_path: Path | None = None,
+) -> None:
+    """Append successfully executed match tokens onto the consent mark."""
+    path = state_path or STATE_FILE
+    mark = _load_mark(path)
+    fp = str(mark.get("fingerprint") or "")
+    if not fp:
+        return
+    prior = load_executed_tokens(path)
+    sent_at = float(mark.get("sent_at") or time.time())
+    _save_mark(path, fp, sent_at, executed=sorted(prior | tokens))
 
 
 def _clear_mark(path: Path) -> None:
@@ -178,6 +225,10 @@ def build_request_body(
             "ATTENDED [APPROVE-…] / APPROVE [APPROVE-…] / SKIP [APPROVE-…]."
         )
         lines.append(
+            "Each marked line authorizes or skips only that match; other matches "
+            "for the same handler stay blocked until their own line."
+        )
+        lines.append(
             "Bare verbs without a marker are ignored (no payment executes)."
         )
     else:
@@ -230,16 +281,26 @@ def overlay_verdicts(
 ) -> tuple[dict[str, HandlerState], bool]:
     """Apply Design/UX verdict overlay on top of ``parse_verdict``.
 
-    Returns (handler_name → state, unrecognized_seen).
+    Returns (match_token → state, unrecognized_seen).
+    SKIP is decisive per match token: once skipped, a later APPROVE/ATTENDED
+    for the same token cannot revive it.
     """
     states: dict[str, HandlerState] = {
-        i.handler_name: "awaiting_approval" for i in items
+        match_key(i): "awaiting_approval" for i in items
     }
-    # Prefer last explicit decision per handler; SKIP wins if both appear.
     decisions: dict[str, HandlerState] = {}
     unrecognized = False
     multi = len(items) > 1
     by_token = {i.token.upper(): i for i in items}
+
+    def _decide(item: PendingItem, state: HandlerState) -> None:
+        key = match_key(item)
+        if decisions.get(key) == "skipped":
+            return
+        if state == "skipped":
+            decisions[key] = "skipped"
+            return
+        decisions[key] = state
 
     for text in texts:
         # Subject may carry a marker for single-item bare verbs.
@@ -266,7 +327,7 @@ def overlay_verdicts(
                     unrecognized = True
                     continue
                 item = by_token[bound_tok]
-                decisions[item.handler_name] = "skipped"
+                _decide(item, "skipped")
                 continue
 
             if first == "ATTENDED":
@@ -280,7 +341,7 @@ def overlay_verdicts(
                 if not item.is_calendar:
                     unrecognized = True
                     continue
-                decisions[item.handler_name] = "approved"
+                _decide(item, "approved")
                 continue
 
             if first in ("APPROVE", "YES"):
@@ -298,9 +359,9 @@ def overlay_verdicts(
                 # Use parse_verdict for non-calendar approve forms.
                 verdict = parse_verdict(text, item.token)
                 if verdict is True:
-                    decisions[item.handler_name] = "approved"
+                    _decide(item, "approved")
                 elif verdict is False:
-                    decisions[item.handler_name] = "skipped"
+                    _decide(item, "skipped")
                 else:
                     unrecognized = True
                 continue
@@ -314,8 +375,8 @@ def overlay_verdicts(
                 ):
                     unrecognized = True
 
-    for name, state in decisions.items():
-        states[name] = state
+    for key, state in decisions.items():
+        states[key] = state
     return states, unrecognized
 
 
@@ -337,6 +398,7 @@ def request_and_collect(
         return result
 
     items = build_pending_items(triggered, yesterday_str)
+    result.pending_items = items
     fp = pending_fingerprint(items)
     mark = _load_mark(path)
     prior_fp = str(mark.get("fingerprint") or "")
@@ -353,13 +415,14 @@ def request_and_collect(
         if not ok:
             log.error("consent_request_send_failed — payments remain blocked; retry next tick")
             for item in items:
-                result.states[item.handler_name] = "blocked"
-                result.blocked.add(item.handler_name)
+                key = match_key(item)
+                result.states[key] = "blocked"
+                result.blocked.add(key)
             result.reason_code = "consent_request_send_failed"
             result.channel_ok = False
             return result
         # Ordering invariant: persist mark ONLY after send_request returns True.
-        _save_mark(path, fp, time.time())
+        _save_mark(path, fp, time.time(), executed=[])
 
     tokens = [i.token for i in items]
     sender_rejected = {"n": 0}
@@ -378,8 +441,9 @@ def request_and_collect(
             f"consent_reply_read_failed kind={outcome.kind} detail={outcome.detail!r}"
         )
         for item in items:
-            result.states[item.handler_name] = "blocked"
-            result.blocked.add(item.handler_name)
+            key = match_key(item)
+            result.states[key] = "blocked"
+            result.blocked.add(key)
         result.reason_code = "consent_reply_read_failed"
         result.channel_ok = False
         return result
@@ -387,22 +451,23 @@ def request_and_collect(
     # kind == ok
     if not outcome.texts:
         for item in items:
-            result.states[item.handler_name] = "awaiting_approval"
-            result.awaiting.add(item.handler_name)
+            key = match_key(item)
+            result.states[key] = "awaiting_approval"
+            result.awaiting.add(key)
         log.info(f"awaiting_approval count={len(items)}")
         return result
 
     states, unrecognized = overlay_verdicts(items, outcome.texts)
     result.states = states
-    for name, state in states.items():
+    for key, state in states.items():
         if state == "approved":
-            result.approved.add(name)
+            result.approved.add(key)
         elif state == "skipped":
-            result.skipped.add(name)
+            result.skipped.add(key)
         elif state == "blocked":
-            result.blocked.add(name)
+            result.blocked.add(key)
         else:
-            result.awaiting.add(name)
+            result.awaiting.add(key)
 
     if unrecognized:
         result.reason_code = "consent_reply_unrecognized"
