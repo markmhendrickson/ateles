@@ -229,19 +229,30 @@ class TestFlagOnUnchanged:
         asyncio.run(apis.handle_event(_task_event("ent_on_2", "due_today"), notifier))
         assert dispatch_calls == [("ent_on_2", "due_today")]
 
-    def test_checkpoint_brief_redispatches(self, monkeypatch):
+    def test_checkpoint_brief_reaches_past_the_flag_gate(self, monkeypatch):
+        """With the flag on, handle_checkpoint_brief must not return at the
+        APIS_TASK_DISPATCH_ENABLED check — it should proceed into its normal
+        durable-state refresh (ateles#1141: fetch_checkpoint_record /
+        _checkpoint_denial_persisted) rather than short-circuiting.
+
+        This does not re-prove the full approved-release flow (authorization,
+        tenant-provenance matching, gate re-evaluation, the actual dispatch) —
+        that is test_checkpoint_release.py's job, and it already covers it in
+        detail through the real consumer. This test's only job is the flag
+        gate itself: on, the function must reach the refresh call; off (see
+        TestFlagOffDefault above), it must return before ever calling it.
+        """
         monkeypatch.setattr(apis, "TASK_DISPATCH_ENABLED", True)
 
-        redispatched: list[str] = []
+        refresh_calls: list[str] = []
 
-        async def _fake_dispatch_task(entity_id, snapshot, trigger, notifier, **kw):
-            redispatched.append(entity_id)
+        def _fake_fetch_checkpoint_record(entity_id):
+            refresh_calls.append(entity_id)
+            return None  # unreadable → handler logs and returns False; fine here
 
-        monkeypatch.setattr(apis, "dispatch_task", _fake_dispatch_task)
-        monkeypatch.setattr(apis, "checkpoint_already_dispatched", lambda snap: False)
-        monkeypatch.setattr(apis, "read_checkpoint_resolution", lambda snap: "approved")
-        monkeypatch.setattr(apis, "fetch_task_snapshot", lambda task_id: {"title": "t"})
-        monkeypatch.setattr(apis, "stamp_checkpoint_dispatched", lambda entity_id, handler: True)
+        monkeypatch.setattr(
+            apis, "fetch_checkpoint_record", _fake_fetch_checkpoint_record
+        )
 
         notifier = _Notifier()
         snapshot = {
@@ -249,8 +260,14 @@ class TestFlagOnUnchanged:
             "task_entity_id": "ent_task_on",
             "title": "Some checkpoint",
         }
-        asyncio.run(apis.handle_event(_checkpoint_event("ent_cb_on", snapshot), notifier))
-        assert redispatched == ["ent_task_on"]
+        result = asyncio.run(
+            apis.handle_checkpoint_brief("ent_cb_on", snapshot, notifier)
+        )
+        assert refresh_calls == ["ent_cb_on"], (
+            "flag on but handle_checkpoint_brief never reached the durable-state "
+            "refresh — the flag gate is short-circuiting live behavior"
+        )
+        assert result is False  # unreadable record → no release, not a crash
 
 
 # ── GitHub path is unaffected by the flag, in either state ────────────────────
