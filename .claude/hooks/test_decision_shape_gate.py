@@ -71,21 +71,34 @@ class TestProbingDiscoveredBugs:
     def test_five_false_positive_probes_produce_no_findings(self, text):
         assert dsg.findings(text) == []
 
-    def test_quoted_inside_a_brief_is_NOT_actually_exempt(self):
-        # Known gap, not a passing regression case: the docstring and
-        # CLAUDE.md both claim "the phrase quoted inside an agent brief" was
-        # one of five probes that returned ZERO findings before BLOCK was
-        # enabled. No literal probe string for this case was ever committed
-        # (checked: absent from every commit touching this file), and every
-        # natural phrasing of it tried here still fires — PERMISSION_RE has
-        # no quote-awareness. Pinned so the documented claim is visibly false
-        # rather than silently unverified; see PR comment for the writeup.
+    def test_quoted_inside_a_brief_is_now_exempt(self):
+        # WAS `test_quoted_inside_a_brief_is_NOT_actually_exempt`, which
+        # pinned a KNOWN GAP rather than desired behaviour: the docstring and
+        # CLAUDE.md both claimed "the phrase quoted inside an agent brief"
+        # was one of five probes returning ZERO findings before BLOCK was
+        # enabled, but PERMISSION_RE had no quote-awareness and every natural
+        # phrasing fired. That test existed to make the false claim visible.
+        #
+        # ateles#1105 closes the gap: QUOTED_PHRASE_RE strips a quoted phrase
+        # before matching, so a rule can be WRITTEN DOWN without tripping the
+        # guard that enforces it. The documented claim is now true, so the
+        # assertion inverts.
         text = (
             'The dispatched brief tells the agent: "Shall I dispatch the '
             'fix?" is the exact phrasing to avoid using.'
         )
-        found = dsg.findings(text)
-        assert len(found) == 1  # documents actual behavior, not the docstring's claim
+        assert dsg.findings(text) == []
+
+    def test_quote_stripping_cannot_swallow_a_real_ending(self):
+        # QUOTED_PHRASE_RE is bounded to one line and 120 characters so an
+        # unterminated quote cannot consume the turn's actual closing
+        # question. An opening quote with no partner must leave the real
+        # ending intact and still findable.
+        text = (
+            'The brief said "avoid that phrasing and proceed instead.\n\n'
+            "Want me to file the issue?"
+        )
+        assert dsg.findings(text) != []
 
     def test_the_real_failing_list_produces_findings(self):
         # feat commit 30b01523: "the real failing list" produced three
@@ -378,3 +391,53 @@ class TestWarnVsBlockBranch:
         code = dsg.main()
         assert code == 0
         assert calls == []
+
+
+class TestQuotedProseDoesNotFire:
+    """ateles#1105 — the gate must judge how the turn ENDS, not what it quotes.
+
+    Its own docstring states the check as "the turn ENDS with a permission
+    question". `closing_section` returned the last 2500 characters, so a
+    phrase quoted anywhere in that window matched. Both observed false
+    positives fired on text DOCUMENTING the rule being enforced, which makes
+    the guard punish the prose that teaches it.
+    """
+
+    def test_trigger_quoted_midbody_with_assessment_ending_is_allowed(self):
+        text = (
+            "Here is the evidence table of what the gate blocked earlier:\n\n"
+            "| turn | phrase | outcome |\n"
+            "|---|---|---|\n"
+            "| 14 | \"Want me to\" | blocked |\n\n"
+            + ("Filler narrative about the session. " * 60)
+            + "\n\nOn balance the matcher is too broad, and the evidence above "
+            "shows it firing on its own documentation."
+        )
+        assert dsg.findings(text) == []
+
+    def test_real_permission_question_at_the_end_still_blocks(self):
+        text = (
+            "I looked at the inventory and classified every row.\n\n"
+            "Want me to split the fourteen NEEDS-SPLIT clusters?"
+        )
+        assert dsg.findings(text) != []
+
+    def test_trigger_inside_fenced_block_is_allowed(self):
+        text = (
+            "The hook matches this pattern:\n\n"
+            "```\nWant me to\n```\n\n"
+            "That is why the turn above was blocked."
+        )
+        assert dsg.findings(text) == []
+
+    def test_trigger_inside_markdown_table_is_allowed(self):
+        text = (
+            "Findings:\n\n"
+            "| # | phrase |\n|---|---|\n| 1 | Want me to |\n\n"
+            "The table lists what fired, and none of it is a live question."
+        )
+        assert dsg.findings(text) == []
+
+    def test_consent_gated_question_at_the_end_still_allowed(self):
+        text = "All checks are green.\n\nWant me to merge and deploy it?"
+        assert dsg.findings(text) == []
