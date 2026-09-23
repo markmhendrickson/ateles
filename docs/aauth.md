@@ -45,9 +45,11 @@ All agent identities share one issuer (`iss = https://markmhendrickson.com`). Ea
 
 The repo currently maintains **two parallel keypair formats** for two contexts:
 
-1. **JWK format** (`.creds/aauth_agent_*.private.jwk`) — used by the Cursor IDE MCP proxy. Provisioned by `aauth_provision_identity.py`. Public keys publish to `markmhendrickson.com/.well-known/jwks.json`. ES256 P-256 only.
+1. **JWK format** (`.creds/aauth_agent_*.private.jwk`) — used by the Cursor IDE MCP proxy, consumed by the full RFC 9421 signer (`execution/scripts/aauth_signer.py`). Public keys publish to `markmhendrickson.com/.well-known/jwks.json`. ES256 P-256 only. **No provisioning script for this flavor exists on `main`** — it is not what `execution/scripts/aauth_provision_identity.py` (below) provisions.
 
-2. **PEM format** (`ateles-private/keys/<daemon>.json`, with `sub`, `key_id`, `algorithm`, and PEM-encoded private/public material) — used by T3 daemons via `lib/daemon_runtime/aauth_signer.py`. **Not yet published to JWKS** — only Neotoma can verify these today (via local key resolution or because the daemon talks to Neotoma over a trusted connection).
+2. **PEM format** (`ateles-private/keys/<daemon>.json`, with `sub`, `key_id`, `algorithm`, and PEM-encoded private/public material) — used by some T3 daemons (e.g. `a2a_executor.py`, `a2a_gateway.py`) via `lib/daemon_runtime/aauth_signer.py`, which produces a lighter `X-AAuth-Token` JWT (not full RFC 9421).
+
+3. **JWK format, T3/T4 flavor** (`ateles-private/keys/<role>.jwk.json`) — used via `lib/daemon_runtime/aauth_httpsig.py`, a full RFC 9421 signer that matches Neotoma's `aauthVerify` wire format (verified end-to-end in `execution/scripts/verify_aauth_signer.py`). **Not yet published to JWKS** — only Neotoma can verify these today (via local key resolution or because the daemon talks to Neotoma over a trusted connection). Provisioned by `execution/scripts/aauth_provision_identity.py --role <role>` (see below).
 
 Unifying these formats and publishing all public keys to the same JWKS is on the to-do list below.
 
@@ -67,23 +69,38 @@ lens signed off, Neotoma matched the `agent_grant` on the *daemon's* principal r
 refused the write, and `gate_status.<lens>` stayed `pending` — indistinguishable from a review that never
 ran.
 
-The header is therefore the identity for this context, and it resolves per agent:
+`skill_runner` resolves a per-role env var for this static header:
 
 | Tier | Source | Principal |
 |---|---|---|
-| 1 | `<ROLE>_NEOTOMA_TOKEN` (e.g. `ACCIPITER_NEOTOMA_TOKEN`) | the agent's own |
+| 1 | `<ROLE>_NEOTOMA_TOKEN` (e.g. `ACCIPITER_NEOTOMA_TOKEN`) | intended: the agent's own |
 | 2 | `NEOTOMA_BEARER_TOKEN` | the shared daemon bearer |
 
 This mirrors `_token_for_agent_on_repo`'s tiering for GitHub, deliberately: the two credential systems
 should degrade the same way. Tier 2 is a real fallback for an **advisory** agent, whose product (a PR
-comment) survives an unattributed run. It is **not** acceptable for an agent that owns a pre-impl gate,
-whose product is a durable write: `skill_runner.run_skill(..., owns_pending_gate=True)` **refuses to
-dispatch** rather than produce a verdict Neotoma will discard.
+comment) survives an unattributed run. `skill_runner.run_skill(..., owns_pending_gate=True)` refuses to
+dispatch a gate-owning role that has no Tier 1 credential, rather than let it proceed on Tier 2 alone.
 
-**To give a gate-owning role its own identity:** provision `<ROLE>_NEOTOMA_TOKEN` for
-`<role>@ateles-swarm`, and file an `agent_grant` matching that sub with `retrieve` + `correct` on `issue`
-(see [Neotoma grant entity](#neotoma-grant-entity)). Both halves are required — a token with no grant is
-refused at admission, and a grant with no token is never matched.
+**`<ROLE>_NEOTOMA_TOKEN` does not, on its own, give a dispatched agent Neotoma's `agent_grant`-admitted
+identity.** Reading Neotoma's server source (`src/services/aauth_admission.ts`,
+`src/services/protected_entity_types.ts`, `src/services/mcp_auth.ts` on Neotoma `origin/main`) shows why:
+`agent_grant` admission is matched only against a *verified AAuth request signature* (`sub`/`iss`/
+`thumbprint` from RFC 9421 `Signature`/`Signature-Input`/`Signature-Key` headers) — never against a bearer
+string. Every bearer/OAuth token Neotoma accepts resolves, via `mcp_oauth_connections`, to a human
+`user_id`, not to an agent `sub`. A static `Authorization: Bearer <token>` header — which is all a
+`--mcp-config` entry can express, since it does not change per request — therefore cannot carry AAuth
+admission no matter what string it holds; Neotoma's own docs state this directly (`docs/subsystems/aauth.md`
+on the Neotoma side: "Bearer tokens, OAuth, and MCP `connection_id` continue to resolve the human `user_id`.
+AAuth never bypasses user-scope resolution.").
+
+Carrying an agent's own AAuth signature into this transport requires a **per-request signing proxy** in
+front of the dispatched child's MCP connection — analogous to Neotoma's own `neotoma mcp proxy --aauth`
+stdio shim — since a signature must be recomputed per request (it covers method, path, and body digest).
+No such proxy is wired into `skill_runner`'s `--mcp-config` construction today; this is tracked separately
+(see the swarm-architecture plan) rather than fixed here. Until it exists, `<ROLE>_NEOTOMA_TOKEN` provisions
+and verifies an agent's own signing key (via `aauth_provision_identity.py`, below) but that key is not yet
+consulted by the dispatched-child transport, so treat any assumption that setting the env var alone
+attributes a gate write to the role as unverified.
 
 ### Per-agent status (ground truth, May 2026)
 
@@ -134,16 +151,29 @@ These are two distinct implementations for two distinct contexts:
 
 | File | Role |
 |---|---|
-| `execution/scripts/aauth_provision_identity.py` | Generates an ES256 P-256 keypair, writes the private JWK to `.creds/`, updates `jwks.json` and `aauth-agent.json` additively. Run once per new agent subject. |
+| `execution/scripts/aauth_provision_identity.py` | Generates an ES256 P-256 keypair for one **T3/T4 role** and writes the private JWK to `ateles-private/keys/<role>.jwk.json` (mode 0600) — the flavor `lib/daemon_runtime/aauth_httpsig.py` consumes. Never prints the private key. Does **not** touch `.creds/`, `jwks.json`, or `aauth-agent.json` — those belong to the separate Cursor-proxy flavor, which has no provisioning script on `main` today. Run once per new agent role, or with `--force` to rotate. |
 
 Usage:
 ```bash
-# Provision a new agent identity (or rotate with --force)
-.venv/bin/python execution/scripts/aauth_provision_identity.py \
-    --sub cursor@markmhendrickson.com \
-    --kid sw-cursor-1 \
-    --force
+# Provision a new agent identity (or rotate with --force):
+python3 execution/scripts/aauth_provision_identity.py --role accipiter
+
+# Then, as the OPERATOR (own authenticated Neotoma session — not this script,
+# not an unattended agent), register the matching agent_grant:
+neotoma request --operation createAgentGrant --body '{
+  "label": "accipiter",
+  "match_sub": "accipiter@ateles-swarm",
+  "match_iss": "https://markmhendrickson.com",
+  "capabilities": [
+    {"op": "retrieve", "entity_types": ["issue"]},
+    {"op": "correct", "entity_types": ["issue"]}
+  ]
+}'
 ```
+
+This keypair alone does not yet change what principal a dispatched agent's gate-verdict write lands
+under — see "A third context neither flavor reaches" above for why, and treat this as identity
+provisioning in advance of the transport wiring that would consume it.
 
 ### Proxy layer (Cursor IDE → Neotoma)
 
@@ -364,26 +394,32 @@ per-server enforcement (option A) can be layered in for defence-in-depth;
 
 ### 1. Mint missing daemon keypairs
 
-Anthus, Tyto, Turdus, Apis, Menura, Piculet, and Strix currently have no keypair on disk. To mint:
+Most T3/T4 roles already have a `ateles-private/keys/<role>.jwk.json` (the `aauth_httpsig.py` flavor).
+For a role that does not yet have one, mint with:
 
 ```bash
-.venv/bin/python execution/scripts/aauth_provision_identity.py \
-    --sub anthus@ateles-swarm --kid sw-anthus-1
+python3 execution/scripts/aauth_provision_identity.py --role <role>
 ```
 
-Note: this script writes a JWK-format key to `.creds/`. The daemon runtime currently expects a PEM-format key at `ateles-private/keys/<daemon>.json`. Either:
-- Add a converter step to translate JWK → PEM for `ateles-private/keys/`, OR
-- Update `lib/daemon_runtime/aauth_signer.py` to also load JWK format (eliminating the format split)
+This writes directly to the format `lib/daemon_runtime/aauth_httpsig.py` already loads — no PEM/JWK
+conversion step is needed for this flavor. (The separate `.creds/`-based JWK flavor used by the Cursor
+proxy is a different identity and has its own, currently unimplemented, provisioning path — see
+"Two identity flavors" above.)
 
 ### 2. Create `agent_grant` entities for remaining subs
 
-Today only Cursor, Cicada, and Vanellus have grants. Apus, Formica, Monedula, neotoma-agent, and Ateles sign locally but are not admitted — Neotoma falls back to operator-level attribution. Create one grant per sub, scoped to the operations that daemon needs:
+Today only Cursor, Cicada, and Vanellus have grants. Apus, Formica, Monedula, neotoma-agent, and Ateles sign locally but are not admitted — Neotoma falls back to operator-level attribution. Create one grant per sub, scoped to the operations that daemon needs, via the operator's own authenticated Neotoma CLI session (`agent_grant` is a protected entity type — see `docs/subsystems/aauth.md` on the Neotoma side — so it is created through the `createAgentGrant` operation, not the generic `store` verb):
 
 ```bash
-neotoma store agent_grant \
-  --match_sub apus@ateles-swarm \
-  --match_iss https://markmhendrickson.com \
-  --capabilities '{"store_structured": "*", "create_relationship": "*"}'
+neotoma request --operation createAgentGrant --body '{
+  "label": "apus",
+  "match_sub": "apus@ateles-swarm",
+  "match_iss": "https://markmhendrickson.com",
+  "capabilities": [
+    {"op": "store_structured", "entity_types": ["*"]},
+    {"op": "create_relationship", "entity_types": ["*"]}
+  ]
+}'
 ```
 
 ### 3. Publish daemon public keys to the JWKS endpoint
@@ -453,8 +489,9 @@ ateles/
 │   └── aauth_agent_cursor.private.jwk     ← JWK format, mode 600 (Cursor IDE only)
 ├── execution/
 │   ├── scripts/
-│   │   ├── aauth_provision_identity.py    ← generate JWK keypair + publish to JWKS
+│   │   ├── aauth_provision_identity.py    ← mint a T3/T4 role's ateles-private/keys/<role>.jwk.json
 │   │   ├── aauth_signer.py                ← full RFC 9421 signer (Cursor proxy)
+│   │   ├── verify_aauth_signer.py         ← interop proof for lib/daemon_runtime/aauth_httpsig.py
 │   │   ├── mcp_identity_proxy.py          ← Cursor → Neotoma proxy with AAuth
 │   │   └── verify_neotoma_identity_proxy.py ← end-to-end smoke test
 │   └── website/markmhendrickson/react-app/public/.well-known/
@@ -462,7 +499,8 @@ ateles/
 │       └── jwks.json                      ← public keys endpoint (sw-cursor-1 only today)
 ├── lib/
 │   └── daemon_runtime/
-│       ├── aauth_signer.py                ← daemon signer (PEM keys, stub-capable)
+│       ├── aauth_signer.py                ← daemon signer (PEM keys, X-AAuth-Token, stub-capable)
+│       ├── aauth_httpsig.py               ← full RFC 9421 signer (ateles-private/keys/<role>.jwk.json)
 │       ├── agent_loader.py                ← loads agent_definition incl. aauth_sub
 │       └── __init__.py                    ← re-exports AAuthSigner
 └── execution/daemons/

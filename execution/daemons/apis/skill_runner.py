@@ -263,12 +263,15 @@ def gate_writeback_identity_error(role: str, *, is_own_identity: bool) -> str | 
         f"{NEOTOMA_IDENTITY_UNAVAILABLE}: '{role}' owns a pre-impl gate and must "
         f"`correct()` the parent issue entity to record its verdict, but no "
         f"{neotoma_token_env_name(role)} is set, so it would present the shared "
-        "daemon bearer instead of its own principal. Neotoma matches the "
-        f"agent_grant on the caller's principal, so the write would be refused "
-        "and the gate would stay `pending` — indistinguishable from a review "
-        f"that never ran (ateles#795). Provision {neotoma_token_env_name(role)} "
-        f"for '{role}@ateles-swarm' and file an agent_grant carrying retrieve + "
-        "correct on `issue`."
+        "daemon bearer instead of its own principal. That write would still be "
+        "ACCEPTED by Neotoma today — `issue` is not a protected entity_type, so "
+        "`agent_grant` admission is not required for it — but it would land "
+        "attributed to the shared/operator principal rather than to "
+        f"'{role}@ateles-swarm', which is indistinguishable in the record from a "
+        "review that never ran under its own identity (ateles#795). Refusing "
+        "here keeps that attribution failure from landing silently. Provision "
+        f"{neotoma_token_env_name(role)} — see docs/aauth.md for what that "
+        "currently does and does not achieve."
     )
 
 
