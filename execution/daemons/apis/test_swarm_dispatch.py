@@ -6648,6 +6648,12 @@ def test_only_qa_lens_gets_a_worktree(monkeypatch):
             return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
         return SkillResult(skill, True, 0, "VERDICT: COMMENT", "")
 
+    # #1164 binds the panel to a verified live head before any lens runs.
+    # Without this stub the test hits api.github.com and flakes on 403 rate
+    # limits (observed on ateles#1199 CI) instead of asserting worktree routing.
+    monkeypatch.setattr(
+        SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40)
+    )
     monkeypatch.setattr(swarm_dispatch, "prepare_pr_worktree", fake_prepare)
     monkeypatch.setattr(swarm_dispatch, "cleanup_pr_worktree", fake_cleanup)
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
