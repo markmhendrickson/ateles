@@ -60,10 +60,6 @@ in the issue, PR or commit message.
 and link each by id into the Ateles app, so the operator can open them.
 5. PROCEED ON YOUR RECOMMENDATION rather than stopping to ask. If you asked \
 something and it went unanswered, re-surface it each turn until answered.
-6. WATCH EXTERNAL STATE YOU ARE WAITING ON. If the next step depends on CI, a \
-PR, a dispatch or a deploy, arm a monitor in the same turn and poll it through. \
-Never end with "once X is green I'll do Y" and stop — that hands the waiting \
-back to the operator. Emit on any state change, not only success.
 
 Full role definition: `.claude/skills/ateles/SKILL.md`. Repo-wide constraints \
 are in CLAUDE.md, which Claude Code re-injects from disk on its own."""
