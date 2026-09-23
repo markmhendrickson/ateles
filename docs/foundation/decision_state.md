@@ -22,10 +22,10 @@ The **Subject** column is a label of a few words, never a substitute for the row
 
 ## What this run found
 
-- **5** row(s) **ruled but not merged** — the corpus on `origin/main` reads open where a ruling exists on a branch.
-- **7** row(s) genuinely open — no ruling anywhere scanned.
+- **12** row(s) **ruled but not merged** — the corpus on `origin/main` reads open where a ruling exists on a branch.
+- **1** row(s) genuinely open — no ruling anywhere scanned.
 - **83** row(s) ruled and merged.
-- **94** row(s) whose implemented axis is `unknown`.
+- **95** row(s) whose implemented axis is `unknown`.
 
 ### Ruled but not merged
 
@@ -33,11 +33,18 @@ Each of these reads **open** to anything reading the corpus. The ruling is on th
 
 | # | Subject | Ruling lives on | Blocks |
 |---|---|---|---|
+| 84 | what distinguishes a task with no intake batch because it is still … | `origin/decision-84-task-assembly-hold` | nothing in the design; whether an assembling task is claimable before it is finished … |
 | 85 | where an artifact a principal produces about an issue or a pull … | `origin/decisions-85-105-106-2ba02e` | nothing in the design; which outbound row of `github.md` a principal's own artifact takes, … |
+| 99 | whether a swarm configured with several instances of the record has planning … | `origin/codex/foundation-decisions-99-102-107-109` | decision 91, which supplies a controlling instance as a candidate home without supplying a … |
+| 102 | whether acyclicity is a property of a relationship type or of the … | `origin/codex/foundation-decisions-99-102-107-109` | stage 1 of the migration, since a check applied without regard to type governs … |
 | 103 | whether a step's declaration is a floor or a ceiling, and whether … | `origin/decisions-103-104-556945` | decision 41 and decision 94, which rule admission per entity type per principal, default-deny, … |
 | 104 | what a reader of adapter-sourced state in the record may rely on … | `origin/decisions-103-104-556945` | nothing in the design; and the placement of a claim `calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of` already makes in … |
 | 105 | where a credential comes from before the custody rules reach it, and … | `origin/decisions-85-105-106-2ba02e` | decision 90, which already makes the target host and the record instance parameters of … |
 | 106 | whether an issue is a pinned-state kind, and what a conclusion on … | `origin/decisions-85-105-106-2ba02e` | decision 72, which named the record and its `conclusion` field and whose pinning rule … |
+| 107 | what a principal's **acts-as** `principal_binding` carries, and whether that edge is presented … | `origin/codex/foundation-decisions-99-102-107-109` | nothing blocks it: stage 1 registers the edge type and its four fields, not … |
+| 108 | whether an `agent` may hold an **acts-as** `principal_binding` to another `agent` — … | `origin/codex/foundation-decisions-99-102-107-109` | decision 48, whose counting rule reads this edge and reasons about interests without stating … |
+| 109 | whether an `operator` may hold an **acts-as** `principal_binding` — the corpus says … | `origin/codex/foundation-decisions-99-102-107-109` | decision 48's counting rule, which would read such an edge and count two operators … |
+| 111 | whether a rule's end may be a **condition** rather than a date … | `origin/ruling-925-relationship-grants` | the live rows that carry a condition in `scope`, which both defeats that field's … |
 
 ## The register on three axes
 
@@ -115,7 +122,7 @@ Each of these reads **open** to anything reading the corpus. The ruling is on th
 | 81 | whether within-tenant default visibility is private-first ("see only my own book") or … | yes | yes | unknown | — | the soft-wall of that document's section 5 |
 | 82 | whether the fork case is a single hosted instance serving many forkers … | yes | yes | unknown | — | whether that document's section 3 is a hedge or a requirement |
 | 83 | the capability ceiling of a non-owner operator within a tenant: whether minting … | yes | yes | unknown | — | the shape of grants minted before the org's own ceiling is enforced |
-| 84 | what distinguishes a task with no intake batch because it is still … | no | no | unknown | — | nothing in the design; whether an assembling task is claimable before it is finished … |
+| 84 | what distinguishes a task with no intake batch because it is still … | yes | no | unknown | `origin/decision-84-task-assembly-hold` | nothing in the design; whether an assembling task is claimable before it is finished … |
 | 85 | where an artifact a principal produces about an issue or a pull … | yes | no | unknown | `origin/decisions-85-105-106-2ba02e` | nothing in the design; which outbound row of `github.md` a principal's own artifact takes, … |
 | 86 | by what grammar a capability names a tool, and therefore what the … | yes | yes | unknown | — | — |
 | 87 | whether a harness may provide a principal any capability its grant does … | yes | yes | unknown | — | decision 86, which supplied the grammar this rule is stated in and deliberately admitted … |
@@ -130,18 +137,19 @@ Each of these reads **open** to anything reading the corpus. The ruling is on th
 | 96 | how the proxy authenticates to the instance on an agent's behalf — … | yes | yes | unknown | — | decision 97, which ruled that a proxy is permitted and never the enforcement point, … |
 | 97 | where the enforcement point for an agent's read and write to the … | yes | yes | unknown | — | decision 56, which ruled the enforcement point at the record for a governance write … |
 | 98 | whether an instance's planning records are per instance — each instance of … | yes | yes | unknown | — | decision 91, whose controlling instance is the candidate home for any swarm-level planning; decision … |
-| 99 | whether a swarm configured with several instances of the record has planning … | no | no | unknown | — | decision 91, which supplies a controlling instance as a candidate home without supplying a … |
+| 99 | whether a swarm configured with several instances of the record has planning … | yes | no | unknown | `origin/codex/foundation-decisions-99-102-107-109` | decision 91, which supplies a controlling instance as a candidate home without supplying a … |
 | 100 | whether a newly declared workflow is proven before it binds production work, … | yes | yes | unknown | — | nothing in the design; and `migration.md#ordering-and-the-cutover-for-the-skills`, whose claim that its cutover batch is the … |
 | 101 | what fields the credential-binding edge carries, and what resolving a credential to … | yes | yes | unknown | — | stage 1 of the migration, which registers `principal_binding` among thirteen relationship types and cannot … |
-| 102 | whether acyclicity is a property of a relationship type or of the … | no | no | unknown | — | stage 1 of the migration, since a check applied without regard to type governs … |
+| 102 | whether acyclicity is a property of a relationship type or of the … | yes | no | unknown | `origin/codex/foundation-decisions-99-102-107-109` | stage 1 of the migration, since a check applied without regard to type governs … |
 | 103 | whether a step's declaration is a floor or a ceiling, and whether … | yes | no | unknown | `origin/decisions-103-104-556945` | decision 41 and decision 94, which rule admission per entity type per principal, default-deny, … |
 | 104 | what a reader of adapter-sourced state in the record may rely on … | yes | no | unknown | `origin/decisions-103-104-556945` | nothing in the design; and the placement of a claim `calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of` already makes in … |
 | 105 | where a credential comes from before the custody rules reach it, and … | yes | no | unknown | `origin/decisions-85-105-106-2ba02e` | decision 90, which already makes the target host and the record instance parameters of … |
 | 106 | whether an issue is a pinned-state kind, and what a conclusion on … | yes | no | unknown | `origin/decisions-85-105-106-2ba02e` | decision 72, which named the record and its `conclusion` field and whose pinning rule … |
-| 107 | what a principal's **acts-as** `principal_binding` carries, and whether that edge is presented … | no | no | unknown | — | nothing blocks it: stage 1 registers the edge type and its four fields, not … |
-| 108 | whether an `agent` may hold an **acts-as** `principal_binding` to another `agent` — … | no | no | unknown | — | decision 48, whose counting rule reads this edge and reasons about interests without stating … |
-| 109 | whether an `operator` may hold an **acts-as** `principal_binding` — the corpus says … | no | no | unknown | — | decision 48's counting rule, which would read such an edge and count two operators … |
+| 107 | what a principal's **acts-as** `principal_binding` carries, and whether that edge is presented … | yes | no | unknown | `origin/codex/foundation-decisions-99-102-107-109` | nothing blocks it: stage 1 registers the edge type and its four fields, not … |
+| 108 | whether an `agent` may hold an **acts-as** `principal_binding` to another `agent` — … | yes | no | unknown | `origin/codex/foundation-decisions-99-102-107-109` | decision 48, whose counting rule reads this edge and reasons about interests without stating … |
+| 109 | whether an `operator` may hold an **acts-as** `principal_binding` — the corpus says … | yes | no | unknown | `origin/codex/foundation-decisions-99-102-107-109` | decision 48's counting rule, which would read such an edge and count two operators … |
 | 110 | whether a **role** may be seated to review what a principal produced … | yes | yes | unknown | — | nothing in the design; a declaration whose steps seat a producing role and a … |
+| 111 | whether a rule's end may be a **condition** rather than a date … | yes | no | unknown | `origin/ruling-925-relationship-grants` | the live rows that carry a condition in `scope`, which both defeats that field's … |
 
 ## What was read
 
