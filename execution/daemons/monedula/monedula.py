@@ -19,12 +19,14 @@ import os
 import subprocess
 import sys
 import time
+import types
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
 # User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
@@ -801,17 +803,18 @@ def _post_escalation_entity(entity: dict, idempotency_key: str) -> bool:
 
 
 def _emit_consent_escalation(
-    result: TelegramPollResult,
+    result: Any,
     *,
     pending_handler_names: list[str],
     yesterday_str: str,
     gate_failure_streak: int,
 ) -> bool:
-    """Escalate a channel failure (409 / timeout / missing creds) to Neotoma.
+    """Escalate a consent-channel failure to Neotoma.
 
-    Never carries payee names, IBANs, addresses, or amounts — only handler
-    labels (yoga/therapy — the same labels already public in this repo's
-    handler config) and the channel-failure diagnostics.
+    ``result`` is channel-agnostic: any object with ``kind``, ``error_code``,
+    and ``error_detail`` attributes (TelegramPollResult, or a SimpleNamespace
+    from the email path). Never carries payee names, IBANs, addresses, or
+    amounts — only handler labels and channel-failure diagnostics.
     """
     today = time.strftime("%Y-%m-%d", time.gmtime())
     is_dead_gate = gate_failure_streak >= MONEDULA_DEAD_GATE_THRESHOLD
@@ -822,9 +825,12 @@ def _emit_consent_escalation(
     )
     severity = "critical" if is_dead_gate else "error"
 
+    kind = getattr(result, "kind", "channel_error")
+    error_code = getattr(result, "error_code", None)
+    error_detail = getattr(result, "error_detail", "")
     detail = (
-        f"kind={result.kind} error_code={result.error_code} "
-        f"detail={result.error_detail!r} consecutive_failures={gate_failure_streak} "
+        f"kind={kind} error_code={error_code} "
+        f"detail={error_detail!r} consecutive_failures={gate_failure_streak} "
         f"pending_handlers={pending_handler_names} payment_date={yesterday_str}"
     )
     entity = {
@@ -835,7 +841,7 @@ def _emit_consent_escalation(
             else f"Monedula consent gate DEAD — {gate_failure_streak} consecutive failures"
         ),
         "body": (
-            f"Monedula's Telegram consent channel failed while payments were "
+            f"Monedula's consent channel failed while payments were "
             f"pending. Payment is BLOCKED (fail-closed) — nothing was executed.\n\n"
             f"{detail}\n\n"
             f"This is a channel failure, not an operator decline: the operator "
@@ -844,7 +850,8 @@ def _emit_consent_escalation(
                 f"This is the {gate_failure_streak}th consecutive run with zero "
                 f"approvals — the gate has not worked at all across that span. "
                 f"See daemon_report ent_71b2ad5e84a9597b56b570e3 for the known "
-                f"Telegram getUpdates single-consumer conflict.\n\n"
+                f"Telegram getUpdates single-consumer conflict when Telegram "
+                f"break-glass is selected.\n\n"
                 if is_dead_gate
                 else ""
             )
@@ -852,12 +859,92 @@ def _emit_consent_escalation(
         ),
         "severity": severity,
         "source_agent": "monedula@ateles-swarm",
-        "source_entity_type": "telegram_consent_gate",
+        "source_entity_type": "consent_gate",
         "status": "open",
         "tags": ["monedula", "payments", "consent_gate", escalation_type],
     }
     idempotency_key = f"monedula-{escalation_type}-{today}"
     return _post_escalation_entity(entity, idempotency_key)
+
+
+def _resolve_consent_channel() -> tuple[str | None, str]:
+    """Select email vs Telegram consent channel from config.
+
+    Returns ``(channel, source)`` where channel is ``\"email\"`` | ``\"telegram\"``
+    | ``None`` (misconfigured) and source is ``env`` | ``binding`` | ``automatic``.
+
+    Order: explicit ``MONEDULA_CONSENT_CHANNEL`` → optional vendor_binding
+    (fall-through only; Monedula has no loader on main today) → automatic
+    (email when Telegram creds absent and lib.approval email armed; else
+    Telegram when both creds + operator principal resolve).
+    """
+    override = (os.environ.get("MONEDULA_CONSENT_CHANNEL") or "").strip().lower()
+    if override in ("email", "telegram"):
+        return override, "env"
+
+    # Binding fall-through: no inventing defaults. A future loader may set
+    # source=binding when a concrete value is read; absent today → continue.
+    tg_token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    tg_chat = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+    tg_present = bool(tg_token) and bool(tg_chat)
+
+    if not tg_token or not tg_chat:
+        try:
+            from lib.approval.email_channel import email_enabled, operator_email
+
+            if email_enabled() and operator_email():
+                return "email", "automatic"
+        except Exception:
+            pass
+        missing = []
+        if not tg_token:
+            missing.append("TELEGRAM_BOT_TOKEN")
+        if not tg_chat:
+            missing.append("TELEGRAM_CHAT_ID")
+        # Also note email arming fields when automatic email could not select.
+        return None, "automatic"
+
+    # Both Telegram creds present.
+    principal, err = _resolve_operator_principal()
+    if principal is not None:
+        return "telegram", "automatic"
+    # Telegram creds present but principal broken — try email fallback before
+    # declaring unconfigured, so email can still be selected when armed.
+    try:
+        from lib.approval.email_channel import email_enabled, operator_email
+
+        if email_enabled() and operator_email():
+            return "email", "automatic"
+    except Exception:
+        pass
+    return None, "automatic"
+
+
+def _consent_failure_notify_body(
+    *,
+    reason_code: str,
+    pending_summaries: list[str],
+    recovery_hint: str,
+) -> str:
+    """Actionable consent-channel-failure alert body (ateles#1178)."""
+    pending = "; ".join(pending_summaries) if pending_summaries else "(none)"
+    return (
+        f"monedula: consent channel failed ({reason_code}). "
+        f"Pending: {pending}. "
+        f"No payment moved. "
+        f"Recovery: {recovery_hint}. "
+        f"Payments BLOCKED, not declined."
+    )
+
+
+def _pending_summaries(triggered: list) -> list[str]:
+    out: list[str] = []
+    for handler, _matches in triggered:
+        profile = getattr(handler, "profile", None)
+        label = getattr(profile, "label", None) or handler.name
+        amount = getattr(profile, "amount_eur", "?")
+        out.append(f"{handler.name}/{label}/EUR {amount}")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1002,7 +1089,11 @@ def escalate_strandings(strandings: list) -> list:
     try:
         from strandings import escalate
 
-        return escalate(strandings, notify=_notify)
+        return escalate(
+            strandings,
+            notify=_notify,
+            clear_dedupe=_clear_notify_dedupe,
+        )
     except Exception as exc:  # noqa: BLE001
         log.exception(f"could not escalate stranded payment profiles: {exc}")
         return []
@@ -1130,6 +1221,14 @@ def main() -> bool:
         log.info(
             "No payment handlers triggered and no due payment tasks — nothing to do."
         )
+        # Empty pending set: clear consent fingerprint + consent-failure dedupe.
+        try:
+            from consent_email import clear_consent_state
+
+            clear_consent_state()
+        except Exception:
+            pass
+        _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
         return not strandings
 
     if not triggered:
@@ -1137,18 +1236,186 @@ def main() -> bool:
             "No calendar-triggered payments, but due payment tasks found — sending reminder only."
         )
 
-    # Build and send preview
+    # If there are only task reminders (no actionable calendar payments), don't wait for approval.
+    if not triggered:
+        # Reminder-only path: still use channel when Telegram break-glass is selected,
+        # otherwise skip Telegram preview when email is the consent default.
+        channel, source = _resolve_consent_channel()
+        log.info(f"consent_channel_selected channel={channel} source={source}")
+        if channel == "telegram":
+            preview_msg = _build_preview_message(
+                triggered, yesterday_str, due_tasks=due_tasks
+            )
+            log.info("Sending payment preview to Telegram...")
+            telegram_send(preview_msg)
+        log.info("Task reminders sent — no calendar payments to approve. Done.")
+        try:
+            from consent_email import clear_consent_state
+
+            clear_consent_state()
+        except Exception:
+            pass
+        _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
+        return not strandings
+
+    # ── Consent: email (default when Telegram absent) or Telegram break-glass ──
+    channel, source = _resolve_consent_channel()
+    configured = []
+    missing = []
+    for name in (
+        "MONEDULA_CONSENT_CHANNEL",
+        "ATELES_NOTIFY_EMAIL",
+        "OPERATOR_EMAIL",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_CHAT_ID",
+        "TELEGRAM_ALLOWED_USER_ID",
+    ):
+        if (os.environ.get(name) or "").strip():
+            configured.append(name)
+        else:
+            missing.append(name)
+    log.info(
+        f"consent_channel_selected channel={channel} source={source} "
+        f"configured_fields={configured} missing_fields={missing}"
+    )
+
+    handler_names = list(dict.fromkeys([h.name for h, _ in triggered]))
+    summaries = _pending_summaries(triggered)
+
+    if channel is None:
+        streak = _record_gate_failure("consent_channel_unconfigured")
+        log.error(
+            "consent_channel_unconfigured — naming missing fields only; "
+            f"missing_fields={missing} — blocking payments, not silent no-op."
+        )
+        failure = types.SimpleNamespace(
+            kind="channel_error",
+            error_code=None,
+            error_detail="consent_channel_unconfigured",
+        )
+        _emit_consent_escalation(
+            failure,
+            pending_handler_names=handler_names,
+            yesterday_str=yesterday_str,
+            gate_failure_streak=streak,
+        )
+        _notify(
+            _consent_failure_notify_body(
+                reason_code="consent_channel_unconfigured",
+                pending_summaries=summaries,
+                recovery_hint=(
+                    "set MONEDULA_CONSENT_CHANNEL=email and arm ATELES_NOTIFY_EMAIL=1 "
+                    "plus OPERATOR_EMAIL, or set Telegram break-glass vars"
+                ),
+            ),
+            priority="blocker",
+            dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
+            email_eligible=True,
+        )
+        return False
+
+    if channel == "email":
+        from consent_email import request_and_collect
+
+        consent = request_and_collect(
+            triggered,
+            yesterday_str,
+            clear_failure_dedupe=lambda: _clear_notify_dedupe(
+                _CONSENT_CHANNEL_DEDUPE_KEY
+            ),
+        )
+        if not consent.channel_ok:
+            reason = consent.reason_code or "consent_request_send_failed"
+            streak = _record_gate_failure(reason)
+            failure = types.SimpleNamespace(
+                kind="channel_error",
+                error_code=None,
+                error_detail=reason,
+            )
+            _emit_consent_escalation(
+                failure,
+                pending_handler_names=handler_names,
+                yesterday_str=yesterday_str,
+                gate_failure_streak=streak,
+            )
+            recovery = {
+                "consent_request_send_failed": (
+                    "request not delivered; next tick retries; check gws gmail +send"
+                ),
+                "consent_reply_read_failed": (
+                    "replies could not be checked; check gws/mailbox; no payment executed"
+                ),
+            }.get(reason, "arm ATELES_NOTIFY_EMAIL/OPERATOR_EMAIL or reply to consent thread")
+            _notify(
+                _consent_failure_notify_body(
+                    reason_code=reason,
+                    pending_summaries=summaries,
+                    recovery_hint=recovery,
+                ),
+                priority="blocker",
+                dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
+                email_eligible=True,
+            )
+            return False
+
+        approved = consent.approved
+        if not approved and not consent.skipped:
+            # Awaiting / partial hold — fail-closed, clean-ish run (not channel dead).
+            log.info(
+                f"Email consent: awaiting={sorted(consent.awaiting)} "
+                f"skipped={sorted(consent.skipped)} blocked={sorted(consent.blocked)} "
+                f"— no execute this tick."
+            )
+            return not strandings
+
+        if not approved:
+            log.info(
+                f"Email consent: all skipped or held "
+                f"(skipped={sorted(consent.skipped)}) — no execute."
+            )
+            _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
+            return not strandings
+
+        _reset_gate_failure_streak()
+        _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
+        log.info(f"Email consent approved handlers: {approved}")
+
+        all_results = []
+        for handler, matches in triggered:
+            if handler.name not in approved:
+                log.info(f"Skipping {handler.name} (not approved).")
+                continue
+            for match in matches:
+                log.info(f"Executing {handler.name} payment...")
+                _job = (
+                    _activity.started(f"executing {handler.name} payment")
+                    if _activity
+                    else None
+                )
+                try:
+                    result = handler.execute(match)
+                    all_results.append((handler, result))
+                    log.info(f"{handler.name} result: {result}")
+                    if _job:
+                        _job.finished(f"{handler.name} payment executed")
+                except Exception as _exc:
+                    if _job:
+                        _job.failed(
+                            f"{handler.name} payment error: {type(_exc).__name__}"
+                        )
+                    raise
+        if not all_results:
+            log.info("Email consent: no payments executed.")
+            return not strandings
+        log.info("Monedula email-consent run complete.")
+        return not strandings
+
+    # channel == "telegram" — break-glass path (unchanged attendance phrases)
     preview_msg = _build_preview_message(triggered, yesterday_str, due_tasks=due_tasks)
     log.info("Sending payment preview to Telegram...")
     telegram_send(preview_msg)
 
-    # If there are only task reminders (no actionable calendar payments), don't wait for approval.
-    if not triggered:
-        log.info("Task reminders sent — no calendar payments to approve. Done.")
-        return not strandings
-
     # Wait for operator reply (2 minutes)
-    handler_names = list(dict.fromkeys([h.name for h, _ in triggered]))
     poll_result = telegram_poll_approval(timeout_sec=120)
 
     if poll_result.kind in ("channel_error", "timeout"):
@@ -1177,27 +1444,22 @@ def main() -> bool:
                 "still blocking payment and notifying best-effort."
             )
         _notify(
-            f"monedula: consent channel failed ({poll_result.kind}) with "
-            f"payments pending ({handler_names}) — {streak} consecutive "
-            "failure(s). Payments BLOCKED, not declined. See escalation.",
+            _consent_failure_notify_body(
+                reason_code=poll_result.kind,
+                pending_summaries=summaries,
+                recovery_hint=(
+                    "check Telegram break-glass vars or switch to email consent "
+                    "(MONEDULA_CONSENT_CHANNEL=email, ATELES_NOTIFY_EMAIL=1, OPERATOR_EMAIL)"
+                ),
+            ),
             priority="blocker",
             dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
-            # Not actionable from the email body alone: there is nothing to
-            # decide or reply to here, only a pointer to "see escalation"
-            # elsewhere. Stays on Telegram (and the escalation entity already
-            # written above is the durable, consultable record) but does not
-            # become an inbox item (ateles#1127).
-            email_eligible=False,
+            email_eligible=True,
         )
-        # Do NOT also call telegram_send here. `_notify(..., email_eligible=False)`
-        # already routes BLOCKER to Telegram via Apprise; a parallel telegram_send
-        # double-fires on the first tick and bypasses the dedupe journal on every
-        # later tick while the condition stays open (ateles#1128 / Falco).
-        # A channel failure is a run that could not even ask, distinct from
-        # both "nothing to do" and a stranding — but it must exit non-zero
-        # for the same reason strandings do: silent 0 is how this stayed
-        # invisible. Reuse the strandings-style False-return contract rather
-        # than inventing a second exit-code channel for the entrypoint.
+        # Do NOT also call telegram_send here. `_notify` already routes BLOCKER
+        # to Telegram via Apprise; a parallel telegram_send double-fires on the
+        # first tick and bypasses the dedupe journal on every later tick while
+        # the condition stays open (ateles#1128 / Falco).
         return False
 
     # poll_result.kind == "reply" from here — a genuine reply arrived, so the

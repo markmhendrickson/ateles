@@ -21,11 +21,31 @@ import os
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from email.utils import parseaddr
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 log = logging.getLogger("ateles.approval.email")
+
+
+@dataclass(frozen=True)
+class ReadRepliesOutcome:
+    """Statusful result of an inbox reply sweep.
+
+    Distinguishes three states that the fail-open ``read_replies`` list cannot:
+      - ``ok``              — transport succeeded; ``texts`` may be empty (no reply yet)
+      - ``transport_error`` — gws/mailbox check failed; ``texts`` is always ``[]``
+      - ``disabled``        — ``ATELES_NOTIFY_EMAIL`` is not armed
+
+    Payment-consent callers MUST use this form and treat non-``ok`` as blocked
+    (fail-closed approve). Non-payment callers may keep using ``read_replies``,
+    which remains fail-open (returns ``[]`` on transport error / disabled).
+    """
+
+    kind: Literal["ok", "transport_error", "disabled"]
+    texts: list[str]
+    detail: str = ""
 
 
 def _strip_html(html: str) -> str:
@@ -188,32 +208,44 @@ def sender_is_operator(from_header: str) -> bool:
     return sender == operator
 
 
-def read_replies(
+def read_replies_with_status(
     tokens: list[str],
     max_msgs: int = 40,
     on_reply_message: Callable[[str, str], None] | None = None,
-) -> list[str]:
-    """Return the full text (subject + body) of recent replies carrying any token.
+    on_sender_rejected: Callable[[], None] | None = None,
+) -> ReadRepliesOutcome:
+    """Statusful inbox sweep — distinguish empty-ok from transport failure.
 
-    `gws gmail +triage` returns only headers (date/from/id/subject) — NOT the
-    body — so a verdict is invisible there. We triage to find candidate message
-    ids whose subject carries a token, then `+read --id` each to pull the body.
+    Same triage/+read flow as ``read_replies``, but returns ``ReadRepliesOutcome``
+    so payment-consent callers can fail-closed on transport error without
+    conflating it with "no reply yet".
 
-    Only messages whose subject starts with "RE:" are considered — the operator's
-    reply can carry a verdict; our own outbound request cannot.
-
-    `on_reply_message(token, message_id)` is invoked for each matched reply, so
-    the caller can persist which message to reply to (for in-thread confirmation).
-    Fail-open: returns [] on any failure.
+    ``on_sender_rejected`` (optional) fires when a candidate reply fails
+    ``sender_is_operator`` — no address argument (PII-safe for Monedula logs).
     """
-    if not tokens or not email_enabled():
-        return []
+    if not email_enabled():
+        return ReadRepliesOutcome(kind="disabled", texts=[], detail="ATELES_NOTIFY_EMAIL")
+    if not tokens:
+        return ReadRepliesOutcome(kind="ok", texts=[], detail="")
+    if not _gws():
+        return ReadRepliesOutcome(
+            kind="transport_error", texts=[], detail="gws_cli_missing"
+        )
+
     texts: list[str] = []
     seen_ids: set[str] = set()
+    saw_transport_error = False
+    transport_detail = ""
 
     for token in tokens:
         data = gws_json(["gmail", "+triage", "--format", "json", "--max",
                          str(max_msgs), "--query", f"newer_than:3d {token}"])
+        if data is None:
+            # gws_json fail-opens to None on any transport/parse failure.
+            # For statusful callers that is distinct from "zero matching msgs".
+            saw_transport_error = True
+            transport_detail = "gws_triage_failed"
+            continue
         msgs: list[dict] = []
         if isinstance(data, dict):
             msgs = data.get("messages") or data.get("results") or []
@@ -234,12 +266,22 @@ def read_replies(
             sender = str(m.get("from") or m.get("sender") or m.get("From") or "")
             if not sender_is_operator(sender):
                 log.warning(
-                    f"approval: ignoring reply {mid} — sender is not the "
-                    "operator (token present but unverified sender)")
+                    "approval: ignoring reply — sender is not the "
+                    "operator (token present but unverified sender)"
+                )
+                if on_sender_rejected is not None:
+                    try:
+                        on_sender_rejected()
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(f"on_sender_rejected callback failed: {exc}")
                 continue
             seen_ids.add(mid)
             body_data = gws_json(["gmail", "+read", "--id", mid, "--headers",
                                   "--format", "json"], timeout=30)
+            if body_data is None:
+                saw_transport_error = True
+                transport_detail = "gws_read_failed"
+                continue
             body = ""
             if isinstance(body_data, dict):
                 # Prefer plaintext (where the operator's verdict + the quoted
@@ -269,7 +311,31 @@ def read_replies(
                 except Exception as exc:  # noqa: BLE001
                     log.warning(f"on_reply_message callback failed: {exc}")
             texts.append(f"{subject}\n{body}")
-    return texts
+
+    if saw_transport_error and not texts:
+        return ReadRepliesOutcome(
+            kind="transport_error", texts=[], detail=transport_detail or "gws_failed"
+        )
+    return ReadRepliesOutcome(kind="ok", texts=texts, detail="")
+
+
+def read_replies(
+    tokens: list[str],
+    max_msgs: int = 40,
+    on_reply_message: Callable[[str, str], None] | None = None,
+) -> list[str]:
+    """Return the full text (subject + body) of recent replies carrying any token.
+
+    Thin fail-open wrapper over ``read_replies_with_status``: returns ``.texts``
+    on ``ok``, else ``[]``. Prefer ``read_replies_with_status`` when the caller
+    must distinguish transport failure from an empty inbox (payment consent).
+    """
+    outcome = read_replies_with_status(
+        tokens, max_msgs=max_msgs, on_reply_message=on_reply_message
+    )
+    if outcome.kind == "ok":
+        return outcome.texts
+    return []
 
 
 def reply_in_thread(message_id: str, body: str,

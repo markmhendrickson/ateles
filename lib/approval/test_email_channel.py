@@ -416,3 +416,38 @@ class TestSenderVerification:
 
         with patch.object(ec, "gws_json", side_effect=fake_gws_json):
             assert ec.read_replies(["TOK"]) == []
+
+
+class TestReadRepliesWithStatus:
+    """ateles#1178: statusful read distinguishes empty-ok from transport failure."""
+
+    def test_read_replies_with_status_ok_empty_texts(self, monkeypatch):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
+        with patch.object(ec, "gws_json", return_value={"messages": []}), \
+             patch.object(ec, "_gws", return_value="/bin/gws"):
+            outcome = ec.read_replies_with_status(["TOK"])
+        assert outcome.kind == "ok"
+        assert outcome.texts == []
+
+    def test_read_replies_with_status_transport_error_is_not_ok(self, monkeypatch):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
+        with patch.object(ec, "gws_json", return_value=None), \
+             patch.object(ec, "_gws", return_value="/bin/gws"):
+            outcome = ec.read_replies_with_status(["TOK"])
+        assert outcome.kind == "transport_error"
+        assert outcome.texts == []
+        assert "operator@example.com" not in (outcome.detail or "")
+
+    def test_read_replies_with_status_disabled(self, monkeypatch):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "0")
+        outcome = ec.read_replies_with_status(["TOK"])
+        assert outcome.kind == "disabled"
+
+    def test_read_replies_wrapper_preserves_fail_open_list(self, monkeypatch):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
+        with patch.object(ec, "gws_json", return_value=None), \
+             patch.object(ec, "_gws", return_value="/bin/gws"):
+            assert ec.read_replies(["TOK"]) == []

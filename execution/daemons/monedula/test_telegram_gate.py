@@ -67,6 +67,7 @@ class _RecordingHandler:
             due_date="",
             calendar_keywords=[name],
             label=name,
+            amount_eur=60,
         )
 
     def matches(self, events):
@@ -92,6 +93,12 @@ def sent_messages(tmp_path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
         monedula, "fetch_due_payment_tasks", lambda *a, **k: [], raising=False
     )
     monkeypatch.setattr(monedula, "fetch_yesterday_events", lambda: [])
+    # Force Telegram break-glass so existing gate tests stay on that path
+    # (ateles#1178 made email the automatic default when Telegram is absent).
+    monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", "telegram")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_ID", "42")
 
     sent: list[str] = []
     monkeypatch.setattr(
@@ -370,18 +377,25 @@ def test_timeout_blocks_payment_and_escalates(
     assert "monedula_consent_channel_failure" in escalation_posts[0][0]["tags"]
 
 
-def test_consent_channel_failure_notify_carries_dedupe_key_and_not_email_eligible(
+def test_consent_channel_failure_notify_carries_dedupe_key_and_email_eligible(
     monkeypatch: pytest.MonkeyPatch,
     sent_messages: list[str],
     escalation_posts: list[tuple[dict, str]],
 ) -> None:
-    """ateles#1127: the consent-channel-timeout alert fired on every ~17-minute
-    poll tick with no memory of having already reported the open condition —
-    299 emails over four days for one still-open failure. `_notify` must be
-    called with the stable dedupe key (so Notifier suppresses the repeat) and
-    email_eligible=False (the body has nothing the operator can act on from
-    the message alone — it just points at the escalation)."""
+    """ateles#1178: consent-channel-failure alert is actionable + email_eligible.
+
+    Still carries the stable dedupe key ``monedula:consent_channel_failed``.
+    Body must not be sole content "see escalation" — includes pending summary,
+    reason, no-payment-moved, recovery hint.
+    """
     handler = _RecordingHandler("therapy")
+    handler.profile = types.SimpleNamespace(
+        one_off=False,
+        due_date="",
+        calendar_keywords=["therapy"],
+        label="Studio Example",
+        amount_eur=60,
+    )
     _install_handlers(monkeypatch, [handler])
     monkeypatch.setattr(
         monedula,
@@ -403,10 +417,47 @@ def test_consent_channel_failure_notify_carries_dedupe_key_and_not_email_eligibl
         c for c in notify_calls if "consent channel failed" in c[0].lower()
     ]
     assert len(consent_calls) == 1
-    _msg, priority, kwargs = consent_calls[0]
+    msg, priority, kwargs = consent_calls[0]
     assert priority == "blocker"
     assert kwargs.get("dedupe_key") == monedula._CONSENT_CHANNEL_DEDUPE_KEY
-    assert kwargs.get("email_eligible") is False
+    assert kwargs.get("email_eligible") is True
+    assert "No payment moved" in msg or "no payment moved" in msg.lower()
+    assert "Studio Example" in msg or "therapy" in msg
+    assert "see escalation" not in msg.lower() or "Recovery" in msg
+
+
+def test_consent_channel_failure_body_is_actionable(
+    monkeypatch: pytest.MonkeyPatch,
+    sent_messages: list[str],
+) -> None:
+    handler = _RecordingHandler("therapy")
+    handler.profile = types.SimpleNamespace(
+        one_off=False,
+        due_date="",
+        calendar_keywords=["therapy"],
+        label="Studio Example",
+        amount_eur=60,
+    )
+    _install_handlers(monkeypatch, [handler])
+    monkeypatch.setattr(
+        monedula,
+        "telegram_poll_approval",
+        lambda *a, **k: monedula.TelegramPollResult(kind="channel_error"),
+    )
+    notify_calls: list[tuple] = []
+    monkeypatch.setattr(
+        monedula,
+        "_notify",
+        lambda msg, priority="info", **k: notify_calls.append((msg, priority, k)),
+    )
+    monedula.main()
+    msg = notify_calls[0][0]
+    assert "Studio Example" in msg
+    assert "60" in msg
+    assert "No payment moved" in msg
+    assert "Recovery" in msg or "recovery" in msg.lower()
+    assert notify_calls[0][2].get("email_eligible") is True
+    assert "see escalation." not in msg.lower().rstrip(".") or "Recovery" in msg
 
 
 def test_consent_channel_dedupe_key_is_cleared_on_a_genuine_reply(

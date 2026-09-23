@@ -22,21 +22,28 @@ returns a benign empty/false value and logs a warning — it never raises into t
 caller's daemon loop.
 """
 
-from .tokens import token_for, parse_verdict
+from .tokens import token_for, parse_verdict, subject_marker
 from .email_channel import (
     email_enabled,
     operator_email,
     send_request,
     read_replies,
+    read_replies_with_status,
+    ReadRepliesOutcome,
     reply_in_thread,
+    sender_is_operator,
 )
 
 __all__ = [
     "token_for",
     "parse_verdict",
+    "subject_marker",
     "email_enabled",
     "operator_email",
     "send_request",
     "read_replies",
+    "read_replies_with_status",
+    "ReadRepliesOutcome",
     "reply_in_thread",
+    "sender_is_operator",
 ]
