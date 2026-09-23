@@ -662,6 +662,43 @@ async def test_failed_stamp_does_not_dispatch(monkeypatch, release_store):
     assert not any("re-dispatch" in message for message in notifier.sent)
 
 
+_CICADA_PR_HEADER = (
+    "[cicada] pull_request_link: https://github.com/markmhendrickson/ateles/pull/999"
+)
+
+
+def _cicada_delivers_a_pr(monkeypatch, records):
+    """Cicada's run now has to NAME its PR to reach DONE (ateles#1155).
+
+    Returns the successful spawn result carrying the header, resolves the ref as
+    real, and routes the artifact completion's result/status writes at the same
+    in-memory task record the read-back reads.
+    """
+    from lib.daemon_runtime import task_lifecycle
+
+    class _Success:
+        ok = True
+        error = None
+        returncode = 0
+        stdout = _CICADA_PR_HEADER + "\n"
+        stderr = ""
+
+    def post(url, headers=None, json=None, timeout=None):
+        records[json["entity_id"]]["snapshot"][json["field"]] = json["value"]
+
+        class _Ok:
+            def raise_for_status(self):
+                return None
+
+        return _Ok()
+
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
+    monkeypatch.setattr(task_lifecycle, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(task_lifecycle.httpx, "post", post)
+    return _Success
+
+
+
 @pytest.mark.asyncio
 async def test_resolve_acknowledges_before_slow_agent_completion(
     monkeypatch, release_store
@@ -673,10 +710,7 @@ async def test_resolve_acknowledges_before_slow_agent_completion(
     monkeypatch.setattr(apis, "RUN_CONVERSATIONS", False)
     monkeypatch.setattr(apis, "RUN_EMAIL", False)
 
-    class _Success:
-        ok = True
-        error = None
-        returncode = 0
+    _Success = _cicada_delivers_a_pr(monkeypatch, records)
 
     async def slow_spawn(*args, **kwargs):
         spawn_started.set()
@@ -758,10 +792,7 @@ async def test_fast_successful_run_is_confirmed_after_reaching_done(
     monkeypatch.setattr(apis, "RUN_CONVERSATIONS", False)
     monkeypatch.setattr(apis, "RUN_EMAIL", False)
 
-    class _Success:
-        ok = True
-        error = None
-        returncode = 0
+    _Success = _cicada_delivers_a_pr(monkeypatch, records)
 
     async def succeed(*args, **kwargs):
         return _Success()
@@ -771,6 +802,7 @@ async def test_fast_successful_run_is_confirmed_after_reaching_done(
     result = await _resolve(brief_id, "approve")
 
     assert records[task_id]["snapshot"]["status"] == "done"
+    assert records[task_id]["snapshot"]["result"] == _CICADA_PR_HEADER
     assert records[task_id]["snapshot"]["blocked_reason"] == ""
     assert records[brief_id]["snapshot"]["resolved_dispatched"] is True
     assert "re-dispatched" in result["action_taken"]

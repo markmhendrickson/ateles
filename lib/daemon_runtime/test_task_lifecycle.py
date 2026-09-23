@@ -119,3 +119,137 @@ def test_set_status_fail_open_on_http_error(monkeypatch):
     monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "test-token")
     monkeypatch.setattr(tl.httpx, "post", boom)
     assert tl.set_task_status("ent_t", TaskStatus.ROUTED, handler="apis") is False
+
+
+# ── complete_task_with_result (ateles#1155) ─────────────────────────────────
+
+_HEADER = "[cicada] pull_request_link: https://github.com/markmhendrickson/ateles/pull/999"
+
+
+class _FakeTaskStore:
+    """A stand-in Neotoma task entity: `/correct` writes here, snapshots read here.
+
+    `drop` names fields whose writes return 2xx but are silently NOT applied
+    (the undeclared-field / idempotency-replay failure mode), and `mangle`
+    maps a field to the value actually stored instead of the one written.
+    """
+
+    def __init__(self, *, drop=(), mangle=None):
+        self.fields: dict = {"status": "executing", "result": ""}
+        self.drop = set(drop)
+        self.mangle = dict(mangle or {})
+        self.writes: list[tuple[str, object]] = []
+
+    def post(self, url, headers=None, json=None, timeout=None):
+        field, value = json["field"], json["value"]
+        self.writes.append((field, value))
+        if field not in self.drop:
+            self.fields[field] = self.mangle.get(field, value)
+        return _Resp()
+
+    def snapshot(self, _entity_id):
+        return dict(self.fields)
+
+
+def _use_store(monkeypatch, store):
+    monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(tl.httpx, "post", store.post)
+
+
+def test_complete_writes_result_before_status_and_reads_both_back(monkeypatch):
+    """Order is the point, and the outcome is only truthy once state read back.
+
+    `set_task_status` writes `status` first and its companions after, so a
+    process killed between the two leaves a task reading DONE with no artifact
+    reference. This path writes the reference first.
+    """
+    store = _FakeTaskStore()
+    _use_store(monkeypatch, store)
+    outcome = tl.complete_task_with_result(
+        "ent_t", handler="apis", result=_HEADER, fetch_snapshot=store.snapshot,
+        from_status="executing",
+    )
+    assert outcome and outcome.stage == "done"
+    assert [f for f, _ in store.writes] == ["result", "status"]
+    assert store.fields == {"status": "done", "result": _HEADER}
+
+
+def test_complete_never_writes_done_when_result_does_not_read_back(monkeypatch):
+    """NEGATIVE effect test: goes RED if the result read-back is removed.
+
+    The `/correct` call for `result` returns 2xx but the entity keeps the old
+    value. Without the read-back the status write still happens and the task
+    reads DONE carrying no (or the wrong) artifact reference.
+    """
+    store = _FakeTaskStore(drop={"result"})
+    _use_store(monkeypatch, store)
+    outcome = tl.complete_task_with_result(
+        "ent_t", handler="apis", result=_HEADER, fetch_snapshot=store.snapshot,
+    )
+    assert not outcome and outcome.stage == "result_readback"
+    assert "status" not in [f for f, _ in store.writes], "wrote DONE unproven"
+    assert store.fields["status"] == "executing"
+
+
+def test_complete_rejects_a_result_that_reads_back_as_something_else(monkeypatch):
+    """Equality, not presence: a stale or truncated earlier value is not the header."""
+    store = _FakeTaskStore(mangle={"result": "cicada completed (trigger=created)"})
+    _use_store(monkeypatch, store)
+    outcome = tl.complete_task_with_result(
+        "ent_t", handler="apis", result=_HEADER, fetch_snapshot=store.snapshot,
+    )
+    assert not outcome and outcome.stage == "result_readback"
+    assert "status" not in [f for f, _ in store.writes]
+
+
+def test_complete_is_not_ok_when_terminal_status_does_not_read_back(monkeypatch):
+    """NEGATIVE effect test: goes RED if the status read-back is removed.
+
+    The `status` write returns 2xx but the entity is not DONE. The caller must
+    be told, because it is about to claim `job.finished`.
+    """
+    store = _FakeTaskStore(drop={"status"})
+    _use_store(monkeypatch, store)
+    outcome = tl.complete_task_with_result(
+        "ent_t", handler="apis", result=_HEADER, fetch_snapshot=store.snapshot,
+    )
+    assert not outcome and outcome.stage == "status_readback"
+    assert outcome.detail
+    assert store.fields["status"] == "executing"
+
+
+def test_complete_fails_closed_when_the_snapshot_read_raises_or_is_missing(monkeypatch):
+    store = _FakeTaskStore()
+    _use_store(monkeypatch, store)
+
+    def boom(_id):
+        raise RuntimeError("neotoma down")
+
+    for reader in (boom, lambda _id: None):
+        store.fields.update(status="executing", result="")
+        outcome = tl.complete_task_with_result(
+            "ent_t", handler="apis", result=_HEADER, fetch_snapshot=reader,
+        )
+        assert not outcome and outcome.stage == "result_readback"
+        assert "status" not in [f for f, _ in store.writes]
+
+
+def test_complete_idempotency_key_carries_artifact_identity(monkeypatch):
+    """Two attempts naming different artifacts must not dedupe into one write."""
+    calls = _capture(monkeypatch)
+    for ref in ("owner/repo#1", "owner/repo#2"):
+        tl.complete_task_with_result(
+            "ent_t", handler="apis", result=ref, artifact_identity=ref,
+            fetch_snapshot=lambda _id, ref=ref: {"status": "done", "result": ref},
+        )
+    keys = [c["json"]["idempotency_key"] for c in calls]
+    assert len(set(keys)) == len(keys), keys
+    assert all("owner/repo#" in k for k in keys)
+
+
+def test_complete_fail_open_without_token(monkeypatch):
+    monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "")
+    outcome = tl.complete_task_with_result(
+        "ent_t", handler="apis", result="x", fetch_snapshot=lambda _id: {},
+    )
+    assert not outcome and outcome.stage == "result_write"
