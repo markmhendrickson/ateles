@@ -2504,6 +2504,251 @@ def test_ci_status_auto_merge_reenters_fresh_exact_head_panel(monkeypatch):
     assert not any(call[0] == "gate" for call in calls)
 
 
+def test_ci_status_concurrent_same_head_coalesces_fresh_panel_but_logs_deliveries(
+    monkeypatch,
+):
+    """Two live deliveries may describe one completed PR head.
+
+    Every GitHub delivery must retain its own harness audit row, while only one
+    full panel may create durable reviews, a native approval, and notifications
+    for the shared (repository, PR, live-head) attempt.
+    """
+    head = "c" * 40
+    calls = []
+    delivery_logs = []
+    fetch_count = 0
+    second_fetch_completed = asyncio.Event()
+    release_panel = asyncio.Event()
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=calls,
+    )
+    d.config.auto_merge = True
+
+    async def fake_log_harness_event(self, trigger):
+        delivery_logs.append(trigger.delivery_id)
+
+    async def fake_fetch_pr(self, repo, num):
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 2:
+            second_fetch_completed.set()
+        return {
+            "number": num,
+            "state": "open",
+            "draft": False,
+            "title": "t",
+            "body": "Closes #80",
+            "html_url": "u",
+            "head": {"sha": head, "ref": "feat/x"},
+            "base": {"ref": "main"},
+        }
+
+    async def fake_handle_pr(self, trigger):
+        calls.append(("fresh-panel", trigger.head_sha, trigger.delivery_id))
+        await release_panel.wait()
+
+    monkeypatch.setattr(SwarmDispatcher, "_log_harness_event", fake_log_harness_event)
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+
+    async def run_concurrently():
+        first = asyncio.create_task(
+            d.handle_trigger(_ci_status_trigger(ci_head_sha=head, delivery_id="ci-a"))
+        )
+        while not calls:
+            await asyncio.sleep(0)
+        second = asyncio.create_task(
+            d.handle_trigger(_ci_status_trigger(ci_head_sha=head, delivery_id="ci-b"))
+        )
+        await second_fetch_completed.wait()
+        # Let the second delivery advance past its live-head read. Without a
+        # coalescing claim it enters the full panel before the first is released.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert calls == [("fresh-panel", head, "")]
+        release_panel.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(run_concurrently())
+
+    # handle_trigger audits deliveries before CI-head coalescing. The
+    # synthesized pr_synchronize trigger deliberately keeps delivery_id empty:
+    # panel storage is canonical by PR/head/content, never by whichever
+    # equivalent check-suite delivery won the in-process claim.
+    assert delivery_logs == ["ci-a", "ci-b"]
+    assert calls == [("fresh-panel", head, "")]
+
+
+def test_ci_status_same_head_runs_again_after_inflight_claim_finishes(monkeypatch):
+    """The claim coalesces overlap; it must not permanently consume a head."""
+    head = "d" * 40
+    calls = []
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=calls,
+    )
+    d.config.auto_merge = True
+
+    async def fake_handle_pr(self, trigger):
+        calls.append(("fresh-panel", trigger.head_sha))
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+
+    async def run_sequentially():
+        await d._handle_ci_status(_ci_status_trigger(ci_head_sha=head))
+        await d._handle_ci_status(_ci_status_trigger(ci_head_sha=head))
+
+    asyncio.run(run_sequentially())
+    assert calls == [("fresh-panel", head), ("fresh-panel", head)]
+
+
+def test_ci_status_different_conclusion_waits_then_rechecks(monkeypatch):
+    """A changed conclusion is serialized, not discarded as a duplicate."""
+    head = "f" * 40
+    events = []
+    ci_states = iter(("green", "failing"))
+    first_panel_entered = asyncio.Event()
+    second_live_head_read = asyncio.Event()
+    release_first_panel = asyncio.Event()
+    fetch_count = 0
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=[],
+    )
+    d.config.auto_merge = True
+
+    async def fake_fetch_pr(self, repo, num):
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 2:
+            second_live_head_read.set()
+        return {
+            "number": num,
+            "state": "open",
+            "draft": False,
+            "title": "t",
+            "body": "Closes #80",
+            "html_url": "u",
+            "head": {"sha": head, "ref": "feat/x"},
+            "base": {"ref": "main"},
+        }
+
+    async def fake_ci(self, trigger):
+        return next(ci_states)
+
+    async def fake_handle_pr(self, trigger):
+        events.append("panel-start")
+        first_panel_entered.set()
+        await release_first_panel.wait()
+        events.append("panel-finish")
+
+    async def fake_route(self, trigger, parent):
+        events.append("route-failure")
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_route_ci_failure", fake_route)
+
+    async def run_concurrently():
+        first = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(ci_head_sha=head, ci_conclusion="success")
+            )
+        )
+        await first_panel_entered.wait()
+        second = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(ci_head_sha=head, ci_conclusion="failure")
+            )
+        )
+        await second_live_head_read.wait()
+        await asyncio.sleep(0)
+        assert events == ["panel-start"]
+        release_first_panel.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(run_concurrently())
+    assert events == ["panel-start", "panel-finish", "route-failure"]
+    # The changed conclusion re-enters through the public handler and therefore
+    # re-reads the live PR/head after waiting for the first claim.
+    assert fetch_count == 3
+
+
+def test_ci_status_claim_is_released_when_claimed_work_raises(monkeypatch):
+    head = "1" * 40
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=[],
+    )
+    d.config.auto_merge = True
+
+    async def failing_panel(self, trigger):
+        raise RuntimeError("panel failed")
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", failing_panel)
+
+    with pytest.raises(RuntimeError, match="panel failed"):
+        asyncio.run(d._handle_ci_status(_ci_status_trigger(ci_head_sha=head)))
+
+    assert d._ci_head_claims == {}
+
+
+def test_ci_status_concurrent_different_prs_do_not_share_claim(monkeypatch):
+    """Coalescing is scoped to repository, PR number, and exact live head."""
+    head = "e" * 40
+    entered = []
+    both_entered = asyncio.Event()
+    release_panels = asyncio.Event()
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=[],
+    )
+    d.config.auto_merge = True
+
+    async def fake_handle_pr(self, trigger):
+        entered.append(trigger.number)
+        if len(entered) == 2:
+            both_entered.set()
+        await release_panels.wait()
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+
+    async def run_concurrently():
+        first = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(number=87, ci_pr_numbers=[87], ci_head_sha=head)
+            )
+        )
+        second = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(number=88, ci_pr_numbers=[88], ci_head_sha=head)
+            )
+        )
+        await asyncio.wait_for(both_entered.wait(), timeout=1)
+        release_panels.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(run_concurrently())
+    assert sorted(entered) == [87, 88]
+
+
 def test_pr_review_is_clear_reads_newest_first(monkeypatch):
     # The intent below is right and unchanged: the LATEST aggregation decides.
     # The mechanism was wrong (ateles#430). This test used to assert

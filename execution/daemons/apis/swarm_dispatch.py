@@ -1974,6 +1974,19 @@ class SwarmDispatcher:
         # that later rots to DIRTY pages again — that transition changes what
         # the operator can actually do about it.
         self._approved_escalated: dict[str, bool] = {}
+        # A check_suite completion can be delivered more than once, and one PR
+        # head can have multiple suites complete together.  The delayed-CI
+        # auto-merge path deliberately re-enters the full review panel, so two
+        # overlapping deliveries would otherwise create two native reviews,
+        # two notification streams, and competing durable supersession writes.
+        #
+        # The claim is per dispatcher process and exists only while work is in
+        # flight.  Later delivery after completion is allowed to re-evaluate
+        # the same head; this is coalescing, not permanent event consumption.
+        # Value: (completion event, leader conclusion, leader delivery id).
+        self._ci_head_claims: dict[
+            tuple[str, int, str], tuple[asyncio.Event, str, str]
+        ] = {}
 
     async def handle_trigger(self, trigger: SwarmTrigger) -> None:
         """Entry point handed to the webhook gateway. Never raises."""
@@ -6127,7 +6140,57 @@ class SwarmDispatcher:
             )
             return
 
+        # The dictionary check-and-insert below contains no await, so it is an
+        # atomic in-process claim on this event loop.  A plain asyncio.Lock
+        # would only serialize duplicate deliveries; the waiter would still
+        # launch a second full panel after the leader released it.  Waiting on
+        # the leader's completion event and returning is what actually
+        # coalesces equivalent overlapping deliveries.
+        claim_key = (trigger.repository.casefold(), pr_number, current_head)
+        existing_claim = self._ci_head_claims.get(claim_key)
+        if existing_claim is not None:
+            completed, leader_conclusion, leader_delivery_id = existing_claim
+            log.info(
+                f"[{DAEMON_NAME}] {ref}@{current_head[:9]}: CI delivery "
+                f"{trigger.delivery_id or '<none>'!r} coalesced behind "
+                f"{leader_delivery_id or '<none>'!r}"
+            )
+            await completed.wait()
+            if trigger.ci_conclusion == leader_conclusion:
+                return
+            # A materially different conclusion is not a duplicate. Re-enter
+            # after the leader finishes so it re-fetches the PR/head and the
+            # aggregate required-CI state rather than racing the first panel.
+            return await self._handle_ci_status(trigger)
+
+        completed = asyncio.Event()
+        claim = (completed, trigger.ci_conclusion, trigger.delivery_id)
+        self._ci_head_claims[claim_key] = claim
+        try:
+            await self._handle_ci_status_for_current_head(trigger, pr, current_head)
+        finally:
+            completed.set()
+            # Delete only our own claim. This is defensive against future code
+            # that may replace a claim while a cancelled leader unwinds.
+            if self._ci_head_claims.get(claim_key) is claim:
+                self._ci_head_claims.pop(claim_key, None)
+
+    async def _handle_ci_status_for_current_head(
+        self,
+        trigger: SwarmTrigger,
+        pr: dict,
+        current_head: str,
+    ) -> None:
+        """Process one claimed delayed-CI attempt for an exact live PR head."""
+        pr_number = pr.get("number", 0) or trigger.number
+        ref = f"{trigger.repository}#{pr_number}"
+
         # Build a PR-shaped trigger the readiness/route helpers expect.
+        # Its delivery_id intentionally remains empty. handle_trigger already
+        # persisted one harness_event for every GitHub delivery before claims
+        # are coalesced; downstream panel state is canonically keyed by PR,
+        # exact head, lens and content, not by whichever equivalent delivery
+        # happened to win this in-process claim.
         pr_trigger = self._pr_trigger_from_api(trigger.repository, pr)
         parent = self._parent_issue_number(pr_trigger.body, trigger.repository)
 
