@@ -317,17 +317,10 @@ def _load_agent_def(role: str) -> AgentDefinition:
 # still `review_verdict_is_clear` (it does not block the merge path or route
 # findings back) without being treated as approval.
 #
-# Extend this tuple — never a second regex or a second hand-typed list — when
-# the swarm needs a new verdict token. Both call sites below are keyed off it,
-# and `test_swarm_dispatch.py::test_instructed_review_verdict_tokens_subseteq_parser`
-# fails CI the moment a token here and the parser regex disagree.
-REVIEW_VERDICT_TOKENS: tuple[str, ...] = (
-    "APPROVE",
-    "REQUEST_CHANGES",
-    "COMMENT",
-    "BLOCKED",
-    "SIGNED_OFF",
-)
+# Extend REVIEW_VERDICT_TOKENS in review_markers.py — never a second list here.
+# Both the SWARM_GITHUB_CONTRACT vocabulary section and the parser regex are
+# keyed off that single tuple (ateles#938).
+from review_markers import REVIEW_VERDICT_TOKENS  # noqa: E402
 
 
 # ── Shared GitHub-interaction convention (Phase 1 / Layer A) ──────────────────

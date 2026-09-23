@@ -8,6 +8,11 @@
     ],
     [
       "PreToolUse",
+      "gh_approve_verdict_guard.py",
+      "Edit|Write|NotebookEdit|Bash"
+    ],
+    [
+      "PreToolUse",
       "gh_identity_guard.py",
       "Edit|Write|NotebookEdit|Bash"
     ],
