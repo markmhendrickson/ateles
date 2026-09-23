@@ -23,6 +23,30 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "canonical-rule-inventory.yml"
 ATELES_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ateles-tests.yml"
 
+TRUST_BOUNDARY_GUIDANCE = "# Trusted default-branch code executes; candidate files cross only as validated data."
+EXIT_CLASS_GUIDANCE = (
+    "# Exit classes (class -> exit -> stable message):",
+    "# untrusted_source -> job fail -> canonical measurement refuses code from fork repositories",
+    "# boundary_rejected -> 2 -> canonical rule inventory input boundary rejected reason=",
+    "# boundary_failed -> 2 -> rule inventory measurement failed before a safe verdict",
+    "# instrument_incomplete -> 3 -> rule inventory equality unavailable: canonical read credential is missing",
+    "# instrument_incomplete -> 3 -> rule inventory equality unavailable: canonical repository roots are missing",
+    "# instrument_incomplete -> 3 -> rule inventory equality unavailable: full measurement is incomplete",
+    "# inventory_mismatch -> 1 -> rule inventory differs from the complete canonical measurement",
+    "# safety_failed -> 2 -> rule inventory public-output safety check failed",
+    "# match -> 0 -> rule inventory matches the complete canonical measurement",
+)
+STAGE_ZERO_GUIDANCE = (
+    "# Local reproduce requires Stage-0 docs/foundation/rule_inventory.md to already "
+    "exist; the packager does not generate it (#1123; not #1114/#923)."
+)
+LOCAL_REPRODUCTION_GUIDANCE = (
+    '# python3 execution/scripts/package_rule_inventory_inputs.py --source "$PWD" '
+    '--destination "$INPUTS_DIR"',
+    '# python3 execution/scripts/package_rule_inventory_inputs.py --validate "$INPUTS_DIR"',
+    '# python3 execution/scripts/run_canonical_rule_inventory_gate.py "$INPUTS_DIR"',
+)
+
 
 def parse_workflow(workflow: str) -> tuple[dict[str, object], dict[str, dict]]:
     """Parse the workflow as data and reject ambiguous execution shapes."""
@@ -388,36 +412,16 @@ def verify_candidate_artifact_transfer(workflow: str) -> None:
 def verify_workflow_guidance(workflow: str) -> None:
     header = workflow.split("\non:", 1)[0]
     comments = [line for line in header.splitlines() if line.startswith("#")]
-    if len(comments) > 15:
-        raise AssertionError("workflow guidance exceeds 15 comment lines")
-    required = {
-        "untrusted_source",
-        "boundary_rejected",
-        "instrument_incomplete",
-        "inventory_mismatch",
-        "safety_failed",
-        "match",
-        "canonical measurement refuses code from fork repositories",
-        "canonical rule inventory input boundary rejected reason=",
-        "rule inventory measurement failed before a safe verdict",
-        "rule inventory equality unavailable: canonical read credential is missing",
-        "rule inventory equality unavailable: canonical repository roots are missing",
-        "rule inventory equality unavailable: full measurement is incomplete",
-        "rule inventory differs from the complete canonical measurement",
-        "rule inventory public-output safety check failed",
-        "rule inventory matches the complete canonical measurement",
-        "package_rule_inventory_inputs.py --source",
-        "package_rule_inventory_inputs.py --validate",
-        "run_canonical_rule_inventory_gate.py",
-        "docs/foundation/rule_inventory.md",
-        "does not generate",
-        "#1114",
-        "#923",
-        "#1123",
-    }
-    missing = sorted(item for item in required if item not in header)
-    if missing:
-        raise AssertionError("workflow guidance is incomplete: " + ", ".join(missing))
+    expected = [
+        TRUST_BOUNDARY_GUIDANCE,
+        *EXIT_CLASS_GUIDANCE,
+        STAGE_ZERO_GUIDANCE,
+        *LOCAL_REPRODUCTION_GUIDANCE,
+    ]
+    if comments != expected:
+        raise AssertionError(
+            "workflow guidance is incomplete, contradictory, or reordered"
+        )
 
 
 def verify_pytest_workflow_path_wiring(workflow: str) -> None:
@@ -637,6 +641,41 @@ class WorkflowBoundaryTest(unittest.TestCase):
         mutant = workflow.replace("# boundary_rejected", "# boundary-removed", 1)
         self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
         with self.assertRaisesRegex(AssertionError, "guidance is incomplete"):
+            verify_workflow_guidance(mutant)
+
+    def test_exit_mapping_cannot_be_masked_by_a_relocated_machine_string(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutant = workflow.replace(
+            "# Trusted default-branch code executes; candidate files cross only as validated data.\n",
+            "# Trusted default-branch code executes; candidate files cross only as validated data; "
+            "canonical rule inventory input boundary rejected reason=.\n",
+            1,
+        ).replace(
+            "# boundary_rejected -> 2 -> canonical rule inventory input boundary rejected reason=\n",
+            "# boundary_rejected -> 0 -> rule inventory matches the complete canonical measurement\n",
+            1,
+        )
+        self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
+        self.assertNotIn(EXIT_CLASS_GUIDANCE[2], mutant.splitlines())
+        with self.assertRaisesRegex(AssertionError, "guidance"):
+            verify_workflow_guidance(mutant)
+
+    def test_stage_zero_contradiction_cannot_be_masked_by_relocated_words(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutant = workflow.replace(
+            "# Trusted default-branch code executes; candidate files cross only as validated data.\n",
+            "# Trusted default-branch code executes; candidate files cross only as validated data; "
+            "does not generate.\n",
+            1,
+        ).replace(
+            STAGE_ZERO_GUIDANCE + "\n",
+            "# Local reproduce treats Stage-0 docs/foundation/rule_inventory.md as optional "
+            "and generates it (#1123; not #1114/#923).\n",
+            1,
+        )
+        self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
+        self.assertNotIn(STAGE_ZERO_GUIDANCE, mutant.splitlines())
+        with self.assertRaisesRegex(AssertionError, "guidance"):
             verify_workflow_guidance(mutant)
 
     def test_workflow_guidance_uses_exact_machine_messages(self) -> None:

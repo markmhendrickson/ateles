@@ -11,7 +11,7 @@ name: canonical rule inventory
 # inventory_mismatch -> 1 -> rule inventory differs from the complete canonical measurement
 # safety_failed -> 2 -> rule inventory public-output safety check failed
 # match -> 0 -> rule inventory matches the complete canonical measurement
-# Local reproduce needs Stage-0 docs/foundation/rule_inventory.md; it does not generate it (#1123; not #1114/#923).
+# Local reproduce requires Stage-0 docs/foundation/rule_inventory.md to already exist; the packager does not generate it (#1123; not #1114/#923).
 # python3 execution/scripts/package_rule_inventory_inputs.py --source "$PWD" --destination "$INPUTS_DIR"
 # python3 execution/scripts/package_rule_inventory_inputs.py --validate "$INPUTS_DIR"
 # python3 execution/scripts/run_canonical_rule_inventory_gate.py "$INPUTS_DIR"
