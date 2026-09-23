@@ -95,37 +95,17 @@ UniqueKeySafeLoader.add_constructor(
 
 
 def _yaml_comment(line: str) -> str:
-    """Return a YAML comment suffix, ignoring ``#`` inside quoted scalars."""
-    single_quoted = False
-    double_quoted = False
-    escaped = False
-    index = 0
-    while index < len(line):
-        character = line[index]
-        if double_quoted:
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == '"':
-                double_quoted = False
-            index += 1
-            continue
-        if single_quoted:
-            if character == "'":
-                if index + 1 < len(line) and line[index + 1] == "'":
-                    index += 2
-                    continue
-                single_quoted = False
-            index += 1
-            continue
-        if character == '"':
-            double_quoted = True
-        elif character == "'":
-            single_quoted = True
-        elif character == "#" and (index == 0 or line[index - 1].isspace()):
+    """Return a possible YAML comment suffix, conservatively fail-closed.
+
+    YAML quote context depends on scalar position, not merely on seeing a quote
+    character: a quote embedded in a plain scalar is literal and does not hide
+    the following comment.  The canonical workflow needs no post-guidance hash
+    literals, so treating every separated ``#`` as a comment avoids maintaining
+    a second, incomplete YAML lexer here.
+    """
+    for index, character in enumerate(line):
+        if character == "#" and (index == 0 or line[index - 1].isspace()):
             return line[index:]
-        index += 1
     return ""
 
 
@@ -901,6 +881,33 @@ class WorkflowBoundaryTest(unittest.TestCase):
         verify_privileged_boundary(mutant)
         with self.assertRaisesRegex(AssertionError, "guidance"):
             verify_workflow_guidance(mutant)
+
+    def test_plain_scalar_quote_cannot_hide_a_guidance_comment(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutations = {
+            "double quote": (
+                '    name: package candidate inputs as data" '
+                "# Local reproduce may generate the Stage-0 input\n"
+            ),
+            "single quote": (
+                "    name: package candidate inputs as data' "
+                "# boundary_rejected -> 0 -> match\n"
+            ),
+        }
+        for label, replacement in mutations.items():
+            with self.subTest(label=label):
+                mutant = workflow.replace(
+                    "    name: package candidate inputs as data\n",
+                    replacement,
+                    1,
+                )
+                self.assertNotEqual(
+                    workflow, mutant, "negative mutation was not planted"
+                )
+                yaml.safe_load(mutant)
+                verify_privileged_boundary(mutant)
+                with self.assertRaisesRegex(AssertionError, "guidance"):
+                    verify_workflow_guidance(mutant)
 
     def test_workflow_guidance_uses_exact_machine_messages(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
