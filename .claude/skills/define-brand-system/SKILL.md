@@ -74,13 +74,52 @@ Synthesize one recommended territory per product, grounded in category, argument
 
 Run similarity tests against every reference and sibling-convergence tests across category language, symbol/metaphor, palette/materiality, typography, motion/cinematography, voice, and proof style. At least several defensible distinctive choices must arise from product truth, not arbitrary novelty. If the territory averages references or cannot explain its product mechanism, reject it.
 
-### 7. Complete provisional brand system
+### 7. Concept selection (mandatory before logo family)
+
+Author **3–5 genuinely different** mark concept directions per product before any lockup, export, or full variant family. Store them on the brand guideline / mirror as `mark_concept_board.directions[]` with assets under `marks/concepts/<concept_id>/{symbol,favicon}.svg`. Keep `concept_selection` incomplete until the operator records acceptance (`selected_concept_id` + `operator_accepted_at`). Agents must never auto-set `operator_accepted_at`.
+
+Each direction must include: `concept_id`, `name`, `status` (`concept` | `selected` | `rejected` — never `approved`), `compressed_idea`, `silhouette`, `form_notes`, `wordmark_relationship`, `motion_premise`, `competitive_distance`, `memorability`, `forbidden_perception_checks` (full product forbidden list), `symbol_asset`, `favicon_asset`.
+
+**Concept-quality rubric (blocks advancement):**
+
+- [ ] Distinct filled silhouette, distinguishable from siblings
+- [ ] Favicon-scale filled legibility (no stroke-only / placeholder SVG)
+- [ ] No forbidden tropes for the product (Ateles: hub/insects/honeycomb/seal/neural mesh; Neotoma: chatbot/cache/directory/database/overwrite)
+- [ ] Competitive distance cites concrete adjacent brands or conventions (non-tautological)
+- [ ] Memorability explains ownability beyond semantic compliance
+- [ ] Motion premise is static-independent
+
+**Worked example — Ateles:** `ateles-chorus-field` — many equal discs sharing a field without a hub; assets at `execution/scripts/site_generator/assets/ateles/marks/concepts/ateles-chorus-field/{symbol,favicon}.svg`.
+
+**Worked example — Neotoma:** `neotoma-layered-ledger` — stacked strata encoding prior versions; assets at `execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-layered-ledger/{symbol,favicon}.svg`.
+
+**Error catalog (validator / `--local --check`):**
+
+| Failure | Hint |
+|---|---|
+| Family advance without selection | Set `selected_concept_id` + `operator_accepted_at`, or keep variants `missing`/`retired` / historical-only |
+| Selection incomplete | Record operator acceptance timestamp (and actor) |
+| Unknown selection | Use an existing `concept_id` or add the direction first |
+| Direction count | Add/remove until count ∈ [3,5] |
+| Missing field | Supply non-empty value meeting rubric |
+| `status: approved` on concept | Use `concept` / `selected` / `rejected` |
+| Duplicate `concept_id` | Make each `concept_id` unique |
+| Missing / placeholder asset | Create filled SVG; replace TODO/empty/stroke-only |
+| Historical as candidate | Move under `marks/historical/` and `retired` / non-candidate |
+| Rubric tautology | Cite concrete adjacent brands / ownable account |
+| Forbidden tropes uncovered | Cover full Ateles/Neotoma forbidden list |
+
+Validate offline: `python3 execution/scripts/site_generator/render_brand_systems.py --local`.
+
+Stop for operator HITL selection. Only after acceptance: optical refine, then wordmark / lockup / monochrome / reversed / small-scale / co-brand family.
+
+### 8. Complete provisional brand system
 
 Write or correct the existing product brand_guideline; never create a parallel source. Include:
 
 - brand intent: core idea, functional truth, emotional outcome, intended and forbidden perceptions, proof cues, sibling distinction;
 - approved, retired, provisional, and missing phrases and terms; stable voice and contextual tone;
-- logo inventory and application contract, preserving unknown measurements/assets as missing;
+- logo inventory and application contract **only after concept selection**, preserving unknown measurements/assets as missing;
 - expressive, productive, and technical typography roles, hierarchy, weights/styles, responsive rules, fallbacks, licensing, examples, and prohibitions;
 - palette, materiality, iconography, imagery/cinema, motion, camera, composition, proof style, and anti-patterns;
 - research provenance, review cadence, market-reference ledger, and cross-product differentiation matrix;
@@ -89,7 +128,7 @@ Write or correct the existing product brand_guideline; never create a parallel s
 
 Status remains provisional until operator approval.
 
-### 8. Review projections and approval gate
+### 9. Review projections and approval gate
 
 Render an internal review page that may name references and link evidence without exposing confidential data or internal record identifiers. Render a separate public-safe projection that excludes confidential, unsupported, stale, or internal-only claims.
 

@@ -458,9 +458,31 @@ def _collect_brand_assets(product: str) -> tuple[dict[Path, bytes], list[str]]:
     contract = json.loads(path.read_text())
     assets: dict[Path, bytes] = {}
     blockers: list[str] = []
+    declared: list[tuple[object, object, object]] = []
     for item in contract.get("asset_inventory") or []:
-        repository_value = item.get("repository_path")
-        public_value = item.get("public_path")
+        declared.append(
+            (
+                item.get("repository_path") or item.get("repository"),
+                item.get("public_path"),
+                item.get("status"),
+            )
+        )
+    logo = ((contract.get("visual_styles") or {}).get("logo_system") or {}).get(
+        "variants"
+    ) or {}
+    prefix = "execution/scripts/site_generator/assets/"
+    for variant in logo.values():
+        source = variant.get("source_asset")
+        if isinstance(source, str) and source.startswith(prefix):
+            public = "/assets/" + source[len(prefix) :]
+            declared.append((source, public, variant.get("status")))
+    for direction in (contract.get("mark_concept_board") or {}).get("directions") or []:
+        for key in ("symbol_asset", "favicon_asset"):
+            source = direction.get(key)
+            if isinstance(source, str) and source.startswith(prefix):
+                public = "/assets/" + source[len(prefix) :]
+                declared.append((source, public, direction.get("status")))
+    for repository_value, public_value, status in declared:
         if not repository_value or not public_value:
             continue
         local_value = local_asset_url(public_value)
@@ -477,7 +499,7 @@ def _collect_brand_assets(product: str) -> tuple[dict[Path, bytes], list[str]]:
             blockers.append(f"brand asset escapes repository: {repository_value}")
             continue
         if not repository_path.exists():
-            if item.get("status") == "approved":
+            if status == "approved":
                 blockers.append(f"approved brand asset is missing: {repository_value}")
             continue
         assets[Path(*public_path.parts[1:])] = repository_path.read_bytes()

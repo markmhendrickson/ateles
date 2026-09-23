@@ -2,7 +2,9 @@
   "_observation_ids": {
     "asset_inventory": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
     "completeness": "63417972-dbc2-ddab-63dd-1a3befdcc8cc",
+    "concept_selection": "local:ateles#1157",
     "downstream_contracts": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
+    "mark_concept_board": "local:ateles#1157",
     "name": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
     "ownership": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
     "phrases": "05cf0304-9640-6f15-32a0-b7c2aff5a033",
@@ -98,6 +100,51 @@
       "source": "ent_9444da0c7dea895c182fe098",
       "status": "missing",
       "use": "Primary hero takeover showing an edge-free swarm becoming an organization"
+    },
+    {
+      "kind": "mark",
+      "name": "Historical mark \u00b7 favicon",
+      "preview": null,
+      "public_path": null,
+      "repository": "execution/scripts/site_generator/assets/ateles/marks/historical/favicon.svg",
+      "status": "retired",
+      "use": "Rejected #1154 provisional evidence only \u2014 not a concept or family candidate."
+    },
+    {
+      "kind": "mark",
+      "name": "Historical mark \u00b7 hub-satellites",
+      "preview": null,
+      "public_path": null,
+      "repository": "execution/scripts/site_generator/assets/ateles/marks/historical/hub-satellites.svg",
+      "status": "retired",
+      "use": "Rejected #1154 provisional evidence only \u2014 not a concept or family candidate."
+    },
+    {
+      "kind": "mark",
+      "name": "Historical mark \u00b7 primary",
+      "preview": null,
+      "public_path": null,
+      "repository": "execution/scripts/site_generator/assets/ateles/marks/historical/primary.svg",
+      "status": "retired",
+      "use": "Rejected #1154 provisional evidence only \u2014 not a concept or family candidate."
+    },
+    {
+      "kind": "mark",
+      "name": "Historical mark \u00b7 symbol",
+      "preview": null,
+      "public_path": null,
+      "repository": "execution/scripts/site_generator/assets/ateles/marks/historical/symbol.svg",
+      "status": "retired",
+      "use": "Rejected #1154 provisional evidence only \u2014 not a concept or family candidate."
+    },
+    {
+      "kind": "mark",
+      "name": "Historical mark \u00b7 wordmark",
+      "preview": null,
+      "public_path": null,
+      "repository": "execution/scripts/site_generator/assets/ateles/marks/historical/wordmark.svg",
+      "status": "retired",
+      "use": "Rejected #1154 provisional evidence only \u2014 not a concept or family candidate."
     }
   ],
   "completeness": {
@@ -169,6 +216,12 @@
       {
         "name": "aesthetic_territory",
         "status": "provisional"
+      },
+      {
+        "guidance": "Operator must select one concept_id and record operator_accepted_at before any logo family advances.",
+        "name": "mark_concept_selection",
+        "source": "ateles#1157 concept-selection stage",
+        "status": "missing"
       }
     ],
     "missing_items": [
@@ -179,9 +232,16 @@
       "Approved horizontal, stacked, monochrome, reversed, favicon and co-branding Ateles assets",
       "Final type weight/style inventory and owner-approved research cadence",
       "Operator approval or revision of the complete provisional brand system and its original aesthetic territory",
-      "Final contradiction audit against the section copy-to-visual production matrix"
+      "Final contradiction audit against the section copy-to-visual production matrix",
+      "Operator concept selection (selected_concept_id + operator_accepted_at) before mark family advance"
     ],
     "overall_status": "provisional"
+  },
+  "concept_selection": {
+    "blocking_family_until_selection": true,
+    "operator_accepted_at": null,
+    "operator_actor": null,
+    "selected_concept_id": null
   },
   "downstream_contracts": [
     {
@@ -215,6 +275,94 @@
       "status": "provisional"
     }
   ],
+  "mark_concept_board": {
+    "directions": [
+      {
+        "competitive_distance": "Distance from Linear/Notion/Asana orchestration glyphs and from neural-net node graphs; closer to flock diagrams than org charts.",
+        "compressed_idea": "Many equal members share one field without a controlling hub.",
+        "concept_id": "ateles-chorus-field",
+        "favicon_asset": "execution/scripts/site_generator/assets/ateles/marks/concepts/ateles-chorus-field/favicon.svg",
+        "forbidden_perception_checks": [
+          "Generic orchestration",
+          "Central controller",
+          "Anonymous neural mesh",
+          "Literal hive or insects",
+          "Seal as brand"
+        ],
+        "form_notes": "Negative space between members reads as temporary lanes; optical scale bias enlarges peripheral discs slightly so the cluster does not collapse to a center.",
+        "memorability": "Ownable as an uneven chorus of peers rather than a single emblem or grid.",
+        "motion_premise": "Members drift and briefly align then separate \u2014 premise readable as a static scatter.",
+        "name": "Chorus Field",
+        "silhouette": "Scattered filled discs of unequal size with shared orientation gaps \u2014 a chorus, not a mesh.",
+        "status": "concept",
+        "symbol_asset": "execution/scripts/site_generator/assets/ateles/marks/concepts/ateles-chorus-field/symbol.svg",
+        "wordmark_relationship": "Symbol sits left of the wordmark with clear space equal to the largest disc diameter; never locked inside a seal."
+      },
+      {
+        "competitive_distance": "Unlike continuous workflow ribbons (Zapier) or chain links (integration suites); temporary arc is the differentiator.",
+        "compressed_idea": "Work passes along a temporary arc between distinct members, then the link dissolves.",
+        "concept_id": "ateles-handoff-arc",
+        "favicon_asset": "execution/scripts/site_generator/assets/ateles/marks/concepts/ateles-handoff-arc/favicon.svg",
+        "forbidden_perception_checks": [
+          "Generic orchestration",
+          "Central controller",
+          "Anonymous neural mesh",
+          "Literal hive or insects",
+          "Seal as brand"
+        ],
+        "form_notes": "Arc rhythm left-to-right; gap is intentional negative space \u2014 not a missing asset.",
+        "memorability": "The interrupted arc is the ownable cue \u2014 continuity without permanent edges.",
+        "motion_premise": "Pulse travels member-to-member along the arc once \u2014 static frame still shows three distinct bodies.",
+        "name": "Handoff Arc",
+        "silhouette": "Three filled lozenges arranged on a shallow arc with a gap where a handoff would occur.",
+        "status": "concept",
+        "symbol_asset": "execution/scripts/site_generator/assets/ateles/marks/concepts/ateles-handoff-arc/symbol.svg",
+        "wordmark_relationship": "Arc sits above a short baseline wordmark; gap aligns with the crossbar of the first capital."
+      },
+      {
+        "competitive_distance": "Distance from hub-and-spoke org charts and seal crests; no permanent edges.",
+        "compressed_idea": "Peers orbit a shared purpose without permanent spokes \u2014 the center is a peer, not a controller.",
+        "concept_id": "ateles-checkpoint-ring",
+        "favicon_asset": "execution/scripts/site_generator/assets/ateles/marks/concepts/ateles-checkpoint-ring/favicon.svg",
+        "forbidden_perception_checks": [
+          "Generic orchestration",
+          "Central controller",
+          "Anonymous neural mesh",
+          "Literal hive or insects",
+          "Seal as brand"
+        ],
+        "form_notes": "Equal orbiting discs; no connecting lines; optical spacing keeps the ring readable at favicon scale as filled dots.",
+        "memorability": "Equal peers around a peer center \u2014 authority without a controller glyph.",
+        "motion_premise": "Orbiters can revolve in motion; static already reads as peer ring.",
+        "name": "Orbit Peers",
+        "silhouette": "One center disc surrounded by five equal orbiting discs \u2014 plurality without spokes or edges.",
+        "status": "concept",
+        "symbol_asset": "execution/scripts/site_generator/assets/ateles/marks/concepts/ateles-checkpoint-ring/symbol.svg",
+        "wordmark_relationship": "Orbit cluster left of wordmark; never enclosed in a seal frame."
+      },
+      {
+        "competitive_distance": "Distance from audio equalizer logos and from rigid org-column icons; staggered heights are intentional plurality.",
+        "compressed_idea": "Short-lived signals are parallel filled bars that never form permanent edges between members.",
+        "concept_id": "ateles-signal-lanes",
+        "favicon_asset": "execution/scripts/site_generator/assets/ateles/marks/concepts/ateles-signal-lanes/favicon.svg",
+        "forbidden_perception_checks": [
+          "Generic orchestration",
+          "Central controller",
+          "Anonymous neural mesh",
+          "Literal hive or insects",
+          "Seal as brand"
+        ],
+        "form_notes": "Bar ends use full radii; uneven heights prevent barcode/equalizer clich\u00e9; gaps equal bar width.",
+        "memorability": "Uneven lane heights read as coordinated roles, not identical workers.",
+        "motion_premise": "Heights rebalance briefly \u2014 static silhouette remains five distinct lanes.",
+        "name": "Signal Lanes",
+        "silhouette": "Five vertical rounded bars of staggered heights \u2014 lanes of attention, not a barcode brand.",
+        "status": "concept",
+        "symbol_asset": "execution/scripts/site_generator/assets/ateles/marks/concepts/ateles-signal-lanes/symbol.svg",
+        "wordmark_relationship": "Bars sit to the left as a unit; tracking of the wordmark matches gap rhythm."
+      }
+    ]
+  },
   "name": "Ateles canonical brand system",
   "ownership": {
     "approval_role": "Product owner for category and brand promise; designated design review for visual execution",
@@ -944,7 +1092,7 @@
       "status": "retired"
     }
   ],
-  "updated_at": "2026-09-22",
+  "updated_at": "2026-09-23T01:00:00Z",
   "visibility": "private_source",
   "visual_concepts": [
     {
@@ -1082,7 +1230,7 @@
           "name": "Application mark",
           "source_asset": null,
           "source_format": null,
-          "status": "provisional",
+          "status": "missing",
           "use": "Align current application mark with the edge-free swarm."
         },
         "favicon": {
@@ -1109,7 +1257,7 @@
           "name": "Swarm + wordmark lockup",
           "source_asset": null,
           "source_format": null,
-          "status": "provisional",
+          "status": "missing",
           "use": "Navigation identity; spacing measurement remains missing."
         },
         "monochrome": {
@@ -1128,9 +1276,9 @@
           ],
           "export_formats": [],
           "name": "Abstract swarm mark",
-          "source_asset": "execution/scripts/site_generator/templates/render.py#_brand_mark",
+          "source_asset": null,
           "source_format": "inline SVG",
-          "status": "provisional",
+          "status": "missing",
           "use": "Primary compact identity."
         },
         "reversed": {
@@ -1148,7 +1296,7 @@
           "name": "Small-scale variant",
           "source_asset": null,
           "source_format": null,
-          "status": "provisional",
+          "status": "missing",
           "use": "Requires tested legibility threshold."
         },
         "stacked": {
@@ -1166,7 +1314,7 @@
           "name": "Abstract swarm symbol",
           "source_asset": null,
           "source_format": null,
-          "status": "provisional",
+          "status": "missing",
           "use": "Compact use after small-scale review."
         },
         "wordmark": {
@@ -1178,7 +1326,7 @@
           "name": "Ateles wordmark",
           "source_asset": null,
           "source_format": null,
-          "status": "provisional",
+          "status": "missing",
           "use": "Named identity."
         }
       }

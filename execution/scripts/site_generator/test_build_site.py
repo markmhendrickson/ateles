@@ -1284,18 +1284,27 @@ def test_brand_routes_share_neutral_chrome_and_scope_candidate_styles(tmp_path):
 def test_missing_logo_variants_are_placeholders_not_fabricated(tmp_path, product):
     assert build_site.build(product, tmp_path) == []
     document = (tmp_path / product / "brand" / "index.html").read_text()
-    placeholders = re.findall(
-        r'<div class="brand-logo-placeholder" data-logo-state="missing">(.*?)</div>',
-        document,
-        re.DOTALL,
-    )
-    assert placeholders
-    assert all("<svg" not in value and "<img" not in value for value in placeholders)
-    if product == "ateles":
-        assert 'data-logo-variant="primary_mark"' in document
-        assert 'aria-label="Ateles swarm mark"' in document
-    else:
-        assert 'src="/assets/neotoma/neotoma-wordmark.svg"' in document
+    # Pre-selection: family board is blocked; concept board carries specimens.
+    assert 'id="concept-specimens"' in document
+    assert "CONCEPT — not approved" in document
+    assert "post-selection family — blocked until selection" in document
+    assert 'data-family-blocked="true"' in document
+    assert "marks/historical/" not in document
+    assert 'data-brand-specimen="concept-' in document
+    assert 'data-brand-specimen="concept-favicon-' in document
+
+
+def test_brand_route_concept_board_precedes_blocked_family(tmp_path):
+    assert build_site.build("ateles", tmp_path) == []
+    document = (tmp_path / "ateles" / "brand" / "index.html").read_text()
+    concept_at = document.index('id="concept-specimens"')
+    family_at = document.index('id="logo-specimens"')
+    assert concept_at < family_at
+    assert "Visual review · concepts" in document
+    assert 'aria-label="' not in document or "not approved" in document
+    # Concept SVGs were copied into the generated tree.
+    concept_svgs = list((tmp_path / "ateles" / "assets" / "ateles" / "marks" / "concepts").rglob("*.svg"))
+    assert len(concept_svgs) >= 6
 
 
 def test_public_url_policy_rejects_active_and_encoded_traversal_urls():

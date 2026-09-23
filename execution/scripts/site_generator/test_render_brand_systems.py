@@ -37,6 +37,7 @@ def test_checked_in_contracts_validate_and_render_complete_human_mirrors(
         "## Voice and copy",
         "## Visual system",
         "### Recommended aesthetic territory",
+        "## Mark concept board",
         "## Logo system",
         "## Typography system",
         "## Asset inventory",
@@ -299,3 +300,114 @@ def test_renderer_check_is_deterministic_except_fetch_timestamp(schema, contract
     changed = copy.deepcopy(contract)
     changed["positioning"]["product_promise"] = "stale"
     assert renderer._normalized(contract) != renderer._normalized(changed)
+
+
+def test_checked_in_markdown_includes_concept_board(schema, contract):
+    renderer.validate_brand_system(contract, schema)
+    document = renderer.render_markdown(contract)
+    assert "## Mark concept board" in document
+    assert "### Directions" in document
+    assert "concept_selection" not in document.lower() or "Selection:" in document
+
+
+def test_family_advance_without_concept_selection_is_blocked(schema, contract):
+    """Effect test: provisional/approved logo variants fail when selection incomplete."""
+    broken = copy.deepcopy(contract)
+    broken["concept_selection"] = {
+        "selected_concept_id": None,
+        "operator_accepted_at": None,
+        "operator_actor": None,
+        "blocking_family_until_selection": True,
+    }
+    variant = broken["visual_styles"]["logo_system"]["variants"]["primary_mark"]
+    variant["status"] = "provisional"
+    variant["source_asset"] = (
+        "execution/scripts/site_generator/assets/"
+        f"{broken['slug']}/marks/concepts/"
+        f"{broken['mark_concept_board']['directions'][0]['concept_id']}/symbol.svg"
+    )
+    variant["export_formats"] = ["svg"]
+    with pytest.raises(
+        renderer.BrandSystemError,
+        match="logo_system.variants provisional/approved while concept_selection incomplete",
+    ):
+        renderer.validate_brand_system(broken, schema)
+
+
+def test_selection_incomplete_unknown_id_and_direction_count_known_positives(
+    schema, contract
+):
+    incomplete = copy.deepcopy(contract)
+    incomplete["concept_selection"]["selected_concept_id"] = incomplete[
+        "mark_concept_board"
+    ]["directions"][0]["concept_id"]
+    incomplete["concept_selection"]["operator_accepted_at"] = None
+    with pytest.raises(
+        renderer.BrandSystemError, match="operator_accepted_at null"
+    ):
+        renderer.validate_brand_system(incomplete, schema)
+
+    unknown = copy.deepcopy(contract)
+    unknown["concept_selection"]["selected_concept_id"] = "does-not-exist"
+    unknown["concept_selection"]["operator_accepted_at"] = "2026-09-23T00:00:00Z"
+    with pytest.raises(
+        renderer.BrandSystemError, match="selected_concept_id not in directions"
+    ):
+        renderer.validate_brand_system(unknown, schema)
+
+    too_few = copy.deepcopy(contract)
+    too_few["mark_concept_board"]["directions"] = too_few["mark_concept_board"][
+        "directions"
+    ][:2]
+    with pytest.raises(renderer.BrandSystemError, match="need 3–5 directions"):
+        renderer.validate_brand_system(too_few, schema)
+
+
+def test_approved_direction_status_and_historical_candidate_known_positives(
+    schema, contract
+):
+    approved = copy.deepcopy(contract)
+    approved["mark_concept_board"]["directions"][0]["status"] = "approved"
+    with pytest.raises(
+        renderer.BrandSystemError, match="approved is forbidden at concept stage"
+    ):
+        renderer.validate_brand_system(approved, schema)
+
+    historical = copy.deepcopy(contract)
+    historical["mark_concept_board"]["directions"][0]["symbol_asset"] = (
+        f"execution/scripts/site_generator/assets/{contract['slug']}/marks/historical/primary.svg"
+    )
+    with pytest.raises(renderer.BrandSystemError, match="historical as candidate"):
+        renderer.validate_brand_system(historical, schema)
+
+
+def test_missing_concept_field_known_positive(schema, contract):
+    broken = copy.deepcopy(contract)
+    broken["mark_concept_board"]["directions"][1]["memorability"] = ""
+    with pytest.raises(renderer.BrandSystemError, match="memorability"):
+        renderer.validate_brand_system(broken, schema)
+
+
+def test_local_check_cli_exits_nonzero_on_advancing_family(tmp_path, monkeypatch, schema):
+    import shutil
+
+    staging = tmp_path / "brand_systems"
+    staging.mkdir()
+    for name in ("schema.v1.json", "ateles.json", "neotoma.json"):
+        shutil.copy(GEN_DIR / "brand_systems" / name, staging / name)
+    broken = json.loads((staging / "ateles.json").read_text())
+    broken["visual_styles"]["logo_system"]["variants"]["favicon"]["status"] = "approved"
+    broken["visual_styles"]["logo_system"]["variants"]["favicon"]["source_asset"] = (
+        broken["mark_concept_board"]["directions"][0]["favicon_asset"]
+    )
+    broken["visual_styles"]["logo_system"]["variants"]["favicon"]["export_formats"] = [
+        "svg"
+    ]
+    (staging / "ateles.json").write_text(json.dumps(broken, indent=2) + "\n")
+
+    monkeypatch.setattr(renderer, "OUT_DIR", staging)
+    monkeypatch.setattr(renderer, "DOC_DIR", tmp_path / "docs")
+    (tmp_path / "docs").mkdir()
+    neotoma = json.loads((staging / "neotoma.json").read_text())
+    assert renderer.check_local(schema, {"ateles": broken, "neotoma": neotoma}) is False
+

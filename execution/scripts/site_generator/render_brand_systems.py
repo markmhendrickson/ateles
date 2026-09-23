@@ -33,6 +33,33 @@ DEFAULT_GUIDELINE_ENTITY_IDS = {
 }
 KNOWN_PRODUCTS = tuple(DEFAULT_GUIDELINE_ENTITY_IDS)
 ALLOWED_STATUSES = {"approved", "provisional", "missing", "retired"}
+CONCEPT_DIRECTION_STATUSES = {"concept", "selected", "rejected"}
+CONCEPT_COMPLETENESS_STATUSES = ALLOWED_STATUSES | {"selected"}
+ADVANCING_LOGO_STATUSES = {"provisional", "approved"}
+PLACEHOLDER_SVG_MARKERS = ("TODO", "FIXME", "placeholder", "<svg></svg>")
+PRODUCT_FORBIDDEN_TROPES = {
+    "ateles": (
+        "Generic orchestration",
+        "Central controller",
+        "Anonymous neural mesh",
+        "Literal hive or insects",
+        "Seal as brand",
+    ),
+    "neotoma": (
+        "Memory chatbot",
+        "Retrieval cache",
+        "Agent directory",
+        "Database dashboard",
+        "Destructive overwrite",
+    ),
+}
+TAUTOLOGY_MARKERS = (
+    "unique and memorable",
+    "stands out",
+    "different from others",
+    "ownable mark",
+    "distinctive logo",
+)
 LOGO_VARIANTS = {
     "primary_mark",
     "wordmark",
@@ -104,12 +131,38 @@ REQUIRED_SECTIONS = (
     "provenance",
     "downstream_contracts",
     "completeness",
+    "mark_concept_board",
+    "concept_selection",
     "updated_at",
 )
 
 
 class BrandSystemError(ValueError):
     """A canonical snapshot cannot safely become a public brand contract."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        field_path: str | None = None,
+        reason: str | None = None,
+        hint: str | None = None,
+    ) -> None:
+        self.field_path = field_path
+        self.reason = reason
+        self.hint = hint
+        if field_path and reason and hint and " — hint: " not in message:
+            message = f"{field_path}: {reason} — hint: {hint}"
+        super().__init__(message)
+
+
+def raise_brand_error(field_path: str, reason: str, hint: str) -> None:
+    raise BrandSystemError(
+        f"{field_path}: {reason} — hint: {hint}",
+        field_path=field_path,
+        reason=reason,
+        hint=hint,
+    )
 
 
 def _as_json_object(value: object, label: str) -> dict:
@@ -407,9 +460,17 @@ def validate_brand_system(data: dict, schema: dict | None = None) -> None:
     )
     for items in status_lists:
         for item in items:
-            if item.get("status") not in ALLOWED_STATUSES:
+            name = item.get("name") or item.get("consumer")
+            status = item.get("status")
+            if name == "mark_concept_selection":
+                if status not in CONCEPT_COMPLETENESS_STATUSES:
+                    raise BrandSystemError(
+                        f"unrecognized item status for {name!r}"
+                    )
+                continue
+            if status not in ALLOWED_STATUSES:
                 raise BrandSystemError(
-                    f"unrecognized item status for {item.get('name') or item.get('consumer')!r}"
+                    f"unrecognized item status for {name!r}"
                 )
     for asset in data.get("asset_inventory") or []:
         public_path = asset.get("public_path")
@@ -465,6 +526,271 @@ def validate_brand_system(data: dict, schema: dict | None = None) -> None:
             ]
             if active:
                 raise BrandSystemError("retired Neotoma memory framing is still active")
+
+    validate_mark_concept_selection(data)
+
+
+def _repo_file(path_value: object) -> Path | None:
+    if not isinstance(path_value, str) or not path_value.strip():
+        return None
+    path = Path(path_value)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    return path
+
+
+def _svg_is_placeholder(path: Path) -> str | None:
+    if not path.is_file():
+        return "missing asset path"
+    text = path.read_text(encoding="utf-8", errors="replace")
+    lowered = text.casefold()
+    if any(marker.casefold() in lowered for marker in PLACEHOLDER_SVG_MARKERS):
+        return "placeholder asset"
+    if "<svg" not in lowered:
+        return "placeholder asset"
+    # Prefer filled silhouettes: reject stroke-only marks with no fill geometry.
+    has_fill_geom = any(
+        token in lowered
+        for token in (
+            "<circle",
+            "<rect",
+            "<path",
+            "<ellipse",
+            "<polygon",
+            'fill="currentcolor"',
+            "fill='currentcolor'",
+            'fill="#',
+        )
+    )
+    stroke_only = "stroke=" in lowered and "fill=\"none\"" in lowered and not has_fill_geom
+    if stroke_only or (not has_fill_geom and "stroke=" in lowered):
+        return "placeholder asset"
+    return None
+
+
+def _is_tautology(text: str) -> bool:
+    lowered = text.casefold().strip()
+    if len(lowered) < 24:
+        return True
+    return any(marker in lowered for marker in TAUTOLOGY_MARKERS) and len(lowered) < 80
+
+
+def concept_selection_complete(selection: dict, directions: list[dict]) -> bool:
+    selected = selection.get("selected_concept_id")
+    accepted = selection.get("operator_accepted_at")
+    if not selected or not accepted:
+        return False
+    return any(item.get("concept_id") == selected for item in directions)
+
+
+def validate_mark_concept_selection(data: dict) -> None:
+    """Fail closed on concept authorship and family-advance gating."""
+    slug = data.get("slug")
+    board = data.get("mark_concept_board")
+    selection = data.get("concept_selection")
+    if not isinstance(board, dict):
+        raise_brand_error(
+            "mark_concept_board",
+            "missing mark_concept_board",
+            "Author 3–5 concept directions under mark_concept_board.directions",
+        )
+    if not isinstance(selection, dict):
+        raise_brand_error(
+            "concept_selection",
+            "missing concept_selection",
+            "Add concept_selection with selected_concept_id and operator_accepted_at",
+        )
+
+    directions = board.get("directions")
+    if not isinstance(directions, list):
+        raise_brand_error(
+            "mark_concept_board.directions",
+            "directions must be a list",
+            "Add/remove until count ∈ [3,5]",
+        )
+    if not 3 <= len(directions) <= 5:
+        raise_brand_error(
+            "mark_concept_board.directions",
+            f"need 3–5 directions, found {len(directions)}",
+            "Add/remove until count ∈ [3,5]",
+        )
+
+    seen_ids: set[str] = set()
+    required_fields = (
+        "concept_id",
+        "name",
+        "status",
+        "compressed_idea",
+        "silhouette",
+        "form_notes",
+        "wordmark_relationship",
+        "motion_premise",
+        "competitive_distance",
+        "memorability",
+        "forbidden_perception_checks",
+        "symbol_asset",
+        "favicon_asset",
+    )
+    forbidden_required = list(PRODUCT_FORBIDDEN_TROPES.get(slug, ()))
+    for index, direction in enumerate(directions):
+        prefix = f"mark_concept_board.directions[{index}]"
+        if not isinstance(direction, dict):
+            raise_brand_error(prefix, "direction must be an object", "Supply a concept direction object")
+        for field in required_fields:
+            value = direction.get(field)
+            if value is None or value == "" or value == []:
+                raise_brand_error(
+                    f"{prefix}.{field}",
+                    f"missing field {field}",
+                    f"Supply non-empty value meeting rubric for {field}",
+                )
+        concept_id = direction["concept_id"]
+        if concept_id in seen_ids:
+            raise_brand_error(
+                f"{prefix}.concept_id",
+                f"duplicate concept_id {concept_id!r}",
+                "Make each concept_id unique",
+            )
+        seen_ids.add(concept_id)
+        status = direction.get("status")
+        if status == "approved":
+            raise_brand_error(
+                f"{prefix}.status",
+                "status: approved is forbidden at concept stage",
+                "Use concept / selected / rejected",
+            )
+        if status not in CONCEPT_DIRECTION_STATUSES:
+            raise_brand_error(
+                f"{prefix}.status",
+                f"unrecognized concept status {status!r}",
+                "Use concept / selected / rejected",
+            )
+        if _is_tautology(str(direction.get("competitive_distance") or "")):
+            raise_brand_error(
+                f"{prefix}.competitive_distance",
+                "competitive_distance is empty or tautological",
+                "Cite concrete adjacent brands / conventions",
+            )
+        if _is_tautology(str(direction.get("memorability") or "")):
+            raise_brand_error(
+                f"{prefix}.memorability",
+                "memorability is empty or tautological",
+                "Cite concrete ownable account, not mere semantic compliance",
+            )
+        checks = [str(item) for item in direction.get("forbidden_perception_checks") or []]
+        missing_tropes = [trope for trope in forbidden_required if trope not in checks]
+        if missing_tropes:
+            raise_brand_error(
+                f"{prefix}.forbidden_perception_checks",
+                f"forbidden tropes uncovered: {', '.join(missing_tropes)}",
+                "Cover full Ateles/Neotoma forbidden list in forbidden_perception_checks",
+            )
+        for asset_field in ("symbol_asset", "favicon_asset"):
+            asset_path = str(direction.get(asset_field) or "")
+            if "marks/historical/" in asset_path.replace("\\", "/"):
+                raise_brand_error(
+                    f"{prefix}.{asset_field}",
+                    f"historical as candidate: {asset_path}",
+                    "Move under marks/historical/ and retired / non-candidate; use marks/concepts/",
+                )
+            resolved = _repo_file(asset_path)
+            if resolved is None:
+                raise_brand_error(
+                    f"{prefix}.{asset_field}",
+                    "missing asset path",
+                    "Create filled SVG at that path",
+                )
+            problem = _svg_is_placeholder(resolved)
+            if problem == "missing asset path":
+                raise_brand_error(
+                    f"{prefix}.{asset_field}",
+                    f"missing asset path: {asset_path}",
+                    "Create filled SVG at that path",
+                )
+            if problem == "placeholder asset":
+                raise_brand_error(
+                    f"{prefix}.{asset_field}",
+                    f"placeholder asset: {asset_path}",
+                    "Replace TODO/empty/stroke-only with filled silhouette",
+                )
+
+    selected_id = selection.get("selected_concept_id")
+    accepted_at = selection.get("operator_accepted_at")
+    if selected_id and not accepted_at:
+        raise_brand_error(
+            "concept_selection.operator_accepted_at",
+            "selected_concept_id set but operator_accepted_at null",
+            "Record operator acceptance timestamp (and actor)",
+        )
+    if selected_id and selected_id not in seen_ids:
+        raise_brand_error(
+            "concept_selection.selected_concept_id",
+            "selected_concept_id not in directions",
+            "Use an existing concept_id or add the direction first",
+        )
+    if accepted_at and not selected_id:
+        raise_brand_error(
+            "concept_selection.selected_concept_id",
+            "operator_accepted_at set without selected_concept_id",
+            "Set selected_concept_id to an existing concept_id",
+        )
+
+    selection_ok = concept_selection_complete(selection, directions)
+    if selection.get("blocking_family_until_selection") is not True and not selection_ok:
+        raise_brand_error(
+            "concept_selection.blocking_family_until_selection",
+            "blocking_family_until_selection must be true until selection is complete",
+            "Keep blocking_family_until_selection true until operator acceptance",
+        )
+
+    styles = data.get("visual_styles") or {}
+    logo = styles.get("logo_system") or {}
+    variants = logo.get("variants") or {}
+    if not selection_ok:
+        for key, variant in variants.items():
+            status = (variant or {}).get("status")
+            source_asset = str((variant or {}).get("source_asset") or "").replace("\\", "/")
+            historical_only = bool(source_asset) and "marks/historical/" in source_asset
+            if status in ADVANCING_LOGO_STATUSES and not historical_only:
+                raise_brand_error(
+                    f"visual_styles.logo_system.variants.{key}.status",
+                    "blocked: logo_system.variants provisional/approved while concept_selection incomplete",
+                    "Set selected_concept_id + operator_accepted_at, or keep variants missing/retired / historical-only",
+                )
+            if source_asset and "marks/historical/" in source_asset and status in ADVANCING_LOGO_STATUSES:
+                raise_brand_error(
+                    f"visual_styles.logo_system.variants.{key}.source_asset",
+                    f"historical as candidate: {source_asset}",
+                    "Move under marks/historical/ and retired / non-candidate",
+                )
+
+    dims = (data.get("completeness") or {}).get("dimensions") or []
+    concept_dim = next((item for item in dims if item.get("name") == "mark_concept_selection"), None)
+    if concept_dim is None:
+        raise_brand_error(
+            "completeness.dimensions",
+            "missing mark_concept_selection dimension",
+            "Add completeness dimension name mark_concept_selection",
+        )
+    dim_status = concept_dim.get("status")
+    if dim_status not in CONCEPT_COMPLETENESS_STATUSES:
+        raise_brand_error(
+            "completeness.dimensions[mark_concept_selection].status",
+            f"unrecognized completeness status {dim_status!r}",
+            "Use missing / provisional / selected / approved / retired",
+        )
+    if selection_ok and dim_status not in {"selected", "approved", "provisional"}:
+        raise_brand_error(
+            "completeness.dimensions[mark_concept_selection].status",
+            "selection complete but mark_concept_selection not marked selected",
+            "Set mark_concept_selection status to selected after operator acceptance",
+        )
+    if not selection_ok and dim_status == "selected":
+        raise_brand_error(
+            "completeness.dimensions[mark_concept_selection].status",
+            "mark_concept_selection selected while concept_selection incomplete",
+            "Keep status missing/provisional until selected_concept_id + operator_accepted_at",
+        )
 
 
 def render_contract(
@@ -657,6 +983,41 @@ def render_markdown(contract: dict) -> str:
         lines.append(
             f"- **{_status(item['status'])} · {item['name']}:** {item['guidance']}"
         )
+    board = contract.get("mark_concept_board") or {}
+    selection = contract.get("concept_selection") or {}
+    lines.extend(
+        [
+            "",
+            "## Mark concept board",
+            "",
+            f"- **Selection:** {selection.get('selected_concept_id') or 'none'} · accepted_at={selection.get('operator_accepted_at') or 'null'} · blocking_family={selection.get('blocking_family_until_selection')}",
+            f"- **Operator actor:** {selection.get('operator_actor') or 'unset'}",
+            "",
+            "### Directions",
+            "",
+        ]
+    )
+    directions = board.get("directions") or []
+    if not directions:
+        lines.append("- [COPY: no concepts yet — author 3–5 directions]")
+    for direction in directions:
+        lines.extend(
+            [
+                f"#### {direction.get('name')} (`{direction.get('concept_id')}`) · {_status(direction.get('status'))}",
+                "",
+                f"- **Idea:** {direction.get('compressed_idea')}",
+                f"- **Silhouette:** {direction.get('silhouette')}",
+                f"- **Form notes:** {direction.get('form_notes')}",
+                f"- **Wordmark relationship:** {direction.get('wordmark_relationship')}",
+                f"- **Motion premise:** {direction.get('motion_premise')}",
+                f"- **Competitive distance:** {direction.get('competitive_distance')}",
+                f"- **Memorability:** {direction.get('memorability')}",
+                f"- **Forbidden perception checks:** {'; '.join(direction.get('forbidden_perception_checks') or [])}",
+                f"- **Symbol asset:** `{direction.get('symbol_asset')}`",
+                f"- **Favicon asset:** `{direction.get('favicon_asset')}`",
+                "",
+            ]
+        )
     lines.extend(["", "## Logo system", ""])
     for key, item in logo["variants"].items():
         source_asset = item.get("source_asset") or "not produced"
@@ -832,9 +1193,39 @@ def render_markdown(contract: dict) -> str:
 
 def _schema_document(snapshot: dict) -> dict:
     schema = _as_json_object(snapshot.get("content"), "schema content")
-    if schema.get("$id") != "urn:ateles:brand-system:1.2.0":
+    if schema.get("$id") != "urn:ateles:brand-system:1.3.0":
         raise BrandSystemError("unexpected brand schema identifier")
     return schema
+
+
+def load_local_mirrors() -> tuple[dict, dict[str, dict]]:
+    schema = json.loads((OUT_DIR / "schema.v1.json").read_text())
+    if schema.get("$id") != "urn:ateles:brand-system:1.3.0":
+        raise BrandSystemError("unexpected brand schema identifier")
+    contracts: dict[str, dict] = {}
+    for product in KNOWN_PRODUCTS:
+        contracts[product] = json.loads((OUT_DIR / f"{product}.json").read_text())
+    return schema, contracts
+
+
+def check_local(schema: dict, contracts: dict[str, dict]) -> bool:
+    ok = True
+    for product, contract in contracts.items():
+        try:
+            validate_brand_system(contract, schema)
+            expected_doc = render_markdown(contract)
+            doc_path = DOC_DIR / f"{product}.md"
+            if doc_path.exists() and doc_path.read_text() != expected_doc:
+                print(
+                    f"DRIFT: docs/brand/{product}.md differs from local contract render"
+                )
+                ok = False
+            print(f"OK local validate {product}")
+        except BrandSystemError as exc:
+            hint = getattr(exc, "hint", None) or str(exc)
+            print(f"FAIL {product}: {hint}")
+            ok = False
+    return ok
 
 
 def fetch_all(base_url: str, token: str) -> tuple[dict, dict[str, dict]]:
@@ -906,7 +1297,18 @@ def check_all(schema: dict, contracts: dict[str, dict]) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Validate checked-in disk mirrors without Neotoma credentials",
+    )
     args = parser.parse_args()
+    if args.local:
+        schema, contracts = load_local_mirrors()
+        if check_local(schema, contracts):
+            print("brand system local check OK — disk mirrors validate")
+            return 0
+        return 1
     base_url, token = load_env()
     schema, contracts = fetch_all(base_url, token)
     if args.check:

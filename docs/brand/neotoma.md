@@ -8,7 +8,9 @@ schema_entity_id: ent_73da44b2d434cbafe5d8ecb9
 observation_ids:
   asset_inventory: f2284285-de83-5e06-dba8-614a6671f842
   completeness: f0e1e060-3153-f2d8-6982-191fa0a92935
+  concept_selection: local:ateles#1157
   downstream_contracts: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
+  mark_concept_board: local:ateles#1157
   name: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
   ownership: 915b31d0-fb4a-1ab4-250b-e8ae484f9552
   phrases: ec5f1518-97a5-8f7e-29c8-b3da4b90619d
@@ -180,19 +182,79 @@ observation_ids:
 - **APPROVED · Provenance and disagreement:** Source relationships and unresolved claims remain inspectable until review settles the current view.
 - **MISSING · Graph-first cinematic replacement:** Required primary film must combine the whole persistent graph with agent operations rather than dramatizing correction alone.
 
+## Mark concept board
+
+- **Selection:** none · accepted_at=null · blocking_family=True
+- **Operator actor:** unset
+
+### Directions
+
+#### Layered Ledger (`neotoma-layered-ledger`) · CONCEPT
+
+- **Idea:** Prior versions remain as underlying filled strata beneath the current record plane.
+- **Silhouette:** Three stacked rounded slabs with progressive inset — a ledger of states, not a database cylinder.
+- **Form notes:** Insets create depth without 3D perspective tricks; corners share one radius family.
+- **Wordmark relationship:** Slabs left of wordmark; top slab aligns to cap height.
+- **Motion premise:** A new stratum slides under — static stack already shows history.
+- **Competitive distance:** Distance from database drum icons and Notion page stacks; strata encode provenance.
+- **Memorability:** Visible underlayers make prior state ownable as form.
+- **Forbidden perception checks:** Memory chatbot; Retrieval cache; Agent directory; Database dashboard; Destructive overwrite
+- **Symbol asset:** `execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-layered-ledger/symbol.svg`
+- **Favicon asset:** `execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-layered-ledger/favicon.svg`
+
+#### Provenance Spine (`neotoma-provenance-spine`) · CONCEPT
+
+- **Idea:** A vertical spine of filled nodes holds branching relationship stubs without becoming a neural mesh.
+- **Silhouette:** Central column of three discs with short filled stubs left and right — graph spine, not synapse web.
+- **Form notes:** Stubs terminate bluntly; no crossing edges; spine weight dominates.
+- **Wordmark relationship:** Spine left; stubs never invade wordmark clear space.
+- **Motion premise:** A stub grows then settles — static shows durable joints.
+- **Competitive distance:** Unlike brain/neural logos and mind-map kits; limited stubs keep it a record graph.
+- **Memorability:** Few deliberate joints beat dense webs for recognition at favicon scale.
+- **Forbidden perception checks:** Memory chatbot; Retrieval cache; Agent directory; Database dashboard; Destructive overwrite
+- **Symbol asset:** `execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-provenance-spine/symbol.svg`
+- **Favicon asset:** `execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-provenance-spine/favicon.svg`
+
+#### Source Anchors (`neotoma-source-anchors`) · CONCEPT
+
+- **Idea:** Records stay tethered to source anchors — filled wedges that never float free.
+- **Silhouette:** One large rounded square with three smaller filled anchors at corners connected by short filled bridges.
+- **Form notes:** Bridges are thick enough to read as filled mass at 16px; avoid hairline strokes.
+- **Wordmark relationship:** Cluster left; square mass balances the capital N.
+- **Motion premise:** Anchors hold while center updates — static already shows tethering.
+- **Competitive distance:** Not a cloud with satellites; not disconnected cards; anchors assert source permanence.
+- **Memorability:** Corner anchors + bridges are the distinctive silhouette.
+- **Forbidden perception checks:** Memory chatbot; Retrieval cache; Agent directory; Database dashboard; Destructive overwrite
+- **Symbol asset:** `execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-source-anchors/symbol.svg`
+- **Favicon asset:** `execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-source-anchors/favicon.svg`
+
+#### Correction Wedge (`neotoma-correction-wedge`) · CONCEPT
+
+- **Idea:** Correction is an additive wedge on a durable disc — disagreement stays in the graph.
+- **Silhouette:** Large filled disc with a distinct wedge bite filled darker as a second mass (same color, separated by gap).
+- **Form notes:** Wedge separated by a thin crescent of negative space so it reads as an event, not a pac-man cliché.
+- **Wordmark relationship:** Disc+wedge unit left of wordmark; wedge points outward away from type.
+- **Motion premise:** Wedge appears then rests — static shows additive correction.
+- **Competitive distance:** Not a stamp, eraser, or overwrite X; wedge encodes correction as preserved structure.
+- **Memorability:** Pac-adjacent risk mitigated by gap + second mass; still unique among record products.
+- **Forbidden perception checks:** Memory chatbot; Retrieval cache; Agent directory; Database dashboard; Destructive overwrite
+- **Symbol asset:** `execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-correction-wedge/symbol.svg`
+- **Favicon asset:** `execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-correction-wedge/favicon.svg`
+
+
 ## Logo system
 
-- **APPROVED · primary mark — Neotoma typographic mark:** Primary compact identity. (source: `inspector/src/assets/neotoma_wordmark.svg`; exports: SVG)
-- **APPROVED · wordmark — Neotoma wordmark:** Named identity. (source: `inspector/src/assets/neotoma_wordmark.svg`; exports: SVG)
-- **MISSING · lockup — Graph symbol + wordmark lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
-- **MISSING · symbol only — Persistent record-graph symbol:** Required before this placement is approved. (source: `not produced`; exports: not produced)
-- **MISSING · horizontal — Horizontal lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
-- **MISSING · stacked — Stacked lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
-- **MISSING · monochrome — Monochrome variant:** One-color reproduction. (source: `not produced`; exports: not produced)
-- **MISSING · reversed — Reversed variant:** Dark or photographic fields. (source: `not produced`; exports: not produced)
-- **PROVISIONAL · small scale — Small-scale variant:** Requires tested legibility threshold. (source: `not produced`; exports: not produced)
+- **MISSING · application — Application mark:** Align Inspector/application marks with persistent-graph semantics. (source: `not produced`; exports: not produced)
 - **MISSING · favicon — Favicon:** Required before this placement is approved. (source: `not produced`; exports: not produced)
-- **PROVISIONAL · application — Application mark:** Align Inspector/application marks with persistent-graph semantics. (source: `not produced`; exports: not produced)
+- **MISSING · horizontal — Horizontal lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
+- **MISSING · lockup — Graph symbol + wordmark lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
+- **MISSING · monochrome — Monochrome variant:** One-color reproduction. (source: `not produced`; exports: not produced)
+- **MISSING · primary mark — Neotoma typographic mark:** Primary compact identity. (source: `not produced`; exports: not produced)
+- **MISSING · reversed — Reversed variant:** Dark or photographic fields. (source: `not produced`; exports: not produced)
+- **MISSING · small scale — Small-scale variant:** Requires tested legibility threshold. (source: `not produced`; exports: not produced)
+- **MISSING · stacked — Stacked lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
+- **MISSING · symbol only — Persistent record-graph symbol:** Required before this placement is approved. (source: `not produced`; exports: not produced)
+- **MISSING · wordmark — Neotoma wordmark:** Named identity. (source: `not produced`; exports: not produced)
 
 - **Clear space · MISSING:** Define and test an exclusion zone from final geometry; no product measurement is approved.
 - **Minimum size · MISSING:** Test final exports; no numerical threshold is approved.
@@ -240,6 +302,11 @@ observation_ids:
 - **PROVISIONAL · Correction-propagation MP4 fallback** (cinematic): Fallback encode for provisional film — `execution/scripts/site_generator/assets/neotoma/hero-concept.mp4`
 - **PROVISIONAL · Correction-propagation poster** (poster): Static and reduced-motion fallback for provisional film — `execution/scripts/site_generator/assets/neotoma/hero-concept.avif`
 - **MISSING · Graph-first hero film** (cinematic): Primary cinematic takeover showing the persistent graph plus create, retrieve, and update operations — `not produced`
+- **RETIRED · Historical mark · favicon** (mark): Rejected #1154 provisional evidence only — not a concept or family candidate. — `not produced`
+- **RETIRED · Historical mark · letter-box** (mark): Rejected #1154 provisional evidence only — not a concept or family candidate. — `not produced`
+- **RETIRED · Historical mark · primary** (mark): Rejected #1154 provisional evidence only — not a concept or family candidate. — `not produced`
+- **RETIRED · Historical mark · symbol** (mark): Rejected #1154 provisional evidence only — not a concept or family candidate. — `not produced`
+- **RETIRED · Historical mark · wordmark** (mark): Rejected #1154 provisional evidence only — not a concept or family candidate. — `not produced`
 
 ## Production contract
 
@@ -279,9 +346,9 @@ observation_ids:
 
 - **APPROVED · contrast:** Meet WCAG contrast for text and meaningful graphics in every approved colorway; media copy needs a tested safe field.
 - **APPROVED · images of text:** Use semantic text; only essential logotypes may be images of text and need accessible names.
-- **APPROVED · semantic headings:** Use one H1 and ordered semantic headings; size never substitutes for level.
-- **APPROVED · relative sizing:** Use relative responsive sizing and preserve resize/reflow without two-dimensional page scrolling.
 - **APPROVED · reduced motion static equivalence:** Honor reduced motion and provide a static state carrying every meaning expressed by motion.
+- **APPROVED · relative sizing:** Use relative responsive sizing and preserve resize/reflow without two-dimensional page scrolling.
+- **APPROVED · semantic headings:** Use one H1 and ordered semantic headings; size never substitutes for level.
 
 ## Research provenance and review
 
@@ -459,6 +526,7 @@ Overall: **PROVISIONAL**
 - PROVISIONAL · market_reference_ledger
 - PROVISIONAL · differentiation_matrix
 - PROVISIONAL · aesthetic_territory
+- MISSING · mark_concept_selection
 
 ### Missing
 
@@ -469,3 +537,4 @@ Overall: **PROVISIONAL**
 - Final type weight/style inventory and owner-approved research cadence
 - Operator approval or revision of the complete provisional brand system and its original aesthetic territory
 - Final contradiction audit against the section copy-to-visual production matrix
+- Operator concept selection (selected_concept_id + operator_accepted_at) before mark family advance

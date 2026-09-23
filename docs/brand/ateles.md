@@ -8,7 +8,9 @@ schema_entity_id: ent_73da44b2d434cbafe5d8ecb9
 observation_ids:
   asset_inventory: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
   completeness: 63417972-dbc2-ddab-63dd-1a3befdcc8cc
+  concept_selection: local:ateles#1157
   downstream_contracts: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
+  mark_concept_board: local:ateles#1157
   name: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
   ownership: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
   phrases: 05cf0304-9640-6f15-32a0-b7c2aff5a033
@@ -182,19 +184,79 @@ observation_ids:
 - **APPROVED · Mission-to-task priority inheritance:** Show purpose narrowing into current work without turning the organization into a permanent graph.
 - **MISSING · Swarm-first cinematic replacement:** Required primary film must preserve edge-free swarm semantics.
 
+## Mark concept board
+
+- **Selection:** none · accepted_at=null · blocking_family=True
+- **Operator actor:** unset
+
+### Directions
+
+#### Chorus Field (`ateles-chorus-field`) · CONCEPT
+
+- **Idea:** Many equal members share one field without a controlling hub.
+- **Silhouette:** Scattered filled discs of unequal size with shared orientation gaps — a chorus, not a mesh.
+- **Form notes:** Negative space between members reads as temporary lanes; optical scale bias enlarges peripheral discs slightly so the cluster does not collapse to a center.
+- **Wordmark relationship:** Symbol sits left of the wordmark with clear space equal to the largest disc diameter; never locked inside a seal.
+- **Motion premise:** Members drift and briefly align then separate — premise readable as a static scatter.
+- **Competitive distance:** Distance from Linear/Notion/Asana orchestration glyphs and from neural-net node graphs; closer to flock diagrams than org charts.
+- **Memorability:** Ownable as an uneven chorus of peers rather than a single emblem or grid.
+- **Forbidden perception checks:** Generic orchestration; Central controller; Anonymous neural mesh; Literal hive or insects; Seal as brand
+- **Symbol asset:** `execution/scripts/site_generator/assets/ateles/marks/concepts/ateles-chorus-field/symbol.svg`
+- **Favicon asset:** `execution/scripts/site_generator/assets/ateles/marks/concepts/ateles-chorus-field/favicon.svg`
+
+#### Handoff Arc (`ateles-handoff-arc`) · CONCEPT
+
+- **Idea:** Work passes along a temporary arc between distinct members, then the link dissolves.
+- **Silhouette:** Three filled lozenges arranged on a shallow arc with a gap where a handoff would occur.
+- **Form notes:** Arc rhythm left-to-right; gap is intentional negative space — not a missing asset.
+- **Wordmark relationship:** Arc sits above a short baseline wordmark; gap aligns with the crossbar of the first capital.
+- **Motion premise:** Pulse travels member-to-member along the arc once — static frame still shows three distinct bodies.
+- **Competitive distance:** Unlike continuous workflow ribbons (Zapier) or chain links (integration suites); temporary arc is the differentiator.
+- **Memorability:** The interrupted arc is the ownable cue — continuity without permanent edges.
+- **Forbidden perception checks:** Generic orchestration; Central controller; Anonymous neural mesh; Literal hive or insects; Seal as brand
+- **Symbol asset:** `execution/scripts/site_generator/assets/ateles/marks/concepts/ateles-handoff-arc/symbol.svg`
+- **Favicon asset:** `execution/scripts/site_generator/assets/ateles/marks/concepts/ateles-handoff-arc/favicon.svg`
+
+#### Orbit Peers (`ateles-checkpoint-ring`) · CONCEPT
+
+- **Idea:** Peers orbit a shared purpose without permanent spokes — the center is a peer, not a controller.
+- **Silhouette:** One center disc surrounded by five equal orbiting discs — plurality without spokes or edges.
+- **Form notes:** Equal orbiting discs; no connecting lines; optical spacing keeps the ring readable at favicon scale as filled dots.
+- **Wordmark relationship:** Orbit cluster left of wordmark; never enclosed in a seal frame.
+- **Motion premise:** Orbiters can revolve in motion; static already reads as peer ring.
+- **Competitive distance:** Distance from hub-and-spoke org charts and seal crests; no permanent edges.
+- **Memorability:** Equal peers around a peer center — authority without a controller glyph.
+- **Forbidden perception checks:** Generic orchestration; Central controller; Anonymous neural mesh; Literal hive or insects; Seal as brand
+- **Symbol asset:** `execution/scripts/site_generator/assets/ateles/marks/concepts/ateles-checkpoint-ring/symbol.svg`
+- **Favicon asset:** `execution/scripts/site_generator/assets/ateles/marks/concepts/ateles-checkpoint-ring/favicon.svg`
+
+#### Signal Lanes (`ateles-signal-lanes`) · CONCEPT
+
+- **Idea:** Short-lived signals are parallel filled bars that never form permanent edges between members.
+- **Silhouette:** Five vertical rounded bars of staggered heights — lanes of attention, not a barcode brand.
+- **Form notes:** Bar ends use full radii; uneven heights prevent barcode/equalizer cliché; gaps equal bar width.
+- **Wordmark relationship:** Bars sit to the left as a unit; tracking of the wordmark matches gap rhythm.
+- **Motion premise:** Heights rebalance briefly — static silhouette remains five distinct lanes.
+- **Competitive distance:** Distance from audio equalizer logos and from rigid org-column icons; staggered heights are intentional plurality.
+- **Memorability:** Uneven lane heights read as coordinated roles, not identical workers.
+- **Forbidden perception checks:** Generic orchestration; Central controller; Anonymous neural mesh; Literal hive or insects; Seal as brand
+- **Symbol asset:** `execution/scripts/site_generator/assets/ateles/marks/concepts/ateles-signal-lanes/symbol.svg`
+- **Favicon asset:** `execution/scripts/site_generator/assets/ateles/marks/concepts/ateles-signal-lanes/favicon.svg`
+
+
 ## Logo system
 
-- **PROVISIONAL · primary mark — Abstract swarm mark:** Primary compact identity. (source: `execution/scripts/site_generator/templates/render.py#_brand_mark`; exports: not produced)
-- **PROVISIONAL · wordmark — Ateles wordmark:** Named identity. (source: `not produced`; exports: not produced)
-- **PROVISIONAL · lockup — Swarm + wordmark lockup:** Navigation identity; spacing measurement remains missing. (source: `not produced`; exports: not produced)
-- **PROVISIONAL · symbol only — Abstract swarm symbol:** Compact use after small-scale review. (source: `not produced`; exports: not produced)
-- **MISSING · horizontal — Horizontal lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
-- **MISSING · stacked — Stacked lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
-- **MISSING · monochrome — Monochrome variant:** One-color reproduction. (source: `not produced`; exports: not produced)
-- **MISSING · reversed — Reversed variant:** Dark or photographic fields. (source: `not produced`; exports: not produced)
-- **PROVISIONAL · small scale — Small-scale variant:** Requires tested legibility threshold. (source: `not produced`; exports: not produced)
+- **MISSING · application — Application mark:** Align current application mark with the edge-free swarm. (source: `not produced`; exports: not produced)
 - **MISSING · favicon — Favicon:** Required before this placement is approved. (source: `not produced`; exports: not produced)
-- **PROVISIONAL · application — Application mark:** Align current application mark with the edge-free swarm. (source: `not produced`; exports: not produced)
+- **MISSING · horizontal — Horizontal lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
+- **MISSING · lockup — Swarm + wordmark lockup:** Navigation identity; spacing measurement remains missing. (source: `not produced`; exports: not produced)
+- **MISSING · monochrome — Monochrome variant:** One-color reproduction. (source: `not produced`; exports: not produced)
+- **MISSING · primary mark — Abstract swarm mark:** Primary compact identity. (source: `not produced`; exports: not produced)
+- **MISSING · reversed — Reversed variant:** Dark or photographic fields. (source: `not produced`; exports: not produced)
+- **MISSING · small scale — Small-scale variant:** Requires tested legibility threshold. (source: `not produced`; exports: not produced)
+- **MISSING · stacked — Stacked lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
+- **MISSING · symbol only — Abstract swarm symbol:** Compact use after small-scale review. (source: `not produced`; exports: not produced)
+- **MISSING · wordmark — Ateles wordmark:** Named identity. (source: `not produced`; exports: not produced)
 
 - **Clear space · MISSING:** Define and test an exclusion zone from final geometry; no product measurement is approved.
 - **Minimum size · MISSING:** Test final exports; no numerical threshold is approved.
@@ -244,6 +306,11 @@ observation_ids:
 - **PROVISIONAL · Connected-node MP4 fallback** (cinematic): Fallback encode for exploratory film — `execution/scripts/site_generator/assets/ateles/hero-concept.mp4`
 - **PROVISIONAL · Connected-node poster** (poster): Static evidence for exploratory film — `execution/scripts/site_generator/assets/ateles/hero-concept.avif`
 - **MISSING · Swarm-first hero film** (cinematic): Primary hero takeover showing an edge-free swarm becoming an organization — `not produced`
+- **RETIRED · Historical mark · favicon** (mark): Rejected #1154 provisional evidence only — not a concept or family candidate. — `not produced`
+- **RETIRED · Historical mark · hub-satellites** (mark): Rejected #1154 provisional evidence only — not a concept or family candidate. — `not produced`
+- **RETIRED · Historical mark · primary** (mark): Rejected #1154 provisional evidence only — not a concept or family candidate. — `not produced`
+- **RETIRED · Historical mark · symbol** (mark): Rejected #1154 provisional evidence only — not a concept or family candidate. — `not produced`
+- **RETIRED · Historical mark · wordmark** (mark): Rejected #1154 provisional evidence only — not a concept or family candidate. — `not produced`
 
 ## Production contract
 
@@ -283,9 +350,9 @@ observation_ids:
 
 - **APPROVED · contrast:** Meet WCAG contrast for text and meaningful graphics in every approved colorway; media copy needs a tested safe field.
 - **APPROVED · images of text:** Use semantic text; only essential logotypes may be images of text and need accessible names.
-- **APPROVED · semantic headings:** Use one H1 and ordered semantic headings; size never substitutes for level.
-- **APPROVED · relative sizing:** Use relative responsive sizing and preserve resize/reflow without two-dimensional page scrolling.
 - **APPROVED · reduced motion static equivalence:** Honor reduced motion and provide a static state carrying every meaning expressed by motion.
+- **APPROVED · relative sizing:** Use relative responsive sizing and preserve resize/reflow without two-dimensional page scrolling.
+- **APPROVED · semantic headings:** Use one H1 and ordered semantic headings; size never substitutes for level.
 
 ## Research provenance and review
 
@@ -463,6 +530,7 @@ Overall: **PROVISIONAL**
 - PROVISIONAL · market_reference_ledger
 - PROVISIONAL · differentiation_matrix
 - PROVISIONAL · aesthetic_territory
+- MISSING · mark_concept_selection
 
 ### Missing
 
@@ -474,3 +542,4 @@ Overall: **PROVISIONAL**
 - Final type weight/style inventory and owner-approved research cadence
 - Operator approval or revision of the complete provisional brand system and its original aesthetic territory
 - Final contradiction audit against the section copy-to-visual production matrix
+- Operator concept selection (selected_concept_id + operator_accepted_at) before mark family advance

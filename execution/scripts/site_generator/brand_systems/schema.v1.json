@@ -54,6 +54,120 @@
       ],
       "type": "object"
     },
+    "concept_direction": {
+      "additionalProperties": false,
+      "properties": {
+        "competitive_distance": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "compressed_idea": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "concept_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "favicon_asset": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "forbidden_perception_checks": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "form_notes": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "memorability": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "motion_premise": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "silhouette": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "concept",
+            "selected",
+            "rejected"
+          ],
+          "type": "string"
+        },
+        "symbol_asset": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "wordmark_relationship": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "concept_id",
+        "name",
+        "status",
+        "compressed_idea",
+        "silhouette",
+        "form_notes",
+        "wordmark_relationship",
+        "motion_premise",
+        "competitive_distance",
+        "memorability",
+        "forbidden_perception_checks",
+        "symbol_asset",
+        "favicon_asset"
+      ],
+      "type": "object"
+    },
+    "concept_selection": {
+      "additionalProperties": false,
+      "properties": {
+        "blocking_family_until_selection": {
+          "type": "boolean"
+        },
+        "operator_accepted_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operator_actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selected_concept_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "selected_concept_id",
+        "operator_accepted_at",
+        "operator_actor",
+        "blocking_family_until_selection"
+      ],
+      "type": "object"
+    },
     "logo_variant": {
       "additionalProperties": true,
       "properties": {
@@ -98,6 +212,23 @@
         "source_format",
         "export_formats",
         "backgrounds"
+      ],
+      "type": "object"
+    },
+    "mark_concept_board": {
+      "additionalProperties": false,
+      "properties": {
+        "directions": {
+          "items": {
+            "$ref": "#/$defs/concept_direction"
+          },
+          "maxItems": 5,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "directions"
       ],
       "type": "object"
     },
@@ -247,10 +378,10 @@
       "type": "object"
     }
   },
-  "$id": "urn:ateles:brand-system:1.2.0",
+  "$id": "urn:ateles:brand-system:1.3.0",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Canonical expression contract with explicit intent, current competitive and aesthetic evidence, one original provisional territory with rejected alternatives and convergence tests, complete state-aware logo and typography systems, accessibility requirements, and a fail-closed approval gate.",
+  "description": "Canonical expression contract with explicit intent, current competitive and aesthetic evidence, one original provisional territory with rejected alternatives and convergence tests, complete state-aware logo and typography systems, accessibility requirements, and a fail-closed approval gate. Adds mark_concept_board and concept_selection: a mandatory concept-selection stage before logo family advance.",
   "properties": {
     "asset_inventory": {
       "items": {
@@ -266,6 +397,9 @@
         "missing_items"
       ],
       "type": "object"
+    },
+    "concept_selection": {
+      "$ref": "#/$defs/concept_selection"
     },
     "downstream_contracts": {
       "items": {
@@ -294,6 +428,9 @@
         "type": "object"
       },
       "type": "array"
+    },
+    "mark_concept_board": {
+      "$ref": "#/$defs/mark_concept_board"
     },
     "name": {
       "type": "string"
@@ -912,8 +1049,10 @@
     "provenance",
     "downstream_contracts",
     "completeness",
-    "updated_at"
+    "updated_at",
+    "mark_concept_board",
+    "concept_selection"
   ],
-  "title": "Reusable product brand system v1.2",
+  "title": "Reusable product brand system v1.3",
   "type": "object"
 }

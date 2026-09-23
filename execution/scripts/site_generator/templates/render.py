@@ -993,9 +993,113 @@ def _logo_visual(product: str, key: str, item: dict) -> str:
     return '<div class="brand-logo-placeholder" data-logo-state="missing">Source-backed preview unavailable · no mark fabricated</div>'
 
 
-def _logo_board(product: str, logo: dict) -> str:
+def _asset_public_url(source_asset: object) -> str | None:
+    if not isinstance(source_asset, str) or not source_asset:
+        return None
+    prefix = "execution/scripts/site_generator/assets/"
+    normalized = source_asset.replace("\\", "/")
+    if normalized.startswith(prefix):
+        return "/assets/" + normalized[len(prefix) :]
+    return local_asset_url(normalized) or public_href(normalized)
+
+
+def _concept_board(product: str, data: dict) -> str:
+    board = data.get("mark_concept_board") or {}
+    selection = data.get("concept_selection") or {}
+    directions = board.get("directions") or []
+    dims = (data.get("completeness") or {}).get("dimensions") or []
+    concept_dim = next(
+        (item for item in dims if item.get("name") == "mark_concept_selection"),
+        {"status": "missing"},
+    )
+    selected_id = selection.get("selected_concept_id")
+    selection_complete = bool(
+        selected_id and selection.get("operator_accepted_at")
+    )
+    status_label = (
+        "selected"
+        if selection_complete
+        else str(concept_dim.get("status") or "missing")
+    )
+    cards = []
+    if not directions:
+        cards.append(
+            '<article class="brand-item" data-brand-specimen="concept-empty">'
+            "<h3>[COPY: no concepts yet — author 3–5 directions]</h3>"
+            "<p>Author concept directions via the define-brand-system concept-selection stage before any mark family work.</p>"
+            "</article>"
+        )
+    for direction in directions:
+        concept_id = direction.get("concept_id") or "unknown"
+        name = direction.get("name") or concept_id
+        status = direction.get("status") or "concept"
+        selected_mark = " selected" if concept_id == selected_id else ""
+        symbol_url = _asset_public_url(direction.get("symbol_asset"))
+        favicon_url = _asset_public_url(direction.get("favicon_asset"))
+        alt = f"{product} concept {name} — not approved"
+        symbol_html = (
+            f'<img src="{_esc(symbol_url)}" alt="{_esc(alt)}" '
+            f'data-brand-specimen="concept-{_esc(concept_id)}">'
+            if symbol_url
+            else '<div class="brand-logo-placeholder">Missing concept symbol</div>'
+        )
+        favicon_html = (
+            f'<img src="{_esc(favicon_url)}" alt="{_esc(alt)} favicon" '
+            f'data-brand-specimen="concept-favicon-{_esc(concept_id)}">'
+            if favicon_url
+            else '<div class="brand-logo-placeholder">Missing concept favicon</div>'
+        )
+        checks = "".join(
+            f"<li>{_esc(item)}</li>"
+            for item in direction.get("forbidden_perception_checks") or []
+        )
+        cards.append(
+            f'<article class="brand-item{selected_mark}" data-brand-specimen="concept-{_esc(concept_id)}">'
+            f'<div class="logo-specimen concept-symbol">{symbol_html}</div>'
+            f'<div class="logo-specimen concept-favicon" aria-label="Favicon scale">'
+            f"<span class=\"small muted\">Favicon</span>{favicon_html}</div>"
+            f'<span class="brand-status brand-status-provisional">CONCEPT — not approved</span>'
+            f"<h3>{_esc(name)}</h3>"
+            f'<p class="small muted"><code>{_esc(concept_id)}</code> · {_esc(status)}</p>'
+            f"<p><strong>Idea.</strong> {_esc(direction.get('compressed_idea'))}</p>"
+            f"<p><strong>Silhouette.</strong> {_esc(direction.get('silhouette'))}</p>"
+            f"<p><strong>Form notes.</strong> {_esc(direction.get('form_notes'))}</p>"
+            f"<p><strong>Wordmark.</strong> {_esc(direction.get('wordmark_relationship'))}</p>"
+            f"<p><strong>Motion premise.</strong> {_esc(direction.get('motion_premise'))}</p>"
+            f"<p><strong>Competitive distance.</strong> {_esc(direction.get('competitive_distance'))}</p>"
+            f"<p><strong>Memorability.</strong> {_esc(direction.get('memorability'))}</p>"
+            f"<h4>Forbidden perception checks</h4><ul>{checks}</ul>"
+            "</article>"
+        )
+    return (
+        '<div class="brand-review-board" id="concept-specimens"><header>'
+        '<p class="eyebrow">Visual review · concepts</p>'
+        "<h2>[COPY: Concept directions for operator selection]</h2>"
+        "<p>[COPY: Compare 3–5 genuinely different symbol directions. None are approved marks.]</p>"
+        f'<p class="small muted">mark_concept_selection · {_esc(status_label)} · '
+        f"selected={_esc(selected_id or 'none')} · "
+        f"accepted_at={_esc(selection.get('operator_accepted_at') or 'null')}</p>"
+        "</header>"
+        f'<div class="brand-grid">{"".join(cards)}</div></div>'
+    )
+
+
+def _logo_board(product: str, logo: dict, *, selection_complete: bool = False) -> str:
+    if not selection_complete:
+        return (
+            '<div class="brand-review-board" id="logo-specimens" data-family-blocked="true">'
+            '<header><p class="eyebrow">Visual review · identity</p>'
+            "<h2>[COPY: post-selection family — blocked until selection]</h2>"
+            "<p>Mark family variants stay hidden as shippable candidates until "
+            "<code>concept_selection.selected_concept_id</code> and "
+            "<code>operator_accepted_at</code> are recorded. "
+            "Historical #1154 marks are not selectable candidates.</p></header></div>"
+        )
     cards = []
     for key, item in logo["variants"].items():
+        source = str(item.get("source_asset") or "").replace("\\", "/")
+        if "marks/historical/" in source:
+            continue
         cards.append(
             '<article class="brand-item" data-logo-variant="'
             + _esc(key)
@@ -1004,18 +1108,10 @@ def _logo_board(product: str, logo: dict) -> str:
             + _status_badge(item.get("status"))
             + f"<h3>{_esc(item.get('name') or key.replace('_', ' '))}</h3><p>{_esc(item.get('use'))}</p></article>"
         )
-    extra = ""
-    if product == "ateles":
-        extra = (
-            '<article class="brand-item" data-logo-variant="application-source">'
-            f'<div class="logo-specimen" data-logo-state="provisional">{_ateles_legacy_symbol()}<span class="app-wordmark">ateles</span></div>'
-            '<span class="brand-status brand-status-provisional">provisional</span><h3>Existing application lockup</h3>'
-            "<p>Verified existing specimen. Its central hub conflicts with the current edge-free swarm direction, so it is evidence—not the approved public symbol.</p></article>"
-        )
     return (
         '<div class="brand-review-board" id="logo-specimens"><header><p class="eyebrow">Visual review · identity</p>'
         "<h2>Existing marks, with absence made visible.</h2><p>Only verified existing marks render. Required variants without an asset remain unmistakably missing.</p></header>"
-        f'<div class="brand-grid">{"".join(cards)}{extra}</div></div>'
+        f'<div class="brand-grid">{"".join(cards)}</div></div>'
     )
 
 
@@ -1243,11 +1339,16 @@ def _render_brand_system(product: str, data: dict) -> str:
             for item in data.get("downstream_contracts") or []
         ]
     )
+    selection = data.get("concept_selection") or {}
+    selection_complete = bool(
+        selection.get("selected_concept_id") and selection.get("operator_accepted_at")
+    )
     visual_review_contents = "".join(
         (
+            _concept_board(product, data),
             _typography_board(typography),
             _palette_board(styles),
-            _logo_board(product, logo),
+            _logo_board(product, logo, selection_complete=selection_complete),
             _material_board(product, territory),
             _cinematic_board(product, production, data.get("asset_inventory") or []),
             _voice_board(product, positioning),

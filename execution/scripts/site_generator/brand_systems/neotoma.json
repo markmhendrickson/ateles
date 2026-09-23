@@ -2,7 +2,9 @@
   "_observation_ids": {
     "asset_inventory": "f2284285-de83-5e06-dba8-614a6671f842",
     "completeness": "f0e1e060-3153-f2d8-6982-191fa0a92935",
+    "concept_selection": "local:ateles#1157",
     "downstream_contracts": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
+    "mark_concept_board": "local:ateles#1157",
     "name": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
     "ownership": "915b31d0-fb4a-1ab4-250b-e8ae484f9552",
     "phrases": "ec5f1518-97a5-8f7e-29c8-b3da4b90619d",
@@ -78,6 +80,51 @@
       "source": "ent_9444da0c7dea895c182fe098",
       "status": "missing",
       "use": "Primary cinematic takeover showing the persistent graph plus create, retrieve, and update operations"
+    },
+    {
+      "kind": "mark",
+      "name": "Historical mark \u00b7 favicon",
+      "preview": null,
+      "public_path": null,
+      "repository": "execution/scripts/site_generator/assets/neotoma/marks/historical/favicon.svg",
+      "status": "retired",
+      "use": "Rejected #1154 provisional evidence only \u2014 not a concept or family candidate."
+    },
+    {
+      "kind": "mark",
+      "name": "Historical mark \u00b7 letter-box",
+      "preview": null,
+      "public_path": null,
+      "repository": "execution/scripts/site_generator/assets/neotoma/marks/historical/letter-box.svg",
+      "status": "retired",
+      "use": "Rejected #1154 provisional evidence only \u2014 not a concept or family candidate."
+    },
+    {
+      "kind": "mark",
+      "name": "Historical mark \u00b7 primary",
+      "preview": null,
+      "public_path": null,
+      "repository": "execution/scripts/site_generator/assets/neotoma/marks/historical/primary.svg",
+      "status": "retired",
+      "use": "Rejected #1154 provisional evidence only \u2014 not a concept or family candidate."
+    },
+    {
+      "kind": "mark",
+      "name": "Historical mark \u00b7 symbol",
+      "preview": null,
+      "public_path": null,
+      "repository": "execution/scripts/site_generator/assets/neotoma/marks/historical/symbol.svg",
+      "status": "retired",
+      "use": "Rejected #1154 provisional evidence only \u2014 not a concept or family candidate."
+    },
+    {
+      "kind": "mark",
+      "name": "Historical mark \u00b7 wordmark",
+      "preview": null,
+      "public_path": null,
+      "repository": "execution/scripts/site_generator/assets/neotoma/marks/historical/wordmark.svg",
+      "status": "retired",
+      "use": "Rejected #1154 provisional evidence only \u2014 not a concept or family candidate."
     }
   ],
   "completeness": {
@@ -149,6 +196,12 @@
       {
         "name": "aesthetic_territory",
         "status": "provisional"
+      },
+      {
+        "guidance": "Operator must select one concept_id and record operator_accepted_at before any logo family advances.",
+        "name": "mark_concept_selection",
+        "source": "ateles#1157 concept-selection stage",
+        "status": "missing"
       }
     ],
     "missing_items": [
@@ -158,9 +211,16 @@
       "Approved symbol-only, lockup, horizontal, stacked, favicon and co-branding Neotoma assets",
       "Final type weight/style inventory and owner-approved research cadence",
       "Operator approval or revision of the complete provisional brand system and its original aesthetic territory",
-      "Final contradiction audit against the section copy-to-visual production matrix"
+      "Final contradiction audit against the section copy-to-visual production matrix",
+      "Operator concept selection (selected_concept_id + operator_accepted_at) before mark family advance"
     ],
     "overall_status": "provisional"
+  },
+  "concept_selection": {
+    "blocking_family_until_selection": true,
+    "operator_accepted_at": null,
+    "operator_actor": null,
+    "selected_concept_id": null
   },
   "downstream_contracts": [
     {
@@ -194,6 +254,94 @@
       "status": "provisional"
     }
   ],
+  "mark_concept_board": {
+    "directions": [
+      {
+        "competitive_distance": "Distance from database drum icons and Notion page stacks; strata encode provenance.",
+        "compressed_idea": "Prior versions remain as underlying filled strata beneath the current record plane.",
+        "concept_id": "neotoma-layered-ledger",
+        "favicon_asset": "execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-layered-ledger/favicon.svg",
+        "forbidden_perception_checks": [
+          "Memory chatbot",
+          "Retrieval cache",
+          "Agent directory",
+          "Database dashboard",
+          "Destructive overwrite"
+        ],
+        "form_notes": "Insets create depth without 3D perspective tricks; corners share one radius family.",
+        "memorability": "Visible underlayers make prior state ownable as form.",
+        "motion_premise": "A new stratum slides under \u2014 static stack already shows history.",
+        "name": "Layered Ledger",
+        "silhouette": "Three stacked rounded slabs with progressive inset \u2014 a ledger of states, not a database cylinder.",
+        "status": "concept",
+        "symbol_asset": "execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-layered-ledger/symbol.svg",
+        "wordmark_relationship": "Slabs left of wordmark; top slab aligns to cap height."
+      },
+      {
+        "competitive_distance": "Unlike brain/neural logos and mind-map kits; limited stubs keep it a record graph.",
+        "compressed_idea": "A vertical spine of filled nodes holds branching relationship stubs without becoming a neural mesh.",
+        "concept_id": "neotoma-provenance-spine",
+        "favicon_asset": "execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-provenance-spine/favicon.svg",
+        "forbidden_perception_checks": [
+          "Memory chatbot",
+          "Retrieval cache",
+          "Agent directory",
+          "Database dashboard",
+          "Destructive overwrite"
+        ],
+        "form_notes": "Stubs terminate bluntly; no crossing edges; spine weight dominates.",
+        "memorability": "Few deliberate joints beat dense webs for recognition at favicon scale.",
+        "motion_premise": "A stub grows then settles \u2014 static shows durable joints.",
+        "name": "Provenance Spine",
+        "silhouette": "Central column of three discs with short filled stubs left and right \u2014 graph spine, not synapse web.",
+        "status": "concept",
+        "symbol_asset": "execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-provenance-spine/symbol.svg",
+        "wordmark_relationship": "Spine left; stubs never invade wordmark clear space."
+      },
+      {
+        "competitive_distance": "Not a cloud with satellites; not disconnected cards; anchors assert source permanence.",
+        "compressed_idea": "Records stay tethered to source anchors \u2014 filled wedges that never float free.",
+        "concept_id": "neotoma-source-anchors",
+        "favicon_asset": "execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-source-anchors/favicon.svg",
+        "forbidden_perception_checks": [
+          "Memory chatbot",
+          "Retrieval cache",
+          "Agent directory",
+          "Database dashboard",
+          "Destructive overwrite"
+        ],
+        "form_notes": "Bridges are thick enough to read as filled mass at 16px; avoid hairline strokes.",
+        "memorability": "Corner anchors + bridges are the distinctive silhouette.",
+        "motion_premise": "Anchors hold while center updates \u2014 static already shows tethering.",
+        "name": "Source Anchors",
+        "silhouette": "One large rounded square with three smaller filled anchors at corners connected by short filled bridges.",
+        "status": "concept",
+        "symbol_asset": "execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-source-anchors/symbol.svg",
+        "wordmark_relationship": "Cluster left; square mass balances the capital N."
+      },
+      {
+        "competitive_distance": "Not a stamp, eraser, or overwrite X; wedge encodes correction as preserved structure.",
+        "compressed_idea": "Correction is an additive wedge on a durable disc \u2014 disagreement stays in the graph.",
+        "concept_id": "neotoma-correction-wedge",
+        "favicon_asset": "execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-correction-wedge/favicon.svg",
+        "forbidden_perception_checks": [
+          "Memory chatbot",
+          "Retrieval cache",
+          "Agent directory",
+          "Database dashboard",
+          "Destructive overwrite"
+        ],
+        "form_notes": "Wedge separated by a thin crescent of negative space so it reads as an event, not a pac-man clich\u00e9.",
+        "memorability": "Pac-adjacent risk mitigated by gap + second mass; still unique among record products.",
+        "motion_premise": "Wedge appears then rests \u2014 static shows additive correction.",
+        "name": "Correction Wedge",
+        "silhouette": "Large filled disc with a distinct wedge bite filled darker as a second mass (same color, separated by gap).",
+        "status": "concept",
+        "symbol_asset": "execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-correction-wedge/symbol.svg",
+        "wordmark_relationship": "Disc+wedge unit left of wordmark; wedge points outward away from type."
+      }
+    ]
+  },
   "name": "Neotoma canonical brand system",
   "ownership": {
     "approval_role": "Product owner for category and brand promise; designated design review for visual execution",
@@ -918,7 +1066,7 @@
       "status": "retired"
     }
   ],
-  "updated_at": "2026-09-22",
+  "updated_at": "2026-09-23T01:00:00Z",
   "visibility": "private_source",
   "visual_concepts": [
     {
@@ -1056,7 +1204,7 @@
           "name": "Application mark",
           "source_asset": null,
           "source_format": null,
-          "status": "provisional",
+          "status": "missing",
           "use": "Align Inspector/application marks with persistent-graph semantics."
         },
         "favicon": {
@@ -1100,13 +1248,11 @@
             "light neutral",
             "dark neutral"
           ],
-          "export_formats": [
-            "SVG"
-          ],
+          "export_formats": [],
           "name": "Neotoma typographic mark",
-          "source_asset": "inspector/src/assets/neotoma_wordmark.svg",
+          "source_asset": null,
           "source_format": "SVG",
-          "status": "approved",
+          "status": "missing",
           "use": "Primary compact identity."
         },
         "reversed": {
@@ -1124,7 +1270,7 @@
           "name": "Small-scale variant",
           "source_asset": null,
           "source_format": null,
-          "status": "provisional",
+          "status": "missing",
           "use": "Requires tested legibility threshold."
         },
         "stacked": {
@@ -1150,13 +1296,11 @@
             "light neutral",
             "dark neutral"
           ],
-          "export_formats": [
-            "SVG"
-          ],
+          "export_formats": [],
           "name": "Neotoma wordmark",
-          "source_asset": "inspector/src/assets/neotoma_wordmark.svg",
+          "source_asset": null,
           "source_format": "SVG",
-          "status": "approved",
+          "status": "missing",
           "use": "Named identity."
         }
       }
