@@ -56,6 +56,7 @@ def main() -> int:
 
     _emit_hook_wiring_notice()
     _emit_skill_drift_notice()
+    _emit_operator_rules()
     return 0
 
 
@@ -104,6 +105,10 @@ def _emit_skill_drift_notice() -> None:
         )
     except Exception:
         return  # fail open: never let skill-sync delay or break session start
+    for line in proc.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("skill_rule_missing "):
+            print(stripped)
     if proc.returncode == 0:
         return
     rows = [r for r in proc.stdout.splitlines() if r.startswith(("MISSING", "DRIFTED"))]
@@ -126,6 +131,34 @@ def _emit_skill_drift_notice() -> None:
         "session). Review before applying — an on-disk body may intentionally "
         "lead Neotoma."
     )
+
+
+def _emit_operator_rules() -> None:
+    """Print rules 1, 2, and 6, or the unbound line. Never raises.
+
+    Silent stdout would leave the rules unbound. Import or call failure is
+    the unbound line, and the process still exits 0.
+    """
+    repo_root = str(Path(__file__).resolve().parents[2])
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    try:
+        from lib.daemon_runtime.agent_loader import (  # noqa: PLC0415
+            resolve_operator_rules,
+            unbound_operator_rules,
+        )
+    except Exception:
+        print(
+            "[rules-unbound] missing=1,2,6 hint=resolve the related entity on "
+            "the agent; do not paste rule text into prompt_markdown or "
+            "CLAUDE.md — docs/operator_rules.md"
+        )
+        return
+    try:
+        rules = resolve_operator_rules()
+    except Exception:
+        rules = unbound_operator_rules()
+    print(rules.block)
 
 
 if __name__ == "__main__":

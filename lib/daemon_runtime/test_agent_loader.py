@@ -257,3 +257,282 @@ def test_no_matching_definition_is_also_a_stub(monkeypatch):
     d = al.AgentLoader("apis").load()
     assert d.is_stub is True
     assert "no agent_definition" in d.load_error
+
+
+RULE_1 = (
+    "Pose every open decision through the harness questions tool "
+    "(`AskUserQuestion`): one call, N labeled options, each with what it "
+    "implies, what is settled, and a recommendation. Zero open decisions: "
+    "no call and no trailer. If the tool is unavailable, print "
+    "`[decisions-unposed]` and each question's text; do not use a numbered "
+    "list. An unanswered item is restated in full next turn; the word "
+    "unchanged is not a carrier. An answered item is dropped."
+)
+RULE_2 = (
+    "Give a full URL for every pull request that needs the operator's "
+    "approval, in the turn that needs the approval."
+)
+RULE_6 = (
+    "Dispatch a subagent on every pulled email. Zero messages pulled: say "
+    "zero pulled. A failed pull: say the pull failed, not that zero were "
+    "pulled. A pull that succeeded whose dispatch failed: name the message "
+    "and say that no subagent ran."
+)
+UNBOUND_LINE = (
+    "[rules-unbound] missing=1,2,6 hint=resolve the related entity on the "
+    "agent; do not paste rule text into prompt_markdown or CLAUDE.md — "
+    "docs/operator_rules.md"
+)
+INCOMPLETE_2 = (
+    "[rules-incomplete] missing=2 hint=resolve the related entity on the "
+    "agent; do not paste rule text into prompt_markdown or CLAUDE.md — "
+    "docs/operator_rules.md"
+)
+
+
+def _rule_row(number: int, text: str, **overrides) -> dict:
+    fields = {
+        "entity_type": "standing_rule",
+        "title": f"{number}. rule",
+        "rule_text": text,
+        "scope": "ateles",
+        "enabled": True,
+    }
+    fields.update(overrides)
+    return {"entity_type": fields["entity_type"], "snapshot": fields}
+
+
+def _related(agent_id: str, rules: list[tuple[str, dict]], *, incoming=None) -> dict:
+    outgoing = []
+    related = {}
+    for target_id, row in rules:
+        outgoing.append({
+            "relationship_type": "REFERS_TO",
+            "source_entity_id": agent_id,
+            "target_entity_id": target_id,
+        })
+        related[target_id] = row
+    payload = {"outgoing": outgoing, "related_entities": related, "incoming": incoming or []}
+    return payload
+
+
+def _query(prompt: str = "You are ateles.", entity_id: str = "ent_ateles") -> dict:
+    return {
+        "entities": [
+            {
+                "entity_id": entity_id,
+                "snapshot": {"snapshot": {"name": "ateles", "prompt_markdown": prompt}},
+            }
+        ]
+    }
+
+
+class TestResolveOperatorRules:
+    def _patch(self, monkeypatch, query, related=None, *, get_error=None):
+        _no_signing(monkeypatch)
+        calls = {"post": [], "get": [], "stub": 0}
+
+        def post(url, **kwargs):
+            calls["post"].append((url, kwargs.get("json") or kwargs.get("body")))
+            return _Resp(query)
+
+        def get(url, **kwargs):
+            calls["get"].append((url, kwargs))
+            if get_error is not None:
+                raise get_error
+            return _Resp(related or {"outgoing": [], "related_entities": {}})
+
+        def stub(self, reason="unknown"):
+            calls["stub"] += 1
+            raise AssertionError(f"_stub must not run ({reason})")
+
+        monkeypatch.setattr(al.httpx, "post", post)
+        monkeypatch.setattr(al.httpx, "get", get)
+        monkeypatch.setattr(al.AgentLoader, "_stub", stub)
+        return calls
+
+    def test_bound_from_edges_ignores_prompt_markdown(self, monkeypatch):
+        agent_id = "ent_ateles"
+        related = _related(agent_id, [
+            ("ent_6", _rule_row(6, RULE_6)),
+            ("ent_1", _rule_row(1, RULE_1)),
+            ("ent_2", _rule_row(2, RULE_2)),
+            ("ent_7", _rule_row(7, "Maintain a live session workboard.")),
+        ])
+        calls = self._patch(
+            monkeypatch,
+            _query("You are ateles."),
+            related,
+        )
+        result = al.resolve_operator_rules()
+        assert result.status == "bound"
+        assert result.missing == []
+        assert result.block.index(RULE_1) < result.block.index(RULE_2) < result.block.index(RULE_6)
+        assert "[rules-unbound]" not in result.block
+        assert "[rules-incomplete]" not in result.block
+        assert "rules bound" not in result.block
+        assert "Maintain a live session workboard." not in result.block
+        assert getattr(result, "is_stub", False) is False
+        assert calls["stub"] == 0
+        assert calls["post"][0][0].endswith("/entities/query")
+        assert "/related" in calls["get"][0][0]
+        assert "/entities/" in calls["get"][0][0]
+        assert "retrieve_related" not in calls["get"][0][0]
+        assert calls["get"][0][1]["timeout"] == 10
+
+    def test_no_edges_is_unbound(self, monkeypatch):
+        self._patch(monkeypatch, _query(RULE_1 + RULE_2 + RULE_6), {"outgoing": [], "related_entities": {}})
+        result = al.resolve_operator_rules()
+        assert result.status == "unbound"
+        assert result.missing == [1, 2, 6]
+        assert result.block == UNBOUND_LINE
+
+    def test_prompt_markdown_cannot_bind(self, monkeypatch):
+        self._patch(
+            monkeypatch,
+            _query(f"{RULE_1}\n{RULE_2}\n{RULE_6}"),
+            {"outgoing": [], "related_entities": {}},
+        )
+        result = al.resolve_operator_rules()
+        assert result.status == "unbound"
+        assert RULE_1 not in result.block
+
+    def test_empty_rule_text_is_incomplete_not_unbound(self, monkeypatch):
+        agent_id = "ent_ateles"
+        related = _related(agent_id, [
+            ("ent_1", _rule_row(1, RULE_1)),
+            ("ent_2", _rule_row(2, "   ")),
+            ("ent_6", _rule_row(6, RULE_6)),
+        ])
+        self._patch(monkeypatch, _query(), related)
+        result = al.resolve_operator_rules()
+        assert result.status == "incomplete"
+        assert result.missing == [2]
+        assert result.block == INCOMPLETE_2
+        assert RULE_1 not in result.block
+        assert RULE_6 not in result.block
+
+    def test_get_error_is_unbound_not_stub(self, monkeypatch):
+        self._patch(monkeypatch, _query(), get_error=httpx.ConnectError("down"))
+        result = al.resolve_operator_rules()
+        assert result.status == "unbound"
+        assert result.missing == [1, 2, 6]
+        assert getattr(result, "is_stub", False) is False
+
+    def test_post_error_is_unbound(self, monkeypatch):
+        _no_signing(monkeypatch)
+
+        def boom(url, **kwargs):
+            raise httpx.ConnectError("down")
+
+        monkeypatch.setattr(al.httpx, "post", boom)
+        monkeypatch.setattr(al.AgentLoader, "_stub", lambda *a, **k: (_ for _ in ()).throw(AssertionError("stub")))
+        result = al.resolve_operator_rules()
+        assert result.status == "unbound"
+        assert result.block == UNBOUND_LINE
+
+    def test_only_two_rules_is_incomplete(self, monkeypatch):
+        agent_id = "ent_ateles"
+        related = _related(agent_id, [
+            ("ent_6", _rule_row(6, RULE_6)),
+            ("ent_1", _rule_row(1, RULE_1)),
+        ])
+        self._patch(monkeypatch, _query(), related)
+        result = al.resolve_operator_rules()
+        assert result.status == "incomplete"
+        assert result.missing == [2]
+        assert "missing=2" in result.block
+
+    def test_missing_numbers_are_ascending(self, monkeypatch):
+        agent_id = "ent_ateles"
+        related = _related(agent_id, [("ent_2", _rule_row(2, RULE_2))])
+        self._patch(monkeypatch, _query(), related)
+        result = al.resolve_operator_rules()
+        assert result.status == "incomplete"
+        assert "missing=1,6" in result.block
+        assert "missing=6,1" not in result.block
+
+    def test_filters_drop_all_three_is_unbound(self, monkeypatch):
+        agent_id = "ent_ateles"
+        related = _related(agent_id, [
+            ("a", _rule_row(1, RULE_1, enabled=False)),
+            ("b", _rule_row(2, RULE_2, scope="other")),
+            ("c", _rule_row(6, RULE_6, title="six without prefix")),
+            ("d", {"entity_type": "note", "snapshot": {"title": "1. x", "rule_text": RULE_1, "scope": "ateles"}}),
+        ])
+        # Incoming edge must not count: agent is the target.
+        related["outgoing"].append({
+            "relationship_type": "REFERS_TO",
+            "source_entity_id": "ent_other",
+            "target_entity_id": "ent_in",
+        })
+        related["related_entities"]["ent_in"] = _rule_row(1, RULE_1)
+        related["outgoing"].append({
+            "relationship_type": "RELATES_TO",
+            "source_entity_id": agent_id,
+            "target_entity_id": "ent_wrong_edge",
+        })
+        related["related_entities"]["ent_wrong_edge"] = _rule_row(2, RULE_2)
+        self._patch(monkeypatch, _query(), related)
+        result = al.resolve_operator_rules()
+        assert result.status == "unbound"
+        assert result.missing == [1, 2, 6]
+
+    def test_enabled_absent_counts_as_enabled(self, monkeypatch):
+        agent_id = "ent_ateles"
+        row1 = _rule_row(1, RULE_1)
+        del row1["snapshot"]["enabled"]
+        related = _related(agent_id, [
+            ("ent_1", row1),
+            ("ent_2", _rule_row(2, RULE_2)),
+            ("ent_6", _rule_row(6, RULE_6)),
+        ])
+        self._patch(monkeypatch, _query(), related)
+        assert al.resolve_operator_rules().status == "bound"
+
+    def test_one_of_two_rule_2_texts_binds(self, monkeypatch):
+        agent_id = "ent_ateles"
+        related = _related(agent_id, [
+            ("ent_1", _rule_row(1, RULE_1)),
+            ("ent_2a", _rule_row(2, "")),
+            ("ent_2b", _rule_row(2, RULE_2)),
+            ("ent_6", _rule_row(6, RULE_6)),
+        ])
+        self._patch(monkeypatch, _query(), related)
+        assert al.resolve_operator_rules().status == "bound"
+
+    def test_both_rule_2_empty_is_incomplete(self, monkeypatch):
+        agent_id = "ent_ateles"
+        related = _related(agent_id, [
+            ("ent_1", _rule_row(1, RULE_1)),
+            ("ent_2a", _rule_row(2, "")),
+            ("ent_2b", _rule_row(2, "  ")),
+            ("ent_6", _rule_row(6, RULE_6)),
+        ])
+        self._patch(monkeypatch, _query(), related)
+        result = al.resolve_operator_rules()
+        assert result.status == "incomplete"
+        assert result.missing == [2]
+
+    def test_related_404_falls_back_to_relationships(self, monkeypatch):
+        _no_signing(monkeypatch)
+        seen = []
+
+        def post(url, **kwargs):
+            return _Resp(_query())
+
+        def get(url, **kwargs):
+            seen.append(url)
+            if url.endswith("/related?expand_entities=true") or "/related?" in url:
+                return _Resp({}, status=404)
+            return _Resp(_related("ent_ateles", [
+                ("ent_1", _rule_row(1, RULE_1)),
+                ("ent_2", _rule_row(2, RULE_2)),
+                ("ent_6", _rule_row(6, RULE_6)),
+            ]))
+
+        monkeypatch.setattr(al.httpx, "post", post)
+        monkeypatch.setattr(al.httpx, "get", get)
+        result = al.resolve_operator_rules()
+        assert result.status == "bound"
+        assert any("/relationships" in url for url in seen)

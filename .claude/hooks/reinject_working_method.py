@@ -35,6 +35,7 @@ its own failure mode; keep this to what compaction actually eats.
 Fail-open: stdlib only, any error exits 0. Never block a session resume.
 """
 import sys
+from pathlib import Path
 
 REMINDER = """\
 [working-method] Context was just compacted. Standing instructions from the \
@@ -67,6 +68,19 @@ are in CLAUDE.md, which Claude Code re-injects from disk on its own."""
 
 def main() -> int:
     print(REMINDER)
+    try:
+        hooks = str(Path(__file__).resolve().parent)
+        if hooks not in sys.path:
+            sys.path.insert(0, hooks)
+        from session_start import _emit_operator_rules  # noqa: PLC0415
+
+        _emit_operator_rules()
+    except Exception:
+        print(
+            "[rules-unbound] missing=1,2,6 hint=resolve the related entity on "
+            "the agent; do not paste rule text into prompt_markdown or "
+            "CLAUDE.md — docs/operator_rules.md"
+        )
     return 0
 
 

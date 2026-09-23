@@ -35,6 +35,7 @@ operational_entity_types:
 canonical_context_entities:
   - operator_profile
   - swarm_roster
+  - deployment_configuration
   - channel_config
 ---
 
