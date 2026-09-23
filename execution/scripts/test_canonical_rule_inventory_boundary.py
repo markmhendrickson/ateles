@@ -46,6 +46,16 @@ LOCAL_REPRODUCTION_GUIDANCE = (
     '# python3 execution/scripts/package_rule_inventory_inputs.py --validate "$INPUTS_DIR"',
     '# python3 execution/scripts/run_canonical_rule_inventory_gate.py "$INPUTS_DIR"',
 )
+CANONICAL_GUIDANCE_HEADER = "\n".join(
+    (
+        "name: canonical rule inventory",
+        "",
+        TRUST_BOUNDARY_GUIDANCE,
+        *EXIT_CLASS_GUIDANCE,
+        STAGE_ZERO_GUIDANCE,
+        *LOCAL_REPRODUCTION_GUIDANCE,
+    )
+)
 
 
 def parse_workflow(workflow: str) -> tuple[dict[str, object], dict[str, dict]]:
@@ -410,15 +420,8 @@ def verify_candidate_artifact_transfer(workflow: str) -> None:
 
 
 def verify_workflow_guidance(workflow: str) -> None:
-    header = workflow.split("\non:", 1)[0]
-    comments = [line for line in header.splitlines() if line.startswith("#")]
-    expected = [
-        TRUST_BOUNDARY_GUIDANCE,
-        *EXIT_CLASS_GUIDANCE,
-        STAGE_ZERO_GUIDANCE,
-        *LOCAL_REPRODUCTION_GUIDANCE,
-    ]
-    if comments != expected:
+    header, separator, _ = workflow.partition("\non:")
+    if not separator or header != CANONICAL_GUIDANCE_HEADER:
         raise AssertionError(
             "workflow guidance is incomplete, contradictory, or reordered"
         )
@@ -675,6 +678,34 @@ class WorkflowBoundaryTest(unittest.TestCase):
         )
         self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
         self.assertNotIn(STAGE_ZERO_GUIDANCE, mutant.splitlines())
+        with self.assertRaisesRegex(AssertionError, "guidance"):
+            verify_workflow_guidance(mutant)
+
+    def test_indented_boundary_mapping_contradiction_is_rejected(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutant = workflow.replace(
+            "on:\n",
+            "  # boundary_rejected -> 0 -> rule inventory matches the complete "
+            "canonical measurement\n"
+            "on:\n",
+            1,
+        )
+        self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
+        yaml.safe_load(mutant)
+        with self.assertRaisesRegex(AssertionError, "guidance"):
+            verify_workflow_guidance(mutant)
+
+    def test_indented_stage_zero_contradiction_is_rejected(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutant = workflow.replace(
+            "on:\n",
+            "  # Local reproduce may generate the Stage-0 "
+            "docs/foundation/rule_inventory.md input\n"
+            "on:\n",
+            1,
+        )
+        self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
+        yaml.safe_load(mutant)
         with self.assertRaisesRegex(AssertionError, "guidance"):
             verify_workflow_guidance(mutant)
 
