@@ -406,76 +406,164 @@ def test_predict_unknown_fields_empty_when_all_fields_declared():
     assert result == []
 
 
-def test_unknown_fields_cli_flag_defaults_to_stop():
+SCRIPT_PATH = str(Path(__file__).resolve().parent / "neotoma_local_fork_replay.py")
+
+
+def _run_cli(args_list, env=None, timeout=10):
+    import os as _os
     import subprocess
     import sys as _sys
 
-    script = str(Path(__file__).resolve().parent / "neotoma_local_fork_replay.py")
+    if env is None:
+        env = dict(_os.environ)
+        # A fake but present base_url/token so dry-run paths (which still
+        # call get_base_url()/get_token() before doing any real work) don't
+        # fail on missing env for tests that aren't exercising that check
+        # specifically. No real HTTP call is made in these tests.
+        env.setdefault("NEOTOMA_BASE_URL", "https://hosted.example.invalid")
+        env.setdefault("NEOTOMA_BEARER_TOKEN", "test-token")
+    return subprocess.run(
+        [_sys.executable, SCRIPT_PATH, *args_list],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+    )
+
+
+def test_unknown_fields_cli_flag_defaults_to_stop():
     # --help exits 0 and prints argparse's own rendering of the flag; assert
     # the default is documented as 'stop' and both choices are offered,
     # without needing a live DB or hosted credentials.
-    result = subprocess.run(
-        [_sys.executable, script, "--help"],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    result = _run_cli(["replay", "--help"])
     assert result.returncode == 0
     assert "--unknown-fields" in result.stdout
     assert "{stop,warn}" in result.stdout or "stop,warn" in result.stdout
 
 
 def test_extend_schemas_and_reconcile_file_flags_present_in_help():
-    import subprocess
-    import sys as _sys
+    replay_result = _run_cli(["replay", "--help"])
+    assert replay_result.returncode == 0
+    assert "--extend-schemas" in replay_result.stdout
 
-    script = str(Path(__file__).resolve().parent / "neotoma_local_fork_replay.py")
-    result = subprocess.run(
-        [_sys.executable, script, "--help"], capture_output=True, text=True, timeout=10
-    )
-    assert result.returncode == 0
-    assert "--extend-schemas" in result.stdout
-    assert "--reconcile-file" in result.stdout
+    reconcile_result = _run_cli(["reconcile", "--help"])
+    assert reconcile_result.returncode == 0
+    assert "--reconcile-file" in reconcile_result.stdout
 
 
 def test_apply_without_confirm_env_refuses_before_touching_hosted():
     """The double guard: --apply alone must refuse, even with no --db given --
     it must fail closed before reaching any hosted call or the --db check."""
     import os as _os
-    import subprocess
-    import sys as _sys
 
-    script = str(Path(__file__).resolve().parent / "neotoma_local_fork_replay.py")
     env = dict(_os.environ)
+    env.pop("NEOTOMA_REPLAY_CONFIRM_APPLY", None)
     env.pop("MIGRATE_CONFIRM_APPLY", None)
-    result = subprocess.run(
-        [_sys.executable, script, "--apply"],
-        capture_output=True,
-        text=True,
-        timeout=10,
+    result = _run_cli(
+        ["replay", "--db", "/tmp/does-not-exist.db", "--cutover", "2026-01-01T00:00:00Z", "--apply"],
         env=env,
     )
     assert result.returncode == 1
-    assert "MIGRATE_CONFIRM_APPLY=yes" in result.stderr
+    assert "code=E_CONFIRMATION_REQUIRED" in result.stderr
+    assert "NEOTOMA_REPLAY_CONFIRM_APPLY=yes" in result.stderr
 
 
 def test_apply_with_wrong_confirm_value_still_refuses():
     import os as _os
-    import subprocess
-    import sys as _sys
 
-    script = str(Path(__file__).resolve().parent / "neotoma_local_fork_replay.py")
     env = dict(_os.environ)
-    env["MIGRATE_CONFIRM_APPLY"] = "true"  # anything other than the literal "yes"
-    result = subprocess.run(
-        [_sys.executable, script, "--apply"],
-        capture_output=True,
-        text=True,
-        timeout=10,
+    env.pop("MIGRATE_CONFIRM_APPLY", None)
+    env["NEOTOMA_REPLAY_CONFIRM_APPLY"] = "true"  # anything other than the literal "yes"
+    result = _run_cli(
+        ["replay", "--db", "/tmp/does-not-exist.db", "--cutover", "2026-01-01T00:00:00Z", "--apply"],
         env=env,
     )
     assert result.returncode == 1
-    assert "MIGRATE_CONFIRM_APPLY=yes" in result.stderr
+    assert "code=E_CONFIRMATION_REQUIRED" in result.stderr
+    assert "NEOTOMA_REPLAY_CONFIRM_APPLY=yes" in result.stderr
+
+
+def test_apply_with_deprecated_migrate_confirm_apply_still_works_with_warning():
+    """MIGRATE_CONFIRM_APPLY is kept as a deprecated fallback (only honored
+    when NEOTOMA_REPLAY_CONFIRM_APPLY is absent) -- confirms it still passes
+    the double-guard and prints a deprecation warning rather than silently
+    dropping an in-flight invocation."""
+    import os as _os
+
+    env = dict(_os.environ)
+    env.pop("NEOTOMA_REPLAY_CONFIRM_APPLY", None)
+    env["MIGRATE_CONFIRM_APPLY"] = "yes"
+    env["NEOTOMA_BASE_URL"] = "https://example.invalid"
+    env["NEOTOMA_BEARER_TOKEN"] = "test-token"
+    result = _run_cli(
+        ["replay", "--db", "/tmp/does-not-exist-for-deprecated-alias-test.db",
+         "--cutover", "2026-01-01T00:00:00Z", "--apply"],
+        env=env,
+    )
+    # Passes the confirm gate (no E_CONFIRMATION_REQUIRED) and prints the
+    # deprecation warning; it then fails downstream opening the nonexistent
+    # DB, which is expected and out of scope for this assertion.
+    assert "code=E_CONFIRMATION_REQUIRED" not in result.stderr
+    assert "MIGRATE_CONFIRM_APPLY is deprecated" in result.stderr
+
+
+def test_zero_references_to_deprecated_confirm_var_remain_as_the_primary_name():
+    """The deprecated alias is kept ONLY as a fallback -- help text and the
+    apply-hint/documentation strings must reference NEOTOMA_REPLAY_CONFIRM_APPLY,
+    never MIGRATE_CONFIRM_APPLY, as the name to use."""
+    result = _run_cli(["--help"])
+    assert "MIGRATE_CONFIRM_APPLY" not in result.stdout
+    assert "NEOTOMA_REPLAY_CONFIRM_APPLY" in result.stdout
+
+
+def test_cli_apply_and_dry_run_conflict_any_mode():
+    for mode, extra in (
+        ("replay", ["--db", "/tmp/x.db"]),
+        ("reconcile", ["--db", "/tmp/x.db", "--reconcile-file", "/tmp/r.json"]),
+        ("restore-gates", ["--db", "/tmp/x.db"]),
+    ):
+        result = _run_cli(
+            [mode, *extra, "--cutover", "2026-01-01T00:00:00Z", "--apply", "--dry-run"]
+        )
+        assert result.returncode == 1, mode
+        assert "code=E_ARGUMENT_CONFLICT" in result.stderr, mode
+        assert "writes_occurred=no" in result.stderr, mode
+
+
+def test_cli_no_subcommand_is_argument_conflict():
+    result = _run_cli([])
+    assert result.returncode == 1
+    assert "code=E_ARGUMENT_CONFLICT" in result.stderr
+
+
+def test_cli_restore_gates_requires_explicit_db():
+    result = _run_cli(["restore-gates", "--cutover", "2026-01-01T00:00:00Z"])
+    assert result.returncode != 0
+    assert "--db" in result.stderr
+
+    help_result = _run_cli(["restore-gates", "--help"])
+    assert "~/data/neotoma" not in help_result.stdout
+
+
+def test_cli_replay_requires_explicit_db():
+    result = _run_cli(["replay", "--cutover", "2026-01-01T00:00:00Z"])
+    assert result.returncode != 0
+    assert "--db" in result.stderr
+
+
+def test_cli_omitting_both_apply_flags_is_dry_run_no_confirm_env_required():
+    import os as _os
+
+    env = dict(_os.environ)
+    env.pop("NEOTOMA_REPLAY_CONFIRM_APPLY", None)
+    env.pop("MIGRATE_CONFIRM_APPLY", None)
+    result = _run_cli(
+        ["replay", "--db", "/tmp/does-not-exist.db", "--cutover", "2026-01-01T00:00:00Z"],
+        env=env,
+    )
+    # Fails downstream (no such DB), but NOT on the confirm gate -- proves
+    # dry-run never checks the confirm env at all.
+    assert "code=E_CONFIRMATION_REQUIRED" not in result.stderr
 
 
 # --- infer_field_type / plan_schema_extensions ------------------------------
@@ -2109,3 +2197,101 @@ def test_canonical_identity_lookup_raises_on_502_never_falls_through_to_none(mon
         _mod.canonical_identity_lookup(
             "issue", "markmhendrickson/ateles", 1172, "https://hosted.example", "tok"
         )
+
+
+# --- CLI end-to-end: NO_CHANGES / apply-hint reproduction -------------------
+
+
+def _make_empty_fork_db(tmp_path):
+    """A real, on-disk local-fork DB with the full three-table shape
+    load_candidates() reads (observations, relationship_observations,
+    sources), but zero rows -- for a genuine CLI-level NO_CHANGES run with
+    no mocking of load_candidates itself."""
+    import sqlite3 as _sqlite3
+
+    db_path = tmp_path / "empty_fork.db"
+    conn = _sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE observations (id TEXT, entity_id TEXT, entity_type TEXT, "
+        "schema_version TEXT, source_id TEXT, interpretation_id TEXT, observed_at TEXT, "
+        "specificity_score REAL, source_priority TEXT, fields TEXT, created_at TEXT, "
+        "user_id TEXT, idempotency_key TEXT, observation_source TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE relationship_observations (id TEXT, relationship_key TEXT, "
+        "relationship_type TEXT, source_entity_id TEXT, target_entity_id TEXT, "
+        "source_id TEXT, interpretation_id TEXT, observed_at TEXT, specificity_score REAL, "
+        "source_priority TEXT, metadata TEXT, created_at TEXT, user_id TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE sources (id TEXT, user_id TEXT, content_hash TEXT, mime_type TEXT, "
+        "storage_url TEXT, file_size INTEGER, original_filename TEXT, provenance TEXT, "
+        "created_at TEXT, idempotency_key TEXT, source_type TEXT, storage_mode TEXT, "
+        "reference_path TEXT)"
+    )
+    conn.commit()
+    conn.close()
+    return str(db_path)
+
+
+def test_cli_replay_empty_db_dry_run_reports_no_changes(tmp_path):
+    db_path = _make_empty_fork_db(tmp_path)
+    log_path = tmp_path / "action.jsonl"
+    result = _run_cli(
+        ["replay", "--db", db_path, "--cutover", "2026-01-01T00:00:00Z", "--log", str(log_path)]
+    )
+    assert result.returncode == 0
+    assert "NO_CHANGES" in result.stdout
+    assert "To apply:" not in result.stdout
+
+
+def test_cli_reconcile_empty_file_dry_run_reports_no_changes(tmp_path):
+    db_path = _make_empty_fork_db(tmp_path)
+    reconcile_file = tmp_path / "reconciliation.json"
+    reconcile_file.write_text("[]", encoding="utf-8")
+    log_path = tmp_path / "action.jsonl"
+    result = _run_cli(
+        [
+            "reconcile",
+            "--db", db_path,
+            "--cutover", "2026-01-01T00:00:00Z",
+            "--reconcile-file", str(reconcile_file),
+            "--log", str(log_path),
+        ]
+    )
+    assert result.returncode == 0
+    assert "NO_CHANGES" in result.stdout
+
+
+def test_build_apply_hint_reproduces_mode_and_safety_flags_appends_only_apply():
+    """Accipiter P1 fix: the apply hint must reprint the exact resolved argv
+    (mode + safety flags) and append only --apply -- never drop the mode,
+    filters, or actual db/cutover paths. Unit-level (no subprocess/network):
+    the CLI-level NO_CHANGES tests above already exercise the real process
+    boundary; this isolates the hint-construction logic itself, since a live
+    replay run also does an (unrelated) hosted schema GET that would need
+    mocking to keep this fast and network-free."""
+    import neotoma_local_fork_replay as _mod
+
+    argv = [
+        "replay",
+        "--db", "/path/to/fork.db",
+        "--cutover", "2026-01-01T00:00:00Z",
+        "--no-only-missing",
+        "--log", "/path/to/action.jsonl",
+    ]
+    hint = _mod.build_apply_hint("replay", argv)
+    assert "replay" in hint
+    assert "/path/to/fork.db" in hint
+    assert "2026-01-01T00:00:00Z" in hint
+    assert hint.count("--apply") == 1
+    assert "--dry-run" not in hint
+
+
+def test_build_apply_hint_strips_dry_run_token_if_present():
+    import neotoma_local_fork_replay as _mod
+
+    argv = ["replay", "--db", "x.db", "--cutover", "2026-01-01T00:00:00Z", "--dry-run"]
+    hint = _mod.build_apply_hint("replay", argv)
+    assert "--dry-run" not in hint
+    assert "--apply" in hint

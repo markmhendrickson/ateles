@@ -11,8 +11,9 @@ killed, the rows written to the local DB after the cutover timestamp needed
 to be replayed forward into hosted so they are not lost.
 
 DRY-RUN BY DEFAULT. Nothing is written unless --apply is passed explicitly
-(and, on top of that, MIGRATE_CONFIRM_APPLY=yes must be set in the
+(and, on top of that, NEOTOMA_REPLAY_CONFIRM_APPLY=yes must be set in the
 environment, as a second deliberate guard against accidental invocation).
+--apply and --dry-run are mutually exclusive; omitting both means dry-run.
 
 Method
 ------
@@ -89,9 +90,23 @@ written. Use --no-only-missing to disable the probe (not recommended for
 
 Usage
 -----
-  python3 neotoma_local_fork_replay.py --db <path-to-local-db> --dry-run
-  python3 neotoma_local_fork_replay.py --db <path-to-local-db> --apply --limit 20
-  python3 neotoma_local_fork_replay.py --db <path-to-local-db> --apply --limit 20 --entity-ids ent_a,ent_b
+This script exposes three explicit, mutually exclusive subcommands. Running
+it with no subcommand prints usage and exits non-zero (code=E_ARGUMENT_CONFLICT).
+See docs/runbooks/neotoma_local_fork_replay.md for the full indexed runbook
+(every mode, canary application, verification, and failure recovery).
+
+  replay        -- class-a observation/relationship replay (the original mode)
+  reconcile     -- class-b field-level reconcile from a --reconcile-file
+  restore-gates -- restore issue gate_status/owner_history/current_owner
+
+Examples:
+  python3 neotoma_local_fork_replay.py replay --db <path> --cutover <ts>
+  python3 neotoma_local_fork_replay.py replay --db <path> --cutover <ts> \
+      --apply --limit 20
+  python3 neotoma_local_fork_replay.py reconcile --db <path> --cutover <ts> \
+      --reconcile-file reconciliation.json
+  python3 neotoma_local_fork_replay.py restore-gates \
+      --db <path1>,<path2> --cutover <ts>
 
 Environment
 -----------
@@ -100,6 +115,10 @@ Environment
   itself). Requires NEOTOMA_BASE_URL to be exported (no hardcoded default,
   since this repo is public and hosted instance URLs are operator-specific
   config). Never prints, logs, or echoes the token or any field value.
+
+  --apply requires NEOTOMA_REPLAY_CONFIRM_APPLY=yes set explicitly, checked
+  BEFORE get_base_url()/get_token()/any HTTP call, as a second deliberate
+  guard against accidental invocation.
 
 JSONL action log
 -----------------
@@ -1270,12 +1289,24 @@ def run_reconciliation(
     if args.limit:
         entities = entities[: args.limit]
 
+    print_run_banner(
+        mode="reconcile",
+        source_paths=[args.db, args.reconcile_file],
+        cutover=args.cutover,
+        base_url=base_url,
+        filters={"limit": args.limit, "entity_ids": args.entity_ids},
+        schema_extension_policy="n/a (reconcile does not extend schemas)",
+        apply_mode=apply_mode,
+        log_path=args.log,
+    )
     print(f"Loaded reconciliation file: {args.reconcile_file}")
     print(f"  entities in file (after --limit/--entity-ids): {len(entities)}")
-    print(
-        f"  mode: {'APPLY (writing to hosted)' if apply_mode else 'DRY-RUN (no writes)'}"
-    )
     print()
+
+    if not entities:
+        print("NO_CHANGES: reconciliation file has no entities matching the filters.")
+        print(f"Action log: {args.log}")
+        return
 
     planned = []
     entities_with_nothing_to_apply = 0
@@ -1347,6 +1378,14 @@ def run_reconciliation(
     applied_entities = 0
     applied_fields = 0
     apply_time_drift_fields = 0
+    run_counts = {
+        "planned": len(planned),
+        "applied": 0,
+        "skipped": entities_with_nothing_to_apply,
+        "deferred": 0,
+        "failed": 0,
+        "unresolved": 0,
+    }
     with open(log_path, "a", encoding="utf-8") as log_fh:
         for (
             entity_id,
@@ -1425,15 +1464,24 @@ def run_reconciliation(
                 http_status=status,
             )
             if not ok:
-                print(
-                    "  Stopping: an error occurred mid-run. Not attempting cleanup.",
-                    file=sys.stderr,
+                run_counts["failed"] += 1
+                emit_error(
+                    CODE_WRITE_FAILED,
+                    f"reconcile write failed for entity_id={entity_id} "
+                    f"entity_type={entity_type} http_status={status}",
+                    writes_occurred=(applied_entities > 0),
+                    log_path=log_path,
+                    next_action="inspect the action log entry for this entity_id and "
+                    "re-run the same command -- idempotency keys make this safe",
                 )
-                sys.exit(1)
             applied_entities += 1
             applied_fields += len(fields_to_write)
+            run_counts["applied"] += 1
             time.sleep(0.05)
 
+    print_run_summary(run_counts)
+    if apply_mode and run_counts["planned"] > 0 and run_counts["applied"] == 0 and run_counts["failed"] == 0:
+        print("NO_CHANGES: every planned entity resolved to a skip (nothing left to apply).")
     print()
     print("=== Reconciliation summary ===")
     print(
@@ -1460,6 +1508,15 @@ def run_reconciliation(
             f"Fields skipped (hosted drifted since reconciliation was computed): {apply_time_drift_fields}"
         )
     print(f"Action log: {log_path}")
+    if not apply_mode:
+        print("This was a DRY RUN. No data was written to hosted Neotoma.")
+        if run_counts["planned"] > 0:
+            print(
+                f"To apply: {NEOTOMA_REPLAY_CONFIRM_APPLY_VAR}=yes "
+                f"{build_apply_hint(args.mode, sys.argv[1:])}"
+            )
+        else:
+            print("NO_CHANGES: nothing planned -- no apply hint to print.")
 
 
 # --- Gate restore (--gate-restore, operator-approved 2026-09-23) -----------
@@ -2134,11 +2191,23 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
     db_paths = [p.strip() for p in args.gate_restore_db.split(",") if p.strip()]
     cutover_ts = args.cutover
     run_ts = datetime.now(timezone.utc).isoformat()
-    print(f"Gate-restore cutover: {cutover_ts}")
+    print_run_banner(
+        mode="restore-gates",
+        source_paths=db_paths,
+        cutover=cutover_ts,
+        base_url=base_url,
+        filters={
+            "limit": args.limit,
+            "entity_ids": args.entity_ids,
+            "exclude_entity_ids": getattr(args, "gate_restore_exclude_entity_ids", None),
+        },
+        schema_extension_policy="n/a (restore-gates does not extend schemas)",
+        apply_mode=apply_mode,
+        log_path=args.log,
+    )
     print(
         f"Gate-restore run started at: {run_ts} (writes from agent runs after this instant are NOT covered)"
     )
-    print(f"Scanning local DBs: {db_paths}")
     print()
 
     candidates = scan_local_gate_candidates(db_paths, cutover_ts)
@@ -2154,8 +2223,14 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
         excludelist = {e.strip() for e in args.gate_restore_exclude_entity_ids.split(",") if e.strip()}
         before = len(candidates)
         candidates = {eid: st for eid, st in candidates.items() if eid not in excludelist}
-        print(f"--gate-restore-exclude-entity-ids excludes: {sorted(excludelist)}")
+        print(f"--exclude-entity-ids excludes: {sorted(excludelist)}")
         print(f"Candidates after exclusion: {len(candidates)} (was {before})")
+
+    if not candidates:
+        print()
+        print("NO_CHANGES: no issues have post-cutover local gate-field writes matching the filters.")
+        print(f"Action log: {args.log}")
+        return
 
     schema_info_cache: dict = {}
     get_schema_declared_fields("issue", base_url, token, schema_info_cache)
@@ -2345,17 +2420,35 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
 
     total_changes = creations + merges
     if total_changes > 150:
-        print(
-            f"STOPPING: dry run proposes {total_changes} issue changes, over the "
-            "150-issue sanity threshold. Not applying. Review the dry-run report "
-            f"at {dry_run_log_path} before re-running.",
-            file=sys.stderr,
+        emit_error(
+            CODE_SANITY_THRESHOLD,
+            f"dry run proposes {total_changes} issue changes, over the "
+            "150-issue sanity threshold",
+            writes_occurred=False,
+            log_path=dry_run_log_path,
+            next_action=f"review the dry-run report at {dry_run_log_path or args.log} "
+            "before re-running, and consider --limit or --entity-ids to narrow the run",
         )
-        sys.exit(1)
 
     if not apply_mode:
         print()
+        run_counts = {
+            "planned": total_changes,
+            "applied": 0,
+            "skipped": noops,
+            "deferred": 0,
+            "failed": 0,
+            "unresolved": 0,
+        }
+        print_run_summary(run_counts)
+        if total_changes == 0:
+            print("NO_CHANGES: no gate-restore writes are needed.")
         print("This was a DRY RUN. No data was written to hosted Neotoma.")
+        if total_changes > 0:
+            print(
+                f"To apply: {NEOTOMA_REPLAY_CONFIRM_APPLY_VAR}=yes "
+                f"{build_apply_hint(args.mode, sys.argv[1:])}"
+            )
         return
 
     print()
@@ -2367,12 +2460,26 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
     failed = 0
     skipped_closed = 0
     request_count = 0
+    run_counts = {
+        "planned": total_changes,
+        "applied": 0,
+        "skipped": noops,
+        "deferred": 0,
+        "failed": 0,
+        "unresolved": 0,
+    }
 
     ok, hstatus = check_health(base_url, token)
     print(f"Health check (pre-apply): {'OK' if ok else 'FAILED'} (status={hstatus})")
     if not ok:
-        print("STOPPING: /health did not return a healthy 200 before apply began.", file=sys.stderr)
-        sys.exit(1)
+        emit_error(
+            CODE_HOSTED_UNHEALTHY,
+            "/health did not return a healthy 200 before apply began",
+            writes_occurred=False,
+            log_path=log_path,
+            next_action="wait for hosted to recover, then re-run the same command "
+            "-- idempotency keys make this safe",
+        )
 
     with open(log_path, "a", encoding="utf-8") as log_fh:
         for p in changed_plans:
@@ -2391,12 +2498,17 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
                 ok, hstatus = check_health(base_url, token)
                 print(f"Health check (after {request_count} requests): {'OK' if ok else 'FAILED'} (status={hstatus})")
                 if not ok:
-                    print(
-                        f"STOPPING: /health returned an unhealthy response after {request_count} "
-                        f"requests ({applied} applied, {failed} failed so far). Not attempting cleanup.",
-                        file=sys.stderr,
+                    run_counts["applied"] = applied
+                    run_counts["failed"] = failed
+                    emit_error(
+                        CODE_HOSTED_UNHEALTHY,
+                        f"/health returned an unhealthy response after {request_count} requests",
+                        writes_occurred=(applied > 0),
+                        log_path=log_path,
+                        next_action=f"wait for hosted to recover, then re-run the same "
+                        f"command with --exclude-entity-ids for the {applied} issue(s) "
+                        "already applied, or rely on idempotency and re-run unchanged",
                     )
-                    sys.exit(1)
 
             # current_owner is decided lazily here (needs a per-field
             # timestamp comparison, which is an extra hosted round-trip we
@@ -2497,14 +2609,23 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
             )
             if not ok:
                 failed += 1
-                print(
-                    "  Stopping: an error occurred mid-run. Not attempting cleanup.",
-                    file=sys.stderr,
+                run_counts["applied"] = applied
+                run_counts["failed"] = failed
+                emit_error(
+                    CODE_WRITE_FAILED,
+                    f"gate-restore write failed for entity_id={entity_id} "
+                    f"http_status={status}",
+                    writes_occurred=(applied > 0),
+                    log_path=log_path,
+                    next_action="inspect the action log entry for this entity_id and "
+                    "re-run the same command -- idempotency keys make this safe",
                 )
-                sys.exit(1)
             applied += 1
             time.sleep(0.1)
 
+    run_counts["applied"] = applied
+    run_counts["failed"] = failed
+    print_run_summary(run_counts)
     print()
     print("=== Gate-restore apply summary ===")
     print(f"Applied: {applied}")
@@ -2555,61 +2676,175 @@ def github_issue_lookup(repo: str, number: int) -> dict | None:
         return None
 
 
-def main() -> None:
+NEOTOMA_REPLAY_CONFIRM_APPLY_VAR = "NEOTOMA_REPLAY_CONFIRM_APPLY"
+
+# Deprecated alias, per the Accipiter ux spec's engineering silence on
+# whether to keep it: kept as a deprecated fallback (with a warning) rather
+# than removed outright, so a caller mid-migration to the new name is not
+# silently locked out. The new NEOTOMA_REPLAY_CONFIRM_APPLY_VAR is always
+# checked first and is the only one referenced by help text/docs.
+MIGRATE_CONFIRM_APPLY_DEPRECATED_VAR = "MIGRATE_CONFIRM_APPLY"
+
+# Stable error/result codes (Accipiter ux spec, Error and empty states table).
+CODE_ARGUMENT_CONFLICT = "E_ARGUMENT_CONFLICT"
+CODE_CONFIRMATION_REQUIRED = "E_CONFIRMATION_REQUIRED"
+CODE_HOSTED_STATE_UNKNOWN = "E_HOSTED_STATE_UNKNOWN"
+CODE_SCHEMA_NOT_VERIFIED = "E_SCHEMA_NOT_VERIFIED"
+CODE_HOSTED_UNHEALTHY = "E_HOSTED_UNHEALTHY"
+CODE_WRITE_FAILED = "E_WRITE_FAILED"
+CODE_NO_CHANGES = "NO_CHANGES"
+CODE_DEFERRED = "DEFERRED"
+# Not in the Accipiter ux spec's table (which enumerates the class-a/class-b
+# replay error states) -- restore-gates' own pre-existing 150-issue sanity
+# threshold, kept as a distinct code so it is never confused with a hosted
+# health failure.
+CODE_SANITY_THRESHOLD = "E_SANITY_THRESHOLD"
+
+
+def emit_error(
+    code: str,
+    cause: str,
+    *,
+    writes_occurred: bool,
+    log_path: str | None,
+    next_action: str,
+) -> None:
+    """Print a stable, field-free error envelope to stderr and exit 1.
+
+    Matches the Accipiter ux spec's required shape exactly: a stable code, a
+    field-free cause summary, whether any writes occurred, the audit-log
+    path, and one concrete next action. Never includes a response body or
+    field/entity value -- only ids, paths, and this function's own fixed
+    vocabulary are ever passed as `cause`/`next_action` by callers.
+    """
+    print(f"code={code}", file=sys.stderr)
+    print(f"cause={cause}", file=sys.stderr)
+    print(f"writes_occurred={'yes' if writes_occurred else 'no'}", file=sys.stderr)
+    print(f"log_path={log_path or '(none)'}", file=sys.stderr)
+    print(f"next_action={next_action}", file=sys.stderr)
+    sys.exit(1)
+
+
+def print_run_banner(
+    *,
+    mode: str,
+    source_paths: list[str],
+    cutover: str | None,
+    base_url: str,
+    filters: dict,
+    schema_extension_policy: str,
+    apply_mode: bool,
+    log_path: str,
+) -> None:
+    """Field-free, pre-work banner (Accipiter ux spec item 8): mode, source
+    path(s), cutover, hosted host only (never the token), filters, schema
+    policy, dry-run/apply state, log path.
+    """
+    from urllib.parse import urlparse
+
+    host = urlparse(base_url).netloc or base_url
+    print("=== Run configuration ===")
+    print(f"  mode: {mode}")
+    print(f"  source path(s): {source_paths}")
+    print(f"  cutover: {cutover}")
+    print(f"  hosted host: {host}")
+    filt_desc = ", ".join(f"{k}={v}" for k, v in filters.items() if v not in (None, "")) or "(none)"
+    print(f"  filters: {filt_desc}")
+    print(f"  schema-extension policy: {schema_extension_policy}")
+    print(f"  apply/dry-run: {'APPLY (writing to hosted)' if apply_mode else 'DRY-RUN (no writes)'}")
+    print(f"  log path: {log_path}")
+    print()
+
+
+def print_run_summary(counts: dict) -> None:
+    """End-of-run summary counts (Accipiter ux spec item 9): planned,
+    applied, skipped, deferred, failed, unresolved.
+    """
+    print()
+    print("=== Run summary ===")
+    for key in ("planned", "applied", "skipped", "deferred", "failed", "unresolved"):
+        print(f"  {key}: {counts.get(key, 0)}")
+
+
+def build_apply_hint(mode: str, argv: list[str]) -> str:
+    """Reproduce the exact resolved argv for this run, preserving mode and
+    every safety-relevant flag, then append only --apply (Accipiter ux spec
+    item 10 / Eng CLI contract item 10). `argv` is the actual argv this
+    process was invoked with (sys.argv[1:]), with any --dry-run token
+    stripped (mutually exclusive with --apply) and --apply added if absent.
+    """
+    cleaned = [a for a in argv if a != "--dry-run"]
+    if "--apply" not in cleaned:
+        cleaned = cleaned + ["--apply"]
+    return " ".join([sys.argv[0], *cleaned])
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument(
-        "--apply",
-        action="store_true",
-        help="Actually write to hosted. Default is dry-run.",
+    subparsers = ap.add_subparsers(dest="mode")
+
+    def add_shared_flags(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument(
+            "--apply",
+            action="store_true",
+            help="Actually write to hosted. Default is dry-run.",
+        )
+        sp.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Explicit dry-run (default behavior). Mutually exclusive with --apply.",
+        )
+        sp.add_argument(
+            "--cutover",
+            required=True,
+            default=None,
+            help="ISO-8601 cutover timestamp. Only rows with created_at > this value "
+            "are considered. Required by every mode.",
+        )
+        sp.add_argument(
+            "--limit",
+            type=int,
+            default=None,
+            help="Cap total number of entities processed (smoke test).",
+        )
+        sp.add_argument(
+            "--entity-ids",
+            default=None,
+            help="Comma-separated allowlist of entity ids to restrict this run to (smoke tests).",
+        )
+        sp.add_argument(
+            "--log",
+            default="neotoma_local_fork_replay.jsonl",
+            help="Path to append the JSONL action log to (default: ./neotoma_local_fork_replay.jsonl).",
+        )
+
+    replay_sp = subparsers.add_parser(
+        "replay",
+        help="Class-a observation/relationship replay: writes rows written to the "
+        "local fork after --cutover into hosted.",
     )
-    ap.add_argument(
-        "--dry-run", action="store_true", help="Explicit dry-run (default behavior)."
-    )
-    ap.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Cap total number of entities processed (smoke test).",
-    )
-    ap.add_argument(
+    add_shared_flags(replay_sp)
+    replay_sp.add_argument(
         "--db",
-        required=False,
-        default=None,
+        required=True,
         help="Path to the LOCAL SQLite copy to replay from. Must be a read-only, "
-        "frozen fork; never a live writable database. Not used by --gate-restore, "
-        "which takes --gate-restore-db instead (it reads from BOTH local DBs).",
+        "frozen fork; never a live writable database. No default -- every run "
+        "must name its source explicitly.",
     )
-    ap.add_argument(
-        "--cutover",
-        required=False,
-        default=None,
-        help="ISO-8601 cutover timestamp. Only rows with created_at > this value are considered. "
-        "Required by every mode including --gate-restore.",
-    )
-    ap.add_argument(
+    replay_sp.add_argument(
         "--only-missing",
         dest="only_missing",
         action="store_true",
         default=True,
         help="Probe GET /entities/<id> before writing and skip unless 404 (default: on).",
     )
-    ap.add_argument(
+    replay_sp.add_argument(
         "--no-only-missing",
         dest="only_missing",
         action="store_false",
         help="Disable the pre-write existence probe (not recommended for --apply).",
     )
-    ap.add_argument(
-        "--entity-ids",
-        default=None,
-        help="Comma-separated allowlist of entity ids to restrict the replay to (smoke tests).",
-    )
-    ap.add_argument(
-        "--log",
-        default="neotoma_local_fork_replay.jsonl",
-        help="Path to append the JSONL action log to (default: ./neotoma_local_fork_replay.jsonl).",
-    )
-    ap.add_argument(
+    replay_sp.add_argument(
         "--unknown-fields",
         dest="unknown_fields_policy",
         choices=("stop", "warn"),
@@ -2629,7 +2864,7 @@ def main() -> None:
             "registered on hosted rather than stopped or warned on."
         ),
     )
-    ap.add_argument(
+    replay_sp.add_argument(
         "--extend-schemas",
         dest="extend_schemas",
         action="store_true",
@@ -2650,24 +2885,36 @@ def main() -> None:
             "extensions are printed and NOT sent."
         ),
     )
-    ap.add_argument(
+    replay_sp.add_argument(
         "--no-extend-schemas",
         dest="extend_schemas",
         action="store_false",
         help="Disable schema auto-extension even under --apply.",
     )
-    ap.add_argument(
+
+    reconcile_sp = subparsers.add_parser(
+        "reconcile",
+        help="Class-b field-level reconcile: writes LOCAL_ONLY/LOCAL_NEWER fields "
+        "from a --reconcile-file onto entities that already exist on hosted.",
+    )
+    add_shared_flags(reconcile_sp)
+    reconcile_sp.add_argument(
+        "--db",
+        required=True,
+        help="Path to the LOCAL SQLite copy to read current field values from. "
+        "Must be a read-only, frozen fork.",
+    )
+    reconcile_sp.add_argument(
         "--reconcile-file",
         dest="reconcile_file",
+        required=True,
         default=None,
         help=(
             "Path to a reconciliation.json (list of {id, entity_type, "
             "fields: [{name, classification, ...}]}) describing class-b "
             "field-level differences between the local fork and hosted. "
-            "When set, this run performs ONLY the reconciliation pass "
-            "(writes LOCAL_ONLY/LOCAL_NEWER fields to hosted, one /store "
-            "per entity with target_id + a deterministic idempotency_key) "
-            "instead of the class-a observation/relationship replay above. "
+            "Writes LOCAL_ONLY/LOCAL_NEWER fields to hosted, one /store "
+            "per entity with target_id + a deterministic idempotency_key. "
             "SAME and HOSTED_NEWER fields are always skipped. Re-verifies "
             "each writable field's hosted_value_hash immediately before "
             "writing and skips (logging entity_class=drifted) any field "
@@ -2675,74 +2922,131 @@ def main() -> None:
             "computed."
         ),
     )
-    ap.add_argument(
-        "--gate-restore",
-        dest="gate_restore",
-        action="store_true",
-        default=False,
-        help=(
-            "Restore issue entities' gate fields (gate_status, owner_history, "
-            "current_owner) from both local DBs onto hosted (operator-approved "
-            "2026-09-23). When set, this run performs ONLY the gate-restore pass "
-            "instead of the class-a replay or --reconcile-file. Requires "
-            "--cutover; reads --gate-restore-db instead of --db."
-        ),
+
+    gate_sp = subparsers.add_parser(
+        "restore-gates",
+        help="Restore issue entities' gate_status/owner_history/current_owner "
+        "from local DB(s) onto hosted.",
     )
-    ap.add_argument(
-        "--gate-restore-db",
+    add_shared_flags(gate_sp)
+    gate_sp.add_argument(
+        "--db",
         dest="gate_restore_db",
-        default=f"{os.path.expanduser('~')}/data/neotoma.prod.db,{os.path.expanduser('~')}/data/neotoma.db",
-        help="Comma-separated local DB paths to scan for --gate-restore (default: both known local forks).",
-    )
-    ap.add_argument(
-        "--gate-restore-dry-log",
-        dest="gate_restore_dry_log",
+        required=True,
         default=None,
-        help="Path to save the --gate-restore dry-run report to (in addition to printing it).",
+        help="Comma-separated local DB paths to scan. No default: every run "
+        "must name its source explicitly (a prior revision silently defaulted "
+        "to a fixed operator path; that default is removed).",
     )
-    ap.add_argument(
-        "--gate-restore-exclude-entity-ids",
+    gate_sp.add_argument(
+        "--exclude-entity-ids",
         dest="gate_restore_exclude_entity_ids",
         default=None,
         help=(
-            "Comma-separated entity ids to EXCLUDE from a --gate-restore run "
+            "Comma-separated entity ids to EXCLUDE from this run "
             "(e.g. issues already applied in an earlier pilot run). Applied "
             "after --entity-ids, if both are given."
         ),
     )
-    args = ap.parse_args()
+    gate_sp.add_argument(
+        "--dry-run-report",
+        dest="gate_restore_dry_log",
+        default=None,
+        help="Path to save the dry-run report to (in addition to printing it). "
+        "Was previously --gate-restore-dry-log.",
+    )
 
-    if args.extend_schemas is None:
-        args.extend_schemas = bool(args.apply)
+    return ap
 
-    apply_mode = args.apply  # dry-run is the default; --apply is the only way to write
+
+def resolve_confirm_apply_env() -> tuple[bool, bool]:
+    """Check the apply double-guard. Returns (confirmed, used_deprecated_alias).
+
+    NEOTOMA_REPLAY_CONFIRM_APPLY is checked first and is authoritative. The
+    deprecated MIGRATE_CONFIRM_APPLY alias is honored ONLY when the new
+    variable is absent, and a deprecation warning is printed whenever it is
+    the one that supplied the confirmation -- the spec's engineering section
+    was silent on whether to keep this alias, so it is kept (never silently
+    dropping an in-flight operator invocation mid-migration) but clearly
+    marked as deprecated.
+    """
+    new_val = os.environ.get(NEOTOMA_REPLAY_CONFIRM_APPLY_VAR)
+    if new_val is not None:
+        return new_val == "yes", False
+    old_val = os.environ.get(MIGRATE_CONFIRM_APPLY_DEPRECATED_VAR)
+    if old_val is not None:
+        print(
+            f"WARNING: {MIGRATE_CONFIRM_APPLY_DEPRECATED_VAR} is deprecated -- "
+            f"use {NEOTOMA_REPLAY_CONFIRM_APPLY_VAR}=yes instead. The old name "
+            "will stop being honored in a future revision.",
+            file=sys.stderr,
+        )
+        return old_val == "yes", True
+    return False, False
+
+
+def main() -> None:
+    ap = build_arg_parser()
+    argv = sys.argv[1:]
+    args = ap.parse_args(argv)
+
+    if args.mode is None:
+        emit_error(
+            CODE_ARGUMENT_CONFLICT,
+            "no subcommand given -- choose one of: replay, reconcile, restore-gates",
+            writes_occurred=False,
+            log_path=None,
+            next_action="re-run with one of: replay | reconcile | restore-gates "
+            "(see --help for each mode's flags)",
+        )
+
+    if args.apply and args.dry_run:
+        emit_error(
+            CODE_ARGUMENT_CONFLICT,
+            "--apply and --dry-run are mutually exclusive",
+            writes_occurred=False,
+            log_path=getattr(args, "log", None),
+            next_action="pass exactly one of --apply or --dry-run (or neither, "
+            "which defaults to dry-run)",
+        )
+
+    apply_mode = bool(args.apply)  # dry-run is the default; --apply is the only way to write
+
     if apply_mode:
-        confirm = os.environ.get("MIGRATE_CONFIRM_APPLY")
-        if confirm != "yes":
-            print(
-                "Refusing to run --apply without MIGRATE_CONFIRM_APPLY=yes set explicitly "
-                "as an extra guard against accidental invocation.",
-                file=sys.stderr,
+        confirmed, _used_deprecated = resolve_confirm_apply_env()
+        if not confirmed:
+            emit_error(
+                CODE_CONFIRMATION_REQUIRED,
+                f"--apply requires {NEOTOMA_REPLAY_CONFIRM_APPLY_VAR}=yes set "
+                "explicitly in the environment",
+                writes_occurred=False,
+                log_path=getattr(args, "log", None),
+                next_action=f"re-run with {NEOTOMA_REPLAY_CONFIRM_APPLY_VAR}=yes "
+                f"{build_apply_hint(args.mode, argv)}",
             )
-            sys.exit(1)
+
+    if getattr(args, "mode", None) == "replay" and args.extend_schemas is None:
+        args.extend_schemas = bool(args.apply)
 
     base_url = get_base_url()
     token = get_token()
 
-    if args.gate_restore:
-        if not args.cutover:
-            print("ERROR: --gate-restore requires --cutover.", file=sys.stderr)
-            sys.exit(1)
+    if args.mode == "restore-gates":
         run_gate_restore(args, base_url, token, apply_mode)
         return
 
-    if not args.db:
-        print("ERROR: --db is required unless --gate-restore is set.", file=sys.stderr)
-        sys.exit(1)
-    if not args.cutover:
-        print("ERROR: --cutover is required.", file=sys.stderr)
-        sys.exit(1)
+    if args.mode == "reconcile":
+        conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+        entity_ids = None
+        if args.entity_ids:
+            entity_ids = {e.strip() for e in args.entity_ids.split(",") if e.strip()}
+        cutover_date = args.cutover.split("T")[0].replace("-", "")
+        run_reconciliation(
+            args, conn, base_url, token, cutover_date, apply_mode, entity_ids
+        )
+        return
 
+    # args.mode == "replay"
     conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
 
     entity_ids = None
@@ -2751,29 +3055,37 @@ def main() -> None:
 
     cutover_date = args.cutover.split("T")[0].replace("-", "")
 
-    if args.reconcile_file:
-        run_reconciliation(
-            args, conn, base_url, token, cutover_date, apply_mode, entity_ids
-        )
-        return
-
     obs, rels, srcs, excluded_schema_lag = load_candidates(
         conn, args.cutover, entity_ids=entity_ids
     )
     if args.limit:
         obs, rels, srcs = obs[: args.limit], rels[: args.limit], srcs[: args.limit]
 
+    print_run_banner(
+        mode="replay",
+        source_paths=[args.db],
+        cutover=args.cutover,
+        base_url=base_url,
+        filters={"limit": args.limit, "entity_ids": args.entity_ids},
+        schema_extension_policy=(
+            "on" if args.extend_schemas else "off"
+        ),
+        apply_mode=apply_mode,
+        log_path=args.log,
+    )
     print(f"Loaded from {args.db}:")
     print(f"  observations candidates (class a+b):   {len(obs)}")
     print(f"  excluded schema_lag_bg_* rewrites:     {len(excluded_schema_lag)}")
     print(f"  relationship_observations candidates:  {len(rels)}")
     print(f"  sources candidates:                    {len(srcs)}")
-    print(
-        f"  mode: {'APPLY (writing to hosted)' if apply_mode else 'DRY-RUN (no writes)'}"
-    )
     print(f"  only-missing probe: {'on' if args.only_missing else 'off'}")
     print(f"  unknown-fields policy: {args.unknown_fields_policy}")
     print()
+
+    if not obs and not rels and not srcs:
+        print("NO_CHANGES: nothing to replay (no post-cutover rows matched the filters).")
+        print(f"Action log: {args.log}")
+        return
 
     plan = []
     entity_cache: dict[str, bool] = {}
@@ -2982,6 +3294,14 @@ def main() -> None:
         )
 
     log_path = args.log
+    run_counts = {
+        "planned": len(plan),
+        "applied": 0,
+        "skipped": 0,
+        "deferred": 0,
+        "failed": 0,
+        "unresolved": 0,
+    }
     with open(log_path, "a", encoding="utf-8") as log_fh:
         for (
             kind,
@@ -3038,15 +3358,16 @@ def main() -> None:
                         idempotency_key=idem_key,
                         http_status=None,
                     )
-                    print(
-                        "  Stopping: --unknown-fields=stop (default) and a field "
-                        "the hosted schema does not declare was predicted for this "
-                        "write. Re-run with --unknown-fields=warn to proceed past "
-                        "predicted (not yet confirmed) UNKNOWN_FIELD cases, or "
-                        "register the field on hosted first.",
-                        file=sys.stderr,
+                    run_counts["unresolved"] += 1
+                    emit_error(
+                        CODE_SCHEMA_NOT_VERIFIED,
+                        f"predicted UNKNOWN_FIELD field(s) {predicted_unknown} for "
+                        f"entity_type={entity_type} under --unknown-fields=stop (default)",
+                        writes_occurred=(run_counts["applied"] > 0),
+                        log_path=log_path,
+                        next_action="re-run with --unknown-fields=warn once reviewed, "
+                        "or register the field on hosted first",
                     )
-                    sys.exit(1)
 
             if not apply_mode:
                 print(f"DRY-RUN would write: {prefix}")
@@ -3071,6 +3392,7 @@ def main() -> None:
                 and entity_class != "a_missing"
             ):
                 print(f"SKIP (not missing on hosted): {prefix}")
+                run_counts["skipped"] += 1
                 log_action(
                     log_fh,
                     kind=kind,
@@ -3141,6 +3463,7 @@ def main() -> None:
                 }
                 if array_keys_in_payload and not remaining_entity_keys:
                     print(f"SKIP (array fields already fully present on hosted): {prefix}")
+                    run_counts["skipped"] += 1
                     log_action(
                         log_fh,
                         kind=kind,
@@ -3168,6 +3491,7 @@ def main() -> None:
                     "sources carry file content (storage_url/reference_path) that "
                     "needs its own re-upload path; flagged for manual/second-pass handling."
                 )
+                run_counts["deferred"] += 1
                 log_action(
                     log_fh,
                     kind=kind,
@@ -3212,28 +3536,39 @@ def main() -> None:
                 http_status=status,
             )
             if not ok:
-                print(
-                    "  Stopping: an error occurred mid-run. Not attempting cleanup.",
-                    file=sys.stderr,
+                run_counts["failed"] += 1
+                emit_error(
+                    CODE_WRITE_FAILED,
+                    f"write failed for entity_id={target_desc} entity_type={entity_type} "
+                    f"kind={kind} http_status={status}",
+                    writes_occurred=(run_counts["applied"] > 0),
+                    log_path=log_path,
+                    next_action="inspect the action log entry for this entity_id and "
+                    "re-run the same command -- idempotency keys make this safe",
                 )
-                sys.exit(1)
             if unknown_field_warnings and args.unknown_fields_policy == "stop":
-                print(
-                    "  Stopping: UNKNOWN_FIELD store_warnings on a write means a field "
-                    "the payload sent has no home on the schema. Not attempting cleanup. "
-                    "Re-run with --unknown-fields=warn to continue past this once the "
-                    "warning has been reviewed.",
-                    file=sys.stderr,
+                run_counts["unresolved"] += 1
+                emit_error(
+                    CODE_SCHEMA_NOT_VERIFIED,
+                    f"UNKNOWN_FIELD store_warnings on a write for entity_id={target_desc} "
+                    f"entity_type={entity_type}",
+                    writes_occurred=True,
+                    log_path=log_path,
+                    next_action="re-run with --unknown-fields=warn once reviewed, "
+                    "or register the field on hosted first",
                 )
-                sys.exit(1)
             elif unknown_field_warnings:
                 print(
                     "  Continuing past UNKNOWN_FIELD store_warnings (--unknown-fields=warn)."
                 )
+            run_counts["applied"] += 1
             time.sleep(0.05)  # gentle rate limiting
 
+    print_run_summary(run_counts)
+    if apply_mode and run_counts["planned"] > 0 and run_counts["applied"] == 0 and run_counts["failed"] == 0:
+        print("NO_CHANGES: every planned action resolved to a skip (nothing left to apply).")
     print()
-    print("=== Summary ===")
+    print("=== Detail ===")
     print(
         f"Entities touched (distinct entity_id across observations): {len(stats['entities_touched'])}"
     )
@@ -3289,10 +3624,13 @@ def main() -> None:
     print(f"Action log: {log_path}")
     if not apply_mode:
         print("This was a DRY RUN. No data was written to hosted Neotoma.")
-        print(
-            "To apply: MIGRATE_CONFIRM_APPLY=yes python3 neotoma_local_fork_replay.py "
-            "--db <path> --cutover <ts> --apply --limit <n>"
-        )
+        if run_counts["planned"] > 0:
+            print(
+                f"To apply: {NEOTOMA_REPLAY_CONFIRM_APPLY_VAR}=yes "
+                f"{build_apply_hint(args.mode, argv)}"
+            )
+        else:
+            print("NO_CHANGES: nothing planned -- no apply hint to print.")
 
 
 if __name__ == "__main__":
