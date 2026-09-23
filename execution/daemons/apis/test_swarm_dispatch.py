@@ -1919,6 +1919,8 @@ def test_route_findings_exhausted_dedup_suppresses_renotify(monkeypatch, tmp_pat
     sent = []
     # Empty silence window: production Madrid 22:00–08:00 holds
     # OPERATOR_DECISION and fails these effect tests after 22:00 local.
+    # Isolate digest path too — default /tmp digest flushes leftover
+    # held notices into `sent` once silence is empty.
     notifier = Notifier(
         rubric={
             "timezone": "Europe/Madrid",
@@ -1927,6 +1929,7 @@ def test_route_findings_exhausted_dedup_suppresses_renotify(monkeypatch, tmp_pat
         }
     )
     notifier._dedupe_path = tmp_path / "dedupe.json"
+    notifier._digest_path = tmp_path / "digest.json"
     notifier._deliver = lambda m, **kw: (sent.append(m), True)[1]
     d = SwarmDispatcher(notifier, _config())
     reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
