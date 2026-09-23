@@ -39,6 +39,8 @@ import asyncio
 import inspect
 import json
 import logging
+import weakref
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -461,36 +463,142 @@ def _lens_key_thumbprint(identity: dict) -> str | None:
         return None
 
 
+def _parse_utc(value: object) -> datetime | None:
+    """*value* as an aware UTC datetime, or None when it is not a timestamp.
+
+    Accepts the ISO-8601 shapes seen on this path: a `Z` suffix or an explicit
+    offset, with or without fractional seconds. A naive timestamp is read as
+    UTC (Neotoma stamps are UTC). Comparing the raw STRINGS was wrong: a
+    `...:05Z` stamp sorts after `...:05.500000+00:00` although it is half a
+    second earlier (both security runs at e874537f).
+    """
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text[-1] in "Zz":
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _observation_time(observation: dict) -> datetime | None:
+    return _parse_utc(
+        observation.get("created_at")
+        or observation.get("observed_at")
+        or observation.get("timestamp")
+    )
+
+
 def _observation_is_attributed(
-    observation: object, *, lens_sub: str, lens_thumbprint: str, not_before: str
+    observation: object,
+    *,
+    lens_sub: str,
+    lens_thumbprint: str,
+    not_before: str | datetime | None,
 ) -> bool:
-    """True only when *observation* was written by this lens's own key, now.
+    """True only when *observation* was written by this lens's own key.
 
     The same three provenance conditions
     `gating.read_authenticated_checkpoint_resolution` requires of a checkpoint
-    approver — subject, key thumbprint, trusted attribution tier — plus
-    freshness (the observation is not older than this call's pre-write read).
-    The tenant check that function also makes has no counterpart here: this
-    store holds no expected tenant id to compare against.
+    approver — subject, key thumbprint, trusted attribution tier — plus, when
+    *not_before* is given, freshness (the observation is not older than this
+    call's pre-write read), compared as parsed datetimes. An observation
+    whose timestamp does not parse is not attributed. The tenant check that
+    function also makes has no counterpart here: this store holds no expected
+    tenant id to compare against.
     """
     if not isinstance(observation, dict):
         return False
     provenance = observation.get("provenance")
     if not isinstance(provenance, dict):
         return False
-    observed_at = str(
-        observation.get("created_at")
-        or observation.get("observed_at")
-        or observation.get("timestamp")
-        or ""
-    )
+    observed_at = _observation_time(observation)
+    if observed_at is None:
+        return False
+    if not_before is not None:
+        floor = _parse_utc(not_before)
+        if floor is None or observed_at < floor:
+            return False
     return (
-        bool(observed_at)
-        and observed_at >= not_before
-        and str(provenance.get("agent_sub") or "").strip() == lens_sub
+        str(provenance.get("agent_sub") or "").strip() == lens_sub
         and str(provenance.get("agent_thumbprint") or "").strip() == lens_thumbprint
         and provenance.get("attribution_tier") in _TRUSTED_AAUTH_TIERS
     )
+
+
+def _gate_status_history(
+    observations: list[dict], head_id: str
+) -> list[tuple[dict[str, str], dict]] | None:
+    """`gate_status` observations from *head_id* back, newest first, or None.
+
+    Each item is (parsed gate map, observation). *head_id* is the observation
+    the entity's field provenance names for `gate_status` (the value the
+    snapshot shows); older ones follow in time order. None — fail closed —
+    when *head_id* is empty or not among *observations*, or when any
+    `gate_status` observation's timestamp does not parse (the order would be
+    a guess).
+    """
+    if not head_id:
+        return None
+    carrying = [
+        o
+        for o in observations
+        if isinstance(o, dict)
+        and isinstance(o.get("fields"), dict)
+        and GATE_STATUS_FIELD in o["fields"]
+    ]
+    stamped = [(_observation_time(o), o) for o in carrying]
+    if any(when is None for when, _ in stamped):
+        return None
+    # Stable: observations with equal timestamps keep the endpoint's
+    # newest-first order.
+    stamped.sort(key=lambda pair: pair[0], reverse=True)
+    ordered = [o for _, o in stamped]
+    start = next((i for i, o in enumerate(ordered) if o.get("id") == head_id), None)
+    if start is None:
+        return None
+    return [
+        (parse_gate_status(o["fields"][GATE_STATUS_FIELD]), o) for o in ordered[start:]
+    ]
+
+
+# ── Per-issue write serialisation (second security run at e874537f, N1) ──────
+# `gate_status` is ONE field holding every gate's state, and Neotoma's
+# `correct` replaces a field's whole value: it has no field-level merge and no
+# conditional (compare-and-set) write. So two sign-offs on the same issue that
+# overlap each read the map, change one key, and write the whole map back, and
+# the later write can bring back a gate the earlier one had just rolled back.
+# The dispatcher is one process, so an in-process lock per (Neotoma instance,
+# repo, issue) serialises every `sign_off` (including its compensating restore)
+# and every `waive`. It does not cover writers outside this process (an agent's
+# own MCP session); the tool deny on every seated reviewer is what keeps those
+# off `correct`.
+_ISSUE_WRITE_LOCKS: weakref.WeakValueDictionary[tuple, asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _issue_write_lock(base_url: str, repo: str, issue_number: int) -> asyncio.Lock:
+    """The lock serialising gate writes to one issue entity in this process.
+
+    Keyed on the running event loop as well, so a lock is never shared across
+    loops (each test's `asyncio.run` gets its own). Held weakly: a lock no
+    coroutine holds or waits on is dropped.
+    """
+    key = (id(asyncio.get_running_loop()), base_url, str(repo), str(issue_number))
+    lock = _ISSUE_WRITE_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _ISSUE_WRITE_LOCKS[key] = lock
+    return lock
 
 
 # ── Neotoma-backed issue-entity store ────────────────────────────────────────
@@ -822,8 +930,18 @@ class IssueGateStore:
         This is the whole fix for #285: a deterministic dispatcher-side write
         followed by a read-back assertion.  The outcome always describes what
         happened, so the caller can post an operator-visible comment on success
-        AND on failure.
+        AND on failure. Serialised with `sign_off` per issue
+        (`_issue_write_lock`): both write the whole `gate_status` map.
         """
+        async with _issue_write_lock(self.base_url, repo, issue_number):
+            return await self._waive_locked(repo, issue_number, pre_impl_gates)
+
+    async def _waive_locked(
+        self,
+        repo: str,
+        issue_number: int,
+        pre_impl_gates: tuple[str, ...],
+    ) -> WaiveOutcome:
         outcome = WaiveOutcome()
         state = await self.load(repo, issue_number)
         if not state.found:
@@ -1011,10 +1129,32 @@ class IssueGateStore:
         failure. Callers treat every failed outcome as NOT cleared whatever a
         later re-read shows.
 
+        SERIALISED PER ISSUE (second security run at e874537f, N1): the whole
+        call, compensating restore included, runs under `_issue_write_lock`,
+        so a concurrent sign-off on the same issue cannot load the map before
+        this one's restore and write a rolled-back gate back.
+
         Raises nothing: every failure path returns a populated
         ``SignOffOutcome`` so the caller can decide (retry, escalate, leave
-        pending) rather than crash the dispatch loop.
+        pending) rather than crash the dispatch loop. (A cancelled task is not
+        a failure path: cancellation propagates, and a write already sent may
+        have landed. The next run does not trust that value — see
+        `unverified_signed_off_gates`.)
         """
+        async with _issue_write_lock(self.base_url, repo, issue_number):
+            return await self._sign_off_locked(
+                repo, issue_number, gate, lens_agent, head_sha, next_owner
+            )
+
+    async def _sign_off_locked(
+        self,
+        repo: str,
+        issue_number: int,
+        gate: str,
+        lens_agent: str,
+        head_sha: str,
+        next_owner: str,
+    ) -> SignOffOutcome:
         lens_sub = f"{lens_agent}@ateles-swarm"
         outcome = SignOffOutcome(gate=gate, lens_agent=lens_agent, lens_sub=lens_sub)
 
@@ -1463,12 +1603,62 @@ class IssueGateStore:
         already read `signed_off` before this call) the class becomes
         `SIGN_OFF_CLEARED_UNVERIFIED`. A re-read that fails is reported as
         what it is, never as `pending`.
+
+        AUDIT (second security run at e874537f): the `signed_off` history entry
+        is written BEFORE the gate (the safety field stays last), so whenever
+        that entry landed and the sign-off then failed, a `sign_off_failed`
+        entry naming the failure class and the gate's re-read value is
+        appended after it — on every failure path, not only when a restore
+        ran. `owner_history` therefore does not end on a `signed_off` for a
+        sign-off that failed. Best-effort: the gate value, not this note, is
+        what callers act on.
         """
         outcome.ok = False
         outcome.verified = False
         original_error = outcome.error
-
         reread = await self.load(repo, issue_number)
+        await self._settle_gate(
+            outcome,
+            reread,
+            repo=repo,
+            issue_number=issue_number,
+            gate=gate,
+            prior_value=prior_value,
+            lens_agent=lens_agent,
+            lens_sub=lens_sub,
+            idempotency_suffix=idempotency_suffix,
+            gate_written=gate_written,
+            original_error=original_error,
+        )
+        if history_written:
+            await self._record_failed_sign_off(
+                reread,
+                repo=repo,
+                issue_number=issue_number,
+                gate=gate,
+                lens_agent=lens_agent,
+                lens_sub=lens_sub,
+                error=outcome.error or original_error,
+                observed=outcome.observed_state,
+                idempotency_suffix=idempotency_suffix,
+            )
+        return outcome
+
+    async def _settle_gate(
+        self,
+        outcome: SignOffOutcome,
+        reread: IssueGateState,
+        *,
+        repo: str,
+        issue_number: int,
+        gate: str,
+        prior_value: str,
+        lens_agent: str,
+        lens_sub: str,
+        idempotency_suffix: str,
+        gate_written: bool,
+        original_error: str,
+    ) -> SignOffOutcome:
         if not reread.found or reread.gate_status_unreadable:
             outcome.observed_state = (
                 "unreadable" if reread.found else "unknown (re-read found no entity)"
@@ -1523,29 +1713,6 @@ class IssueGateStore:
                 )
                 return outcome
             current = (after.gate_status.get(gate) or "").strip().lower() or "pending"
-            if history_written and not reread.owner_history_unreadable:
-                # Best-effort audit note beside the `signed_off` history entry
-                # this call already appended, so the history does not assert a
-                # sign-off the gate no longer carries. The gate value, not
-                # this note, is what callers act on.
-                await self._sign_off_write(
-                    reread.entity_id,
-                    "owner_history",
-                    list(reread.owner_history)
-                    + [
-                        {
-                            "gate": gate,
-                            "action": "sign_off_rolled_back",
-                            "actor": lens_agent,
-                            "reason": original_error,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        }
-                    ],
-                    f"gate-signoff-rollback-history-{gate}-{idempotency_suffix}",
-                    lens_agent=lens_agent,
-                    lens_sub=lens_sub,
-                    context=(repo, issue_number, gate),
-                )
 
         outcome.observed_state = current
         if current == "signed_off":
@@ -1566,6 +1733,152 @@ class IssueGateStore:
             ),
         )
         return outcome
+
+    async def _record_failed_sign_off(
+        self,
+        reread: IssueGateState,
+        *,
+        repo: str,
+        issue_number: int,
+        gate: str,
+        lens_agent: str,
+        lens_sub: str,
+        error: str,
+        observed: str,
+        idempotency_suffix: str,
+    ) -> None:
+        """Append a `sign_off_failed` entry after this call's `signed_off` one.
+
+        Built on the settling re-read's `owner_history` (a fresh read, taken
+        under the per-issue lock). Never written through an unreadable stored
+        value, and not written when the re-read found no entity: there is then
+        no current list to append to, and writing this call's own copy back
+        could drop an entry another writer added.
+        """
+        if not reread.found or reread.owner_history_unreadable:
+            log.error(
+                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: owner_history "
+                "not readable on re-read — sign_off_failed note not written",
+                repo,
+                issue_number,
+                gate,
+                lens_agent,
+            )
+            return
+        failure = await self._sign_off_write(
+            reread.entity_id,
+            "owner_history",
+            list(reread.owner_history)
+            + [
+                {
+                    "gate": gate,
+                    "action": "sign_off_failed",
+                    "actor": lens_agent,
+                    "reason": error,
+                    "gate_after": observed,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+            f"gate-signoff-failed-history-{gate}-{idempotency_suffix}",
+            lens_agent=lens_agent,
+            lens_sub=lens_sub,
+            context=(repo, issue_number, gate),
+        )
+        if failure:
+            log.error(
+                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: sign_off_failed "
+                "note did not land (%s) — owner_history still ends on this "
+                "call's signed_off entry",
+                repo,
+                issue_number,
+                gate,
+                lens_agent,
+                failure,
+            )
+
+    async def unverified_signed_off_gates(
+        self, state: IssueGateState, owners: Mapping[str, str]
+    ) -> set[str]:
+        """Gates in *owners* that read `signed_off` without a provable sign-off.
+
+        A later run must not trust a `signed_off` it did not itself verify
+        (second security run at e874537f, N2, and the cancellation case): a
+        sign-off whose settle could not run or could not restore — a Neotoma
+        outage after the gate write landed, or a task cancelled while the
+        worker thread's write was already on the wire — leaves the gate
+        reading `signed_off`, and nothing else remembers that it failed.
+
+        So the value is re-proven from provenance. *owners* maps each gate to
+        the lens that owns it (`pm` -> `pavo`, ...). A `signed_off` gate is
+        VERIFIED only when an observation in its current `signed_off` run —
+        from the observation the reducer's provenance names for
+        `gate_status`, walking back through older `gate_status` observations
+        while the gate still reads `signed_off` — was written by that owner's
+        own key: the owner's subject, the RFC 7638 thumbprint of the owner's
+        key file, and a trusted attribution tier (`_observation_is_attributed`).
+        The walk is needed because every sign-off rewrites the whole map: the
+        newest observation for a later gate also carries the earlier gates'
+        `signed_off`, written by a different lens.
+
+        Fails closed: an unreadable record, a missing provenance entry, an
+        observations read that returns nothing, an observation whose
+        timestamp does not parse, or an owner key this process cannot read
+        leaves every `signed_off` gate it affects UNVERIFIED. Callers treat an
+        unverified gate as pending, so its owner is seated again and a clean
+        verdict re-signs it: a false negative costs one review round.
+        """
+        signed = {
+            gate
+            for gate in owners
+            if (state.gate_status.get(gate) or "").strip().lower() == "signed_off"
+        }
+        if not signed:
+            return set()
+        if not state.found or state.gate_status_unreadable:
+            return signed
+        head_id = state.field_provenance.get(GATE_STATUS_FIELD, "")
+        observations = await self._observations(state.entity_id) if head_id else []
+        history = _gate_status_history(observations, head_id)
+        if history is None:
+            log.warning(
+                "[apis.gate_waive] %s#%s: gate_status provenance could not be "
+                "read back (observation %r) — treating %s as unverified",
+                state.repo,
+                state.issue_number,
+                head_id or "(none)",
+                ", ".join(sorted(signed)),
+            )
+            return signed
+        unverified: set[str] = set()
+        for gate in sorted(signed):
+            owner = owners[gate]
+            owner_sub = f"{owner}@ateles-swarm"
+            identity = _ns.agent_identity(owner, sub=owner_sub)
+            thumbprint = _lens_key_thumbprint(identity) if identity is not None else None
+            verified = False
+            if thumbprint:
+                for gates_map, observation in history:
+                    if (gates_map.get(gate) or "").strip().lower() != "signed_off":
+                        break
+                    if _observation_is_attributed(
+                        observation,
+                        lens_sub=owner_sub,
+                        lens_thumbprint=thumbprint,
+                        not_before=None,
+                    ):
+                        verified = True
+                        break
+            if not verified:
+                unverified.add(gate)
+        if unverified:
+            log.warning(
+                "[apis.gate_waive] %s#%s: %s read signed_off without an "
+                "observation signed by the owning lens — treated as pending",
+                state.repo,
+                state.issue_number,
+                ", ".join(sorted(unverified)),
+            )
+        return unverified
 
     async def waive_many(
         self,

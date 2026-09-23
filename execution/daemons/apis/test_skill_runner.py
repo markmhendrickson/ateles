@@ -3748,8 +3748,11 @@ class TestGateOwnerToolDenyAcrossProviders:
     def test_advisory_lens_gets_no_disallowed_tools_flag(
         self, MockLoader, mock_write_harness, monkeypatch
     ) -> None:
-        """Non-regression: an advisory lens (owns_pending_gate=False) is not
-        narrowed by this fix — no `--disallowed-tools` flag at all."""
+        """Non-regression: a run with neither control set (owns_pending_gate
+        and seated_reviewer both False) gets no `--disallowed-tools` flag.
+        The dispatcher seats every lens with `seated_reviewer=True` (PR #1181,
+        e874537f round), so a SEATED advisory lens does carry the deny — see
+        test_gate_sign_off_residuals.py."""
         fake_def = _make_def(
             prompt_markdown="Role: Falco.",
             tool_allowlist="*",

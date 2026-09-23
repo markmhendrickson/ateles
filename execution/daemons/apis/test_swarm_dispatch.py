@@ -6886,6 +6886,20 @@ def _install_pipeline_stubs(monkeypatch, run_skill_impl, *, select_agents=None):
         swarm_dispatch.IssueGateStore, "load", fake_gate_load
     )
 
+    # "Genuinely cleared" includes provenance: each `signed_off` is backed by
+    # its owning lens's own signed write (PR #1181, second security run at
+    # e874537f, N2). The re-proof itself is tested in
+    # test_gate_sign_off_residuals.py.
+    async def fake_all_proven(self, state, owners):
+        return set()
+
+    monkeypatch.setattr(
+        swarm_dispatch.IssueGateStore,
+        "unverified_signed_off_gates",
+        fake_all_proven,
+        raising=False,
+    )
+
     # ateles#795 amended ADR, extended to the Phase-1 pm gate: the pipeline
     # now calls the real `IssueGateStore.sign_off` after a clean pm verdict.
     # These pipeline-mechanics tests exercise section ordering / persistence
@@ -7185,29 +7199,29 @@ def test_sign_off_is_warranted_requires_explicit_clear_token():
     from swarm_dispatch import sign_off_is_warranted
 
     # Unparseable / empty stdout: no verdict token at all.
-    assert sign_off_is_warranted("") is False
-    assert sign_off_is_warranted(None) is False
-    assert sign_off_is_warranted("garbled output, no token, no marker") is False
+    assert sign_off_is_warranted("", lens_agent="pavo") is False
+    assert sign_off_is_warranted(None, lens_agent="pavo") is False
+    assert sign_off_is_warranted("garbled output, no token, no marker", lens_agent="pavo") is False
 
     # An explicit non-clear token, even with no [BLOCKING] line in the body.
-    assert sign_off_is_warranted("**BLOCKED**\nmissing information") is False
-    assert sign_off_is_warranted("**REQUEST_CHANGES**\nplease fix X") is False
+    assert sign_off_is_warranted("**BLOCKED**\nmissing information", lens_agent="pavo") is False
+    assert sign_off_is_warranted("**REQUEST_CHANGES**\nplease fix X", lens_agent="pavo") is False
 
     # A [BLOCKING] finding under a nominally-clear token still refuses
     # (the body cross-check is an EXTRA veto, never relaxed by the token).
     assert (
-        sign_off_is_warranted("**APPROVE**\n[BLOCKING] scope: actually missing")
+        sign_off_is_warranted("**APPROVE**\n[BLOCKING] scope: actually missing", lens_agent="pavo")
         is False
     )
 
     # The only warranted shapes: an explicit clear token, clean body.
-    assert sign_off_is_warranted("**SIGNED_OFF**\nno concerns") is True
-    assert sign_off_is_warranted("**APPROVE**\nlgtm") is True
+    assert sign_off_is_warranted("**SIGNED_OFF**\nno concerns", lens_agent="pavo") is True
+    assert sign_off_is_warranted("**APPROVE**\nlgtm", lens_agent="pavo") is True
     # `COMMENT` ("observations only") names no gate decision, so it does not
     # clear a gate (second security run, PR #1181: only an explicit clear
     # token may). See test_gate_sign_off_fail_closed.py for the mixed-verdict
     # cases that finding was about.
-    assert sign_off_is_warranted("**COMMENT**\nobservation only") is False
+    assert sign_off_is_warranted("**COMMENT**\nobservation only", lens_agent="pavo") is False
 
 
 def test_pm_unparseable_verdict_does_not_call_sign_off(monkeypatch):

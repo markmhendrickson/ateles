@@ -69,6 +69,9 @@ class _Record:
     ``attributed_sub`` / ``tier`` / ``thumbprint``: what the minted
     observation's provenance says, so a test can make the write land under a
     different principal, an untrusted tier, or a different key.
+    ``tier_by_sub``: a per-signer tier, overriding ``tier`` for that subject.
+    Each minted observation also carries ``fields`` ({field: value}), the
+    shape the provenance re-proof reads.
     """
 
     def __init__(
@@ -81,6 +84,7 @@ class _Record:
         attributed_sub: str | None = None,
         tier: str = "software",
         thumbprint: str = LENS_TP,
+        tier_by_sub: dict[str, str] | None = None,
     ) -> None:
         self.gate_status = dict(gate_status)
         self.owner_history: list[dict] = []
@@ -95,6 +99,7 @@ class _Record:
         self.attributed_sub = attributed_sub
         self.tier = tier
         self.thumbprint = thumbprint
+        self.tier_by_sub = dict(tier_by_sub or {})
 
     async def load(self, repo: str, issue_number: int) -> IssueGateState:
         return IssueGateState(
@@ -130,15 +135,17 @@ class _Record:
             self.current_owner = str(value)
         observation_id = f"obs-{len(self.writes)}"
         self.provenance[field_name] = observation_id
+        signer = self.attributed_sub or sub
         self.observations.insert(
             0,
             {
                 "id": observation_id,
                 "created_at": LATER,
+                "fields": {field_name: value},
                 "provenance": {
-                    "agent_sub": self.attributed_sub or sub,
+                    "agent_sub": signer,
                     "agent_thumbprint": self.thumbprint,
-                    "attribution_tier": self.tier,
+                    "attribution_tier": self.tier_by_sub.get(signer, self.tier),
                 },
             },
         )
@@ -201,7 +208,7 @@ class TestAmbiguousVerdictDoesNotClear:
             "In the previous round waxwing **SIGNED_OFF** the arch gate.\n\n"
             "**BLOCKED** — the ux spec section is missing"
         )
-        assert swarm_dispatch.sign_off_is_warranted(stdout) is False
+        assert swarm_dispatch.sign_off_is_warranted(stdout, lens_agent="pavo") is False
 
     def test_quoted_approve_then_prose_request_changes_is_not_warranted(self):
         """Security run input 2: a quoted APPROVE, then this lens's own
@@ -211,11 +218,11 @@ class TestAmbiguousVerdictDoesNotClear:
             "**REQUEST_CHANGES**\n\n"
             "The migration drops the covering index; please restore it before merge."
         )
-        assert swarm_dispatch.sign_off_is_warranted(stdout) is False
+        assert swarm_dispatch.sign_off_is_warranted(stdout, lens_agent="pavo") is False
 
     def test_changes_requested_anywhere_is_not_warranted(self):
         stdout = "**SIGNED_OFF**\n\nGitHub still shows CHANGES_REQUESTED from the last round."
-        assert swarm_dispatch.sign_off_is_warranted(stdout) is False
+        assert swarm_dispatch.sign_off_is_warranted(stdout, lens_agent="pavo") is False
 
     def test_own_verdict_is_read_from_the_line_after_the_header(self):
         """The lens protocol (skill_runner.SWARM_GITHUB_CONTRACT, "Verdict
@@ -224,20 +231,22 @@ class TestAmbiguousVerdictDoesNotClear:
         for a verdict line that is missing or is something else."""
         header = "**🤖 Accipiter — Ateles swarm, ux gate owner**\n"
         assert swarm_dispatch.sign_off_is_warranted(
-            header + "**SIGNED_OFF**\n\n- [x] design section present"
+            header + "**SIGNED_OFF**\n\n- [x] design section present",
+            lens_agent="accipiter",
         ) is True
         assert swarm_dispatch.sign_off_is_warranted(
-            header + "Reviewed the diff.\n\n**SIGNED_OFF**"
+            header + "Reviewed the diff.\n\n**SIGNED_OFF**",
+            lens_agent="accipiter",
         ) is False
 
     def test_comment_is_not_a_sign_off(self):
         """`COMMENT` means "observations only"; it names no gate decision, so
         it cannot clear one."""
-        assert swarm_dispatch.sign_off_is_warranted("**COMMENT**\nobservation only") is False
+        assert swarm_dispatch.sign_off_is_warranted("**COMMENT**\nobservation only", lens_agent="pavo") is False
 
     def test_clean_explicit_clear_tokens_still_clear(self):
-        assert swarm_dispatch.sign_off_is_warranted("**SIGNED_OFF**\nno concerns") is True
-        assert swarm_dispatch.sign_off_is_warranted("**APPROVE**\nlgtm") is True
+        assert swarm_dispatch.sign_off_is_warranted("**SIGNED_OFF**\nno concerns", lens_agent="pavo") is True
+        assert swarm_dispatch.sign_off_is_warranted("**APPROVE**\nlgtm", lens_agent="pavo") is True
 
 
 # ── 2. A failed sign-off never leaves the gate cleared (security B2) ────────
@@ -502,6 +511,19 @@ class TestToolDenyFromTheLiveRecord:
         seen: dict = {}
         calls: list = []
         monkeypatch.setattr(swarm_dispatch.IssueGateStore, "load", load_impl)
+
+        # A `signed_off` in these records is backed by its owner's own signed
+        # write; the provenance re-proof is tested in
+        # test_gate_sign_off_residuals.py.
+        async def all_proven(self, state, owners):
+            return set()
+
+        monkeypatch.setattr(
+            swarm_dispatch.IssueGateStore,
+            "unverified_signed_off_gates",
+            all_proven,
+            raising=False,
+        )
         d = tsd._pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls)
 
         async def fake_run_skill(skill, prompt, **kwargs):

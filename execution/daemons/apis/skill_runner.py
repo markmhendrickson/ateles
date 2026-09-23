@@ -177,6 +177,12 @@ def gate_writeback_allowlist(tools: list[str]) -> list[str]:
 # the CLI's DENY list, which takes precedence over any allow entry including a
 # wildcard. This is a subtractive control, not an additive grant, so it cannot
 # be defeated by the same class of gap that made the additive fix incomplete.
+#
+# Since the dispatcher security run at e874537f (BLOCKING
+# `incomplete_class_sweep`), the deny also covers EVERY seated reviewer
+# (`run_skill(seated_reviewer=True)`), not only a run that owns a pending gate:
+# an advisory seat, or a gate owner re-seated after its gate cleared, held the
+# same wildcard over the same shared bearer.
 GATE_OWNER_DENIED_TOOLS: tuple[str, ...] = ("mcp__mcpsrv_neotoma__correct",)
 
 
@@ -1421,8 +1427,9 @@ async def _run_skill_once(
             f"{GATE_OWNER_TOOL_DENY_UNAVAILABLE}: provider {provider!r} has no "
             "mechanism in this codebase to deny a single MCP tool "
             f"({GATE_OWNER_DENIED_TOOLS[0]}) while still granting the rest of "
-            "the agent's Neotoma access — refusing to launch a gate-owning "
-            "lens on it rather than running unrestricted (ateles#795, "
+            "the agent's Neotoma access — refusing to launch a seated "
+            "reviewer or gate-owning lens on it rather than running "
+            "unrestricted (ateles#795, "
             "Falco's security review on PR #1181)."
         )
         log.error(f"[apis] {skill} dispatch refused — {msg}")
@@ -1708,8 +1715,8 @@ async def _run_skill_once(
         log.info(
             f"[apis] Spawning via {provider}: <{_role}:{skill}.SKILL.md> "
             f"--disallowed-tools {','.join(disallowed_list)} "
-            "(gate-owning run — correct() of gate_status denied regardless "
-            "of allowlist)"
+            "(seated reviewer or gate-owning run — correct() denied "
+            "regardless of allowlist)"
         )
     if provider != "claude":
         log.info(
@@ -2082,6 +2089,7 @@ async def run_skill(
     provider: str | None = None,
     preferred_provider: str | None = None,
     owns_pending_gate: bool = False,
+    seated_reviewer: bool = False,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
 
@@ -2106,20 +2114,37 @@ async def run_skill(
     that still wants to distinguish a gate-owning run from an advisory one
     (e.g. logging), and MUST NOT be reintroduced as a hard launch refusal
     without re-litigating the amended ADR on ateles#795.
+
+    ``seated_reviewer`` (PR #1181, dispatcher security run at e874537f,
+    BLOCKING `incomplete_class_sweep`): True for EVERY lens the dispatcher
+    seats on a PR panel, an issue-spec section, a missing-lens re-run, or a
+    fix-guidance round, whether or not it owns a pending gate. Each such run
+    gets the `mcp__mcpsrv_neotoma__*` wildcard over the shared daemon bearer,
+    so an advisory seat (security, content, ...) or a gate owner re-seated
+    after its gate cleared could otherwise still `correct` the shared
+    `gate_status` map. It carries the same controls as a gate-owning run:
+    `correct` on the CLI deny list, and claude-only routing, since no other
+    adapter here can deny a single MCP tool. No seated lens needs `correct`
+    for anything but gate state: they file findings through `store`.
     """
+    # One control, two reasons to apply it. The internal name stays
+    # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
+    # use it only for the deny and the claude-only routing.
+    deny_correct = owns_pending_gate or seated_reviewer
+
     async def attempt(selected: str) -> SkillResult:
         return await _run_skill_once(
             skill, prompt, provider=selected, role=role,
             task_entity_id=task_entity_id, timeout=timeout, env_extra=env_extra,
             notifier=notifier, github_token=github_token,
             include_github_contract=include_github_contract, cwd=cwd,
-            owns_pending_gate=owns_pending_gate,
+            owns_pending_gate=deny_correct,
         )
 
     return await _run_provider_attempts(
         skill, attempt, binaries=_provider_binaries(), provider=provider,
         role=role, task_entity_id=task_entity_id, notifier=notifier,
-        preferred_provider=preferred_provider, owns_pending_gate=owns_pending_gate,
+        preferred_provider=preferred_provider, owns_pending_gate=deny_correct,
     )
 
 
@@ -2156,6 +2181,15 @@ async def _run_provider_attempts(
     every call path (pinned or not).
     """
     if owns_pending_gate and provider is None:
+        if preferred_provider and preferred_provider != "claude":
+            # A lens preference (e.g. the security lens's second-model
+            # `codex`) cannot be honoured on a run that must deny `correct`:
+            # say so rather than drop it silently.
+            log.info(
+                f"[apis] {skill}: preferred provider {preferred_provider!r} "
+                "not used — this run denies mcp__mcpsrv_neotoma__correct, which "
+                "only the claude adapter can enforce"
+            )
         binaries = {"claude": binaries.get("claude")}
         preferred_provider = None
 
@@ -2167,8 +2201,9 @@ async def _run_provider_attempts(
             reason = provider_exclusion_reason("claude", binaries) or "not eligible"
             msg = (
                 f"{GATE_OWNER_TOOL_DENY_UNAVAILABLE}: claude is the only "
-                "provider that can deny a single MCP tool for a gate-owning "
-                f"run, and it is currently ineligible ({reason}) — refusing "
+                "provider that can deny a single MCP tool for a seated "
+                "reviewer or gate-owning run, and it is currently ineligible "
+                f"({reason}) — refusing "
                 "to launch on cursor/codex unrestricted rather than falling "
                 "over to them (ateles#795, #1181 operational finding). "
                 "Nothing was cooled down."

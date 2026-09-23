@@ -332,6 +332,12 @@ def _dispatcher_with_gate_state(monkeypatch, state, raises=None):
                 raise raises
             return state
 
+        async def unverified_signed_off_gates(self, state, owners):
+            # Every `signed_off` here is backed by its owner's own signed
+            # write; the provenance re-proof (PR #1181, N2) is tested in
+            # test_gate_sign_off_residuals.py.
+            return set()
+
     monkeypatch.setattr(sd, "IssueGateStore", _Store)
     d = sd.SwarmDispatcher.__new__(sd.SwarmDispatcher)
     d.config = type(
