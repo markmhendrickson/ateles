@@ -5,20 +5,18 @@ from __future__ import annotations
 import asyncio
 import logging
 
-import pytest
-
-from lib.notify import Notifier, Priority
+from lib.notify import Notifier
 from execution.daemons.apis import swarm_dispatch
 from execution.daemons.apis.swarm_dispatch import (
-    DispatchConfig,
+    ReviewBindingReceipt,
     SwarmDispatcher,
-    content_digest,
+    agent_github_login,
 )
-from execution.daemons.apis.swarm_dispatch import ReviewBindingReceipt
 from execution.daemons.apis.test_swarm_dispatch import (
     SkillResult,
     _async_return,
     _config,
+    _issue_trigger,
     _trigger,
 )
 
@@ -261,220 +259,278 @@ def test_ci_exhausted_body_includes_failing_check_and_run_link(monkeypatch, tmp_
     assert "APIS_MAX_FIX_ROUNDS" in sent[0]
 
 
-# ── #2 skill updates ────────────────────────────────────────────────────────
+# ── #2 skill updates (drive _handle_pr learning pass) ───────────────────────
 
 
-def _systemic_review():
-    return [("arch", "[BLOCKING] schema: missing field\nadd schema version")]
-
-
-async def _fake_learning_path(d, monkeypatch, reviews, store_payload=None):
-    async def store(self, entities, idempotency_key):
-        return store_payload or {
-            "entities": [{"entity_id": "ent_skill_1"}],
+def _skill_proposal(rule: str = "Always declare fields") -> list[dict]:
+    return [
+        {
+            "entity_type": "proposed_skill_update",
+            "title": "Learn",
+            "finding_category": "schema",
+            "proposed_rule": rule,
+            "status": "proposed",
         }
-
-    monkeypatch.setattr(SwarmDispatcher, "_store_entities", store)
-
-    ref = f"{_trigger().repository}#{_trigger().number}"
-    proposals = swarm_dispatch.propose_skill_updates(reviews, pr_ref=ref)
-    digest = content_digest(proposals)
-    store_result = await d._store_entities(proposals, idempotency_key=f"x-{digest}")
-    first = proposals[0]
-    stored_ids = [
-        e["entity_id"] for e in (store_result or {}).get("entities", [])
     ]
-    trig = _trigger()
-    d.notifier.send(
-        f"{len(proposals)} systemic review finding(s) on {ref} — "
-        f"proposed skill update(s) await operator approval.\n"
-        f"Finding: {first.get('finding_category')}\n"
-        f"Proposed rule: {first.get('proposed_rule')}\n"
-        f"PR: {trig.html_url}\n"
-        f"proposed_skill_update entity id(s): {', '.join(stored_ids)}",
-        priority=Priority.OPERATOR_DECISION,
-        handler="apis",
-        dedupe_key=f"skill-updates:{ref}:{digest}",
-        email_eligible=bool(trig.html_url or stored_ids),
+
+
+def _pr_dispatcher_learning(monkeypatch, tmp_path, sent, *, deliver_kw=None):
+    """Reach the learning-pass Notifier.send inside production `_handle_pr`."""
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "vanellus":
+            return SkillResult(skill, True, 0, "**APPROVE**\nlgtm", "")
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    async def fake_store(self, entities, idempotency_key):
+        return {"entities": [{"entity_id": "ent_skill_1"}]}
+
+    async def fake_emit(self, trigger, verdict, body, **kwargs):
+        return ReviewBindingReceipt(
+            review_id="1",
+            reviewer_login=agent_github_login("vanellus"),
+            commit_id="a" * 40,
+            state="APPROVED",
+        )
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40)
     )
+    monkeypatch.setattr(
+        SwarmDispatcher, "_changed_files", lambda self, t: _async_return(["x"])
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher, "_route_blocking_findings", lambda *a, **k: _async_return(None)
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher, "_gate_merge_readiness", lambda *a, **k: _async_return(None)
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher, "_persist_panel_reviews", lambda *a, **k: _async_return(True)
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher, "_post_missing_panel_comments", lambda *a, **k: _async_return(None)
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_post_missing_vanellus_comment",
+        lambda *a, **k: _async_return(None),
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_preregistered_expectations",
+        lambda self, r, p: _async_return({}),
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher, "_claim_escalation", lambda *a, **k: _async_return(True)
+    )
+    monkeypatch.setattr(SwarmDispatcher, "_emit_formal_review", fake_emit)
+    return SwarmDispatcher(
+        _notifier(tmp_path, sent, deliver_kw=deliver_kw), _config()
+    )
+
+
+def _skill_sends(sent):
+    return [m for m in sent if "systemic review finding" in m]
 
 
 def test_skill_updates_identical_digest_suppresses(monkeypatch, tmp_path):
     sent = []
-    d = _dispatcher(tmp_path, sent)
-    reviews = _systemic_review()
     monkeypatch.setattr(
-        swarm_dispatch,
-        "propose_skill_updates",
-        lambda reviews, pr_ref: [
-            {
-                "entity_type": "proposed_skill_update",
-                "title": "Learn",
-                "finding_category": "schema",
-                "proposed_rule": "Always declare fields",
-                "status": "proposed",
-            }
-        ],
+        swarm_dispatch, "propose_skill_updates", lambda reviews, pr_ref: _skill_proposal()
     )
-
-    async def run():
-        await _fake_learning_path(d, monkeypatch, reviews)
-        await _fake_learning_path(d, monkeypatch, reviews)
-
-    asyncio.run(run())
-    assert len(sent) == 1
+    d = _pr_dispatcher_learning(monkeypatch, tmp_path, sent)
+    asyncio.run(d._handle_pr(_trigger()))
+    asyncio.run(d._handle_pr(_trigger()))
+    assert len(_skill_sends(sent)) == 1
 
 
 def test_skill_updates_new_digest_sends(monkeypatch, tmp_path):
     sent = []
-    d = _dispatcher(tmp_path, sent)
     rules = ["Always declare fields", "Different rule text"]
     idx = {"i": 0}
 
     def proposals(reviews, pr_ref):
         rule = rules[idx["i"]]
         idx["i"] += 1
-        return [
-            {
-                "entity_type": "proposed_skill_update",
-                "title": "Learn",
-                "finding_category": "schema",
-                "proposed_rule": rule,
-                "status": "proposed",
-            }
-        ]
+        return _skill_proposal(rule)
 
     monkeypatch.setattr(swarm_dispatch, "propose_skill_updates", proposals)
-
-    async def run():
-        await _fake_learning_path(d, monkeypatch, _systemic_review())
-        await _fake_learning_path(d, monkeypatch, _systemic_review())
-
-    asyncio.run(run())
-    assert len(sent) == 2
+    d = _pr_dispatcher_learning(monkeypatch, tmp_path, sent)
+    asyncio.run(d._handle_pr(_trigger()))
+    asyncio.run(d._handle_pr(_trigger()))
+    assert len(_skill_sends(sent)) == 2
 
 
 def test_skill_updates_body_names_finding_and_approve_path(monkeypatch, tmp_path):
     sent = []
     deliver_kw = []
-    d = _dispatcher(tmp_path, sent, deliver_kw=deliver_kw)
     monkeypatch.setattr(
-        swarm_dispatch,
-        "propose_skill_updates",
-        lambda reviews, pr_ref: [
-            {
-                "entity_type": "proposed_skill_update",
-                "title": "Learn",
-                "finding_category": "schema",
-                "proposed_rule": "Always declare fields",
-                "status": "proposed",
-            }
-        ],
+        swarm_dispatch, "propose_skill_updates", lambda reviews, pr_ref: _skill_proposal()
     )
-    asyncio.run(_fake_learning_path(d, monkeypatch, _systemic_review()))
-    assert "schema" in sent[0]
-    assert "ent_skill_1" in sent[0]
-    assert deliver_kw[0]["email_eligible"] is True
+    d = _pr_dispatcher_learning(monkeypatch, tmp_path, sent, deliver_kw=deliver_kw)
+    trig = _trigger()
+    asyncio.run(d._handle_pr(trig))
+    body = _skill_sends(sent)[0]
+    assert "Finding: schema" in body
+    assert "Proposed rule: Always declare fields" in body
+    assert trig.html_url in body
+    assert "ent_skill_1" in body
+    skill_kw = [
+        kw
+        for kw, msg in zip(deliver_kw, sent)
+        if "systemic review finding" in msg
+    ]
+    assert skill_kw and skill_kw[0]["email_eligible"] is True
 
 
-# ── #3 spec ready ───────────────────────────────────────────────────────────
+# ── #3 spec ready (drive _run_issue_spec_pipeline) ──────────────────────────
 
 
-async def _notify_spec_ready(d, trigger, *, auto_build, gates_green, pr_url=None):
-    ref = f"{trigger.repository}#{trigger.number}"
-    spec_ready_key = f"spec-ready:{ref}"
-    spec_action = (
-        f"Open {trigger.html_url} — set ATELES_SWARM_AUTO_BUILD=1 and ensure "
-        "pre-implementation gates are signed off (_gates_green), or approve "
-        "the build manually once gates are green."
-    )
-    completed = ["pm"]
-    if auto_build and gates_green:
-        if pr_url:
-            d.notifier.clear_dedupe(spec_ready_key)
-            d.notifier.send(
-                f"Issue {ref}: additive spec assembled ({', '.join(completed)}); "
-                f"auto-build ON — implementation PR opened ({pr_url});",
-                priority=Priority.INFO,
-                handler="apis",
-            )
-        else:
-            d.notifier.send(
-                f"Issue {ref}: additive spec assembled ({', '.join(completed)}); "
-                f"NO PR. {spec_action}",
-                priority=Priority.OPERATOR_DECISION,
-                handler="apis",
-                dedupe_key=spec_ready_key,
-            )
-    else:
-        reason = "auto-build OFF" if not auto_build else "gates not green"
-        d.notifier.send(
-            f"Issue {ref}: spec ready ({reason}). {spec_action}",
-            priority=Priority.OPERATOR_DECISION,
-            handler="apis",
-            dedupe_key=spec_ready_key,
+def _spec_pipeline_dispatcher(monkeypatch, tmp_path, sent, *, auto_build, pr_url=None):
+    """Stub the issue pipeline against *this* module's swarm_dispatch import.
+
+    ``_install_pipeline_stubs`` patches the short-name ``swarm_dispatch`` module
+    used by ``test_swarm_dispatch``; this file imports
+    ``execution.daemons.apis.swarm_dispatch``, which is a separate module object
+    under pytest's path setup. Patch here so production ``run_skill`` is never
+    invoked (that would spawn ``claude`` and hang the suite).
+    """
+    from execution.daemons.apis.test_swarm_dispatch import _FakeSpecStore
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        return SkillResult(
+            skill, True, 0, "<<<SPEC_SECTION>>>text<<<END_SPEC_SECTION>>>", ""
         )
 
+    _FakeSpecStore.instances = []
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(swarm_dispatch, "IssueSpecStore", _FakeSpecStore)
+    monkeypatch.setattr(
+        swarm_dispatch, "select_expectation_agents", lambda *a, **kw: []
+    )
 
-def test_spec_ready_second_trigger_suppresses(tmp_path):
+    class _ClearGateState:
+        found = True
+        gate_status = {
+            "pm": "signed_off",
+            "ux": "signed_off",
+            "arch": "signed_off",
+        }
+
+    async def fake_gate_load(self, repo, issue_number):
+        return _ClearGateState()
+
+    monkeypatch.setattr(swarm_dispatch.IssueGateStore, "load", fake_gate_load)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_mirror_spec_to_issue", lambda *a, **k: _async_return(None)
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher, "_gates_green", lambda *a, **k: _async_return(True)
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_open_implementation_pr",
+        lambda *a, **k: _async_return(pr_url),
+    )
+    return SwarmDispatcher(
+        _notifier(tmp_path, sent),
+        _config(auto_build=auto_build),
+    )
+
+
+def _spec_ready_sends(sent):
+    return [
+        m
+        for m in sent
+        if "additive spec assembled" in m or "awaiting `build` approval" in m
+    ]
+
+
+def test_spec_ready_second_trigger_suppresses(monkeypatch, tmp_path):
     sent = []
-    d = _dispatcher(tmp_path, sent)
-    trig = _trigger(kind="issue_opened", html_url="https://github.com/owner/repo/issues/80")
-
-    async def run():
-        await _notify_spec_ready(d, trig, auto_build=False, gates_green=False)
-        await _notify_spec_ready(d, trig, auto_build=False, gates_green=False)
-
-    asyncio.run(run())
-    assert len(sent) == 1
+    d = _spec_pipeline_dispatcher(monkeypatch, tmp_path, sent, auto_build=False)
+    trig = _issue_trigger(html_url="https://github.com/owner/repo/issues/100")
+    asyncio.run(d._run_issue_spec_pipeline(trig))
+    asyncio.run(d._run_issue_spec_pipeline(trig))
+    assert len(_spec_ready_sends(sent)) == 1
 
 
-def test_spec_ready_info_pr_opened_branch_does_not_require_dedupe(tmp_path):
+def test_spec_ready_info_path_does_not_consume_dedupe_key(monkeypatch, tmp_path):
     sent = []
-    d = _dispatcher(tmp_path, sent)
-    trig = _trigger(kind="issue_opened", html_url="https://github.com/owner/repo/issues/80")
+    d_info = _spec_pipeline_dispatcher(
+        monkeypatch, tmp_path, sent, auto_build=True, pr_url="https://pr/1"
+    )
+    trig = _issue_trigger(html_url="https://github.com/owner/repo/issues/100")
     key = f"spec-ready:{trig.repository}#{trig.number}"
-    asyncio.run(
-        _notify_spec_ready(d, trig, auto_build=False, gates_green=False)
+    asyncio.run(d_info._run_issue_spec_pipeline(trig))
+    # Priority.INFO is never delivered (Notifier drops it) and must not mark
+    # the dedupe key — so a later OPERATOR_DECISION for the same condition
+    # can still reach the inbox.
+    assert sent == []
+    assert not d_info.notifier._is_duplicate(key)
+
+    d_wait = SwarmDispatcher(d_info.notifier, _config(auto_build=False))
+    monkeypatch.setattr(
+        SwarmDispatcher, "_gates_green", lambda *a, **k: _async_return(True)
     )
-    assert len(sent) == 1
-    assert d.notifier._is_duplicate(key)
-    asyncio.run(
-        _notify_spec_ready(
-            d, trig, auto_build=True, gates_green=True, pr_url="https://pr/1"
-        )
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_open_implementation_pr",
+        lambda *a, **k: _async_return(None),
     )
-    assert not d.notifier._is_duplicate(key)
-    asyncio.run(
-        _notify_spec_ready(d, trig, auto_build=False, gates_green=False)
-    )
-    assert len(sent) == 2
+    asyncio.run(d_wait._run_issue_spec_pipeline(trig))
+    assert len(_spec_ready_sends(sent)) == 1
+    assert d_wait.notifier._is_duplicate(key)
 
 
-def test_spec_ready_clears_when_pr_opens(tmp_path):
+def test_spec_ready_clears_when_pr_opens(monkeypatch, tmp_path):
     sent = []
-    d = _dispatcher(tmp_path, sent)
-    trig = _trigger(kind="issue_opened", html_url="https://github.com/owner/repo/issues/80")
+    trig = _issue_trigger(html_url="https://github.com/owner/repo/issues/100")
+    d_wait = _spec_pipeline_dispatcher(monkeypatch, tmp_path, sent, auto_build=False)
+    asyncio.run(d_wait._run_issue_spec_pipeline(trig))
+    assert len(_spec_ready_sends(sent)) == 1
+    key = f"spec-ready:{trig.repository}#{trig.number}"
+    assert d_wait.notifier._is_duplicate(key)
 
-    async def run():
-        await _notify_spec_ready(d, trig, auto_build=False, gates_green=False)
-        await _notify_spec_ready(
-            d, trig, auto_build=True, gates_green=True, pr_url="https://pr/2"
-        )
-        await _notify_spec_ready(d, trig, auto_build=False, gates_green=False)
+    d_build = SwarmDispatcher(d_wait.notifier, _config(auto_build=True))
+    monkeypatch.setattr(
+        SwarmDispatcher, "_gates_green", lambda *a, **k: _async_return(True)
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_open_implementation_pr",
+        lambda *a, **k: _async_return("https://pr/2"),
+    )
+    asyncio.run(d_build._run_issue_spec_pipeline(trig))
+    assert not d_build.notifier._is_duplicate(key)
 
-    asyncio.run(run())
-    assert len(sent) == 2
+    d_wait2 = SwarmDispatcher(d_wait.notifier, _config(auto_build=False))
+    monkeypatch.setattr(
+        SwarmDispatcher, "_gates_green", lambda *a, **k: _async_return(True)
+    )
+    asyncio.run(d_wait2._run_issue_spec_pipeline(trig))
+    # wait + INFO(clear, undelivered) + wait-again → 2 delivered sends
+    assert len(_spec_ready_sends(sent)) == 2
 
 
-def test_spec_ready_body_includes_issue_url_and_exact_approve_action(tmp_path):
+def test_spec_ready_body_includes_issue_url_and_exact_approve_action(
+    monkeypatch, tmp_path
+):
     sent = []
-    d = _dispatcher(tmp_path, sent)
-    trig = _trigger(kind="issue_opened", html_url="https://github.com/owner/repo/issues/80")
-    asyncio.run(_notify_spec_ready(d, trig, auto_build=False, gates_green=False))
-    assert trig.html_url in sent[0]
-    assert "ATELES_SWARM_AUTO_BUILD=1" in sent[0]
-    assert "_gates_green" in sent[0]
+    d = _spec_pipeline_dispatcher(monkeypatch, tmp_path, sent, auto_build=False)
+    trig = _issue_trigger(html_url="https://github.com/owner/repo/issues/100")
+    asyncio.run(d._run_issue_spec_pipeline(trig))
+    body = _spec_ready_sends(sent)[0]
+    assert trig.html_url in body
+    assert "ATELES_SWARM_AUTO_BUILD=1" in body
+    assert "_gates_green" in body
 
 
 # ── #4 self-review refused ──────────────────────────────────────────────────
@@ -638,7 +694,9 @@ def test_fix_exhausted_claim_false_still_sends_once(monkeypatch, tmp_path):
 # ── #7 unparseable ──────────────────────────────────────────────────────────
 
 
-def test_unparseable_verdict_head_keyed_suppresses(monkeypatch, tmp_path):
+def test_unparseable_verdict_head_keyed_suppresses_then_new_head_sends(
+    monkeypatch, tmp_path
+):
     sent = []
 
     async def no_skill(skill, prompt, **kwargs):
@@ -650,15 +708,27 @@ def test_unparseable_verdict_head_keyed_suppresses(monkeypatch, tmp_path):
     )
 
     d = _dispatcher(tmp_path, sent)
+    reviews = [("pm", "vague")]
     trig = _trigger()
-    for _ in range(2):
-        asyncio.run(
-            d._route_blocking_findings(
-                trig, 80, [("pm", "vague")], "request_changes", reviewed_head="a" * 40
-            )
+    asyncio.run(
+        d._route_blocking_findings(
+            trig, 80, reviews, "request_changes", reviewed_head="a" * 40
         )
+    )
+    asyncio.run(
+        d._route_blocking_findings(
+            trig, 80, reviews, "request_changes", reviewed_head="a" * 40
+        )
+    )
     assert len(sent) == 1
     assert trig.html_url in sent[0]
+
+    asyncio.run(
+        d._route_blocking_findings(
+            trig, 80, reviews, "request_changes", reviewed_head="b" * 40
+        )
+    )
+    assert len(sent) == 2
 
 
 def test_unparseable_verdict_claim_false_still_sends_once(monkeypatch, tmp_path):
@@ -683,7 +753,9 @@ def test_unparseable_verdict_claim_false_still_sends_once(monkeypatch, tmp_path)
 # ── #8 process blocked ──────────────────────────────────────────────────────
 
 
-def test_process_blocked_head_keyed_suppresses(monkeypatch, tmp_path):
+def test_process_blocked_head_keyed_suppresses_then_new_head_sends(
+    monkeypatch, tmp_path
+):
     sent = []
     monkeypatch.setattr(
         swarm_dispatch,
@@ -694,17 +766,37 @@ def test_process_blocked_head_keyed_suppresses(monkeypatch, tmp_path):
         SwarmDispatcher, "_claim_escalation", lambda *a, **k: _async_return(True)
     )
     d = _dispatcher(tmp_path, sent)
-    for _ in range(2):
-        asyncio.run(
-            d._route_blocking_findings(
-                _trigger(),
-                80,
-                [("pm", "gate missing")],
-                "blocked",
-                reviewed_head="c" * 40,
-            )
+    reviews = [("pm", "gate missing")]
+    asyncio.run(
+        d._route_blocking_findings(
+            _trigger(),
+            80,
+            reviews,
+            "blocked",
+            reviewed_head="c" * 40,
         )
+    )
+    asyncio.run(
+        d._route_blocking_findings(
+            _trigger(),
+            80,
+            reviews,
+            "blocked",
+            reviewed_head="c" * 40,
+        )
+    )
     assert len(sent) == 1
+
+    asyncio.run(
+        d._route_blocking_findings(
+            _trigger(),
+            80,
+            reviews,
+            "blocked",
+            reviewed_head="d" * 40,
+        )
+    )
+    assert len(sent) == 2
 
 
 def test_process_blocked_claim_false_still_sends_once(monkeypatch, tmp_path):
