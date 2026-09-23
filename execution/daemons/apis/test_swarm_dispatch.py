@@ -10115,3 +10115,316 @@ class TestGateOwnerToolDenyFailureClass:
             "waxwing", False, 1, "", "boom", error="boom", provider="codex"
         )
         assert swarm_dispatch.review_failure_class(other) == "execution failure"
+
+
+# ── PR #1181 ux review [BLOCKING]: a gate-owning lens refused AT LAUNCH must
+# carry the same Design **BLOCKED** contract (reason/gate/attempted/observed/
+# next_action) as a failed sign_off, not the generic "Review incomplete"
+# prose `_handle_panel_session_limit` posts for every other incomplete-panel
+# cause. Covers both launch-refusal classes named in `review_failure_class`:
+# `gate identity unavailable` and `gate-owner tool-deny unavailable on
+# provider`.
+#
+# WHAT THIS LOOKED LIKE RED, before the fix: `_surface_gate_launch_refusals`
+# did not exist, `GATE_LAUNCH_REFUSAL_CLASSES` did not exist, and a
+# gate-owning lens refused at launch reached the PR only through
+# `_handle_panel_session_limit`'s generic comment — no `**BLOCKED**` token,
+# no per-lens reason/gate/attempted/observed fields, no next_action.
+class TestGateLaunchRefusalSurface:
+    def test_surface_posts_blocked_template_for_identity_unavailable(self, monkeypatch):
+        comment_bodies: list[str] = []
+
+        class _CapturingClient:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get(self, url, **kwargs):
+                return _FakeListResp([])
+            async def post(self, url, **kwargs):
+                comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+                return _FakeResp(201)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+        monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+        notifier = _StubNotifier()
+        d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="x"))
+        trig = _trigger(number=1181, repository="owner/repo")
+        asyncio.run(
+            d._surface_gate_launch_refusals(
+                trig, 795,
+                [("ux", "accipiter", "gate identity unavailable")],
+            )
+        )
+
+        assert len(comment_bodies) == 1
+        body = comment_bodies[0]
+        assert swarm_dispatch.GATE_LAUNCH_REFUSED_MARKER in body
+        assert "**BLOCKED**" in body
+        assert "reason: `gate identity unavailable`" in body
+        assert "gate: `ux` (lens: `accipiter`)" in body
+        assert "attempted: `review`" in body
+        assert "observed: `gate identity unavailable`" in body
+        assert "next_action:" in body
+        assert "Provision the lens's own Neotoma identity" in body
+        # Non-blocking finding: the comment must state retry-or-stuck, not
+        # leave the reader to infer it.
+        assert "does NOT retry this on its own" in body
+        assert "not** a verdict" in body or "not a verdict" in body.lower()
+        assert notifier.priorities == [swarm_dispatch.Priority.BLOCKER]
+
+    def test_surface_posts_blocked_template_for_tool_deny_unavailable(self, monkeypatch):
+        comment_bodies: list[str] = []
+
+        class _CapturingClient:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get(self, url, **kwargs):
+                return _FakeListResp([])
+            async def post(self, url, **kwargs):
+                comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+                return _FakeResp(201)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+        monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+        notifier = _StubNotifier()
+        d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="x"))
+        trig = _trigger(number=1181, repository="owner/repo")
+        asyncio.run(
+            d._surface_gate_launch_refusals(
+                trig, 795,
+                [
+                    (
+                        "arch",
+                        "waxwing",
+                        "gate-owner tool-deny unavailable on provider",
+                    )
+                ],
+            )
+        )
+
+        assert len(comment_bodies) == 1
+        body = comment_bodies[0]
+        assert "reason: `gate-owner tool-deny unavailable on provider`" in body
+        assert "gate: `arch` (lens: `waxwing`)" in body
+        assert "next_action:" in body
+        assert "claude" in body
+        # This class DOES self-retry — the class-specific next_action differs
+        # from the identity-unavailable case above.
+        assert "retries automatically" in body
+        assert "Provision the lens's own Neotoma identity" not in body
+
+    def test_surface_is_idempotent_on_marker(self, monkeypatch):
+        posted = []
+
+        class _CapturingClient:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get(self, url, **kwargs):
+                return _FakeListResp(
+                    [{"body": swarm_dispatch.GATE_LAUNCH_REFUSED_MARKER}]
+                )
+            async def post(self, url, **kwargs):
+                posted.append(1)
+                return _FakeResp(201)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+        monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+        d = SwarmDispatcher(_StubNotifier(), DispatchConfig(neotoma_token="", github_token="x"))
+        trig = _trigger(number=1181, repository="owner/repo")
+        asyncio.run(
+            d._surface_gate_launch_refusals(
+                trig, 795,
+                [("ux", "accipiter", "gate identity unavailable")],
+            )
+        )
+        assert posted == []  # already surfaced — no duplicate comment
+
+    def test_handle_pr_routes_gate_owning_launch_refusal_to_blocked_surface(
+        self, monkeypatch
+    ):
+        """A gate-owning lens refused at launch is pulled out of the generic
+        `failed_lenses` bucket and routed to `_surface_gate_launch_refusals`
+        instead of `_handle_panel_session_limit`."""
+        calls = []
+        d = _pr_dispatcher_with_stubs(
+            monkeypatch, vanellus_stdout="**APPROVE**", calls=calls
+        )
+        monkeypatch.setattr(
+            swarm_dispatch,
+            "select_panel",
+            lambda **kwargs: [
+                Lens(agent="accipiter", lens="ux", gate="ux", checks="design"),
+            ],
+        )
+
+        async def fake_run_skill(skill, prompt, **kwargs):
+            if skill == "lanius":
+                return SkillResult(
+                    skill, True, 0,
+                    "GATE_INHERITANCE: clear\nGATE_PENDING: ux", "",
+                )
+            if skill == "accipiter":
+                return SkillResult(
+                    skill, False, None, "", "",
+                    error=(
+                        f"{swarm_dispatch.NEOTOMA_IDENTITY_UNAVAILABLE}: "
+                        "'accipiter' owns a pre-impl gate ..."
+                    ),
+                )
+            raise AssertionError(f"unexpected skill: {skill}")
+
+        session_limit_calls = []
+        launch_refusal_calls = []
+
+        async def fake_session_limit(self, *args, **kwargs):
+            session_limit_calls.append((args, kwargs))
+
+        async def fake_launch_refusal(self, trigger, parent, refused):
+            launch_refusal_calls.append((trigger.number, parent, refused))
+
+        monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+        monkeypatch.setattr(
+            SwarmDispatcher, "_handle_panel_session_limit", fake_session_limit
+        )
+        monkeypatch.setattr(
+            SwarmDispatcher, "_surface_gate_launch_refusals", fake_launch_refusal
+        )
+
+        asyncio.run(d._handle_pr(_trigger(body="Closes #795.")))
+
+        assert session_limit_calls == []
+        assert len(launch_refusal_calls) == 1
+        issue_number, parent, refused = launch_refusal_calls[0]
+        assert refused == [
+            ("ux", "accipiter", "gate identity unavailable")
+        ]
+        # Panel incomplete → must not fall through to merge-authorization.
+        assert not any(kind in {"route", "gate"} for kind, _ in calls)
+
+    def test_advisory_lens_launch_refusal_still_uses_generic_path(self, monkeypatch):
+        """The SAME failure class on a lens that does NOT own the pending gate
+        has no gate riding on it — stays on the existing generic
+        `_handle_panel_session_limit` path, unchanged."""
+        calls = []
+        d = _pr_dispatcher_with_stubs(
+            monkeypatch, vanellus_stdout="**APPROVE**", calls=calls
+        )
+        monkeypatch.setattr(
+            swarm_dispatch,
+            "select_panel",
+            lambda **kwargs: [
+                Lens(agent="falco", lens="security", gate=None, checks="security"),
+            ],
+        )
+
+        async def fake_run_skill(skill, prompt, **kwargs):
+            if skill == "lanius":
+                return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+            if skill == "falco":
+                return SkillResult(
+                    skill, False, None, "", "",
+                    error=(
+                        f"{swarm_dispatch.GATE_OWNER_TOOL_DENY_UNAVAILABLE}: "
+                        "provider 'codex' has no mechanism ..."
+                    ),
+                )
+            raise AssertionError(f"unexpected skill: {skill}")
+
+        session_limit_calls = []
+        launch_refusal_calls = []
+
+        async def fake_session_limit(self, *args, **kwargs):
+            session_limit_calls.append(kwargs)
+
+        async def fake_launch_refusal(self, trigger, parent, refused):
+            launch_refusal_calls.append(refused)
+
+        monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+        monkeypatch.setattr(
+            SwarmDispatcher, "_handle_panel_session_limit", fake_session_limit
+        )
+        monkeypatch.setattr(
+            SwarmDispatcher, "_surface_gate_launch_refusals", fake_launch_refusal
+        )
+
+        asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+        assert launch_refusal_calls == []
+        assert len(session_limit_calls) == 1
+        assert session_limit_calls[0]["failed_lenses"] == (
+            ("security", "gate-owner tool-deny unavailable on provider"),
+        )
+
+
+# ── Regression: other incomplete-panel causes keep their EXISTING message ──
+# unchanged (usage limit / provider exhaustion / head-changed / stale). Only
+# the two named launch-refusal classes on a GATE-OWNING lens move to the new
+# surface.
+class TestOtherIncompletePanelCausesUnchanged:
+    def test_session_limit_still_uses_generic_deferral_message(self, monkeypatch):
+        comment_bodies: list[str] = []
+
+        class _CapturingClient:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def get(self, url, **kwargs):
+                return _FakeListResp([])
+            async def post(self, url, **kwargs):
+                comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+                return _FakeResp(201)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+        monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+        notifier = _StubNotifier()
+        d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="x"))
+        asyncio.run(
+            d._handle_panel_session_limit(
+                _trigger(number=264, repository="owner/repo"),
+                None,
+                "vanellus",
+                "You've hit your session limit · resets 7:30pm", "",
+            )
+        )
+        assert len(comment_bodies) == 1
+        body = comment_bodies[0]
+        assert "Review incomplete" in body
+        assert swarm_dispatch.GATE_LAUNCH_REFUSED_MARKER not in body
+        assert "**BLOCKED**" not in body
+
+    def test_head_changed_still_uses_generic_message(self, monkeypatch):
+        comment_bodies: list[str] = []
+
+        class _CapturingClient:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def get(self, url, **kwargs):
+                return _FakeListResp([])
+            async def post(self, url, **kwargs):
+                comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+                return _FakeResp(201)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+        monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+        notifier = _StubNotifier()
+        d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="x"))
+        asyncio.run(
+            d._handle_panel_session_limit(
+                _trigger(number=264, repository="owner/repo"),
+                None, "vanellus", "", "",
+                reason="PR head changed during review or could not be verified",
+            )
+        )
+        assert len(comment_bodies) == 1
+        body = comment_bodies[0]
+        assert "Review incomplete" in body
+        assert swarm_dispatch.GATE_LAUNCH_REFUSED_MARKER not in body
+        assert "**BLOCKED**" not in body

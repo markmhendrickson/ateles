@@ -664,6 +664,11 @@ GATE_WRITEBACK_DENIED_MARKER = "<!-- apis-gate-writeback-denied -->"
 # correct() being refused. Different failure, different fix (the lens's AAuth
 # key / the server allowlist vs. the lens's own MCP tool grant).
 GATE_SIGN_OFF_FAILED_MARKER = "<!-- apis-gate-sign-off-failed -->"
+# ateles#795 / #1181 ux review: a gate-owning lens that is REFUSED AT LAUNCH
+# (never runs at all) is a third failure shape, distinct from both markers
+# above — no verdict, no writeback attempt, nothing to sign off. Its own
+# marker so `_surface_gate_launch_refusals` can dedupe per-PR the same way.
+GATE_LAUNCH_REFUSED_MARKER = "<!-- apis-gate-launch-refused -->"
 
 # The durable outcomes of a merge attempt. `authorized_but_unable` is the state
 # ateles#565 says is missing: the autonomy flag AUTHORIZED the merge and a
@@ -1977,6 +1982,66 @@ def sign_off_next_action(reason: str) -> str:
     """Default `next_action` for a Design reason token (issue #795 table)."""
     return _SIGN_OFF_NEXT_ACTION.get(
         reason, "Check the dispatcher log for the underlying error class · escalate Anthus"
+    )
+
+
+# ── Gate-owner launch-refusal surface (ateles#795, PR #1181 ux [BLOCKING]) ──
+# `review_failure_class` already names two launch-time refusals with their own
+# stable tokens ("gate identity unavailable" / "gate-owner tool-deny
+# unavailable on provider"), but until this PR they reached the PR only
+# through `_handle_panel_session_limit`'s generic "Review incomplete" prose,
+# with no `next_action`. These map those two tokens onto the SAME Design
+# `**BLOCKED**` shape `_surface_failed_sign_offs` already uses, rather than a
+# third comment grammar. Kept separate from `_SIGN_OFF_NEXT_ACTION` above:
+# these are LAUNCH refusals (the lens never ran) and the fix is provider/
+# identity provisioning, not a retry of a write.
+GATE_LAUNCH_REFUSAL_CLASSES = frozenset(
+    {"gate identity unavailable", "gate-owner tool-deny unavailable on provider"}
+)
+
+# Whether the dispatcher retries this class on its own (auto_resume-style) or
+# the PR stays blocked until an operator acts — the ux review's non-blocking
+# finding: state this explicitly rather than leaving the reader to infer it.
+_GATE_LAUNCH_REFUSAL_RETRY_STATUS: dict[str, str] = {
+    "gate identity unavailable": (
+        "The dispatcher does NOT retry this on its own — it stays blocked "
+        "until an operator provisions the identity."
+    ),
+    "gate-owner tool-deny unavailable on provider": (
+        "The dispatcher retries automatically: the next sweep re-attempts the "
+        "panel, and this lens launches as soon as `claude` is an eligible "
+        "provider again. No operator action is required unless `claude` "
+        "stays ineligible."
+    ),
+}
+
+_GATE_LAUNCH_REFUSAL_NEXT_ACTION: dict[str, str] = {
+    "gate identity unavailable": (
+        "Provision the lens's own Neotoma identity (the "
+        "`<ROLE>_NEOTOMA_TOKEN` env var for this agent) and file the "
+        "agent_grant carrying retrieve + correct on `issue` · escalate Anthus"
+    ),
+    "gate-owner tool-deny unavailable on provider": (
+        "Ensure a `claude` binary is available and eligible to the dispatcher "
+        "(not cooling down / not excluded) — the run will be retried "
+        "automatically once `claude` is eligible again"
+    ),
+}
+
+
+def gate_launch_refusal_next_action(reason: str) -> str:
+    """Default `next_action` for a gate-owner launch-refusal class."""
+    return _GATE_LAUNCH_REFUSAL_NEXT_ACTION.get(
+        reason, "Check the dispatcher log for the underlying error class · escalate Anthus"
+    )
+
+
+def gate_launch_refusal_retry_status(reason: str) -> str:
+    """Whether this launch-refusal class self-retries or stays blocked."""
+    return _GATE_LAUNCH_REFUSAL_RETRY_STATUS.get(
+        reason,
+        "Retry behaviour for this class is not yet documented — treat it as "
+        "blocked until an operator confirms otherwise.",
     )
 
 
@@ -4745,6 +4810,12 @@ class SwarmDispatcher:
         # DISPATCHER's signed write failing, which points at a different fix
         # (the lens's AAuth key / the server allowlist, not its MCP grant).
         failed_sign_offs: list[tuple[str, str, str]] = []
+        # (lens, agent, reason) for each gate-owning lens refused AT LAUNCH
+        # (ateles#795, PR #1181 ux [BLOCKING]) — distinct from `failed_lenses`
+        # below: these never ran at all, so they get the Design **BLOCKED**
+        # template via `_surface_gate_launch_refusals` rather than the generic
+        # incomplete-panel notice.
+        gate_launch_refusals: list[tuple[str, str, str]] = []
         for lens in panel:
             # QE3: the qa lens (Phoenicurus) authors + runs an eval, so it needs a
             # writable PR-branch checkout as its cwd. Other lenses stay diff-only
@@ -4832,7 +4903,24 @@ class SwarmDispatcher:
                                 (lens.lens, lens.agent, sign_off_outcome.error)
                             )
             else:
-                failed_lenses.append((lens.lens, review_failure_class(result)))
+                failure_class = review_failure_class(result)
+                # ateles#795 / PR #1181 ux review [BLOCKING]: a gate-owning
+                # lens refused AT LAUNCH (never ran) must carry the same
+                # Design **BLOCKED** contract as a failed sign_off, not the
+                # generic "Review incomplete" prose `_handle_panel_session_
+                # limit` posts for every other incomplete-panel cause. Only
+                # for a lens that actually OWNS the pending gate — an
+                # advisory lens hitting the same class has no gate riding on
+                # it, so it stays on the existing generic path.
+                if (
+                    lens.lens in pending_gates
+                    and failure_class in GATE_LAUNCH_REFUSAL_CLASSES
+                ):
+                    gate_launch_refusals.append(
+                        (lens.lens, lens.agent, failure_class)
+                    )
+                else:
+                    failed_lenses.append((lens.lens, failure_class))
             # ateles#795: a lens that owns a gate and reports its own writeback
             # was refused must not leave the gate merely `pending`. Recorded per
             # lens here, surfaced on the PR below, so "silenced" is legible as
@@ -4852,6 +4940,13 @@ class SwarmDispatcher:
         if failed_sign_offs:
             await self._surface_failed_sign_offs(
                 trigger, parent, failed_sign_offs
+            )
+        # 2a-quater. Surface any gate-owning lens refused at launch (ateles#795,
+        # PR #1181 ux [BLOCKING]) — no verdict, no writeback attempt, review
+        # never ran.
+        if gate_launch_refusals:
+            await self._surface_gate_launch_refusals(
+                trigger, parent, gate_launch_refusals
             )
 
         # 2b. Persist the captured reviews and backfill any review:<lens>
@@ -4893,6 +4988,15 @@ class SwarmDispatcher:
                 completed_lenses=tuple(lens for lens, _ in reviews),
                 failed_lenses=tuple(failed_lenses),
             )
+            return
+
+        # ateles#795 / PR #1181 ux review: a gate-owning lens refused at
+        # launch already got its own **BLOCKED** surface above — but the
+        # panel is still INCOMPLETE (that gate's lens never ran), so the
+        # dispatcher must stop here exactly as the generic incomplete-panel
+        # path does, rather than falling through to merge-authorization with
+        # a hole in the panel.
+        if gate_launch_refusals:
             return
 
         if durable_review_state is False:
@@ -10094,6 +10198,11 @@ class SwarmDispatcher:
             "The affected `gate_status` field(s) therefore still read "
             "`pending`. This is a WRITE failure, not a review failure — the "
             "review ran and was clean. Merge stays withheld either way.\n\n"
+            "The dispatcher does NOT retry this write on its own — the gate "
+            "re-signs only on the next clean panel run for this lens (e.g. a "
+            "new push, or an operator-triggered re-review), so this PR stays "
+            "blocked until an operator acts (ux non-blocking finding, PR "
+            "#1181).\n\n"
             "Raised automatically (ateles#795 amended ADR: the dispatcher "
             "signs the gate write with the lens's own AAuth key rather than "
             "the shared daemon bearer)."
@@ -10126,6 +10235,127 @@ class SwarmDispatcher:
         except Exception as exc:
             log.error(
                 f"[{DAEMON_NAME}] sign-off-failure comment failed for "
+                f"{t.repository}#{t.number}: {exc}"
+            )
+
+    async def _surface_gate_launch_refusals(
+        self,
+        t: SwarmTrigger,
+        parent: int | None,
+        refused: list[tuple[str, str, str]],
+    ) -> None:
+        """Make a gate-owning lens's LAUNCH refusal visible (ateles#795, #1181 ux).
+
+        Distinct from `_surface_failed_sign_offs` above: that surfaces a CLEAN
+        verdict whose signed gate write failed. This surfaces a lens that
+        never ran at all — refused before launch by `skill_runner` for one of
+        the two named classes (`GATE_LAUNCH_REFUSAL_CLASSES`): no Neotoma
+        identity to sign with, or seated on a provider that cannot deny a
+        single MCP tool. Previously this reached the PR only through
+        `_handle_panel_session_limit`'s generic "Review incomplete" prose,
+        which carries no `next_action` — the ux [BLOCKING] finding on PR
+        #1181. Reuses the same `**BLOCKED**` template
+        `_surface_failed_sign_offs` already posts, rather than a third comment
+        grammar: `reason`, `gate`, `attempted`, `observed`, `next_action`,
+        plus whether the dispatcher retries this on its own or the PR stays
+        blocked until an operator acts.
+
+        `refused` is a list of ``(lens, agent, reason)`` where ``reason`` is
+        one of `GATE_LAUNCH_REFUSAL_CLASSES`. Best-effort and idempotent on
+        the marker; never raises into the panel loop.
+        """
+        if not refused:
+            return
+        blocked_entries = [
+            {
+                "lens": lens,
+                "agent": agent,
+                "reason": reason,
+                "attempted": "review",
+                "observed": reason,
+                "next_action": gate_launch_refusal_next_action(reason),
+                "retry_status": gate_launch_refusal_retry_status(reason),
+            }
+            for lens, agent, reason in sorted(refused)
+        ]
+        lenses = ", ".join(f"`{e['lens']}`" for e in blocked_entries)
+        log.error(
+            f"[{DAEMON_NAME}] {t.repository}#{t.number}: gate-owning lens(es) "
+            f"{lenses} refused at launch — the gate stays pending because the "
+            "review never ran, not because it found something"
+        )
+        try:
+            self.notifier.send(
+                f"Gate-owning lens launch refused on {t.repository}#{t.number} "
+                f"for {lenses}. The review never ran, so the gate reads "
+                "`pending` with no verdict behind it. Check the dispatcher log "
+                "for the named failure class.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+        except Exception as exc:  # notifier must never crash the pipeline
+            log.error(f"[{DAEMON_NAME}] gate-launch-refusal notification failed: {exc}")
+
+        repo_token = _token_for_repo(t.repository)
+        if not repo_token:
+            return
+        parent_ref = f" on parent issue #{parent}" if parent else ""
+        blocked_blocks = "\n\n".join(
+            (
+                "**BLOCKED**\n"
+                f"- reason: `{e['reason']}`\n"
+                f"- gate: `{e['lens']}` (lens: `{e['agent']}`)\n"
+                f"- attempted: `{e['attempted']}`\n"
+                f"- observed: `{e['observed']}`\n"
+                f"- next_action: {e['next_action']}\n"
+                f"- retry: {e['retry_status']}"
+            )
+            for e in blocked_entries
+        )
+        body = (
+            f"{GATE_LAUNCH_REFUSED_MARKER}\n"
+            "**🤖 Apis — Ateles swarm, swarm dispatcher**\n\n"
+            f"The following gate-owning lens(es) were refused at launch"
+            f"{parent_ref} — no review ran, so there is no verdict to "
+            f"evaluate:\n\n"
+            f"{blocked_blocks}\n\n"
+            "The affected `gate_status` field(s) therefore still read "
+            "`pending`. This is **not** a verdict and **not** a write "
+            "failure — the review itself never started. Merge stays "
+            "withheld either way.\n\n"
+            "Raised automatically (ateles#795 / PR #1181 ux review: a "
+            "gate-owning lens refused at launch must carry the same "
+            "reason/gate/attempted/observed/next_action contract as a failed "
+            "sign_off, not the generic incomplete-panel notice)."
+        )
+        url = (
+            f"https://api.github.com/repos/{t.repository}/issues/"
+            f"{t.number}/comments"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    url,
+                    params={
+                        "per_page": 100,
+                        "sort": "created",
+                        "direction": "desc",
+                    },
+                    headers=self._github_headers(t.repository),
+                )
+                resp.raise_for_status()
+                if any(
+                    GATE_LAUNCH_REFUSED_MARKER in (c.get("body") or "")
+                    for c in resp.json()
+                ):
+                    return  # already surfaced for this PR
+                post = await client.post(
+                    url, json={"body": body}, headers=self._github_headers(t.repository)
+                )
+                post.raise_for_status()
+        except Exception as exc:
+            log.error(
+                f"[{DAEMON_NAME}] gate-launch-refusal comment failed for "
                 f"{t.repository}#{t.number}: {exc}"
             )
 
