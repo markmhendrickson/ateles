@@ -856,9 +856,15 @@ PROPOSAL_RULINGS = {
     ),
     "P10": RuleRuling(
         "Avoid a named stylistic tell in generated prose because it reads as machine-written",
-        "QUARANTINED",
-        "none",
-        "No rule is created until the exact stylistic tell and scope are supplied.",
+        "DUPLICATE",
+        "`brand_voice` (`ent_5d92093cdcc4d0b52c69f13b`, scope `personal`)",
+        "The quarantine asked for the exact tell and scope; the brand_voice entity "
+        "already supplies both, naming each tell with its scope and the dated "
+        "correction it came from, and corvus and hirundo resolve it at write time. "
+        "Create no second rule: a rule restating the entity would drift from it. "
+        "Scope limit: brand_voice governs the operator's voice in correspondence "
+        "and published prose, not repository text such as issue bodies or code "
+        "comments; a rule for that surface would be a NEW candidate, not this one.",
     ),
 }
 
