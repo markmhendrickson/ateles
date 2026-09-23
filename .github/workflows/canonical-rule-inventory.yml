@@ -1,8 +1,18 @@
 name: canonical rule inventory
 
-# pull_request_target loads this workflow and all privileged executable code
-# from the trusted default branch. Candidate repository files cross the hosted
-# boundary only through the fixed data packer and its validated manifest.
+# Trusted default-branch code executes; candidate files cross only as validated data.
+# Exit classes (class -> exit -> stable message):
+# untrusted_source -> job fail -> canonical measurement refuses fork repositories
+# boundary_rejected -> 2 -> canonical rule inventory input boundary rejected
+# instrument_incomplete -> 3 -> rule inventory equality unavailable
+# inventory_mismatch -> 1 -> rule inventory differs from the complete measurement
+# safety_failed -> 2 -> rule inventory public-output safety check failed
+# match -> 0 -> rule inventory matches the complete canonical measurement
+# Local reproduce (set INPUTS_DIR to a fresh, absent path):
+# python3 execution/scripts/package_rule_inventory_inputs.py --source "$PWD" --destination "$INPUTS_DIR"
+# python3 execution/scripts/package_rule_inventory_inputs.py --validate "$INPUTS_DIR"
+# python3 execution/scripts/run_canonical_rule_inventory_gate.py "$INPUTS_DIR"
+# This check does not progress #1114 or #923; Stage-0 binding remains #1123.
 on:
   pull_request_target:
     types: [opened, reopened, synchronize]

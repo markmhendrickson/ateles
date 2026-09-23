@@ -1408,6 +1408,11 @@ def measurement_readiness(stores: list[Store]) -> tuple[list[str], list[str]]:
     return missing, unread
 
 
+def measurement_totals(clusters: list[Cluster]) -> tuple[int, int]:
+    """Return the rule and clustered-statement totals used to reject silence."""
+    return len(clusters), sum(len(cluster.statements) for cluster in clusters)
+
+
 def _mtime(p: Path) -> str:
     try:
         return date.fromtimestamp(p.stat().st_mtime).isoformat()
@@ -2777,6 +2782,14 @@ def main() -> int:
             print(
                 "rule inventory equality unavailable: full measurement is "
                 "incomplete; " + "; ".join(details),
+                file=sys.stderr,
+            )
+            return 3
+        rule_count, statement_count = measurement_totals(clusters)
+        if rule_count < 1 or statement_count < 1:
+            print(
+                "rule inventory equality unavailable: full measurement is "
+                "incomplete; instrument returned zero rules or statements",
                 file=sys.stderr,
             )
             return 3

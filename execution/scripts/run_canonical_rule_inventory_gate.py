@@ -65,13 +65,15 @@ def main(argv: list[str]) -> int:
         2: "rule inventory public-output safety check failed",
         3: "rule inventory equality unavailable: full measurement is incomplete",
     }
+    known_returncode = completed.returncode in messages
+    result = completed.returncode if known_returncode else 2
     message = messages.get(
         completed.returncode,
         "rule inventory measurement failed before a safe verdict",
     )
-    stream = sys.stdout if completed.returncode == 0 else sys.stderr
+    stream = sys.stdout if result == 0 else sys.stderr
     print(message, file=stream)
-    return completed.returncode
+    return result
 
 
 if __name__ == "__main__":
