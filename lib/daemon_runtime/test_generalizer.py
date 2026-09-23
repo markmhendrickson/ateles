@@ -204,3 +204,69 @@ def test_generalizer_reads_post_to_entities_query(monkeypatch, call, payload):
             "retrieve_entities is an MCP tool name, not a REST path — it 404s "
             "live and _post degrades the 404 into an empty result"
         )
+
+
+class TestProvisionalPolicyFieldCorrectness:
+    """Loxia on #1184: the `domain` and `rule_kind` changes were argued but
+    untested. `domain` engages `canonical_name_fields`, so its value carries
+    dedup semantics — a regression here silently changes which policies
+    coalesce.
+    """
+
+    def _cluster(self):
+        # `representative_text` and `source_refs` are computed PROPERTIES over
+        # `signals`, not constructor arguments — build the cluster from a real
+        # signal so the fixture exercises the same shape production does.
+        sig = gz.DriftSignal(
+            agent="corvus",
+            text="Read a write back before reporting success.",
+            source_ref="ent_x",
+        )
+        return gz.DriftCluster(
+            agent="corvus", theme_key="checkpoint_release", signals=[sig]
+        )
+
+    def _capture(self, monkeypatch):
+        sent = {}
+
+        async def fake_post(path, body, bearer):
+            # `create_provisional_policy` posts more than once (the policy,
+            # then a daemon_report), so capture BY TYPE rather than keeping
+            # the last call — otherwise the assertion reads the report.
+            for ent in body.get("entities", []):
+                if ent.get("entity_type") == "agent_policy":
+                    sent["payload"] = ent
+                    sent["path"] = path
+            return {"entities": [{"entity_id": "ent_new"}]}
+
+        monkeypatch.setattr(gz, "_post", fake_post)
+        return sent
+
+    def test_domain_is_the_theme_not_the_agent_identifier(self, monkeypatch):
+        # data_model.md: `domain` is the SUBJECT a rule is about, "never an
+        # agent identifier, which is `agent_sub`'s". Writing the agent id here
+        # is what produced the live rows ateles#1118 found.
+        import asyncio
+
+        sent = self._capture(monkeypatch)
+        asyncio.run(gz.create_provisional_policy(self._cluster(), "tok"))
+        assert sent["payload"]["domain"] == "checkpoint_release"
+        assert not sent["payload"]["domain"].endswith("@ateles-swarm")
+
+    def test_agent_sub_carries_the_full_principal(self, monkeypatch):
+        import asyncio
+
+        sent = self._capture(monkeypatch)
+        asyncio.run(gz.create_provisional_policy(self._cluster(), "tok"))
+        assert sent["payload"]["agent_sub"] == "corvus@ateles-swarm"
+
+    def test_rule_kind_is_inside_the_closed_set(self, monkeypatch):
+        # `rule_kind` is CLOSED to mandatory | advisory; anything else reads as
+        # mandatory, the restrictive branch. An auto-generated policy must
+        # never land there by default — "prefer" did.
+        import asyncio
+
+        sent = self._capture(monkeypatch)
+        asyncio.run(gz.create_provisional_policy(self._cluster(), "tok"))
+        assert sent["payload"]["rule_kind"] in ("mandatory", "advisory")
+        assert sent["payload"]["rule_kind"] == "advisory"
