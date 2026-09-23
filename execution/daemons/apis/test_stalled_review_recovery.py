@@ -224,7 +224,12 @@ def _stalled_recovery_dispatcher(monkeypatch, *, vanellus_stdout):
         # The GitHub-facing boundary this test exists to prove gets reached.
         assert reviewed_head == "a" * 40
         posted_reviews.append((f"{trigger.repository}#{trigger.number}", verdict))
-        return "rev-1"
+        return sd.ReviewBindingReceipt(
+            review_id="rev-1",
+            reviewer_login="markmhendrickson-ateles-vanellus",
+            commit_id="a" * 40,
+            state="APPROVED",
+        )
 
     async def fake_persist(self, *a, **k):  # noqa: ANN001
         return None

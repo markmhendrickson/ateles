@@ -250,6 +250,82 @@ def test_panel_reviews_seed_round_from_max_of_all_live_priors(monkeypatch):
     assert superseded == [(priors, {"qa": "ent_new"})]
 
 
+def test_security_findings_store_only_declared_fields_and_require_readback(monkeypatch):
+    stored = []
+    reviewed_head = "b" * 40
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+        return {
+            "entities": [
+                {"observation_index": index, "entity_id": f"ent_security_{index}"}
+                for index, _ in enumerate(entities)
+            ]
+        }
+
+    async def fake_post(self, path, payload):
+        canonical = payload["snapshot_filters"]["canonical_name"]["value"]
+        entity = next(row for row in stored if row["canonical_name"] == canonical)
+        return {
+            "entities": [
+                {"entity_id": "ent_security_0", "snapshot": dict(entity)}
+            ]
+        }
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_security_findings(
+            _trigger(),
+            [
+                (
+                    "security",
+                    "**REQUEST_CHANGES**\n"
+                    "[BLOCKING] auth: pin producer JKT\n"
+                    "Evidence in `execution/auth.py`.",
+                )
+            ],
+            reviewed_head,
+        )
+    )
+
+    assert confirmed is True
+    assert len(stored) == 1
+    assert set(stored[0]) == {
+        "entity_type",
+        "canonical_name",
+        "title",
+        "severity",
+        "notes",
+        "status",
+        "class_description",
+        "class_sweep_record",
+        "regression_test_path",
+        "remediation_refs",
+        "source_audit",
+        "verified_at",
+    }
+
+
+def test_security_finding_missing_readback_fails_closed(monkeypatch):
+    async def fake_store(self, entities, idempotency_key):
+        return {"entities": [{"observation_index": 0, "entity_id": "ent_new"}]}
+
+    async def no_readback(self, path, payload):
+        return {"entities": []}
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", no_readback)
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_security_findings(
+            _trigger(),
+            [("security", "[NON-BLOCKING] hardening: tighten timeout")],
+            "b" * 40,
+        )
+    )
+    assert confirmed is False
+
+
 def test_replacement_ids_require_exact_head_live_readback(monkeypatch):
     reviewed_head = "b" * 40
     entities = [
@@ -964,6 +1040,20 @@ def test_handle_pr_clear_verdict_without_verified_approval_holds_readiness(monke
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert ("review", "APPROVE") in calls
     assert ("gate", None) not in calls
+
+
+def test_handle_pr_holds_before_aggregation_when_durable_readback_fails(monkeypatch):
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+
+    async def durability_failed(self, *args, **kwargs):
+        return False
+
+    monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", durability_failed)
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
 
 
 def test_handle_pr_emits_formal_review_on_blocking_path(monkeypatch):

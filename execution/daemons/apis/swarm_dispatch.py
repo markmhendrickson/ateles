@@ -4381,9 +4381,10 @@ class SwarmDispatcher:
         #     comment the panelist could not post itself (PR-87 self-dogfood
         #     findings: stdout was the only copy, and Vanellus aggregates
         #     from the PR comments).
+        durable_review_state: bool | None = None
         if reviews:
             agents_by_lens = {p.lens: p.agent for p in panel}
-            await self._persist_panel_reviews(
+            durable_review_state = await self._persist_panel_reviews(
                 trigger,
                 reviews,
                 agents_by_lens,
@@ -4414,6 +4415,17 @@ class SwarmDispatcher:
                 ),
                 completed_lenses=tuple(lens for lens, _ in reviews),
                 failed_lenses=tuple(failed_lenses),
+            )
+            return
+
+        if durable_review_state is False:
+            await self._handle_panel_session_limit(
+                trigger,
+                parent,
+                "panel",
+                "",
+                "",
+                reason="durable exact-head review read-back failed",
             )
             return
 
@@ -4590,9 +4602,10 @@ class SwarmDispatcher:
         # review against the exact head the panel judged.  A missing token,
         # same-principal identity, rejected POST, stale head, or mismatched
         # readback all hold here.  Routing blockers remains independent above.
+        proves_approval = getattr(binding_receipt, "proves_approval", None)
         if not (
-            binding_receipt
-            and binding_receipt.proves_approval(head_sha=aggregation_head)
+            callable(proves_approval)
+            and proves_approval(head_sha=aggregation_head)
         ):
             log.error(
                 f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: clear "
@@ -8488,7 +8501,7 @@ class SwarmDispatcher:
         agents_by_lens: dict[str, str] | None = None,
         *,
         reviewed_head: str = "",
-    ) -> None:
+    ) -> bool:
         """Persist exact-head ``pr_review`` records plus dispatch audit rows.
 
         The caller supplies the pre-panel live head. This method never derives
@@ -8500,6 +8513,7 @@ class SwarmDispatcher:
         sha = _normalise_full_sha(reviewed_head)
         now = datetime.now(timezone.utc).isoformat()
 
+        durability_confirmed = False
         if sha:
             priors = await self._prior_live_reviews(
                 t, [lens for lens, _ in reviews], sha
@@ -8574,6 +8588,25 @@ class SwarmDispatcher:
                 priors=priors,
                 new_ids_by_lens=confirmed_ids,
             )
+            expected_lenses = {entity["review_lens"] for entity in entities}
+            reviews_confirmed = set(confirmed_ids) == expected_lenses
+            security_confirmed = await self._persist_security_findings(
+                t, reviews, sha, verified_at=now
+            )
+            pull_request_confirmed = await self._persist_and_confirm_pull_request(
+                t, sha
+            )
+            durability_confirmed = (
+                reviews_confirmed
+                and security_confirmed
+                and pull_request_confirmed
+            )
+            if not durability_confirmed:
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: durable "
+                    "exact-head panel state incomplete; merge readiness must "
+                    "remain closed"
+                )
         elif reviews:
             log.error(
                 f"[{DAEMON_NAME}] {t.repository}#{t.number}: refusing to "
@@ -8601,6 +8634,186 @@ class SwarmDispatcher:
                 f"panel-reviews-{t.repository}-{t.number}-"
                 f"{t.delivery_id}-{content_digest(audit)}"
             ),
+        )
+        return durability_confirmed
+
+    @staticmethod
+    def _store_result_has_unknown_fields(store_result: dict | None) -> bool:
+        """True when a Neotoma store response reports schema loss."""
+
+        def walk(value: object) -> bool:
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key == "unknown_fields_count":
+                        try:
+                            if int(item or 0) > 0:
+                                return True
+                        except (TypeError, ValueError):
+                            return True
+                    if key == "unknown_fields" and item:
+                        return True
+                    if walk(item):
+                        return True
+            elif isinstance(value, list):
+                return any(walk(item) for item in value)
+            return False
+
+        return walk(store_result or {})
+
+    async def _persist_security_findings(
+        self,
+        t: SwarmTrigger,
+        reviews: list[tuple[str, str]],
+        reviewed_head: str,
+        *,
+        verified_at: str | None = None,
+    ) -> bool:
+        """Persist and read back every structured Falco finding.
+
+        ``security_finding`` has a deliberately narrow schema.  Repository,
+        PR, lens and exact-head anchoring therefore live in the canonical name
+        and ``source_audit`` rather than undeclared convenience fields that
+        Neotoma would silently route to raw fragments.
+        """
+        sha = _normalise_full_sha(reviewed_head)
+        if not sha:
+            return False
+        now = verified_at or datetime.now(timezone.utc).isoformat()
+        entities: list[dict] = []
+        for lens, text in reviews:
+            if lens != "security":
+                continue
+            for finding in parse_findings(text, lens=lens):
+                key = f"{finding.category}: {finding.summary}"
+                identifier = finding_id(lens, sha, key)
+                canonical = (
+                    f"security_finding:{t.repository}|{t.number}|{sha}|"
+                    f"{identifier}"
+                )
+                entities.append(
+                    {
+                        "entity_type": "security_finding",
+                        "canonical_name": canonical,
+                        "title": finding.summary,
+                        "severity": (
+                            "blocking" if finding.blocking else "non_blocking"
+                        ),
+                        "notes": finding.detail[:4000],
+                        "status": "live",
+                        "class_description": finding.category,
+                        "class_sweep_record": "apis security review panel",
+                        "regression_test_path": "",
+                        "remediation_refs": ", ".join(finding.files),
+                        "source_audit": (
+                            f"{t.repository}#{t.number}|security|{sha}|"
+                            f"{identifier}"
+                        ),
+                        "verified_at": now,
+                    }
+                )
+        if not entities:
+            return True
+
+        digest_basis = [
+            {key: value for key, value in entity.items() if key != "verified_at"}
+            for entity in entities
+        ]
+        store_result = await self._store_entities(
+            entities,
+            idempotency_key=(
+                f"security-findings-{t.repository}-{t.number}-{sha[:12]}-"
+                f"{content_digest(digest_basis)}"
+            ),
+        )
+        if not store_result or self._store_result_has_unknown_fields(store_result):
+            log.error(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: security_finding "
+                "store failed or reported unknown fields"
+            )
+            return False
+
+        for entity in entities:
+            data = await self._neotoma_post(
+                "entities/query",
+                {
+                    "entity_type": "security_finding",
+                    "snapshot_filters": {
+                        "canonical_name": {
+                            "op": "eq",
+                            "value": entity["canonical_name"],
+                        }
+                    },
+                    "limit": 5,
+                    "include_snapshots": True,
+                },
+            )
+            expected = {
+                key: value for key, value in entity.items() if key != "entity_type"
+            }
+            matches = [
+                row
+                for row in (data or {}).get("entities", [])
+                if all((row.get("snapshot") or {}).get(key) == value
+                       for key, value in expected.items())
+            ]
+            if not matches:
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: exact-head "
+                    f"security_finding read-back missing for "
+                    f"{entity['canonical_name']}"
+                )
+                return False
+        return True
+
+    async def _persist_and_confirm_pull_request(
+        self, t: SwarmTrigger, reviewed_head: str
+    ) -> bool:
+        """Refresh the canonical PR row at the verified head and read it back."""
+        sha = _normalise_full_sha(reviewed_head)
+        if not sha:
+            return False
+        entity = {
+            "entity_type": "pull_request",
+            "repository": t.repository,
+            "number": t.number,
+            "provider": "github",
+            "url": t.html_url,
+            "title": t.title,
+            "state": "open",
+            "status": "open",
+            "head_ref": t.head_ref,
+            "base_ref": t.base_ref,
+            "author_login": t.author,
+            "head_sha": sha,
+        }
+        store_result = await self._store_entities(
+            [entity],
+            idempotency_key=(
+                f"pull-request-{t.repository}-{t.number}-{sha[:12]}-"
+                f"{content_digest([entity])}"
+            ),
+        )
+        if not store_result or self._store_result_has_unknown_fields(store_result):
+            return False
+        data = await self._neotoma_post(
+            "entities/query",
+            {
+                "entity_type": "pull_request",
+                "snapshot_filters": {
+                    "repository": {"op": "eq", "value": t.repository},
+                    "number": {"op": "eq", "value": t.number},
+                },
+                "limit": 5,
+                "include_snapshots": True,
+            },
+        )
+        return any(
+            (row.get("snapshot") or {}).get("repository") == t.repository
+            and str((row.get("snapshot") or {}).get("number")) == str(t.number)
+            and _normalise_full_sha(
+                str((row.get("snapshot") or {}).get("head_sha") or "")
+            ) == sha
+            for row in (data or {}).get("entities", [])
         )
 
     async def _neotoma_post(self, path: str, payload: dict) -> dict | None:
