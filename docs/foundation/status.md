@@ -421,14 +421,14 @@ hands the trigger in-process to `swarm_dispatch.py`. From there:
   merge path. The lenses' verdicts are read from GitHub review state and comment bodies, not from
   sign-offs on a batch; a lens's approval and the aggregator's summary are the same kind of thing to the
   code, whereas the design makes one a sign-off and the other an observation.
-- `pull_request_review` with state `approved` from the operator's login (`_OPERATOR_LOGIN`, an env
-  literal) is routed to the shared approval path and, flag-gated (`APIS_AUTONOMY_AUTO_MERGE`), merges.
+- `pull_request_review` with state `approved` from the operator's login (`_OPERATOR_LOGIN` only — `APIS_COMMAND_LOGINS` does not widen this) is routed to the shared approval path and, flag-gated (`APIS_AUTONOMY_AUTO_MERGE`), merges.
   This is the design's "operator's `APPROVE` resolves the checkpoint on the merge action" row, built as a
   credential compared to one literal rather than resolved to a principal, and with no checkpoint entity
   resolved or read back.
-- `issue_comment` carrying `/approve` or `/confirm-gates-clear` from the operator is an operator
-  override on the pipeline: a comment that advances a step directly, which the design's second
-  invariant forbids.
+- `issue_comment` mechanics commands (`/confirm-gates-clear`, `/swarm-run`) are admitted by `_COMMAND_LOGINS`
+  (`APIS_COMMAND_LOGINS`, operator always included, unset = operator-only). H1 comments (`/approve`,
+  `/reject`, `/hold`) stay on `_OPERATOR_LOGIN` alone. A comment that advances a step directly is still what
+  the design's second invariant forbids; this split only separates the two authorizations.
 - `check_suite.completed` on the release repository's default branch is used as the retry that lets a
   deferred release prepare run: a CI event driving an effect on its own, where the design makes CI an
   observation on the artifact (`checks`) that the `release` step owner reads.
