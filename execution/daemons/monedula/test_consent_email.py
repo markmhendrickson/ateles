@@ -684,3 +684,96 @@ def test_email_consent_approved_on_later_tick_executes_once(monkeypatch, tmp_pat
     assert h.execute_calls == [match]
     assert len(sends) == 1
     assert len(reads) == 2  # no consent sweep once calendar claimed + no triggered
+
+
+# ── Real email_channel read path (PR #1202 security review) ─────────────────
+#
+# These do NOT stub read_replies_with_status: they stub only the gws boundary
+# so the channel's own sender-authentication and complete-read rules decide
+# what reaches the payment verdict overlay.
+
+import json as _json  # noqa: E402
+
+from lib.approval import email_channel as _ec  # noqa: E402
+
+_GOOGLE_PASS = (
+    "mx.google.com; dkim=pass header.i=@example.com header.s=s; "
+    "dmarc=pass (p=NONE) header.from=example.com"
+)
+
+
+def _fake_gws(tok: str, *, auth_by_id: dict, body_by_id: dict):
+    def fake(args, timeout=45):
+        if "+triage" in args:
+            return {"messages": [
+                {"id": mid, "subject": f"RE: [ATELES] {subject_marker(tok)}",
+                 "from": "Op <op@example.com>"}
+                for mid in body_by_id
+            ]}
+        if list(args[:4]) == ["gmail", "users", "messages", "get"]:
+            mid = _json.loads(args[args.index("--params") + 1])["id"]
+            auth = auth_by_id.get(mid)
+            if auth is None:
+                return None
+            return {"id": mid, "payload": {"headers": [
+                {"name": "Authentication-Results", "value": v} for v in auth]}}
+        if "+read" in args:
+            mid = args[args.index("--id") + 1]
+            body = body_by_id.get(mid)
+            return None if body is None else {"body_text": body}
+        return None
+    return fake
+
+
+def _arm_email(monkeypatch):
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(_ec, "_gws", lambda: "/bin/gws")
+    monkeypatch.setattr(consent_email, "send_request", lambda *a, **k: True)
+
+
+def test_real_read_authenticated_operator_attended_is_approved(monkeypatch, tmp_path):
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    items = consent_email.build_pending_items([(h, [{}])], "2026-09-22")
+    tok = items[0].token
+    key = consent_email.match_key(items[0])
+    _arm_email(monkeypatch)
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        tok, auth_by_id={"m1": [_GOOGLE_PASS]}, body_by_id={"m1": "ATTENDED"}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.states[key] == "approved"
+
+
+def test_real_read_unauthenticated_operator_attended_is_held(monkeypatch, tmp_path):
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    items = consent_email.build_pending_items([(h, [{}])], "2026-09-22")
+    tok = items[0].token
+    key = consent_email.match_key(items[0])
+    _arm_email(monkeypatch)
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        tok, auth_by_id={"m1": []}, body_by_id={"m1": "ATTENDED"}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.states[key] != "approved"
+    assert key not in result.approved
+
+
+def test_real_read_partial_failure_holds_every_payment(monkeypatch, tmp_path):
+    """m1 (authenticated ATTENDED) loads; m2 fails. Monedula must hold, not act
+    on the half it could read."""
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    items = consent_email.build_pending_items([(h, [{}])], "2026-09-22")
+    tok = items[0].token
+    key = consent_email.match_key(items[0])
+    _arm_email(monkeypatch)
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        tok,
+        auth_by_id={"m1": [_GOOGLE_PASS], "m2": [_GOOGLE_PASS]},
+        body_by_id={"m1": "ATTENDED", "m2": None}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.reason_code == "consent_reply_read_failed"
+    assert result.states[key] == "blocked"
+    assert result.approved == set()
+    assert result.channel_ok is False

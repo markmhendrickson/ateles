@@ -35,7 +35,9 @@ class ReadRepliesOutcome:
 
     Distinguishes three states that the fail-open ``read_replies`` list cannot:
       - ``ok``              — transport succeeded; ``texts`` may be empty (no reply yet)
-      - ``transport_error`` — gws/mailbox check failed; ``texts`` is always ``[]``
+      - ``transport_error`` — ANY gws fetch in the sweep failed (triage, auth
+                              metadata, or body); ``texts`` is always ``[]``,
+                              never a partial set
       - ``disabled``        — ``ATELES_NOTIFY_EMAIL`` is not armed
 
     Payment-consent callers MUST use this form and treat non-``ok`` as blocked
@@ -187,15 +189,11 @@ def sender_is_operator(from_header: str) -> bool:
     domain (`op@example.com.evil.example`) nor an address hidden in a display
     name can satisfy it.
 
-    NOTE ON STRENGTH: this is a header check. A From: header is forgeable in
-    general; what makes it meaningful here is that these messages have already
-    been accepted and classified into the operator's OWN mailbox by Gmail, whose
-    SPF/DKIM/DMARC evaluation a spoofed sender has to survive first. So this
-    closes "anyone who holds the token can approve" — it does not by itself
-    defeat an attacker who can forge mail that passes the operator's domain
-    authentication. Defence in depth (a shared secret in the BODY, or a channel
-    that authenticates the principal directly) is the stronger form and is
-    deliberately left as follow-up rather than bundled into a security fix.
+    NOTE ON STRENGTH: this is the ADDRESS-BINDING half of sender identity
+    only. A From header is sender-chosen text, so a match here is necessary
+    but never sufficient: ``read_replies_with_status`` additionally requires
+    ``sender_domain_authenticated`` (Gmail's own recorded DMARC/aligned-DKIM
+    pass for the operator's domain) before a reply's verdict counts.
     """
     operator = _parse_address(operator_email())
     if not operator:
@@ -206,6 +204,132 @@ def sender_is_operator(from_header: str) -> bool:
     if not sender:
         return False
     return sender == operator
+
+
+# The only receiving server whose authentication verdict we accept: Gmail's own
+# inbound MTA, which stamps this authserv-id on mail it receives for the mailbox.
+_TRUSTED_AUTHSERV_ID = "mx.google.com"
+
+
+def _strip_comments(value: str) -> str:
+    """Remove RFC 5322 parenthesised comments (nesting-aware).
+
+    Comments in Authentication-Results are free text; nothing inside one may
+    count as a result. An unbalanced comment leaves the value unparseable,
+    which the caller treats as not authenticated.
+    """
+    out: list[str] = []
+    depth = 0
+    for ch in value:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                return ""
+            depth -= 1
+        elif depth == 0:
+            out.append(ch)
+    return "" if depth else "".join(out)
+
+
+def _auth_result_authorizes(header_value: str, domain: str) -> bool:
+    """True only when ONE Authentication-Results value, stamped by Google's
+    receiving server, records that ``domain`` authorized the message.
+
+    Accepted evidence (either suffices):
+      - ``dmarc=pass`` with ``header.from=<domain>``
+      - ``dkim=pass`` with ``header.d=<domain>`` or ``header.i=...@<domain>``
+        (exact domain — strict alignment with the From domain)
+
+    Everything else — another authserv-id, failing or absent results, a pass
+    for another domain, text only inside a comment, or a value that does not
+    parse — is False.
+    """
+    if not header_value or not domain:
+        return False
+    value = _strip_comments(" ".join(header_value.split()))
+    if not value:
+        return False
+    parts = [p.strip() for p in value.split(";")]
+    # First element is the authserv-id, optionally followed by a version.
+    authserv = (parts[0].split() or [""])[0].lower()
+    if authserv != _TRUSTED_AUTHSERV_ID:
+        return False
+    for resinfo in parts[1:]:
+        tokens = resinfo.split()
+        if not tokens or "=" not in tokens[0]:
+            continue
+        method, _, result = tokens[0].lower().partition("=")
+        if result != "pass":
+            continue
+        props: dict[str, str] = {}
+        for tok in tokens[1:]:
+            k, sep, v = tok.partition("=")
+            if sep:
+                props.setdefault(k.lower(), v.strip().strip('"').lower())
+        if method == "dmarc" and props.get("header.from") == domain:
+            return True
+        if method == "dkim":
+            if props.get("header.d") == domain:
+                return True
+            ident = props.get("header.i", "")
+            if "@" in ident and ident.rpartition("@")[2] == domain:
+                return True
+    return False
+
+
+def _fetch_auth_results(message_id: str) -> list[str] | None:
+    """Read a message's Authentication-Results header values, in header order.
+
+    Returns None when the metadata could not be read (transport failure or an
+    unexpected response shape) — the caller treats that as a failed read, not
+    as "unauthenticated". Returns [] when the message was read and carries no
+    Authentication-Results header.
+    """
+    params = json.dumps({
+        "userId": "me",
+        "id": message_id,
+        "format": "metadata",
+        "metadataHeaders": ["Authentication-Results"],
+    })
+    data = gws_json(["gmail", "users", "messages", "get", "--params", params],
+                    timeout=30)
+    if not isinstance(data, dict):
+        return None
+    payload = data.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    headers = payload.get("headers")
+    if headers is None:
+        headers = []
+    if not isinstance(headers, list):
+        return None
+    values: list[str] = []
+    for h in headers:
+        if not isinstance(h, dict):
+            return None
+        if str(h.get("name") or "").strip().lower() == "authentication-results":
+            values.append(str(h.get("value") or ""))
+    return values
+
+
+def sender_domain_authenticated(auth_results: list[str]) -> bool:
+    """True only when the TOPMOST Authentication-Results header was stamped by
+    Google's receiving server and records the operator's domain authorizing the
+    message (DMARC pass, or DKIM pass aligned with the operator's domain).
+
+    FAIL CLOSED: no header, a failing result, a non-Google or unparseable top
+    header, or an unset/unparseable OPERATOR_EMAIL all return False. Only the
+    topmost header is considered because the receiving server prepends its own;
+    a lower header carrying the same authserv-id did not come from this receipt.
+    """
+    operator = _parse_address(operator_email())
+    if not operator:
+        return False
+    domain = operator.rpartition("@")[2]
+    if not auth_results:
+        return False
+    return _auth_result_authorizes(auth_results[0], domain)
 
 
 def read_replies_with_status(
@@ -275,6 +399,27 @@ def read_replies_with_status(
                     except Exception as exc:  # noqa: BLE001
                         log.warning(f"on_sender_rejected callback failed: {exc}")
                 continue
+            # The From address is text the sender chose. Require Gmail's own
+            # record that the operator's domain authorized this message before
+            # its body is read or its verdict counted. Unreadable metadata is a
+            # failed read (the whole sweep fails below); readable but absent or
+            # failing authentication is not the operator.
+            auth_results = _fetch_auth_results(mid)
+            if auth_results is None:
+                saw_transport_error = True
+                transport_detail = "gws_auth_metadata_failed"
+                continue
+            if not sender_domain_authenticated(auth_results):
+                log.warning(
+                    "approval: ignoring reply — sender domain authentication "
+                    "absent or not a pass (address matched, identity unknown)"
+                )
+                if on_sender_rejected is not None:
+                    try:
+                        on_sender_rejected()
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(f"on_sender_rejected callback failed: {exc}")
+                continue
             seen_ids.add(mid)
             body_data = gws_json(["gmail", "+read", "--id", mid, "--headers",
                                   "--format", "json"], timeout=30)
@@ -312,7 +457,10 @@ def read_replies_with_status(
                     log.warning(f"on_reply_message callback failed: {exc}")
             texts.append(f"{subject}\n{body}")
 
-    if saw_transport_error and not texts:
+    # Any fetch failure within the sweep fails the WHOLE read: a verdict set
+    # built from only the messages that loaded is incomplete, and acting on it
+    # could honour one reply while missing a later one that changes it.
+    if saw_transport_error:
         return ReadRepliesOutcome(
             kind="transport_error", texts=[], detail=transport_detail or "gws_failed"
         )
