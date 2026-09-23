@@ -48,13 +48,19 @@ from gate_waive import (
 HEAD = "a" * 40
 
 
-def _state(gate_status: dict | None = None, found: bool = True, entity_id: str = "ent_1") -> IssueGateState:
+def _state(
+    gate_status: dict | None = None,
+    found: bool = True,
+    entity_id: str = "ent_1",
+    current_owner: str = "",
+) -> IssueGateState:
     return IssueGateState(
         repo="o/r",
         issue_number=795,
         entity_id=entity_id if found else "",
         gate_status=gate_status or {},
         owner_history=[],
+        current_owner=current_owner,
     )
 
 
@@ -198,6 +204,125 @@ class TestOnlyDeclaredFieldsWritten:
         assert outcome.ok
         assert set(sent_fields) == {"gate_status", "owner_history"}  # vocab-ok: live Neotoma wire field name
         assert "gate_writeback_outcome" not in sent_fields
+
+
+# ── current_owner advance (PR #1181, provider-table round) ──────────────────
+#
+# Moves the phase-handoff write the lens's own prompt used to make via
+# in-session `correct()` onto the dispatcher's signed `sign_off` path, same as
+# `gate_status` itself. Opt-in via `next_owner`: omitted, behaviour is
+# unchanged from before this parameter existed.
+
+
+class TestCurrentOwnerAdvance:
+    @pytest.mark.asyncio
+    async def test_next_owner_writes_current_owner_in_the_same_signed_call(
+        self, monkeypatch
+    ):
+        store = IssueGateStore("http://x", "daemon-bearer-tok")
+        monkeypatch.setattr(
+            "gate_waive._ns.agent_identity",
+            lambda agent, sub=None: _identity(agent, sub or f"{agent}@ateles-swarm"),
+        )
+        sent: list[tuple[str, object]] = []
+
+        async def _capture(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+            sent.append((body["field"], body["value"]))
+            return 200, {}
+
+        monkeypatch.setattr("gate_waive._ns.signed_request", _capture)
+        monkeypatch.setattr(
+            store,
+            "load",
+            _LoadSequence(
+                [
+                    _state({"pm": "pending"}, current_owner="pavo"),
+                    _state({"pm": "signed_off"}, current_owner="accipiter"),
+                ]
+            ),
+        )
+
+        outcome = await store.sign_off(
+            "o/r", 795, "pm", "pavo", HEAD, next_owner="accipiter"
+        )
+
+        assert outcome.ok
+        fields_sent = {f for f, _ in sent}
+        assert "current_owner" in fields_sent, (
+            "next_owner was supplied — current_owner must be written in the "
+            "same signed call as gate_status/owner_history"
+        )
+        assert dict(sent)["current_owner"] == "accipiter"
+
+    @pytest.mark.asyncio
+    async def test_omitted_next_owner_never_writes_current_owner(self, monkeypatch):
+        """Default behaviour (no next_owner) must be byte-for-byte the same
+        as before this parameter existed — no current_owner write attempted."""
+        store = IssueGateStore("http://x", "daemon-bearer-tok")
+        monkeypatch.setattr(
+            "gate_waive._ns.agent_identity",
+            lambda agent, sub=None: _identity(agent, sub or f"{agent}@ateles-swarm"),
+        )
+        sent_fields: list[str] = []
+
+        async def _capture(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+            sent_fields.append(body["field"])
+            return 200, {}
+
+        monkeypatch.setattr("gate_waive._ns.signed_request", _capture)
+        monkeypatch.setattr(
+            store,
+            "load",
+            _LoadSequence(
+                [_state({"pm": "pending"}), _state({"pm": "signed_off"})]
+            ),
+        )
+
+        outcome = await store.sign_off("o/r", 795, "pm", "pavo", HEAD)
+
+        assert outcome.ok
+        assert "current_owner" not in sent_fields
+        assert set(sent_fields) == {"gate_status", "owner_history"}  # vocab-ok: live Neotoma wire field name
+
+    @pytest.mark.asyncio
+    async def test_current_owner_readback_mismatch_is_verify_failed(self, monkeypatch):
+        """A landed gate_status write is not evidence current_owner ALSO
+        survived — same read-it-back discipline, checked as its own field."""
+        store = IssueGateStore("http://x", "daemon-bearer-tok")
+        monkeypatch.setattr(
+            "gate_waive._ns.agent_identity",
+            lambda agent, sub=None: _identity(agent, sub or f"{agent}@ateles-swarm"),
+        )
+        monkeypatch.setattr(
+            "gate_waive._ns.signed_request",
+            mock.AsyncMock(return_value=(200, {})),
+        )
+        monkeypatch.setattr(
+            store,
+            "load",
+            _LoadSequence(
+                [
+                    _state({"pm": "pending"}, current_owner="pavo"),
+                    # gate_status landed but current_owner silently dropped —
+                    # the undeclared/dropped-field shape this repo has
+                    # documented before.
+                    _state({"pm": "signed_off"}, current_owner="pavo"),
+                ]
+            ),
+        )
+
+        outcome = await store.sign_off(
+            "o/r", 795, "pm", "pavo", HEAD, next_owner="accipiter"
+        )
+
+        assert not outcome.ok
+        assert outcome.error == SIGN_OFF_VERIFY_FAILED
+
+    @pytest.mark.asyncio
+    async def test_current_owner_is_a_declared_field(self):
+        from gate_waive import _SIGN_OFF_DECLARED_FIELDS
+
+        assert "current_owner" in _SIGN_OFF_DECLARED_FIELDS
 
 
 # ── Read-back assertion ──────────────────────────────────────────────────────

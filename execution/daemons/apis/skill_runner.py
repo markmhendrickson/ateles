@@ -159,6 +159,27 @@ def gate_writeback_allowlist(tools: list[str]) -> list[str]:
     return merged
 
 
+# ── Deny the sibling attribution-bypass sink (Falco's REQUEST_CHANGES, PR #1181) ──
+# `GATE_WRITEBACK_TOOLS` is additive — it never carried `correct`, but an
+# ADDITIVE allowlist cannot un-grant a tool the agent already has through the
+# `mcp__mcpsrv_neotoma__*` wildcard (every claude dispatch gets this wildcard;
+# see the `--mcp-config` block below) or through `tools == ["*"]` (every tool,
+# unconditionally). Removing `correct` from `GATE_WRITEBACK_TOOLS` was
+# necessary but not sufficient: the wildcard/`*` path still pre-approves
+# `mcp__mcpsrv_neotoma__correct` for a gate-owning lens exactly as before,
+# which is the identical shared-bearer attribution-bypass sink `sign_off` was
+# built to close (Falco's finding `ent_f276d2310e1705a7bbbe1fd0`, reconfirmed
+# at commit `104867d`).
+#
+# This is the actual close: for a run that OWNS a pending pre-impl gate
+# (`owns_pending_gate=True` — every run whose clean verdict `sign_off` records,
+# i.e. the PR panel and the Phase-1 issue-spec pm turn), `correct` is placed on
+# the CLI's DENY list, which takes precedence over any allow entry including a
+# wildcard. This is a subtractive control, not an additive grant, so it cannot
+# be defeated by the same class of gap that made the additive fix incomplete.
+GATE_OWNER_DENIED_TOOLS: tuple[str, ...] = ("mcp__mcpsrv_neotoma__correct",)
+
+
 # ── Per-agent Neotoma credential (ateles#795) ─────────────────────────────────
 # A lens that owns a pre-impl gate is INSTRUCTED to record its own verdict by
 # `correct()`-ing the parent issue entity. Neotoma admits that write against the
@@ -192,6 +213,13 @@ def gate_writeback_allowlist(tools: list[str]) -> list[str]:
 # case the caller refuses instead (`gate_writeback_identity_error`), per
 # CLAUDE.md "fail closed on the field that carries the safety meaning".
 NEOTOMA_IDENTITY_UNAVAILABLE = "per-agent Neotoma identity unavailable"
+
+# ateles#795, Falco's REQUEST_CHANGES on PR #1181: the public-safe error-class
+# prefix for a gate-owning run refused because its provider cannot deny a
+# single MCP tool (see the `owns_pending_gate and provider != "claude"` check
+# in `_run_skill_once`). Mirrors `NEOTOMA_IDENTITY_UNAVAILABLE`'s shape so
+# `swarm_dispatch.review_failure_class` can match on it the same way.
+GATE_OWNER_TOOL_DENY_UNAVAILABLE = "gate-owner tool-deny unavailable on provider"
 
 
 def neotoma_token_env_name(role: str) -> str:
@@ -1367,6 +1395,39 @@ async def _run_skill_once(
         log.error(f"[apis] {skill} dispatch skipped — {msg}")
         return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
+    # ── Fail closed on providers that cannot deny a specific MCP tool ──────────
+    # Falco's REQUEST_CHANGES on PR #1181: the `claude` adapter can put
+    # `correct` on a CLI deny list (`GATE_OWNER_DENIED_TOOLS`, applied below),
+    # which takes precedence over the `mcp__mcpsrv_neotoma__*` wildcard every
+    # dispatch grants. Neither other adapter has an equivalent mechanism in
+    # this codebase today:
+    #   - `codex exec` here is launched with `--sandbox workspace-write` and
+    #     no `--mcp-config` / tool-allowlist flag at all (see
+    #     `_provider_command`) — there is no per-tool grant to narrow.
+    #   - `cursor-agent --print` is launched with `--force --approve-mcps`
+    #     (see `_provider_command`), which auto-approves EVERY MCP tool call
+    #     with no per-tool exception.
+    # A gate-owning run (`owns_pending_gate=True` — every run whose clean
+    # verdict `sign_off` records) must never reach either adapter unrestricted:
+    # that would silently reopen the exact sink this PR closes for `claude`,
+    # on a path nobody is failing loudly on. Refuse the launch instead, with a
+    # legible reason surfaced through the same `SkillResult.ok=False` +
+    # `error` shape every other launch failure already uses — `swarm_dispatch`
+    # already maps that shape to a public failure-class string in
+    # `review_failure_class` / `_surface_failed_sign_offs`, so this reuses the
+    # existing surfacing rather than inventing a new one.
+    if owns_pending_gate and provider != "claude":
+        msg = (
+            f"{GATE_OWNER_TOOL_DENY_UNAVAILABLE}: provider {provider!r} has no "
+            "mechanism in this codebase to deny a single MCP tool "
+            f"({GATE_OWNER_DENIED_TOOLS[0]}) while still granting the rest of "
+            "the agent's Neotoma access — refusing to launch a gate-owning "
+            "lens on it rather than running unrestricted (ateles#795, "
+            "Falco's security review on PR #1181)."
+        )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+
     # ateles#795 amended ADR — this preflight refusal is RELAXED, not removed.
     #
     # It used to hard-block a gate owner from launching at all when it had no
@@ -1579,6 +1640,17 @@ async def _run_skill_once(
             _mcp_tmp_path = None
 
     tools = agent_def.tools  # property: list[str]; ['*'] means all
+    # ateles#795, Falco's REQUEST_CHANGES on PR #1181: for a gate-owning run,
+    # `correct` goes on the CLI's DENY list, never relying on the additive
+    # allowlist alone. `--disallowed-tools` takes precedence over
+    # `--allowed-tools` (verified against this installed CLI's `--help`,
+    # which documents both flags; Claude Code's allow/deny precedence is
+    # deny-wins, matching every other permission layer in the product — see
+    # the PR comment for the reviewer-run provider table), so this closes the
+    # wildcard/`*` gap the additive `GATE_WRITEBACK_TOOLS` fix left open: a
+    # gate owner's session can no longer clear `gate_status` over the shared
+    # bearer no matter what its allowlist otherwise grants.
+    disallowed_list = list(GATE_OWNER_DENIED_TOOLS) if owns_pending_gate else []
     if provider == "claude" and tools != ["*"]:
         # --allowed-tools is confirmed present in `claude --print --help`
         # (alias: --allowedTools). Accepts comma- or space-separated tool names.
@@ -1595,7 +1667,9 @@ async def _run_skill_once(
         # a wildcard that could later narrow. `correct` is deliberately absent
         # (see `GATE_WRITEBACK_TOOLS`'s docstring): the dispatcher's signed
         # `sign_off` is the system-of-record write now, and this session's own
-        # `correct()` of `gate_status` must NOT be pre-approved.
+        # `correct()` of `gate_status` must NOT be pre-approved — and, for a
+        # gate-owning run, is additionally on the deny list below regardless
+        # of the wildcard.
         allowed_list = gate_writeback_allowlist(allowed_list)
         allowed = ",".join(allowed_list)
         cmd += ["--allowed-tools", allowed]
@@ -1618,7 +1692,10 @@ async def _run_skill_once(
         # `GATE_WRITEBACK_TOOLS`'s docstring: the dispatcher's signed
         # `sign_off` is the system-of-record write now). This does NOT narrow
         # the agent: the `*` wildcard is preserved as the first entry, so every
-        # other tool the agent had remains available exactly as before.
+        # other tool the agent had remains available exactly as before. For a
+        # gate-owning run, `correct` is additionally denied below — the `*`
+        # wildcard on its own left `correct` reachable, which is exactly the
+        # sink Falco's review confirmed on PR #1181.
         allowed = ",".join(gate_writeback_allowlist(["*"]))
         cmd += ["--allowed-tools", allowed]
         log.info(
@@ -1626,7 +1703,15 @@ async def _run_skill_once(
             f"<{_role}:{'agent_def+' if not degraded else 'degraded-'}{skill}.SKILL.md> "
             f"--allowed-tools {allowed} timeout={timeout}s"
         )
-    else:
+    if provider == "claude" and disallowed_list:
+        cmd += ["--disallowed-tools", ",".join(disallowed_list)]
+        log.info(
+            f"[apis] Spawning via {provider}: <{_role}:{skill}.SKILL.md> "
+            f"--disallowed-tools {','.join(disallowed_list)} "
+            "(gate-owning run — correct() of gate_status denied regardless "
+            "of allowlist)"
+        )
+    if provider != "claude":
         log.info(
             f"[apis] Spawning via {provider}: "
             f"<{_role}:{'agent_def+' if not degraded else 'degraded-'}{skill}.SKILL.md> "

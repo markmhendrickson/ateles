@@ -301,7 +301,22 @@ _SIGN_OFF_OTHER_AUTHORITY_STATES: frozenset[str] = frozenset(
 # note in `sign_off()` below. Neotoma silently drops undeclared fields on
 # write rather than erroring, so this module writes ONLY what is on this
 # list, never a field it would like to exist.
-_SIGN_OFF_DECLARED_FIELDS = frozenset({"gate_status", "owner_history"})
+#
+# `current_owner` (PR #1181, Cicada's provider-table round): `IssueGateState`
+# already READS this field from the entity snapshot (`_load` below,
+# `state.current_owner = str(snap.get("current_owner") or "")`), which is how
+# `workflow_owner_drift` and the prompts' own handoff logic observe it today.
+# A snapshot read returns declared schema fields, not `raw_fragments` — the
+# same signal `_SIGN_OFF_DECLARED_FIELDS`'s existing two entries rest on — so
+# it is included here on that basis. This was NOT independently re-confirmed
+# against prod via a fresh `describe_entity_type`/snapshot call in this PR (no
+# Neotoma credential was available in the sandbox this round ran in); the
+# `sign_off_advances_owner` write path below is exercised only against the
+# same mocked-store shape every other `sign_off` test uses, so a stale
+# assumption here would surface as `SIGN_OFF_VERIFY_FAILED` on the very next
+# live sign-off, exactly as it would for any other undeclared field, not as a
+# schema corruption.
+_SIGN_OFF_DECLARED_FIELDS = frozenset({"gate_status", "owner_history", "current_owner"})
 
 
 @dataclass
@@ -672,8 +687,23 @@ class IssueGateStore:
         gate: str,
         lens_agent: str,
         head_sha: str,
+        next_owner: str = "",
     ) -> SignOffOutcome:
         """Record ``gate_status.<gate>`` = ``"signed_off"``, SIGNED as *lens_agent*.
+
+        ``next_owner`` (PR #1181, provider-table round): when supplied, ALSO
+        advances ``current_owner`` to this value in the SAME signed write —
+        moving the phase-handoff mutation the lens's own prompt used to make
+        via an in-session `correct()` (see docs/agents/pavo.md's "Gate
+        handoff" recipe, still generated that way — tracked as a post-deploy
+        follow-up, not edited by this PR) onto the dispatcher's signed path,
+        same as `gate_status` itself. This method does NOT decide who the
+        next owner is: `swarm_dispatch` has no gate-to-next-owner resolver
+        today (that routing — including the label fast-paths and the
+        interface-surface override — lives only in the per-lens prompts), and
+        inventing one here would be a second, parallel version of that same
+        routing table. Left "" (the default), no `current_owner` write is
+        attempted and behaviour is identical to before this parameter existed.
 
         ateles#795 amended ADR: the write is the SYSTEM OF RECORD, and it must
         be attributed to the reviewing lens, not to Apis. This method never
@@ -721,9 +751,10 @@ class IssueGateStore:
              subject `<lens_agent>@ateles-swarm` — never the ambient
              `NEOTOMA_AAUTH_SUB` this process (Apis) may itself carry
              (constraint 2; see `neotoma_signed.agent_identity`'s docstring).
-          5. Write ONLY declared schema fields (`gate_status`, `owner_history`
-             — constraint 4). No `gate_writeback_outcome` or other field is
-             attempted; see the module-level note above.
+          5. Write ONLY declared schema fields (`gate_status`, `owner_history`,
+             and `current_owner` when *next_owner* is supplied — constraint 4).
+             No `gate_writeback_outcome` or other field is attempted; see the
+             module-level note above.
           6. READ BACK and assert the field holds exactly what was written
              (constraint 3c) — a 2xx from `signed_request` is not evidence a
              write landed on this codebase's own documented history of
@@ -833,10 +864,15 @@ class IssueGateStore:
         ]
         key = f"{repo}#{issue_number}"
 
-        for field_name, value in (
+        fields_to_write: list[tuple[str, object]] = [
             ("gate_status", self._encode_gate_status(state, merged_gates)),
             ("owner_history", merged_history),
-        ):
+        ]
+        next_owner = next_owner.strip()
+        if next_owner:
+            fields_to_write.append(("current_owner", next_owner))
+
+        for field_name, value in fields_to_write:
             # Constraint 4 — never write a field this module has not confirmed
             # is declared on the production schema.
             assert field_name in _SIGN_OFF_DECLARED_FIELDS, (
@@ -916,16 +952,37 @@ class IssueGateStore:
             )
             return outcome
 
+        # Same read-it-back discipline for `current_owner` when a handoff was
+        # requested — a landed `gate_status` write is not evidence the SAME
+        # POST's `current_owner` field also survived (this codebase's own
+        # documented history of undeclared/dropped-field writes is exactly why
+        # each field gets its own read-back rather than one covering both).
+        if next_owner and reread.current_owner.strip() != next_owner:
+            outcome.error = SIGN_OFF_VERIFY_FAILED
+            log.error(
+                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: %s "
+                "(current_owner read-back=%r, wanted=%r)",
+                repo,
+                issue_number,
+                gate,
+                lens_agent,
+                SIGN_OFF_VERIFY_FAILED,
+                reread.current_owner,
+                next_owner,
+            )
+            return outcome
+
         outcome.ok = True
         outcome.verified = True
         log.info(
             "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s (sub=%s): "
-            "verified signed_off",
+            "verified signed_off%s",
             repo,
             issue_number,
             gate,
             lens_agent,
             lens_sub,
+            f", current_owner->{next_owner}" if next_owner else "",
         )
         return outcome
 

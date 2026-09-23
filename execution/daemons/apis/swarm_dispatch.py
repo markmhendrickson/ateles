@@ -94,6 +94,7 @@ from review_panel import (
     select_panel,
 )
 from skill_runner import (
+    GATE_OWNER_TOOL_DENY_UNAVAILABLE,
     NEOTOMA_IDENTITY_UNAVAILABLE,
     REVIEW_VERDICT_TOKENS,
     SkillResult,
@@ -847,8 +848,10 @@ _MERGE_REFUSED_RE = re.compile(
 
 
 def _normalize_for_blocking_scan(text: str) -> str:
-    """NFKC-normalize *text* and strip zero-width characters (Falco's security
-    review, PR #1181, NON-BLOCKING PLAUSIBLE-miss finding).
+    """NFKC-normalize *text*, strip zero-width/format/combining marks, and fold
+    common Cyrillic/Greek confusables of the ASCII letters in ``BLOCKING``
+    (Falco's security review, PR #1181, NON-BLOCKING PLAUSIBLE-miss finding,
+    hardened further in the provider-table round).
 
     `_BLOCKING_MARKER_RE` matches the literal ASCII token `[BLOCKING]`. Falco's
     review flagged that a fullwidth, homoglyph, or zero-width-joiner-split
@@ -858,22 +861,94 @@ def _normalize_for_blocking_scan(text: str) -> str:
     one of those forms would read as CLEAN and reach `sign_off` — clearing the
     gate on a finding the dispatcher never actually saw as blocking.
 
-    NFKC normalization folds fullwidth/compatibility variants to their ASCII
-    equivalents (fullwidth `［` → `[`, etc.); stripping the zero-width code
-    points (ZWSP U+200B, ZWNJ U+200C, ZWJ U+200D, BOM/ZWNBSP U+FEFF) closes the
-    splice-insertion form. This is a WIDENING of what counts as `[BLOCKING]`,
-    never a narrowing — it cannot turn a genuine `[NON-BLOCKING]` into a false
-    block, because the same normalization is applied before the same
-    lookbehind-guarded regex runs, and the negative lookbehind on `NON-` still
-    applies to the normalized text.
+    Four widening passes, in order:
+      1. NFKC normalization folds fullwidth/compatibility variants to their
+         ASCII equivalents (fullwidth `［` → `[`, etc.).
+      2. Every Unicode **format** (category Cf — zero-width joiners/non-joiners,
+         BOM, soft hyphen U+00AD, bidi controls, …) and **combining** (category
+         Mn — combining accents that can be stacked onto an otherwise-ASCII
+         letter) code point is stripped, closing the splice-insertion form for
+         ANY such character, not just the four originally enumerated.
+      3. A small confusables table maps the Cyrillic/Greek look-alikes of the
+         ASCII letters in `BLOCKING` (e.g. Cyrillic `І` U+0406, `В` U+0412) to
+         their ASCII originals, closing the homoglyph form Falco's finding
+         named as a PLAUSIBLE miss.
+      4. Runs of plain spaces inside an otherwise-bracketed token are collapsed
+         (`[ B L O C K I N G ]` -> `[BLOCKING]`) so a spaced-out rendering does
+         not evade the marker either.
+
+    This is a WIDENING of what counts as `[BLOCKING]`, never a narrowing — it
+    cannot turn a genuine `[NON-BLOCKING]` into a false block, because the same
+    normalization is applied before the same lookbehind-guarded regex runs,
+    and the negative lookbehind on `NON-` still applies to the normalized text
+    (see `test_zero_width_joiner_split_non_blocking_still_not_flagged` and its
+    confusable-form siblings in test_merge_path.py, which pin exactly this).
     """
     normalized = unicodedata.normalize("NFKC", text)
-    return "".join(ch for ch in normalized if ch not in _ZERO_WIDTH_CHARS)
+    stripped = "".join(
+        ch
+        for ch in normalized
+        if ch not in _ZERO_WIDTH_CHARS and unicodedata.category(ch) not in _STRIPPED_UNICODE_CATEGORIES
+    )
+    folded = stripped.translate(_CONFUSABLE_TRANSLATION)
+    return _SPACED_LETTER_RUN_RE.sub(_collapse_spaced_run, folded)
 
 
 _ZERO_WIDTH_CHARS = frozenset(
     "​‌‍﻿"  # ZWSP, ZWNJ, ZWJ, BOM/ZWNBSP
 )
+
+# Unicode general categories stripped wholesale, on top of the explicit
+# `_ZERO_WIDTH_CHARS` set above (kept for the characters it already names
+# rather than removed, so the change is additive):
+#   Cf — "Format" — zero-width joiners/non-joiners, BOM, the soft hyphen
+#        (U+00AD), bidi control characters, and any other invisible format
+#        character a future evasion attempt might use. `_ZERO_WIDTH_CHARS`
+#        only enumerated four of these by name; category-based stripping
+#        closes the class, not just the instances already seen.
+#   Mn — "Mark, nonspacing" — combining accents/diacritics, which can be
+#        stacked onto an ASCII letter (e.g. "B" + combining acute) to change
+#        its rendered/byte form without changing which base letter a human
+#        reader perceives.
+_STRIPPED_UNICODE_CATEGORIES = frozenset({"Cf", "Mn"})
+
+# Common Cyrillic/Greek confusables of the ASCII letters appearing in
+# "BLOCKING", mapped to their ASCII originals. Deliberately narrow — this is
+# NOT a general confusables table (Unicode TR39 has thousands of entries);
+# it covers exactly the letters `_BLOCKING_MARKER_RE` needs, both cases, so an
+# attacker cannot swap one letter in the token for a visually-identical
+# Cyrillic/Greek one and have it read as clean. Extend this table, never add a
+# second one, if another marker needs the same treatment.
+_CONFUSABLE_TO_ASCII: dict[str, str] = {
+    # Cyrillic
+    "В": "B", "в": "b",  # U+0412 / U+0432 (Cyrillic VE)
+    "Ｂ": "B",  # defensive: NFKC already folds fullwidth, kept for clarity
+    "О": "O", "о": "o",  # U+041E / U+043E (Cyrillic O) — visually identical to Latin O
+    "С": "C", "с": "c",  # U+0421 / U+0441 (Cyrillic ES)
+    "К": "K", "к": "k",  # U+041A / U+043A (Cyrillic KA)
+    "І": "I", "і": "i",  # U+0406 / U+0456 (Ukrainian/Belarusian I) — Falco's named example
+    "Ι": "I", "ι": "i",  # U+0399 / U+03B9 (Greek Iota)
+    "Ⲛ": "N",  # U+2C9B (Coptic Capital N) — visually identical to Latin N
+    "Ν": "N", "ν": "n",  # U+039D / U+03BD (Greek Nu) — visually identical to Latin N
+    "Ԍ": "G",  # U+0524 (Cyrillic Komi Ge) — visually close to Latin G
+    "Ꮐ": "G",  # U+13C8 (Cherokee Nah) — visually close to Latin G in some fonts
+    # No entry for "L": no common single-codepoint Cyrillic/Greek confusable
+    # reads as a bare Latin "L" (deliberately considered and excluded, not an
+    # oversight).
+}
+_CONFUSABLE_TRANSLATION = str.maketrans(_CONFUSABLE_TO_ASCII)
+
+# A run of single characters separated by plain ASCII spaces, inside brackets
+# — `[B L O C K I N G]` or `[ BLOCKING ]`. Collapsing interior spaces (but
+# never touching text outside a bracketed run) closes the "spaced letters"
+# evasion Falco's finding raised as plausible, without turning unrelated
+# bracketed prose into a false match (the collapsed text still has to satisfy
+# `_BLOCKING_MARKER_RE` afterwards).
+_SPACED_LETTER_RUN_RE = re.compile(r"\[(?:\s*[A-Za-z\-]\s*){2,}\]")
+
+
+def _collapse_spaced_run(match: "re.Match[str]") -> str:
+    return "[" + re.sub(r"\s+", "", match.group(0)[1:-1]) + "]"
 
 
 def body_has_blocking_findings(body: str | None) -> bool:
@@ -1786,6 +1861,14 @@ def review_failure_class(result: SkillResult) -> str:
     # replaces it).
     if NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or ""):
         return "gate identity unavailable"
+    # ateles#795, Falco's REQUEST_CHANGES on PR #1181: a gate-owning lens
+    # routed to a provider that cannot deny a single MCP tool is refused at
+    # launch (`skill_runner._run_skill_once`) rather than run unrestricted.
+    # Checked before the generic auth-failure probe for the same reason as
+    # the identity-unavailable branch above — this is a deliberate refusal,
+    # not a credential problem, and must not be misreported as one.
+    if GATE_OWNER_TOOL_DENY_UNAVAILABLE in (result.error or ""):
+        return "gate-owner tool-deny unavailable on provider"
     if detect_auth_failure(result.stdout, result.stderr, result.error):
         return "credential failure"
     return "execution failure"
@@ -3877,6 +3960,16 @@ class SwarmDispatcher:
                 ),
                 include_github_contract=True,
                 notifier=self.notifier,
+                # ateles#795, Falco's REQUEST_CHANGES on PR #1181: this call
+                # site was found NOT passing `owns_pending_gate` at all, so
+                # Pavo's `pm` turn here ran with the gate-owner tool-deny
+                # never applied even though it is exactly the run whose clean
+                # verdict `sign_off` below records (`section.lens == "pm"` is
+                # the SAME predicate that call already gates on). `ux`/`arch`
+                # sections in this pipeline never reach `sign_off` (they
+                # clear later via the PR panel's own `run_skill` call, which
+                # already threads this correctly) so they stay False here.
+                owns_pending_gate=section.lens == "pm",
             )
             section_text = self._extract_section_text(result.stdout, section)
             # Persist ADDITIVELY: correct only this section's field. Even when

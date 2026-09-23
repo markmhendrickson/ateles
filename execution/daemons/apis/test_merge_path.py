@@ -87,6 +87,80 @@ def test_zero_width_joiner_split_non_blocking_still_not_flagged():
     assert not body_has_blocking_findings(f"**COMMENT**\n\n{spliced}")
 
 
+# ── PR #1181 provider-table round: harden past NFKC + zero-width alone ───────
+# (Falco's second-pass finding: Cyrillic/spaced/soft-hyphen/combining forms of
+# [BLOCKING] still missed the guard).
+
+
+def test_cyrillic_i_confusable_still_detected():
+    """Falco's own named example: Ukrainian/Belarusian `І` (U+0406) reads as
+    Latin `I` to a human but is a distinct code point NFKC does not fold."""
+    cyrillic_i = "[BLOCKІNG]"
+    assert cyrillic_i != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{cyrillic_i} scope: nope")
+
+
+def test_cyrillic_ve_confusable_still_detected():
+    """Cyrillic `В` (U+0412) is visually identical to Latin `B`."""
+    cyrillic_ve = "[ВLOCKING]"
+    assert cyrillic_ve != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{cyrillic_ve} scope: nope")
+
+
+def test_greek_iota_confusable_still_detected():
+    """Greek Iota (U+0399) is visually identical to Latin `I`."""
+    greek_iota = "[BLOCKΙNG]"
+    assert greek_iota != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{greek_iota} scope: nope")
+
+
+def test_soft_hyphen_still_detected():
+    """The soft hyphen (U+00AD, category Cf) spliced into the token — the same
+    splice-insertion shape as the zero-width forms above, but a code point
+    the original fix's explicit four-character set did not name."""
+    soft_hyphen = "[BLOCKING­]"
+    assert soft_hyphen != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{soft_hyphen} scope: nope")
+
+
+def test_combining_mark_spliced_into_token_still_detected():
+    """A combining acute accent (U+0301, category Mn) stacked onto a letter —
+    changes the code-point sequence without changing what a human reads."""
+    combining = "[B́LOCKING]"
+    assert combining != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{combining} scope: nope")
+
+
+def test_spaced_letters_still_detected():
+    """Falco's finding: 'spaced letters, if spaced is reasonable' — a lens
+    could write the token with a space between every letter."""
+    spaced = "[ B L O C K I N G ]"
+    assert spaced != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{spaced} scope: nope")
+
+
+def test_spaced_non_blocking_still_not_flagged():
+    """The spaced-letters widening must not turn a spaced-out NON-BLOCKING
+    into a false block — mirrors `test_zero_width_joiner_split_non_blocking_
+    still_not_flagged` for the new spacing pass."""
+    spaced = "[ N O N - B L O C K I N G ] naming: nit"
+    assert not body_has_blocking_findings(f"**COMMENT**\n\n{spaced}")
+
+
+def test_confusables_table_is_narrow_and_covers_named_letters():
+    """The confusables table is deliberately scoped to the letters in
+    BLOCKING, not a general Unicode-TR39 confusables table."""
+    from swarm_dispatch import _CONFUSABLE_TO_ASCII
+
+    assert _CONFUSABLE_TO_ASCII, "table must not be empty for the fix to apply"
+    for src, dst in _CONFUSABLE_TO_ASCII.items():
+        assert dst.upper() in "BLOCKING", (
+            f"{src!r} -> {dst!r} maps to a letter outside BLOCKING — the "
+            "table must stay scoped to the marker it defends"
+        )
+        assert src != dst, "no-op identity entries add nothing and confuse intent"
+
+
 def test_comment_token_with_blocking_body_escalates_to_request_changes():
     """ateles#595, the exact ateles#558 shape: the legal lens posted **COMMENT**
     with a [BLOCKING] credential-scope finding. Submitted as --comment, it never

@@ -7066,6 +7066,62 @@ def test_pm_clean_verdict_triggers_dispatcher_sign_off(monkeypatch):
     assert head_sha  # a non-empty content-derived surrogate, never blank
 
 
+def test_pm_section_run_skill_call_carries_owns_pending_gate(monkeypatch):
+    """PR #1181 provider-table round: this call site was found NOT passing
+    `owns_pending_gate` at all (every section ran with the default `False`).
+    That is exactly the gate-owner tool-deny fix's activation condition
+    (`skill_runner._run_skill_once`'s `owns_pending_gate and provider !=
+    "claude"` refusal, and its `--disallowed-tools` append on claude) — so
+    Pavo's `pm` turn here ran with the deny NEVER applied even though it is
+    the same run whose clean verdict `sign_off` immediately below records.
+    `ux`/`arch` sections in THIS pipeline never reach `sign_off` (they clear
+    later via the PR panel, which already threads this correctly), so they
+    must stay False here — this is scoped to `pm` exactly.
+    """
+    seen_kwargs: dict[str, dict] = {}
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        seen_kwargs[skill] = kwargs
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            from gate_waive import SignOffOutcome
+            return SignOffOutcome(
+                ok=True, gate=gate, lens_agent=lens_agent,
+                lens_sub=f"{lens_agent}@ateles-swarm", verified=True,
+            )
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert "pavo" in seen_kwargs, "the pm section (pavo) must have run"
+    assert seen_kwargs["pavo"]["owns_pending_gate"] is True, (
+        "pavo's pm-section run is the run whose clean verdict sign_off "
+        "records — it must carry owns_pending_gate=True so the gate-owner "
+        "tool-deny actually applies to it"
+    )
+    # Non-pm sections in this pipeline never reach sign_off; must not be
+    # mis-flagged as gate-owning either.
+    for other in ("cicada", "phoenicurus"):
+        if other in seen_kwargs:
+            assert seen_kwargs[other]["owns_pending_gate"] is False
+
+
 def test_pm_blocking_verdict_does_not_call_sign_off(monkeypatch):
     """A `[BLOCKING]` pm verdict must leave the gate pending — no sign_off
     attempted — exactly like the panel's own blocking-finding guard."""
@@ -10026,5 +10082,36 @@ class TestGateIdentityFailureClass:
     def test_ordinary_failure_still_classes_as_execution_failure(self) -> None:
         other = SkillResult(
             "accipiter", False, 1, "", "boom", error="boom", provider="claude"
+        )
+        assert swarm_dispatch.review_failure_class(other) == "execution failure"
+
+
+# ── PR #1181 provider-table round: a fail-closed provider refusal for a ──────
+# gate-owning lens must be its own legible class, not a bare "execution
+# failure" (which would read identically to an unrelated crash) or a
+# "credential failure" (which would send the operator chasing a token that
+# was never the problem).
+class TestGateOwnerToolDenyFailureClass:
+    def test_provider_refusal_is_its_own_class(self) -> None:
+        refused = SkillResult(
+            "waxwing",
+            False,
+            None,
+            "",
+            "",
+            error=(
+                f"{swarm_dispatch.GATE_OWNER_TOOL_DENY_UNAVAILABLE}: provider "
+                "'codex' has no mechanism ..."
+            ),
+            provider="codex",
+        )
+        assert (
+            swarm_dispatch.review_failure_class(refused)
+            == "gate-owner tool-deny unavailable on provider"
+        )
+
+    def test_ordinary_failure_still_classes_as_execution_failure(self) -> None:
+        other = SkillResult(
+            "waxwing", False, 1, "", "boom", error="boom", provider="codex"
         )
         assert swarm_dispatch.review_failure_class(other) == "execution failure"
