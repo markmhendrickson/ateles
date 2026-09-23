@@ -1547,6 +1547,70 @@ def build_gate_restore_idempotency_key(entity_id: str, merged_payload: dict) -> 
     return f"migrate-gates-{entity_id}-{payload_hash}"
 
 
+def recheck_fields_against_current_hosted(
+    entity_id: str, action: str, fields: dict, local_state: dict, base_url: str, token: str
+) -> dict:
+    """Re-fetch hosted's CURRENT state immediately before a write and drop
+    any field from `fields` that is a no-op against that fresh read.
+
+    Regression this exists to close (found live, 2026-09-23, during an
+    idempotency re-run against ~130 already-applied issues): hosted's
+    /store creates a new observation on EVERY call regardless of whether
+    the field VALUE actually changes -- confirmed by a direct probe
+    (neotoma#2033: observation_count went 112 -> 113 from a write whose
+    payload was byte-identical to what was already stored, using a fresh
+    idempotency_key). Since this script's idempotency_key is a hash of the
+    merged payload, and other agents write to these same issues
+    concurrently (this migration ran alongside live swarm activity), a
+    plan computed against a SNAPSHOT of hosted taken minutes earlier can
+    legitimately differ from hosted's state at write time in ways that are
+    themselves already-applied by an earlier pass of this same script --
+    re-running the merge against a FRESH hosted read is the only way to
+    tell "genuinely new local data" from "the diff computed against a
+    stale snapshot". This function is the fix: never trust `fields` as
+    computed at plan time for a MERGE action -- re-derive it here against
+    a live GET, and only send what that live comparison still calls a
+    change.
+
+    Does nothing for a CREATE action (there's no existing hosted state to
+    re-diff against) or for `current_owner` (already re-decided fresh by
+    its own dedicated lazy check in the apply loop; left untouched here).
+    """
+    if action != "merge" or not fields:
+        return fields
+    if "gate_status" not in fields and "owner_history" not in fields:
+        return fields
+
+    hosted_now = get_hosted_entity(entity_id, base_url, token)
+    if hosted_now is None:
+        # Entity vanished between planning and apply (shouldn't happen for
+        # a merge target, but fail closed: send nothing rather than guess).
+        return {k: v for k, v in fields.items() if k not in ("gate_status", "owner_history")}
+
+    hosted_snapshot_now = hosted_now.get("snapshot") or {}
+    rechecked = dict(fields)
+
+    if "gate_status" in fields:
+        hosted_gate_status_now = hosted_snapshot_now.get("gate_status") if isinstance(hosted_snapshot_now.get("gate_status"), dict) else {}
+        local_gate_status = local_state.get("gate_status") if isinstance(local_state.get("gate_status"), dict) else {}
+        merged_now, changes_now = merge_gate_status(hosted_gate_status_now, local_gate_status)
+        if not changes_now:
+            rechecked.pop("gate_status", None)
+        else:
+            rechecked["gate_status"] = merged_now
+
+    if "owner_history" in fields:
+        hosted_owner_history_now = hosted_snapshot_now.get("owner_history") if isinstance(hosted_snapshot_now.get("owner_history"), list) else []
+        local_owner_history = local_state.get("owner_history") if isinstance(local_state.get("owner_history"), list) else []
+        merged_now = merge_owner_history(hosted_owner_history_now, local_owner_history)
+        if merged_now == hosted_owner_history_now:
+            rechecked.pop("owner_history", None)
+        else:
+            rechecked["owner_history"] = merged_now
+
+    return rechecked
+
+
 def plan_gate_restore_for_entity(
     entity_id: str, local_state: dict, hosted_entity: dict | None
 ) -> dict:
@@ -1934,6 +1998,38 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
                     )
 
             if not fields:
+                continue
+
+            # Re-derive gate_status/owner_history against a FRESH hosted
+            # read taken right now, not the snapshot the plan was computed
+            # from -- see recheck_fields_against_current_hosted docstring.
+            # This is what makes re-running the apply against an
+            # already-applied batch converge to zero writes instead of
+            # creating a fresh (duplicate-content) observation every time.
+            local_state_for_recheck = candidates.get(entity_id) or filtered_candidates.get(entity_id) or {}
+            issues_recheck_request = p["action"] == "merge" and ("gate_status" in fields or "owner_history" in fields)
+            fields = recheck_fields_against_current_hosted(
+                entity_id, p["action"], fields, local_state_for_recheck, base_url, token
+            )
+            if issues_recheck_request:
+                request_count += 1  # the recheck GET inside recheck_fields_against_current_hosted
+
+            if not fields:
+                print(f"SKIP (no-op against current hosted state): {label} entity={entity_id}")
+                log_action(
+                    log_fh,
+                    kind="gate_restore",
+                    local_id=entity_id,
+                    entity_id=entity_id,
+                    entity_type="issue",
+                    entity_class=p["action"],
+                    repo=p.get("repo"),
+                    github_number=p.get("github_number"),
+                    fields_written=[],
+                    action="skipped_noop_against_current_hosted",
+                    idempotency_key=None,
+                    http_status=None,
+                )
                 continue
 
             merged_payload_for_key = fields
