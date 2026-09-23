@@ -7,12 +7,13 @@ import contextlib
 import io
 import json
 import os
-import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+import yaml
 
 import package_rule_inventory_inputs as inputs
 import render_rule_inventory as renderer
@@ -23,108 +24,340 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "canonical-rule-inventory.yml"
 ATELES_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ateles-tests.yml"
 
 
-def job_blocks(workflow: str) -> dict[str, str]:
-    if "\njobs:" not in workflow:
-        raise AssertionError("workflow has no jobs section")
-    section = workflow[workflow.index("\njobs:") :]
-    headers = list(re.finditer(r"^  ([a-zA-Z0-9_-]+):\s*$", section, re.M))
-    return {
-        header.group(1): section[
-            header.end() : headers[index + 1].start()
-            if index + 1 < len(headers)
-            else len(section)
-        ]
-        for index, header in enumerate(headers)
+def parse_workflow(workflow: str) -> tuple[dict[str, object], dict[str, dict]]:
+    """Parse the workflow as data and reject ambiguous execution shapes."""
+
+    try:
+        document = yaml.safe_load(workflow)
+    except yaml.YAMLError as exc:
+        raise AssertionError("workflow is not valid YAML") from exc
+    if not isinstance(document, dict):
+        raise AssertionError("workflow root is not a mapping")
+    allowed_root_keys = {"name", True, "permissions", "jobs"}
+    if set(document) - allowed_root_keys:
+        raise AssertionError("workflow root has an unsafe execution control")
+    triggers = document.get(True)
+    if not isinstance(triggers, dict) or set(triggers) != {"pull_request_target"}:
+        raise AssertionError("privileged workflow trigger is not default-branch-only")
+    pull_request_target = triggers["pull_request_target"]
+    if (
+        not isinstance(pull_request_target, dict)
+        or pull_request_target.get("types") != ["opened", "reopened", "synchronize"]
+        or not isinstance(pull_request_target.get("paths"), list)
+    ):
+        raise AssertionError("privileged workflow trigger is not structurally pinned")
+    if document.get("permissions") != {"contents": "read"}:
+        raise AssertionError("workflow permissions are not read-only")
+    jobs = document.get("jobs")
+    if not isinstance(jobs, dict):
+        raise AssertionError("workflow has no structural jobs mapping")
+    allowed_job_keys = {
+        "name",
+        "needs",
+        "runs-on",
+        "timeout-minutes",
+        "steps",
+        "env",
+        "if",
+        "continue-on-error",
     }
+    allowed_step_keys = {
+        "name",
+        "uses",
+        "with",
+        "run",
+        "env",
+        "if",
+        "continue-on-error",
+    }
+    for job_name, job in jobs.items():
+        if not isinstance(job_name, str) or not isinstance(job, dict):
+            raise AssertionError("workflow job is not a named mapping")
+        if set(job) - allowed_job_keys:
+            raise AssertionError(f"job {job_name} has an unsafe execution control")
+        steps = job.get("steps")
+        if not isinstance(steps, list) or not steps:
+            raise AssertionError(f"job {job_name} has no structural steps list")
+        for index, step in enumerate(steps):
+            if not isinstance(step, dict):
+                raise AssertionError(f"job {job_name} step {index} is not a mapping")
+            if set(step) - allowed_step_keys:
+                raise AssertionError(
+                    f"job {job_name} step {index} has an unsafe execution control"
+                )
+            forms = [key for key in ("uses", "run") if key in step]
+            if len(forms) != 1:
+                raise AssertionError(
+                    f"job {job_name} step {index} has an ambiguous execution form"
+                )
+            form = forms[0]
+            if not isinstance(step[form], str) or not step[form].strip():
+                raise AssertionError(
+                    f"job {job_name} step {index} has an invalid {form} form"
+                )
+            if "with" in step and (
+                form != "uses" or not isinstance(step["with"], dict)
+            ):
+                raise AssertionError(
+                    f"job {job_name} step {index} has an invalid with mapping"
+                )
+            if "env" in step and not isinstance(step["env"], dict):
+                raise AssertionError(
+                    f"job {job_name} step {index} has an invalid env mapping"
+                )
+        if "env" in job and not isinstance(job["env"], dict):
+            raise AssertionError(f"job {job_name} has an invalid env mapping")
+    return document, jobs
+
+
+def _needs(job: dict, dependency: str) -> bool:
+    needs = job.get("needs")
+    if isinstance(needs, str):
+        return needs == dependency
+    return isinstance(needs, list) and needs == [dependency]
+
+
+def _command(step: dict) -> str:
+    return str(step["run"]).strip()
+
+
+def _checkout_steps(jobs: dict[str, dict]):
+    for job_name, job in jobs.items():
+        for index, step in enumerate(job["steps"]):
+            if step.get("uses") == "actions/checkout@v4":
+                yield job_name, index, step
 
 
 def verify_privileged_boundary(workflow: str) -> None:
-    if "pull_request_target:" not in workflow or "workflow_dispatch:" in workflow:
-        raise AssertionError("privileged workflow trigger is not default-branch-only")
-    blocks = job_blocks(workflow)
-    if set(blocks) != {"trusted-source", "candidate-inputs", "rule-inventory"}:
+    document, jobs = parse_workflow(workflow)
+    if set(jobs) != {"trusted-source", "candidate-inputs", "rule-inventory"}:
         raise AssertionError("unexpected workflow job set")
-    privileged = blocks["rule-inventory"]
-    trusted_source = blocks["trusted-source"]
-    fork_refusal = (
-        '          if [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then\n'
-        '            echo "::error::canonical measurement refuses code from fork repositories"\n'
-        "            exit 1\n"
-        "          fi\n"
+    trusted_source = jobs["trusted-source"]
+    candidate = jobs["candidate-inputs"]
+    privileged = jobs["rule-inventory"]
+    refusal_steps = [
+        step
+        for step in trusted_source["steps"]
+        if step.get("name") == "Refuse fork repositories before privileged execution"
+    ]
+    expected_refusal = (
+        'if [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then\n'
+        '  echo "::error::canonical measurement refuses code from fork repositories"\n'
+        "  exit 1\n"
+        "fi"
     )
     if (
-        fork_refusal not in trusted_source
-        or "needs: trusted-source" not in blocks["candidate-inputs"]
+        len(trusted_source["steps"]) != 1
+        or len(refusal_steps) != 1
+        or "if" in trusted_source
+        or "continue-on-error" in trusted_source
+        or "if" in refusal_steps[0]
+        or "continue-on-error" in refusal_steps[0]
+        or _command(refusal_steps[0]) != expected_refusal
+        or refusal_steps[0].get("env")
+        != {"HEAD_REPOSITORY": "${{ github.event.pull_request.head.repo.full_name }}"}
+        or not _needs(candidate, "trusted-source")
     ):
         raise AssertionError("fork refusal is not binding before candidate admission")
-    if "runs-on: [self-hosted, macOS, canonical-rule-inventory]" not in privileged:
+    if privileged.get("runs-on") != [
+        "self-hosted",
+        "macOS",
+        "canonical-rule-inventory",
+    ]:
         raise AssertionError("canonical job is not pinned to its runner class")
-    if "needs: candidate-inputs" not in privileged:
+    if not _needs(privileged, "candidate-inputs"):
         raise AssertionError("privileged job can bypass candidate-data admission")
-    if "github.event.pull_request.head" in privileged or re.search(
-        r"^\s+path:\s*candidate\s*$", privileged, re.M
-    ):
-        raise AssertionError("privileged job can check out candidate code")
-    if "ref: ${{ github.event.repository.default_branch }}" not in privileged:
-        raise AssertionError("privileged checkout is not the trusted default branch")
+
+    candidate_checkouts = [
+        (index, step)
+        for job_name, index, step in _checkout_steps(jobs)
+        if job_name == "candidate-inputs"
+    ]
+    trusted_packer_checkouts = [
+        (index, step)
+        for index, step in candidate_checkouts
+        if step.get("with", {}).get("path") == "trusted"
+    ]
+    expected_trusted_checkout = {
+        "ref": "${{ github.event.repository.default_branch }}",
+        "path": "trusted",
+        "persist-credentials": False,
+    }
     if (
-        "path: trusted" not in privileged
-        or "persist-credentials: false" not in privileged
+        len(trusted_packer_checkouts) != 1
+        or trusted_packer_checkouts[0][1].get("with") != expected_trusted_checkout
     ):
         raise AssertionError(
-            "trusted checkout does not preserve the credential boundary"
+            "candidate packer checkout is not exactly one trusted checkout"
         )
-    allowed_actions = {
-        "actions/checkout@v4",
-        "actions/setup-python@v5",
-        "actions/download-artifact@v4",
-    }
-    actions = set(re.findall(r"uses:\s*([^\s]+)", privileged))
-    if not actions.issubset(allowed_actions):
-        raise AssertionError("privileged job invokes an unapproved action")
-    commands = [
-        line.strip()
-        for block in re.findall(r"run:\s*\|\n((?:[ \t]+.*\n?)*)", privileged)
-        for line in block.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    allowed_prefixes = (
-        "python3 trusted/execution/scripts/package_rule_inventory_inputs.py",
-        "python3 trusted/execution/scripts/run_canonical_rule_inventory_gate.py",
-        "--validate ",
-        '"$GITHUB_WORKSPACE/candidate-inputs"',
+    packer_command = (
+        "python3 trusted/execution/scripts/package_rule_inventory_inputs.py \\\n"
+        '  --source "$GITHUB_WORKSPACE/candidate" \\\n'
+        '  --destination "$GITHUB_WORKSPACE/candidate-inputs"'
     )
-    if any(line != "\\" and not line.startswith(allowed_prefixes) for line in commands):
-        raise AssertionError("privileged job can execute a non-trusted command")
-    if "--validate" not in privileged:
-        raise AssertionError("candidate data is not validated on the privileged host")
-    if len(re.findall(r"^\s+NEOTOMA_BEARER_TOKEN:\s*", privileged, re.M)) != 1:
+    packer_steps = [
+        (index, step)
+        for index, step in enumerate(candidate["steps"])
+        if "run" in step and _command(step) == packer_command
+    ]
+    if len(packer_steps) != 1 or packer_steps[0][0] <= trusted_packer_checkouts[0][0]:
+        raise AssertionError("candidate packer checkout does not bind the packer run")
+    if not any(
+        step.get("with", {}).get("ref") == "${{ github.event.pull_request.head.sha }}"
+        and step.get("with", {}).get("path") == "candidate"
+        for _, step in candidate_checkouts
+    ):
+        raise AssertionError("candidate inputs are not bound to the declared PR head")
+
+    for _, _, checkout in _checkout_steps(jobs):
+        checkout_with = checkout.get("with")
+        if (
+            not isinstance(checkout_with, dict)
+            or checkout_with.get("persist-credentials") is not False
+        ):
+            raise AssertionError("a checkout can retain persisted credentials")
+
+    allowed_actions = {
+        "candidate-inputs": {
+            "actions/checkout@v4",
+            "actions/setup-python@v5",
+            "actions/upload-artifact@v4",
+        },
+        "rule-inventory": {
+            "actions/checkout@v4",
+            "actions/setup-python@v5",
+            "actions/download-artifact@v4",
+        },
+    }
+    allowed_runs = {
+        "candidate-inputs": {packer_command},
+        "rule-inventory": {
+            "python3 trusted/execution/scripts/package_rule_inventory_inputs.py "
+            '\\\n  --validate "$GITHUB_WORKSPACE/candidate-inputs"',
+            "python3 trusted/execution/scripts/run_canonical_rule_inventory_gate.py "
+            '\\\n  "$GITHUB_WORKSPACE/candidate-inputs"',
+        },
+    }
+    for job_name in ("candidate-inputs", "rule-inventory"):
+        if "if" in jobs[job_name] or "continue-on-error" in jobs[job_name]:
+            raise AssertionError(f"job {job_name} has an unsafe execution control")
+        for step in jobs[job_name]["steps"]:
+            if "if" in step or "continue-on-error" in step:
+                raise AssertionError(
+                    f"job {job_name} step has an unsafe execution control"
+                )
+            if "uses" in step and step["uses"] not in allowed_actions[job_name]:
+                message = (
+                    "privileged job invokes an unapproved action"
+                    if job_name == "rule-inventory"
+                    else "candidate packer invokes an unapproved action"
+                )
+                raise AssertionError(message)
+            if "run" in step and _command(step) not in allowed_runs[job_name]:
+                message = (
+                    "privileged job can execute a non-trusted command"
+                    if job_name == "rule-inventory"
+                    else "candidate packer can execute a non-trusted command"
+                )
+                raise AssertionError(message)
+
+    if len(candidate_checkouts) != 2:
+        raise AssertionError("candidate packer checkout set is not exact")
+    candidate_setup = [
+        step
+        for step in candidate["steps"]
+        if step.get("uses") == "actions/setup-python@v5"
+    ]
+    candidate_upload = [
+        step
+        for step in candidate["steps"]
+        if step.get("uses") == "actions/upload-artifact@v4"
+    ]
+    if len(candidate_setup) != 1 or candidate_setup[0].get("with") != {
+        "python-version": "3.13"
+    }:
+        raise AssertionError("candidate packer Python action is not exact")
+    if len(candidate_upload) != 1 or candidate_upload[0].get("with") != {
+        "name": "canonical-rule-inventory-inputs",
+        "path": "candidate-inputs",
+        "include-hidden-files": True,
+        "if-no-files-found": "error",
+        "retention-days": 1,
+    }:
+        raise AssertionError("candidate artifact action is not exact")
+    privileged_checkouts = [
+        step
+        for job_name, _, step in _checkout_steps(jobs)
+        if job_name == "rule-inventory"
+    ]
+    if (
+        len(privileged_checkouts) != 1
+        or privileged_checkouts[0].get("with") != expected_trusted_checkout
+    ):
+        raise AssertionError("privileged checkout is not the trusted default branch")
+    privileged_setup = [
+        step
+        for step in privileged["steps"]
+        if step.get("uses") == "actions/setup-python@v5"
+    ]
+    privileged_download = [
+        step
+        for step in privileged["steps"]
+        if step.get("uses") == "actions/download-artifact@v4"
+    ]
+    if len(privileged_setup) != 1 or privileged_setup[0].get("with") != {
+        "python-version": "3.13"
+    }:
+        raise AssertionError("privileged Python action is not exact")
+    if len(privileged_download) != 1 or privileged_download[0].get("with") != {
+        "name": "canonical-rule-inventory-inputs",
+        "path": "candidate-inputs",
+    }:
+        raise AssertionError("privileged artifact action is not exact")
+
+    token_locations: list[tuple[str, object]] = []
+    for scope_name, scope in [("workflow", document), *jobs.items()]:
+        env = scope.get("env") if isinstance(scope, dict) else None
+        if env is not None:
+            if not isinstance(env, dict):
+                raise AssertionError(f"{scope_name} has an invalid env mapping")
+            if "NEOTOMA_BEARER_TOKEN" in env:
+                token_locations.append(
+                    (f"{scope_name}.env", env["NEOTOMA_BEARER_TOKEN"])
+                )
+    gate_steps = []
+    for job_name, job in jobs.items():
+        for index, step in enumerate(job["steps"]):
+            env = step.get("env", {})
+            if "NEOTOMA_BEARER_TOKEN" in env:
+                token_locations.append(
+                    (f"{job_name}.steps[{index}].env", env["NEOTOMA_BEARER_TOKEN"])
+                )
+                gate_steps.append(step)
+    if (
+        len(token_locations) != 1
+        or len(gate_steps) != 1
+        or gate_steps[0].get("name") != "Rule inventory — full measured output matches"
+        or gate_steps[0].get("env")
+        != {"NEOTOMA_BEARER_TOKEN": "${{ secrets.NEOTOMA_BEARER_TOKEN }}"}
+        or token_locations[0][1] != "${{ secrets.NEOTOMA_BEARER_TOKEN }}"
+        or workflow.count("${{ secrets.NEOTOMA_BEARER_TOKEN }}") != 1
+    ):
         raise AssertionError(
             "canonical credential is exposed outside one measurement step"
         )
+    allowed_env_steps = {id(refusal_steps[0]), id(gate_steps[0])}
+    for job in jobs.values():
+        for step in job["steps"]:
+            if "env" in step and id(step) not in allowed_env_steps:
+                raise AssertionError(
+                    "workflow step can alter the trusted execution env"
+                )
+    if "env" in document or any("env" in job for job in jobs.values()):
+        raise AssertionError("workflow scope can alter the trusted execution env")
     if "vars.RULE_INVENTORY_CANONICAL_REPOSITORY_ROOTS" in workflow:
         raise AssertionError(
             "private canonical roots moved into repository configuration"
-        )
-    candidate = blocks["candidate-inputs"]
-    trusted_packer_checkout = (
-        "      - name: Check out trusted measurement code\n"
-        "        uses: actions/checkout@v4\n"
-        "        with:\n"
-        "          ref: ${{ github.event.repository.default_branch }}\n"
-        "          path: trusted\n"
-        "          persist-credentials: false\n"
-    )
-    if trusted_packer_checkout not in candidate:
-        raise AssertionError("candidate packer checkout is not trusted")
-    if "github.event.pull_request.head.sha" not in candidate:
-        raise AssertionError("candidate inputs are not bound to the declared PR head")
-    if (
-        "python3 trusted/execution/scripts/package_rule_inventory_inputs.py"
-        not in candidate
-    ):
-        raise AssertionError(
-            "candidate input packer is not trusted default-branch code"
         )
 
 
@@ -137,21 +370,18 @@ def verify_candidate_artifact_transfer(workflow: str) -> None:
     incomplete even though the packer and validator are individually sound.
     """
 
-    candidate = job_blocks(workflow)["candidate-inputs"]
-    upload_match = re.search(
-        r"uses:\s*actions/upload-artifact@v4\s*\n"
-        r"\s+with:\s*\n(?P<with>(?:\s{10,}[^\n]*\n?)*)",
-        candidate,
-    )
-    if upload_match is None:
+    _, jobs = parse_workflow(workflow)
+    uploads = [
+        step
+        for step in jobs["candidate-inputs"]["steps"]
+        if step.get("uses") == "actions/upload-artifact@v4"
+    ]
+    if len(uploads) != 1:
         raise AssertionError("candidate input artifact upload step is missing")
-    upload_with = upload_match.group("with")
-    if not re.search(r"^\s+path:\s*candidate-inputs\s*$", upload_with, re.M):
+    upload_with = uploads[0].get("with", {})
+    if upload_with.get("path") != "candidate-inputs":
         raise AssertionError("artifact upload is not limited to the curated data tree")
-    hidden_setting = re.search(
-        r"^\s+include-hidden-files:\s*([^\s#]+)", upload_with, re.M
-    )
-    if hidden_setting is None or hidden_setting.group(1).lower() != "true":
+    if upload_with.get("include-hidden-files") is not True:
         raise AssertionError("candidate artifact upload excludes hidden inputs")
 
 
@@ -167,9 +397,20 @@ def verify_workflow_guidance(workflow: str) -> None:
         "inventory_mismatch",
         "safety_failed",
         "match",
+        "canonical measurement refuses code from fork repositories",
+        "canonical rule inventory input boundary rejected reason=",
+        "rule inventory measurement failed before a safe verdict",
+        "rule inventory equality unavailable: canonical read credential is missing",
+        "rule inventory equality unavailable: canonical repository roots are missing",
+        "rule inventory equality unavailable: full measurement is incomplete",
+        "rule inventory differs from the complete canonical measurement",
+        "rule inventory public-output safety check failed",
+        "rule inventory matches the complete canonical measurement",
         "package_rule_inventory_inputs.py --source",
         "package_rule_inventory_inputs.py --validate",
         "run_canonical_rule_inventory_gate.py",
+        "docs/foundation/rule_inventory.md",
+        "does not generate",
         "#1114",
         "#923",
         "#1123",
@@ -238,6 +479,21 @@ class WorkflowBoundaryTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "non-trusted command"):
             verify_privileged_boundary(planted)
 
+    def test_inline_privileged_run_is_also_rejected(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        prefix, privileged = workflow.split("  rule-inventory:\n", 1)
+        planted_privileged = privileged.replace(
+            "      - uses: actions/setup-python@v5\n",
+            "      - name: planted inline candidate execution\n"
+            "        run: python3 candidate-inputs/attacker_controlled.py\n"
+            "      - uses: actions/setup-python@v5\n",
+            1,
+        )
+        planted = prefix + "  rule-inventory:\n" + planted_privileged
+        self.assertNotEqual(workflow, planted, "negative mutation was not planted")
+        with self.assertRaisesRegex(AssertionError, "non-trusted command"):
+            verify_privileged_boundary(planted)
+
     def test_workflow_dispatch_branch_override_is_rejected(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         with self.assertRaisesRegex(AssertionError, "trigger"):
@@ -261,6 +517,39 @@ class WorkflowBoundaryTest(unittest.TestCase):
         for replacement in ("            exit 0\n", ""):
             with self.subTest(replacement=replacement or "removed"):
                 mutant = workflow.replace("            exit 1\n", replacement, 1)
+                self.assertNotEqual(
+                    workflow, mutant, "negative mutation was not planted"
+                )
+                with self.assertRaisesRegex(AssertionError, "fork refusal"):
+                    verify_privileged_boundary(mutant)
+
+    def test_fork_refusal_cannot_be_skipped_or_continued(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutations = {
+            "step if": (
+                "      - name: Refuse fork repositories before privileged execution\n",
+                "      - name: Refuse fork repositories before privileged execution\n"
+                "        if: ${{ false }}\n",
+            ),
+            "step continue": (
+                "      - name: Refuse fork repositories before privileged execution\n",
+                "      - name: Refuse fork repositories before privileged execution\n"
+                "        continue-on-error: true\n",
+            ),
+            "job if": (
+                "  trusted-source:\n    name: canonical measurement source is trusted\n",
+                "  trusted-source:\n    name: canonical measurement source is trusted\n"
+                "    if: ${{ false }}\n",
+            ),
+            "job continue": (
+                "  trusted-source:\n    name: canonical measurement source is trusted\n",
+                "  trusted-source:\n    name: canonical measurement source is trusted\n"
+                "    continue-on-error: true\n",
+            ),
+        }
+        for label, (before, after) in mutations.items():
+            with self.subTest(label=label):
+                mutant = workflow.replace(before, after, 1)
                 self.assertNotEqual(
                     workflow, mutant, "negative mutation was not planted"
                 )
@@ -292,12 +581,87 @@ class WorkflowBoundaryTest(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, "packer checkout"):
                     verify_privileged_boundary(mutant)
 
+    def test_trusted_packer_checkout_cannot_be_overwritten_later(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutant = workflow.replace(
+            "      - uses: actions/setup-python@v5\n",
+            "      - name: Overwrite trusted packer with candidate code\n"
+            "        uses: actions/checkout@v4\n"
+            "        with:\n"
+            "          ref: ${{ github.event.pull_request.head.sha }}\n"
+            "          path: trusted\n"
+            "          persist-credentials: false\n"
+            "      - uses: actions/setup-python@v5\n",
+            1,
+        )
+        self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
+        with self.assertRaisesRegex(AssertionError, "packer checkout"):
+            verify_privileged_boundary(mutant)
+
+    def test_every_checkout_must_disable_persisted_credentials(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        declared_candidate = (
+            "      - name: Check out declared candidate inputs\n"
+            "        uses: actions/checkout@v4\n"
+            "        with:\n"
+            "          ref: ${{ github.event.pull_request.head.sha }}\n"
+            "          path: candidate\n"
+            "          persist-credentials: false\n"
+        )
+        mutant = workflow.replace(
+            declared_candidate,
+            declared_candidate.replace(
+                "persist-credentials: false", "persist-credentials: true"
+            ),
+            1,
+        )
+        self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
+        with self.assertRaisesRegex(AssertionError, "persisted credentials"):
+            verify_privileged_boundary(mutant)
+
+    def test_canonical_token_exists_only_on_the_gate_step(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutant = workflow.replace(
+            "  candidate-inputs:\n    name: package candidate inputs as data\n",
+            "  candidate-inputs:\n    name: package candidate inputs as data\n"
+            "    env:\n"
+            "      NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}\n",
+            1,
+        )
+        self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
+        with self.assertRaisesRegex(AssertionError, "canonical credential"):
+            verify_privileged_boundary(mutant)
+
     def test_workflow_guidance_fails_red_when_exit_class_is_removed(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         mutant = workflow.replace("# boundary_rejected", "# boundary-removed", 1)
         self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
         with self.assertRaisesRegex(AssertionError, "guidance is incomplete"):
             verify_workflow_guidance(mutant)
+
+    def test_workflow_guidance_uses_exact_machine_messages(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        header = workflow.split("\non:", 1)[0]
+        exact_messages = {
+            "canonical measurement refuses code from fork repositories",
+            "canonical rule inventory input boundary rejected reason=",
+            "rule inventory measurement failed before a safe verdict",
+            "rule inventory equality unavailable: canonical read credential is missing",
+            "rule inventory equality unavailable: canonical repository roots are missing",
+            "rule inventory equality unavailable: full measurement is incomplete",
+            "rule inventory differs from the complete canonical measurement",
+            "rule inventory public-output safety check failed",
+            "rule inventory matches the complete canonical measurement",
+        }
+        self.assertEqual(
+            [], sorted(message for message in exact_messages if message not in header)
+        )
+
+    def test_local_reproduction_discloses_stage_zero_input_dependency(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        header = workflow.split("\non:", 1)[0]
+        self.assertIn("docs/foundation/rule_inventory.md", header)
+        self.assertIn("does not generate", header)
 
     def test_canonical_workflow_edit_must_trigger_pytest_lane(self) -> None:
         workflow = ATELES_TEST_WORKFLOW.read_text(encoding="utf-8")

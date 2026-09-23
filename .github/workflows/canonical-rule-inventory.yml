@@ -2,17 +2,19 @@ name: canonical rule inventory
 
 # Trusted default-branch code executes; candidate files cross only as validated data.
 # Exit classes (class -> exit -> stable message):
-# untrusted_source -> job fail -> canonical measurement refuses fork repositories
-# boundary_rejected -> 2 -> canonical rule inventory input boundary rejected
-# instrument_incomplete -> 3 -> rule inventory equality unavailable
-# inventory_mismatch -> 1 -> rule inventory differs from the complete measurement
+# untrusted_source -> job fail -> canonical measurement refuses code from fork repositories
+# boundary_rejected -> 2 -> canonical rule inventory input boundary rejected reason=
+# boundary_failed -> 2 -> rule inventory measurement failed before a safe verdict
+# instrument_incomplete -> 3 -> rule inventory equality unavailable: canonical read credential is missing
+# instrument_incomplete -> 3 -> rule inventory equality unavailable: canonical repository roots are missing
+# instrument_incomplete -> 3 -> rule inventory equality unavailable: full measurement is incomplete
+# inventory_mismatch -> 1 -> rule inventory differs from the complete canonical measurement
 # safety_failed -> 2 -> rule inventory public-output safety check failed
 # match -> 0 -> rule inventory matches the complete canonical measurement
-# Local reproduce (set INPUTS_DIR to a fresh, absent path):
+# Local reproduce needs Stage-0 docs/foundation/rule_inventory.md; it does not generate it (#1123; not #1114/#923).
 # python3 execution/scripts/package_rule_inventory_inputs.py --source "$PWD" --destination "$INPUTS_DIR"
 # python3 execution/scripts/package_rule_inventory_inputs.py --validate "$INPUTS_DIR"
 # python3 execution/scripts/run_canonical_rule_inventory_gate.py "$INPUTS_DIR"
-# This check does not progress #1114 or #923; Stage-0 binding remains #1123.
 on:
   pull_request_target:
     types: [opened, reopened, synchronize]
