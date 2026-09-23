@@ -1866,6 +1866,16 @@ class ReviewBindingReceipt:
 
 
 @dataclass
+class _CIHeadClaim:
+    """One in-process delayed-CI leader and the outcome its waiters need."""
+
+    completed: asyncio.Event
+    conclusion: str
+    delivery_id: str
+    handled: bool = False
+
+
+@dataclass
 class DispatchConfig:
     neotoma_base_url: str = os.environ.get(
         "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
@@ -1983,10 +1993,11 @@ class SwarmDispatcher:
         # The claim is per dispatcher process and exists only while work is in
         # flight.  Later delivery after completion is allowed to re-evaluate
         # the same head; this is coalescing, not permanent event consumption.
-        # Value: (completion event, leader conclusion, leader delivery id).
-        self._ci_head_claims: dict[
-            tuple[str, int, str], tuple[asyncio.Event, str, str]
-        ] = {}
+        # A waiter may suppress its equivalent delivery only when the leader
+        # completed a conclusive handling path. Pending/unknown state and an
+        # exception or cancellation leave ``handled`` false so the waiter
+        # re-enters and re-fetches the live head and aggregate required-CI state.
+        self._ci_head_claims: dict[tuple[str, int, str], _CIHeadClaim] = {}
 
     async def handle_trigger(self, trigger: SwarmTrigger) -> None:
         """Entry point handed to the webhook gateway. Never raises."""
@@ -6149,27 +6160,35 @@ class SwarmDispatcher:
         claim_key = (trigger.repository.casefold(), pr_number, current_head)
         existing_claim = self._ci_head_claims.get(claim_key)
         if existing_claim is not None:
-            completed, leader_conclusion, leader_delivery_id = existing_claim
             log.info(
                 f"[{DAEMON_NAME}] {ref}@{current_head[:9]}: CI delivery "
                 f"{trigger.delivery_id or '<none>'!r} coalesced behind "
-                f"{leader_delivery_id or '<none>'!r}"
+                f"{existing_claim.delivery_id or '<none>'!r}"
             )
-            await completed.wait()
-            if trigger.ci_conclusion == leader_conclusion:
+            await existing_claim.completed.wait()
+            if (
+                trigger.ci_conclusion == existing_claim.conclusion
+                and existing_claim.handled
+            ):
                 return
-            # A materially different conclusion is not a duplicate. Re-enter
-            # after the leader finishes so it re-fetches the PR/head and the
-            # aggregate required-CI state rather than racing the first panel.
+            # A materially different conclusion is never a duplicate. Neither
+            # is the same conclusion after a leader found aggregate CI still
+            # pending/unknown or unwound through exception/cancellation.
+            # Re-enter so the waiter re-fetches the PR/head and aggregate state.
             return await self._handle_ci_status(trigger)
 
-        completed = asyncio.Event()
-        claim = (completed, trigger.ci_conclusion, trigger.delivery_id)
+        claim = _CIHeadClaim(
+            completed=asyncio.Event(),
+            conclusion=trigger.ci_conclusion,
+            delivery_id=trigger.delivery_id,
+        )
         self._ci_head_claims[claim_key] = claim
         try:
-            await self._handle_ci_status_for_current_head(trigger, pr, current_head)
+            claim.handled = await self._handle_ci_status_for_current_head(
+                trigger, pr, current_head
+            )
         finally:
-            completed.set()
+            claim.completed.set()
             # Delete only our own claim. This is defensive against future code
             # that may replace a claim while a cancelled leader unwinds.
             if self._ci_head_claims.get(claim_key) is claim:
@@ -6180,7 +6199,7 @@ class SwarmDispatcher:
         trigger: SwarmTrigger,
         pr: dict,
         current_head: str,
-    ) -> None:
+    ) -> bool:
         """Process one claimed delayed-CI attempt for an exact live PR head."""
         pr_number = pr.get("number", 0) or trigger.number
         ref = f"{trigger.repository}#{pr_number}"
@@ -6200,9 +6219,11 @@ class SwarmDispatcher:
         if ci == "failing":
             log.info(f"[{DAEMON_NAME}] {ref}: CI completed failing — routing to fix")
             await self._route_ci_failure(pr_trigger, parent)
-            return
+            return True
         if ci != "green":
-            return  # pending/unknown — a later check_suite:completed will re-fire
+            # Pending/unknown is not handled: an overlapping same-conclusion
+            # completion may be the suite that makes the aggregate conclusive.
+            return False
 
         # CI green: only advance the merge-ready signal if review is ALREADY
         # clear. An unreviewed PR going green is the panel path's job, not ours.
@@ -6213,7 +6234,7 @@ class SwarmDispatcher:
                 f"[{DAEMON_NAME}] {ref}: CI green but no clear panel verdict yet "
                 "— leaving to the review path"
             )
-            return
+            return True
         if self.config.auto_merge:
             # A delayed CI event no longer has the expected panel manifest in
             # memory. The canonical rows identify what exists, but they do not
@@ -6229,7 +6250,7 @@ class SwarmDispatcher:
                 "the exact-head panel to re-prove canonical durability"
             )
             await self._handle_pr(pr_trigger)
-            return
+            return True
         log.info(f"[{DAEMON_NAME}] {ref}: CI green + review clear — gating readiness")
         # Pass the CI state we already computed so the gate does not re-fetch it.
         await self._gate_merge_readiness(
@@ -6240,6 +6261,7 @@ class SwarmDispatcher:
             reviewed_head=current_head,
             binding_receipt=None,
         )
+        return True
 
     async def _binding_approval_receipt_from_github(
         self,
