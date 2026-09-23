@@ -131,6 +131,42 @@ def test_combining_mark_spliced_into_token_still_detected():
     assert body_has_blocking_findings(f"**COMMENT**\n\n{combining} scope: nope")
 
 
+def test_precomposed_accented_letter_confusable_still_detected():
+    """ateles#795 comment 5796296178 (Falco): the previous revision ran NFKC
+    BEFORE stripping combining marks, so `I` + combining acute (U+0301) — the
+    same splice `test_combining_mark_spliced_into_token_still_detected` covers
+    for `B` — composed into the PRECOMPOSED `Í` (U+00CD) first. `Í` has no
+    confusables-table entry, so the marker read as clean. Fixed by decomposing
+    (NFKD) before stripping marks, then recomposing (NFKC) after. Covers `Í`
+    (acute), `Ì` (grave), and a mark stacked on every letter of BLOCKING."""
+    precomposed_i_acute = "[BLOCKÍNG]"
+    assert precomposed_i_acute != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{precomposed_i_acute} scope: nope")
+
+    precomposed_i_grave = "[BLOCKÌNG]"
+    assert precomposed_i_grave != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{precomposed_i_grave} scope: nope")
+
+    mark_before_base = "[B́LOCKING]"  # combining acute BEFORE the base letter
+    assert mark_before_base != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{mark_before_base} scope: nope")
+
+    every_letter_marked = "[" + "".join(ch + "́" for ch in "BLOCKING") + "]"
+    assert every_letter_marked != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{every_letter_marked} scope: nope")
+
+
+def test_precomposed_accented_letter_non_blocking_still_not_flagged():
+    """Mirrors `test_zero_width_joiner_split_non_blocking_still_not_flagged`
+    for the precomposed-accent form: the decompose/strip/recompose ordering
+    fix must not turn a genuine [NON-BLOCKING] into a false block."""
+    precomposed = "[NON-BLOCKÍNG] naming: nit"
+    assert not body_has_blocking_findings(f"**COMMENT**\n\n{precomposed}")
+
+    precomposed_grave = "[NON-BLOCKÌNG] naming: nit"
+    assert not body_has_blocking_findings(f"**COMMENT**\n\n{precomposed_grave}")
+
+
 def test_spaced_letters_still_detected():
     """Falco's finding: 'spaced letters, if spaced is reasonable' — a lens
     could write the token with a space between every letter."""

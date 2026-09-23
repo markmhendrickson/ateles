@@ -853,10 +853,11 @@ _MERGE_REFUSED_RE = re.compile(
 
 
 def _normalize_for_blocking_scan(text: str) -> str:
-    """NFKC-normalize *text*, strip zero-width/format/combining marks, and fold
-    common Cyrillic/Greek confusables of the ASCII letters in ``BLOCKING``
-    (Falco's security review, PR #1181, NON-BLOCKING PLAUSIBLE-miss finding,
-    hardened further in the provider-table round).
+    """Decompose *text* to strip combining marks, recompose, fold confusables,
+    and collapse spaced-out letter runs (Falco's security review, PR #1181,
+    NON-BLOCKING PLAUSIBLE-miss finding; hardened further in the provider-table
+    round; hardened again — this docstring's "compose-before-strip" ordering
+    bug — in the sign-off keying round, ateles#795 comment 5796296178).
 
     `_BLOCKING_MARKER_RE` matches the literal ASCII token `[BLOCKING]`. Falco's
     review flagged that a fullwidth, homoglyph, or zero-width-joiner-split
@@ -866,21 +867,44 @@ def _normalize_for_blocking_scan(text: str) -> str:
     one of those forms would read as CLEAN and reach `sign_off` — clearing the
     gate on a finding the dispatcher never actually saw as blocking.
 
-    Four widening passes, in order:
-      1. NFKC normalization folds fullwidth/compatibility variants to their
-         ASCII equivalents (fullwidth `［` → `[`, etc.).
+    Five widening passes, in this order — DECOMPOSE, STRIP, RECOMPOSE, fold,
+    collapse:
+
+      1. NFKD (compatibility **decomposition**) splits every precomposed
+         character into base letter + combining marks, and also covers the
+         fullwidth/compatibility forms NFKC alone would fold (fullwidth `［` →
+         `[`, etc.) — decomposition subsumes that half of NFKC's job.
       2. Every Unicode **format** (category Cf — zero-width joiners/non-joiners,
          BOM, soft hyphen U+00AD, bidi controls, …) and **combining** (category
-         Mn — combining accents that can be stacked onto an otherwise-ASCII
-         letter) code point is stripped, closing the splice-insertion form for
-         ANY such character, not just the four originally enumerated.
-      3. A small confusables table maps the Cyrillic/Greek look-alikes of the
+         Mn, plus the rarer spacing-combining Mc and enclosing Me marks) code
+         point is stripped from the now-decomposed text. Because step 1 already
+         decomposed every precomposed accented letter (`Í` U+00CD, `Ḃ` U+1E02,
+         `Ì`, `Ĩ`, …) into base + mark, this strips them too — not just marks an
+         attacker spliced onto an already-ASCII letter, but marks that arrived
+         pre-fused into a single code point. Ordering this BEFORE recomposition
+         is the fix: doing it after (as the previous revision did, via NFKC
+         then strip) let NFKC compose `I` + combining acute (U+0301) into `Í`
+         (U+00CD) first, so by the time the strip ran there was no longer a
+         separate Mn character to remove — `Í` has no confusables-table entry,
+         so it read as clean.
+      3. NFKC (compatibility **composition**) recomposes what step 2 left
+         (now-bare base letters, since their marks are gone) into their
+         canonical single-code-point form. Running this AFTER the strip cannot
+         re-introduce a mark: there is nothing left for a base letter to
+         recompose WITH — recomposition only rejoins a base with a combining
+         character that still follows it, and step 2 already removed every
+         such character. It only normalizes width/compatibility variants that
+         survived decomposition unmarked.
+      4. A small confusables table maps the Cyrillic/Greek look-alikes of the
          ASCII letters in `BLOCKING` (e.g. Cyrillic `І` U+0406, `В` U+0412) to
          their ASCII originals, closing the homoglyph form Falco's finding
-         named as a PLAUSIBLE miss.
-      4. Runs of plain spaces inside an otherwise-bracketed token are collapsed
+         named as a PLAUSIBLE miss. Runs after recomposition so it sees single
+         code points, matching the table's keys.
+      5. Runs of plain spaces inside an otherwise-bracketed token are collapsed
          (`[ B L O C K I N G ]` -> `[BLOCKING]`) so a spaced-out rendering does
-         not evade the marker either.
+         not evade the marker either. This must run last: it operates on the
+         fully-folded text, and nothing after it could re-split or re-mark a
+         letter it joins.
 
     This is a WIDENING of what counts as `[BLOCKING]`, never a narrowing — it
     cannot turn a genuine `[NON-BLOCKING]` into a false block, because the same
@@ -889,13 +913,14 @@ def _normalize_for_blocking_scan(text: str) -> str:
     (see `test_zero_width_joiner_split_non_blocking_still_not_flagged` and its
     confusable-form siblings in test_merge_path.py, which pin exactly this).
     """
-    normalized = unicodedata.normalize("NFKC", text)
+    decomposed = unicodedata.normalize("NFKD", text)
     stripped = "".join(
         ch
-        for ch in normalized
+        for ch in decomposed
         if ch not in _ZERO_WIDTH_CHARS and unicodedata.category(ch) not in _STRIPPED_UNICODE_CATEGORIES
     )
-    folded = stripped.translate(_CONFUSABLE_TRANSLATION)
+    recomposed = unicodedata.normalize("NFKC", stripped)
+    folded = recomposed.translate(_CONFUSABLE_TRANSLATION)
     return _SPACED_LETTER_RUN_RE.sub(_collapse_spaced_run, folded)
 
 
@@ -914,8 +939,22 @@ _ZERO_WIDTH_CHARS = frozenset(
 #   Mn — "Mark, nonspacing" — combining accents/diacritics, which can be
 #        stacked onto an ASCII letter (e.g. "B" + combining acute) to change
 #        its rendered/byte form without changing which base letter a human
-#        reader perceives.
-_STRIPPED_UNICODE_CATEGORIES = frozenset({"Cf", "Mn"})
+#        reader perceives. Also what NFKD decomposition of a PRECOMPOSED
+#        accented letter (`Í` U+00CD -> `I` + U+0301) leaves behind, which is
+#        why this strip must run AFTER decomposition, not after composition —
+#        see `_normalize_for_blocking_scan`'s docstring.
+#   Mc — "Mark, spacing combining" — combining marks that occupy their own
+#        advance width (e.g. some Devanagari vowel signs) rather than
+#        overlaying the previous glyph. Included for the same reason as Mn:
+#        NFKD can decompose a precomposed spacing-mark sequence into base +
+#        Mc, and an Mc left behind after decomposition would be exactly as
+#        undetected as an Mn left behind, by the same mechanism.
+#   Me — "Mark, enclosing" — marks that draw an enclosure around the base
+#        character (e.g. combining enclosing circle, U+20DD). Included for
+#        completeness with Mn/Mc: nothing distinguishes an enclosing mark from
+#        a nonspacing one for this guard's purpose — both are strippable marks
+#        that could be spliced onto or decomposed out of a letter.
+_STRIPPED_UNICODE_CATEGORIES = frozenset({"Cf", "Mn", "Mc", "Me"})
 
 # Common Cyrillic/Greek confusables of the ASCII letters appearing in
 # "BLOCKING", mapped to their ASCII originals. Deliberately narrow — this is
