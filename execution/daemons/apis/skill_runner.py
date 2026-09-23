@@ -374,6 +374,15 @@ REVIEW_VERDICT_TOKENS: tuple[str, ...] = (
     "SIGNED_OFF",
 )
 
+# The one sentence every gate-verdict prompt uses to state where the
+# dispatcher reads a verdict (`swarm_dispatch.lens_own_verdict`: a fixed
+# position, independent security run at 8f51ffc2 on PR #1181). The contract
+# below and `swarm_dispatch.gate_verdict_instruction` both render it from
+# here, so the prompts cannot state two different rules.
+GATE_VERDICT_POSITION_RULE = (
+    "the FIRST line of your reply must be your header; the second line your verdict"
+)
+
 
 # ── Shared GitHub-interaction convention (Phase 1 / Layer A) ──────────────────
 # Injected into every GitHub-dispatched agent's system prompt by build_system_prompt
@@ -432,11 +441,12 @@ Per ateles#109: when posting under your own dedicated provisioned account (avata
 attribution), the header MAY be omitted. When included, it MUST be the exact form above.
 
 **Gate verdicts are read from your header only.** When you own a gate, the dispatcher \
-clears it only from your reply's own attribution header — exactly one, naming you, on \
-every account including a dedicated one — with your verdict line immediately after it, \
-both outside any code fence, `>` blockquote, or copied section. No header, more than \
-one, a header naming another agent, or a header or verdict line inside a fence, quote, \
-or copied section leaves the gate pending. Never reproduce an earlier comment's header \
+reads your verdict from a fixed position in the reply you return: \
+{gate_verdict_position_rule}. That holds on every account, including a dedicated one; \
+at most one `<!-- review:<lens> commit=<sha> -->` marker line may come before the \
+header, and everything else goes after the verdict line. A first line that is not your \
+header, a second line that is not your verdict, a second header, or a second verdict \
+line anywhere leaves the gate pending. Never reproduce an earlier comment's header \
 or verdict line, quoted or not.
 
 ### Verdict line — exact, verbatim form
@@ -547,7 +557,7 @@ summary, not a narrative.\
 # cannot occur elsewhere in the text has no such failure mode.
 SWARM_GITHUB_CONTRACT = SWARM_GITHUB_CONTRACT.replace(
     "{verdict_vocabulary_block}", _VERDICT_VOCABULARY_BLOCK
-)
+).replace("{gate_verdict_position_rule}", GATE_VERDICT_POSITION_RULE)
 
 # ── Prior-art contract (check existing context before building) ───────────────
 # Injected into every dispatched agent's system prompt by build_system_prompt,

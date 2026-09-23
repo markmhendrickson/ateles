@@ -138,22 +138,30 @@ class TestVerdictCountsOnlyFromTheLensHeader:
     def test_own_header_and_verdict_clear(self):
         assert _warranted(f"{PAVO}\n**SIGNED_OFF**\n\n- [x] scoped") is True
 
-    def test_own_header_after_the_spec_and_design_basis_sections_clears(self):
-        stdout = (
+    def test_own_header_before_the_spec_and_design_basis_sections_clears(self):
+        """Fixed position (independent security run at 8f51ffc2): the header
+        and verdict come first, the sections after them. The 8f51ffc2 shape,
+        with the header after the sections, no longer clears."""
+        sections = (
             "<<<SPEC_SECTION>>>\n## PM scope\n- in scope: x\n<<<END_SPEC_SECTION>>>\n\n"
             "<<<DESIGN_BASIS>>>\nDesign basis: docs/foundation/x.md#y — z\n"
             "<<<END_DESIGN_BASIS>>>\n\n"
-            f"{PAVO}\n**SIGNED_OFF**\n\npm gate passes: scope bounded"
         )
-        assert _warranted(stdout) is True
+        verdict = f"{PAVO}\n**SIGNED_OFF**\n\npm gate passes: scope bounded\n\n"
+        assert _warranted(verdict + sections) is True
+        assert _warranted(sections + verdict) is False
 
     def test_panel_comment_shape_clears(self):
-        stdout = (
-            f"<!-- review:qa commit={HEAD} -->\nreview:qa\n"
-            "**🤖 Phoenicurus — Ateles swarm, qa lens panelist**\n**SIGNED_OFF**\n\n"
-            "eval green"
-        )
-        assert _warranted(stdout, "phoenicurus") is True
+        """One leading review marker, then the header. The posted comment's
+        plain `review:<lens>` line may not precede the header in the reply."""
+        header = "**🤖 Phoenicurus — Ateles swarm, qa lens panelist**\n**SIGNED_OFF**\n\n"
+        assert _warranted(
+            f"<!-- review:qa commit={HEAD} -->\n{header}eval green", "phoenicurus"
+        ) is True
+        assert _warranted(
+            f"<!-- review:qa commit={HEAD} -->\nreview:qa\n{header}eval green",
+            "phoenicurus",
+        ) is False
 
     def test_prompts_ask_for_the_header_and_verdict_line(self, monkeypatch):
         """Every prompt that asks a gate-owning lens for its verdict."""
@@ -354,7 +362,15 @@ class _Recording:
         return False
 
     async def get(self, url, params=None, headers=None):
-        rows = self.existing
+        # The dispatcher now resolves its own login and pages the thread
+        # (independent security run at 8f51ffc2); answer both like GitHub.
+        params = params or {}
+        if url.rstrip("/").endswith("api.github.com/user"):
+            rows: object = {"login": "ateles-agent"}
+        else:
+            per_page = int(params.get("per_page", 30))
+            page = int(params.get("page", 1))
+            rows = self.existing[(page - 1) * per_page: page * per_page]
 
         class _R:
             def raise_for_status(self):
@@ -367,7 +383,7 @@ class _Recording:
 
     async def post(self, url, json=None, headers=None):
         self.posted.append(json)
-        self.existing.insert(0, json)
+        self.existing.append({**json, "user": {"login": "ateles-agent"}})
 
         class _R:
             def raise_for_status(self):
@@ -561,7 +577,7 @@ class TestQaAndLegalAreSigned:
             if skill == agent:
                 return SkillResult(
                     skill, True, 0,
-                    f"<!-- review:{lens_name} commit={HEAD} -->\nreview:{lens_name}\n"
+                    f"<!-- review:{lens_name} commit={HEAD} -->\n"
                     f"**🤖 {agent.capitalize()} — Ateles swarm, {lens_name} lens panelist**\n"
                     "**SIGNED_OFF**\n\nno concerns",
                     "",

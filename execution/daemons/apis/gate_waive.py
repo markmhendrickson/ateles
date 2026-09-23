@@ -751,6 +751,31 @@ class WaiveOutcome:
         return self.entity_found and not self.failed
 
 
+def _entity_page(data: object) -> list[dict] | None:
+    """The entity rows of one ``/entities/query`` response, or None when the
+    response is not a well-formed entity page.
+
+    Well formed means a JSON object with an ``entities`` list of objects, no
+    ``error`` key, and a ``next_cursor`` that is absent, null or a string.
+    ``{"entities": []}`` is the one definite not-found. Anything else a 2xx
+    can carry (an empty body or a 204, which `_post` returns as ``{}``; ``{}``
+    itself; ``{"error": ...}``; ``{"entities": null}``; a top-level list) is
+    a failed read, never "no such issue": reading it as absent let the
+    pre-panel re-proof seat nobody (independent security run at 8f51ffc2 on
+    PR #1181, NON-BLOCKING). A failed transport read (`_post` -> None) is
+    None here too.
+    """
+    if not isinstance(data, dict) or "error" in data:
+        return None
+    entities = data.get("entities")
+    if not isinstance(entities, list) or not all(isinstance(e, dict) for e in entities):
+        return None
+    cursor = data.get("next_cursor")
+    if cursor is not None and not isinstance(cursor, str):
+        return None
+    return entities
+
+
 class IssueGateStore:
     """Read / correct the ``gate_status`` + ``owner_history`` of an issue entity.
 
@@ -909,10 +934,11 @@ class IssueGateStore:
                     },
                 },
             )
-            if data is None:
+            page = _entity_page(data)
+            if page is None:
                 state.read_failed = True
                 return state
-            entities = data.get("entities", [])
+            entities = page
             if entities:
                 break
         if not entities:
@@ -985,11 +1011,9 @@ class IssueGateStore:
             if cursor:
                 payload["cursor"] = cursor
             data = await self._post("entities/query", payload)
-            if data is None:
+            page = _entity_page(data)
+            if page is None:
                 return None
-            if not data:
-                return []
-            page = data.get("entities", [])
             for entity in page:
                 snap = entity.get("snapshot") or {}
                 inner = snap.get("snapshot")

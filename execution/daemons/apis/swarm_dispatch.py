@@ -99,6 +99,7 @@ from review_panel import (
 )
 from skill_runner import (
     GATE_OWNER_TOOL_DENY_UNAVAILABLE,
+    GATE_VERDICT_POSITION_RULE,
     NEOTOMA_IDENTITY_UNAVAILABLE,
     REVIEW_VERDICT_TOKENS,
     SkillResult,
@@ -852,15 +853,14 @@ _BLOCKING_VERDICT_BARE_RE = re.compile(
 )
 
 # The contract's attribution header (skill_runner.SWARM_GITHUB_CONTRACT,
-# "Attribution header"): `**🤖 <Agent> — Ateles swarm, <role>**` on its own line.
-# `_HEADER_CANDIDATE_RE` matches anything that LOOKS like a header (so a
-# malformed one, e.g. missing the comma, is still counted and refused);
-# `_OWN_HEADER_RE` is the well-formed header a verdict can be read under.
-_HEADER_CANDIDATE_RE = re.compile(r"^\s*\*\*\s*🤖")
+# "Attribution header"): `**🤖 <Agent> — Ateles swarm, <role>**`. A gate
+# verdict is read only from a reply whose FIRST line is this header.
 _OWN_HEADER_RE = re.compile(
     r"^\*\*🤖\s*(?P<name>[^\s—–-][^—–\-\n]*?)\s*[—–-]+\s*Ateles swarm,"
     r"\s*(?P<role>[^\n]*?\S)\s*\*\*\s*$"
 )
+# The header's emoji. More than one in a reply is an extra header.
+_HEADER_EMOJI = "\U0001f916"
 # The contract's verdict line: a bold verdict token alone on its line.
 _VERDICT_TOKEN_ALT = "|".join(re.escape(tok) for tok in REVIEW_VERDICT_TOKENS)
 _VERDICT_LINE_RE = re.compile(r"^\*\*(" + _VERDICT_TOKEN_ALT + r")\*\*\s*$", re.I)
@@ -874,159 +874,117 @@ _VERDICT_LIKE_RE = re.compile(
     + _VERDICT_TOKEN_ALT
     + r")(?![A-Za-z0-9]|_[A-Za-z0-9])"
 )
-# Markdown code fences: a run of 3+ backticks or tildes, indented at most 3.
-_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-# Copied sections a lens reproduces rather than authors: the spec pipeline's
-# `<<<SPEC_SECTION>>>` / `<<<DESIGN_BASIS>>>` spans (whose text is built from
-# the author-controlled issue body), and the dispatcher's own `----- X -----`
-# ... `----- END X -----` delimiters (issue description, spec so far, inline
-# panel reviews) should a lens echo them.
-_ANGLE_SPAN_OPEN_RE = re.compile(r"^\s*<<<(?!END_)([A-Z_]+)>>>\s*$")
-_DASH_SPAN_OPEN_RE = re.compile(r"^\s*-{5}\s+(?!END\b)(.+?)\s+-{5}\s*$")
+# Every line break `str.splitlines()` honours. All of them end a line here,
+# and only `\n`, `\r\n` and `\r` may end one of the lines up to and including
+# the verdict: Markdown does not break a line at U+2028, U+2029, U+0085, a
+# form feed or the other separators, so a header "line" ended by one is not a
+# line a reader sees (independent security run at 8f51ffc2).
+_LINE_BREAK_RE = re.compile(r"\r\n|[\n\r\x0b\x0c\x1c\x1d\x1e\x85  ]")
+_PLAIN_LINE_BREAKS = frozenset({"\n", "\r\n", "\r"})
+# The one marker line a reply may carry ahead of its header: the head-scoped
+# lens marker every panel comment opens with (`compose_lens_review_marker`).
+_LEADING_REVIEW_MARKER_RE = re.compile(
+    r"^<!--\s*review:[a-z0-9_-]+\s+commit=[0-9a-f]{7,40}\s*-->$", re.I
+)
+# Decoration a copied verdict can sit behind on its line: whitespace, `>`
+# quote markers, table pipes, HTML tags. Stripped only for the second-verdict
+# veto, never to find the verdict itself.
+_LINE_DECORATION_RE = re.compile(r"^(?:\s|>|\||<[^>\n]*>)*")
 
 
-def _classify_quoted_lines(lines: list[str]) -> list[bool]:
-    """Per line, True when it sits in quoted or copied text, not the lens's own.
+def _split_lines_keeping_breaks(text: str) -> list[tuple[str, str]]:
+    """``(line, break)`` pairs, splitting on every `_LINE_BREAK_RE` break.
 
-    Quoted means: inside a code fence (the fence lines included), a blockquote
-    (`>`), an indented code block (a tab or 4+ spaces), a multi-line HTML
-    comment, or a copied span (`<<<X>>>` … `<<<END_X>>>`, `----- X -----` …
-    `----- END X -----`; the delimiter lines included). An unclosed fence or
-    span runs to the end of the output, so a truncated quotation is never
-    read as the lens's own text.
+    The last pair's break is ``""``. Keeping the break lets the caller refuse
+    a header or verdict line ended by anything but a plain newline.
     """
-    quoted: list[bool] = []
-    fence: tuple[str, int] | None = None
-    span_close: re.Pattern[str] | None = None
-    in_html_comment = False
-    for line in lines:
-        if fence is not None:
-            quoted.append(True)
-            m = _FENCE_OPEN_RE.match(line)
-            if (
-                m
-                and m.group(1)[0] == fence[0]
-                and len(m.group(1)) >= fence[1]
-                and not line.strip().lstrip(fence[0])
-            ):
-                fence = None
-            continue
-        if span_close is not None:
-            quoted.append(True)
-            if span_close.match(line):
-                span_close = None
-            continue
-        if in_html_comment:
-            quoted.append(True)
-            if "-->" in line:
-                in_html_comment = False
-            continue
-        m = _FENCE_OPEN_RE.match(line)
-        if m:
-            fence = (m.group(1)[0], len(m.group(1)))
-            quoted.append(True)
-            continue
-        m = _ANGLE_SPAN_OPEN_RE.match(line)
-        if m:
-            span_close = re.compile(r"^\s*<<<END_" + re.escape(m.group(1)) + r">>>\s*$")
-            quoted.append(True)
-            continue
-        m = _DASH_SPAN_OPEN_RE.match(line)
-        if m:
-            span_close = re.compile(
-                r"^\s*-{5}\s+END\s+" + re.escape(m.group(1)) + r"\s+-{5}\s*$"
-            )
-            quoted.append(True)
-            continue
-        stripped = line.lstrip(" ")
-        if (
-            stripped.startswith(">")
-            or line.startswith("\t")
-            or len(line) - len(stripped) >= 4
-        ):
-            quoted.append(True)
-            continue
-        opened = line.rfind("<!--")
-        if opened != -1 and "-->" not in line[opened:]:
-            in_html_comment = True
-            quoted.append(True)
-            continue
-        quoted.append(False)
-    return quoted
+    out: list[tuple[str, str]] = []
+    pos = 0
+    for m in _LINE_BREAK_RE.finditer(text):
+        out.append((text[pos:m.start()], m.group()))
+        pos = m.end()
+    out.append((text[pos:], ""))
+    return out
 
 
-def _quoted_line_is_verdict_or_header(line: str) -> bool:
-    """A quoted line that carries a header or a verdict line once unquoted."""
-    body = re.sub(r"^(?:\s*>)+", "", line).strip()
-    return bool(_HEADER_CANDIDATE_RE.match(body) or _VERDICT_LINE_RE.match(body))
+def _starts_a_markdown_line(line: str) -> bool:
+    """True when *line* is not an indented code block: its indentation is at
+    most three plain spaces and no tab."""
+    lead = line[: len(line) - len(line.lstrip())]
+    return len(lead) <= 3 and lead == " " * len(lead)
 
 
 def lens_own_verdict(stdout: str | None, *, lens_agent: str) -> str | None:
-    """The lens's OWN verdict, or None when it cannot be singled out.
+    """The lens's OWN verdict, read from a fixed position, or None.
 
-    `skill_runner.SWARM_GITHUB_CONTRACT` ("Verdict line") puts exactly one
-    verdict on its own line immediately after the attribution header. A
-    verdict counts ONLY from the lens's own header. This returns the verdict
-    when, and only when, all of these hold:
+    `skill_runner.SWARM_GITHUB_CONTRACT` and `gate_verdict_instruction` tell
+    a gate-owning lens that the FIRST line of its reply is its attribution
+    header and the second line its verdict. This reads the verdict from there
+    and nowhere else. It returns the verdict when, and only when, all of
+    these hold:
 
-      - exactly ONE attribution header appears outside quoted or copied text
-        (code fences, blockquotes, indented code, HTML comments, the
-        `<<<SPEC_SECTION>>>`/`<<<DESIGN_BASIS>>>` spans, the dispatcher's
-        `----- X -----` delimiters), it is well formed, and it names
-        *lens_agent*;
-      - its next non-blank line is a verdict line, also outside quoted text;
-      - no other line outside quoted text reads as a verdict statement
-        (`Verdict: COMMENT`, `**COMMENT** — …`, `__COMMENT__`, …);
-      - no header or verdict line appears INSIDE quoted or copied text.
+      - after any leading blank lines, and at most ONE leading marker line of
+        the form `<!-- review:<lens> commit=<sha> -->` (and blank lines after
+        it), the first line is a well-formed attribution header naming
+        *lens_agent*, matched after `_normalize_for_blocking_scan`;
+      - the next non-empty line is a verdict line (`**<TOKEN>**` alone);
+      - neither line is indented as code (four spaces or a tab), and every
+        line up to and including the verdict line ends in `\\n`, `\\r\\n` or
+        `\\r`, never U+2028, U+2029, U+0085, a form feed or another separator;
+      - the reply carries no other header (the header emoji appears exactly
+        once) and no other line that reads as a verdict statement
+        (`Verdict: COMMENT`, `**COMMENT** — …`, `__COMMENT__`,
+        `<td>**APPROVE**</td>`, …).
 
-    Anything else is None: no header, more than one, a malformed header (e.g.
-    missing the comma after "Ateles swarm"), a header naming another agent, a
-    verdict line not directly under the header, or any quoted header or
-    verdict line. A quoted clear verdict is refused rather than skipped
-    because nothing distinguishes a quotation the lens adopts from one it
-    rejects in prose.
-
-    There is no headerless path. The contract lets a lens posting from its own
-    GitHub account omit the header in the COMMENT, but this reads the lens's
-    reply, and the gate prompts require the header there on every account.
+    Anything else is None. `sign_off_is_warranted` adds the blocking-token
+    and `[BLOCKING]` vetoes, which apply anywhere in the reply.
 
     History (Falco, PR #1181): the first version took the first verdict token
     anywhere; the second the FIRST header or first standalone verdict line;
-    the third accepted a single verdict line with no header, so a sole
-    blockquoted `> **APPROVE**`, a fenced `**SIGNED_OFF**` followed by an
-    off-format "Verdict: COMMENT", a copied issue-body `**APPROVE**` inside
-    the spec section, a header missing its comma, and the contract's own
-    quoted worked example each cleared a gate (both security runs at
-    bf97b1a4, BLOCKING).
+    the third accepted a single verdict line with no header; the fourth
+    required exactly one header outside quoted or copied text, and depended
+    on a classifier of quoted text. Each round found a way of quoting the
+    classifier missed, the last being HTML blocks (`<details>`, `<blockquote>`,
+    `<pre>`, `<code>`, table cells), lazy blockquote continuation, mid-line or
+    lower-case spec spans, and Unicode line separators (independent security
+    run at 8f51ffc2, BLOCKING). Reading from a fixed position does not need
+    to recognise quotes: copied text is never the first line of the reply
+    unless the lens put it there.
     """
-    lines = (stdout or "").splitlines()
-    quoted = _classify_quoted_lines(lines)
-    if any(q and _quoted_line_is_verdict_or_header(line) for line, q in zip(lines, quoted)):
+    lines = _split_lines_keeping_breaks(stdout or "")
+    count = len(lines)
+
+    def next_non_blank(i: int) -> int:
+        while i < count and not lines[i][0].strip():
+            i += 1
+        return i
+
+    header_at = next_non_blank(0)
+    if header_at < count and _LEADING_REVIEW_MARKER_RE.match(lines[header_at][0].strip()):
+        header_at = next_non_blank(header_at + 1)
+    verdict_at = next_non_blank(header_at + 1)
+    if verdict_at >= count:
         return None
-    headers = [
-        i for i, line in enumerate(lines) if not quoted[i] and _HEADER_CANDIDATE_RE.match(line)
-    ]
-    if len(headers) != 1:
+    if any(brk not in _PLAIN_LINE_BREAKS for _, brk in lines[: verdict_at + 1] if brk):
         return None
-    header_at = headers[0]
-    header = _OWN_HEADER_RE.match(lines[header_at])
-    if not header or header.group("name").strip().lower() != (lens_agent or "").strip().lower():
+    raw_header, raw_verdict = lines[header_at][0], lines[verdict_at][0]
+    if not (_starts_a_markdown_line(raw_header) and _starts_a_markdown_line(raw_verdict)):
         return None
-    verdict_at = next(
-        (i for i in range(header_at + 1, len(lines)) if lines[i].strip()), None
-    )
-    if verdict_at is None or quoted[verdict_at]:
+    header = _OWN_HEADER_RE.match(_normalize_for_blocking_scan(raw_header).strip())
+    want = (lens_agent or "").strip().lower()
+    if not want or not header or header.group("name").strip().lower() != want:
         return None
-    verdict = _VERDICT_LINE_RE.match(lines[verdict_at])
+    verdict = _VERDICT_LINE_RE.match(_normalize_for_blocking_scan(raw_verdict).strip())
     if not verdict:
         return None
-    verdict_like = [
-        i
-        for i, line in enumerate(lines)
-        if not quoted[i] and _VERDICT_LIKE_RE.match(_normalize_for_blocking_scan(line))
-    ]
-    if verdict_like != [verdict_at]:
+    if _normalize_for_blocking_scan(stdout or "").count(_HEADER_EMOJI) != 1:
         return None
+    for i, (line, _) in enumerate(lines):
+        if i == verdict_at:
+            continue
+        body = _LINE_DECORATION_RE.sub("", _normalize_for_blocking_scan(line))
+        if _VERDICT_LIKE_RE.match(body):
+            return None
     return verdict.group(1).lower()
 
 
@@ -1054,9 +1012,9 @@ def sign_off_is_warranted(stdout: str | None, *, lens_agent: str) -> bool:
     The single predicate both dispatcher-side `sign_off` call sites use. It
     clears ONLY when all three hold:
 
-      1. the lens's OWN verdict (`lens_own_verdict`: the verdict line directly
-         under exactly one unquoted attribution header naming *lens_agent*)
-         is `SIGNED_OFF` or `APPROVE`;
+      1. the lens's OWN verdict (`lens_own_verdict`: the reply's first line
+         is the attribution header naming *lens_agent* and its next non-empty
+         line the verdict) is `SIGNED_OFF` or `APPROVE`;
       2. no blocking verdict token appears anywhere in the output
          (`output_has_blocking_verdict`);
       3. no `[BLOCKING]` finding line appears (`body_has_blocking_findings`).
@@ -1069,8 +1027,11 @@ def sign_off_is_warranted(stdout: str | None, *, lens_agent: str) -> bool:
     third took the first header or first verdict line, so a quoted clear
     verdict before the lens's own `**COMMENT**` still cleared (second
     security run at e874537f). The fourth accepted a lone quoted or copied
-    verdict line with no header (both security runs at bf97b1a4); a verdict
-    now counts only from the lens's own header. Mixed or ambiguous output now resolves to "not
+    verdict line with no header (both security runs at bf97b1a4). The fifth
+    needed one header outside quoted text, and a header quoted in a form the
+    classifier did not know cleared (independent security run at 8f51ffc2); a
+    verdict now counts only from a fixed position, the reply's first two
+    lines. Mixed or ambiguous output now resolves to "not
     warranted" (`docs/foundation/principles.md` §§5 and 7): the gate stays
     pending and the next panel round asks again, which costs a round, never a
     false clear.
@@ -1817,28 +1778,30 @@ def attribution_header(agent: str, role: str) -> str:
 def gate_verdict_instruction(agent: str, role: str) -> str:
     """The verdict format every gate-owning lens prompt asks for (ateles#795).
 
-    `lens_own_verdict` reads a gate verdict ONLY from the lens's own
-    attribution header followed by its verdict line, outside any quoted or
-    copied text, so every prompt whose verdict can clear a gate says exactly
-    that. Unlike `_agent_prompt_instruction`, the header is required here on a
-    provisioned account too: the dispatcher reads the reply, not the posted
-    comment (both security runs at bf97b1a4).
+    `lens_own_verdict` reads a gate verdict ONLY from a fixed position: the
+    reply's first line is the lens's attribution header and its second line
+    the verdict. Every prompt whose verdict can clear a gate states that rule
+    in the same words (`GATE_VERDICT_POSITION_RULE`, also in
+    `skill_runner.SWARM_GITHUB_CONTRACT`). Unlike `_agent_prompt_instruction`,
+    the header is required here on a provisioned account too: the dispatcher
+    reads the reply, not the posted comment (both security runs at bf97b1a4).
     """
     return (
         "GATE VERDICT (ateles#795): the dispatcher records your gate result, "
         "signed with your own identity, ONLY from your own verdict in the "
-        "reply you return here. Your reply MUST contain your attribution "
-        f"header exactly once, `{attribution_header(agent, role)}`, with your "
-        "verdict line on the very next line: `**SIGNED_OFF**` (or "
-        "`**APPROVE**`) when the gate passes, or `**BLOCKED**` / "
-        "`**REQUEST_CHANGES**` plus a `[BLOCKING] <category>: <summary>` line "
-        "when it does not. Include the header in this reply even if you post "
-        "from your own GitHub account. Both lines must sit outside any code "
-        "fence, `>` blockquote, `<<<...>>>` section, or other copied text. Do "
-        "not reproduce an earlier comment's header or verdict line anywhere in "
-        "the reply, not even quoted or fenced. A reply with no header, more "
-        "than one, a header naming another agent, or any quoted verdict line "
-        "is read as NOT passing, and the gate stays pending."
+        f"reply you return here, and {GATE_VERDICT_POSITION_RULE}. The header "
+        f"is exactly `{attribution_header(agent, role)}`. The verdict line is "
+        "`**SIGNED_OFF**` (or `**APPROVE**`) when the gate passes, or "
+        "`**BLOCKED**` / `**REQUEST_CHANGES**` plus a "
+        "`[BLOCKING] <category>: <summary>` line when it does not. Write the "
+        "header first even if you post from your own GitHub account, and do "
+        "not start the reply with the `review:` lines, any spec section, or "
+        "any other text; everything else goes after the verdict line. Do not "
+        "reproduce your header, another agent's header, or an earlier "
+        "verdict line anywhere else in the reply, not even quoted or fenced. "
+        "A reply whose first line is not your header, whose second line is "
+        "not your verdict, or that carries a second header or verdict line is "
+        "read as NOT passing, and the gate stays pending."
     )
 
 
@@ -9381,7 +9344,8 @@ class SwarmDispatcher:
             "VERDICT RULE (ateles#112; writeback path amended by ateles#795): "
             "state your verdict in ONE GitHub comment on the issue, in the "
             "contract's format (attribution header, then the verdict line), "
-            "and repeat that header and verdict line in your reply here. The "
+            "and repeat that header and verdict line at the very start of your "
+            f"reply here: {GATE_VERDICT_POSITION_RULE}. The "
             "dispatcher — never this session — records the system-of-record "
             "gate clearance, signed with your own AAuth identity, after "
             "reading your verdict. You have no durable write to make here.\n"
@@ -9487,8 +9451,9 @@ class SwarmDispatcher:
                 "\n\nGATE (verdict via comment, not spec): state your verdict "
                 "in ONE GitHub comment on the issue, in the contract's format "
                 "(attribution header, then the verdict line), and repeat that "
-                "header and verdict line in your reply here, AFTER every "
-                "`<<<...>>>` section and outside them. The dispatcher — never this "
+                "header and verdict line at the very START of your reply here, "
+                "BEFORE every `<<<...>>>` section: "
+                f"{GATE_VERDICT_POSITION_RULE}. The dispatcher — never this "
                 "session — records the system-of-record gate clearance, "
                 "signed with your own AAuth identity, after reading your "
                 "verdict. You have no durable write to make here.\n"
@@ -11122,7 +11087,9 @@ class SwarmDispatcher:
         says why the value is not trusted. Once per gate per *head*: each
         gate carries its own marker (`gate_cleared_unverified_marker`), so a
         re-check at the same head posts nothing, and only gates not yet
-        surfaced at that head are posted. Best-effort; never raises.
+        surfaced at that head are posted. A marker counts only in a comment
+        the dispatcher's own login wrote, found across every page of the
+        thread. Best-effort; never raises.
         """
         gates = {g for g in (gates or set()) if g}
         if not gates:
@@ -11139,17 +11106,27 @@ class SwarmDispatcher:
         parent_ref = f"parent issue #{parent}" if parent else "the issue"
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(
-                    url,
-                    params={
-                        "per_page": 100,
-                        "sort": "created",
-                        "direction": "desc",
-                    },
+                # Every page, and only the dispatcher's own comments (independent
+                # security run at 8f51ffc2, NON-BLOCKING): this endpoint ignores
+                # `sort`/`direction`, so one page was the OLDEST 100 comments and
+                # a long thread re-posted on every run; and a marker any commenter
+                # posted suppressed the notice. The login is the one the posting
+                # token resolves to, read live; an unreadable login raises into
+                # the handler below, which posts nothing.
+                me = await client.get(
+                    "https://api.github.com/user",
                     headers=self._github_headers(t.repository),
                 )
-                resp.raise_for_status()
-                existing = "\n".join((c.get("body") or "") for c in resp.json())
+                me.raise_for_status()
+                own_login = str((me.json() or {}).get("login") or "").casefold()
+                if not own_login:
+                    raise RuntimeError("the dispatcher's own GitHub login is unreadable")
+                comments = await self._all_issue_comments(t.repository, t.number, client)
+                existing = "\n".join(
+                    (c.get("body") or "")
+                    for c in comments
+                    if str((c.get("user") or {}).get("login") or "").casefold() == own_login
+                )
                 fresh = sorted(
                     g
                     for g in gates
