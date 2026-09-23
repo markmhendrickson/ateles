@@ -152,27 +152,176 @@ def get_token() -> str:
     return tok
 
 
-def http_request(method: str, base_url: str, path: str, token: str, body=None):
+def get_schema_declared_fields(entity_type: str, base_url: str, token: str, cache: dict):
+    """Fetch and cache a hosted entity type's declared field names.
+
+    GET /schemas/<entity_type> is a read -- never a write -- and is fetched
+    at most once per entity_type per run (results cached in `cache`). A 200
+    means the type has a hosted schema; `schema_definition.fields` gives the
+    declared field names. A 404 means hosted has no schema at all for this
+    type (class-a data of that type can still be replayed -- there is just
+    nothing to check field names against, so every field is "unknown" in
+    the sense that nothing declares it, but that is expected and not an
+    UNKNOWN_FIELD store_warning risk distinct from any other field).
+    """
+    if entity_type in cache:
+        return cache[entity_type]
+    status, body = http_request(
+        "GET", base_url, f"/schemas/{entity_type}", token, retries=3, retry_backoff_seconds=2.0
+    )
+    if status == 200 and isinstance(body, dict):
+        fields = body.get("schema_definition", {}).get("fields", {})
+        declared = set(fields.keys()) if isinstance(fields, dict) else set()
+        cache[entity_type] = {"has_schema": True, "declared_fields": declared}
+    else:
+        cache[entity_type] = {"has_schema": False, "declared_fields": set()}
+    return cache[entity_type]
+
+
+# Keys that are never real entity field data regardless of entity_type --
+# they are either reserved by the /store request schema itself (and so
+# belong at the top level of the request, never inside an entity record --
+# see build_entity_record's docstring) or are local-fork bookkeeping that
+# has no meaning on hosted at all. Stripped unconditionally.
+ALWAYS_STRIP_FIELD_KEYS = {"_migration_run_id"}
+
+# Keys that are reserved on MOST entity types (a stray collision with a
+# /store request's reserved per-entity keys, or with a local-fork-only
+# bookkeeping convention) but are documented as genuine declared fields on
+# a small set of types. Whether to strip these is schema-driven, not
+# hardcoded: a key is kept if-and-only-if the hosted schema for that
+# specific entity_type declares it, so a schema change on hosted is picked
+# up automatically rather than requiring this script to be edited.
+CONDITIONALLY_RESERVED_FIELD_KEYS = {"entity_id", "idempotency_key", "canonical_name"}
+
+
+def strip_reserved_fields(entity_type: str, fields: dict, schema_info: dict) -> tuple[dict, list[str]]:
+    """Remove reserved/bogus keys from an entity's field payload.
+
+    Returns (cleaned_fields, stripped_key_names). Two categories are
+    stripped, both documented on the module and on the constants above:
+
+    1. ALWAYS_STRIP_FIELD_KEYS -- `_migration_run_id` is local-fork
+       migration-tracking metadata written by the background re-write
+       process on the LOCAL fork; it was never a real field on any hosted
+       schema and has no meaning there. Always dropped.
+    2. CONDITIONALLY_RESERVED_FIELD_KEYS -- `entity_id`, `idempotency_key`,
+       and `canonical_name` collide with reserved concepts elsewhere in the
+       /store request or with entity-identity machinery, but a handful of
+       entity types (agent_definition, workflow_definition,
+       operator_profile, agent_strategy, per the migration brief) declare
+       `entity_id` as a genuine field on their hosted schema. This function
+       keeps a conditionally-reserved key exactly when the entity_type's
+       hosted schema (fetched via get_schema_declared_fields, never
+       hardcoded) declares it, and strips it otherwise. When the schema
+       fetch found no hosted schema for the type at all (has_schema=False),
+       these keys are stripped defensively -- with no schema to declare
+       them, there is nothing to keep them for, and the collision risk
+       (`entity_id` in particular is read by the /store entity-resolution
+       loop as a NAME, not a hint, per actions.ts:7690-7698 in this
+       module's docstring) outweighs preserving a field with no known home.
+    """
+    declared = schema_info.get("declared_fields", set())
+    has_schema = schema_info.get("has_schema", False)
+    cleaned = {}
+    stripped = []
+    for k, v in fields.items():
+        if k in ALWAYS_STRIP_FIELD_KEYS:
+            stripped.append(k)
+            continue
+        if k in CONDITIONALLY_RESERVED_FIELD_KEYS:
+            if has_schema and k in declared:
+                cleaned[k] = v
+            else:
+                stripped.append(k)
+            continue
+        cleaned[k] = v
+    return cleaned, stripped
+
+
+def is_schema_lag_background_rewrite(fields_json: str | None) -> bool:
+    """True if an observation's fields carry a schema_lag_bg_* migration_run_id.
+
+    These ~960 post-cutover observations are the LOCAL fork's own automatic
+    background re-write process re-touching rows it already had -- not new
+    operator or agent data that failed to reach hosted. Replaying them would
+    re-inject stale local rewrites over whatever hosted independently holds
+    for the same entities, which is exactly the class-b divergence this
+    script's --only-missing probe exists to avoid. Excluded unconditionally,
+    before class-a/class-b classification runs.
+    """
+    if not fields_json:
+        return False
+    try:
+        fields = json.loads(fields_json)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(fields, dict):
+        return False
+    mrid = fields.get("_migration_run_id")
+    return isinstance(mrid, str) and mrid.startswith("schema_lag_bg_")
+
+
+def http_request(
+    method: str,
+    base_url: str,
+    path: str,
+    token: str,
+    body=None,
+    retries: int = 0,
+    retry_backoff_seconds: float = 1.0,
+):
+    """Issue one HTTP request, with optional retry for TRANSIENT failures only.
+
+    `retries` is 0 by default (no retry) -- callers that want resilience
+    against transient network hiccups (the GET-heavy existence-probe path in
+    particular, which "pools the GETs politely" over potentially thousands
+    of entities) opt in explicitly. Retries apply ONLY to a connection-level
+    failure (timeout, connection reset, DNS hiccup) -- an HTTPError with a
+    real status code (404, 500, ...) is returned immediately, never retried,
+    since retrying a request the server already answered risks a duplicate
+    side effect on a non-idempotent call. GETs are idempotent by definition
+    so this is safe for the probe path; POST /store and POST
+    /create_relationship are also idempotent by construction (idempotency_key
+    / relationship_key, per the module docstring) but this script does not
+    pass retries> 0 for those calls -- a write failure surfaces immediately
+    and stops the run rather than being silently retried, matching the
+    existing "stop on any write error" behavior.
+    """
     url = f"{base_url}{path}"
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("User-Agent", USER_AGENT)
-    if data is not None:
-        req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.status, json.loads(resp.read().decode("utf-8") or "{}")
-    except urllib.error.HTTPError as e:
+    attempt = 0
+    while True:
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("User-Agent", USER_AGENT)
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
         try:
-            payload = json.loads(e.read().decode("utf-8"))
-        except Exception:
-            payload = {"error": str(e)}
-        return e.code, payload
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8") or "{}")
+        except urllib.error.HTTPError as e:
+            try:
+                payload = json.loads(e.read().decode("utf-8"))
+            except Exception:
+                payload = {"error": str(e)}
+            return e.code, payload
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+            attempt += 1
+            if attempt > retries:
+                raise
+            print(
+                f"  (transient network error on {method} {path}: {e!r} -- "
+                f"retry {attempt}/{retries} in {retry_backoff_seconds:.1f}s)",
+                file=sys.stderr,
+            )
+            time.sleep(retry_backoff_seconds)
 
 
 def entity_exists(entity_id: str, base_url: str, token: str) -> bool:
-    status, _ = http_request("GET", base_url, f"/entities/{entity_id}", token)
+    status, _ = http_request(
+        "GET", base_url, f"/entities/{entity_id}", token, retries=3, retry_backoff_seconds=2.0
+    )
     return status == 200
 
 
@@ -185,7 +334,9 @@ def load_candidates(conn: sqlite3.Connection, cutover_ts: str, entity_ids=None):
         "FROM observations WHERE created_at > ? ORDER BY created_at",
         (cutover_ts,),
     )
-    obs = cur.fetchall()
+    all_obs = cur.fetchall()
+    excluded_schema_lag = [row for row in all_obs if is_schema_lag_background_rewrite(row[9])]
+    obs = [row for row in all_obs if not is_schema_lag_background_rewrite(row[9])]
     if entity_ids:
         obs = [row for row in obs if row[1] in entity_ids]
 
@@ -209,7 +360,7 @@ def load_candidates(conn: sqlite3.Connection, cutover_ts: str, entity_ids=None):
     )
     srcs = cur.fetchall()
 
-    return obs, rels, srcs
+    return obs, rels, srcs, excluded_schema_lag
 
 
 def build_entity_record(entity_type: str, target_id: str, fields: dict) -> dict:
@@ -233,7 +384,7 @@ def build_entity_record(entity_type: str, target_id: str, fields: dict) -> dict:
     return record
 
 
-def build_observation_payload(row, cutover_date: str):
+def build_observation_payload(row, cutover_date: str, schema_info: dict | None = None):
     (
         local_id,
         entity_id,
@@ -251,6 +402,9 @@ def build_observation_payload(row, cutover_date: str):
         observation_source,
     ) = row
     fields = json.loads(fields_json) if fields_json else {}
+    stripped_keys: list[str] = []
+    if schema_info is not None:
+        fields, stripped_keys = strip_reserved_fields(entity_type, fields, schema_info)
     idem_key = f"migrate-{cutover_date}-obs-{local_id}"
     # observed_at is intentionally NOT included anywhere in this payload:
     # /store has no client-supplied observed_at override (it is
@@ -265,7 +419,26 @@ def build_observation_payload(row, cutover_date: str):
             "source_priority": source_priority,
         },
         idem_key,
+        stripped_keys,
     )
+
+
+def predict_unknown_fields(entity_type: str, fields: dict, schema_info: dict) -> list[str]:
+    """Pre-flight prediction of which of an entity's (already-stripped)
+    field keys would come back as UNKNOWN_FIELD store_warnings.
+
+    Runs against the same fetched hosted schema used by strip_reserved_fields
+    -- one GET per entity_type, cached, never a write. When hosted has no
+    schema at all for entity_type (has_schema=False), every field is
+    "unknown" in the sense that nothing declares it; that case is reported
+    separately (as a no-schema type) rather than folded into this list,
+    since it is a different condition than "schema exists but omits this
+    field".
+    """
+    if not schema_info.get("has_schema"):
+        return []
+    declared = schema_info.get("declared_fields", set())
+    return sorted(k for k in fields if k not in declared)
 
 
 def build_relationship_payload(row, cutover_date: str):
@@ -361,6 +534,24 @@ def main() -> None:
         default="neotoma_local_fork_replay.jsonl",
         help="Path to append the JSONL action log to (default: ./neotoma_local_fork_replay.jsonl).",
     )
+    ap.add_argument(
+        "--unknown-fields",
+        dest="unknown_fields_policy",
+        choices=("stop", "warn"),
+        default="stop",
+        help=(
+            "Policy when a write's response carries an UNKNOWN_FIELD "
+            "store_warning (or, in --dry-run, when pre-flight prediction "
+            "against the fetched hosted schema finds a field the schema "
+            "does not declare): 'stop' (default) halts the run immediately, "
+            "matching the existing behavior this script has always had. "
+            "'warn' logs the warning and continues to the next planned "
+            "action instead of exiting -- use only once the schema_additions "
+            "proposal this script can generate has been reviewed and the "
+            "operator has decided which undeclared fields are acceptable "
+            "to keep sending."
+        ),
+    )
     args = ap.parse_args()
 
     apply_mode = args.apply  # dry-run is the default; --apply is the only way to write
@@ -384,43 +575,116 @@ def main() -> None:
 
     cutover_date = args.cutover.split("T")[0].replace("-", "")
 
-    obs, rels, srcs = load_candidates(conn, args.cutover, entity_ids=entity_ids)
+    obs, rels, srcs, excluded_schema_lag = load_candidates(
+        conn, args.cutover, entity_ids=entity_ids
+    )
     if args.limit:
         obs, rels, srcs = obs[: args.limit], rels[: args.limit], srcs[: args.limit]
 
     print(f"Loaded from {args.db}:")
-    print(f"  observations candidates:               {len(obs)}")
+    print(f"  observations candidates (class a+b):   {len(obs)}")
+    print(
+        f"  excluded schema_lag_bg_* rewrites:     {len(excluded_schema_lag)}"
+    )
     print(f"  relationship_observations candidates:  {len(rels)}")
     print(f"  sources candidates:                    {len(srcs)}")
     print(
         f"  mode: {'APPLY (writing to hosted)' if apply_mode else 'DRY-RUN (no writes)'}"
     )
     print(f"  only-missing probe: {'on' if args.only_missing else 'off'}")
+    print(f"  unknown-fields policy: {args.unknown_fields_policy}")
     print()
 
     plan = []
     entity_cache: dict[str, bool] = {}
+    schema_cache: dict[str, dict] = {}
+
+    # Fetch each observation's entity_type's hosted schema ONCE up front
+    # (GET /schemas/<type>, cached in schema_cache) -- used for both
+    # field-stripping (strip_reserved_fields) and pre-flight UNKNOWN_FIELD
+    # prediction (predict_unknown_fields) below, so a run never issues more
+    # than one schema GET per distinct entity_type regardless of how many
+    # observations of that type it processes.
+    distinct_obs_types = sorted({row[2] for row in obs})
+    for et in distinct_obs_types:
+        get_schema_declared_fields(et, base_url, token, schema_cache)
+
+    stats = {
+        "entities_touched": set(),
+        "observations_by_class": {},
+        "relationships_among_replayed": 0,
+        "relationships_to_hosted_existing": 0,
+        "relationships_deferred": 0,
+        "predicted_unknown_field_warnings": {},  # entity_type -> {field: count}
+        "no_schema_type_counts": {},
+    }
 
     for row in obs:
         local_id, entity_id, entity_type = row[0], row[1], row[2]
-        payload, idem_key = build_observation_payload(row, cutover_date)
+        schema_info = schema_cache.get(entity_type, {"has_schema": False, "declared_fields": set()})
+        payload, idem_key, stripped_keys = build_observation_payload(
+            row, cutover_date, schema_info=schema_info
+        )
+        (entity_record,) = payload["entities"]
+        entity_fields = {
+            k: v for k, v in entity_record.items() if k not in ("entity_type", "target_id")
+        }
+        if not schema_info.get("has_schema"):
+            stats["no_schema_type_counts"][entity_type] = (
+                stats["no_schema_type_counts"].get(entity_type, 0) + 1
+            )
+        predicted_unknown = predict_unknown_fields(entity_type, entity_fields, schema_info)
+        if predicted_unknown:
+            bucket = stats["predicted_unknown_field_warnings"].setdefault(entity_type, {})
+            for k in predicted_unknown:
+                bucket[k] = bucket.get(k, 0) + 1
+        stats["entities_touched"].add(entity_id)
         plan.append(
-            ("observation", local_id, entity_id, entity_type, idem_key, payload)
+            (
+                "observation",
+                local_id,
+                entity_id,
+                entity_type,
+                idem_key,
+                payload,
+                stripped_keys,
+                predicted_unknown,
+            )
         )
 
+    replayed_entity_ids = stats["entities_touched"]
     for row in rels:
         local_id = row[0]
+        source_entity_id, target_entity_id = row[3], row[4]
         payload, idem_key = build_relationship_payload(row, cutover_date)
+        source_replayed = source_entity_id in replayed_entity_ids
+        target_replayed = target_entity_id in replayed_entity_ids
+        if source_replayed and target_replayed:
+            rel_class = "among_replayed"
+            stats["relationships_among_replayed"] += 1
+        elif source_replayed or target_replayed:
+            rel_class = "to_hosted_existing"
+            stats["relationships_to_hosted_existing"] += 1
+        else:
+            # Neither endpoint is a class-a entity this run is replaying --
+            # nothing to check without probing hosted for both ids, which
+            # only happens under --only-missing for observations today.
+            # Reported separately rather than guessed at.
+            rel_class = "deferred"
+            stats["relationships_deferred"] += 1
         plan.append(
             (
                 "relationship",
                 local_id,
-                f"{row[3]}->{row[4]}",
+                f"{source_entity_id}->{target_entity_id}",
                 "relationship_observation",
                 idem_key,
                 payload,
+                [],
+                [],
             )
         )
+        _ = rel_class  # recorded in stats above; not threaded into the log tuple
 
     for row in srcs:
         local_id = row[0]
@@ -433,12 +697,23 @@ def main() -> None:
                 "source",
                 idem_key,
                 {"content_hash": row[2]},
+                [],
+                [],
             )
         )
 
     log_path = args.log
     with open(log_path, "a", encoding="utf-8") as log_fh:
-        for kind, local_id, target_desc, entity_type, idem_key, payload in plan:
+        for (
+            kind,
+            local_id,
+            target_desc,
+            entity_type,
+            idem_key,
+            payload,
+            stripped_keys,
+            predicted_unknown,
+        ) in plan:
             entity_class = "n/a"
             if kind == "observation":
                 if args.only_missing:
@@ -446,6 +721,7 @@ def main() -> None:
                         entity_cache[target_desc] = entity_exists(
                             target_desc, base_url, token
                         )
+                        time.sleep(0.05)  # polite pacing between probe GETs
                     exists_on_hosted = entity_cache[target_desc]
                     entity_class = (
                         "b_diverged_or_present" if exists_on_hosted else "a_missing"
@@ -457,6 +733,41 @@ def main() -> None:
                 f"[{kind:12s}] local_id={local_id[:12]}... target={target_desc} "
                 f"idem={idem_key} class={entity_class}"
             )
+            if stripped_keys:
+                prefix += f" stripped={stripped_keys}"
+
+            # Pre-flight UNKNOWN_FIELD prediction applies in BOTH dry-run and
+            # apply mode -- it is computed from the fetched hosted schema,
+            # not from a live write's response, so it is available before
+            # any write happens. --unknown-fields=stop halts here (before
+            # ever making the write) exactly as it would after a live
+            # UNKNOWN_FIELD store_warning; --unknown-fields=warn logs and
+            # proceeds either way.
+            if kind == "observation" and predicted_unknown:
+                print(f"  PREDICTED UNKNOWN_FIELD (pre-flight): {predicted_unknown}")
+                if args.unknown_fields_policy == "stop":
+                    log_action(
+                        log_fh,
+                        kind=kind,
+                        local_id=local_id,
+                        entity_id=target_desc,
+                        entity_type=entity_type,
+                        entity_class=entity_class,
+                        stripped_keys=stripped_keys,
+                        predicted_unknown_fields=predicted_unknown,
+                        action="stopped_predicted_unknown_field",
+                        idempotency_key=idem_key,
+                        http_status=None,
+                    )
+                    print(
+                        "  Stopping: --unknown-fields=stop (default) and a field "
+                        "the hosted schema does not declare was predicted for this "
+                        "write. Re-run with --unknown-fields=warn to proceed past "
+                        "predicted (not yet confirmed) UNKNOWN_FIELD cases, or "
+                        "register the field on hosted first.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
 
             if not apply_mode:
                 print(f"DRY-RUN would write: {prefix}")
@@ -467,6 +778,8 @@ def main() -> None:
                     entity_id=target_desc,
                     entity_type=entity_type,
                     entity_class=entity_class,
+                    stripped_keys=stripped_keys,
+                    predicted_unknown_fields=predicted_unknown,
                     action="dry_run",
                     idempotency_key=idem_key,
                     http_status=None,
@@ -486,6 +799,7 @@ def main() -> None:
                     entity_id=target_desc,
                     entity_type=entity_type,
                     entity_class=entity_class,
+                    stripped_keys=stripped_keys,
                     action="skipped_not_missing",
                     idempotency_key=idem_key,
                     http_status=None,
@@ -554,15 +868,41 @@ def main() -> None:
                     file=sys.stderr,
                 )
                 sys.exit(1)
-            if unknown_field_warnings:
+            if unknown_field_warnings and args.unknown_fields_policy == "stop":
                 print(
                     "  Stopping: UNKNOWN_FIELD store_warnings on a write means a field "
-                    "the payload sent has no home on the schema. Not attempting cleanup.",
+                    "the payload sent has no home on the schema. Not attempting cleanup. "
+                    "Re-run with --unknown-fields=warn to continue past this once the "
+                    "warning has been reviewed.",
                     file=sys.stderr,
                 )
                 sys.exit(1)
+            elif unknown_field_warnings:
+                print(
+                    "  Continuing past UNKNOWN_FIELD store_warnings (--unknown-fields=warn)."
+                )
             time.sleep(0.05)  # gentle rate limiting
 
+    print()
+    print("=== Summary ===")
+    print(f"Entities touched (distinct entity_id across observations): {len(stats['entities_touched'])}")
+    print(f"Observations planned:                                      {len(obs)}")
+    print(f"Observations excluded (schema_lag_bg_* rewrites):          {len(excluded_schema_lag)}")
+    print(f"Relationships among replayed entities (both endpoints):    {stats['relationships_among_replayed']}")
+    print(f"Relationships to a hosted-existing entity (one endpoint):  {stats['relationships_to_hosted_existing']}")
+    print(f"Relationships deferred (neither endpoint replayed here):   {stats['relationships_deferred']}")
+    print(f"Sources deferred (blob replay unimplemented):              {len(srcs)}")
+    if stats["no_schema_type_counts"]:
+        print("Entity types with no hosted schema (class-a obs count):")
+        for et, n in sorted(stats["no_schema_type_counts"].items(), key=lambda x: -x[1]):
+            print(f"  {et}: {n}")
+    if stats["predicted_unknown_field_warnings"]:
+        print("Predicted UNKNOWN_FIELD store_warnings (pre-flight, by type):")
+        for et, fields in sorted(stats["predicted_unknown_field_warnings"].items()):
+            field_summary = ", ".join(f"{k}x{v}" for k, v in sorted(fields.items(), key=lambda x: -x[1]))
+            print(f"  {et}: {field_summary}")
+    else:
+        print("Predicted UNKNOWN_FIELD store_warnings (pre-flight): none")
     print()
     print(f"Total planned operations: {len(plan)}")
     print(f"Action log: {log_path}")

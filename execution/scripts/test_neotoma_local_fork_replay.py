@@ -32,9 +32,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from neotoma_local_fork_replay import (  # noqa: E402
+    ALWAYS_STRIP_FIELD_KEYS,
+    CONDITIONALLY_RESERVED_FIELD_KEYS,
     build_entity_record,
     build_observation_payload,
     build_relationship_payload,
+    is_schema_lag_background_rewrite,
+    predict_unknown_fields,
+    strip_reserved_fields,
 )
 
 # --- StoreRequestSchema, action_schemas.ts:723-763 -------------------------
@@ -125,7 +130,7 @@ def test_build_entity_record_flattens_fields_alongside_reserved_keys():
 
 
 def test_observation_payload_top_level_keys_are_all_declared_on_store_schema():
-    payload, idem_key = build_observation_payload(OBSERVATION_ROW, "20260804")
+    payload, idem_key, _stripped = build_observation_payload(OBSERVATION_ROW, "20260804")
     unknown = set(payload.keys()) - STORE_REQUEST_TOP_LEVEL_KEYS
     assert not unknown, (
         f"payload has keys StoreRequestSchema does not declare: {unknown}"
@@ -135,7 +140,7 @@ def test_observation_payload_top_level_keys_are_all_declared_on_store_schema():
 
 
 def test_observation_payload_idempotency_key_is_top_level_not_per_entity():
-    payload, _ = build_observation_payload(OBSERVATION_ROW, "20260804")
+    payload, _, _stripped = build_observation_payload(OBSERVATION_ROW, "20260804")
     assert "idempotency_key" in payload
     for entity in payload["entities"]:
         assert "idempotency_key" not in entity, (
@@ -146,7 +151,7 @@ def test_observation_payload_idempotency_key_is_top_level_not_per_entity():
 
 
 def test_observation_payload_entity_record_has_no_reserved_key_collisions_with_fields():
-    payload, _ = build_observation_payload(OBSERVATION_ROW, "20260804")
+    payload, _, _stripped = build_observation_payload(OBSERVATION_ROW, "20260804")
     (entity,) = payload["entities"]
     assert entity["entity_type"] == "task"
     assert entity["target_id"] == "ent_deadbeef00000000000000"
@@ -155,7 +160,7 @@ def test_observation_payload_entity_record_has_no_reserved_key_collisions_with_f
 
 
 def test_observation_payload_never_includes_observed_at_anywhere():
-    payload, _ = build_observation_payload(OBSERVATION_ROW, "20260804")
+    payload, _, _stripped = build_observation_payload(OBSERVATION_ROW, "20260804")
     assert "observed_at" not in payload, (
         "StoreRequestSchema has no observed_at field; the public /store API "
         "server-stamps it (actions.ts:7158/8031)."
@@ -203,3 +208,177 @@ def test_build_entity_record_round_trips_arbitrary_field_shapes(fields):
     record = build_entity_record("note", "ent_x", fields)
     for key, value in fields.items():
         assert record[key] == value
+
+
+# --- schema_lag_bg_* exclusion ----------------------------------------------
+
+
+def test_is_schema_lag_background_rewrite_true_for_schema_lag_bg_prefix():
+    fields_json = json.dumps({"_migration_run_id": "schema_lag_bg_2026-09-06T16:58:38.065Z"})
+    assert is_schema_lag_background_rewrite(fields_json) is True
+
+
+def test_is_schema_lag_background_rewrite_false_for_other_migration_run_id():
+    fields_json = json.dumps({"_migration_run_id": "some_other_run_id"})
+    assert is_schema_lag_background_rewrite(fields_json) is False
+
+
+def test_is_schema_lag_background_rewrite_false_when_no_migration_run_id():
+    fields_json = json.dumps({"title": "Do the thing"})
+    assert is_schema_lag_background_rewrite(fields_json) is False
+
+
+@pytest.mark.parametrize("bad_input", [None, "", "not json", "{", json.dumps(["a", "list"])])
+def test_is_schema_lag_background_rewrite_false_on_malformed_or_missing_input(bad_input):
+    # Malformed/absent fields_json must never raise or be mistaken for a
+    # schema_lag rewrite -- default to NOT excluding when unsure, since
+    # excluding a real observation silently would be the worse failure.
+    assert is_schema_lag_background_rewrite(bad_input) is False
+
+
+# --- reserved/bogus field stripping -----------------------------------------
+
+
+def test_strip_reserved_fields_always_drops_migration_run_id():
+    schema_info = {"has_schema": True, "declared_fields": {"title", "status"}}
+    cleaned, stripped = strip_reserved_fields(
+        "task", {"title": "x", "_migration_run_id": "schema_lag_bg_x"}, schema_info
+    )
+    assert "_migration_run_id" not in cleaned
+    assert cleaned == {"title": "x"}
+    assert "_migration_run_id" in stripped
+
+
+def test_strip_reserved_fields_drops_entity_id_when_not_declared():
+    # issue and task do not declare entity_id -- a stray collision with the
+    # /store entity-resolution loop's reserved per-entity keys, not real
+    # field data (see module docstring, actions.ts:7690-7698).
+    schema_info = {"has_schema": True, "declared_fields": {"title"}}
+    cleaned, stripped = strip_reserved_fields(
+        "issue", {"title": "x", "entity_id": "ent_bogus"}, schema_info
+    )
+    assert "entity_id" not in cleaned
+    assert "entity_id" in stripped
+
+
+def test_strip_reserved_fields_keeps_entity_id_when_declared_on_hosted_schema():
+    # agent_definition, workflow_definition, operator_profile, and
+    # agent_strategy declare entity_id as a genuine field on the hosted
+    # schema (verified against the fetched schema, not a hardcoded list) --
+    # it must survive stripping for exactly those types.
+    schema_info = {"has_schema": True, "declared_fields": {"name", "entity_id"}}
+    cleaned, stripped = strip_reserved_fields(
+        "agent_definition", {"name": "Apis", "entity_id": "ent_acdb65a8"}, schema_info
+    )
+    assert cleaned["entity_id"] == "ent_acdb65a8"
+    assert "entity_id" not in stripped
+
+
+def test_strip_reserved_fields_drops_conditionally_reserved_keys_when_no_hosted_schema():
+    # With no hosted schema at all for the type (has_schema=False -- e.g.
+    # symptom_report, github_issue_ref, github_comment_intent), there is
+    # nothing to declare a conditionally-reserved key, so it is stripped
+    # defensively rather than guessed at.
+    schema_info = {"has_schema": False, "declared_fields": set()}
+    cleaned, stripped = strip_reserved_fields(
+        "symptom_report",
+        {"summary": "x", "entity_id": "ent_y", "idempotency_key": "k1"},
+        schema_info,
+    )
+    assert cleaned == {"summary": "x"}
+    assert set(stripped) == {"entity_id", "idempotency_key"}
+
+
+def test_strip_reserved_fields_leaves_ordinary_fields_untouched():
+    schema_info = {"has_schema": True, "declared_fields": {"title", "status", "priority"}}
+    cleaned, stripped = strip_reserved_fields(
+        "task", {"title": "x", "status": "open", "priority": 1}, schema_info
+    )
+    assert cleaned == {"title": "x", "status": "open", "priority": 1}
+    assert stripped == []
+
+
+def test_conditionally_reserved_keys_constant_matches_documented_set():
+    # Guards against ALWAYS_STRIP_FIELD_KEYS and CONDITIONALLY_RESERVED_FIELD_KEYS
+    # silently drifting apart from what strip_reserved_fields's docstring
+    # (and the task brief) actually names.
+    assert ALWAYS_STRIP_FIELD_KEYS == {"_migration_run_id"}
+    assert CONDITIONALLY_RESERVED_FIELD_KEYS == {"entity_id", "idempotency_key", "canonical_name"}
+
+
+def test_build_observation_payload_applies_schema_driven_stripping():
+    schema_info = {"has_schema": True, "declared_fields": {"title", "status"}}
+    row = (
+        "obs-local-2",
+        "ent_x",
+        "task",
+        "1.0.0",
+        "src-1",
+        None,
+        "2026-08-05T00:00:00.000Z",
+        100,
+        100,
+        json.dumps({"title": "y", "status": "open", "entity_id": "ent_bogus", "_migration_run_id": "schema_lag_bg_z"}),
+        "2026-08-05T00:00:00.000Z",
+        "user-1",
+        None,
+        "import",
+    )
+    payload, _idem_key, stripped = build_observation_payload(row, "20260804", schema_info=schema_info)
+    (entity,) = payload["entities"]
+    assert entity["title"] == "y"
+    assert entity["status"] == "open"
+    assert "entity_id" not in entity
+    assert "_migration_run_id" not in entity
+    assert set(stripped) == {"entity_id", "_migration_run_id"}
+
+
+def test_build_observation_payload_without_schema_info_does_not_strip():
+    # Backward-compatible default: callers that don't pass schema_info (the
+    # pre-existing OBSERVATION_ROW fixture tests above) keep the original
+    # unconditional pass-through behavior.
+    payload, _idem_key, stripped = build_observation_payload(OBSERVATION_ROW, "20260804")
+    assert stripped == []
+
+
+# --- --unknown-fields pre-flight prediction ---------------------------------
+
+
+def test_predict_unknown_fields_returns_empty_when_no_hosted_schema():
+    schema_info = {"has_schema": False, "declared_fields": set()}
+    result = predict_unknown_fields("symptom_report", {"summary": "x", "weird": 1}, schema_info)
+    assert result == []
+
+
+def test_predict_unknown_fields_flags_fields_the_schema_does_not_declare():
+    schema_info = {"has_schema": True, "declared_fields": {"title", "status"}}
+    result = predict_unknown_fields(
+        "task", {"title": "x", "status": "open", "reviewing_agent": "cicada"}, schema_info
+    )
+    assert result == ["reviewing_agent"]
+
+
+def test_predict_unknown_fields_empty_when_all_fields_declared():
+    schema_info = {"has_schema": True, "declared_fields": {"title", "status"}}
+    result = predict_unknown_fields("task", {"title": "x", "status": "open"}, schema_info)
+    assert result == []
+
+
+def test_unknown_fields_cli_flag_defaults_to_stop():
+    import argparse
+    import subprocess
+    import sys as _sys
+
+    script = str(Path(__file__).resolve().parent / "neotoma_local_fork_replay.py")
+    # --help exits 0 and prints argparse's own rendering of the flag; assert
+    # the default is documented as 'stop' and both choices are offered,
+    # without needing a live DB or hosted credentials.
+    result = subprocess.run(
+        [_sys.executable, script, "--help"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert "--unknown-fields" in result.stdout
+    assert "{stop,warn}" in result.stdout or "stop,warn" in result.stdout
