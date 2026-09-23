@@ -10063,6 +10063,274 @@ def test_binding_review_app_installation_id_from_env_or_api(monkeypatch, caplog)
     assert lookups == []
 
 
+def test_binding_review_app_mint_discovers_unset_installation_id(monkeypatch):
+    """Direct coverage of _mint_reviewer_app_installation_token: no env
+    installation id -> the real function calls GET .../installation to
+    discover it, then POSTs .../access_tokens with the discovered id."""
+    swarm_dispatch._clear_reviewer_app_installation_token_cache()
+    _configure_binding_credentials(monkeypatch, mode="app", installation_id=None)
+    monkeypatch.setattr(swarm_dispatch, "_mint_reviewer_app_jwt", lambda: "fake.jwt")
+    installation_gets = []
+    token_posts = []
+
+    class _Resp:
+        def __init__(self, status, payload=None):
+            self.status_code = status
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kwargs):
+            if url.endswith("/installation"):
+                installation_gets.append(url)
+                assert (headers or {}).get("Authorization") == "Bearer fake.jwt"
+                return _Resp(200, {"id": 777333})
+            raise AssertionError(f"unexpected GET {url}")
+
+        async def post(self, url, headers=None, **kwargs):
+            assert "/installations/777333/access_tokens" in url
+            token_posts.append(url)
+            return _Resp(
+                200,
+                {"token": "ghs_discovered", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+
+    async def _run():
+        async with _Client() as client:
+            return await swarm_dispatch._mint_reviewer_app_installation_token(
+                "owner/repo", client
+            )
+
+    token = asyncio.run(_run())
+    assert token == "ghs_discovered"
+    assert installation_gets == ["https://api.github.com/repos/owner/repo/installation"]
+    assert token_posts
+
+
+def test_binding_review_app_mint_discovery_failure_returns_none(
+    monkeypatch,
+):
+    """A 404 on the installation-discovery GET must fail closed (None), not
+    raise and not fall through to any other credential."""
+    swarm_dispatch._clear_reviewer_app_installation_token_cache()
+    _configure_binding_credentials(monkeypatch, mode="app", installation_id=None)
+    monkeypatch.setattr(swarm_dispatch, "_mint_reviewer_app_jwt", lambda: "fake.jwt")
+
+    class _Resp:
+        def __init__(self, status, payload=None):
+            self.status_code = status
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kwargs):
+            if url.endswith("/installation"):
+                return _Resp(404, {})
+            raise AssertionError(f"unexpected GET {url}")
+
+        async def post(self, url, headers=None, **kwargs):
+            raise AssertionError("must not mint a token after failed discovery")
+
+    async def _run():
+        async with _Client() as client:
+            return await swarm_dispatch._mint_reviewer_app_installation_token(
+                "owner/repo", client
+            )
+
+    assert asyncio.run(_run()) is None
+
+
+def test_binding_review_app_mint_access_token_post_failure_returns_none(
+    monkeypatch,
+):
+    """A non-2xx on the access-token POST must fail closed (None)."""
+    swarm_dispatch._clear_reviewer_app_installation_token_cache()
+    _configure_binding_credentials(monkeypatch, mode="app", installation_id="424242")
+    monkeypatch.setattr(swarm_dispatch, "_mint_reviewer_app_jwt", lambda: "fake.jwt")
+
+    class _Resp:
+        def __init__(self, status, payload=None):
+            self.status_code = status
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kwargs):
+            raise AssertionError("installation id was set via env; must not GET it")
+
+        async def post(self, url, headers=None, **kwargs):
+            assert "/installations/424242/access_tokens" in url
+            return _Resp(401, {})
+
+    async def _run():
+        async with _Client() as client:
+            return await swarm_dispatch._mint_reviewer_app_installation_token(
+                "owner/repo", client
+            )
+
+    assert asyncio.run(_run()) is None
+
+
+def test_binding_review_app_mint_jwt_signing_failure_returns_none(
+    monkeypatch,
+):
+    """A malformed PEM must make JWT signing raise inside the mint function,
+    and the mint function must swallow it and fail closed rather than
+    propagate or fall through to a network call."""
+    swarm_dispatch._clear_reviewer_app_installation_token_cache()
+    _configure_binding_credentials(
+        monkeypatch, mode="app", pem="not-a-real-pem", installation_id="424242"
+    )
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kwargs):
+            raise AssertionError("must not reach network after signing failure")
+
+        async def post(self, url, headers=None, **kwargs):
+            raise AssertionError("must not reach network after signing failure")
+
+    async def _run():
+        async with _Client() as client:
+            return await swarm_dispatch._mint_reviewer_app_installation_token(
+                "owner/repo", client
+            )
+
+    assert asyncio.run(_run()) is None
+
+
+def test_binding_review_app_mint_cache_reused_within_ttl(monkeypatch):
+    """A second mint call before the cached token's near-expiry window must
+    reuse the cache and issue no new network calls at all."""
+    swarm_dispatch._clear_reviewer_app_installation_token_cache()
+    _configure_binding_credentials(monkeypatch, mode="app", installation_id="424242")
+    monkeypatch.setattr(swarm_dispatch, "_mint_reviewer_app_jwt", lambda: "fake.jwt")
+    calls = {"get": 0, "post": 0}
+
+    class _Resp:
+        def __init__(self, status, payload=None):
+            self.status_code = status
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kwargs):
+            calls["get"] += 1
+            raise AssertionError("installation id from env; must not GET it")
+
+        async def post(self, url, headers=None, **kwargs):
+            calls["post"] += 1
+            return _Resp(
+                200,
+                {"token": "ghs_first", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+
+    async def _run():
+        async with _Client() as client:
+            first = await swarm_dispatch._mint_reviewer_app_installation_token(
+                "owner/repo", client
+            )
+            second = await swarm_dispatch._mint_reviewer_app_installation_token(
+                "owner/repo", client
+            )
+            return first, second
+
+    first, second = asyncio.run(_run())
+    assert first == "ghs_first"
+    assert second == "ghs_first"
+    assert calls["post"] == 1
+    assert calls["get"] == 0
+
+
+def test_binding_review_app_mint_remints_after_near_expiry(monkeypatch):
+    """A cached token within 1 minute of expires_at must be treated as
+    unusable and re-minted, not returned stale."""
+    from datetime import timedelta
+
+    swarm_dispatch._clear_reviewer_app_installation_token_cache()
+    _configure_binding_credentials(monkeypatch, mode="app", installation_id="424242")
+    monkeypatch.setattr(swarm_dispatch, "_mint_reviewer_app_jwt", lambda: "fake.jwt")
+    almost_expired = datetime.now(timezone.utc) + timedelta(seconds=30)
+    swarm_dispatch._REVIEWER_APP_INSTALLATION_TOKEN_CACHE = (
+        "ghs_stale",
+        almost_expired,
+    )
+    calls = {"post": 0}
+
+    class _Resp:
+        def __init__(self, status, payload=None):
+            self.status_code = status
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kwargs):
+            raise AssertionError("installation id from env; must not GET it")
+
+        async def post(self, url, headers=None, **kwargs):
+            calls["post"] += 1
+            return _Resp(
+                200,
+                {"token": "ghs_reminted", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+
+    async def _run():
+        async with _Client() as client:
+            return await swarm_dispatch._mint_reviewer_app_installation_token(
+                "owner/repo", client
+            )
+
+    token = asyncio.run(_run())
+    assert token == "ghs_reminted"
+    assert calls["post"] == 1
+    swarm_dispatch._clear_reviewer_app_installation_token_cache()
+
+
 def test_binding_review_app_preferred_over_pat(monkeypatch, caplog):
     _, _, _, _, ctx = _emit_binding_review(
         monkeypatch,
