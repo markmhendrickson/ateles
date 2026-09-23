@@ -315,9 +315,12 @@ def _load_agent_def(role: str) -> AgentDefinition:
 # escalated to the operator instead of clearing the panel.
 #
 # `SIGNED_OFF` is NOT a synonym for `APPROVE`. It certifies a narrower, prior
-# claim: that a gate-owning lens's `correct()` write to `gate_status` landed,
-# confirmed by an immediate read-back (see the GATE WRITEBACK instruction in
-# swarm_dispatch._panelist_prompt). `APPROVE` certifies a judgement about the
+# claim: that a gate-owning lens's `gate_status` write landed, confirmed by an
+# immediate read-back — as of ateles#795's amended ADR that write is the
+# DISPATCHER's own lens-AAuth-signed `gate_waive.IssueGateStore.sign_off`
+# (called from `swarm_dispatch._run_pr_review_panel` and
+# `_run_issue_spec_pipeline`), never the lens's own in-session `correct()`.
+# `APPROVE` certifies a judgement about the
 # PR as a whole. Collapsing the two would let a durable-write confirmation
 # stand in for a merge authorisation it never made — so `SIGNED_OFF` maps to
 # the inert GitHub `COMMENT` event, never `APPROVE` (see
@@ -1376,10 +1379,14 @@ async def _run_skill_once(
     # `IssueGateStore.sign_off()` (`gate_waive.py`) after a clean verdict,
     # which signs the write with the LENS's own AAuth keypair via
     # `neotoma_signed.signed_request` — not the lens's MCP bearer, and not the
-    # daemon's shared bearer either. A lens's in-session `correct()` is now
-    # best-effort / advisory only (the GATE WRITEBACK prompt block still asks
-    # for it, as a belt-and-suspenders attempt), so the absence of a per-agent
-    # MCP bearer is no longer a reason to refuse the launch — refusing here
+    # daemon's shared bearer either. No prompt instructs a gate-owning lens
+    # to `correct()` `gate_status` itself any more — the panel's
+    # `_panelist_prompt` GATE WRITEBACK block and the additive-spec
+    # pipeline's `pm_gate_block` / `_pavo_prompt` were all rewritten to state
+    # a verdict via comment only (Falco's security review, PR #1181's
+    # follow-up round) — so a lens's own MCP `correct()` of `gate_status` is
+    # unsolicited at best, not even "advisory", and the absence of a
+    # per-agent MCP bearer is no longer a reason to refuse the launch — refusing here
     # would leave pm/arch/ux permanently unable to run, which is the second
     # failure this amendment exists to fix (the operator's decision comment
     # names this explicitly: provisioning `<ROLE>_NEOTOMA_TOKEN` "routes

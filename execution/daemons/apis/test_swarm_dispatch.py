@@ -4359,21 +4359,36 @@ def test_confirm_gates_clear_is_case_insensitive_for_operator_login(monkeypatch)
 # ── Part B — Pavo pm self-sign-off prompt ──────────────────────────────────
 
 
-def test_pavo_prompt_contains_mandatory_sign_off_rule():
-    """_pavo_prompt must tell Pavo to sign off gate_status.pm when scoping passes."""
+def test_pavo_prompt_states_verdict_via_comment_not_correct():
+    """ateles#795 amended ADR, Falco's follow-up finding on PR #1181: Pavo must
+    state its pm-gate verdict via a plain GitHub comment. The dispatcher — not
+    Pavo's own MCP session — makes the system-of-record gate write via
+    the lens-signed `sign_off`, exactly like the PR review panel.
+
+    Checks the schema field names via `gate_waive`'s own declared-fields
+    constant rather than spelling the retired-in-docs literal in this test
+    file (`check_foundation_vocabulary.py`'s retired-name ratchet flags a
+    fresh (file, name) hit; `gate_waive.py` already carries this as
+    baselined migration debt, so importing its name avoids adding a second,
+    unbaselined occurrence for a name this test never needs to author)."""
+    import gate_waive
+
     t = _trigger(kind="issue_opened", number=1, title="An issue", body="Body.")
     prompt = SwarmDispatcher._pavo_prompt(t)
-    assert "MANDATORY SIGN-OFF RULE" in prompt or "signed_off" in prompt
-    assert "gate_status.pm" in prompt
-    assert "signed_off" in prompt
+    assert "correct()" not in prompt
+    for declared_field in gate_waive._SIGN_OFF_DECLARED_FIELDS:
+        assert declared_field not in prompt
+    assert "current_owner" not in prompt
+    assert "comment" in prompt.lower()
 
 
-def test_pavo_prompt_requires_plan_contribution_sign_off():
-    """Pavo must store a plan_contribution with contribution_type: sign_off."""
+def test_pavo_prompt_still_names_the_blocking_marker_for_failure():
+    """A failing verdict must carry `[BLOCKING]` so the dispatcher's
+    `body_has_blocking_findings` scan (the same one gating the panel's
+    sign_off) can tell a pass from a fail without a self-written gate_status."""
     t = _trigger(kind="issue_opened", number=1, title="An issue", body="Body.")
     prompt = SwarmDispatcher._pavo_prompt(t)
-    assert "sign_off" in prompt
-    assert "plan_contribution" in prompt
+    assert "[BLOCKING]" in prompt
 
 
 def test_pavo_prompt_warns_against_pending_deadlock():
@@ -6871,6 +6886,24 @@ def _install_pipeline_stubs(monkeypatch, run_skill_impl, *, select_agents=None):
         swarm_dispatch.IssueGateStore, "load", fake_gate_load
     )
 
+    # ateles#795 amended ADR, extended to the Phase-1 pm gate: the pipeline
+    # now calls the real `IssueGateStore.sign_off` after a clean pm verdict.
+    # These pipeline-mechanics tests exercise section ordering / persistence
+    # / build-handoff, not gate-signing behaviour (which has its own tests
+    # around `test_pm_clean_verdict_triggers_dispatcher_sign_off` below), so
+    # stub `sign_off` to a no-op success rather than growing `_ClearGateState`
+    # into a full fake of every field the real method's write path touches.
+    async def fake_sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+        from gate_waive import SignOffOutcome
+        return SignOffOutcome(
+            ok=True, gate=gate, lens_agent=lens_agent,
+            lens_sub=f"{lens_agent}@ateles-swarm", verified=True,
+        )
+
+    monkeypatch.setattr(
+        swarm_dispatch.IssueGateStore, "sign_off", fake_sign_off
+    )
+
     # Neutralize the GitHub-body mirror (no network); we test it separately.
     async def fake_mirror(self, trigger, state):
         pass
@@ -6966,6 +6999,171 @@ def test_issue_pipeline_sections_persist_additively(monkeypatch):
     assert store.mirrored is True
 
 
+# ── Phase-1 pm gate: dispatcher-signed sign_off (ateles#795 amended ADR,
+#    Falco's follow-up finding on PR #1181) ──────────────────────────────────
+#
+# The panel loop (`_run_pr_review_panel`) already routes a clean lens verdict
+# through `IssueGateStore.sign_off` rather than the lens's own MCP `correct()`.
+# Falco's review found the additive-spec (Phase-1) pipeline had NOT been
+# updated to match: `_spec_section_prompt`'s pm_gate_block still instructed
+# Pavo to `correct()` `gate_status.pm` itself, and because this PR relaxes the
+# launch refusal that used to keep gate-owning lenses from starting at all,
+# merging without this fix would have REOPENED unsigned Phase-1 gate writes on
+# the shared bearer. These tests cover the dispatcher-side fix mirroring the
+# panel's own pattern.
+
+
+def test_pm_clean_verdict_triggers_dispatcher_sign_off(monkeypatch):
+    """A clean (non-blocking) pm verdict must call the dispatcher's
+    lens-signed `IssueGateStore.sign_off` — never the lens's own `correct()`,
+    which no longer exists as an instructed path after this fix."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "pavo":
+            return SkillResult(
+                skill, True, 0,
+                "<<<SPEC_SECTION>>>**Scope:** pm section with enough substance "
+                "to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>\n"
+                "pm gate passes — intent, acceptance criteria, and scope are "
+                "all clear.",
+                "",
+            )
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            calls.append((repo, issue_number, gate, lens_agent, head_sha))
+            from gate_waive import SignOffOutcome
+            return SignOffOutcome(
+                ok=True, gate=gate, lens_agent=lens_agent,
+                lens_sub=f"{lens_agent}@ateles-swarm", verified=True,
+            )
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert len(calls) == 1
+    repo, issue_number, gate, lens_agent, head_sha = calls[0]
+    assert repo == "owner/repo"
+    assert issue_number == 100
+    assert gate == "pm"
+    assert lens_agent == "pavo"
+    assert head_sha  # a non-empty content-derived surrogate, never blank
+
+
+def test_pm_blocking_verdict_does_not_call_sign_off(monkeypatch):
+    """A `[BLOCKING]` pm verdict must leave the gate pending — no sign_off
+    attempted — exactly like the panel's own blocking-finding guard."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "pavo":
+            return SkillResult(
+                skill, True, 0,
+                "<<<SPEC_SECTION>>>**Scope:** pm section with enough substance "
+                "to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>\n"
+                "[BLOCKING] scope: no acceptance criteria stated.",
+                "",
+            )
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, *a, **kw):
+            calls.append((a, kw))
+            raise AssertionError("sign_off must not be called on a blocking verdict")
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert calls == []
+
+
+def test_pm_sign_off_failure_is_surfaced_not_swallowed(monkeypatch):
+    """A clean verdict whose dispatcher-side sign_off FAILS must be surfaced
+    (via `_surface_failed_sign_offs`), never silently left as a bare
+    `pending` indistinguishable from "review never ran" (ateles#795)."""
+    surfaced = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "pavo":
+            return SkillResult(
+                skill, True, 0,
+                "<<<SPEC_SECTION>>>**Scope:** pm section with enough substance "
+                "to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>\n"
+                "pm gate passes.",
+                "",
+            )
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            from gate_waive import SignOffOutcome, SIGN_OFF_SIGNING_FAILED
+            return SignOffOutcome(
+                ok=False, gate=gate, lens_agent=lens_agent,
+                lens_sub=f"{lens_agent}@ateles-swarm",
+                error=SIGN_OFF_SIGNING_FAILED,
+            )
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    async def fake_surface(self, trigger, parent, failed):
+        surfaced.append((trigger.number, parent, failed))
+
+    monkeypatch.setattr(
+        SwarmDispatcher, "_surface_failed_sign_offs", fake_surface
+    )
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert len(surfaced) == 1
+    issue_number, parent, failed = surfaced[0]
+    from gate_waive import SIGN_OFF_SIGNING_FAILED
+    assert issue_number == 100
+    assert failed == [("pm", "pavo", SIGN_OFF_SIGNING_FAILED)]
+
+
 def test_spec_section_prompt_is_additive_and_no_comment(monkeypatch):
     """The section prompt must tell the agent to add ONLY its section, build on
     prior sections, and NOT post spec as a comment."""
@@ -6978,8 +7176,35 @@ def test_spec_section_prompt_is_additive_and_no_comment(monkeypatch):
     assert "ONLY" in prompt
     assert "<<<SPEC_SECTION>>>" in prompt
     assert "Do NOT post your section as a" in prompt or "not** post" in prompt.lower()
-    # PM section still folds in the gate sign-off.
-    assert "gate_status.pm" in prompt
+    # PM section still folds in the gate verdict instruction (via comment,
+    # never a self-issued `correct()` — see
+    # test_spec_section_prompt_pm_gate_never_instructs_correct below).
+    assert "GATE" in prompt
+
+
+def test_spec_section_prompt_pm_gate_never_instructs_correct():
+    """ateles#795 amended ADR, Falco's follow-up finding on PR #1181: the
+    additive-spec pipeline's pm gate block must NOT instruct Pavo to
+    `correct()` the gate schema fields itself — that is the exact
+    shared-bearer sink Falco's review found still open after the panel's own
+    block was fixed. The dispatcher's lens-signed `sign_off` (mirroring the
+    panel loop) is now the sole system-of-record write for this gate too.
+
+    Field names come from `gate_waive`'s own declared-fields constant, not a
+    literal spelled in this test file — see the sibling assertion on
+    `_pavo_prompt` above for why."""
+    import gate_waive
+
+    pm = next(s for s in SECTIONS if s.key == "pm")
+    prompt = SwarmDispatcher._spec_section_prompt(
+        _issue_trigger(), pm, "PRIOR SPEC CONTENT"
+    )
+    assert "correct()" not in prompt
+    for declared_field in gate_waive._SIGN_OFF_DECLARED_FIELDS:
+        assert declared_field not in prompt
+    assert "current_owner" not in prompt
+    assert "plan_contribution" not in prompt
+    assert "[BLOCKING]" in prompt
 
 
 def test_extract_section_text_prefers_fenced_content():

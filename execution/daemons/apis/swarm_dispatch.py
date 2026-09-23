@@ -3861,6 +3861,7 @@ class SwarmDispatcher:
         )
 
         completed: list[str] = []
+        failed_sign_offs: list[tuple[str, str, str]] = []
         for section in sections:
             spec_so_far = assemble_spec_markdown(state.sections or {})
             result = await run_skill(
@@ -3895,6 +3896,70 @@ class SwarmDispatcher:
             # Mirror after each section so the issue body reflects the growing
             # spec incrementally (and re-running only replaces the marked block).
             await self._mirror_spec_to_issue(trigger, state)
+
+            # ateles#795 amended ADR, extended to the Phase-1 pm gate: the
+            # dispatcher — never the lens's own MCP session — makes the
+            # system-of-record gate write, SIGNED as the lens. Mirrors the
+            # PR-panel loop's per-lens `sign_off` call in
+            # `_run_pr_review_panel` exactly, narrowed to the ONE pre-impl
+            # gate the additive-spec pipeline itself clears (`pm` — ux/arch
+            # clear later via that same panel loop once a PR exists to
+            # review). Only when this section OWNS a gate (`section.lens`)
+            # and posted a CLEAN verdict this turn (no `[BLOCKING]` finding
+            # in its stdout) — a blocking finding leaves the gate pending
+            # exactly as before. A failed sign_off does not fail the
+            # pipeline: the review itself succeeded, so this is surfaced,
+            # never swallowed.
+            if section.lens == "pm" and result.ok:
+                if body_has_blocking_findings(result.stdout):
+                    log.info(
+                        f"[{DAEMON_NAME}] {ref}: pm verdict has blocking "
+                        "findings — leaving gate pending, no sign_off "
+                        "attempted"
+                    )
+                else:
+                    gate_store = IssueGateStore(
+                        self.config.neotoma_base_url,
+                        self.config.neotoma_token,
+                    )
+                    # Issues carry no commit SHA the way a PR does (there is
+                    # no "head" until a PR opens), so `sign_off`'s required
+                    # head_sha names the issue CONTENT the verdict is FOR —
+                    # the same `content_digest` helper `finding_id` already
+                    # uses for a stable content-derived identifier — rather
+                    # than leaving it empty (which sign_off refuses) or
+                    # inventing a second freshness mechanism.
+                    issue_head = content_digest(
+                        [trigger.repository, trigger.number, trigger.title,
+                         trigger.body]
+                    )
+                    sign_off_outcome = await gate_store.sign_off(
+                        trigger.repository,
+                        trigger.number,
+                        "pm",
+                        section.agent,
+                        issue_head,
+                    )
+                    if sign_off_outcome.ok:
+                        log.info(
+                            f"[{DAEMON_NAME}] {ref}: gate pm signed off by "
+                            f"{section.agent} "
+                            f"(sub={sign_off_outcome.lens_sub}), verified"
+                        )
+                    else:
+                        log.error(
+                            f"[{DAEMON_NAME}] {ref}: sign_off FAILED for "
+                            f"gate pm lens {section.agent}: "
+                            f"{sign_off_failure_class(sign_off_outcome.error)}"
+                        )
+                        failed_sign_offs.append(
+                            ("pm", section.agent, sign_off_outcome.error)
+                        )
+
+        if failed_sign_offs:
+            await self._surface_failed_sign_offs(
+                trigger, None, failed_sign_offs
+            )
 
         await spec_store.mark_mirrored(state)
 
@@ -8284,27 +8349,22 @@ class SwarmDispatcher:
             "criteria, and scope. Read any "
             f"`{EXPECTATION_MARKER}` comments on the issue first — they are "
             "the review contract for this issue.\n\n"
-            "MANDATORY SIGN-OFF RULE (ateles#112): when scoping PASSES — "
-            "intent is clear, acceptance criteria exist, and scope is "
-            "adequately bounded — you MUST do ALL of the following:\n"
-            "  1. `correct()` the issue entity: set `gate_status.pm` → "
-            "`\"signed_off\"`.\n"
-            "  2. Store a `plan_contribution` entity with "
-            "`contribution_type: \"sign_off\"`, `gate: \"pm\"`, "
-            "`agent: \"pavo\"`, and a brief `summary` of what you validated.\n"
-            "  3. Append to `owner_history`: "
-            '`{"gate": "pm", "action": "signed_off", "actor": "pavo", '
-            '"timestamp": "<now>"}`.\n'
-            "  4. Set `current_owner` to `\"arch\"` (advancing to the next "
-            "phase).\n"
-            "  5. Post a GitHub comment on the issue confirming the pm gate "
-            "is signed off and what you validated.\n\n"
-            "Only leave pm `pending` or set it to `blocked` when scoping "
-            "GENUINELY FAILS — missing intent, no acceptance criteria, or "
-            "scope is unclear. In that case post a comment explaining exactly "
-            "what is missing so the author can address it. Do NOT leave pm "
-            "`pending` after a successful evaluation — a pending pm gate is "
-            "a deadlock for any PR that closes this issue.\n\n"
+            "VERDICT RULE (ateles#112; writeback path amended by ateles#795): "
+            "state your verdict as a PLAIN GitHub comment ONLY. The dispatcher "
+            "— never this session — records the system-of-record gate "
+            "clearance, signed with your own AAuth identity, after reading "
+            "your verdict comment. You have no durable write to make here; "
+            "your product is the comment.\n"
+            "- When scoping PASSES — intent is clear, acceptance criteria "
+            "exist, and scope is adequately bounded — post ONE comment "
+            "confirming the pm gate passes, with a brief summary of what you "
+            "validated. Carry NO `[BLOCKING]` marker in that comment.\n"
+            "- Only when scoping GENUINELY FAILS — missing intent, no "
+            "acceptance criteria, or scope unclear — post a comment with a "
+            "`[BLOCKING] scope: <what is missing>` line explaining exactly "
+            "what the author must address. Do NOT leave pm looking passed "
+            "after a successful evaluation — a pending pm gate is a deadlock "
+            "for any PR that closes this issue.\n\n"
             f"{_agent_prompt_instruction('pavo', 'pm gate owner')}"
         )
 
@@ -8377,19 +8437,40 @@ class SwarmDispatcher:
 
         pm_gate_block = ""
         if section.lens == "pm":
-            # PM still owns the pm gate: fold the mandatory sign-off in so gate
-            # mechanics keep advancing the pipeline (comments carry the verdict,
-            # the body carries the spec).
+            # PM still owns the pm gate, but the WRITE is no longer this
+            # lens's own. ateles#795 amended ADR (the same one that removed
+            # the panel's GATE WRITEBACK block, `_panelist_prompt`): a
+            # gate-owning lens states its verdict, and the DISPATCHER —
+            # never the lens's own MCP session — records the
+            # system-of-record `gate_status` write via the lens-AAuth-signed
+            # `IssueGateStore.sign_off` (mirrors the panel loop's per-lens
+            # `sign_off` call in `_run_pr_review_panel`). Instructing the
+            # lens to `correct()` `gate_status` itself here would reopen the
+            # exact shared-bearer sink Falco's review found on PR #1181: this
+            # session presents the SAME daemon bearer over MCP as every other
+            # seated lens, so a pre-approved (or merely attempted) `correct()`
+            # here could clear the gate unattributed, then have `sign_off`'s
+            # already-cleared no-op read that unattributed write back as a
+            # verified lens sign-off.
             pm_gate_block = (
-                "\n\nGATE (verdict via comment, not spec): when scoping PASSES you "
-                "MUST also (a) `correct()` the issue entity `gate_status.pm` → "
-                '`"signed_off"`, (b) store a `plan_contribution` '
-                '(`contribution_type: "sign_off"`, `gate: "pm"`, `agent: "pavo"`), '
-                '(c) append `owner_history` `{"gate":"pm","action":"signed_off",'
-                '"actor":"pavo"}`, (d) set `current_owner` → `"arch"`, and (e) post '
-                "ONE short verdict COMMENT confirming the pm gate is signed off. "
-                "Only leave pm `pending`/`blocked` when scoping GENUINELY FAILS — a "
-                "pending pm gate deadlocks any PR that closes this issue."
+                "\n\nGATE (verdict via comment, not spec): state your verdict "
+                "as a PLAIN GitHub comment on the issue ONLY. The dispatcher "
+                "— never this session — records the system-of-record gate "
+                "clearance, signed with your own AAuth identity, after "
+                "reading your verdict comment. You have no durable write to "
+                "make here.\n"
+                "- When scoping PASSES — intent is clear, acceptance "
+                "criteria exist, scope is adequately bounded — post ONE "
+                "short comment stating the pm gate passes, with a one-line "
+                "summary of what you validated. Carry NO `[BLOCKING]` marker "
+                "in that comment: its absence is what tells the dispatcher "
+                "to sign off the pm gate.\n"
+                "- Only when scoping GENUINELY FAILS — missing intent, no "
+                "acceptance criteria, or scope unclear — post a comment "
+                "with a `[BLOCKING] scope: <what is missing>` line explaining "
+                "exactly what the author must address. A pending pm gate "
+                "deadlocks any PR that closes this issue, so do not leave it "
+                "blocked without saying why."
             )
 
         # Foundation binding (docs/foundation/conformance.md): the pm gate
@@ -9913,7 +9994,7 @@ class SwarmDispatcher:
         body = (
             f"{GATE_SIGN_OFF_FAILED_MARKER}\n"
             "**🤖 Apis — Ateles swarm, swarm dispatcher**\n\n"
-            f"The following lens(es) completed a CLEAN review of this PR, but "
+            f"The following lens(es) completed a CLEAN review, but "
             f"the dispatcher's signed system-of-record write did not land"
             f"{parent_ref}:\n\n"
             f"{blocked_blocks}\n\n"
