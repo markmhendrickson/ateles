@@ -120,6 +120,15 @@ python3 execution/scripts/check_foundation_decision_101.py || ERRORS=$((ERRORS +
 echo "  - Checking foundation vocabulary (no Never word in the prose)..."
 python3 execution/scripts/check_foundation_vocabulary.py || ERRORS=$((ERRORS + 1))
 
+# Adapter admission conformance fixture (AD-21..AD-34, ateles#1191). Informational only for now,
+# same posture as the agent-doc-mirror check below: its precondition, the lib.adapters sixth
+# reference adapter (ateles#1190), is not merged, so RUNTIME_MISSING is the correct and expected
+# report today (never a soft skip-green within the fixture's own output) — but this local lint
+# does not yet fail the whole checkout on a dependency this issue does not own landing first.
+# Make this blocking (drop `|| true`) once #1190 merges.
+echo "  - Checking adapter-admission conformance fixture (AD-21..AD-34, informational until #1190 lands)..."
+python3 execution/scripts/check_adapter_admission.py || true
+
 # Data model coverage: a governance type conformance_suite.md names must have a row in
 # data_model.md#concepts. `agent_policy` was authoritative in conformance.md and declared zero times
 # in data_model.md, with nothing failing — the gap this closes. Exit 2 means the check did not run
