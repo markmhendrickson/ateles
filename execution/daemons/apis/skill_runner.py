@@ -2119,23 +2119,62 @@ async def run_skill(
     return await _run_provider_attempts(
         skill, attempt, binaries=_provider_binaries(), provider=provider,
         role=role, task_entity_id=task_entity_id, notifier=notifier,
-        preferred_provider=preferred_provider,
+        preferred_provider=preferred_provider, owns_pending_gate=owns_pending_gate,
     )
 
 
 async def _run_provider_attempts(
     skill, attempt, *, binaries, provider=None, role=None, task_entity_id="",
     notifier=None, retry_safe=False, preferred_provider=None,
+    owns_pending_gate: bool = False,
 ) -> SkillResult:
     """One selection/cooldown/failover mechanism for every harness entrypoint.
 
     ``retry_safe`` is reserved for tool-free inference: only those calls can
     safely repeat after a timeout/outage without duplicating external effects.
+
+    ``owns_pending_gate`` (ateles#795 / #1181 operational finding): an
+    UNPINNED gate-owning reviewer run (``provider is None``, the normal
+    dispatch path) must land on ``claude`` only — it is the sole provider
+    that can deny `mcp__mcpsrv_neotoma__correct` at the tool-permission layer
+    (see the preflight refusal in `_run_skill_once`). That refusal used to be
+    the ONLY mechanism enforcing this, but it fires from *inside* a
+    per-provider attempt, after `provider_candidates` has already picked
+    cursor or codex first (the common case — see the live dispatch mix in the
+    #1181 finding). `_run_provider_attempts` only fails over on a classified
+    `failure_kind` or a `"{selected} launch failed:"` error, and the in-attempt
+    refusal is neither, so it returned immediately with no failover to claude
+    and most gate-owner runs would stop. Filtering candidates to `claude`
+    BEFORE selection, here, fixes that: claude is simply the only candidate an
+    unpinned gate-owning run ever sees, so normal failover logic (try the next
+    eligible candidate) never needs to special-case this refusal.
+
+    A caller that hard-PINS a specific non-claude ``provider`` (diagnostics,
+    focused tests) is left untouched by this filter — pinning already means
+    "run exactly this adapter or fail," so it still reaches the in-attempt
+    refusal in `_run_skill_once` unchanged, which remains the backstop for
+    every call path (pinned or not).
     """
+    if owns_pending_gate and provider is None:
+        binaries = {"claude": binaries.get("claude")}
+        preferred_provider = None
+
     candidates = provider_candidates(binaries, preferred=provider)
     if preferred_provider in candidates and provider is None:
         candidates = [preferred_provider, *[p for p in candidates if p != preferred_provider]]
     if not candidates:
+        if owns_pending_gate and provider is None:
+            reason = provider_exclusion_reason("claude", binaries) or "not eligible"
+            msg = (
+                f"{GATE_OWNER_TOOL_DENY_UNAVAILABLE}: claude is the only "
+                "provider that can deny a single MCP tool for a gate-owning "
+                f"run, and it is currently ineligible ({reason}) — refusing "
+                "to launch on cursor/codex unrestricted rather than falling "
+                "over to them (ateles#795, #1181 operational finding). "
+                "Nothing was cooled down."
+            )
+            log.error(f"[apis] {skill} dispatch refused — {msg}")
+            return SkillResult(skill, False, None, "", "", error=msg)
         if provider is not None:
             reason = provider_exclusion_reason(provider, binaries)
             msg = (

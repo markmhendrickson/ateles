@@ -3919,3 +3919,137 @@ class TestGateOwnerToolDenyAcrossProviders:
         assert set(skill_runner.GATE_OWNER_DENIED_TOOLS) == {
             "mcp__mcpsrv_neotoma__correct"
         }
+
+
+# ── #1181 operational finding: gate-owner refusal must fail over, not stop ────
+#
+# The in-attempt refusal above (`_run_skill_once` returning `SkillResult(ok=
+# False, error=f"{GATE_OWNER_TOOL_DENY_UNAVAILABLE}: ...")`) is correct in
+# isolation, but `_run_provider_attempts` only advances to the next candidate
+# on a classified `failure_kind` or a `"{selected} launch failed:"` error —
+# this refusal is neither, so when `provider_candidates` picked cursor or
+# codex first (the common case per the live dispatch mix in the finding), the
+# loop returned the refusal immediately with no attempt on claude. The fix
+# filters candidates to `claude` BEFORE selection whenever `owns_pending_gate`
+# is set, so ordinary failover logic naturally lands on claude without ever
+# reaching the in-attempt refusal on a live run.
+class TestGateOwnerFailoverToClaude:
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_gate_owning_run_launches_on_claude_despite_candidate_order(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """RED before the fix: with [cursor, codex, claude] all eligible,
+        `provider_candidates` picks cursor first (smooth weighted round-robin
+        with equal headroom follows configured order). The old code attempted
+        cursor, got the in-attempt refusal, and returned it unchanged — never
+        trying claude. The fix must land on claude."""
+        harness_router.reset_state()
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex,claude")
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+        monkeypatch.delenv("APIS_HARNESS_HEADROOM", raising=False)
+
+        attempted: list[str] = []
+
+        async def attempt(selected: str) -> skill_runner.SkillResult:
+            attempted.append(selected)
+            if selected != "claude":
+                # Exactly the shape of the real in-attempt refusal: ok=False,
+                # an error that is neither a classified failure_kind nor a
+                # "launch failed:"-prefixed string.
+                return skill_runner.SkillResult(
+                    "waxwing", False, None, "", "",
+                    error=(
+                        f"{skill_runner.GATE_OWNER_TOOL_DENY_UNAVAILABLE}: "
+                        f"provider {selected!r} has no mechanism..."
+                    ),
+                    provider=selected,
+                )
+            return skill_runner.SkillResult(
+                "waxwing", True, 0, "**SIGNED_OFF**", "", provider=selected,
+            )
+
+        result = self._run(
+            skill_runner._run_provider_attempts(
+                "waxwing",
+                attempt,
+                binaries={"cursor": "c", "codex": "d", "claude": "e"},
+                owns_pending_gate=True,
+            )
+        )
+
+        assert result.ok
+        assert result.provider == "claude"
+        assert attempted == ["claude"], (
+            "cursor/codex must never even be attempted — the constraint is "
+            "applied at candidate selection, not discovered via a failed "
+            "attempt"
+        )
+        assert harness_router.cooling_providers() == set(), (
+            "the in-attempt refusal is not a launch failure and must not "
+            "cool down cursor or codex for every other role"
+        )
+
+    def test_gate_owning_run_fails_closed_when_claude_ineligible(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """The same run with only [cursor, codex] eligible (no claude binary
+        at all) must fail closed with a legible reason and cool nothing —
+        never fall over to cursor/codex unrestricted."""
+        harness_router.reset_state()
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex")
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+        monkeypatch.delenv("APIS_HARNESS_HEADROOM", raising=False)
+
+        async def should_not_run(selected: str) -> skill_runner.SkillResult:
+            raise AssertionError(f"ineligible provider was attempted: {selected}")
+
+        result = self._run(
+            skill_runner._run_provider_attempts(
+                "waxwing",
+                should_not_run,
+                binaries={"cursor": "c", "codex": "d"},
+                owns_pending_gate=True,
+            )
+        )
+
+        assert not result.ok
+        assert skill_runner.GATE_OWNER_TOOL_DENY_UNAVAILABLE in result.error
+        assert result.attempted_providers == ()
+        assert harness_router.cooling_providers() == set(), (
+            "failing closed on an unavailable claude must not cool down any "
+            "provider — cursor and codex are simply not offered, not failing"
+        )
+
+    def test_non_gate_owning_run_keeps_unchanged_candidate_order(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Non-regression: an advisory run (owns_pending_gate=False, the
+        default) with [cursor, codex, claude] all eligible still launches on
+        cursor — the first candidate in configured order — exactly as before
+        this fix."""
+        harness_router.reset_state()
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex,claude")
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+        monkeypatch.delenv("APIS_HARNESS_HEADROOM", raising=False)
+
+        attempted: list[str] = []
+
+        async def attempt(selected: str) -> skill_runner.SkillResult:
+            attempted.append(selected)
+            return skill_runner.SkillResult(
+                "falco", True, 0, "**COMMENT**", "", provider=selected,
+            )
+
+        result = self._run(
+            skill_runner._run_provider_attempts(
+                "falco",
+                attempt,
+                binaries={"cursor": "c", "codex": "d", "claude": "e"},
+            )
+        )
+
+        assert result.ok
+        assert result.provider == "cursor"
+        assert attempted == ["cursor"]
