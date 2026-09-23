@@ -65,7 +65,7 @@ This revision applies the merge test — two statements are the same rule only i
 | Claude Code user rules | `~/.claude/CLAUDE.md` | 1 | 7 | 2026-07-16 | yes |
 | Cursor | `~/.cursor/rules` | 31 | 2 | 2026-09-23 | stale |
 | Canonical repository instruction roots | `~/repos/<canonical-roots>` | — | — | — | **UNREAD** |
-| ateles/CLAUDE.md checkout copies | `~/repos/<checkout>` | 148 | 0 | 2026-09-24 | divergent |
+| ateles/CLAUDE.md checkout copies | `~/repos/<checkout>` | 147 | 0 | 2026-09-24 | divergent |
 | neotoma/AGENTS.md checkout copies | `~/repos/<checkout>` | 167 | 0 | 2026-09-23 | divergent |
 | OpenClaw | `~/.openclaw/agents/<agent>` | 0 | 0 | — | n/a |
 
@@ -1121,7 +1121,7 @@ That prose inventory is the input to this one, not a thing it discards: each of 
 
 ### The store nobody had counted: one instruction file, many checkouts
 
-`CLAUDE.md` is re-injected from disk at every compaction, which is what makes it the home for standing instructions. The disk it is read from is the one in the session's own checkout. Measured on this machine: **148 copies of `ateles/CLAUDE.md` in 23 distinct versions**, and **167 copies of `neotoma/AGENTS.md` in 4 distinct versions**.
+`CLAUDE.md` is re-injected from disk at every compaction, which is what makes it the home for standing instructions. The disk it is read from is the one in the session's own checkout. Measured on this machine: **147 copies of `ateles/CLAUDE.md` in 23 distinct versions**, and **167 copies of `neotoma/AGENTS.md` in 4 distinct versions**.
 
 So a rule's reach is not whether it is in `CLAUDE.md` but which copy of `CLAUDE.md` the reader opened, and the deployment checkouts the daemons run from (`~/ateles-rc-src`, `~/neotoma-rc-src`) are two more copies again. This is `docs/foundation/principles.md#1` — a rule that lives in only one checkout does not bind — measured rather than asserted, and it is the concrete mechanism behind ateles#973, where a session ran for hours from a worktree whose `CLAUDE.md` lacked the never-stash rule and both compaction hooks.
 
