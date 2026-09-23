@@ -61,6 +61,38 @@ WAIVED = "waived"
 # ── Pure helpers (no I/O — unit tested directly) ─────────────────────────────
 
 
+def parse_snapshot_list_field(raw: object) -> list[dict]:
+    """Normalize a stored LIST-valued snapshot field into a list of dicts.
+
+    The list-shaped sibling of ``parse_gate_status``. Neotoma's
+    ``/entities/query`` returns list-valued snapshot fields as JSON STRINGS
+    (schema inference types them as strings), so a reader that assumes a parsed
+    list iterates characters and raises ``AttributeError`` on the first
+    ``.get()``. That shipped in ateles#442's drift check and crashed on every
+    daemon startup for hours; fail-open swallowed it, so the check reported
+    nothing — indistinguishable from reporting clean (#450).
+
+    Tolerates the shapes seen in prod:
+      * a real list of dicts,
+      * a JSON-encoded string,
+      * anything else / missing / malformed → ``[]``.
+
+    Non-dict entries are dropped rather than raising: a partially-malformed
+    field should degrade to the rows that parse, not lose all of them.
+    """
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            raw = json.loads(text)
+        except (ValueError, TypeError):
+            return []
+    if not isinstance(raw, list):
+        return []
+    return [entry for entry in raw if isinstance(entry, dict)]
+
+
 def parse_gate_status(raw: object) -> dict[str, str]:
     """Normalize a stored ``gate_status`` value into ``{gate: state}``.
 
