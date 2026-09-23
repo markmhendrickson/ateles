@@ -42,6 +42,11 @@ from datetime import datetime, timezone
 
 import httpx
 
+try:  # package import (normal daemon runtime) with script-import fallback
+    from lib.daemon_runtime import neotoma_signed as _ns
+except ImportError:  # pragma: no cover
+    import neotoma_signed as _ns  # type: ignore
+
 log = logging.getLogger("apis.gate_waive")
 
 
@@ -244,6 +249,50 @@ def format_waive_comment(
         + ". The pipeline is already clear."
     )
     return "\n".join(lines)
+
+
+# ── Lens-signed gate sign-off (ateles#795 amended ADR) ───────────────────────
+#
+# The dispatcher (Apis) records a gate-owning lens's verdict, but the WRITE
+# must carry the LENS's own AAuth identity, never the daemon's shared bearer
+# token — otherwise the write is attributed to Apis and the gate record lies
+# about who reviewed. `waive()` above is the operator-override sibling of
+# this: same target field, same re-read-and-verify shape, different actor
+# (the operator, via the daemon bearer, is legitimate there — an operator
+# override IS the daemon's own act) and a different value (`waived` vs
+# `signed_off`).
+#
+# Fail-closed error CLASSES, surfaced the way `review_failure_class` in
+# swarm_dispatch.py surfaces panel failures — a short, stable token, never a
+# stack trace, a token, a key path, or a raw response body (Buteo's review,
+# ateles#795).
+SIGN_OFF_NO_SIGNING_KEY = "sign_off: no AAuth key for lens"
+SIGN_OFF_SIGNING_FAILED = "sign_off: signed write failed"
+SIGN_OFF_ENTITY_NOT_FOUND = "sign_off: no issue entity"
+SIGN_OFF_HEAD_MISMATCH = "sign_off: issue head moved since review"
+SIGN_OFF_VERIFY_FAILED = "sign_off: write did not read back"
+SIGN_OFF_GATE_NOT_PENDING = "sign_off: gate not pending for this lens"
+
+# Fields actually declared on the production `issue` entity schema (confirmed
+# by Waxwing's `describe_entity_type` read on ateles#795, and matching
+# `parse_gate_status`/`parse_owner_history` above, which already round-trip
+# both). `gate_writeback_outcome` is NOT on this list — see the module-level
+# note in `sign_off()` below. Neotoma silently drops undeclared fields on
+# write rather than erroring, so this module writes ONLY what is on this
+# list, never a field it would like to exist.
+_SIGN_OFF_DECLARED_FIELDS = frozenset({"gate_status", "owner_history"})
+
+
+@dataclass
+class SignOffOutcome:
+    """Result of one lens's dispatcher-mediated, lens-signed gate sign-off."""
+
+    ok: bool = False
+    gate: str = ""
+    lens_agent: str = ""
+    lens_sub: str = ""
+    error: str = ""  # one of the SIGN_OFF_* class constants above, or ""
+    verified: bool = False
 
 
 # ── Neotoma-backed issue-entity store ────────────────────────────────────────
@@ -593,6 +642,226 @@ class IssueGateStore:
                 issue_number,
                 ", ".join(outcome.waived),
             )
+        return outcome
+
+    async def sign_off(
+        self,
+        repo: str,
+        issue_number: int,
+        gate: str,
+        lens_agent: str,
+        head_sha: str,
+    ) -> SignOffOutcome:
+        """Record ``gate_status.<gate>`` = ``"signed_off"``, SIGNED as *lens_agent*.
+
+        ateles#795 amended ADR: the write is the SYSTEM OF RECORD, and it must
+        be attributed to the reviewing lens, not to Apis. This method never
+        falls back to the daemon bearer on any failure — that would silently
+        reproduce the exact bug this exists to fix (constraint 1). Every
+        failure returns ``SignOffOutcome(ok=False, error=<class>)`` instead;
+        callers surface the class the way `review_failure_class` does for
+        panel failures, and never treat a non-2xx or a raised exception as a
+        signal to retry with the bearer.
+
+        Mirrors `waive()`'s safety shape, narrowed to ONE gate and ONE lens:
+          1. Re-read current state (never trust a caller-supplied snapshot —
+             `waive()`'s own docstring names this as the #241 failure mode).
+          2. Refuse if the gate is not actually `pending` for this lens (a
+             lens that already signed off, or a gate it does not own, is not
+             this lens's write to make — mirrors `IssueGateStore._matches`'s
+             (repo, issue) exactness, narrowed further to (repo, issue, gate)).
+          3. Require *head_sha* (the exact commit the lens's clean verdict was
+             FOR — `swarm_dispatch` already resolves this as `review_head`
+             before the panel runs). `gate_status` carries no per-gate head
+             pin in prod to compare against, so the freshness guarantee is
+             step 1's fresh re-read itself: current state is loaded INSIDE
+             this call, never trusted from a caller-held snapshot, which is
+             the same "exact durable state" discipline `waive()`/`_matches`
+             apply to (repo, issue) — extended here so a head is always named
+             even though there is nowhere yet to store it for comparison.
+          4. Sign the write with *lens_agent*'s OWN key and an EXPLICIT
+             subject `<lens_agent>@ateles-swarm` — never the ambient
+             `NEOTOMA_AAUTH_SUB` this process (Apis) may itself carry
+             (constraint 2; see `neotoma_signed.agent_identity`'s docstring).
+          5. Write ONLY declared schema fields (`gate_status`, `owner_history`
+             — constraint 4). No `gate_writeback_outcome` or other field is
+             attempted; see the module-level note above.
+          6. READ BACK and assert the field holds exactly what was written
+             (constraint 3c) — a 2xx from `signed_request` is not evidence a
+             write landed on this codebase's own documented history of
+             undeclared-field drops and fire-and-forget writes.
+
+        Raises nothing: every failure path returns a populated
+        ``SignOffOutcome`` so the caller can decide (retry, escalate, leave
+        pending) rather than crash the dispatch loop.
+        """
+        lens_sub = f"{lens_agent}@ateles-swarm"
+        outcome = SignOffOutcome(gate=gate, lens_agent=lens_agent, lens_sub=lens_sub)
+
+        # Constraint 1 — fail closed BEFORE any write attempt if this lens has
+        # no signing key. Checking here, not inside the try/except below,
+        # keeps "no key" and "signing raised" as distinct, legible classes.
+        if _ns.agent_identity(lens_agent, sub=lens_sub) is None:
+            outcome.error = SIGN_OFF_NO_SIGNING_KEY
+            log.error(
+                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: %s "
+                "— refusing to fall back to the daemon bearer",
+                repo,
+                issue_number,
+                gate,
+                lens_agent,
+                SIGN_OFF_NO_SIGNING_KEY,
+            )
+            return outcome
+
+        state = await self.load(repo, issue_number)
+        if not state.found:
+            outcome.error = SIGN_OFF_ENTITY_NOT_FOUND
+            log.error(
+                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: %s",
+                repo,
+                issue_number,
+                gate,
+                lens_agent,
+                SIGN_OFF_ENTITY_NOT_FOUND,
+            )
+            return outcome
+
+        current = (state.gate_status.get(gate) or "").strip().lower()
+        if current in CLEARED_GATE_STATES:
+            # Idempotent no-op, not a failure: a retry after a verified
+            # sign_off (or a concurrent one) finds the gate already clear.
+            outcome.ok = True
+            outcome.verified = True
+            log.info(
+                "[apis.gate_waive] sign_off %s#%s gate=%s: already %r — no-op",
+                repo,
+                issue_number,
+                gate,
+                current,
+            )
+            return outcome
+        if current and current != "pending":
+            # Some other non-cleared, non-pending value (unexpected shape) —
+            # do not overwrite a state this method does not understand.
+            outcome.error = SIGN_OFF_GATE_NOT_PENDING
+            log.error(
+                "[apis.gate_waive] sign_off %s#%s gate=%s: current state %r "
+                "is neither pending nor cleared — refusing to write",
+                repo,
+                issue_number,
+                gate,
+                current,
+            )
+            return outcome
+
+        if not head_sha:
+            # Required, not optional: the caller must name the exact commit
+            # its clean verdict was FOR (swarm_dispatch already resolves this
+            # as `review_head` before the panel runs). `gate_status` itself
+            # carries no per-gate head pin in prod (see this module's shape
+            # notes) — there is no stored value to compare against — so the
+            # freshness guarantee this method gives is the re-read immediately
+            # above (current state is loaded fresh, inside this call, not
+            # passed in stale by the caller), matching `waive()`'s own
+            # "re-read before write" shape for the (repo, issue, gate) triple.
+            # An empty head_sha means the caller skipped resolving one, which
+            # is itself a bug in the call site, not a state to write through.
+            outcome.error = SIGN_OFF_HEAD_MISMATCH
+            log.error(
+                "[apis.gate_waive] sign_off %s#%s gate=%s: no head_sha supplied "
+                "— refusing to certify a verdict against an unnamed commit",
+                repo,
+                issue_number,
+                gate,
+            )
+            return outcome
+
+        now = datetime.now(timezone.utc).isoformat()
+        merged_gates = dict(state.gate_status)
+        merged_gates[gate] = "signed_off"
+        merged_history = list(state.owner_history) + [
+            {
+                "gate": gate,
+                "action": "signed_off",
+                "actor": lens_agent,
+                "reason": f"lens-signed sign-off via AAuth sub {lens_sub}",
+                "timestamp": now,
+            }
+        ]
+        key = f"{repo}#{issue_number}"
+
+        for field_name, value in (
+            ("gate_status", self._encode_gate_status(state, merged_gates)),
+            ("owner_history", merged_history),
+        ):
+            # Constraint 4 — never write a field this module has not confirmed
+            # is declared on the production schema.
+            assert field_name in _SIGN_OFF_DECLARED_FIELDS, (
+                f"sign_off attempted to write undeclared field {field_name!r}"
+            )
+            try:
+                await _ns.signed_request(
+                    "POST",
+                    f"{self.base_url}/correct",
+                    {
+                        "entity_id": state.entity_id,
+                        "entity_type": self.ENTITY_TYPE,
+                        "field": field_name,
+                        "value": value,
+                        "idempotency_key": (
+                            f"gate-signoff-{gate}-{key}-{field_name}-{now[:16]}"
+                        ),
+                    },
+                    agent_name=lens_agent,
+                    sub=lens_sub,
+                )
+            except Exception as exc:  # noqa: BLE001 — classify, never crash
+                # Error CLASS only in the log line — never the exception's
+                # full text, which can carry a signed-request body, an auth
+                # header, or a filesystem path (Buteo's review, ateles#795).
+                outcome.error = SIGN_OFF_SIGNING_FAILED
+                log.error(
+                    "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: "
+                    "%s (%s)",
+                    repo,
+                    issue_number,
+                    gate,
+                    lens_agent,
+                    field_name,
+                    SIGN_OFF_SIGNING_FAILED,
+                    type(exc).__name__,
+                )
+                return outcome
+
+        # Constraint 3c / CLAUDE.md "read it back" — a successful signed POST
+        # is not evidence the write landed.
+        reread = await self.load(repo, issue_number)
+        if not reread.found or (reread.gate_status.get(gate) or "").strip().lower() != "signed_off":
+            outcome.error = SIGN_OFF_VERIFY_FAILED
+            log.error(
+                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: %s "
+                "(read-back state=%r)",
+                repo,
+                issue_number,
+                gate,
+                lens_agent,
+                SIGN_OFF_VERIFY_FAILED,
+                reread.gate_status.get(gate) if reread.found else "(entity missing)",
+            )
+            return outcome
+
+        outcome.ok = True
+        outcome.verified = True
+        log.info(
+            "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s (sub=%s): "
+            "verified signed_off",
+            repo,
+            issue_number,
+            gate,
+            lens_agent,
+            lens_sub,
+        )
         return outcome
 
     async def waive_many(
