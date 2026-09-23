@@ -3470,10 +3470,21 @@ class TestGateOwnerIdentity:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_gate_owner_without_own_identity_is_refused(
+    def test_gate_owner_without_own_mcp_identity_still_launches(
         self, MockLoader, mock_write_harness, monkeypatch
     ) -> None:
-        """RED before the fix: the review RAN and its verdict went nowhere."""
+        """Amended ADR (ateles#795 operator decision comment): a gate owner
+        with no per-agent MCP bearer must still be allowed to launch.
+
+        This test used to assert the OPPOSITE — a hard preflight refusal —
+        back when the lens's own in-session `correct()` was the only planned
+        writeback path. The operator's amendment moves the system-of-record
+        write to the dispatcher (`gate_waive.IssueGateStore.sign_off`, signed
+        with the lens's OWN AAuth keypair, independent of this MCP session),
+        so the lens no longer needs a Neotoma identity of its own just to be
+        allowed to review. Refusing here would leave pm/arch/ux permanently
+        unable to run — the second failure mode this amendment exists to fix.
+        """
         fake_def = _make_def(
             prompt_markdown="Role: Accipiter.",
             aauth_sub="accipiter@ateles-swarm",
@@ -3516,14 +3527,14 @@ class TestGateOwnerIdentity:
                 )
             )
 
-        assert not result.ok, (
-            "A gate owner that cannot write its own verdict must FAIL LOUDLY, "
-            "not run and leave the gate reading `pending`."
+        assert result.ok, (
+            "A gate owner with no per-agent MCP bearer must still be allowed "
+            "to launch — the dispatcher's signed sign_off() is now the "
+            "system-of-record write, independent of this session's identity."
         )
-        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
-        assert launched == [], (
-            "The refusal must precede the subprocess — running the review burns "
-            "a full session whose verdict Neotoma will discard."
+        assert launched, (
+            "The review must actually run: refusing to launch is exactly the "
+            "regression this amendment closes."
         )
 
     @patch("skill_runner._write_harness_event")

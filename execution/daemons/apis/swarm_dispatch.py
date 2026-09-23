@@ -648,6 +648,11 @@ def detect_gate_writeback_denial(*texts: str) -> bool:
 # comment says the review RAN and was SILENCED, which is a different problem
 # from a review that is merely outstanding, and needs a different fix.
 GATE_WRITEBACK_DENIED_MARKER = "<!-- apis-gate-writeback-denied -->"
+# ateles#795 amended ADR — distinct marker from the one above: this covers the
+# DISPATCHER's own signed sign_off() write failing, not the lens's in-session
+# correct() being refused. Different failure, different fix (the lens's AAuth
+# key / the server allowlist vs. the lens's own MCP tool grant).
+GATE_SIGN_OFF_FAILED_MARKER = "<!-- apis-gate-sign-off-failed -->"
 
 # The durable outcomes of a merge attempt. `authorized_but_unable` is the state
 # ateles#565 says is missing: the autonomy flag AUTHORIZED the merge and a
@@ -1726,15 +1731,50 @@ def review_failure_class(result: SkillResult) -> str:
         return "usage limit"
     if "no subscription-backed harness provider" in (result.error or ""):
         return "provider exhaustion"
-    # ateles#795 — checked BEFORE the auth-failure probe. A refused gate owner
-    # never launched, so there is no 401 to find; classing it as a generic
-    # "execution failure" would put the one failure this fix exists to make
-    # legible back into the catch-all bucket.
+    # ateles#795 — checked BEFORE the auth-failure probe. Kept for any OTHER
+    # caller of `gate_writeback_identity_error` (the amended ADR relaxed the
+    # `skill_runner.run_skill` preflight refusal this class used to name, so
+    # this branch is not reached from the panel launch path any more — see
+    # `sign_off_failure_class` below for the write-time failure class that
+    # replaces it).
     if NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or ""):
         return "gate identity unavailable"
     if detect_auth_failure(result.stdout, result.stderr, result.error):
         return "credential failure"
     return "execution failure"
+
+
+def sign_off_failure_class(error: str) -> str:
+    """Return a public-safe reason for one failed `IssueGateStore.sign_off`.
+
+    Mirrors `review_failure_class`'s shape: a short, stable token the
+    dispatcher can surface on the PR/issue without leaking the underlying
+    exception text, which can carry a signed-request body, an auth header, or
+    a filesystem path (Buteo's review, ateles#795). `sign_off` itself already
+    returns one of the ``gate_waive.SIGN_OFF_*`` class constants rather than a
+    raw exception, so this is a thin, explicit map to the operator-facing
+    vocabulary — kept separate from ``review_failure_class`` because a
+    sign-off failure is a WRITE failure after a clean verdict, not a review
+    that could not run.
+    """
+    from gate_waive import (
+        SIGN_OFF_ENTITY_NOT_FOUND,
+        SIGN_OFF_GATE_NOT_PENDING,
+        SIGN_OFF_HEAD_MISMATCH,
+        SIGN_OFF_NO_SIGNING_KEY,
+        SIGN_OFF_SIGNING_FAILED,
+        SIGN_OFF_VERIFY_FAILED,
+    )
+
+    mapping = {
+        SIGN_OFF_NO_SIGNING_KEY: "lens signing key unavailable",
+        SIGN_OFF_SIGNING_FAILED: "signed write failed",
+        SIGN_OFF_ENTITY_NOT_FOUND: "no issue entity",
+        SIGN_OFF_HEAD_MISMATCH: "reviewed head not confirmed",
+        SIGN_OFF_VERIFY_FAILED: "sign-off did not read back",
+        SIGN_OFF_GATE_NOT_PENDING: "gate not pending",
+    }
+    return mapping.get(error, "sign-off failure")
 
 
 def compose_auth_failure_comment(agent: str) -> str:
@@ -4420,6 +4460,13 @@ class SwarmDispatcher:
         failed_lenses: list[tuple[str, str]] = []
         # (lens, agent) for each gate owner that reported its writeback refused.
         denied_gate_writebacks: list[tuple[str, str]] = []
+        # (lens, agent, error_class) for each dispatcher-side sign_off() call
+        # that failed after a clean verdict (ateles#795 amended ADR). Distinct
+        # from `denied_gate_writebacks` above: that list is the LENS reporting
+        # its own in-session `correct()` was refused; this one is the
+        # DISPATCHER's signed write failing, which points at a different fix
+        # (the lens's AAuth key / the server allowlist, not its MCP grant).
+        failed_sign_offs: list[tuple[str, str, str]] = []
         for lens in panel:
             # QE3: the qa lens (Phoenicurus) authors + runs an eval, so it needs a
             # writable PR-branch checkout as its cwd. Other lenses stay diff-only
@@ -4451,16 +4498,61 @@ class SwarmDispatcher:
                     preferred_provider=resolve_lens_provider(
                         lens, available_providers=usable_providers()
                     ),
-                    # ateles#795: a lens seated because it OWNS a pending gate
-                    # must be able to write that gate as itself. Passing the
-                    # flag lets the runner refuse up front rather than produce a
-                    # verdict Neotoma will discard.
+                    # ateles#795: True when this lens is seated because it OWNS
+                    # a pending gate. No longer gates the launch itself (the
+                    # amended ADR moved that write off this session — see
+                    # `sign_off` below); threaded through for any downstream
+                    # use (logging, prompt shaping already reads it too).
                     owns_pending_gate=lens.lens in pending_gates,
                 )
             finally:
                 await cleanup_pr_worktree(qa_worktree)
             if result.ok:
                 reviews.append((lens.lens, result.stdout))
+                # ateles#795 amended ADR: the dispatcher — not the lens's own
+                # MCP session — makes the system-of-record gate write, SIGNED
+                # as the lens. Only for a lens that (a) owns a pending gate and
+                # (b) posted a CLEAN verdict this round (no [BLOCKING] finding
+                # — a blocking finding must leave the gate pending exactly as
+                # before). A failed sign_off does not fail the panel: the
+                # review itself succeeded, and the gate simply stays pending
+                # for the next round, which is the pre-existing degraded state
+                # (never a NEW failure mode) — but it IS surfaced, never
+                # swallowed silently.
+                if parent and lens.gate and lens.lens in pending_gates:
+                    if body_has_blocking_findings(result.stdout):
+                        log.info(
+                            f"[{DAEMON_NAME}] {ref}: {lens.lens} verdict has "
+                            "blocking findings — leaving gate pending, no "
+                            "sign_off attempted"
+                        )
+                    else:
+                        store = IssueGateStore(
+                            self.config.neotoma_base_url,
+                            self.config.neotoma_token,
+                        )
+                        sign_off_outcome = await store.sign_off(
+                            trigger.repository,
+                            parent,
+                            lens.gate,
+                            lens.agent,
+                            review_head,
+                        )
+                        if sign_off_outcome.ok:
+                            log.info(
+                                f"[{DAEMON_NAME}] {ref}: gate {lens.gate} "
+                                f"signed off by {lens.agent} "
+                                f"(sub={sign_off_outcome.lens_sub}), verified"
+                            )
+                        else:
+                            log.error(
+                                f"[{DAEMON_NAME}] {ref}: sign_off FAILED for "
+                                f"gate {lens.gate} lens {lens.agent}: "
+                                f"{sign_off_failure_class(sign_off_outcome.error)}"
+                            )
+                            failed_sign_offs.append(
+                                (lens.lens, lens.agent, sign_off_outcome.error)
+                            )
             else:
                 failed_lenses.append((lens.lens, review_failure_class(result)))
             # ateles#795: a lens that owns a gate and reports its own writeback
@@ -4476,6 +4568,12 @@ class SwarmDispatcher:
         if denied_gate_writebacks:
             await self._surface_denied_gate_writebacks(
                 trigger, parent, denied_gate_writebacks
+            )
+        # 2a-ter. Surface any failed dispatcher-side sign_off (ateles#795
+        # amended ADR) — a clean verdict whose SIGNED write did not land.
+        if failed_sign_offs:
+            await self._surface_failed_sign_offs(
+                trigger, parent, failed_sign_offs
             )
 
         # 2b. Persist the captured reviews and backfill any review:<lens>
@@ -9650,6 +9748,100 @@ class SwarmDispatcher:
         except Exception as exc:
             log.error(
                 f"[{DAEMON_NAME}] denied-writeback comment failed for "
+                f"{t.repository}#{t.number}: {exc}"
+            )
+
+    async def _surface_failed_sign_offs(
+        self,
+        t: SwarmTrigger,
+        parent: int | None,
+        failed: list[tuple[str, str, str]],
+    ) -> None:
+        """Make a failed dispatcher-side sign_off() visible (ateles#795).
+
+        A CLEAN lens verdict whose signed gate write did not land is a
+        DIFFERENT failure from `_surface_denied_gate_writebacks` above: this
+        one is the dispatcher's own signed write (`IssueGateStore.sign_off`)
+        failing, not the lens's in-session `correct()` being refused. Error
+        classes only — never the underlying exception text, which can carry a
+        signed-request body, an auth header, or a filesystem path (Buteo's
+        review, ateles#795). Best-effort and idempotent on the marker; never
+        raises into the panel loop.
+        """
+        if not failed:
+            return
+        rows = "\n".join(
+            f"| `{lens}` | {agent} | {sign_off_failure_class(error)} |"
+            for lens, agent, error in sorted(failed)
+        )
+        lenses = ", ".join(f"`{lens}`" for lens, _, _ in sorted(failed))
+        log.error(
+            f"[{DAEMON_NAME}] {t.repository}#{t.number}: sign_off FAILED for "
+            f"{lenses} — the gate stays pending because the dispatcher's "
+            "signed write did not land, not because the review is outstanding"
+        )
+        try:
+            self.notifier.send(
+                f"Gate sign_off failed on {t.repository}#{t.number} for "
+                f"{lenses}. The lens reviewed cleanly and the dispatcher's "
+                "signed write did not land, so the gate reads `pending` and "
+                "merge is withheld on a review that actually completed. Check "
+                "the lens's AAuth key and the server's strict-subject "
+                "allowlist.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+        except Exception as exc:  # notifier must never crash the pipeline
+            log.error(f"[{DAEMON_NAME}] sign_off-failure notification failed: {exc}")
+
+        repo_token = _token_for_repo(t.repository)
+        if not repo_token:
+            return
+        parent_ref = f" on parent issue #{parent}" if parent else ""
+        body = (
+            f"{GATE_SIGN_OFF_FAILED_MARKER}\n"
+            "**🤖 Apis — Ateles swarm, swarm dispatcher**\n"
+            "**GATE SIGN-OFF FAILED**\n\n"
+            f"The following lens(es) completed a CLEAN review of this PR, but "
+            f"the dispatcher's signed system-of-record write did not land"
+            f"{parent_ref}:\n\n"
+            "| gate | lens agent | failure class |\n|---|---|---|\n"
+            f"{rows}\n\n"
+            "The affected `gate_status` field(s) therefore still read "
+            "`pending`. This is a WRITE failure, not a review failure — the "
+            "review ran and was clean. Merge stays withheld either way.\n\n"
+            "Raised automatically (ateles#795 amended ADR: the dispatcher "
+            "signs the gate write with the lens's own AAuth key rather than "
+            "the shared daemon bearer)."
+        )
+        url = (
+            f"https://api.github.com/repos/{t.repository}/issues/"
+            f"{t.number}/comments"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    url,
+                    params={
+                        "per_page": 100,
+                        "sort": "created",
+                        "direction": "desc",
+                    },
+                    headers=self._github_headers(t.repository),
+                )
+                resp.raise_for_status()
+                if any(
+                    GATE_SIGN_OFF_FAILED_MARKER in (c.get("body") or "")
+                    for c in resp.json()
+                ):
+                    return  # already surfaced for this PR
+                post = await client.post(
+                    url, json={"body": body}, headers=self._github_headers(t.repository)
+                )
+                post.raise_for_status()
+        except Exception as exc:
+            log.error(
+                f"[{DAEMON_NAME}] sign-off-failure comment failed for "
                 f"{t.repository}#{t.number}: {exc}"
             )
 

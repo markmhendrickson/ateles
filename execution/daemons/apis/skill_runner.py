@@ -1356,29 +1356,31 @@ async def _run_skill_once(
         log.error(f"[apis] {skill} dispatch skipped — {msg}")
         return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
-    # ateles#795 — a gate owner that cannot be ATTRIBUTED must not run silently.
-    # Running it anyway burns a full review whose verdict Neotoma will refuse,
-    # and leaves `gate_status.<lens>` at `pending` — the state that is
-    # indistinguishable from a review that never ran, which is the whole defect.
-    # Refusing BEFORE the subprocess turns that invisible loss into a named,
-    # loud failure the panel surfaces on the PR. Only gate owners are refused;
-    # an advisory lens still runs on the shared bearer exactly as before.
-    if owns_pending_gate:
-        _, _own_identity = neotoma_token_for_agent(_role)
-        identity_error = gate_writeback_identity_error(
-            _role, is_own_identity=_own_identity
-        )
-        if identity_error:
-            log.error(f"[apis] {skill} dispatch refused — {identity_error}")
-            return SkillResult(
-                skill,
-                False,
-                None,
-                "",
-                "",
-                error=identity_error,
-                provider=provider,
-            )
+    # ateles#795 amended ADR — this preflight refusal is RELAXED, not removed.
+    #
+    # It used to hard-block a gate owner from launching at all when it had no
+    # per-agent Neotoma bearer (`<ROLE>_NEOTOMA_TOKEN`): the lens's own MCP
+    # `correct()` was the only planned writeback path, and a write Neotoma
+    # would refuse for lack of attribution was worse than never running.
+    #
+    # The operator's amended decision moves the SYSTEM-OF-RECORD write off the
+    # lens's MCP session entirely: `swarm_dispatch` now calls
+    # `IssueGateStore.sign_off()` (`gate_waive.py`) after a clean verdict,
+    # which signs the write with the LENS's own AAuth keypair via
+    # `neotoma_signed.signed_request` — not the lens's MCP bearer, and not the
+    # daemon's shared bearer either. A lens's in-session `correct()` is now
+    # best-effort / advisory only (the GATE WRITEBACK prompt block still asks
+    # for it, as a belt-and-suspenders attempt), so the absence of a per-agent
+    # MCP bearer is no longer a reason to refuse the launch — refusing here
+    # would leave pm/arch/ux permanently unable to run, which is the second
+    # failure this amendment exists to fix (the operator's decision comment
+    # names this explicitly: provisioning `<ROLE>_NEOTOMA_TOKEN` "routes
+    # around the design rather than implementing it").
+    #
+    # `gate_writeback_identity_error` / `neotoma_token_for_agent` are kept
+    # (still exercised by their own unit tests) for any OTHER caller that
+    # still needs to refuse a write attempted as the wrong principal — this
+    # call site just no longer treats their answer as a launch gate.
 
     try:
         skill_md = skill_path.read_text(encoding="utf-8")
@@ -1496,8 +1498,12 @@ async def _run_skill_once(
         ).rstrip("/")
         # ateles#795: prefer the ROLE's own Neotoma principal. Falls back to the
         # shared daemon bearer, so every agent without its own credential behaves
-        # exactly as before; a gate owner that needs attribution has already been
-        # refused upstream by the `owns_pending_gate` preflight.
+        # exactly as before. A gate owner is NOT refused here for lacking one
+        # (amended ADR): the system-of-record write is now the dispatcher's
+        # `IssueGateStore.sign_off`, signed with the lens's own AAuth key,
+        # independent of this MCP session's bearer. This session's own
+        # `correct()` call (if the lens attempts it per the GATE WRITEBACK
+        # prompt block) is best-effort only and may land on the shared bearer.
         _neotoma_token, _ = neotoma_token_for_agent(_role)
         if not _neotoma_token:
             # Unlike the harness_event writer above, this is not a
@@ -1979,9 +1985,18 @@ async def run_skill(
     Passing ``provider`` pins the invocation to one adapter, primarily for
     diagnostics and focused tests.
 
-    ``owns_pending_gate`` (ateles#795): the run must be able to record a durable
-    verdict as ITSELF. Without its own Neotoma credential the run is refused
-    rather than started, so a verdict cannot evaporate into a `pending` gate.
+    ``owns_pending_gate`` (ateles#795): True when this run is seated because it
+    OWNS a pending pre-impl gate (pm/arch/ux). Historically this refused the
+    run outright when the role had no per-agent Neotoma credential, because
+    the lens's own in-session `correct()` was the only writeback path and a
+    write Neotoma would refuse for lack of attribution was worse than not
+    running. The amended ADR moves the system-of-record write to the
+    dispatcher (`gate_waive.IssueGateStore.sign_off`, signed with the lens's
+    own AAuth key, independent of this session), so this flag no longer gates
+    the launch — it is threaded through to `_run_skill_once` for any caller
+    that still wants to distinguish a gate-owning run from an advisory one
+    (e.g. logging), and MUST NOT be reintroduced as a hard launch refusal
+    without re-litigating the amended ADR on ateles#795.
     """
     async def attempt(selected: str) -> SkillResult:
         return await _run_skill_once(
