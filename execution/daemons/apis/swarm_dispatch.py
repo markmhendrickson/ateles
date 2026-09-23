@@ -3785,8 +3785,8 @@ class SwarmDispatcher:
                 f"Issue {ref}: additive spec assembled in order "
                 f"({', '.join(completed) or 'none'}); Lanius"
                 f"{'✓' if lanius.ok else '✗'}. "
-                f"Spec is ready ({reason}). {spec_action} "
-                "No PR opened; nothing auto-merged.",
+                f"Spec is ready and awaiting `build` approval ({reason}). "
+                f"{spec_action} No PR opened; nothing auto-merged.",
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
                 dedupe_key=spec_ready_key,
