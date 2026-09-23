@@ -126,8 +126,11 @@ class TestVerdictPositionFailsClosed:
         )
         assert _warranted(stdout, "pavo") is True
 
-    def test_no_header_and_a_single_clear_verdict_clears(self):
-        assert _warranted("**SIGNED_OFF**\nno concerns", "pavo") is True
+    def test_no_header_and_a_single_clear_verdict_does_not_clear(self):
+        """Inverted at bf97b1a4 (both security runs, BLOCKING): a verdict
+        counts only from the lens's own header; there is no headerless
+        path."""
+        assert _warranted("**SIGNED_OFF**\nno concerns", "pavo") is False
 
 
 # ── 2. Every seated lens is denied `correct` (dispatcher security run) ──────

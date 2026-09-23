@@ -245,8 +245,18 @@ class TestAmbiguousVerdictDoesNotClear:
         assert swarm_dispatch.sign_off_is_warranted("**COMMENT**\nobservation only", lens_agent="pavo") is False
 
     def test_clean_explicit_clear_tokens_still_clear(self):
-        assert swarm_dispatch.sign_off_is_warranted("**SIGNED_OFF**\nno concerns", lens_agent="pavo") is True
-        assert swarm_dispatch.sign_off_is_warranted("**APPROVE**\nlgtm", lens_agent="pavo") is True
+        """Under the lens's own header (a headerless verdict no longer counts:
+        both security runs at bf97b1a4)."""
+        header = "**🤖 Pavo — Ateles swarm, pm gate owner**\n"
+        assert swarm_dispatch.sign_off_is_warranted(
+            header + "**SIGNED_OFF**\nno concerns", lens_agent="pavo"
+        ) is True
+        assert swarm_dispatch.sign_off_is_warranted(
+            header + "**APPROVE**\nlgtm", lens_agent="pavo"
+        ) is True
+        assert swarm_dispatch.sign_off_is_warranted(
+            "**SIGNED_OFF**\nno concerns", lens_agent="pavo"
+        ) is False
 
 
 # ── 2. A failed sign-off never leaves the gate cleared (security B2) ────────

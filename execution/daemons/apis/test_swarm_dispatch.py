@@ -1406,6 +1406,13 @@ def test_handle_pr_panel_loop_clean_verdict_calls_sign_off(monkeypatch):
 
     monkeypatch.setattr(swarm_dispatch.IssueGateStore, "sign_off", fake_sign_off)
 
+    # Which gates to sign comes from the LIVE record now (PR #1181, qa/legal
+    # gap), not from Lanius's report: the record reads `arch` pending.
+    async def fake_live(self, repository, issue_number):
+        return {"pm": "signed_off", "ux": "signed_off", "arch": "pending"}
+
+    monkeypatch.setattr(SwarmDispatcher, "_live_gate_status", fake_live)
+
     d = _pr_dispatcher_with_stubs(
         monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
     )
@@ -1423,7 +1430,14 @@ def test_handle_pr_panel_loop_clean_verdict_calls_sign_off(monkeypatch):
         if skill == "vanellus":
             return SkillResult(skill, True, 0, "**APPROVE**\nlgtm", "")
         if skill == "waxwing":
-            return SkillResult(skill, True, 0, "**SIGNED_OFF**\nno concerns", "")
+            return SkillResult(
+                skill,
+                True,
+                0,
+                "**🤖 Waxwing — Ateles swarm, arch lens panelist**\n"
+                "**SIGNED_OFF**\nno concerns",
+                "",
+            )
         return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill_gate_pending)
@@ -4764,8 +4778,9 @@ def test_additive_spec_pr_opened_is_info_priority(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(swarm_dispatch, "select_expectation_agents",
                         lambda *a, **kw: [])
-    # ateles#460: _gates_green is async and takes (lanius, repository, number).
-    async def _always_green(self, lanius, repository, issue_number):
+    # ateles#460: _gates_green is async and takes (lanius, repository, number),
+    # plus the trigger/head keywords its reverted-gate surface uses.
+    async def _always_green(self, lanius, repository, issue_number, **kwargs):
         return True
 
     monkeypatch.setattr(SwarmDispatcher, "_gates_green", _always_green)
@@ -7214,9 +7229,12 @@ def test_sign_off_is_warranted_requires_explicit_clear_token():
         is False
     )
 
-    # The only warranted shapes: an explicit clear token, clean body.
-    assert sign_off_is_warranted("**SIGNED_OFF**\nno concerns", lens_agent="pavo") is True
-    assert sign_off_is_warranted("**APPROVE**\nlgtm", lens_agent="pavo") is True
+    # The only warranted shapes: an explicit clear token under the lens's own
+    # header, clean body (no headerless path since bf97b1a4's security runs).
+    header = "**🤖 Pavo — Ateles swarm, pm gate owner**\n"
+    assert sign_off_is_warranted(header + "**SIGNED_OFF**\nno concerns", lens_agent="pavo") is True
+    assert sign_off_is_warranted(header + "**APPROVE**\nlgtm", lens_agent="pavo") is True
+    assert sign_off_is_warranted("**SIGNED_OFF**\nno concerns", lens_agent="pavo") is False
     # `COMMENT` ("observations only") names no gate decision, so it does not
     # clear a gate (second security run, PR #1181: only an explicit clear
     # token may). See test_gate_sign_off_fail_closed.py for the mixed-verdict
@@ -10627,15 +10645,26 @@ class TestCallersTreatAFailedSignOffAsNotCleared:
         async def fake_load(self, repo, issue_number):
             return _Cleared()
 
+        # The pre-panel live read, which decides what to sign, shows `arch`
+        # pending; the re-read after the failed sign_off shows it cleared.
+        async def fake_live(self, repository, issue_number):
+            return {"pm": "signed_off", "ux": "signed_off", "arch": "pending"}
+
         monkeypatch.setattr(swarm_dispatch.IssueGateStore, "sign_off", fake_sign_off)
         monkeypatch.setattr(swarm_dispatch.IssueGateStore, "load", fake_load)
+        monkeypatch.setattr(SwarmDispatcher, "_live_gate_status", fake_live)
         d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls)
 
         async def fake_run_skill(skill, prompt, **kwargs):
             if skill == "lanius":
                 return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear\nGATE_PENDING: arch", "")
             if skill == "waxwing":
-                return SkillResult(skill, True, 0, "**SIGNED_OFF**\nno concerns", "")
+                return SkillResult(
+                    skill, True, 0,
+                    "**🤖 Waxwing — Ateles swarm, arch lens panelist**\n"
+                    "**SIGNED_OFF**\nno concerns",
+                    "",
+                )
             return SkillResult(skill, True, 0, "**APPROVE**\nlgtm", "")
 
         original_prompt = SwarmDispatcher._vanellus_prompt

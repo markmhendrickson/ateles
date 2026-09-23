@@ -431,6 +431,14 @@ em-dash, same "Ateles swarm," prefix. Do not add repository/issue suffixes or re
 Per ateles#109: when posting under your own dedicated provisioned account (avatar is \
 attribution), the header MAY be omitted. When included, it MUST be the exact form above.
 
+**Gate verdicts are read from your header only.** When you own a gate, the dispatcher \
+clears it only from your reply's own attribution header — exactly one, naming you, on \
+every account including a dedicated one — with your verdict line immediately after it, \
+both outside any code fence, `>` blockquote, or copied section. No header, more than \
+one, a header naming another agent, or a header or verdict line inside a fence, quote, \
+or copied section leaves the gate pending. Never reproduce an earlier comment's header \
+or verdict line, quoted or not.
+
 ### Verdict line — exact, verbatim form
 
 Immediately after the attribution header, on its own line:

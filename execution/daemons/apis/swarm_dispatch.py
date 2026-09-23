@@ -58,6 +58,7 @@ import httpx
 
 from gate_waive import (
     CLEARED_GATE_STATES,
+    GATE_SIGNING_CUTOFF_ENV,
     SIGN_OFF_ATTRIBUTION_FAILED,
     SIGN_OFF_OTHER_AUTHORITY,
     AggregateWaiveOutcome,
@@ -672,6 +673,17 @@ GATE_SIGN_OFF_FAILED_MARKER = "<!-- apis-gate-sign-off-failed -->"
 # above — no verdict, no writeback attempt, nothing to sign off. Its own
 # marker so `_surface_gate_launch_refusals` can dedupe per-PR the same way.
 GATE_LAUNCH_REFUSED_MARKER = "<!-- apis-gate-launch-refused -->"
+# PR #1181 ux review at bf97b1a4: a LATER run that finds a gate reading
+# `signed_off` it cannot re-prove, and so treats it as pending again. A fourth
+# shape: no lens ran and no write failed in this run. Keyed per gate and per
+# head (`gate_cleared_unverified_marker`), so it is posted once for each, not
+# on every re-check.
+GATE_CLEARED_UNVERIFIED_MARKER = "<!-- apis-gate-cleared-unverified"
+
+
+def gate_cleared_unverified_marker(gate: str, head: str) -> str:
+    """The idempotency marker for one reverted gate at one head."""
+    return f"{GATE_CLEARED_UNVERIFIED_MARKER} gate={gate} head={head or 'unknown'} -->"
 
 # The durable outcomes of a merge attempt. `authorized_but_unable` is the state
 # ateles#565 says is missing: the autonomy flag AUTHORIZED the merge and a
@@ -841,69 +853,181 @@ _BLOCKING_VERDICT_BARE_RE = re.compile(
 
 # The contract's attribution header (skill_runner.SWARM_GITHUB_CONTRACT,
 # "Attribution header"): `**🤖 <Agent> — Ateles swarm, <role>**` on its own line.
-# Matched loosely on purpose (any line that LOOKS like a header counts), so a
-# quoted header inside a blockquote or a fence is still counted as a header:
-# `lens_own_verdict` refuses when it sees more than one.
-_ATTRIBUTION_HEADER_RE = re.compile(r"^[\s>]*\*\*🤖[^\n]*Ateles swarm,[^\n]*\*\*\s*$")
-# The agent name a header carries: the text between the robot and the dash.
-_ATTRIBUTION_HEADER_NAME_RE = re.compile(r"\*\*🤖\s*([^\s—–-][^—–-]*?)\s*[—–-]+\s*Ateles swarm,")
-# The contract's verdict line: a bold verdict token alone on its line. A
-# blockquote prefix (`> **APPROVE**`) still counts, so a quoted verdict line is
-# seen as a second verdict line rather than skipped.
-_VERDICT_LINE_RE = re.compile(
-    r"^[\s>]*\*\*(" + "|".join(re.escape(tok) for tok in REVIEW_VERDICT_TOKENS) + r")\*\*\s*$",
-    re.I,
+# `_HEADER_CANDIDATE_RE` matches anything that LOOKS like a header (so a
+# malformed one, e.g. missing the comma, is still counted and refused);
+# `_OWN_HEADER_RE` is the well-formed header a verdict can be read under.
+_HEADER_CANDIDATE_RE = re.compile(r"^\s*\*\*\s*🤖")
+_OWN_HEADER_RE = re.compile(
+    r"^\*\*🤖\s*(?P<name>[^\s—–-][^—–\-\n]*?)\s*[—–-]+\s*Ateles swarm,"
+    r"\s*(?P<role>[^\n]*?\S)\s*\*\*\s*$"
 )
+# The contract's verdict line: a bold verdict token alone on its line.
+_VERDICT_TOKEN_ALT = "|".join(re.escape(tok) for tok in REVIEW_VERDICT_TOKENS)
+_VERDICT_LINE_RE = re.compile(r"^\*\*(" + _VERDICT_TOKEN_ALT + r")\*\*\s*$", re.I)
+# Anything else that reads as a verdict statement, in the forms lenses have
+# actually written off-contract: `**COMMENT** — observations only`,
+# `Verdict: COMMENT`, `__COMMENT__`, `**COMMENT.**`, `### COMMENT`,
+# `** COMMENT **` (second security run at bf97b1a4). Upper-case tokens only, so
+# prose that happens to start with "Approve" is not counted.
+_VERDICT_LIKE_RE = re.compile(
+    r"^[#*_\s]*(?:(?i:verdict)\s*[:=—–-]\s*)?[#*_\s]*(?:"
+    + _VERDICT_TOKEN_ALT
+    + r")(?![A-Za-z0-9]|_[A-Za-z0-9])"
+)
+# Markdown code fences: a run of 3+ backticks or tildes, indented at most 3.
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+# Copied sections a lens reproduces rather than authors: the spec pipeline's
+# `<<<SPEC_SECTION>>>` / `<<<DESIGN_BASIS>>>` spans (whose text is built from
+# the author-controlled issue body), and the dispatcher's own `----- X -----`
+# ... `----- END X -----` delimiters (issue description, spec so far, inline
+# panel reviews) should a lens echo them.
+_ANGLE_SPAN_OPEN_RE = re.compile(r"^\s*<<<(?!END_)([A-Z_]+)>>>\s*$")
+_DASH_SPAN_OPEN_RE = re.compile(r"^\s*-{5}\s+(?!END\b)(.+?)\s+-{5}\s*$")
+
+
+def _classify_quoted_lines(lines: list[str]) -> list[bool]:
+    """Per line, True when it sits in quoted or copied text, not the lens's own.
+
+    Quoted means: inside a code fence (the fence lines included), a blockquote
+    (`>`), an indented code block (a tab or 4+ spaces), a multi-line HTML
+    comment, or a copied span (`<<<X>>>` … `<<<END_X>>>`, `----- X -----` …
+    `----- END X -----`; the delimiter lines included). An unclosed fence or
+    span runs to the end of the output, so a truncated quotation is never
+    read as the lens's own text.
+    """
+    quoted: list[bool] = []
+    fence: tuple[str, int] | None = None
+    span_close: re.Pattern[str] | None = None
+    in_html_comment = False
+    for line in lines:
+        if fence is not None:
+            quoted.append(True)
+            m = _FENCE_OPEN_RE.match(line)
+            if (
+                m
+                and m.group(1)[0] == fence[0]
+                and len(m.group(1)) >= fence[1]
+                and not line.strip().lstrip(fence[0])
+            ):
+                fence = None
+            continue
+        if span_close is not None:
+            quoted.append(True)
+            if span_close.match(line):
+                span_close = None
+            continue
+        if in_html_comment:
+            quoted.append(True)
+            if "-->" in line:
+                in_html_comment = False
+            continue
+        m = _FENCE_OPEN_RE.match(line)
+        if m:
+            fence = (m.group(1)[0], len(m.group(1)))
+            quoted.append(True)
+            continue
+        m = _ANGLE_SPAN_OPEN_RE.match(line)
+        if m:
+            span_close = re.compile(r"^\s*<<<END_" + re.escape(m.group(1)) + r">>>\s*$")
+            quoted.append(True)
+            continue
+        m = _DASH_SPAN_OPEN_RE.match(line)
+        if m:
+            span_close = re.compile(
+                r"^\s*-{5}\s+END\s+" + re.escape(m.group(1)) + r"\s+-{5}\s*$"
+            )
+            quoted.append(True)
+            continue
+        stripped = line.lstrip(" ")
+        if (
+            stripped.startswith(">")
+            or line.startswith("\t")
+            or len(line) - len(stripped) >= 4
+        ):
+            quoted.append(True)
+            continue
+        opened = line.rfind("<!--")
+        if opened != -1 and "-->" not in line[opened:]:
+            in_html_comment = True
+            quoted.append(True)
+            continue
+        quoted.append(False)
+    return quoted
+
+
+def _quoted_line_is_verdict_or_header(line: str) -> bool:
+    """A quoted line that carries a header or a verdict line once unquoted."""
+    body = re.sub(r"^(?:\s*>)+", "", line).strip()
+    return bool(_HEADER_CANDIDATE_RE.match(body) or _VERDICT_LINE_RE.match(body))
 
 
 def lens_own_verdict(stdout: str | None, *, lens_agent: str) -> str | None:
     """The lens's OWN verdict, or None when it cannot be singled out.
 
     `skill_runner.SWARM_GITHUB_CONTRACT` ("Verdict line") puts exactly one
-    verdict on its own line immediately after the attribution header, one per
-    comment. This reads the output as the contract defines it and refuses
-    (returns None) whenever the output holds more than one candidate:
+    verdict on its own line immediately after the attribution header. A
+    verdict counts ONLY from the lens's own header. This returns the verdict
+    when, and only when, all of these hold:
 
-      - more than one attribution header anywhere (a quoted earlier comment
-        carries its own header) — None;
-      - more than one standalone verdict line anywhere, including inside a
-        fence or a blockquote (a quoted earlier round's verdict line) — None;
-      - one header that does not name *lens_agent* — None (the verdict is
-        someone else's);
-      - one header whose next non-blank line is not that single verdict
-        line — None.
+      - exactly ONE attribution header appears outside quoted or copied text
+        (code fences, blockquotes, indented code, HTML comments, the
+        `<<<SPEC_SECTION>>>`/`<<<DESIGN_BASIS>>>` spans, the dispatcher's
+        `----- X -----` delimiters), it is well formed, and it names
+        *lens_agent*;
+      - its next non-blank line is a verdict line, also outside quoted text;
+      - no other line outside quoted text reads as a verdict statement
+        (`Verdict: COMMENT`, `**COMMENT** — …`, `__COMMENT__`, …);
+      - no header or verdict line appears INSIDE quoted or copied text.
 
-    With no header at all (the contract allows omitting it on a dedicated
-    account), the single standalone verdict line is the verdict.
+    Anything else is None: no header, more than one, a malformed header (e.g.
+    missing the comma after "Ateles swarm"), a header naming another agent, a
+    verdict line not directly under the header, or any quoted header or
+    verdict line. A quoted clear verdict is refused rather than skipped
+    because nothing distinguishes a quotation the lens adopts from one it
+    rejects in prose.
+
+    There is no headerless path. The contract lets a lens posting from its own
+    GitHub account omit the header in the COMMENT, but this reads the lens's
+    reply, and the gate prompts require the header there on every account.
 
     History (Falco, PR #1181): the first version took the first verdict token
-    anywhere; the second took the FIRST header, or the first standalone
-    verdict line, so an output that quoted an earlier `**APPROVE**` or an
-    earlier comment's header + `**SIGNED_OFF**` before the lens's own
-    `**COMMENT**` still cleared the gate (second security run at e874537f,
-    BLOCKING). Position alone cannot tell a quotation from a verdict, so an
-    output with two candidates has no single own verdict.
+    anywhere; the second the FIRST header or first standalone verdict line;
+    the third accepted a single verdict line with no header, so a sole
+    blockquoted `> **APPROVE**`, a fenced `**SIGNED_OFF**` followed by an
+    off-format "Verdict: COMMENT", a copied issue-body `**APPROVE**` inside
+    the spec section, a header missing its comma, and the contract's own
+    quoted worked example each cleared a gate (both security runs at
+    bf97b1a4, BLOCKING).
     """
     lines = (stdout or "").splitlines()
-    header_lines = [i for i, line in enumerate(lines) if _ATTRIBUTION_HEADER_RE.match(line)]
-    verdict_lines = [
-        (i, m.group(1).lower())
-        for i, line in enumerate(lines)
-        if (m := _VERDICT_LINE_RE.match(line))
+    quoted = _classify_quoted_lines(lines)
+    if any(q and _quoted_line_is_verdict_or_header(line) for line, q in zip(lines, quoted)):
+        return None
+    headers = [
+        i for i, line in enumerate(lines) if not quoted[i] and _HEADER_CANDIDATE_RE.match(line)
     ]
-    if len(header_lines) > 1 or len(verdict_lines) != 1:
+    if len(headers) != 1:
         return None
-    verdict_at, verdict = verdict_lines[0]
-    if not header_lines:
-        return verdict
-    header_at = header_lines[0]
-    name = _ATTRIBUTION_HEADER_NAME_RE.search(lines[header_at])
-    if not name or name.group(1).strip().lower() != (lens_agent or "").strip().lower():
+    header_at = headers[0]
+    header = _OWN_HEADER_RE.match(lines[header_at])
+    if not header or header.group("name").strip().lower() != (lens_agent or "").strip().lower():
         return None
-    next_line = next(
+    verdict_at = next(
         (i for i in range(header_at + 1, len(lines)) if lines[i].strip()), None
     )
-    return verdict if next_line == verdict_at else None
+    if verdict_at is None or quoted[verdict_at]:
+        return None
+    verdict = _VERDICT_LINE_RE.match(lines[verdict_at])
+    if not verdict:
+        return None
+    verdict_like = [
+        i
+        for i, line in enumerate(lines)
+        if not quoted[i] and _VERDICT_LIKE_RE.match(_normalize_for_blocking_scan(line))
+    ]
+    if verdict_like != [verdict_at]:
+        return None
+    return verdict.group(1).lower()
 
 
 def output_has_blocking_verdict(stdout: str | None) -> bool:
@@ -930,8 +1054,8 @@ def sign_off_is_warranted(stdout: str | None, *, lens_agent: str) -> bool:
     The single predicate both dispatcher-side `sign_off` call sites use. It
     clears ONLY when all three hold:
 
-      1. the lens's OWN verdict (`lens_own_verdict`: the single verdict line,
-         under at most one attribution header, which must name *lens_agent*)
+      1. the lens's OWN verdict (`lens_own_verdict`: the verdict line directly
+         under exactly one unquoted attribution header naming *lens_agent*)
          is `SIGNED_OFF` or `APPROVE`;
       2. no blocking verdict token appears anywhere in the output
          (`output_has_blocking_verdict`);
@@ -944,7 +1068,9 @@ def sign_off_is_warranted(stdout: str | None, *, lens_agent: str) -> bool:
     `**BLOCKED**` cleared the gate (second security run, BLOCKING B1). The
     third took the first header or first verdict line, so a quoted clear
     verdict before the lens's own `**COMMENT**` still cleared (second
-    security run at e874537f). Mixed or ambiguous output now resolves to "not
+    security run at e874537f). The fourth accepted a lone quoted or copied
+    verdict line with no header (both security runs at bf97b1a4); a verdict
+    now counts only from the lens's own header. Mixed or ambiguous output now resolves to "not
     warranted" (`docs/foundation/principles.md` §§5 and 7): the gate stays
     pending and the next panel round asks again, which costs a round, never a
     false clear.
@@ -1688,6 +1814,34 @@ def attribution_header(agent: str, role: str) -> str:
     return f"**\U0001f916 {agent.capitalize()} — Ateles swarm, {role}**"
 
 
+def gate_verdict_instruction(agent: str, role: str) -> str:
+    """The verdict format every gate-owning lens prompt asks for (ateles#795).
+
+    `lens_own_verdict` reads a gate verdict ONLY from the lens's own
+    attribution header followed by its verdict line, outside any quoted or
+    copied text, so every prompt whose verdict can clear a gate says exactly
+    that. Unlike `_agent_prompt_instruction`, the header is required here on a
+    provisioned account too: the dispatcher reads the reply, not the posted
+    comment (both security runs at bf97b1a4).
+    """
+    return (
+        "GATE VERDICT (ateles#795): the dispatcher records your gate result, "
+        "signed with your own identity, ONLY from your own verdict in the "
+        "reply you return here. Your reply MUST contain your attribution "
+        f"header exactly once, `{attribution_header(agent, role)}`, with your "
+        "verdict line on the very next line: `**SIGNED_OFF**` (or "
+        "`**APPROVE**`) when the gate passes, or `**BLOCKED**` / "
+        "`**REQUEST_CHANGES**` plus a `[BLOCKING] <category>: <summary>` line "
+        "when it does not. Include the header in this reply even if you post "
+        "from your own GitHub account. Both lines must sit outside any code "
+        "fence, `>` blockquote, `<<<...>>>` section, or other copied text. Do "
+        "not reproduce an earlier comment's header or verdict line anywhere in "
+        "the reply, not even quoted or fenced. A reply with no header, more "
+        "than one, a header naming another agent, or any quoted verdict line "
+        "is read as NOT passing, and the gate stays pending."
+    )
+
+
 def compose_fallback_comment(
     lens: str, agent: str, text: str, commit_sha: str = ""
 ) -> str:
@@ -2275,6 +2429,38 @@ def gate_owner_tool_deny(
     if live_gate_status is None:
         return True
     return (live_gate_status.get(gate) or "pending").strip().lower() not in CLEARED_GATE_STATES
+
+
+def gate_awaits_sign_off(
+    gate: str,
+    live_gate_status: dict[str, str] | None,
+    *,
+    unproven: set[str] | frozenset[str] = frozenset(),
+) -> bool:
+    """Whether a seated lens's clean verdict should be signed for *gate*.
+
+    Decided from the LIVE `gate_status` read, not from Lanius's report, for
+    every gate a lens owns — `qa` and `legal` included, which Lanius never
+    reports (#1181 known gap: with the lens's own `correct` denied, the
+    dispatcher's signed write is their only path to clear). True when the
+    record reads the gate `pending`, or when it reads `signed_off` but the
+    re-proof could not tie that value to the owner (*unproven*), so the owner
+    re-signs it. An ABSENT pre-impl gate reads as pending (the convention
+    `gate_owner_tool_deny` applies); an absent `qa`/`legal` gate is not part of
+    this issue's workflow and is not added. False with no gate, and when the
+    record could not be read (*live_gate_status* is None): nothing is signed
+    against an unknown record, the gate stays as it is, and the next round
+    asks again.
+    """
+    gate = (gate or "").strip().lower()
+    if not gate or live_gate_status is None:
+        return False
+    if gate in unproven:
+        return True
+    value = live_gate_status.get(gate)
+    if value is None or not str(value).strip():
+        return gate in PRE_IMPL_GATES
+    return str(value).strip().lower() == "pending"
 
 
 # ── Gate-owner launch-refusal surface (ateles#795, PR #1181 ux [BLOCKING]) ──
@@ -4482,7 +4668,16 @@ class SwarmDispatcher:
         #    (and ultimately stops at the operator's merge approval). When OFF,
         #    STOP and notify that the spec is ready awaiting `build` approval.
         gates_green = await self._gates_green(
-            lanius, trigger.repository, trigger.number
+            lanius,
+            trigger.repository,
+            trigger.number,
+            trigger=trigger,
+            # The same content-derived "head" the pm sign_off above names:
+            # an issue has no commit, so its reverted-gate surface is keyed on
+            # the issue content it was judged against.
+            head=content_digest(
+                [trigger.repository, trigger.number, trigger.title, trigger.body]
+            ),
         )
         if gates_green and failed_sign_offs:
             # A failed sign_off is NOT a cleared gate, whatever the re-read
@@ -4565,37 +4760,75 @@ class SwarmDispatcher:
     async def _unverified_signed_off_gates(
         self, repository: str, issue_number: int | None
     ) -> set[str]:
-        """Pre-impl gates reading `signed_off` with no provable owner sign-off.
+        """Pre-impl gates to treat as pending because a `signed_off` is unproven.
 
-        Empty when there is no parent issue or no issue entity (nothing can
-        read `signed_off`). A failed read returns every pre-impl gate, so
-        their owners are seated and merge authorization sees them pending;
-        the post-panel `_refresh_pending_gates` narrows that again once the
-        record can be read.
+        The first half of `_reprove_signed_off_gates`, for callers that only
+        seat owners and do not surface the reverts.
+        """
+        pending, _reverted = await self._reprove_signed_off_gates(
+            repository, issue_number
+        )
+        return pending
+
+    async def _reprove_signed_off_gates(
+        self, repository: str, issue_number: int | None
+    ) -> tuple[set[str], set[str]]:
+        """(gates to hold pending, gates reverted from a proven-unproven read).
+
+        Pre-impl gates reading `signed_off` with no provable owner sign-off
+        are held pending, and also returned as REVERTED so the caller can say
+        so on the PR (`_surface_unverified_signed_off_gates`).
+
+        Empty when there is no parent issue or the read SUCCEEDED and found no
+        issue entity (nothing can read `signed_off`). A failed or inconclusive
+        read (`IssueGateState.read_failed`, or a `load` that raises) holds
+        every pre-impl gate pending, so their owners are seated and merge
+        authorization sees them pending; the post-panel
+        `_refresh_pending_gates` narrows that again once the record can be
+        read. Nothing is reported as reverted on a failed read: what the gate
+        read is unknown.
+
+        Second security run at bf97b1a4: `load` does not raise on a transport
+        failure; it returned an empty state with `found == False`, which this
+        treated as "no entity" and returned nothing, so pre-panel seating
+        failed open.
         """
         if not issue_number:
-            return set()
+            return set(), set()
         ref = f"{repository}#{issue_number}"
         try:
             store = IssueGateStore(
                 self.config.neotoma_base_url, self.config.neotoma_token
             )
             state = await store.load(repository, issue_number)
+            if getattr(state, "read_failed", False):
+                log.warning(
+                    f"[{DAEMON_NAME}] {ref}: gate_status read failed — treating "
+                    "every pre-impl gate as pending for this panel"
+                )
+                return set(PRE_IMPL_GATES), set()
             if not state.found:
-                return set()
-            return await store.unverified_signed_off_gates(
+                return set(), set()
+            unproven = await store.unverified_signed_off_gates(
                 state, PRE_IMPL_GATE_OWNERS
             )
+            return set(unproven), set(unproven)
         except Exception as exc:  # noqa: BLE001 — fail closed, never crash
             log.warning(
                 f"[{DAEMON_NAME}] {ref}: could not re-verify signed_off gates "
                 f"({type(exc).__name__}) — treating every pre-impl gate as "
                 "pending for this panel"
             )
-            return set(PRE_IMPL_GATES)
+            return set(PRE_IMPL_GATES), set()
 
     async def _refresh_pending_gates(
-        self, repository: str, parent: int | None, snapshot: set[str]
+        self,
+        repository: str,
+        parent: int | None,
+        snapshot: set[str],
+        *,
+        trigger: SwarmTrigger | None = None,
+        head: str = "",
     ) -> set[str]:
         """Re-read `gate_status` from the system of record at DECISION time.
 
@@ -4613,10 +4846,18 @@ class SwarmDispatcher:
         (`_gates_green` reads the entity rather than Lanius's report of it),
         applied to the PR-panel path where it was never carried over.
 
-        Fails SAFE by returning the snapshot unchanged: a read failure must not
-        silently CLEAR a gate. Narrowing only ever happens on a successful read
-        of the record, so the worst case here is the status quo — a stale block
-        the operator can see — never an unearned merge.
+        Fails SAFE: a read failure must not silently CLEAR a gate. Narrowing
+        only ever happens on a successful read of the record. A failed or
+        inconclusive re-read (a `load` that raises, or
+        `IssueGateState.read_failed`) holds EVERY pre-impl gate pending for
+        merge authorization, on top of the snapshot (second security run at
+        bf97b1a4); a read that succeeds and finds no entity keeps the
+        snapshot. The worst case is a block the operator can see, never an
+        unearned merge.
+
+        With *trigger*, a `signed_off` gate this re-read cannot re-prove is
+        also surfaced on the PR (`_surface_unverified_signed_off_gates`), keyed
+        on *head*.
         """
         if not parent or not snapshot:
             return snapshot
@@ -4629,10 +4870,15 @@ class SwarmDispatcher:
         except Exception as exc:  # noqa: BLE001 — never crash the pipeline
             log.warning(
                 f"[{DAEMON_NAME}] {ref}: live gate_status re-read failed "
-                f"({exc}) — keeping the pre-panel snapshot "
-                f"({', '.join(sorted(snapshot))})"
+                f"({type(exc).__name__}) — holding every pre-impl gate pending"
             )
-            return snapshot
+            return set(snapshot) | set(PRE_IMPL_GATES)
+        if getattr(state, "read_failed", False):
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: live gate_status re-read failed — "
+                "holding every pre-impl gate pending"
+            )
+            return set(snapshot) | set(PRE_IMPL_GATES)
         if not state.found:
             log.warning(
                 f"[{DAEMON_NAME}] {ref}: no issue entity on re-read — keeping "
@@ -4658,9 +4904,14 @@ class SwarmDispatcher:
         }
         if owned:
             try:
-                still_pending |= await store.unverified_signed_off_gates(
-                    state, owned
+                reverted = set(
+                    await store.unverified_signed_off_gates(state, owned)
                 )
+                still_pending |= reverted
+                if trigger is not None and reverted:
+                    await self._surface_unverified_signed_off_gates(
+                        trigger, parent, reverted, head
+                    )
             except Exception as exc:  # noqa: BLE001 — keep them pending
                 log.warning(
                     f"[{DAEMON_NAME}] {ref}: could not re-verify signed_off "
@@ -4678,7 +4929,13 @@ class SwarmDispatcher:
         return still_pending
 
     async def _gates_green(
-        self, lanius: SkillResult, repository: str, issue_number: int
+        self,
+        lanius: SkillResult,
+        repository: str,
+        issue_number: int,
+        *,
+        trigger: SwarmTrigger | None = None,
+        head: str = "",
     ) -> bool:
         """Whether every pre-impl gate is cleared in the SYSTEM OF RECORD.
 
@@ -4700,6 +4957,10 @@ class SwarmDispatcher:
         fails — but silence no longer passes. Fails CLOSED when the entity
         cannot be read: declining to build costs a delay, building on unsigned
         gates costs a PR nobody authorised.
+
+        With *trigger*, a `signed_off` gate that cannot be re-proven is also
+        surfaced on the issue (`_surface_unverified_signed_off_gates`), keyed
+        on *head*.
         """
         if not lanius.ok:
             return False
@@ -4719,6 +4980,12 @@ class SwarmDispatcher:
             )
             return False
 
+        if getattr(state, "read_failed", False):
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: gate_status read failed — treating "
+                "gates as NOT green (fail closed)"
+            )
+            return False
         if not state.found:
             log.warning(
                 f"[{DAEMON_NAME}] {ref}: no issue entity, so no gate_status to "
@@ -4761,6 +5028,10 @@ class SwarmDispatcher:
                 "signed_off without an observation signed by the owning lens — "
                 "not handing off to build"
             )
+            if trigger is not None:
+                await self._surface_unverified_signed_off_gates(
+                    trigger, issue_number, set(unverified), head
+                )
             return False
         return True
 
@@ -5195,9 +5466,23 @@ class SwarmDispatcher:
         # reads as cleared to it, so its owner would never be seated to
         # re-sign it (second security run at e874537f, N2). Re-prove each one
         # from provenance and treat an unproven one as pending.
-        pending_gates |= await self._unverified_signed_off_gates(
+        reproved_pending, reverted_gates = await self._reprove_signed_off_gates(
             trigger.repository, parent
         )
+        pending_gates |= reproved_pending
+        if reverted_gates:
+            # A gate that read `signed_off` is being walked back to pending:
+            # say so on the PR, before any early return below, so the owner's
+            # re-seating is never mistaken for a fresh review (PR #1181 ux
+            # review at bf97b1a4, REQUEST_CHANGES).
+            await self._surface_unverified_signed_off_gates(
+                trigger,
+                parent,
+                reverted_gates,
+                _normalise_full_sha(
+                    trigger.head_sha or (await self._pr_head_sha(trigger)) or ""
+                ),
+            )
         if verdict == "blocked":
             # ateles#230: on the FIRST look a gate-blocked PR should skip the
             # panel — nothing has been reviewed, so there is no finding to
@@ -5301,6 +5586,14 @@ class SwarmDispatcher:
         # incomplete-panel notice.
         gate_launch_refusals: list[tuple[str, str, str]] = []
         for lens in panel:
+            # Whether this seat's clean verdict is signed for its gate, decided
+            # from the LIVE record (and the pre-panel re-proof), never from
+            # Lanius's report: Lanius reports the pre-impl gates only, so qa
+            # (Phoenicurus) and legal (Buteo) could never clear once the
+            # `correct` deny took away their own writes (#1181 known gap).
+            signs_gate = bool(parent) and gate_awaits_sign_off(
+                lens.gate, live_gates, unproven=reverted_gates
+            )
             # QE3: the qa lens (Phoenicurus) authors + runs an eval, so it needs a
             # writable PR-branch checkout as its cwd. Other lenses stay diff-only
             # (cwd=None). Best-effort: prep failure → diff-only fallback, no stall.
@@ -5364,7 +5657,7 @@ class SwarmDispatcher:
                 # gate simply stays pending for the next round, which is the
                 # pre-existing degraded state (never a NEW failure mode) — but
                 # it IS surfaced, never swallowed silently.
-                if parent and lens.gate and lens.lens in pending_gates:
+                if signs_gate:
                     if not sign_off_is_warranted(
                         result.stdout, lens_agent=lens.agent
                     ):
@@ -5418,7 +5711,7 @@ class SwarmDispatcher:
                 # advisory lens hitting the same class has no gate riding on
                 # it, so it stays on the existing generic path.
                 if (
-                    lens.lens in pending_gates
+                    (lens.lens in pending_gates or signs_gate)
                     and failure_class in GATE_LAUNCH_REFUSAL_CLASSES
                 ):
                     gate_launch_refusals.append(
@@ -5430,7 +5723,7 @@ class SwarmDispatcher:
             # was refused must not leave the gate merely `pending`. Recorded per
             # lens here, surfaced on the PR below, so "silenced" is legible as
             # something other than "not yet reviewed".
-            if lens.lens in pending_gates and detect_gate_writeback_denial(
+            if (lens.lens in pending_gates or signs_gate) and detect_gate_writeback_denial(
                 result.stdout, result.stderr
             ):
                 denied_gate_writebacks.append((lens.lens, lens.agent))
@@ -5537,7 +5830,11 @@ class SwarmDispatcher:
         #     decision. `pending_gates` above is a PRE-panel snapshot, and the
         #     panel is what clears gates — see _refresh_pending_gates.
         pending_gates = await self._refresh_pending_gates(
-            trigger.repository, parent, pending_gates
+            trigger.repository,
+            parent,
+            pending_gates,
+            trigger=trigger,
+            head=review_head,
         )
         # A failed sign_off is NOT a cleared gate, whatever that re-read shows
         # (Falco's second security run, BLOCKING B2, PR #1181): the record can
@@ -9082,21 +9379,23 @@ class SwarmDispatcher:
             f"`{EXPECTATION_MARKER}` comments on the issue first — they are "
             "the review contract for this issue.\n\n"
             "VERDICT RULE (ateles#112; writeback path amended by ateles#795): "
-            "state your verdict as a PLAIN GitHub comment ONLY. The dispatcher "
-            "— never this session — records the system-of-record gate "
-            "clearance, signed with your own AAuth identity, after reading "
-            "your verdict comment. You have no durable write to make here; "
-            "your product is the comment.\n"
+            "state your verdict in ONE GitHub comment on the issue, in the "
+            "contract's format (attribution header, then the verdict line), "
+            "and repeat that header and verdict line in your reply here. The "
+            "dispatcher — never this session — records the system-of-record "
+            "gate clearance, signed with your own AAuth identity, after "
+            "reading your verdict. You have no durable write to make here.\n"
             "- When scoping PASSES — intent is clear, acceptance criteria "
-            "exist, and scope is adequately bounded — post ONE comment "
-            "confirming the pm gate passes, with a brief summary of what you "
-            "validated. Carry NO `[BLOCKING]` marker in that comment.\n"
+            "exist, and scope is adequately bounded — the verdict line is "
+            "`**SIGNED_OFF**`, followed by a brief summary of what you "
+            "validated. Carry NO `[BLOCKING]` marker.\n"
             "- Only when scoping GENUINELY FAILS — missing intent, no "
-            "acceptance criteria, or scope unclear — post a comment with a "
-            "`[BLOCKING] scope: <what is missing>` line explaining exactly "
-            "what the author must address. Do NOT leave pm looking passed "
-            "after a successful evaluation — a pending pm gate is a deadlock "
-            "for any PR that closes this issue.\n\n"
+            "acceptance criteria, or scope unclear — the verdict line is "
+            "`**BLOCKED**`, with a `[BLOCKING] scope: <what is missing>` line "
+            "explaining exactly what the author must address. Do NOT leave pm "
+            "looking passed after a successful evaluation — a pending pm gate "
+            "is a deadlock for any PR that closes this issue.\n\n"
+            f"{gate_verdict_instruction('pavo', 'pm gate owner')}\n\n"
             f"{_agent_prompt_instruction('pavo', 'pm gate owner')}"
         )
 
@@ -9186,23 +9485,26 @@ class SwarmDispatcher:
             # verified lens sign-off.
             pm_gate_block = (
                 "\n\nGATE (verdict via comment, not spec): state your verdict "
-                "as a PLAIN GitHub comment on the issue ONLY. The dispatcher "
-                "— never this session — records the system-of-record gate "
-                "clearance, signed with your own AAuth identity, after "
-                "reading your verdict comment. You have no durable write to "
-                "make here.\n"
+                "in ONE GitHub comment on the issue, in the contract's format "
+                "(attribution header, then the verdict line), and repeat that "
+                "header and verdict line in your reply here, AFTER every "
+                "`<<<...>>>` section and outside them. The dispatcher — never this "
+                "session — records the system-of-record gate clearance, "
+                "signed with your own AAuth identity, after reading your "
+                "verdict. You have no durable write to make here.\n"
                 "- When scoping PASSES — intent is clear, acceptance "
-                "criteria exist, scope is adequately bounded — post ONE "
-                "short comment stating the pm gate passes, with a one-line "
-                "summary of what you validated. Carry NO `[BLOCKING]` marker "
-                "in that comment: its absence is what tells the dispatcher "
-                "to sign off the pm gate.\n"
+                "criteria exist, scope is adequately bounded — the verdict "
+                "line is `**SIGNED_OFF**`, followed by a one-line summary of "
+                "what you validated, with NO `[BLOCKING]` marker: that "
+                "header, verdict line, and absence of a blocking marker is "
+                "what tells the dispatcher to sign off the pm gate.\n"
                 "- Only when scoping GENUINELY FAILS — missing intent, no "
-                "acceptance criteria, or scope unclear — post a comment "
-                "with a `[BLOCKING] scope: <what is missing>` line explaining "
-                "exactly what the author must address. A pending pm gate "
-                "deadlocks any PR that closes this issue, so do not leave it "
-                "blocked without saying why."
+                "acceptance criteria, or scope unclear — the verdict line is "
+                "`**BLOCKED**`, with a `[BLOCKING] scope: <what is missing>` "
+                "line explaining exactly what the author must address. A "
+                "pending pm gate deadlocks any PR that closes this issue, so "
+                "do not leave it blocked without saying why.\n\n"
+                + gate_verdict_instruction(section.agent, "pm gate owner")
             )
 
         # Foundation binding (docs/foundation/conformance.md): the pm gate
@@ -9503,7 +9805,16 @@ class SwarmDispatcher:
         # this session (`skill_runner.GATE_WRITEBACK_TOOLS`), so an unsolicited
         # attempt would only hit an unanswerable approval prompt — best-effort
         # at most, never a clearance path.
-        gate_writeback_block = ""
+        #
+        # What remains is the VERDICT FORMAT the dispatcher reads (both
+        # security runs at bf97b1a4): a gate-owning lens's verdict counts only
+        # from its own header + verdict line in its reply, so every seat that
+        # owns a gate is told so.
+        gate_writeback_block = (
+            "\n\n" + gate_verdict_instruction(lens.agent, f"{lens.lens} lens panelist")
+            if lens.gate and not lens.forward_looking
+            else ""
+        )
         # Foundation binding: the reading list, keyed to this PR's paths.
         foundation_block = ""
         if not lens.forward_looking:
@@ -10787,6 +11098,121 @@ class SwarmDispatcher:
                 f"[{DAEMON_NAME}] sign-off-failure comment failed for "
                 f"{t.repository}#{t.number}: {exc}"
             )
+
+    async def _surface_unverified_signed_off_gates(
+        self,
+        t: SwarmTrigger,
+        parent: int | None,
+        gates: set[str],
+        head: str,
+    ) -> None:
+        """Say on the PR/issue that a cleared-looking gate was walked back.
+
+        PR #1181 ux review at bf97b1a4 (REQUEST_CHANGES): a later run that
+        finds `gate_status.<gate>` reading `signed_off` with no observation
+        signed by the owning lens (`IssueGateStore.unverified_signed_off_gates`)
+        treats the gate as pending and re-seats its owner, and used to say so
+        only in the dispatcher log. The operator then saw an owner re-seated
+        for a gate that had read cleared, with nothing distinguishing it from
+        a fresh review.
+
+        Posts the Design `**BLOCKED**` template with the existing
+        `gate_cleared_unverified` token and its next_action (written for this
+        exact state: the gate reads cleared without a verified sign-off), and
+        says why the value is not trusted. Once per gate per *head*: each
+        gate carries its own marker (`gate_cleared_unverified_marker`), so a
+        re-check at the same head posts nothing, and only gates not yet
+        surfaced at that head are posted. Best-effort; never raises.
+        """
+        gates = {g for g in (gates or set()) if g}
+        if not gates:
+            return
+        repo_token = _token_for_repo(t.repository)
+        if not repo_token:
+            return
+        url = (
+            f"https://api.github.com/repos/{t.repository}/issues/"
+            f"{t.number}/comments"
+        )
+        reason = "gate_cleared_unverified"
+        next_action = sign_off_next_action(reason)
+        parent_ref = f"parent issue #{parent}" if parent else "the issue"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    url,
+                    params={
+                        "per_page": 100,
+                        "sort": "created",
+                        "direction": "desc",
+                    },
+                    headers=self._github_headers(t.repository),
+                )
+                resp.raise_for_status()
+                existing = "\n".join((c.get("body") or "") for c in resp.json())
+                fresh = sorted(
+                    g
+                    for g in gates
+                    if gate_cleared_unverified_marker(g, head) not in existing
+                )
+                if not fresh:
+                    return  # already surfaced for every gate at this head
+                blocks = "\n\n".join(
+                    "**BLOCKED**\n"
+                    f"- reason: `{reason}`\n"
+                    f"- gate: `{gate}` (lens: "
+                    f"`{PRE_IMPL_GATE_OWNERS.get(gate, 'unknown')}`)\n"
+                    "- attempted: none — a read-only re-check of an earlier "
+                    "sign-off; no write was made\n"
+                    f"- observed: `gate_status.{gate}` reads `signed_off`, but "
+                    "no observation behind that value is signed by the owning "
+                    "lens's own key at a trusted attribution tier, and it was "
+                    f"not written before `{GATE_SIGNING_CUTOFF_ENV}` (unset, "
+                    "or the write came after it)\n"
+                    f"- next_action: {next_action}"
+                    for gate in fresh
+                )
+                body = (
+                    "\n".join(gate_cleared_unverified_marker(g, head) for g in fresh)
+                    + "\n**🤖 Apis — Ateles swarm, swarm dispatcher**\n\n"
+                    f"A gate on {parent_ref} READ CLEARED (`signed_off`) and is "
+                    "now treated as pending again:\n\n"
+                    f"{blocks}\n\n"
+                    "Why it is not trusted: a `signed_off` value alone does not "
+                    "show who wrote it. A sign-off whose write landed and then "
+                    "failed or was cancelled leaves `signed_off` behind with "
+                    "nothing recording the failure, and a write made with the "
+                    "shared daemon credential or another agent's key reads the "
+                    "same. So a later run re-checks the value against the "
+                    "record's own provenance, and this one found no signature "
+                    "from the gate's owner.\n\n"
+                    "What happens next: the gate's owner is seated again, and "
+                    "a clean verdict from it re-signs the gate with its own "
+                    "key. Until then merge and build hand-off treat the gate as "
+                    "pending. This is not a new review finding.\n\n"
+                    "Posted once per gate per head (PR #1181 ux review)."
+                )
+                post = await client.post(
+                    url, json={"body": body}, headers=self._github_headers(t.repository)
+                )
+                post.raise_for_status()
+        except Exception as exc:
+            log.error(
+                f"[{DAEMON_NAME}] reverted-gate comment failed for "
+                f"{t.repository}#{t.number}: {type(exc).__name__}"
+            )
+            return
+        try:
+            self.notifier.send(
+                f"{t.repository}#{t.number}: "
+                f"{', '.join(f'`{g}`' for g in fresh)} read signed_off without "
+                "a sign-off the dispatcher can prove — treated as pending, "
+                "owner re-seated. See the PR/issue comment.",
+                priority=Priority.INFO,
+                handler=DAEMON_NAME,
+            )
+        except Exception as exc:  # notifier must never crash the pipeline
+            log.error(f"[{DAEMON_NAME}] reverted-gate notification failed: {exc}")
 
     async def _surface_gate_launch_refusals(
         self,

@@ -377,17 +377,17 @@ class TestPendingGatesAreReReadAtDecisionTime:
 
         assert await d._refresh_pending_gates("o/r", 788, {"arch", "ux"}) == {"arch"}
 
-    async def test_a_read_failure_keeps_the_snapshot(self, monkeypatch):
-        """Fails SAFE: a broken read must never CLEAR a gate.
-
-        The worst case is the status quo — a stale block the operator can see —
-        never an unearned merge.
+    async def test_a_read_failure_holds_every_pre_impl_gate(self, monkeypatch):
+        """Fails SAFE: a broken read must never CLEAR a gate, and holds every
+        pre-impl gate pending for merge authorization (second security run at
+        bf97b1a4), not just the pre-panel snapshot.
         """
         d = _dispatcher_with_gate_state(
             monkeypatch, None, raises=RuntimeError("neotoma down")
         )
 
-        assert await d._refresh_pending_gates("o/r", 788, {"arch"}) == {"arch"}
+        result = await d._refresh_pending_gates("o/r", 788, {"arch"})
+        assert result == {"arch"} | set(sd.PRE_IMPL_GATES)
 
     async def test_a_missing_entity_keeps_the_snapshot(self, monkeypatch):
         d = _dispatcher_with_gate_state(monkeypatch, _GateState({}, found=False))

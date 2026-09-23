@@ -39,6 +39,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -497,6 +498,70 @@ def _observation_time(observation: dict) -> datetime | None:
     )
 
 
+# ── Pre-deploy sign-offs (grandfathering by SERVER time) ─────────────────────
+# Before lens-signed sign-offs deployed, every gate clearance was an unsigned
+# write, so the re-proof below would hold every existing `signed_off` gate as
+# pending. The operator names the deploy instant here; a `signed_off` value
+# whose setting write Neotoma INGESTED before it counts as a legacy sign-off.
+# Unset or unparseable means no grandfathering at all: every unsigned value is
+# unproven (fail closed).
+GATE_SIGNING_CUTOFF_ENV = "APIS_GATE_SIGNING_CUTOFF"
+
+
+def gate_signing_cutoff() -> datetime | None:
+    """The configured cutoff as an aware UTC datetime, or None.
+
+    Read from `APIS_GATE_SIGNING_CUTOFF` at call time. It must be ISO 8601
+    WITH an explicit offset or `Z` (`2026-09-24T09:00:00Z`): a naive time
+    could be read in the wrong zone, which would move the cutoff by hours, so
+    it is treated as unparseable. None — no grandfathering — when unset,
+    empty, or unparseable.
+    """
+    raw = os.environ.get(GATE_SIGNING_CUTOFF_ENV, "").strip()
+    if not raw:
+        return None
+    text = raw[:-1] + "+00:00" if raw[-1] in "Zz" else raw
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        parsed = None
+    if parsed is None or parsed.tzinfo is None:
+        log.error(
+            "[apis.gate_waive] %s=%r is not an ISO 8601 timestamp with an "
+            "offset — no pre-deploy sign-off is grandfathered",
+            GATE_SIGNING_CUTOFF_ENV,
+            raw[:64],
+        )
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _server_ingested_at(observation: object) -> datetime | None:
+    """When Neotoma ingested *observation*: its server-assigned `created_at`.
+
+    Never `observed_at`, which is event time a writer or sync peer can carry
+    in, and never a fallback to it: an observation without a parseable
+    `created_at` has no server time. Confirmed against neotoma
+    `src/shared/action_schemas.ts` (`at_ingested`: "`created_at` (row-insertion
+    time)", distinct from `observed_at`, which backfilled or late-arriving
+    observations carry in the past), `src/services/observation_storage.ts`
+    (`created_at: new Date().toISOString()` set on insert, `observed_at` taken
+    from the caller's params), and the live `GET /entities/{id}/observations`
+    response, which carries `created_at` on every observation.
+    """
+    if not isinstance(observation, dict):
+        return None
+    return _parse_utc(observation.get("created_at"))
+
+
+def _set_before_signing_cutoff(observation: object, cutoff: datetime | None) -> bool:
+    """True when *observation* was ingested strictly before *cutoff*."""
+    if cutoff is None:
+        return False
+    ingested = _server_ingested_at(observation)
+    return ingested is not None and ingested < cutoff
+
+
 def _observation_is_attributed(
     observation: object,
     *,
@@ -627,6 +692,15 @@ class IssueGateState:
     # value actually held.
     gate_status_unreadable: bool = False
     owner_history_unreadable: bool = False
+    # True when the READ itself failed or was inconclusive (a transport error,
+    # a non-2xx, no token, or the bounded fallback scan running out of pages),
+    # as opposed to a read that succeeded and found no entity. Both leave
+    # `found` False; only this one means "unknown" (second security run at
+    # bf97b1a4: a failed read reported "not found", so the signed_off re-proof
+    # returned nothing and pre-panel seating failed open). Same shape as the
+    # two `*_unreadable` flags above: `found` keeps its meaning and callers
+    # that must tell the cases apart read this flag alongside it.
+    read_failed: bool = False
     # Per-field REDUCER provenance ({field_name: observation_id}), read
     # straight off the snapshot the same way `agent_loader.py`'s
     # `_parse`/`lib.daemon_runtime.gating.read_authenticated_checkpoint_*`
@@ -836,6 +910,7 @@ class IssueGateStore:
                 },
             )
             if data is None:
+                state.read_failed = True
                 return state
             entities = data.get("entities", [])
             if entities:
@@ -844,8 +919,13 @@ class IssueGateStore:
             # Fall back to an unfiltered scan for entities whose snapshot does
             # not carry the composite fields (e.g. legacy rows keyed by
             # local_issue_id or title). Bounded and paged, so a miss here means
-            # the entity genuinely is not there.
-            entities = await self._scan_for_issue(repo, issue_number)
+            # the entity genuinely is not there; a failed or exhausted scan
+            # returns None, which is a failed read, not an absent entity.
+            scanned = await self._scan_for_issue(repo, issue_number)
+            if scanned is None:
+                state.read_failed = True
+                return state
+            entities = scanned
         for entity in entities:
             snap = entity.get("snapshot") or {}
             # Some responses nest the field map one level deeper.
@@ -865,7 +945,18 @@ class IssueGateStore:
             state.gate_status_unreadable = gate_status_is_unreadable(raw_gates)
             state.owner_history_unreadable = owner_history_is_unreadable(raw_history)
             state.current_owner = str(snap.get("current_owner") or "")
-            raw_provenance = snap.get("provenance")
+            # The reducer's per-field provenance rides on the query row's
+            # ENVELOPE (`entity["provenance"]`), beside `snapshot`, not inside
+            # it: read live from prod `/entities/query` on 2026-09-23 for
+            # ateles#795's issue entity, `snapshot.provenance` was absent and
+            # `entity.provenance.gate_status` named the head observation. The
+            # snapshot-level read is kept as a fallback for any response that
+            # nests it there. Reading only the snapshot left
+            # `field_provenance` empty in prod, so every attribution read-back
+            # and re-proof failed closed on a missing observation id.
+            raw_provenance = entity.get("provenance")
+            if not isinstance(raw_provenance, dict):
+                raw_provenance = snap.get("provenance")
             if isinstance(raw_provenance, dict):
                 state.field_provenance = {
                     str(k): str(v) for k, v in raw_provenance.items() if v
@@ -873,12 +964,16 @@ class IssueGateStore:
             break
         return state
 
-    async def _scan_for_issue(self, repo: str, issue_number: int) -> list[dict]:
+    async def _scan_for_issue(self, repo: str, issue_number: int) -> list[dict] | None:
         """Paged fallback scan for entities lacking composite snapshot fields.
 
         Uses cursor paging rather than a single truncated page, so "not found"
         means absent rather than beyond an arbitrary window. Bounded by
         ``_MAX_SCAN_PAGES`` so a pathological corpus cannot hang a gate check.
+
+        Returns ``[]`` only when the scan completed without a match, and None
+        when it could not complete: a failed page read, or the page bound hit
+        before the corpus ended. Neither of those shows the entity is absent.
         """
         cursor = ""
         for _ in range(self._MAX_SCAN_PAGES):
@@ -890,6 +985,8 @@ class IssueGateStore:
             if cursor:
                 payload["cursor"] = cursor
             data = await self._post("entities/query", payload)
+            if data is None:
+                return None
             if not data:
                 return []
             page = data.get("entities", [])
@@ -909,7 +1006,7 @@ class IssueGateStore:
             issue_number,
             self._MAX_SCAN_PAGES,
         )
-        return []
+        return None
 
     def _encode_gate_status(
         self, state: IssueGateState, gate_status: dict[str, str]
@@ -1820,6 +1917,16 @@ class IssueGateStore:
         newest observation for a later gate also carries the earlier gates'
         `signed_off`, written by a different lens.
 
+        LEGACY sign-offs: a `signed_off` gate with no owner-signed observation
+        is still VERIFIED when the observation that set it (the oldest one in
+        its current `signed_off` run) was ingested by Neotoma before
+        `APIS_GATE_SIGNING_CUTOFF`, judged by the server-assigned `created_at`,
+        never the writer-supplied `observed_at` (`_server_ingested_at`). With
+        the cutoff unset or unparseable, nothing is grandfathered. Only the
+        literal `signed_off` is re-proven here; the other cleared values
+        (`waived`, `not_required`, …) are still trusted as written (tracked
+        separately, ateles#1200 / #1203).
+
         Fails closed: an unreadable record, a missing provenance entry, an
         observations read that returns nothing, an observation whose
         timestamp does not parse, or an owner key this process cannot read
@@ -1850,26 +1957,44 @@ class IssueGateStore:
             )
             return signed
         unverified: set[str] = set()
+        legacy: set[str] = set()
+        cutoff = gate_signing_cutoff()
         for gate in sorted(signed):
             owner = owners[gate]
             owner_sub = f"{owner}@ateles-swarm"
             identity = _ns.agent_identity(owner, sub=owner_sub)
             thumbprint = _lens_key_thumbprint(identity) if identity is not None else None
             verified = False
-            if thumbprint:
-                for gates_map, observation in history:
-                    if (gates_map.get(gate) or "").strip().lower() != "signed_off":
-                        break
-                    if _observation_is_attributed(
-                        observation,
-                        lens_sub=owner_sub,
-                        lens_thumbprint=thumbprint,
-                        not_before=None,
-                    ):
-                        verified = True
-                        break
+            # The oldest observation of the current `signed_off` run seen so
+            # far: the one that set the value, as far as this history reaches.
+            setter: dict | None = None
+            for gates_map, observation in history:
+                if (gates_map.get(gate) or "").strip().lower() != "signed_off":
+                    break
+                setter = observation
+                if thumbprint and _observation_is_attributed(
+                    observation,
+                    lens_sub=owner_sub,
+                    lens_thumbprint=thumbprint,
+                    not_before=None,
+                ):
+                    verified = True
+                    break
+            if not verified and _set_before_signing_cutoff(setter, cutoff):
+                verified = True
+                legacy.add(gate)
             if not verified:
                 unverified.add(gate)
+        if legacy:
+            log.info(
+                "[apis.gate_waive] %s#%s: %s read signed_off from a write "
+                "Neotoma ingested before %s=%s — accepted as a legacy sign-off",
+                state.repo,
+                state.issue_number,
+                ", ".join(sorted(legacy)),
+                GATE_SIGNING_CUTOFF_ENV,
+                cutoff.isoformat() if cutoff else "",
+            )
         if unverified:
             log.warning(
                 "[apis.gate_waive] %s#%s: %s read signed_off without an "
