@@ -3485,6 +3485,12 @@ class TestGateOwnerIdentity:
 
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
         monkeypatch.delenv("ACCIPITER_NEOTOMA_TOKEN", raising=False)
+        # ateles#1196: production default is allow_unattributed; this test pins
+        # the refuse alternate (identity-error SkillResult before subprocess).
+        monkeypatch.setenv(
+            skill_runner.GATE_OWNER_IDENTITY_POLICY_ENV,
+            skill_runner.GATE_OWNER_IDENTITY_REFUSE,
+        )
 
         launched = []
 
@@ -3580,3 +3586,135 @@ class TestGateOwnerIdentity:
             "An advisory lens must keep running on the shared bearer — its "
             "product (a PR comment) does not need attribution to survive."
         )
+
+
+# ── ateles#1196: interim gate-owner identity policy ───────────────────────────
+
+
+class TestGateOwnerIdentityPolicy:
+    """ATELES_GATE_OWNER_IDENTITY_POLICY: allow_unattributed (default) | refuse."""
+
+    def setup_method(self) -> None:
+        skill_runner._agent_def_cache.clear()
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _launch_gate_owner(self, MockLoader, monkeypatch, *, policy, entrance):
+        fake_def = _make_def(
+            prompt_markdown="Role: Accipiter.",
+            aauth_sub="accipiter@ateles-swarm",
+            name="accipiter",
+        )
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+        monkeypatch.delenv("ACCIPITER_NEOTOMA_TOKEN", raising=False)
+        if policy is None:
+            monkeypatch.delenv(
+                skill_runner.GATE_OWNER_IDENTITY_POLICY_ENV, raising=False
+            )
+        else:
+            monkeypatch.setenv(
+                skill_runner.GATE_OWNER_IDENTITY_POLICY_ENV, policy
+            )
+
+        launched: list = []
+
+        async def fake_exec(*cmd, **kwargs):
+            launched.append(cmd)
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"**SIGNED_OFF**", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "accipiter",
+                    "review prompt",
+                    role="accipiter",
+                    provider="claude",
+                    task_entity_id="ent_abc",
+                    owns_pending_gate=True,
+                    dispatch_entrance=entrance,
+                )
+            )
+        return result, launched
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_gate_owner_identity_policy_allow_unattributed_proceeds_with_warn(
+        self, MockLoader, mock_write_harness, monkeypatch, caplog
+    ) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            result, launched = self._launch_gate_owner(
+                MockLoader,
+                monkeypatch,
+                policy=None,
+                entrance="panel",
+            )
+
+        assert result.ok
+        assert launched, "allow_unattributed must launch the subprocess"
+        text = caplog.text
+        assert "gate_owner_identity_policy=allow_unattributed" in text
+        assert "owns_pending_gate=true" in text
+        assert "role=accipiter" in text
+        assert "entrance=panel" in text
+        assert "token_env=ACCIPITER_NEOTOMA_TOKEN" in text
+        assert "until ateles#1181" in text
+        assert skill_runner.GATE_OWNER_IDENTITY_REFUSE in text
+        # Credential non-exposure: never log a token value.
+        assert "shared-daemon-token" not in text
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_gate_owner_identity_policy_refuse_returns_identity_error(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        result, launched = self._launch_gate_owner(
+            MockLoader,
+            monkeypatch,
+            policy=skill_runner.GATE_OWNER_IDENTITY_REFUSE,
+            entrance="missing_lens_redispatch",
+        )
+        assert not result.ok
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
+        assert launched == []
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_gate_owner_identity_policy_invalid_env_defaults_to_allow(
+        self, MockLoader, mock_write_harness, monkeypatch, caplog
+    ) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            result, launched = self._launch_gate_owner(
+                MockLoader,
+                monkeypatch,
+                policy="bogus",
+                entrance="spec_pipeline",
+            )
+
+        assert result.ok
+        assert launched
+        text = caplog.text
+        assert "bogus" in text
+        assert skill_runner.GATE_OWNER_IDENTITY_ALLOW in text
+        assert "allow_unattributed" in text
+        assert "refuse" in text
