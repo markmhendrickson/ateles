@@ -34,12 +34,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from neotoma_local_fork_replay import (  # noqa: E402
     ALWAYS_STRIP_FIELD_KEYS,
     CONDITIONALLY_RESERVED_FIELD_KEYS,
+    FIELD_TYPE_CHOICES,
     build_entity_record,
     build_observation_payload,
+    build_reconcile_idempotency_key,
+    build_register_schema_payload,
     build_relationship_payload,
+    build_store_payload_for_reconcile,
+    build_update_schema_incremental_payload,
+    filter_writable_fields,
+    infer_field_type,
     is_schema_lag_background_rewrite,
+    plan_class_b_reconciliation_for_entity,
+    plan_schema_extensions,
     predict_unknown_fields,
     strip_reserved_fields,
+    value_hash,
 )
 
 # --- StoreRequestSchema, action_schemas.ts:723-763 -------------------------
@@ -382,3 +392,319 @@ def test_unknown_fields_cli_flag_defaults_to_stop():
     assert result.returncode == 0
     assert "--unknown-fields" in result.stdout
     assert "{stop,warn}" in result.stdout or "stop,warn" in result.stdout
+
+
+def test_extend_schemas_and_reconcile_file_flags_present_in_help():
+    import subprocess
+    import sys as _sys
+
+    script = str(Path(__file__).resolve().parent / "neotoma_local_fork_replay.py")
+    result = subprocess.run([_sys.executable, script, "--help"], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0
+    assert "--extend-schemas" in result.stdout
+    assert "--reconcile-file" in result.stdout
+
+
+# --- infer_field_type / plan_schema_extensions ------------------------------
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (True, "boolean"),
+        (False, "boolean"),
+        (1, "number"),
+        (1.5, "number"),
+        ("x", "string"),
+        (None, "string"),
+        (["a"], "array"),
+        ({"k": "v"}, "object"),
+    ],
+)
+def test_infer_field_type_covers_json_value_shapes(value, expected):
+    assert infer_field_type(value) == expected
+
+
+def test_infer_field_type_only_ever_returns_a_valid_field_type_choice():
+    for value in (True, 1, 1.5, "x", None, ["a"], {"k": "v"}, object()):
+        assert infer_field_type(value) in FIELD_TYPE_CHOICES
+
+
+def test_plan_schema_extensions_only_includes_undeclared_fields():
+    schema_info = {"has_schema": True, "declared_fields": {"title"}}
+    samples = {"title": "already declared", "reviewing_agent": "cicada", "pr_number": 42}
+    plan = plan_schema_extensions("note", samples, schema_info)
+    names = {f["field_name"] for f in plan}
+    assert names == {"reviewing_agent", "pr_number"}
+
+
+def test_plan_schema_extensions_infers_types_and_is_never_required():
+    schema_info = {"has_schema": True, "declared_fields": set()}
+    samples = {"count": 3, "flag": True, "name": "x"}
+    plan = plan_schema_extensions("t", samples, schema_info)
+    by_name = {f["field_name"]: f for f in plan}
+    assert by_name["count"]["field_type"] == "number"
+    assert by_name["flag"]["field_type"] == "boolean"
+    assert by_name["name"]["field_type"] == "string"
+    assert all(f["required"] is False for f in plan)
+
+
+def test_plan_schema_extensions_empty_when_no_hosted_schema_and_no_samples():
+    schema_info = {"has_schema": False, "declared_fields": set()}
+    assert plan_schema_extensions("symptom_report", {}, schema_info) == []
+
+
+def test_plan_schema_extensions_all_fields_undeclared_when_no_hosted_schema():
+    # has_schema=False means declared_fields is empty regardless of what the
+    # dict happens to hold -- every sampled field is treated as undeclared.
+    schema_info = {"has_schema": False, "declared_fields": {"should_be_ignored"}}
+    plan = plan_schema_extensions("symptom_report", {"summary": "x"}, schema_info)
+    assert [f["field_name"] for f in plan] == ["summary"]
+
+
+# --- schema-extension request payloads: additive only, no destructive ops --
+
+
+def test_update_schema_incremental_payload_never_carries_fields_to_remove():
+    fields_to_add = [{"field_name": "x", "field_type": "string", "required": False}]
+    payload = build_update_schema_incremental_payload("task", fields_to_add)
+    assert "fields_to_remove" not in payload
+    assert "canonical_name_fields" not in payload
+    assert payload["fields_to_add"] == fields_to_add
+    assert payload["activate"] is True
+    assert payload["entity_type"] == "task"
+
+
+def test_update_schema_incremental_payload_top_level_keys_are_all_declared():
+    # UpdateSchemaIncrementalRequestSchema, action_schemas.ts:947-985.
+    declared_keys = {
+        "entity_type",
+        "fields_to_add",
+        "fields_to_remove",
+        "canonical_name_fields",
+        "schema_version",
+        "user_specific",
+        "user_id",
+        "activate",
+        "migrate_existing",
+        "force",
+    }
+    payload = build_update_schema_incremental_payload("task", [])
+    assert set(payload.keys()) <= declared_keys
+
+
+def test_register_schema_payload_sets_identity_opt_out_never_canonical_name_fields():
+    fields_to_add = [{"field_name": "summary", "field_type": "string", "required": False}]
+    payload = build_register_schema_payload("symptom_report", fields_to_add)
+    assert payload["schema_definition"]["identity_opt_out"] == "heuristic_canonical_name"
+    assert "canonical_name_fields" not in payload["schema_definition"]
+    assert payload["schema_definition"]["fields"] == {"summary": {"type": "string"}}
+    assert payload["activate"] is True
+
+
+def test_register_schema_payload_top_level_keys_are_all_declared():
+    # RegisterSchemaRequestSchema, action_schemas.ts:987-996.
+    declared_keys = {
+        "entity_type",
+        "schema_definition",
+        "reducer_config",
+        "schema_version",
+        "user_specific",
+        "user_id",
+        "activate",
+        "force",
+    }
+    payload = build_register_schema_payload("symptom_report", [])
+    assert set(payload.keys()) <= declared_keys
+
+
+def test_register_schema_payload_reducer_config_has_no_merge_policies_that_remove_fields():
+    payload = build_register_schema_payload("symptom_report", [])
+    assert payload["reducer_config"] == {"merge_policies": {}}
+
+
+# --- class-b reconciliation: field filtering --------------------------------
+
+
+def test_filter_writable_fields_keeps_only_local_only_and_local_newer():
+    entity_record = {
+        "id": "ent_x",
+        "entity_type": "issue",
+        "fields": [
+            {"name": "a", "classification": "SAME"},
+            {"name": "b", "classification": "LOCAL_ONLY"},
+            {"name": "c", "classification": "LOCAL_NEWER"},
+            {"name": "d", "classification": "HOSTED_NEWER"},
+        ],
+    }
+    writable = filter_writable_fields(entity_record)
+    assert {f["name"] for f in writable} == {"b", "c"}
+
+
+def test_filter_writable_fields_excludes_unrecognized_classification():
+    entity_record = {
+        "id": "ent_x",
+        "entity_type": "issue",
+        "fields": [{"name": "a", "classification": "SOMETHING_ELSE"}],
+    }
+    assert filter_writable_fields(entity_record) == []
+
+
+def test_filter_writable_fields_empty_when_no_fields_key():
+    assert filter_writable_fields({"id": "ent_x", "entity_type": "issue"}) == []
+
+
+def test_build_reconcile_idempotency_key_deterministic_for_same_field_set():
+    k1 = build_reconcile_idempotency_key("20260804", "ent_x", ["b", "c"])
+    k2 = build_reconcile_idempotency_key("20260804", "ent_x", ["c", "b"])  # order shouldn't matter
+    assert k1 == k2
+    assert k1.startswith("migrate-20260804-recon-ent_x-")
+
+
+def test_build_reconcile_idempotency_key_differs_for_different_field_sets():
+    k1 = build_reconcile_idempotency_key("20260804", "ent_x", ["b"])
+    k2 = build_reconcile_idempotency_key("20260804", "ent_x", ["b", "c"])
+    assert k1 != k2
+
+
+def test_build_store_payload_for_reconcile_uses_target_id_and_top_level_idempotency_key():
+    payload = build_store_payload_for_reconcile("ent_x", "issue", {"body": "new text"}, "migrate-20260804-recon-ent_x-abc123")
+    (entity,) = payload["entities"]
+    assert entity["target_id"] == "ent_x"
+    assert entity["entity_type"] == "issue"
+    assert entity["body"] == "new text"
+    assert payload["idempotency_key"] == "migrate-20260804-recon-ent_x-abc123"
+    assert "entity_id" not in entity
+
+
+# --- class-b reconciliation: local-state planning + drift skip -------------
+
+
+def _make_sqlite_with_observations(tmp_path, entity_id, rows):
+    """rows: list of (fields_dict, created_at_iso) -- builds a minimal
+    observations table matching the columns plan_class_b_reconciliation_for_entity
+    (via local_post_cutover_field_state) reads."""
+    import sqlite3 as _sqlite3
+
+    db_path = tmp_path / "fork.db"
+    conn = _sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE observations (id TEXT, entity_id TEXT, entity_type TEXT, fields TEXT, created_at TEXT)"
+    )
+    for i, (fields, created_at) in enumerate(rows):
+        conn.execute(
+            "INSERT INTO observations (id, entity_id, entity_type, fields, created_at) VALUES (?, ?, ?, ?, ?)",
+            (f"obs-{i}", entity_id, "issue", json.dumps(fields), created_at),
+        )
+    conn.commit()
+    return conn
+
+
+def test_plan_class_b_reconciliation_reads_latest_local_value_per_field(tmp_path):
+    conn = _make_sqlite_with_observations(
+        tmp_path,
+        "ent_x",
+        [
+            ({"body": "first draft"}, "2026-08-05T00:00:00.000Z"),
+            ({"body": "second draft"}, "2026-08-06T00:00:00.000Z"),
+        ],
+    )
+    entity_record = {
+        "id": "ent_x",
+        "entity_type": "issue",
+        "fields": [
+            {
+                "name": "body",
+                "classification": "LOCAL_NEWER",
+                "local_value_hash": value_hash("second draft"),
+                "hosted_value_hash": value_hash("old hosted body"),
+            }
+        ],
+    }
+    entity_id, entity_type, fields_to_write, drifted, idem_key = plan_class_b_reconciliation_for_entity(
+        entity_record, conn, "2026-08-04T08:51:43.023Z", "20260804"
+    )
+    assert fields_to_write == {"body": "second draft"}
+    assert drifted == []
+    assert idem_key is not None
+
+
+def test_plan_class_b_reconciliation_skips_when_local_value_hash_mismatches():
+    import sqlite3 as _sqlite3
+
+    conn = _sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE observations (id TEXT, entity_id TEXT, entity_type TEXT, fields TEXT, created_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO observations VALUES (?, ?, ?, ?, ?)",
+        ("obs-1", "ent_x", "issue", json.dumps({"body": "actual current value"}), "2026-08-05T00:00:00.000Z"),
+    )
+    conn.commit()
+    entity_record = {
+        "id": "ent_x",
+        "entity_type": "issue",
+        "fields": [
+            {
+                "name": "body",
+                "classification": "LOCAL_NEWER",
+                "local_value_hash": value_hash("a stale hash from a different value"),
+                "hosted_value_hash": "irrelevant",
+            }
+        ],
+    }
+    entity_id, entity_type, fields_to_write, drifted, idem_key = plan_class_b_reconciliation_for_entity(
+        entity_record, conn, "2026-08-04T08:51:43.023Z", "20260804"
+    )
+    assert fields_to_write == {}
+    assert drifted == ["body"]
+    assert idem_key is None
+
+
+def test_plan_class_b_reconciliation_skips_field_with_no_post_cutover_local_state():
+    import sqlite3 as _sqlite3
+
+    conn = _sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE observations (id TEXT, entity_id TEXT, entity_type TEXT, fields TEXT, created_at TEXT)"
+    )
+    conn.commit()  # no rows at all for this entity
+    entity_record = {
+        "id": "ent_x",
+        "entity_type": "issue",
+        "fields": [
+            {"name": "closed_at", "classification": "LOCAL_ONLY", "local_value_hash": "abc", "hosted_value_hash": "def"}
+        ],
+    }
+    entity_id, entity_type, fields_to_write, drifted, idem_key = plan_class_b_reconciliation_for_entity(
+        entity_record, conn, "2026-08-04T08:51:43.023Z", "20260804"
+    )
+    assert fields_to_write == {}
+    assert drifted == ["closed_at"]
+
+
+def test_plan_class_b_reconciliation_nothing_to_apply_when_all_same():
+    import sqlite3 as _sqlite3
+
+    conn = _sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE observations (id TEXT, entity_id TEXT, entity_type TEXT, fields TEXT, created_at TEXT)"
+    )
+    conn.commit()
+    entity_record = {
+        "id": "ent_x",
+        "entity_type": "issue",
+        "fields": [{"name": "a", "classification": "SAME"}, {"name": "b", "classification": "HOSTED_NEWER"}],
+    }
+    entity_id, entity_type, fields_to_write, drifted, idem_key = plan_class_b_reconciliation_for_entity(
+        entity_record, conn, "2026-08-04T08:51:43.023Z", "20260804"
+    )
+    assert fields_to_write == {}
+    assert drifted == []
+    assert idem_key is None
+
+
+def test_value_hash_stable_for_same_value_differs_for_different_value():
+    assert value_hash("same") == value_hash("same")
+    assert value_hash("a") != value_hash("b")
+    assert value_hash({"k": 1}) == value_hash({"k": 1})
