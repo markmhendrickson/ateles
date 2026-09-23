@@ -4,14 +4,15 @@
 ``conformance.md#mechanical-checks-on-this-directory`` registers this script under *Decision
 citations*, and states what fails on it in two clauses:
 
-    a commit hash in any document here but ``status.md`` and ``skill_inventory.md``; an issue or
+    a commit hash in any document here but ``status.md``, ``skill_inventory.md``, and
+    ``rule_inventory.md``; an issue or
     pull-request number outside the positions ``#phases-and-implementation-state`` names
 
 That section gives both clauses their syntactic form, so that this lint can read the rule rather
 than a reviewer sensing it:
 
-    a commit hash appears in no document in this directory but ``status.md`` and
-    ``skill_inventory.md``; an issue or
+    a commit hash appears in no document in this directory but ``status.md``,
+    ``skill_inventory.md``, and ``rule_inventory.md``; an issue or
     pull-request number appears only in a document's ``**Derived from:**`` header, in a
     ``Sources:`` clause, or in its *Scope*, *Contradictions this document settles*, *Prior art*, or
     *Beyond the sources* section — the positions where a document names what it derived from — and a
@@ -23,7 +24,8 @@ an issue or PR is cited only as the record of a decision, never as state. ``stat
 document that records what a checkout implements, so it is exempt from both clauses.
 ``skill_inventory.md`` is exempt on the same ground as a measurement, not as design: its content
 hashes are 12-hex runs the commit-hash clause cannot tell from a git hash, and rewriting them
-would destroy the measurement.
+would destroy the measurement. ``rule_inventory.md`` is the same measurement class: it quotes other
+stores and names the findings' GitHub issues as provenance.
 
 Stdlib only; registered in ``conformance.md#mechanical-checks-on-this-directory``.
 
@@ -77,7 +79,10 @@ FOUNDATION_DIR = Path("docs/foundation")
 # design prose — and its hex hashes are a different thing than the rule this clause polices: a
 # content hash (name + body, per skill), not a git commit hash citing a fix as landed. The regex
 # cannot tell the two apart by shape, so the document is exempted the same way status.md is.
-EXEMPT = {"status.md", "skill_inventory.md"}
+# rule_inventory.md is the same measurement class: its body quotes other stores and names the
+# GitHub issues those findings came from (ateles#1114, #1115, …). Those citations are the
+# inventory's provenance, not design prose asserting a fix as landed.
+EXEMPT = {"status.md", "skill_inventory.md", "rule_inventory.md"}
 
 # The sections in which a document names what it derived from. conformance.md#phases-and-implementation-state
 # enumerates these four by name; matched on the heading text, case-insensitively, so that a document
@@ -174,14 +179,16 @@ def check(root: Path) -> list[str]:
             if _SOURCES_RE.search(line):
                 in_sources = True
 
-            # Clause 1: a commit hash appears in no document here but status.md and
-            # skill_inventory.md. Unconditional — the rule names no position where one is allowed.
+            # Clause 1: a commit hash appears in no document here but status.md,
+            # skill_inventory.md, and rule_inventory.md. Unconditional — the rule
+            # names no position where one is allowed.
             for h in _HASH_RE.findall(line):
                 if _ALL_DIGITS.match(h):
                     continue  # a run of digits is a number; clause 2 judges it by position
                 violations.append(
                     f"{rel}:{no}: commit hash {h} — a commit hash appears in no document "
-                    f"in this directory but status.md and skill_inventory.md "
+                    f"in this directory but status.md, skill_inventory.md, and "
+                    f"rule_inventory.md "
                     f"(conformance.md#phases-and-implementation-state)"
                 )
 
