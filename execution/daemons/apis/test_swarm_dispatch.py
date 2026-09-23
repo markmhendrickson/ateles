@@ -1383,6 +1383,96 @@ def test_handle_pr_clear_verdict_gates_readiness(monkeypatch):
     assert not any(c[0] == "route" for c in calls)
 
 
+def test_handle_pr_panel_loop_clean_verdict_calls_sign_off(monkeypatch):
+    """Phoenicurus's QA review, PR #1181 (NON-BLOCKING coverage gap): the
+    panel-loop `sign_off` branch in `_handle_pr` — CLEAN verdict for a gate a
+    lens owns -> `IssueGateStore.sign_off` called with `(repo, parent, gate,
+    agent, review_head)` — was covered only at the helper level
+    (`test_gate_sign_off.py`, `test_gate_sign_off_dispatch.py`), never at the
+    call site that wires them into the actual panel loop. This drives one
+    real `_handle_pr` panel iteration end to end via the same
+    `_pr_dispatcher_with_stubs` scaffolding the other `_handle_pr` tests use,
+    with the `arch` lens (always-seated) returning a clean `**SIGNED_OFF**`."""
+    import gate_waive
+
+    calls = []
+    sign_off_calls = []
+
+    async def fake_sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+        sign_off_calls.append((repo, issue_number, gate, lens_agent, head_sha))
+        return gate_waive.SignOffOutcome(
+            ok=True, gate=gate, lens_agent=lens_agent, verified=True
+        )
+
+    monkeypatch.setattr(swarm_dispatch.IssueGateStore, "sign_off", fake_sign_off)
+
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+    review_head = "a" * 40
+
+    async def fake_run_skill_gate_pending(skill, prompt, **kwargs):
+        # Lanius reports `arch` as the still-pending gate, which is what
+        # `owns_pending_gate` (and therefore the sign_off call) is keyed on —
+        # `arch` being `always=True` gets it a panel SEAT regardless, but the
+        # sign_off branch additionally requires `lens.lens in pending_gates`.
+        if skill == "lanius":
+            return SkillResult(
+                skill, True, 0, "GATE_INHERITANCE: clear\nGATE_PENDING: arch", ""
+            )
+        if skill == "vanellus":
+            return SkillResult(skill, True, 0, "**APPROVE**\nlgtm", "")
+        if skill == "waxwing":
+            return SkillResult(skill, True, 0, "**SIGNED_OFF**\nno concerns", "")
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill_gate_pending)
+
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.", head_sha=review_head)))
+
+    assert sign_off_calls, "sign_off was never called for the arch lens"
+    assert ("owner/repo", 80, "arch", "waxwing", review_head) in sign_off_calls
+
+
+def test_handle_pr_panel_loop_blocking_verdict_does_not_call_sign_off(monkeypatch):
+    """The inverse of the above: a `[BLOCKING]` finding from the gate-owning
+    lens must leave the gate untouched — `sign_off` is not called at all."""
+
+    calls = []
+    sign_off_calls = []
+
+    async def fake_sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+        sign_off_calls.append((repo, issue_number, gate, lens_agent, head_sha))
+        raise AssertionError("sign_off must not be called on a blocking verdict")
+
+    monkeypatch.setattr(swarm_dispatch.IssueGateStore, "sign_off", fake_sign_off)
+
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch,
+        vanellus_stdout="**REQUEST_CHANGES**\n[BLOCKING] arch: bad contract",
+        calls=calls,
+    )
+
+    async def fake_run_skill_blocking(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "vanellus":
+            return SkillResult(
+                skill, True, 0, "**REQUEST_CHANGES**\n[BLOCKING] arch: bad contract", ""
+            )
+        if skill == "waxwing":
+            return SkillResult(
+                skill, True, 0, "**REQUEST_CHANGES**\n[BLOCKING] arch: bad contract", ""
+            )
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill_blocking)
+
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.", head_sha="a" * 40)))
+
+    assert not sign_off_calls, "sign_off must not be called when the lens blocked"
+
+
 def test_handle_pr_clear_verdict_without_verified_approval_holds_readiness(monkeypatch):
     """A clear model verdict is prose until GitHub readback proves an exact-head
     APPROVED review by the distinct Vanellus principal."""
@@ -3585,36 +3675,38 @@ def _arch_lens() -> Lens:
 
 
 def test_panelist_prompt_gate_writeback_when_owns_pending_gate():
-    """A pending-gate owner is told to correct gate_status.<gate> → signed_off."""
+    """Was: a pending-gate owner was told to correct gate_status.<gate> itself.
+
+    Falco's security review, PR #1181 (ateles#795 amended ADR): that
+    instruction was removed entirely — it was half of the attribution-bypass
+    sink, since it told a lens seated over the SAME shared daemon bearer as
+    every other session to attempt a write that could land unattributed. The
+    dispatcher's `IssueGateStore.sign_off` (in the panel loop, keyed on the
+    SAME `owns_pending_gate` flag) is the sole system-of-record write now, so
+    the prompt must NOT carry a `correct()`-gate_status instruction even for a
+    pending-gate owner — this assertion is the inverse of what it was before
+    the fix, and the inversion IS the fix.
+    """
     t = _trigger()
     expectation = "- [ ] arch check\n"
     prompt = SwarmDispatcher._panelist_prompt(
         t, _arch_lens(), expectation, parent=80, owns_pending_gate=True
     )
-    assert "GATE WRITEBACK" in prompt
-    assert "gate_status.arch" in prompt
-    assert '"signed_off"' in prompt
-    # Must be conditional on a clean verdict and must preserve the rest of the map.
-    assert "ONLY if" in prompt
-    assert "MERGE the existing map" in prompt
-    assert "gate-signoff-arch-" in prompt  # idempotency key stem
-    # Effect chrome (ateles#769): read-back + BLOCKED on mismatch, never
-    # trust correct() 200 alone.
-    assert "READ-BACK" in prompt
-    assert "retrieve_entity_snapshot" in prompt
-    assert "**BLOCKED**" in prompt
-    assert "SIGNED_OFF" in prompt  # only after confirm
+    assert "GATE WRITEBACK" not in prompt
+    assert "you MUST reconcile `gate_status`" not in prompt
+    assert '"signed_off"' not in prompt
 
 
-def test_panelist_prompt_gate_writeback_blocks_signed_off_without_readback():
-    """Failure path must be present: BLOCKED when read-back does not confirm."""
+def test_panelist_prompt_never_instructs_lens_correct_of_gate_status_regardless_of_ownership():
+    """Neither an owner nor a non-owner is ever told to correct() gate_status —
+    the write moved off the prompt entirely, not just off the non-owner path
+    (which already carried no instruction before this fix)."""
     t = _trigger()
-    prompt = SwarmDispatcher._panelist_prompt(
-        t, _arch_lens(), "- [ ] x\n", parent=80, owns_pending_gate=True
-    )
-    assert "If read-back fails" in prompt or "read-back fails" in prompt.lower()
-    assert "do NOT emit SIGNED_OFF" in prompt or "Do NOT emit SIGNED_OFF" in prompt
-    assert "attempted vs read-back" in prompt
+    for owns in (True, False):
+        prompt = SwarmDispatcher._panelist_prompt(
+            t, _arch_lens(), "- [ ] x\n", parent=80, owns_pending_gate=owns
+        )
+        assert "GATE WRITEBACK" not in prompt
 
 
 def test_panelist_prompt_no_gate_writeback_when_not_owner():

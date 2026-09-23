@@ -91,21 +91,29 @@ class TestGateWritebackIsGranted:
         assert skill_runner.gate_writeback_allowlist(once) == once
 
     def test_the_grant_is_narrow(self):
-        """Least privilege: exactly the read-back-and-write path, nothing more.
+        """Least privilege: READ-ONLY situational awareness, nothing that mutates.
 
-        This is the assertion that fails if someone later "fixes" a permission
-        problem by widening this constant. A gate writeback is an internal
-        governance write on one entity type — it is not a licence to store new
-        entities, delete them, or reach any non-Neotoma surface.
+        Was: this constant included `mcp__mcpsrv_neotoma__correct`, pre-approving
+        a lens's own MCP write of `gate_status`. Falco's security review on PR
+        #1181 (ateles#795 amended ADR) found that pre-approval was itself the
+        remaining attribution-bypass sink: every lens session authenticates to
+        MCP with the SAME shared daemon bearer (`neotoma_token_for_agent`'s
+        Tier-2 fallback), so a pre-approved `correct()` could clear a gate with
+        no lens AAuth signature at all — and `sign_off`'s own "already cleared"
+        read would then treat that unattributed write as a verified success.
+        The dispatcher's lens-signed `IssueGateStore.sign_off` is now the SOLE
+        system-of-record write, so `correct` must NOT be pre-approved here —
+        this assertion is now the inverse of what it was before the fix, and
+        that inversion IS the fix, not a regression of it.
         """
         granted = set(skill_runner.GATE_WRITEBACK_TOOLS)
 
         assert granted == {
             "mcp__mcpsrv_neotoma__retrieve_entity_by_identifier",
             "mcp__mcpsrv_neotoma__retrieve_entity_snapshot",
-            "mcp__mcpsrv_neotoma__correct",
         }
         for forbidden in (
+            "mcp__mcpsrv_neotoma__correct",
             "mcp__mcpsrv_neotoma__store",
             "mcp__mcpsrv_neotoma__delete_entity",
             "mcp__mcpsrv_neotoma__submit_entity",
@@ -113,7 +121,9 @@ class TestGateWritebackIsGranted:
         ):
             assert forbidden not in granted, (
                 f"{forbidden} is not needed to record a gate verdict — the "
-                "grant must stay at least privilege"
+                "grant must stay at least privilege, and `correct` in "
+                "particular must never be pre-approved (it is the "
+                "attribution-bypass sink Falco's review closed)"
             )
 
     def test_no_blanket_permission_bypass_on_the_claude_path(self):
@@ -223,17 +233,35 @@ class TestDeniedWritebackIsVisible:
         )
         assert sd.detect_gate_writeback_denial(review) is False
 
-    def test_the_prompt_tells_the_lens_to_emit_the_attestation(self):
-        """A marker nobody is told to write detects nothing.
+    def test_the_prompt_no_longer_instructs_a_lens_correct_of_gate_status(self):
+        """The GATE WRITEBACK instruction block was deliberately REMOVED.
 
-        Unlike the prose signatures it replaces, this contract only holds if
-        the gate-writeback instructions name the exact token — the same
-        prompt/parser pairing MERGE_REFUSED_MARKER already uses.
+        Was: this test asserted the panelist prompt instructed a gate-owning
+        lens to `correct()` `gate_status` itself and, on refusal, to emit
+        `GATE_WRITEBACK_DENIED_ATTESTATION`. Falco's security review on PR
+        #1181 (ateles#795 amended ADR) found that instruction was itself half
+        of the attribution-bypass sink: it told every seated lens to attempt a
+        write that (given the pre-approved tool grant this file also covers)
+        could land unattributed via the shared daemon bearer. The dispatcher's
+        lens-signed `IssueGateStore.sign_off` is now the sole system-of-record
+        write, so the prompt must NOT instruct a lens to `correct()`
+        `gate_status` — this assertion is the inverse of what it was before
+        the fix, and that inversion IS the fix.
+
+        `GATE_WRITEBACK_DENIED_ATTESTATION` itself is kept as a dormant
+        detector (a lens MAY still volunteer it) — see the module-level
+        comment above `GATE_WRITEBACK_DENIED_ATTESTATION` in swarm_dispatch.py
+        — so this test checks the PROMPT no longer instructs it, not that the
+        constant or its detector were deleted.
         """
         src = inspect.getsource(sd.SwarmDispatcher._panelist_prompt)
-        assert "GATE_WRITEBACK_DENIED_ATTESTATION" in src, (
-            "the panelist prompt must instruct the lens to emit the "
-            "attestation, or a real denial is never declared"
+        assert "GATE WRITEBACK —" not in src, (
+            "the GATE WRITEBACK instruction block must stay removed — the "
+            "dispatcher's signed sign_off is the sole system-of-record write "
+            "now (ateles#795 amended ADR)"
+        )
+        assert "you MUST reconcile `gate_status`" not in src, (
+            "the prompt must not instruct a lens to write gate_status itself"
         )
 
     @pytest.mark.parametrize(
@@ -378,17 +406,28 @@ class TestPendingGatesAreReReadAtDecisionTime:
 # ── The invariant that ties the three together ────────────────────────────────
 
 
-def test_every_gate_owning_lens_is_covered_by_the_grant():
+def test_every_gate_owning_lens_is_covered_by_the_read_only_grant():
     """Derived from the LENSES registry, so a lens added later is covered.
 
     ateles#769 learned this the hard way: the issue's own table named four
     lenses and missed a fifth (buteo/legal), which only surfaced because the
     check derived its list from the registry rather than from the table.
+
+    Was: asserted `mcp__mcpsrv_neotoma__correct` was in the grant (every gate
+    owner could write its own `gate_status`). PR #1181's security fix removes
+    `correct` from the pre-approved grant entirely (see
+    `TestGateWritebackIsGranted.test_the_grant_is_narrow`'s docstring) — the
+    dispatcher's lens-signed `sign_off` is the sole clearance path now, so
+    there is no per-lens MCP write left to cover. What every gate owner IS
+    still covered by, by construction (the grant rides every claude dispatch,
+    not a per-agent list), is READ-ONLY situational awareness of `gate_status`.
     """
     gate_owners = [lens for lens in LENSES if lens.gate]
 
     assert gate_owners, "no gate-owning lenses found — the registry moved"
-    # The grant is not per-agent: it rides every claude dispatch, so every gate
-    # owner is covered by construction. Assert the property that makes that
-    # true rather than re-listing the agents.
-    assert "mcp__mcpsrv_neotoma__correct" in skill_runner.GATE_WRITEBACK_TOOLS
+    assert "mcp__mcpsrv_neotoma__correct" not in skill_runner.GATE_WRITEBACK_TOOLS
+    for read_tool in (
+        "mcp__mcpsrv_neotoma__retrieve_entity_by_identifier",
+        "mcp__mcpsrv_neotoma__retrieve_entity_snapshot",
+    ):
+        assert read_tool in skill_runner.GATE_WRITEBACK_TOOLS

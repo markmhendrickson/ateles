@@ -269,9 +269,30 @@ def format_waive_comment(
 SIGN_OFF_NO_SIGNING_KEY = "sign_off: no AAuth key for lens"
 SIGN_OFF_SIGNING_FAILED = "sign_off: signed write failed"
 SIGN_OFF_ENTITY_NOT_FOUND = "sign_off: no issue entity"
-SIGN_OFF_HEAD_MISMATCH = "sign_off: issue head moved since review"
+# Named for what the check actually is (no head_sha was supplied at all), not
+# for a comparison this method cannot make. Renamed from `SIGN_OFF_HEAD_MISMATCH`
+# (Loxia review nit + Falco security review, PR #1181): `gate_status` carries no
+# per-gate head pin in prod, so there is nothing to "mismatch" against — the
+# only check this method makes is that *a* head_sha was named at all. The old
+# name read, at a skim, as "the head changed since review", which is not what
+# happened and is not what this error means.
+SIGN_OFF_NO_HEAD = "sign_off: no head_sha supplied"
 SIGN_OFF_VERIFY_FAILED = "sign_off: write did not read back"
 SIGN_OFF_GATE_NOT_PENDING = "sign_off: gate not pending for this lens"
+
+# Gate states some OTHER authority already set, which `sign_off` must treat as
+# a true no-op (no write attempted at all) rather than something to (re-)sign:
+# an operator `waive`, a triage-time `not_required`/`not_applicable`, or a
+# `skipped` gate are all terminal states this lens's verdict does not own.
+# Deliberately narrower than `CLEARED_GATE_STATES` (which also includes
+# `signed_off`): `signed_off` IS this method's own state, and a lens signing
+# off on an already-`signed_off` gate must still perform the signed write and
+# read-back (see the "always re-sign" note in `sign_off`'s docstring) so the
+# latest observation on record is always attributable to the reviewing lens,
+# not to whichever session cleared it first.
+_SIGN_OFF_OTHER_AUTHORITY_STATES: frozenset[str] = frozenset(
+    {"waived", "not_required", "not_applicable", "skipped"}
+)
 
 # Fields actually declared on the production `issue` entity schema (confirmed
 # by Waxwing's `describe_entity_type` read on ateles#795, and matching
@@ -663,13 +684,30 @@ class IssueGateStore:
         panel failures, and never treat a non-2xx or a raised exception as a
         signal to retry with the bearer.
 
+        ALWAYS RE-SIGNS an already-``signed_off`` gate (Falco's security review,
+        PR #1181): a caller-observed ``signed_off`` snapshot proves nothing
+        about WHO signed it — the pre-amendment bug was exactly a shared-bearer
+        write landing unattributed, and a naive "already cleared -> no-op"
+        short-circuit would let that same unattributed write pass through as a
+        verified lens sign-off merely because the value happened to already
+        match. So the write and its read-back below are NOT skipped for
+        ``signed_off`` (only for a genuinely different authority's terminal
+        state — see ``_SIGN_OFF_OTHER_AUTHORITY_STATES``): the write is
+        idempotent (same value, freshly re-signed idempotency key), so
+        performing it again costs nothing and its read-back is always the
+        LENS's own latest observation, never a stale or differently-attributed
+        one this call merely trusted.
+
         Mirrors `waive()`'s safety shape, narrowed to ONE gate and ONE lens:
           1. Re-read current state (never trust a caller-supplied snapshot —
              `waive()`'s own docstring names this as the #241 failure mode).
-          2. Refuse if the gate is not actually `pending` for this lens (a
-             lens that already signed off, or a gate it does not own, is not
-             this lens's write to make — mirrors `IssueGateStore._matches`'s
-             (repo, issue) exactness, narrowed further to (repo, issue, gate)).
+          2. Refuse only if the gate is a DIFFERENT authority's terminal state
+             (`waived`/`not_required`/`not_applicable`/`skipped`) or an
+             unrecognized non-pending value — never for `pending` or an
+             already-`signed_off` gate, both of which this lens may write (the
+             latter is a re-sign, per the note above). Mirrors
+             `IssueGateStore._matches`'s (repo, issue) exactness, narrowed
+             further to (repo, issue, gate).
           3. Require *head_sha* (the exact commit the lens's clean verdict was
              FOR — `swarm_dispatch` already resolves this as `review_head`
              before the panel runs). `gate_status` carries no per-gate head
@@ -728,20 +766,24 @@ class IssueGateStore:
             return outcome
 
         current = (state.gate_status.get(gate) or "").strip().lower()
-        if current in CLEARED_GATE_STATES:
-            # Idempotent no-op, not a failure: a retry after a verified
-            # sign_off (or a concurrent one) finds the gate already clear.
+        if current in _SIGN_OFF_OTHER_AUTHORITY_STATES:
+            # A gate some OTHER authority already cleared (operator `waive`,
+            # `not_required`/`not_applicable` at triage, `skipped`) is a true
+            # no-op: this lens's sign_off must never overwrite a different
+            # actor's terminal state, and there is nothing to (re-)sign here —
+            # skip both the write and the read-back below.
             outcome.ok = True
             outcome.verified = True
             log.info(
-                "[apis.gate_waive] sign_off %s#%s gate=%s: already %r — no-op",
+                "[apis.gate_waive] sign_off %s#%s gate=%s: already %r "
+                "(other authority) — no-op, no write attempted",
                 repo,
                 issue_number,
                 gate,
                 current,
             )
             return outcome
-        if current and current != "pending":
+        if current and current != "pending" and current != "signed_off":
             # Some other non-cleared, non-pending value (unexpected shape) —
             # do not overwrite a state this method does not understand.
             outcome.error = SIGN_OFF_GATE_NOT_PENDING
@@ -767,7 +809,7 @@ class IssueGateStore:
             # "re-read before write" shape for the (repo, issue, gate) triple.
             # An empty head_sha means the caller skipped resolving one, which
             # is itself a bug in the call site, not a state to write through.
-            outcome.error = SIGN_OFF_HEAD_MISMATCH
+            outcome.error = SIGN_OFF_NO_HEAD
             log.error(
                 "[apis.gate_waive] sign_off %s#%s gate=%s: no head_sha supplied "
                 "— refusing to certify a verdict against an unnamed commit",
@@ -801,7 +843,7 @@ class IssueGateStore:
                 f"sign_off attempted to write undeclared field {field_name!r}"
             )
             try:
-                await _ns.signed_request(
+                status, _resp = await _ns.signed_request(
                     "POST",
                     f"{self.base_url}/correct",
                     {
@@ -831,6 +873,29 @@ class IssueGateStore:
                     field_name,
                     SIGN_OFF_SIGNING_FAILED,
                     type(exc).__name__,
+                )
+                return outcome
+            if status < 200 or status >= 300:
+                # Falco's security review, PR #1181 (NON-BLOCKING, defense in
+                # depth): `signed_request` returns its HTTP status rather than
+                # raising on a non-2xx, so a caller that ignores it relies
+                # entirely on the read-back below to catch a rejected write.
+                # The read-back IS fail-closed on its own (constraint 3c), but
+                # treating a non-2xx as an explicit failure CLASS here — rather
+                # than silently falling through to a read-back that happens to
+                # also fail — makes the failure attributable to the write
+                # itself, not to an unrelated-looking verify-failed reread.
+                outcome.error = SIGN_OFF_SIGNING_FAILED
+                log.error(
+                    "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: "
+                    "%s (HTTP %s)",
+                    repo,
+                    issue_number,
+                    gate,
+                    lens_agent,
+                    field_name,
+                    SIGN_OFF_SIGNING_FAILED,
+                    status,
                 )
                 return outcome
 

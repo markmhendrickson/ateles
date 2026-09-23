@@ -59,6 +59,34 @@ def test_non_blocking_marker_is_not_a_blocker():
     )
 
 
+def test_fullwidth_encoding_of_blocking_still_detected():
+    """Falco's security review, PR #1181 (NON-BLOCKING PLAUSIBLE-miss finding):
+    a fullwidth Unicode rendering of `[BLOCKING]` must still be detected, or a
+    lens verdict written in that form would read as CLEAN and reach
+    `sign_off` on a finding the dispatcher never saw as blocking. NFKC
+    normalization folds the fullwidth brackets/letters to their ASCII form."""
+    fullwidth = "［ＢＬＯＣＫＩＮＧ］"
+    assert fullwidth != "[BLOCKING]"  # sanity: genuinely a different string
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{fullwidth} scope: nope")
+
+
+def test_zero_width_joiner_split_encoding_still_detected():
+    """The splice-insertion form: a zero-width character spliced between the
+    ASCII letters of `[BLOCKING]` so a literal substring match misses it."""
+    spliced = "[BLO​CKING]"
+    assert spliced != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{spliced} scope: nope")
+
+
+def test_zero_width_joiner_split_non_blocking_still_not_flagged():
+    """The normalization widens detection of [BLOCKING]; it must not also
+    widen [NON-BLOCKING] into a false block by stripping the very characters
+    that (accidentally) helped it read as NON- in some encoding. The negative
+    lookbehind on `NON-` must still apply to the NORMALIZED text."""
+    spliced = "[NON​-BLOCKING] naming: nit"
+    assert not body_has_blocking_findings(f"**COMMENT**\n\n{spliced}")
+
+
 def test_comment_token_with_blocking_body_escalates_to_request_changes():
     """ateles#595, the exact ateles#558 shape: the legal lens posted **COMMENT**
     with a [BLOCKING] credential-scope finding. Submitted as --comment, it never

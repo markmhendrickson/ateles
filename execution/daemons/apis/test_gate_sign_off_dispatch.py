@@ -22,7 +22,7 @@ import pytest
 from gate_waive import (
     SIGN_OFF_ENTITY_NOT_FOUND,
     SIGN_OFF_GATE_NOT_PENDING,
-    SIGN_OFF_HEAD_MISMATCH,
+    SIGN_OFF_NO_HEAD,
     SIGN_OFF_NO_SIGNING_KEY,
     SIGN_OFF_SIGNING_FAILED,
     SIGN_OFF_VERIFY_FAILED,
@@ -84,7 +84,7 @@ class TestSignOffFailureClass:
             (SIGN_OFF_NO_SIGNING_KEY, "lens signing key unavailable"),
             (SIGN_OFF_SIGNING_FAILED, "signed write failed"),
             (SIGN_OFF_ENTITY_NOT_FOUND, "no issue entity"),
-            (SIGN_OFF_HEAD_MISMATCH, "reviewed head not confirmed"),
+            (SIGN_OFF_NO_HEAD, "no reviewed head supplied"),
             (SIGN_OFF_VERIFY_FAILED, "sign-off did not read back"),
             (SIGN_OFF_GATE_NOT_PENDING, "gate not pending"),
         ],
@@ -180,6 +180,37 @@ class TestSurfaceFailedSignOffs:
         assert "waxwing" in body
         assert "sign-off did not read back" in body
         assert notifier.sent, "must page the operator, not just comment"
+
+    async def test_posts_the_design_token_blocked_contract(self, monkeypatch):
+        """Pavo's PM review, PR #1181: the issue's Design/UX spec requires every
+        denied/unconfirmed writeback surface to post `**BLOCKED**` with the
+        Design token fields `reason`, `gate`, `attempted`, `observed`,
+        `next_action` — never a bespoke prose-only shape. This is the exact
+        contract from issue #795's "Error / empty message contract" table."""
+        from swarm_dispatch import sign_off_design_reason, sign_off_next_action
+
+        client = _RecordingClient(existing_comments=[])
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **k: client)
+        monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+        d = SwarmDispatcher(_StubNotifier(), _config())
+
+        await d._surface_failed_sign_offs(
+            _trigger(),
+            80,
+            [("arch", "waxwing", SIGN_OFF_VERIFY_FAILED)],
+        )
+
+        body = client.posted[0]["body"]
+        assert "**BLOCKED**" in body
+        assert "reason:" in body
+        assert "gate:" in body
+        assert "attempted:" in body
+        assert "observed:" in body
+        assert "next_action:" in body
+        expected_reason = sign_off_design_reason(SIGN_OFF_VERIFY_FAILED)
+        assert expected_reason == "gate_writeback_unconfirmed"
+        assert f"`{expected_reason}`" in body
+        assert sign_off_next_action(expected_reason) in body
 
     async def test_idempotent_on_its_own_marker(self, monkeypatch):
         """A second call for the same PR must not double-post."""

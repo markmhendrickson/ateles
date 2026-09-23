@@ -37,7 +37,7 @@ import pytest
 from gate_waive import (
     SIGN_OFF_ENTITY_NOT_FOUND,
     SIGN_OFF_GATE_NOT_PENDING,
-    SIGN_OFF_HEAD_MISMATCH,
+    SIGN_OFF_NO_HEAD,
     SIGN_OFF_NO_SIGNING_KEY,
     SIGN_OFF_SIGNING_FAILED,
     SIGN_OFF_VERIFY_FAILED,
@@ -261,6 +261,37 @@ class TestReadBackAssertion:
         assert outcome.verified
         assert outcome.error == ""
 
+    @pytest.mark.asyncio
+    async def test_non_2xx_status_is_an_explicit_failure_not_just_a_readback_gap(
+        self, monkeypatch
+    ):
+        """Falco's security review, PR #1181 (NON-BLOCKING, defense in depth):
+        `signed_request` returns its HTTP status rather than raising on a
+        non-2xx. A caller that discards the status relies entirely on the
+        read-back to catch a rejected write — this asserts the status itself
+        is checked, classifying the failure as a write failure even in the
+        (contrived) case where a stale read-back would otherwise appear to
+        agree with what was attempted."""
+        store = IssueGateStore("http://x", "daemon-bearer-tok")
+        monkeypatch.setattr(
+            "gate_waive._ns.agent_identity",
+            lambda agent, sub=None: _identity(agent, sub or f"{agent}@ateles-swarm"),
+        )
+        monkeypatch.setattr(
+            "gate_waive._ns.signed_request",
+            mock.AsyncMock(return_value=(403, {"error": "forbidden"})),
+        )
+        monkeypatch.setattr(
+            store,
+            "load",
+            _LoadSequence([_state({"ux": "pending"})]),
+        )
+
+        outcome = await store.sign_off("o/r", 795, "ux", "accipiter", HEAD)
+
+        assert not outcome.ok
+        assert outcome.error == SIGN_OFF_SIGNING_FAILED
+
 
 # ── Safety preconditions (copied shape from waive()/_matches) ───────────────
 
@@ -284,13 +315,23 @@ class TestSafetyPreconditions:
         write.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_already_signed_off_is_an_idempotent_no_op(self, monkeypatch):
+    async def test_already_signed_off_still_performs_the_lens_signed_write(
+        self, monkeypatch
+    ):
+        """An already-`signed_off` gate is idempotent at the VALUE level (the
+        write doesn't change what's stored) but NOT skipped: a caller-observed
+        `signed_off` snapshot proves nothing about who signed it, so `sign_off`
+        always re-performs the lens-signed write and read-back rather than
+        trusting a snapshot it did not itself just verify (Falco's security
+        review, PR #1181 — the CLEARED-state no-op was flagged as a sink that
+        would let an unattributed shared-bearer write pass through as a
+        verified lens sign-off merely because the value happened to match)."""
         store = IssueGateStore("http://x", "daemon-bearer-tok")
         monkeypatch.setattr(
             "gate_waive._ns.agent_identity",
             lambda agent, sub=None: _identity(agent, sub or f"{agent}@ateles-swarm"),
         )
-        write = mock.AsyncMock()
+        write = mock.AsyncMock(return_value=(200, {}))
         monkeypatch.setattr("gate_waive._ns.signed_request", write)
         monkeypatch.setattr(
             store, "load", _LoadSequence([_state({"arch": "signed_off"})])
@@ -300,7 +341,12 @@ class TestSafetyPreconditions:
 
         assert outcome.ok
         assert outcome.verified
-        write.assert_not_called()
+        assert write.call_count == 2  # gate_status + owner_history
+        for call in write.call_args_list:
+            assert call.kwargs["sub"] == "waxwing@ateles-swarm", (
+                "the re-sign must still be attributed to THIS lens, never a "
+                "prior (possibly unattributed) clearer"
+            )
 
     @pytest.mark.asyncio
     async def test_waived_gate_is_also_a_no_op_not_an_overwrite(self, monkeypatch):
@@ -357,7 +403,7 @@ class TestSafetyPreconditions:
         outcome = await store.sign_off("o/r", 795, "arch", "waxwing", "")
 
         assert not outcome.ok
-        assert outcome.error == SIGN_OFF_HEAD_MISMATCH
+        assert outcome.error == SIGN_OFF_NO_HEAD
         write.assert_not_called()
 
 

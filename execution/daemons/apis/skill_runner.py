@@ -106,34 +106,42 @@ ATELES_REPO = Path(
 _DROPPED_ALLOWLIST_RULE_RE = re.compile(r'Ignoring\s+--allowedTools rule "([^"]*)"')
 
 # ── Gate-writeback tool grant (ateles#795) ────────────────────────────────────
-# The Neotoma tools a gate-owning review lens needs to record its OWN verdict.
+# The Neotoma tools a gate-owning review lens is pre-approved for READ-ONLY
+# access to, so it can look up and read back the parent issue's `gate_status`
+# for its own situational awareness.
 #
-# A panelist seated because it owns a pending pre-impl gate is instructed (the
-# GATE WRITEBACK block in swarm_dispatch._panelist_prompt) to `correct()`
-# `gate_status.<lens>` on the parent issue entity and then read it back. On PR
-# #791 that write was DENIED — and not by Neotoma: the `agent_grant` admitting
-# `issue` on retrieve+correct has been live and `active` since ateles#769, and
-# the instance policy is permissive. It was denied by the LOCAL harness. A
+# HISTORY, and why `correct` is NO LONGER in this tuple. A panelist seated
+# because it owns a pending pre-impl gate used to be instructed to `correct()`
+# `gate_status.<lens>` on the parent issue entity itself, pre-approved via this
+# same allowlist. On PR #791 that write was DENIED by the LOCAL harness (a
 # headless `claude --print` child runs in `default` permission mode, where an
-# MCP write tool it was not explicitly granted raises an approval prompt that a
-# non-interactive child cannot answer. The lens signed off in prose while
-# `gate_status.ux` stayed `pending`, and gate inheritance — a hard stop that
-# outranks APIS_AUTONOMY_AUTO_MERGE — withheld the merge forever.
+# MCP write tool it was not explicitly granted raises an approval prompt a
+# non-interactive child cannot answer), so this tuple originally added
+# `mcp__mcpsrv_neotoma__correct` to pre-approve exactly that write.
 #
-# The remedy is to name these three tools on `--allowed-tools` so the writeback
-# is pre-approved at tool granularity. Deliberately NOT the remedy:
-# `--permission-mode bypassPermissions` or `--dangerously-skip-permissions`,
-# either of which lifts every gate on the child (shell, network, the entire MCP
-# surface) to fix one internal governance write. Least privilege is the point.
+# The operator's amended ADR on ateles#795 moved the system-of-record write
+# off this path entirely: `gate_waive.IssueGateStore.sign_off`, called by the
+# DISPATCHER after a clean lens verdict, signs the write with the LENS's own
+# AAuth keypair — never this MCP session's shared daemon bearer. Leaving
+# `mcp__mcpsrv_neotoma__correct` pre-approved here left an unattributed sibling
+# path wide open: every lens session presents the SAME shared bearer over MCP
+# (see `neotoma_token_for_agent`'s Tier-2 fallback), so a pre-approved
+# `correct()` on `gate_status` from ANY seated lens could clear a gate with no
+# lens AAuth signature at all — and `sign_off`'s own idempotent no-op on an
+# already-cleared gate (see `gate_waive.sign_off`) would then read that
+# shared-bearer write back as a verified success. Removing `correct` from this
+# allowlist closes that sink: an agent MCP `correct()` of `gate_status` is no
+# longer pre-approved at the tool-permission layer, so it falls back to the
+# same `default`-mode approval prompt a non-interactive child cannot answer —
+# best-effort at most, never a clearance path (Falco's security review on PR
+# #1181, ateles#795 amended ADR).
 #
-# The two retrieve tools are here because the recipe is correct-then-READ-BACK:
-# a `correct()` the lens cannot verify is exactly the silent failure ateles#762
-# cause #2 named, and a blind write would trade one invisible failure for
-# another.
+# The two retrieve tools remain pre-approved: they are read-only situational
+# awareness (what does `gate_status` currently say), not a system-of-record
+# mutation, so pre-approving them carries none of the attribution risk above.
 GATE_WRITEBACK_TOOLS: tuple[str, ...] = (
     "mcp__mcpsrv_neotoma__retrieve_entity_by_identifier",
     "mcp__mcpsrv_neotoma__retrieve_entity_snapshot",
-    "mcp__mcpsrv_neotoma__correct",
 )
 
 
@@ -1501,9 +1509,13 @@ async def _run_skill_once(
         # exactly as before. A gate owner is NOT refused here for lacking one
         # (amended ADR): the system-of-record write is now the dispatcher's
         # `IssueGateStore.sign_off`, signed with the lens's own AAuth key,
-        # independent of this MCP session's bearer. This session's own
-        # `correct()` call (if the lens attempts it per the GATE WRITEBACK
-        # prompt block) is best-effort only and may land on the shared bearer.
+        # independent of this MCP session's bearer. The prompt no longer
+        # instructs a gate-owning lens to `correct()` `gate_status` itself (the
+        # GATE WRITEBACK block was removed from `_panelist_prompt`), and
+        # `mcp__mcpsrv_neotoma__correct` is no longer pre-approved for this
+        # session either (see `GATE_WRITEBACK_TOOLS`) — an unsolicited `correct`
+        # attempt on `gate_status` would fall back to an unanswerable
+        # `default`-mode approval prompt, never a clearance path.
         _neotoma_token, _ = neotoma_token_for_agent(_role)
         if not _neotoma_token:
             # Unlike the harness_event writer above, this is not a
@@ -1570,11 +1582,13 @@ async def _run_skill_once(
         allowed_list = list(tools)
         if "mcp__mcpsrv_neotoma__*" not in allowed_list:
             allowed_list.append("mcp__mcpsrv_neotoma__*")
-        # ateles#795: name the gate-writeback tools explicitly even though the
-        # `mcp__mcpsrv_neotoma__*` wildcard above nominally covers them. The
-        # wildcard is what a restricted agent already had on PR #791 when its
-        # `correct()` was still denied, so it is not sufficient evidence that
-        # the writeback is pre-approved. Exact tool names are.
+        # ateles#795: name the two read-only gate tools explicitly even though
+        # the `mcp__mcpsrv_neotoma__*` wildcard above nominally covers them —
+        # exact tool names are the durable statement of intent, not reliance on
+        # a wildcard that could later narrow. `correct` is deliberately absent
+        # (see `GATE_WRITEBACK_TOOLS`'s docstring): the dispatcher's signed
+        # `sign_off` is the system-of-record write now, and this session's own
+        # `correct()` of `gate_status` must NOT be pre-approved.
         allowed_list = gate_writeback_allowlist(allowed_list)
         allowed = ",".join(allowed_list)
         cmd += ["--allowed-tools", allowed]
@@ -1591,10 +1605,13 @@ async def _run_skill_once(
         # cannot answer a prompt. So the most-trusted agents were the ones
         # whose gate writeback was surest to be denied (ateles#795).
         #
-        # Granting the three gate-writeback tools by name is the smallest fix
-        # that makes the verdict recordable. It does NOT narrow the agent: the
-        # `*` wildcard is preserved as the first entry, so every other tool the
-        # agent had remains available exactly as before.
+        # Granting the two read-only gate tools by name is a courtesy grant for
+        # situational awareness, not a writeback fix — `correct` on
+        # `gate_status` is deliberately NOT pre-approved (see
+        # `GATE_WRITEBACK_TOOLS`'s docstring: the dispatcher's signed
+        # `sign_off` is the system-of-record write now). This does NOT narrow
+        # the agent: the `*` wildcard is preserved as the first entry, so every
+        # other tool the agent had remains available exactly as before.
         allowed = ",".join(gate_writeback_allowlist(["*"]))
         cmd += ["--allowed-tools", allowed]
         log.info(
