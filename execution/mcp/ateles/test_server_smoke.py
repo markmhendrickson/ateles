@@ -129,7 +129,7 @@ def test_initialize_and_tools_list():
         assert names == {
             "get_swarm_roster", "route_task", "list_checkpoints", "resolve_checkpoint",
             # Read-only swarm observability (see server.py).
-            "get_gate_status", "list_pipeline_queue", "get_dispatch_health",
+            "get_gate_status", "list_pipeline_queue", "get_dispatch_health", "get_session_workboard",
         }, names
         route_task = next(t for t in tools if t["name"] == "route_task")
         assert route_task["inputSchema"]["required"] == ["task_description"]
