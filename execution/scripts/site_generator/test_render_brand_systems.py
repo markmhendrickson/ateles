@@ -313,3 +313,35 @@ def test_local_cli_check_surfaces_both_complete_products():
     assert result.returncode == 0, result.stdout + result.stderr
     assert "BRAND_REVIEW_COMPLETE product=ateles failures=0" in result.stdout
     assert "BRAND_REVIEW_COMPLETE product=neotoma failures=0" in result.stdout
+
+
+def test_local_cli_check_exits_nonzero_when_ateles_review_is_incomplete():
+    """Exposing surface: render_brand_systems.py --local --check must fail closed."""
+    contract_path = GEN_DIR / "brand_systems" / "ateles.json"
+    original = contract_path.read_text()
+    try:
+        broken = json.loads(original)
+        next(
+            item
+            for item in broken["completeness"]["deliverables"]
+            if item["id"] == "cinematic.inputs"
+        )["render"]["proofs"] = []
+        contract_path.write_text(json.dumps(broken, indent=2) + "\n")
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(GEN_DIR / "render_brand_systems.py"),
+                "--local",
+                "--check",
+            ],
+            cwd=GEN_DIR.parents[2],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        combined = result.stdout + result.stderr
+        assert result.returncode != 0, combined
+        assert "BRAND_REVIEW_INCOMPLETE" in combined
+        assert "product=ateles" in combined
+    finally:
+        contract_path.write_text(original)
