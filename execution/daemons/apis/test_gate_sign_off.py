@@ -196,7 +196,7 @@ class TestOnlyDeclaredFieldsWritten:
         outcome = await store.sign_off("o/r", 795, "pm", "pavo", HEAD)
 
         assert outcome.ok
-        assert set(sent_fields) == {"gate_status", "owner_history"}
+        assert set(sent_fields) == {"gate_status", "owner_history"}  # vocab-ok: live Neotoma wire field name
         assert "gate_writeback_outcome" not in sent_fields
 
 
