@@ -3746,30 +3746,35 @@ class SwarmDispatcher:
         gates_green = await self._gates_green(
             lanius, trigger.repository, trigger.number
         )
+        spec_ready_key = f"spec-ready:{ref}"
+        spec_action = (
+            f"Open {trigger.html_url} — set ATELES_SWARM_AUTO_BUILD=1 and ensure "
+            "pre-implementation gates are signed off (_gates_green), or approve "
+            "the build manually once gates are green."
+        )
         if self.config.auto_build and gates_green:
             pr_url = await self._open_implementation_pr(trigger, state)
-            self.notifier.send(
-                f"Issue {ref}: additive spec assembled ("
-                f"{', '.join(completed) or 'none'}); "
-                + (
+            if pr_url:
+                self.notifier.clear_dedupe(spec_ready_key)
+                self.notifier.send(
+                    f"Issue {ref}: additive spec assembled ("
+                    f"{', '.join(completed) or 'none'}); "
                     f"auto-build ON — implementation PR opened ({pr_url}); the "
-                    "PR gate pipeline now owns it (merge stays operator-gated)."
-                    if pr_url
-                    else "auto-build ON, but the Cicada build handoff opened NO "
-                    "PR (spec may be incomplete or the build produced nothing). "
-                    "Spec is ready; open the build manually or re-run once the "
-                    "spec is implementable."
-                ),
-                # A successfully-opened PR is FYI — the PR gate pipeline owns it
-                # and will stop at the operator's merge approval, so this needs
-                # no immediate action and belongs in the digest. The NO-PR branch
-                # is a real failure the operator must act on, so it stays an
-                # immediate operator decision.
-                priority=(
-                    Priority.INFO if pr_url else Priority.OPERATOR_DECISION
-                ),
-                handler=DAEMON_NAME,
-            )
+                    "PR gate pipeline now owns it (merge stays operator-gated).",
+                    priority=Priority.INFO,
+                    handler=DAEMON_NAME,
+                )
+            else:
+                self.notifier.send(
+                    f"Issue {ref}: additive spec assembled ("
+                    f"{', '.join(completed) or 'none'}); "
+                    "auto-build ON, but the Cicada build handoff opened NO PR "
+                    "(spec may be incomplete or the build produced nothing). "
+                    f"{spec_action}",
+                    priority=Priority.OPERATOR_DECISION,
+                    handler=DAEMON_NAME,
+                    dedupe_key=spec_ready_key,
+                )
         else:
             reason = (
                 "auto-build OFF"
@@ -3780,10 +3785,11 @@ class SwarmDispatcher:
                 f"Issue {ref}: additive spec assembled in order "
                 f"({', '.join(completed) or 'none'}); Lanius"
                 f"{'✓' if lanius.ok else '✗'}. "
-                f"Spec is ready and awaiting `build` approval ({reason}). "
+                f"Spec is ready ({reason}). {spec_action} "
                 "No PR opened; nothing auto-merged.",
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
+                dedupe_key=spec_ready_key,
             )
 
     async def _refresh_pending_gates(
@@ -4535,18 +4541,44 @@ class SwarmDispatcher:
         #    proposed_skill_update entities.
         proposals = propose_skill_updates(reviews, pr_ref=ref)
         if proposals:
-            await self._store_entities(
+            digest = content_digest(proposals)
+            store_result = await self._store_entities(
                 proposals,
                 idempotency_key=(
-                    f"learning-{ref}-{trigger.delivery_id}-"
-                    f"{content_digest(proposals)}"
+                    f"learning-{ref}-{trigger.delivery_id}-{digest}"
                 ),
             )
+            first = proposals[0]
+            finding_label = first.get("finding_category") or first.get("title", "")
+            proposed_rule = first.get("proposed_rule") or first.get("title", "")
+            stored_ids: list[str] = []
+            if store_result:
+                for ent in store_result.get("entities", []):
+                    eid = ent.get("entity_id")
+                    if eid:
+                        stored_ids.append(eid)
+            approve_bits: list[str] = []
+            if trigger.html_url:
+                approve_bits.append(f"PR: {trigger.html_url}")
+            if stored_ids:
+                approve_bits.append(
+                    "proposed_skill_update entity id(s): "
+                    + ", ".join(stored_ids)
+                )
+            approve_bits.append(
+                "Approve the proposed_skill_update record(s) in Neotoma when ready."
+            )
+            email_eligible = bool(trigger.html_url or stored_ids)
             self.notifier.send(
                 f"{len(proposals)} systemic review finding(s) on {ref} — "
-                f"proposed skill update(s) await operator approval",
+                f"proposed skill update(s) await operator approval.\n"
+                f"Finding: {finding_label}\n"
+                f"Proposed rule: {proposed_rule}\n"
+                + "\n".join(approve_bits),
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
+                dedupe_key=f"skill-updates:{ref}:{digest}",
+                email_eligible=email_eligible,
             )
 
         # 3b. ateles#795: re-read gate_status from the record before the merge
@@ -4709,16 +4741,21 @@ class SwarmDispatcher:
                 "panel verdict lacks a verified exact-head APPROVED receipt "
                 "from the distinct Vanellus principal — merge readiness held"
             )
-            if await self._claim_escalation(trigger, "binding-review-unverified"):
-                self.notifier.send(
-                    f"PR {trigger.repository}#{trigger.number}: the panel is "
-                    "clear, but GitHub did not confirm an exact-head APPROVED "
-                    "review from the dedicated Vanellus identity. Merge "
-                    "readiness is held closed.",
-                    priority=Priority.OPERATOR_DECISION,
-                    handler=DAEMON_NAME,
-                )
+            await self._claim_escalation(trigger, "binding-review-unverified")
+            self.notifier.send(
+                f"PR {trigger.repository}#{trigger.number}: standing "
+                "self-review defect (ateles#1139 — reviewer token must differ "
+                "from PR author): GitHub did not confirm an exact-head APPROVED "
+                "review from the dedicated Vanellus identity. "
+                "https://github.com/markmhendrickson/ateles/issues/1139 — "
+                "merge readiness is held closed.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+                dedupe_key="self-review-refused",
+            )
             return
+
+        self.notifier.clear_dedupe("self-review-refused")
 
         # Close the receipt-to-readiness race.  The formal-review path checked
         # the live head before posting, but a push can land after that GET and
@@ -5203,16 +5240,18 @@ class SwarmDispatcher:
             # BLOCKED without content findings means a process precondition was
             # unmet. It is actionable context, not a malformed verdict and not
             # code for Cicada to change.
-            if await self._claim_escalation(trigger, "process-blocked"):
-                detail = next((text.strip() for _, text in reviews if text.strip()), "")
-                self.notifier.send(
-                    f"ℹ️ Vanellus reports BLOCKED (process, not content): no "
-                    f"blocking findings, but a process gate is unmet. "
-                    f"{detail[:300]}. No code changes required — see PR "
-                    f"body/thread. PR {ref} remains held.",
-                    priority=Priority.OPERATOR_DECISION,
-                    handler=DAEMON_NAME,
-                )
+            await self._claim_escalation(trigger, "process-blocked")
+            detail = next((text.strip() for _, text in reviews if text.strip()), "")
+            head_key = _normalise_full_sha(reviewed_head) or reviewed_head
+            self.notifier.send(
+                f"ℹ️ Vanellus reports BLOCKED (process, not content): no "
+                f"blocking findings, but a process gate is unmet. "
+                f"{detail[:300]}. No code changes required — see PR "
+                f"body/thread. PR {ref} ({trigger.html_url}) remains held.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+                dedupe_key=f"process-blocked:{ref}:{head_key}",
+            )
             return
 
         if not by_lens:
@@ -5224,14 +5263,17 @@ class SwarmDispatcher:
             # human reads the review. Without this the body-derived blocker would
             # simply land in a different silence than the one it came from.
             # Only notify once per PR: a re-review must not re-ping the operator.
-            if await self._claim_escalation(trigger, "unparseable-verdict"):
-                self.notifier.send(
-                    f"PR {ref}: review verdict `{verdict or 'unparseable'}` did "
-                    "not clear the merge path but no blocking findings could be "
-                    "parsed from the lens reviews — needs your read. Merge held.",
-                    priority=Priority.OPERATOR_DECISION,
-                    handler=DAEMON_NAME,
-                )
+            await self._claim_escalation(trigger, "unparseable-verdict")
+            head_key = _normalise_full_sha(reviewed_head) or reviewed_head
+            self.notifier.send(
+                f"PR {ref}: review verdict `{verdict or 'unparseable'}` did "
+                "not clear the merge path but no blocking findings could be "
+                f"parsed from the lens reviews — needs your read. "
+                f"{trigger.html_url} Merge held.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+                dedupe_key=f"unparseable-verdict:{ref}:{head_key}",
+            )
             return
 
         prior_rounds = await self._fix_round_count(trigger)
@@ -5240,14 +5282,18 @@ class SwarmDispatcher:
             # Once-per-PR: the exhausted-rounds condition is re-evaluated on
             # every subsequent push, so guard the operator ping behind the
             # escalation marker to avoid identical repeats (ateles#262 ×4).
-            if await self._claim_escalation(trigger, "auto-fix-exhausted"):
-                self.notifier.send(
-                    f"PR {ref}: {self.config.max_fix_rounds} auto-fix rounds did "
-                    f"not clear review (still blocking on: {lenses}). Escalating "
-                    "— needs your attention. Merge held.",
-                    priority=Priority.OPERATOR_DECISION,
-                    handler=DAEMON_NAME,
-                )
+            await self._claim_escalation(trigger, "auto-fix-exhausted")
+            head = _normalise_full_sha(
+                (await self._pr_head_sha(trigger)) or reviewed_head or ""
+            ) or reviewed_head
+            self.notifier.send(
+                f"PR {ref}: {self.config.max_fix_rounds} auto-fix rounds did "
+                f"not clear review (still blocking on: {lenses}). Escalating "
+                f"— needs your attention. {trigger.html_url} Merge held.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+                dedupe_key=f"fix-exhausted:{ref}:{head}",
+            )
             return
 
         this_round = prior_rounds + 1
@@ -5454,6 +5500,14 @@ class SwarmDispatcher:
             )
             return
 
+        ci_exhaust_head = expected_head or _normalise_full_sha(
+            (await self._pr_head_sha(trigger)) or ""
+        )
+        if ci_exhaust_head:
+            self.notifier.clear_dedupe(
+                f"ci-exhausted:{trigger.repository}#{trigger.number}:{ci_exhaust_head}"
+            )
+
         if self.config.auto_merge:
             merged, detail = await self._merge_pr(
                 trigger.repository,
@@ -5493,6 +5547,69 @@ class SwarmDispatcher:
             handler=DAEMON_NAME,
         )
 
+    async def _fetch_head_ci_snapshot(
+        self, trigger: SwarmTrigger
+    ) -> tuple[str, str, list[dict]]:
+        """Return PR head SHA, combined commit status state, and raw check-runs."""
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = self._github_headers(trigger.repository)
+            pr = await client.get(
+                f"https://api.github.com/repos/{trigger.repository}/pulls/"
+                f"{trigger.number}",
+                headers=headers,
+            )
+            pr.raise_for_status()
+            head_sha = pr.json().get("head", {}).get("sha", "")
+            if not head_sha:
+                return "", "unknown", []
+
+            status = await client.get(
+                f"https://api.github.com/repos/{trigger.repository}/commits/"
+                f"{head_sha}/status",
+                headers=headers,
+            )
+            status.raise_for_status()
+            state = status.json().get("state", "")
+
+            checks = await client.get(
+                f"https://api.github.com/repos/{trigger.repository}/commits/"
+                f"{head_sha}/check-runs",
+                headers={**headers, "Accept": "application/vnd.github+json"},
+            )
+            checks.raise_for_status()
+            runs = checks.json().get("check_runs", [])
+            return head_sha, state, runs
+
+    async def _failing_check_runs(
+        self, trigger: SwarmTrigger
+    ) -> list[dict[str, str]]:
+        """Failing check-runs for the PR head — name and html_url only."""
+        try:
+            _head, _state, runs = await self._fetch_head_ci_snapshot(trigger)
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                f"could not fetch check-runs for CI notify: {exc}"
+            )
+            return []
+        failing_conclusions = (
+            "failure",
+            "timed_out",
+            "cancelled",
+            "action_required",
+        )
+        out: list[dict[str, str]] = []
+        for run in runs:
+            if run.get("conclusion") not in failing_conclusions:
+                continue
+            out.append(
+                {
+                    "name": (run.get("name") or "").strip(),
+                    "html_url": (run.get("html_url") or "").strip(),
+                }
+            )
+        return out
+
     async def _required_ci_state(self, trigger: SwarmTrigger) -> str:
         """Return "green" | "failing" | "pending" | "unknown" for the PR head.
 
@@ -5511,52 +5628,25 @@ class SwarmDispatcher:
         """
 
         async def _fetch_state() -> str:
-            async with httpx.AsyncClient(timeout=30) as client:
-                headers = self._github_headers(trigger.repository)
-                pr = await client.get(
-                    f"https://api.github.com/repos/{trigger.repository}/pulls/"
-                    f"{trigger.number}",
-                    headers=headers,
-                )
-                pr.raise_for_status()
-                head_sha = pr.json().get("head", {}).get("sha", "")
-                if not head_sha:
-                    return "unknown"
+            head_sha, state, runs = await self._fetch_head_ci_snapshot(trigger)
+            if not head_sha:
+                return "unknown"
+            run_conclusions = [r.get("conclusion") for r in runs]
+            run_statuses = [r.get("status") for r in runs]
 
-                # Combined legacy commit status (Loxia, external CIs).
-                status = await client.get(
-                    f"https://api.github.com/repos/{trigger.repository}/commits/"
-                    f"{head_sha}/status",
-                    headers=headers,
-                )
-                status.raise_for_status()
-                state = status.json().get("state", "")  # success|failure|pending|""
+            failing_run = any(
+                c in ("failure", "timed_out", "cancelled", "action_required")
+                for c in run_conclusions
+            )
+            pending_run = any(s != "completed" for s in run_statuses)
 
-                # GitHub Actions check-runs (not covered by the status API).
-                checks = await client.get(
-                    f"https://api.github.com/repos/{trigger.repository}/commits/"
-                    f"{head_sha}/check-runs",
-                    headers={**headers, "Accept": "application/vnd.github+json"},
-                )
-                checks.raise_for_status()
-                runs = checks.json().get("check_runs", [])
-                run_conclusions = [r.get("conclusion") for r in runs]
-                run_statuses = [r.get("status") for r in runs]
-
-                failing_run = any(
-                    c in ("failure", "timed_out", "cancelled", "action_required")
-                    for c in run_conclusions
-                )
-                pending_run = any(s != "completed" for s in run_statuses)
-
-                if state == "failure" or failing_run:
-                    return "failing"
-                if state == "pending" or pending_run:
-                    return "pending"
-                if state in ("success", "") and not runs and not failing_run:
-                    # No checks configured at all — treat as green (nothing to fail).
-                    return "green"
+            if state == "failure" or failing_run:
+                return "failing"
+            if state == "pending" or pending_run:
+                return "pending"
+            if state in ("success", "") and not runs and not failing_run:
                 return "green"
+            return "green"
 
         ref = f"{trigger.repository}#{trigger.number}"
         # load_policy() does a blocking httpx.get(); run it off the event loop
@@ -5631,12 +5721,39 @@ class SwarmDispatcher:
         ref = f"{trigger.repository}#{trigger.number}"
         prior_rounds = await self._fix_round_count(trigger)
         if prior_rounds >= self.config.max_fix_rounds:
-            self.notifier.send(
+            head = _normalise_full_sha((await self._pr_head_sha(trigger)) or "")
+            dedupe_key = (
+                f"ci-exhausted:{trigger.repository}#{trigger.number}:{head}"
+                if head
+                else None
+            )
+            failing = await self._failing_check_runs(trigger)
+            check_lines = [
+                f"- {c['name']}: {c['html_url']}"
+                for c in failing
+                if c.get("name") and c.get("html_url")
+            ]
+            action = (
+                "Open the failing check URL(s) above, re-push a fix, or raise "
+                f"APIS_MAX_FIX_ROUNDS (currently {self.config.max_fix_rounds})."
+            )
+            email_eligible = bool(check_lines)
+            body = (
                 f"PR {ref}: required CI is failing after "
                 f"{self.config.max_fix_rounds} auto-fix rounds. Escalating — "
-                "needs your attention. Merge held.",
+                "needs your attention. Merge held.\n"
+            )
+            if check_lines:
+                body += "Failing checks:\n" + "\n".join(check_lines) + "\n"
+            body += action
+            if trigger.html_url:
+                body += f"\nPR: {trigger.html_url}"
+            self.notifier.send(
+                body,
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
+                dedupe_key=dedupe_key,
+                email_eligible=email_eligible,
             )
             return
         this_round = prior_rounds + 1

@@ -84,11 +84,17 @@ class _StubNotifier:
         self.sent = []
         self.priorities = []  # HEAD-side: priority-only assertions
         self.sent_full = []  # main-side: (message, priority) assertions
+        self.kwargs = []
+        self.cleared = []
 
-    def send(self, message, priority=None, handler=None):
+    def send(self, message, priority=None, handler=None, **kwargs):
         self.sent.append(message)
         self.priorities.append(priority)
         self.sent_full.append((message, priority))
+        self.kwargs.append(kwargs)
+
+    def clear_dedupe(self, key):
+        self.cleared.append(key)
 
 
 def _config(**overrides):
@@ -1782,12 +1788,11 @@ def test_route_findings_escalates_at_retry_cap(monkeypatch):
     assert any("auto-fix rounds did not clear" in m for m in notifier.sent)
 
 
-def test_route_findings_exhausted_dedup_suppresses_renotify(monkeypatch):
+def test_route_findings_exhausted_dedup_suppresses_renotify(monkeypatch, tmp_path):
     """A re-review after the cap must not re-page the operator.
 
-    Regression for the duplicate-fire bug (ateles#262 sent four identical
-    auto-fix-exhausted pings): when _claim_escalation reports the condition was
-    already escalated (returns False), the notification is suppressed.
+    Notifier dedupe (ateles#1165) suppresses repeats; _claim_escalation False
+    still allows the first Notifier delivery for that head.
     """
     async def fake_run_skill(skill, prompt, **kwargs):
         return SkillResult(skill, True, 0, "x", "")
@@ -1798,18 +1803,37 @@ def test_route_findings_exhausted_dedup_suppresses_renotify(monkeypatch):
     async def fake_claim(self, trigger, kind):
         return False  # already escalated → suppress
 
+    from lib.notify import Notifier
+
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
     monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40)
+    )
 
-    notifier = _StubNotifier()
+    sent = []
+    notifier = Notifier(
+        rubric={
+            "timezone": "Europe/Madrid",
+            "silence_start": "22:00",
+            "silence_end": "08:00",
+        }
+    )
+    notifier._dedupe_path = tmp_path / "dedupe.json"
+    notifier._deliver = lambda m, **kw: (sent.append(m), True)[1]
     d = SwarmDispatcher(notifier, _config())
     reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
-    asyncio.run(
-        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
-                                   verdict="request_changes")
-    )
-    assert not any("auto-fix rounds did not clear" in m for m in notifier.sent)
+    trig = _trigger()
+    for _ in range(2):
+        asyncio.run(
+            d._route_blocking_findings(
+                trig, parent=80, reviews=reviews, verdict="request_changes",
+                reviewed_head="a" * 40,
+            )
+        )
+    assert len(sent) == 1
+    assert "auto-fix rounds did not clear" in sent[0]
 
 
 def test_route_findings_cicada_auth_failure_pages_infra(monkeypatch):
@@ -1869,7 +1893,7 @@ def test_route_findings_no_parseable_blocking_escalates(monkeypatch):
     assert any("process, not content" in m for m in notifier.sent)
 
 
-def test_route_findings_unparseable_dedup_suppresses_renotify(monkeypatch):
+def test_route_findings_unparseable_dedup_suppresses_renotify(monkeypatch, tmp_path):
     """A re-review of the same unparseable verdict must not re-page the operator."""
     async def fake_run_skill(skill, prompt, **kwargs):
         raise AssertionError("should not dispatch when nothing parses")
@@ -1877,18 +1901,34 @@ def test_route_findings_unparseable_dedup_suppresses_renotify(monkeypatch):
     async def fake_claim(self, trigger, kind):
         return False  # already escalated → suppress
 
+    from lib.notify import Notifier
+
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
-    notifier = _StubNotifier()
+
+    sent = []
+    notifier = Notifier(
+        rubric={
+            "timezone": "Europe/Madrid",
+            "silence_start": "22:00",
+            "silence_end": "08:00",
+        }
+    )
+    notifier._dedupe_path = tmp_path / "dedupe2.json"
+    notifier._deliver = lambda m, **kw: (sent.append(m), True)[1]
     d = SwarmDispatcher(notifier, _config())
-    asyncio.run(
-        d._route_blocking_findings(_trigger(), parent=80,
-                                   reviews=[("pm", "cannot proceed")],
-                                   verdict="blocked")
-    )
-    assert not any(
-        "no blocking findings could be parsed" in m for m in notifier.sent
-    )
+    trig = _trigger()
+    for _ in range(2):
+        asyncio.run(
+            d._route_blocking_findings(
+                trig, parent=80,
+                reviews=[("pm", "cannot proceed")],
+                verdict="request_changes",
+                reviewed_head="a" * 40,
+            )
+        )
+    assert len(sent) == 1
+    assert "no blocking findings could be parsed" in sent[0]
 
 
 # ── _gate_merge_readiness (verdict-clear AND CI-green) ───────────────────────

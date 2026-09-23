@@ -35,8 +35,11 @@ class _Notifier:
     def __init__(self):
         self.sent: list[str] = []
 
-    def send(self, message, priority=None, handler=None):
+    def send(self, message, priority=None, handler=None, **kwargs):
         self.sent.append(message)
+
+    def clear_dedupe(self, key):
+        pass
 
 
 @pytest.fixture(autouse=True)
