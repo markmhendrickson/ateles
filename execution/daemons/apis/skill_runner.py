@@ -230,6 +230,107 @@ def gate_writeback_identity_error(role: str, *, is_own_identity: bool) -> str | 
     )
 
 
+def gate_owner_transport_identity_error(
+    role: str,
+    provider: str,
+    *,
+    cmd: list[str],
+    subprocess_env: dict[str, str],
+    agent_def: AgentDefinition,
+) -> str | None:
+    """Why this provider launch cannot attribute a gate verdict to *role*.
+
+    The check is deliberately over the command and child environment that will
+    actually be launched. A credential existing elsewhere is not attribution:
+    Claude presents a static bearer in its MCP config, while Codex presents an
+    AAuth signer through Neotoma's fail-closed proxy.
+    """
+    if provider == "claude":
+        token, is_own = neotoma_token_for_agent(role)
+        if not is_own:
+            return gate_writeback_identity_error(
+                role, is_own_identity=False
+            )
+
+        try:
+            config_index = cmd.index("--mcp-config")
+            config_path = cmd[config_index + 1]
+            with open(config_path, encoding="utf-8") as config_file:
+                config = json.load(config_file)
+            actual_header = config["mcpServers"]["mcpsrv_neotoma"]["headers"][
+                "Authorization"
+            ]
+        except (ValueError, IndexError, OSError, TypeError, KeyError, json.JSONDecodeError):
+            return (
+                f"{NEOTOMA_IDENTITY_UNAVAILABLE}: '{role}' owns a pre-impl "
+                "gate, but this Claude launch has no readable mcpsrv_neotoma "
+                "MCP config carrying the role bearer. The MCP session would "
+                "not present the role principal."
+            )
+        if actual_header != f"Bearer {token}":
+            return (
+                f"{NEOTOMA_IDENTITY_UNAVAILABLE}: '{role}' owns a pre-impl "
+                "gate, but this Claude launch's mcpsrv_neotoma Authorization "
+                "header does not carry the role bearer. The MCP session would "
+                "not present the role principal."
+            )
+        return None
+
+    if provider == "codex":
+        expected_proxy_args = ["mcp", "proxy", "--aauth", "--fail-closed"]
+        effective_proxy_args: object = None
+        for index, arg in enumerate(cmd[:-1]):
+            if arg != "-c":
+                continue
+            config_arg = cmd[index + 1]
+            key, separator, raw_value = config_arg.partition("=")
+            if separator != "=" or key != "mcp_servers.neotoma.args":
+                continue
+            try:
+                effective_proxy_args = json.loads(raw_value)
+            except json.JSONDecodeError:
+                effective_proxy_args = None
+        if effective_proxy_args != expected_proxy_args:
+            return (
+                f"{NEOTOMA_IDENTITY_UNAVAILABLE}: '{role}' owns a pre-impl "
+                "gate, but this Codex launch is not bound to Neotoma's exact "
+                "fail-closed AAuth proxy transport. A bearer or signer in the "
+                "environment alone is not attribution."
+            )
+
+        keys_dir = os.environ.get("ATELES_PRIVATE_KEYS_DIR", "").strip()
+        expected_jwk = (
+            os.path.join(keys_dir, f"{role}.jwk.json") if keys_dir else ""
+        )
+        actual_jwk = subprocess_env.get(
+            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH", ""
+        )
+        expected_sub = (agent_def.aauth_sub or "").strip()
+        actual_sub = subprocess_env.get("NEOTOMA_AAUTH_SUB", "").strip()
+        if (
+            not expected_jwk
+            or actual_jwk != expected_jwk
+            or not os.path.exists(expected_jwk)
+        ):
+            return (
+                f"{NEOTOMA_IDENTITY_UNAVAILABLE}: '{role}' owns a pre-impl "
+                "gate, but this Codex launch does not carry the role's JWK "
+                "signer on the fail-closed proxy transport."
+            )
+        if not expected_sub or actual_sub != expected_sub:
+            return (
+                f"{NEOTOMA_IDENTITY_UNAVAILABLE}: '{role}' owns a pre-impl "
+                "gate, but this Codex launch does not carry the role's "
+                "non-empty AAuth subject on the fail-closed proxy transport."
+            )
+        return None
+
+    return (
+        f"{NEOTOMA_IDENTITY_UNAVAILABLE}: '{role}' owns a pre-impl gate, but "
+        f"provider {provider!r} has no recognized role-identity transport."
+    )
+
+
 def _require_neotoma_base_url() -> str:
     """Return NEOTOMA_BASE_URL (trailing slash stripped) or raise.
 
@@ -1344,30 +1445,6 @@ async def _run_skill_once(
         log.error(f"[apis] {skill} dispatch skipped — {msg}")
         return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
-    # ateles#795 — a gate owner that cannot be ATTRIBUTED must not run silently.
-    # Running it anyway burns a full review whose verdict Neotoma will refuse,
-    # and leaves `gate_status.<lens>` at `pending` — the state that is
-    # indistinguishable from a review that never ran, which is the whole defect.
-    # Refusing BEFORE the subprocess turns that invisible loss into a named,
-    # loud failure the panel surfaces on the PR. Only gate owners are refused;
-    # an advisory lens still runs on the shared bearer exactly as before.
-    if owns_pending_gate:
-        _, _own_identity = neotoma_token_for_agent(_role)
-        identity_error = gate_writeback_identity_error(
-            _role, is_own_identity=_own_identity
-        )
-        if identity_error:
-            log.error(f"[apis] {skill} dispatch refused — {identity_error}")
-            return SkillResult(
-                skill,
-                False,
-                None,
-                "",
-                "",
-                error=identity_error,
-                provider=provider,
-            )
-
     try:
         skill_md = skill_path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -1442,14 +1519,35 @@ async def _run_skill_once(
     # A dispatch carrying the GitHub contract is one whose task involves
     # commit/push/PR — the delivery path #590 is about. Everything else runs
     # with the sandbox's default network denial.
-    cmd, stdin_payload = _provider_command(
-        provider,
-        binary,
-        system_prompt,
-        prompt,
-        cwd=cwd,
-        network=include_github_contract,
-    )
+    try:
+        cmd, stdin_payload = _provider_command(
+            provider,
+            binary,
+            system_prompt,
+            prompt,
+            cwd=cwd,
+            network=include_github_contract,
+        )
+    except ValueError:
+        if not owns_pending_gate:
+            raise
+        identity_error = gate_owner_transport_identity_error(
+            _role,
+            provider,
+            cmd=[],
+            subprocess_env={},
+            agent_def=agent_def,
+        )
+        log.error(f"[apis] {skill} dispatch refused — {identity_error}")
+        return SkillResult(
+            skill,
+            False,
+            None,
+            "",
+            "",
+            error=identity_error or NEOTOMA_IDENTITY_UNAVAILABLE,
+            provider=provider,
+        )
 
     # ── Stage 6: inject Neotoma MCP config so dispatched child can reach Neotoma ─
     # Dispatched `claude --print` children inherit the ambient Claude MCP config,
@@ -1484,8 +1582,8 @@ async def _run_skill_once(
         ).rstrip("/")
         # ateles#795: prefer the ROLE's own Neotoma principal. Falls back to the
         # shared daemon bearer, so every agent without its own credential behaves
-        # exactly as before; a gate owner that needs attribution has already been
-        # refused upstream by the `owns_pending_gate` preflight.
+        # exactly as before. The gate-owner preflight below verifies the header
+        # in this generated file before any subprocess starts.
         _neotoma_token, _ = neotoma_token_for_agent(_role)
         _mcp_cfg: dict = {
             "mcpServers": {
@@ -1570,21 +1668,6 @@ async def _run_skill_once(
             f"timeout={timeout}s"
         )
 
-    # ── Stage 2: harness_event at dispatch start ───────────────────────────────
-    try:
-        await asyncio.to_thread(
-            _write_harness_event,
-            task_entity_id=task_entity_id,
-            role=_role,
-            agent_sub=agent_def.aauth_sub,
-            event_type="subprocess",
-            tool_name=f"{provider}:{skill}",
-            success="partial",  # "partial" = in-flight / started
-            input_summary=prompt[:200],
-        )
-    except Exception as exc:
-        log.debug(f"[apis] start harness_event write failed (non-fatal): {exc}")
-
     # Hard boundary from the approved plan: all three adapters use bundled
     # subscription auth by default. API-key credentials are removed so a capped
     # plan queues/fails over instead of silently spending metered tokens.
@@ -1629,6 +1712,51 @@ async def _run_skill_once(
                 subprocess_env["NEOTOMA_AAUTH_ISS"] = os.environ.get(
                     "NEOTOMA_AAUTH_ISS", "https://markmhendrickson.com"
                 )
+
+    # ateles#1087 — a gate owner that cannot be ATTRIBUTED on the provider's
+    # actual transport must not run silently. Judge the final command and child
+    # environment, not the mere presence of a credential another adapter uses.
+    # Refusal happens before both the subprocess and its in-flight event, so a
+    # denied review cannot look like one that started and never finished.
+    if owns_pending_gate:
+        identity_error = gate_owner_transport_identity_error(
+            _role,
+            provider,
+            cmd=cmd,
+            subprocess_env=subprocess_env,
+            agent_def=agent_def,
+        )
+        if identity_error:
+            log.error(f"[apis] {skill} dispatch refused — {identity_error}")
+            if _mcp_tmp_path is not None:
+                try:
+                    os.unlink(_mcp_tmp_path)
+                except OSError:
+                    pass
+            return SkillResult(
+                skill,
+                False,
+                None,
+                "",
+                "",
+                error=identity_error,
+                provider=provider,
+            )
+
+    # ── Stage 2: harness_event at dispatch start ───────────────────────────────
+    try:
+        await asyncio.to_thread(
+            _write_harness_event,
+            task_entity_id=task_entity_id,
+            role=_role,
+            agent_sub=agent_def.aauth_sub,
+            event_type="subprocess",
+            tool_name=f"{provider}:{skill}",
+            success="partial",  # "partial" = in-flight / started
+            input_summary=prompt[:200],
+        )
+    except Exception as exc:
+        log.debug(f"[apis] start harness_event write failed (non-fatal): {exc}")
 
     _start_ns = time.monotonic_ns()
     try:
@@ -1923,9 +2051,10 @@ async def run_skill(
     Passing ``provider`` pins the invocation to one adapter, primarily for
     diagnostics and focused tests.
 
-    ``owns_pending_gate`` (ateles#795): the run must be able to record a durable
-    verdict as ITSELF. Without its own Neotoma credential the run is refused
-    rather than started, so a verdict cannot evaporate into a `pending` gate.
+    ``owns_pending_gate`` (ateles#795, ateles#1087): the run must be able to
+    record a durable verdict as ITSELF through the provider transport being
+    launched. A Claude bearer does not attest a Codex or Cursor launch; each
+    adapter is checked on the command and child environment it actually uses.
     """
     async def attempt(selected: str) -> SkillResult:
         return await _run_skill_once(

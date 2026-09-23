@@ -3248,6 +3248,111 @@ class TestGateOwnerIdentity:
     def _run(self, coro):
         return asyncio.run(coro)
 
+    def _run_provider_case(
+        self,
+        *,
+        monkeypatch,
+        tmp_path,
+        provider: str,
+        owns_pending_gate: bool = True,
+        own_token: bool = False,
+        role_jwk: bool = False,
+        aauth_sub: str = "accipiter@ateles-swarm",
+        command_extra: list[str] | None = None,
+    ):
+        """Run one transport case through run_skill with no real subprocess."""
+        fake_def = _make_def(
+            prompt_markdown="Role: Accipiter.",
+            aauth_sub=aauth_sub,
+            name="accipiter",
+        )
+        skill_dir = tmp_path / ".claude" / "skills" / "accipiter"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("skill md", encoding="utf-8")
+        monkeypatch.setattr(skill_runner, "ATELES_REPO", tmp_path)
+
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", provider)
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM", f'{{"{provider}": 1.0}}')
+        harness_router.reset_state()
+        monkeypatch.setattr(
+            skill_runner,
+            "_provider_binaries",
+            lambda: {provider: f"/usr/bin/{provider}"},
+        )
+        if provider not in {"claude", "codex", "cursor"}:
+            # Reach _run_skill_once's fail-closed provider branch. The router
+            # normally filters unknown providers before the command builder.
+            monkeypatch.setattr(
+                skill_runner,
+                "provider_candidates",
+                lambda binaries, preferred=None: [provider],
+            )
+
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.com")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+        monkeypatch.delenv("ACCIPITER_NEOTOMA_TOKEN", raising=False)
+        if own_token:
+            monkeypatch.setenv("ACCIPITER_NEOTOMA_TOKEN", "accipiter-own-token")
+
+        keys_dir = tmp_path / "keys"
+        keys_dir.mkdir()
+        monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", str(keys_dir))
+        if role_jwk:
+            (keys_dir / "accipiter.jwk.json").write_text("{}", encoding="utf-8")
+
+        launched: list[tuple[tuple, dict, dict]] = []
+
+        async def fake_exec(*cmd, **kwargs):
+            mcp_config: dict = {}
+            if "--mcp-config" in cmd:
+                import json as _json
+
+                config_path = cmd[cmd.index("--mcp-config") + 1]
+                with open(config_path, encoding="utf-8") as config_file:
+                    mcp_config.update(_json.load(config_file))
+            launched.append((cmd, kwargs, mcp_config))
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"**SIGNED_OFF**", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        original_provider_command = skill_runner._provider_command
+
+        def wrapped_provider_command(*args, **kwargs):
+            cmd, stdin = original_provider_command(*args, **kwargs)
+            if command_extra:
+                cmd.extend(command_extra)
+            return cmd, stdin
+
+        with (
+            patch("skill_runner.AgentLoader") as MockLoader,
+            patch("skill_runner._write_harness_event") as mock_write_harness,
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch(
+                "skill_runner._provider_command",
+                side_effect=wrapped_provider_command,
+            ),
+        ):
+            instance = MagicMock()
+            instance.load.return_value = fake_def
+            MockLoader.return_value = instance
+            result = self._run(
+                skill_runner.run_skill(
+                    "accipiter",
+                    "review prompt",
+                    role="accipiter",
+                    provider=provider,
+                    task_entity_id="ent_abc",
+                    owns_pending_gate=owns_pending_gate,
+                )
+            )
+        assert result.provider == provider
+        return result, launched, mock_write_harness
+
     def test_token_env_name_is_per_role(self) -> None:
         assert skill_runner.neotoma_token_env_name("accipiter") == (
             "ACCIPITER_NEOTOMA_TOKEN"
@@ -3361,7 +3466,7 @@ class TestGateOwnerIdentity:
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
     def test_gate_owner_without_own_identity_is_refused(
-        self, MockLoader, mock_write_harness, monkeypatch
+        self, MockLoader, mock_write_harness, monkeypatch, tmp_path
     ) -> None:
         """RED before the fix: the review RAN and its verdict went nowhere."""
         fake_def = _make_def(
@@ -3377,6 +3482,13 @@ class TestGateOwnerIdentity:
         monkeypatch.delenv("ACCIPITER_NEOTOMA_TOKEN", raising=False)
 
         launched = []
+        real_mkstemp = skill_runner.tempfile.mkstemp
+
+        def local_mkstemp(*args, **kwargs):
+            kwargs["dir"] = tmp_path
+            return real_mkstemp(*args, **kwargs)
+
+        monkeypatch.setattr(skill_runner.tempfile, "mkstemp", local_mkstemp)
 
         async def fake_exec(*cmd, **kwargs):
             launched.append(cmd)
@@ -3414,6 +3526,10 @@ class TestGateOwnerIdentity:
         assert launched == [], (
             "The refusal must precede the subprocess — running the review burns "
             "a full session whose verdict Neotoma will discard."
+        )
+        assert list(tmp_path.glob("apis_mcp_*.json")) == [], (
+            "A refused Claude gate owner must not leave its bearer-bearing "
+            "temporary MCP config on disk."
         )
 
     @patch("skill_runner._write_harness_event")
@@ -3470,3 +3586,285 @@ class TestGateOwnerIdentity:
             "An advisory lens must keep running on the shared bearer — its "
             "product (a PR comment) does not need attribution to survive."
         )
+
+    def test_claude_gate_owner_with_own_bearer_is_not_refused(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        result, launched, _ = self._run_provider_case(
+            monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            provider="claude",
+            own_token=True,
+        )
+        assert result.ok
+        assert len(launched) == 1
+        cmd = launched[0][0]
+        assert "--mcp-config" in cmd
+        assert launched[0][2]["mcpServers"]["mcpsrv_neotoma"]["headers"][
+            "Authorization"
+        ] == "Bearer accipiter-own-token"
+
+    def test_codex_gate_owner_with_bearer_and_stock_command_is_refused(
+        self, monkeypatch, tmp_path, caplog
+    ) -> None:
+        """RED before #1087: an unused Claude bearer lets Codex launch."""
+        result, launched, mock_write = self._run_provider_case(
+            monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            provider="codex",
+            own_token=True,
+        )
+        assert not result.ok
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
+        assert "ACCIPITER_NEOTOMA_TOKEN" not in (result.error or "")
+        assert launched == []
+        mock_write.assert_not_called()
+        assert any(
+            "[apis] accipiter dispatch refused" in record.message
+            for record in caplog.records
+        )
+
+    def test_codex_gate_owner_without_token_or_jwk_is_refused(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        result, launched, mock_write = self._run_provider_case(
+            monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            provider="codex",
+        )
+        assert not result.ok
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
+        assert launched == []
+        mock_write.assert_not_called()
+
+    def test_codex_gate_owner_signer_env_without_proxy_args_is_refused(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        result, launched, mock_write = self._run_provider_case(
+            monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            provider="codex",
+            role_jwk=True,
+        )
+        assert not result.ok
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
+        assert launched == []
+        mock_write.assert_not_called()
+
+    def test_codex_gate_owner_proxy_args_and_role_jwk_is_not_refused(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """RED before #1087: the early bearer check ignores Codex transport."""
+        result, launched, _ = self._run_provider_case(
+            monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            provider="codex",
+            role_jwk=True,
+            command_extra=[
+                "-c",
+                'mcp_servers.neotoma.args=["mcp", "proxy", "--aauth", "--fail-closed"]',
+            ],
+        )
+        assert result.ok
+        assert len(launched) == 1
+        assert launched[0][1]["env"]["NEOTOMA_AAUTH_PRIVATE_JWK_PATH"] == str(
+            tmp_path / "keys" / "accipiter.jwk.json"
+        )
+        assert (
+            launched[0][1]["env"]["NEOTOMA_AAUTH_SUB"]
+            == "accipiter@ateles-swarm"
+        )
+
+    @pytest.mark.parametrize(
+        "trailing_value",
+        ['["mcp", "proxy"]', "not-json"],
+    )
+    def test_codex_gate_owner_trailing_proxy_override_is_refused(
+        self, monkeypatch, tmp_path, trailing_value
+    ) -> None:
+        """The effective (last) Codex config must be the exact safe transport."""
+        result, launched, mock_write = self._run_provider_case(
+            monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            provider="codex",
+            role_jwk=True,
+            command_extra=[
+                "-c",
+                'mcp_servers.neotoma.args=["mcp", "proxy", "--aauth", "--fail-closed"]',
+                "-c",
+                f"mcp_servers.neotoma.args={trailing_value}",
+            ],
+        )
+        assert not result.ok
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
+        assert launched == []
+        mock_write.assert_not_called()
+
+    def test_codex_gate_owner_proxy_args_without_jwk_is_refused(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        result, launched, mock_write = self._run_provider_case(
+            monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            provider="codex",
+            command_extra=[
+                "-c",
+                'mcp_servers.neotoma.args=["mcp", "proxy", "--aauth", "--fail-closed"]',
+            ],
+        )
+        assert not result.ok
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
+        assert launched == []
+        mock_write.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "proxy_value",
+        [
+            '["mcp", "proxy", "--aauth", "--fail-closed", "--extra"]',
+            "mcp proxy --aauth --fail-closed",
+        ],
+    )
+    def test_codex_proxy_args_not_exact_list_is_refused(
+        self, monkeypatch, tmp_path, proxy_value
+    ) -> None:
+        result, launched, mock_write = self._run_provider_case(
+            monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            provider="codex",
+            role_jwk=True,
+            command_extra=["-c", f"mcp_servers.neotoma.args={proxy_value}"],
+        )
+        assert not result.ok
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
+        assert launched == []
+        mock_write.assert_not_called()
+
+    def test_codex_gate_owner_empty_aauth_sub_is_refused(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        result, launched, mock_write = self._run_provider_case(
+            monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            provider="codex",
+            role_jwk=True,
+            aauth_sub="",
+            command_extra=[
+                "-c",
+                'mcp_servers.neotoma.args=["mcp", "proxy", "--aauth", "--fail-closed"]',
+            ],
+        )
+        assert not result.ok
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
+        assert launched == []
+        mock_write.assert_not_called()
+
+    @pytest.mark.parametrize("mutated_field", ["jwk_path", "subject"])
+    def test_codex_gate_owner_mutated_attribution_is_refused(
+        self, monkeypatch, tmp_path, mutated_field
+    ) -> None:
+        keys_dir = tmp_path / "keys"
+        keys_dir.mkdir()
+        expected_jwk = keys_dir / "accipiter.jwk.json"
+        expected_jwk.write_text("{}", encoding="utf-8")
+        monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", str(keys_dir))
+        subprocess_env = {
+            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH": str(expected_jwk),
+            "NEOTOMA_AAUTH_SUB": "accipiter@ateles-swarm",
+        }
+        if mutated_field == "jwk_path":
+            subprocess_env["NEOTOMA_AAUTH_PRIVATE_JWK_PATH"] = str(
+                keys_dir / "other.jwk.json"
+            )
+        else:
+            subprocess_env["NEOTOMA_AAUTH_SUB"] = "other@ateles-swarm"
+
+        err = skill_runner.gate_owner_transport_identity_error(
+            role="accipiter",
+            provider="codex",
+            cmd=[
+                "codex",
+                "-c",
+                'mcp_servers.neotoma.args=["mcp", "proxy", "--aauth", "--fail-closed"]',
+            ],
+            subprocess_env=subprocess_env,
+            agent_def=_make_def(
+                name="accipiter", aauth_sub="accipiter@ateles-swarm"
+            ),
+        )
+        assert err is not None
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in err
+
+    def test_cursor_gate_owner_with_own_bearer_is_refused(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """RED before #1087: Cursor is allowed by a bearer it never presents."""
+        result, launched, mock_write = self._run_provider_case(
+            monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            provider="cursor",
+            own_token=True,
+        )
+        assert not result.ok
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
+        assert "cursor" in (result.error or "")
+        assert launched == []
+        mock_write.assert_not_called()
+
+    def test_unsupported_provider_gate_owner_returns_named_error(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """RED before #1087: unsupported provider raises instead of refusing."""
+        result, launched, mock_write = self._run_provider_case(
+            monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            provider="gemini",
+            own_token=True,
+        )
+        assert not result.ok
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
+        assert "gemini" in (result.error or "")
+        assert launched == []
+        mock_write.assert_not_called()
+
+    def test_codex_advisory_without_token_still_runs(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        result, launched, _ = self._run_provider_case(
+            monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            provider="codex",
+            owns_pending_gate=False,
+        )
+        assert result.ok
+        assert len(launched) == 1
+
+    def test_claude_mcp_header_mismatch_is_unavailable(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("ACCIPITER_NEOTOMA_TOKEN", "accipiter-own-token")
+        config_path = tmp_path / "mcp.json"
+        config_path.write_text(
+            '{"mcpServers":{"mcpsrv_neotoma":{"headers":'
+            '{"Authorization":"Bearer other"}}}}',
+            encoding="utf-8",
+        )
+        kwargs = {
+            "role": "accipiter",
+            "provider": "claude",
+            "cmd": ["claude", "--mcp-config", str(config_path)],
+            "subprocess_env": {},
+            "agent_def": _make_def(name="accipiter"),
+        }
+        err = skill_runner.gate_owner_transport_identity_error(**kwargs)
+        assert err is not None
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in err
+
+        for cmd in (
+            ["claude"],
+            ["claude", "--mcp-config", str(tmp_path / "missing.json")],
+        ):
+            err = skill_runner.gate_owner_transport_identity_error(
+                **{**kwargs, "cmd": cmd}
+            )
+            assert err is not None
+            assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in err
