@@ -400,6 +400,9 @@ the old name and lacks the new mechanism; that gap is what these rows record.
 
 ## `adapters.md`: the adapter and the engine are one process (revision 7, 2026-09-04)
 
+The shared adapter runtime that makes admission obligations 1, 4, and 5 fail when violated lands under
+`lib/adapters/` (foundation design text stays in `adapters.md`).
+
 Read from the code on this branch (`c221ff2` plus revision 7) on 2026-09-04 by reading the module
 docstrings and the handlers named below; nothing on prod and no deployed checkout was inspected. The
 design separates the adapter (touches the external system, writes signals about artifacts) from the
