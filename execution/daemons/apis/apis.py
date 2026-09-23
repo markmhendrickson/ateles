@@ -1964,26 +1964,26 @@ async def main() -> None:
                 exc_info=True,
             )
 
-        # Same pass, separate concern: reap pipeline markers orphaned on CLOSED
-        # issues. `_clear_pipeline_inflight` is best-effort, so a GitHub blip or
-        # a kill between the last agent and the clear leaves one behind, and the
-        # resume sweep above only scans OPEN issues — so nothing ever reclaimed
-        # them. GitHub renders a marker-only comment as "No description
-        # provided.", so each orphan is a blank swarm comment on the thread
-        # forever. Kept out of `resume_interrupted_pipelines`' return value: it
-        # is housekeeping, not a resume outcome.
+    # 7a. Closed-issue marker housekeeping (ateles#446). Previously nested
+    #     AFTER resume_interrupted_pipelines inside resume_sweep(); resume
+    #     routinely outlives the daemon's restart interval (8–25 min), so the
+    #     clear never ran in production even though #437's logic was correct.
+    #     Scheduled as an independent gather sibling so housekeeping reaches
+    #     completion regardless of whether resume is still hung. Fail-open and
+    #     always logs completion (including cleared=0) — silence must not mean
+    #     "did not run".
+    async def clear_closed_issue_markers_sweep() -> None:
         try:
             cleared = await dispatcher._clear_closed_issue_markers(
                 list(dispatcher.config.resume_repositories)
             )
-            if cleared:
-                log.info(
-                    f"[{DAEMON_NAME}] cleared {cleared} stale pipeline "
-                    "marker(s) on closed issues"
-                )
-        except Exception as exc:  # housekeeping must never kill startup
+            log.info(
+                f"[{DAEMON_NAME}] closed-issue marker sweep: cleared={cleared}"
+            )
+        except Exception as exc:  # housekeeping must never kill startup siblings
             log.error(
-                f"[{DAEMON_NAME}] stale-marker sweep failed: {exc}",
+                f"[{DAEMON_NAME}] closed-issue marker sweep failed: {exc} "
+                "— will retry next boot; housekeeping independent of resume",
                 exc_info=True,
             )
 
@@ -2134,6 +2134,7 @@ async def main() -> None:
         watchdog.run(notifier, watchdog_dispatch),
         reconciler.run(reconcile_dispatch),
         resume_sweep(),
+        clear_closed_issue_markers_sweep(),
         deferred_review_sweep(),
         workflow_drift_check(),
         unroutable_flush(),

@@ -2413,7 +2413,8 @@ class SwarmDispatcher:
             except Exception as exc:
                 log.warning(
                     f"[{DAEMON_NAME}] stale-marker sweep: could not scan "
-                    f"{repository} ({exc}) — skipping"
+                    f"{repository} ({exc}) — skipping {repository} — "
+                    "will retry next boot"
                 )
                 continue
         return cleared
