@@ -6691,6 +6691,12 @@ def test_only_qa_lens_gets_a_worktree(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "prepare_pr_worktree", fake_prepare)
     monkeypatch.setattr(swarm_dispatch, "cleanup_pr_worktree", fake_cleanup)
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    # Without this, _handle_pr's real GitHub call to verify the PR head SHA
+    # hits the live API and can 403 on rate limits (as it did in CI), which
+    # makes _handle_pr bail out before the panel loop ever runs.
+    monkeypatch.setattr(
+        SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40)
+    )
 
     # Force a panel that includes phoenicurus + at least one other lens.
     monkeypatch.setattr(
