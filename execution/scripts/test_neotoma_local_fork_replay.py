@@ -1179,24 +1179,44 @@ def test_format_issue_label_uses_repo_and_number_when_present():
     assert format_issue_label(None, None, "ent_x") == "ent_x"
 
 
-def test_canonical_identity_lookup_returns_matched_entity_id(monkeypatch):
+def test_canonical_identity_lookup_uses_entity_type_prefixed_identifier(monkeypatch):
+    # Regression: confirmed against a live hosted canonical_name during the
+    # 2026-09-23 apply run ("issue:998|markmhendrickson/ateles"). An earlier
+    # version sent "1172|markmhendrickson/ateles" (no "issue:" prefix),
+    # which /retrieve_entity_by_identifier silently never matched --
+    # {"entities": [], "total": 0, "match_mode": "none"} every time -- so
+    # the canonical-identity fallback never fired and a real hosted entity
+    # under a DIFFERENT id was missed, producing a live ERR_MERGE_REFUSED
+    # 400 (ateles#998) when this script then tried to create at the wrong id.
     import neotoma_local_fork_replay as _mod
 
     def fake_http_request(
         method, base_url, path, token, body=None, retries=0, retry_backoff_seconds=1.0
     ):
         assert path == "/retrieve_entity_by_identifier"
-        assert body == {
-            "entity_type": "issue",
-            "identifier": "1172|markmhendrickson/ateles",
-        }
-        return 200, {"entities": [{"entity_id": "ent_canonical_match"}]}
+        assert body == {"entity_type": "issue", "identifier": "issue:1172|markmhendrickson/ateles"}
+        return 200, {"entities": [{"id": "ent_canonical_match"}]}
 
     monkeypatch.setattr(_mod, "http_request", fake_http_request)
     result = canonical_identity_lookup(
         "issue", "markmhendrickson/ateles", 1172, "https://hosted.example", "tok"
     )
     assert result == "ent_canonical_match"
+
+
+def test_canonical_identity_lookup_falls_back_to_entity_id_key(monkeypatch):
+    # The live /retrieve_entity_by_identifier response uses "id", but this
+    # function also accepts "entity_id" defensively in case a different
+    # response shape is returned by another endpoint variant.
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(
+        _mod, "http_request", lambda *a, **k: (200, {"entities": [{"entity_id": "ent_via_entity_id_key"}]})
+    )
+    result = canonical_identity_lookup(
+        "issue", "markmhendrickson/ateles", 1172, "https://hosted.example", "tok"
+    )
+    assert result == "ent_via_entity_id_key"
 
 
 def test_canonical_identity_lookup_returns_none_on_no_match():
@@ -1267,4 +1287,55 @@ def test_github_issue_lookup_returns_none_without_repo_or_number():
 
     assert _mod.github_issue_lookup(None, 1172) is None
     assert _mod.github_issue_lookup("markmhendrickson/ateles", None) is None
+
+
+# --- Load rules (concurrency 1, timeout >=180s, periodic health check) -----
+
+
+def test_http_client_timeout_is_at_least_180_seconds():
+    import neotoma_local_fork_replay as _mod
+
+    assert _mod.HTTP_CLIENT_TIMEOUT_SECONDS >= 180
+
+
+def test_health_check_batch_size_is_20():
+    import neotoma_local_fork_replay as _mod
+
+    assert _mod.HEALTH_CHECK_BATCH_SIZE == 20
+
+
+def test_check_health_ok_on_200_with_no_body_opinion(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod, "http_request", lambda *a, **k: (200, {}))
+    ok, status = _mod.check_health("https://hosted.example", "tok")
+    assert ok is True
+    assert status == 200
+
+
+def test_check_health_ok_false_on_non_200():
+    import neotoma_local_fork_replay as _mod
+    import pytest as _pytest
+
+    mp = _pytest.MonkeyPatch()
+    mp.setattr(_mod, "http_request", lambda *a, **k: (503, {"error": "unavailable"}))
+    try:
+        ok, status = _mod.check_health("https://hosted.example", "tok")
+        assert ok is False
+        assert status == 503
+    finally:
+        mp.undo()
+
+
+def test_check_health_ok_false_when_body_says_not_ok():
+    import neotoma_local_fork_replay as _mod
+    import pytest as _pytest
+
+    mp = _pytest.MonkeyPatch()
+    mp.setattr(_mod, "http_request", lambda *a, **k: (200, {"ok": False}))
+    try:
+        ok, status = _mod.check_health("https://hosted.example", "tok")
+        assert ok is False
+    finally:
+        mp.undo()
     assert value_hash({"k": 1}) == value_hash({"k": 1})

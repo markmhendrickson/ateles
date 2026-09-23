@@ -128,6 +128,18 @@ from datetime import datetime, timezone
 
 USER_AGENT = "ateles-migrate/1.0"
 
+# Load rule (operator instruction, hosted Neotoma migration): the client
+# timeout on every request against hosted must be at least 180s, and an
+# in-flight request must never be abandoned (an abandoned request is what
+# crashed hosted per neotoma#2483). 180s, not the urllib default (fixed
+# above at a bare `timeout=30`, which was itself a violation of this rule
+# until corrected here).
+HTTP_CLIENT_TIMEOUT_SECONDS = 180
+
+# Load rule: check /health before each batch of this many requests, and
+# abort the whole run on a non-200 health response.
+HEALTH_CHECK_BATCH_SIZE = 20
+
 
 def get_base_url() -> str:
     base = os.environ.get("NEOTOMA_BASE_URL")
@@ -309,7 +321,7 @@ def http_request(
         if data is not None:
             req.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=HTTP_CLIENT_TIMEOUT_SECONDS) as resp:
                 return resp.status, json.loads(resp.read().decode("utf-8") or "{}")
         except urllib.error.HTTPError as e:
             try:
@@ -339,6 +351,21 @@ def entity_exists(entity_id: str, base_url: str, token: str) -> bool:
         retry_backoff_seconds=2.0,
     )
     return status == 200
+
+
+def check_health(base_url: str, token: str) -> tuple[bool, int | None]:
+    """GET /health -- returns (ok, status). ok is True iff status == 200 AND
+    the body's own `ok` field (when present) is not False. Called before
+    each batch of HEALTH_CHECK_BATCH_SIZE requests during a --gate-restore
+    apply run (load rule); the caller aborts the whole run on ok=False
+    rather than continuing to hammer a degraded or down hosted instance.
+    """
+    status, body = http_request("GET", base_url, "/health", token, retries=1, retry_backoff_seconds=2.0)
+    if status != 200:
+        return False, status
+    if isinstance(body, dict) and body.get("ok") is False:
+        return False, status
+    return True, status
 
 
 def load_candidates(conn: sqlite3.Connection, cutover_ts: str, entity_ids=None):
@@ -1451,12 +1478,30 @@ def canonical_identity_lookup(
     with the schema's declared composite identifier shape; returns None (not
     an error) on any non-200 or unparseable response -- callers treat that
     as "no canonical match found" and fall through to class-a create.
+
+    identifier format is `<entity_type>:<github_number>|<repo>`, matching the
+    `issue` schema's declared canonical_name_fields composite (repo -> the
+    hosted /schemas/issue response documents `canonical_name_fields:
+    [local_issue_id, {composite: [github_number, repo]}, title]`, and a real
+    hosted entity's canonical_name is literally "issue:998|markmhendrickson/
+    ateles" -- confirmed against a live 400 ERR_MERGE_REFUSED response
+    during the 2026-09-23 gate-restore apply, which reported the SAME issue
+    already existing on hosted under a DIFFERENT entity_id than this
+    script's local fork held, with exactly that canonical_name). An earlier
+    version of this function omitted the `<entity_type>:` prefix
+    (`f"{github_number}|{repo}"`), which silently never matched --
+    /retrieve_entity_by_identifier returned `{"entities": [], "total": 0,
+    "match_mode": "none"}` for every call, so every canonical-identity
+    fallback silently failed and fell through to attempting a create against
+    an id hosted already used for a different entity under identity
+    conflict. This bug caused a live ERR_MERGE_REFUSED (ateles#998) that
+    halted a gate-restore apply run mid-batch.
     """
     if not repo or github_number is None:
         return None
     payload = {
         "entity_type": entity_type,
-        "identifier": f"{github_number}|{repo}",
+        "identifier": f"{entity_type}:{github_number}|{repo}",
     }
     status, body = http_request(
         "POST",
@@ -1470,7 +1515,7 @@ def canonical_identity_lookup(
     if status == 200 and isinstance(body, dict):
         entities = body.get("entities")
         if isinstance(entities, list) and entities:
-            eid = entities[0].get("entity_id")
+            eid = entities[0].get("id") or entities[0].get("entity_id")
             if isinstance(eid, str) and eid and eid != "PLACEHOLDER":
                 return eid
     return None
@@ -1612,6 +1657,13 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
         candidates = {eid: st for eid, st in candidates.items() if eid in allowlist}
         print(f"--entity-ids restricts this run to: {sorted(allowlist)}")
         print(f"Candidates after --entity-ids restriction: {len(candidates)}")
+
+    if getattr(args, "gate_restore_exclude_entity_ids", None):
+        excludelist = {e.strip() for e in args.gate_restore_exclude_entity_ids.split(",") if e.strip()}
+        before = len(candidates)
+        candidates = {eid: st for eid, st in candidates.items() if eid not in excludelist}
+        print(f"--gate-restore-exclude-entity-ids excludes: {sorted(excludelist)}")
+        print(f"Candidates after exclusion: {len(candidates)} (was {before})")
 
     schema_info_cache: dict = {}
     get_schema_declared_fields("issue", base_url, token, schema_info_cache)
@@ -1820,11 +1872,37 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
     applied = 0
     failed = 0
     skipped_closed = 0
+    request_count = 0
+
+    ok, hstatus = check_health(base_url, token)
+    print(f"Health check (pre-apply): {'OK' if ok else 'FAILED'} (status={hstatus})")
+    if not ok:
+        print("STOPPING: /health did not return a healthy 200 before apply began.", file=sys.stderr)
+        sys.exit(1)
+
     with open(log_path, "a", encoding="utf-8") as log_fh:
         for p in changed_plans:
             entity_id = p["entity_id"]
             label = p["label"]
             fields = dict(p["fields"])
+
+            # Load rule: check /health before each batch of
+            # HEALTH_CHECK_BATCH_SIZE requests, abort the whole run on a
+            # non-200/unhealthy response rather than continuing to write
+            # against a degraded hosted instance. Counted against the
+            # REQUEST count (GETs + the store POST), not just applies, so a
+            # run heavy on current_owner freshness lookups (each an extra
+            # GET) still checks health often enough.
+            if request_count > 0 and request_count % HEALTH_CHECK_BATCH_SIZE == 0:
+                ok, hstatus = check_health(base_url, token)
+                print(f"Health check (after {request_count} requests): {'OK' if ok else 'FAILED'} (status={hstatus})")
+                if not ok:
+                    print(
+                        f"STOPPING: /health returned an unhealthy response after {request_count} "
+                        f"requests ({applied} applied, {failed} failed so far). Not attempting cleanup.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
 
             # current_owner is decided lazily here (needs a per-field
             # timestamp comparison, which is an extra hosted round-trip we
@@ -1842,6 +1920,7 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
                 hosted_ts = hosted_latest_field_write_ts(
                     entity_id, "current_owner", base_url, token
                 )
+                request_count += 1  # hosted_latest_field_write_ts issues 1-2 GETs; counted conservatively as 1
                 new_owner, changed = merge_current_owner(
                     p.get("hosted_current_owner"),
                     p.get("local_current_owner"),
@@ -1869,6 +1948,7 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
             status, resp = http_request(
                 "POST", base_url, "/store", token, store_payload
             )
+            request_count += 1
             ok = status in (200, 201)
             print(
                 f"{'APPLIED' if ok else 'ERROR'}: {label} entity={entity_id} status={status}"
@@ -2091,6 +2171,16 @@ def main() -> None:
         dest="gate_restore_dry_log",
         default=None,
         help="Path to save the --gate-restore dry-run report to (in addition to printing it).",
+    )
+    ap.add_argument(
+        "--gate-restore-exclude-entity-ids",
+        dest="gate_restore_exclude_entity_ids",
+        default=None,
+        help=(
+            "Comma-separated entity ids to EXCLUDE from a --gate-restore run "
+            "(e.g. issues already applied in an earlier pilot run). Applied "
+            "after --entity-ids, if both are given."
+        ),
     )
     args = ap.parse_args()
 
