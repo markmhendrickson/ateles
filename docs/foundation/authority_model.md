@@ -1200,7 +1200,7 @@ declares. Any operator-facing presentation of that read is non-authoritative: it
 grains or multiple deployments into one cell, and it must keep `Permit`, `Deny`, `Indeterminate`, and a
 valid empty distinguishable from one another. Presentation never authorizes a claim, admission, action,
 routing, or deployment decision. There is no ordered path every agent traverses and no transition writer
-keeping one true. Worked walkthrough: [`scenarios.md#k-agent-inventory-two-deployments-empty-indeterminate-and-deny`](scenarios.md#k-agent-inventory-two-deployments-empty-indeterminate-and-deny).
+keeping one true. Scenario walkthrough: [`scenarios.md#k-agent-inventory-two-deployments-empty-indeterminate-and-deny`](scenarios.md#k-agent-inventory-two-deployments-empty-indeterminate-and-deny).
 
 **The decisions are mechanism-specific.** The four mechanisms in
 `work_model.md#the-four-execution-mechanisms` do not share a universal `may_accept_work` predicate:
