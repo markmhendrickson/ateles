@@ -1,0 +1,119 @@
+name: canonical rule inventory
+
+# Trusted default-branch code executes; candidate files cross only as validated data.
+# Exit classes (class -> exit -> stable message):
+# untrusted_source -> job fail -> canonical measurement refuses code from fork repositories
+# boundary_rejected -> 2 -> canonical rule inventory input boundary rejected reason=
+# boundary_failed -> 2 -> rule inventory measurement failed before a safe verdict
+# instrument_incomplete -> 3 -> rule inventory equality unavailable: canonical read credential is missing
+# instrument_incomplete -> 3 -> rule inventory equality unavailable: canonical repository roots are missing
+# instrument_incomplete -> 3 -> rule inventory equality unavailable: full measurement is incomplete
+# inventory_mismatch -> 1 -> rule inventory differs from the complete canonical measurement
+# safety_failed -> 2 -> rule inventory public-output safety check failed
+# match -> 0 -> rule inventory matches the complete canonical measurement
+# Local reproduce requires Stage-0 docs/foundation/rule_inventory.md to already exist; the packager does not generate it (#1123; not #1114/#923).
+# python3 execution/scripts/package_rule_inventory_inputs.py --source "$PWD" --destination "$INPUTS_DIR"
+# python3 execution/scripts/package_rule_inventory_inputs.py --validate "$INPUTS_DIR"
+# python3 execution/scripts/run_canonical_rule_inventory_gate.py "$INPUTS_DIR"
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+    paths:
+      - "docs/foundation/**"
+      - "lib/daemon_runtime/agent_loader.py"
+      - ".claude/skills/**/SKILL.md"
+      - ".claude/hooks/*.py"
+      - "execution/scripts/render_rule_inventory.py"
+      - "execution/scripts/package_rule_inventory_inputs.py"
+      - "execution/scripts/run_canonical_rule_inventory_gate.py"
+      - "execution/scripts/test_canonical_rule_inventory_boundary.py"
+      - "execution/scripts/test_rule_inventory_rulings.py"
+      - ".github/workflows/canonical-rule-inventory.yml"
+      - ".github/workflows/foundation-checks.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  trusted-source:
+    name: canonical measurement source is trusted
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse fork repositories before privileged execution
+        env:
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          if [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then
+            echo "::error::canonical measurement refuses code from fork repositories"
+            exit 1
+          fi
+
+  candidate-inputs:
+    name: package candidate inputs as data
+    needs: trusted-source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out trusted measurement code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: trusted
+          persist-credentials: false
+      - name: Check out declared candidate inputs
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Copy fixed candidate inputs into a data-only tree
+        run: |
+          python3 trusted/execution/scripts/package_rule_inventory_inputs.py \
+            --source "$GITHUB_WORKSPACE/candidate" \
+            --destination "$GITHUB_WORKSPACE/candidate-inputs"
+      - name: Upload candidate input data
+        uses: actions/upload-artifact@v4
+        with:
+          name: canonical-rule-inventory-inputs
+          path: candidate-inputs
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  rule-inventory:
+    name: canonical rule inventory
+    needs: candidate-inputs
+    runs-on: [self-hosted, macOS, canonical-rule-inventory]
+    timeout-minutes: 15
+    steps:
+      - name: Check out trusted measurement code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Download candidate input data
+        uses: actions/download-artifact@v4
+        with:
+          name: canonical-rule-inventory-inputs
+          path: candidate-inputs
+      - name: Validate candidate input boundary
+        run: |
+          python3 trusted/execution/scripts/package_rule_inventory_inputs.py \
+            --validate "$GITHUB_WORKSPACE/candidate-inputs"
+
+      # RULE_INVENTORY_CANONICAL_REPOSITORY_ROOTS is supplied by the runner
+      # service environment. It is never copied into repository configuration
+      # or printed. The wrapper captures all renderer output and emits only a
+      # stable exit-class message.
+      - name: Rule inventory — full measured output matches
+        env:
+          NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}
+        run: |
+          python3 trusted/execution/scripts/run_canonical_rule_inventory_gate.py \
+            "$GITHUB_WORKSPACE/candidate-inputs"
