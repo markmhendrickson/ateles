@@ -1352,12 +1352,25 @@ class TestGithubTokenInjection:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_github_token_not_injected_when_empty_string(
+    def test_github_token_hard_fails_when_empty_string(
         self, MockLoader, mock_write_harness, monkeypatch
     ) -> None:
-        """When github_token='' (falsy), the env override must NOT happen.
-        This guards against passing an unresolved empty token and clobbering a
-        valid ambient GITHUB_TOKEN with an empty string."""
+        """When github_token='' (explicitly requested but resolved empty), the
+        dispatch must HARD-FAIL rather than silently proceed on the daemon's
+        ambient GITHUB_TOKEN.
+
+        This replaces a prior version of this test
+        (test_github_token_not_injected_when_empty_string) that asserted the
+        opposite: that an empty github_token silently fell through to the
+        ambient token. That "protection" was the actual defect — on a host
+        where the ambient/keyring `gh` session belongs to a different
+        identity (e.g. the operator's own account), the child authenticated
+        as that ambient identity with no error anywhere in the path, and a
+        PR was opened under the wrong account. github_token='' now means
+        "the caller explicitly asked for a per-agent token and none was
+        configured," which must never be treated the same as github_token=None
+        ("no per-agent token was requested at all," still a no-op — see
+        test_github_token_not_injected_when_none)."""
         fake_def = _make_def(prompt_markdown="Role: Gryllus.", tool_allowlist="*")
         instance = MagicMock()
         instance.load.return_value = fake_def
@@ -1377,21 +1390,20 @@ class TestGithubTokenInjection:
             ),
             patch("os.path.exists", return_value=False),
         ):
-            result = self._run(
-                skill_runner.run_skill(
-                    "gryllus",
-                    "work prompt",
-                    role="gryllus",
-                    task_entity_id="ent_abc",
-                    github_token="",
+            with pytest.raises(RuntimeError, match="EMPTY string"):
+                self._run(
+                    skill_runner.run_skill(
+                        "gryllus",
+                        "work prompt",
+                        role="gryllus",
+                        task_entity_id="ent_abc",
+                        github_token="",
+                    )
                 )
-            )
 
-        assert result.ok
-        env = captured_envs[0]
-        assert env.get("GITHUB_TOKEN") == "ghp_ambient_daemon_token", (
-            "Empty github_token must not clobber a valid ambient GITHUB_TOKEN"
-        )
+        # The subprocess must never have been spawned under the ambient
+        # identity — the failure happens before exec, not after.
+        assert captured_envs == []
 
 
 # ── Phase 1 / Layer A: SWARM_GITHUB_CONTRACT injection ───────────────────────
