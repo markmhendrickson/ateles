@@ -22,7 +22,7 @@ def main(argv: list[str]) -> int:
     candidate_root = Path(argv[1])
     try:
         if renderer.is_symlink() or renderer.resolve(strict=True) != renderer:
-            raise inputs.InputBoundaryError
+            raise inputs.InputBoundaryError("invalid_root")
         inputs.validate_inputs(candidate_root)
         candidate_root = candidate_root.resolve(strict=True)
         if not os.environ.get("NEOTOMA_BEARER_TOKEN"):

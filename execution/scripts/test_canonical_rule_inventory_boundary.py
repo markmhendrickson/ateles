@@ -46,9 +46,14 @@ def verify_privileged_boundary(workflow: str) -> None:
         raise AssertionError("unexpected workflow job set")
     privileged = blocks["rule-inventory"]
     trusted_source = blocks["trusted-source"]
+    fork_refusal = (
+        '          if [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then\n'
+        '            echo "::error::canonical measurement refuses code from fork repositories"\n'
+        "            exit 1\n"
+        "          fi\n"
+    )
     if (
-        "::error::canonical measurement refuses code from fork repositories"
-        not in trusted_source
+        fork_refusal not in trusted_source
         or "needs: trusted-source" not in blocks["candidate-inputs"]
     ):
         raise AssertionError("fork refusal is not binding before candidate admission")
@@ -102,6 +107,16 @@ def verify_privileged_boundary(workflow: str) -> None:
             "private canonical roots moved into repository configuration"
         )
     candidate = blocks["candidate-inputs"]
+    trusted_packer_checkout = (
+        "      - name: Check out trusted measurement code\n"
+        "        uses: actions/checkout@v4\n"
+        "        with:\n"
+        "          ref: ${{ github.event.repository.default_branch }}\n"
+        "          path: trusted\n"
+        "          persist-credentials: false\n"
+    )
+    if trusted_packer_checkout not in candidate:
+        raise AssertionError("candidate packer checkout is not trusted")
     if "github.event.pull_request.head.sha" not in candidate:
         raise AssertionError("candidate inputs are not bound to the declared PR head")
     if (
@@ -241,6 +256,42 @@ class WorkflowBoundaryTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "fork refusal"):
             verify_privileged_boundary(mutant)
 
+    def test_fork_refusal_fails_red_when_exit_is_not_failure(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        for replacement in ("            exit 0\n", ""):
+            with self.subTest(replacement=replacement or "removed"):
+                mutant = workflow.replace("            exit 1\n", replacement, 1)
+                self.assertNotEqual(
+                    workflow, mutant, "negative mutation was not planted"
+                )
+                with self.assertRaisesRegex(AssertionError, "fork refusal"):
+                    verify_privileged_boundary(mutant)
+
+    def test_candidate_packer_checkout_must_remain_trusted(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutations = {
+            "candidate ref": (
+                "          ref: ${{ github.event.repository.default_branch }}\n",
+                "          ref: ${{ github.event.pull_request.head.sha }}\n",
+            ),
+            "candidate path": (
+                "          path: trusted\n",
+                "          path: candidate\n",
+            ),
+            "checkout credential": (
+                "          persist-credentials: false\n",
+                "          persist-credentials: true\n",
+            ),
+        }
+        for label, (before, after) in mutations.items():
+            with self.subTest(label=label):
+                mutant = workflow.replace(before, after, 1)
+                self.assertNotEqual(
+                    workflow, mutant, "negative mutation was not planted"
+                )
+                with self.assertRaisesRegex(AssertionError, "packer checkout"):
+                    verify_privileged_boundary(mutant)
+
     def test_workflow_guidance_fails_red_when_exit_class_is_removed(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         mutant = workflow.replace("# boundary_rejected", "# boundary-removed", 1)
@@ -311,6 +362,28 @@ class CandidateDataPackerTest(unittest.TestCase):
             self.assert_boundary_reason(
                 "symlink", lambda: inputs.package_inputs(source, root / "data")
             )
+
+    def test_symlinked_optional_store_root_is_rejected(self) -> None:
+        for store_name in ("skills", "hooks"):
+            with (
+                self.subTest(store_name=store_name),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                source = root / "source"
+                source.mkdir()
+                for relative in sorted(inputs.EXACT_INPUTS):
+                    path = source / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("candidate data\n", encoding="utf-8")
+                outside = root / "outside"
+                outside.mkdir()
+                claude = source / ".claude"
+                claude.mkdir()
+                (claude / store_name).symlink_to(outside, target_is_directory=True)
+                self.assert_boundary_reason(
+                    "symlink", lambda: inputs.package_inputs(source, root / "data")
+                )
 
     def test_undeclared_destination_file_is_rejected_with_reason(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -526,6 +599,20 @@ class MeasurementInstrumentTest(unittest.TestCase):
 
 
 class StableGateOutputTest(unittest.TestCase):
+    def test_renderer_integrity_failure_is_stable_and_fail_closed(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(gate.Path, "is_symlink", return_value=True),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = gate.main(["gate", "/private/candidate-inputs"])
+        self.assertEqual(result, 2)
+        self.assertEqual(
+            stderr.getvalue(),
+            "rule inventory measurement failed before a safe verdict\n",
+        )
+        self.assertNotIn("/private", stderr.getvalue())
+
     def test_renderer_output_is_captured_and_complete_flag_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

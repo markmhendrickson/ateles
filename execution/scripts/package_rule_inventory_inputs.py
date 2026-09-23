@@ -71,12 +71,21 @@ def _allowed(relative: str) -> bool:
 
 def _candidate_paths(source: Path) -> list[Path]:
     paths = [source / relative for relative in sorted(EXACT_INPUTS)]
-    skills = source / ".claude" / "skills"
-    hooks = source / ".claude" / "hooks"
-    if skills.is_dir() and not skills.is_symlink():
-        paths.extend(sorted(skills.glob("*/SKILL.md")))
-    if hooks.is_dir() and not hooks.is_symlink():
-        paths.extend(sorted(hooks.glob("*.py")))
+    claude = source / ".claude"
+    if claude.is_symlink():
+        raise InputBoundaryError("symlink")
+    if claude.exists() and not claude.is_dir():
+        raise InputBoundaryError("invalid_root")
+    for store, pattern in (
+        (claude / "skills", "*/SKILL.md"),
+        (claude / "hooks", "*.py"),
+    ):
+        if store.is_symlink():
+            raise InputBoundaryError("symlink")
+        if store.exists() and not store.is_dir():
+            raise InputBoundaryError("invalid_root")
+        if store.is_dir():
+            paths.extend(sorted(store.glob(pattern)))
     return paths
 
 
