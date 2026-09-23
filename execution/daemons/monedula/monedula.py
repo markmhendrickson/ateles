@@ -886,7 +886,6 @@ def _resolve_consent_channel() -> tuple[str | None, str]:
     # source=binding when a concrete value is read; absent today → continue.
     tg_token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     tg_chat = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
-    tg_present = bool(tg_token) and bool(tg_chat)
 
     if not tg_token or not tg_chat:
         try:
