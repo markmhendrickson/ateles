@@ -1400,6 +1400,14 @@ def test_recheck_drops_owner_history_when_hosted_already_has_every_local_entry(m
         "snapshot": {LEGACY_GATE_STATUS_FIELD: {}, "owner_history": [entry]}
     }
     monkeypatch.setattr(_mod, "get_hosted_entity", lambda *a, **k: hosted_entity)
+    # owner_history presence is decided from OBSERVATIONS (neotoma#2341), not
+    # the snapshot -- mock that source directly to say the entry is already
+    # present, independent of whatever the snapshot fixture above says.
+    monkeypatch.setattr(
+        _mod,
+        "hosted_array_field_present_keys",
+        lambda *a, **k: {_mod.array_entry_dedupe_key(entry)},
+    )
 
     local_state = {"owner_history": [dict(entry)]}
     fields = {"owner_history": [entry, {"agent": "stale", "action": "x", "at": "t"}]}  # stale plan-time value
@@ -1416,6 +1424,7 @@ def test_recheck_keeps_owner_history_with_genuinely_new_entries(monkeypatch):
         "snapshot": {LEGACY_GATE_STATUS_FIELD: {}, "owner_history": []}
     }
     monkeypatch.setattr(_mod, "get_hosted_entity", lambda *a, **k: hosted_entity)
+    monkeypatch.setattr(_mod, "hosted_array_field_present_keys", lambda *a, **k: set())
 
     new_entry = {"agent": "pavo", "action": "signed_off", "gate": "pm", "at": "2026-09-23T10:00:00Z"}
     local_state = {"owner_history": [new_entry]}
@@ -1471,3 +1480,364 @@ def test_recheck_fails_closed_when_hosted_entity_vanishes(monkeypatch):
     assert "owner_history" not in result
     assert result.get("current_owner") == "waxwing"  # untouched by this function
     assert value_hash({"k": 1}) == value_hash({"k": 1})
+
+
+# --- merge_array presence from OBSERVATIONS, not the snapshot (neotoma#2341) -
+#
+# The bug this section covers: hosted's snapshot never reflects a
+# merge_array-reducer field's true state (a store() write is accepted and
+# bumps observation_count, but a subsequent GET /entities/<id> keeps showing
+# the field's PRE-write value), so a script that diffs "what to send" against
+# the snapshot never converges -- every re-run re-sends the same array
+# entries. The fix reads presence from POST /list_observations instead.
+
+from neotoma_local_fork_replay import (  # noqa: E402
+    array_entry_dedupe_key,
+    get_hosted_field_observations,
+    hosted_array_field_present_keys,
+    plan_array_field_missing_entries,
+    reduce_array_fields_to_missing_entries,
+)
+
+
+def _list_observations_responder(pages_by_entity):
+    """Build a fake http_request(method, base_url, path, token, body, ...)
+    that answers POST /list_observations from a canned {entity_id: [obs, ...]}
+    map, paginating by LIMIT/OFFSET the same way the real route does, and
+    errors (a plain assert) on any other path -- so a test using this never
+    silently talks to a different route than the one it's fixturing.
+    """
+
+    def _fake(method, base_url, path, token, body=None, **kwargs):
+        assert path == "/list_observations", f"unexpected path: {path}"
+        entity_id = body["entity_id"]
+        limit = body.get("limit", 100)
+        offset = body.get("offset", 0)
+        all_obs = pages_by_entity.get(entity_id, [])
+        page = all_obs[offset : offset + limit]
+        return 200, {"observations": page}
+
+    return _fake
+
+
+def test_array_entry_dedupe_key_stable_across_key_order():
+    a = {"agent": "pavo", "action": "signed_off", "at": "t1"}
+    b = {"action": "signed_off", "at": "t1", "agent": "pavo"}
+    assert array_entry_dedupe_key(a) == array_entry_dedupe_key(b)
+
+
+def test_array_entry_dedupe_key_differs_for_different_content():
+    a = {"agent": "pavo", "at": "t1"}
+    b = {"agent": "pavo", "at": "t2"}
+    assert array_entry_dedupe_key(a) != array_entry_dedupe_key(b)
+
+
+def test_get_hosted_field_observations_unions_across_pages(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    entries = [{"agent": f"a{i}", "at": f"t{i}"} for i in range(3)]
+    pages = {
+        "ent_x": [
+            {"fields": {"owner_history": [entries[0]]}},
+            {"fields": {"owner_history": [entries[1]]}},
+            {"fields": {"other_field": "irrelevant"}},
+            {"fields": {"owner_history": [entries[2]]}},
+        ]
+    }
+    monkeypatch.setattr(
+        _mod, "http_request", _list_observations_responder(pages)
+    )
+    values = get_hosted_field_observations(
+        "ent_x", "owner_history", "https://hosted.example", "tok"
+    )
+    assert values == [[entries[0]], [entries[1]], [entries[2]]]
+
+
+def test_get_hosted_field_observations_empty_on_non_200(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(
+        _mod, "http_request", lambda *a, **k: (500, {"error": "boom"})
+    )
+    values = get_hosted_field_observations(
+        "ent_x", "owner_history", "https://hosted.example", "tok"
+    )
+    assert values == []
+
+
+def test_hosted_array_field_present_keys_unions_entries_from_every_observation(
+    monkeypatch,
+):
+    import neotoma_local_fork_replay as _mod
+
+    e1 = {"agent": "pavo", "action": "signed_off", "gate": "pm", "at": "t1"}
+    e2 = {"agent": "cicada", "action": "handed_off", "gate": "ux", "at": "t2"}
+    pages = {
+        "ent_x": [
+            {"fields": {"owner_history": [e1]}},
+            {"fields": {"owner_history": [e1, e2]}},  # e1 repeated -- still one key
+        ]
+    }
+    monkeypatch.setattr(_mod, "http_request", _list_observations_responder(pages))
+    present = hosted_array_field_present_keys(
+        "ent_x", "owner_history", "https://hosted.example", "tok"
+    )
+    assert present == {array_entry_dedupe_key(e1), array_entry_dedupe_key(e2)}
+
+
+# --- Requirement 3 (task spec): an array ALREADY present in observations
+# produces NO write.
+
+
+def test_plan_array_field_missing_entries_empty_when_all_already_present():
+    e1 = {"agent": "pavo", "at": "t1"}
+    e2 = {"agent": "cicada", "at": "t2"}
+    present = {array_entry_dedupe_key(e1), array_entry_dedupe_key(e2)}
+    missing = plan_array_field_missing_entries([e1, e2], present)
+    assert missing == []
+
+
+# --- Requirement 2 (task spec): a PARTIALLY present array sends only the
+# missing entries.
+
+
+def test_plan_array_field_missing_entries_sends_only_the_missing_subset():
+    e1 = {"agent": "pavo", "at": "t1"}
+    e2 = {"agent": "cicada", "at": "t2"}  # already on hosted
+    e3 = {"agent": "waxwing", "at": "t3"}  # NOT on hosted -- genuinely new
+    present = {array_entry_dedupe_key(e2)}
+    missing = plan_array_field_missing_entries([e1, e2, e3], present)
+    assert missing == [e1, e3]
+
+
+def test_plan_array_field_missing_entries_dedupes_local_duplicates():
+    e1 = {"agent": "pavo", "at": "t1"}
+    missing = plan_array_field_missing_entries([e1, dict(e1), e1], set())
+    assert missing == [e1]
+
+
+def test_plan_array_field_missing_entries_preserves_local_order():
+    e1 = {"agent": "a", "at": "1"}
+    e2 = {"agent": "b", "at": "2"}
+    e3 = {"agent": "c", "at": "3"}
+    missing = plan_array_field_missing_entries([e3, e1, e2], set())
+    assert missing == [e3, e1, e2]
+
+
+# --- schema reducer detection (merge_array) --------------------------------
+
+
+def test_get_schema_declared_fields_captures_merge_array_reducer(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    def fake_http_request(method, base_url, path, token, body=None, **kwargs):
+        assert path == "/schemas/issue"
+        return 200, {
+            "schema_definition": {
+                "fields": {"owner_history": {"type": "array"}, "title": {"type": "string"}}
+            },
+            "reducer_config": {
+                "merge_policies": {
+                    "owner_history": {"strategy": "merge_array"},
+                    "gate_status": {"strategy": "last_write"},
+                }
+            },
+        }
+
+    monkeypatch.setattr(_mod, "http_request", fake_http_request)
+    info = _mod.get_schema_declared_fields("issue", "https://hosted.example", "tok", {})
+    assert info["merge_array_fields"] == {"owner_history"}
+    assert "gate_status" not in info["merge_array_fields"]
+
+
+def test_get_schema_declared_fields_merge_array_empty_when_no_hosted_schema(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod, "http_request", lambda *a, **k: (404, {"error": "not found"}))
+    info = _mod.get_schema_declared_fields("nosuchtype", "https://hosted.example", "tok", {})
+    assert info["has_schema"] is False
+    assert info["merge_array_fields"] == set()
+
+
+# --- reduce_array_fields_to_missing_entries (--reconcile-file path) --------
+
+
+def test_reduce_array_fields_drops_field_entirely_present(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    e1 = {"agent": "pavo", "at": "t1"}
+    pages = {"ent_x": [{"fields": {"owner_history": [e1]}}]}
+    monkeypatch.setattr(_mod, "http_request", _list_observations_responder(pages))
+
+    schema_info = {"merge_array_fields": {"owner_history"}}
+    reduced = reduce_array_fields_to_missing_entries(
+        "ent_x",
+        "issue",
+        {"owner_history": [dict(e1)], "title": "unrelated"},
+        schema_info,
+        "https://hosted.example",
+        "tok",
+    )
+    assert "owner_history" not in reduced
+    assert reduced["title"] == "unrelated"  # non-array field untouched
+
+
+def test_reduce_array_fields_keeps_only_missing_subset(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    e1 = {"agent": "pavo", "at": "t1"}
+    e2 = {"agent": "cicada", "at": "t2"}
+    pages = {"ent_x": [{"fields": {"owner_history": [e1]}}]}
+    monkeypatch.setattr(_mod, "http_request", _list_observations_responder(pages))
+
+    schema_info = {"merge_array_fields": {"owner_history"}}
+    reduced = reduce_array_fields_to_missing_entries(
+        "ent_x",
+        "issue",
+        {"owner_history": [dict(e1), e2]},
+        schema_info,
+        "https://hosted.example",
+        "tok",
+    )
+    assert reduced["owner_history"] == [e2]
+
+
+def test_reduce_array_fields_protects_locally_list_typed_field_even_without_schema_flag(
+    monkeypatch,
+):
+    """A field can be array-valued without this run's schema cache having
+    classified it as merge_array yet (e.g. a type with no hosted schema at
+    all) -- reduce_array_fields_to_missing_entries still protects it because
+    it also checks isinstance(value, list), not only the schema flag.
+    """
+    import neotoma_local_fork_replay as _mod
+
+    e1 = {"agent": "pavo", "at": "t1"}
+    pages = {"ent_x": [{"fields": {"some_array": [e1]}}]}
+    monkeypatch.setattr(_mod, "http_request", _list_observations_responder(pages))
+
+    schema_info = {"merge_array_fields": set()}  # NOT flagged by schema
+    reduced = reduce_array_fields_to_missing_entries(
+        "ent_x",
+        "no_schema_type",
+        {"some_array": [dict(e1)]},
+        schema_info,
+        "https://hosted.example",
+        "tok",
+    )
+    assert "some_array" not in reduced  # still correctly detected as fully present
+
+
+# --- Requirement 1 (task spec): convergence -- re-planning after a simulated
+# write yields zero changes.
+
+
+def test_gate_restore_owner_history_converges_to_zero_after_simulated_write(
+    monkeypatch,
+):
+    """Simulates exactly the regression this fix targets: plan once (nothing
+    on hosted yet), "apply" by adding the sent entries to the fake hosted
+    observations store, then re-plan -- the second plan must send ZERO
+    owner_history entries, proving convergence rather than re-sending the
+    same entries forever.
+    """
+    import neotoma_local_fork_replay as _mod
+
+    entry = {"agent": "pavo", "action": "signed_off", "gate": "pm", "at": "2026-09-23T10:00:00Z"}
+    hosted_observations: list = []  # simulates hosted's observations table
+
+    def fake_http_request(method, base_url, path, token, body=None, **kwargs):
+        assert path == "/list_observations"
+        return 200, {"observations": list(hosted_observations)}
+
+    monkeypatch.setattr(_mod, "http_request", fake_http_request)
+
+    local_state = {"owner_history": [entry]}
+    hosted_entity = {"snapshot": {LEGACY_GATE_STATUS_FIELD: {}, "owner_history": []}}
+
+    # First plan: hosted has nothing yet -> entry is genuinely missing.
+    plan1 = plan_gate_restore_for_entity(
+        "ent_x", local_state, hosted_entity, base_url="https://hosted.example", token="tok"
+    )
+    assert plan1["owner_history_changed"] is True
+    assert plan1["fields"]["owner_history"] == [entry]
+
+    # Simulate the apply: hosted's observations table now has this entry.
+    hosted_observations.append({"fields": {"owner_history": [entry]}})
+
+    # Second plan (a re-run, or the same run's apply-time recheck): must
+    # converge to zero owner_history change.
+    plan2 = plan_gate_restore_for_entity(
+        "ent_x", local_state, hosted_entity, base_url="https://hosted.example", token="tok"
+    )
+    assert plan2["owner_history_changed"] is False
+    assert "owner_history" not in plan2["fields"]
+
+
+def test_recheck_fields_against_current_hosted_converges_after_simulated_write(
+    monkeypatch,
+):
+    """Same convergence property, exercised through the apply-time recheck
+    function directly (recheck_fields_against_current_hosted) rather than
+    the plan function -- this is the function actually called immediately
+    before each --gate-restore write.
+    """
+    import neotoma_local_fork_replay as _mod
+
+    entry = {"agent": "pavo", "action": "signed_off", "gate": "pm", "at": "2026-09-23T10:00:00Z"}
+    hosted_observations: list = []
+
+    def fake_http_request(method, base_url, path, token, body=None, **kwargs):
+        assert path == "/list_observations"
+        return 200, {"observations": list(hosted_observations)}
+
+    monkeypatch.setattr(_mod, "http_request", fake_http_request)
+    hosted_entity = {"snapshot": {LEGACY_GATE_STATUS_FIELD: {}, "owner_history": []}}
+    monkeypatch.setattr(_mod, "get_hosted_entity", lambda *a, **k: hosted_entity)
+
+    local_state = {"owner_history": [entry]}
+    fields = {"owner_history": [entry]}
+
+    result1 = recheck_fields_against_current_hosted(
+        "ent_x", "merge", fields, local_state, "https://hosted.example", "tok"
+    )
+    assert result1["owner_history"] == [entry]
+
+    # Simulate the write landing.
+    hosted_observations.append({"fields": {"owner_history": [entry]}})
+
+    result2 = recheck_fields_against_current_hosted(
+        "ent_x", "merge", dict(fields), local_state, "https://hosted.example", "tok"
+    )
+    assert "owner_history" not in result2
+
+
+# --- Requirement 4 (task spec): load rules honored on the read-only
+# verification path against hosted (concurrency 1 -- strictly sequential
+# calls, no threading/async fan-out anywhere in this module; timeout >= 180s;
+# health check every HEALTH_CHECK_BATCH_SIZE requests -- both already covered
+# by test_http_client_timeout_is_at_least_180_seconds and
+# test_health_check_batch_size_is_20 above). get_hosted_field_observations
+# must never abandon an in-flight request: it has no timeout/cancellation
+# logic of its own and delegates entirely to http_request, whose only retry
+# path is for TRANSIENT connection failures (never a live request already in
+# flight) -- asserted here by checking it passes retries/backoff through and
+# performs no concurrent/threaded calls.
+
+
+def test_get_hosted_field_observations_uses_retries_not_silent_abandon(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    calls = []
+
+    def fake_http_request(method, base_url, path, token, body=None, retries=0, retry_backoff_seconds=1.0):
+        calls.append((path, retries, retry_backoff_seconds))
+        return 200, {"observations": []}
+
+    monkeypatch.setattr(_mod, "http_request", fake_http_request)
+    get_hosted_field_observations("ent_x", "owner_history", "https://hosted.example", "tok")
+    assert len(calls) == 1
+    # retries>0 with a real backoff -- never a bare fire-and-forget call that
+    # would abandon a transient failure instead of retrying it.
+    assert calls[0][1] > 0
+    assert calls[0][2] > 0

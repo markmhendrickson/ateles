@@ -193,9 +193,27 @@ def get_schema_declared_fields(
     if status == 200 and isinstance(body, dict):
         fields = body.get("schema_definition", {}).get("fields", {})
         declared = set(fields.keys()) if isinstance(fields, dict) else set()
-        cache[entity_type] = {"has_schema": True, "declared_fields": declared}
+        merge_policies = (
+            body.get("reducer_config", {}).get("merge_policies", {})
+            if isinstance(body.get("reducer_config"), dict)
+            else {}
+        )
+        merge_array_fields = {
+            name
+            for name, policy in (merge_policies or {}).items()
+            if isinstance(policy, dict) and policy.get("strategy") == "merge_array"
+        }
+        cache[entity_type] = {
+            "has_schema": True,
+            "declared_fields": declared,
+            "merge_array_fields": merge_array_fields,
+        }
     else:
-        cache[entity_type] = {"has_schema": False, "declared_fields": set()}
+        cache[entity_type] = {
+            "has_schema": False,
+            "declared_fields": set(),
+            "merge_array_fields": set(),
+        }
     return cache[entity_type]
 
 
@@ -351,6 +369,143 @@ def entity_exists(entity_id: str, base_url: str, token: str) -> bool:
         retry_backoff_seconds=2.0,
     )
     return status == 200
+
+
+# --- merge_array presence via OBSERVATIONS, not the snapshot (neotoma#2341) -
+#
+# The hosted SNAPSHOT never reflects a merge_array-reducer field's true state:
+# store() writes to an array field (e.g. issue.owner_history) are accepted
+# and increment observation_count, but the snapshot the entity GET returns
+# keeps showing the field's PRE-write value indefinitely (confirmed live
+# during the 2026-09-23 gate-restore: ~150 redundant observations sent across
+# repeated runs, each computing "missing" against a snapshot that never
+# converged). Every presence/diff decision for a merge_array field -- or, more
+# conservatively, ANY array-valued field, since a field can use merge_array
+# without this script's local schema_info cache having been asked about it
+# yet -- must be made from hosted's OBSERVATIONS via POST /list_observations,
+# never from GET /entities/<id>'s snapshot. This function is that read: the
+# union, across every observation for entity_id, of whatever that field held
+# on each one (an observation's `fields` may set the field to a whole array,
+# per the write shape this script itself sends -- build_entity_record puts
+# the full local array value under the field name -- so "union across
+# observations" means "union of every array any single observation set for
+# this field", not a per-element list, though in practice each write is
+# itself already a full array).
+LIST_OBSERVATIONS_PAGE_SIZE = 100
+
+
+def get_hosted_field_observations(
+    entity_id: str, field_name: str, base_url: str, token: str
+) -> list:
+    """Every value observed for `field_name` on `entity_id`, oldest call order
+    not guaranteed -- returns a flat list of the raw per-observation values
+    (whatever type each observation stored under this field key; for an
+    array-valued field this is normally a list-of-lists, one list per
+    observation that touched the field). Paginates POST /list_observations
+    (limit/offset) until a short page ends it. Read-only. Returns [] on any
+    non-200/unparseable response for any single page (fail toward "found
+    nothing new", never toward silently fabricating presence) rather than
+    raising, since this is a presence check that gates whether a write
+    happens, not a correctness-critical read whose failure should halt the
+    whole run the way a write failure does elsewhere in this script.
+    """
+    values: list = []
+    offset = 0
+    while True:
+        status, body = http_request(
+            "POST",
+            base_url,
+            "/list_observations",
+            token,
+            {
+                "entity_id": entity_id,
+                "limit": LIST_OBSERVATIONS_PAGE_SIZE,
+                "offset": offset,
+            },
+            retries=3,
+            retry_backoff_seconds=2.0,
+        )
+        if status != 200 or not isinstance(body, dict):
+            break
+        page = body.get("observations")
+        if not isinstance(page, list) or not page:
+            break
+        for obs in page:
+            if not isinstance(obs, dict):
+                continue
+            fields = obs.get("fields")
+            if isinstance(fields, dict) and field_name in fields:
+                values.append(fields[field_name])
+        if len(page) < LIST_OBSERVATIONS_PAGE_SIZE:
+            break
+        offset += LIST_OBSERVATIONS_PAGE_SIZE
+    return values
+
+
+def array_entry_dedupe_key(entry) -> str:
+    """Canonical dedupe key for one array-field entry: JSON-canonicalised
+    (sorted keys, no incidental whitespace) full content, hashed. Two entries
+    with the same content in a different key order or float/int spelling
+    still collide correctly because json.dumps(sort_keys=True) is applied to
+    the whole entry before hashing, not to a hand-picked subset of fields
+    (contrast merge_owner_history's `_owner_history_entry_key`, which is
+    deliberately narrower for the owner_history-specific gate-restore path).
+    Every JSON-serializable entry hashes (dict, list, str, number, bool,
+    None); a non-JSON-serializable entry falls back to its repr() so this
+    function never raises.
+    """
+    try:
+        canonical = json.dumps(entry, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        canonical = repr(entry)
+    return hashlib.sha256(canonical.encode("utf-8", errors="replace")).hexdigest()
+
+
+def hosted_array_field_present_keys(
+    entity_id: str, field_name: str, base_url: str, token: str
+) -> set:
+    """Dedupe-key set of every entry hosted's OBSERVATIONS already hold for
+    `field_name` on `entity_id` -- the union of every array any observation
+    stored under this field, each element keyed by array_entry_dedupe_key.
+    This is the presence source of truth for a merge_array (or any
+    array-valued) field: never the snapshot (see module note above).
+    """
+    present: set = set()
+    for value in get_hosted_field_observations(entity_id, field_name, base_url, token):
+        if isinstance(value, list):
+            for entry in value:
+                present.add(array_entry_dedupe_key(entry))
+        else:
+            # A non-list value observed under a nominally array field (e.g. a
+            # legacy write before the field was declared merge_array) -- key
+            # it as a single entry rather than silently dropping it, so it
+            # still counts toward "already present" and is never re-sent.
+            present.add(array_entry_dedupe_key(value))
+    return present
+
+
+def plan_array_field_missing_entries(
+    local_entries: list, hosted_present_keys: set
+) -> list:
+    """Given the LOCAL array's full entry list and the dedupe-key set already
+    present on hosted (from hosted_array_field_present_keys), return only the
+    entries genuinely missing -- deduped against each other too, so a locally
+    duplicated entry is sent at most once. Order is preserved (first
+    occurrence wins) so behaviour is deterministic across runs. An empty
+    result means "send nothing" -- callers must not write the field at all
+    in that case (an empty merge_array write is still a write, and per
+    neotoma#2033 hosted creates a new observation even for a content-
+    identical payload).
+    """
+    missing = []
+    seen_this_call: set = set()
+    for entry in local_entries or []:
+        key = array_entry_dedupe_key(entry)
+        if key in hosted_present_keys or key in seen_this_call:
+            continue
+        seen_this_call.add(key)
+        missing.append(entry)
+    return missing
 
 
 def check_health(base_url: str, token: str) -> tuple[bool, int | None]:
@@ -842,12 +997,57 @@ def plan_class_b_reconciliation_for_entity(
     return entity_id, entity_type, fields_to_write, drifted_fields, idem_key
 
 
+def reduce_array_fields_to_missing_entries(
+    entity_id: str,
+    entity_type: str,
+    fields_to_write: dict,
+    schema_info: dict,
+    base_url: str,
+    token: str,
+) -> dict:
+    """Reduce every merge_array-reducer (or otherwise list-valued) field in
+    `fields_to_write` down to only the entries hosted's OBSERVATIONS don't
+    already have, per neotoma#2341 -- the snapshot never reflects a
+    merge_array write, so presence must come from POST /list_observations
+    (hosted_array_field_present_keys), never from a snapshot-based hash
+    comparison. A field with nothing missing is DROPPED from the returned
+    dict (never sent with an empty/unchanged value -- neotoma#2033 means
+    even a content-identical write still creates a new observation). Runs
+    for every field whose name is in schema_info['merge_array_fields'], and
+    -- defensively, since a field can be array-valued without this script's
+    schema cache having classified it yet -- for any field whose CURRENT
+    fields_to_write value is itself a Python list, so an array field on a
+    no-schema entity_type is still protected. Non-array fields pass through
+    untouched, still subject to the caller's own hash-based drift check.
+    """
+    merge_array_fields = schema_info.get("merge_array_fields", set()) if schema_info else set()
+    reduced = dict(fields_to_write)
+    for name, value in list(fields_to_write.items()):
+        if name not in merge_array_fields and not isinstance(value, list):
+            continue
+        if not isinstance(value, list):
+            # Declared merge_array on hosted but this run's local value isn't
+            # a list -- fail closed, drop rather than guess how to diff it.
+            reduced.pop(name, None)
+            continue
+        hosted_present_keys = hosted_array_field_present_keys(
+            entity_id, name, base_url, token
+        )
+        missing_entries = plan_array_field_missing_entries(value, hosted_present_keys)
+        if not missing_entries:
+            reduced.pop(name, None)
+        else:
+            reduced[name] = missing_entries
+    return reduced
+
+
 def recheck_hosted_drift(
     entity_id: str,
     field_names: list[str],
     expected_hashes: dict,
     base_url: str,
     token: str,
+    array_field_names: set | None = None,
 ) -> list[str]:
     """Re-fetch hosted's CURRENT value for each field and compare hashes.
 
@@ -858,7 +1058,19 @@ def recheck_hosted_drift(
     than overwritten, per the brief. Uses GET /entities/<id> (a read) --
     never a write -- and only the fields this entity's plan actually
     touches are compared.
+
+    `array_field_names` (neotoma#2341) names the fields this call's
+    `fields_to_write` were already reduced to "missing entries only" by
+    reduce_array_fields_to_missing_entries, upstream of this hash check --
+    for those, `field_names`' VALUE is no longer the full field content the
+    reconciliation.json's hosted_value_hash was computed against (a full
+    array vs. a missing-entries sublist would never hash-match even with
+    zero actual drift), so this function skips the hash comparison for them
+    entirely and trusts the observations-based presence check that already
+    ran. Every other (non-array) field is still hash-checked exactly as
+    before.
     """
+    array_field_names = array_field_names or set()
     status, body = http_request(
         "GET",
         base_url,
@@ -870,10 +1082,12 @@ def recheck_hosted_drift(
     if status != 200 or not isinstance(body, dict):
         # Can't verify -- treat every field as drifted (fail closed: skip
         # rather than write over a state we could not just confirm).
-        return list(field_names)
+        return [n for n in field_names if n not in array_field_names]
     hosted_fields = body.get("fields") or body.get("entity", {}).get("fields") or {}
     drifted = []
     for name in field_names:
+        if name in array_field_names:
+            continue
         current_hash = (
             value_hash(hosted_fields.get(name)) if name in hosted_fields else None
         )
@@ -972,6 +1186,8 @@ def run_reconciliation(
     entities_with_nothing_to_apply = 0
     total_fields_planned = 0
     total_fields_drifted_local = 0
+    total_array_fields_already_present = 0
+    reconcile_schema_cache: dict = {}
     for entity_record in entities:
         entity_id, entity_type, fields_to_write, drifted_fields, idem_key = (
             plan_class_b_reconciliation_for_entity(
@@ -982,6 +1198,29 @@ def run_reconciliation(
         if not fields_to_write:
             entities_with_nothing_to_apply += 1
             continue
+
+        # merge_array presence check (neotoma#2341): reduce any array-valued
+        # writable field down to only the entries hosted's OBSERVATIONS don't
+        # already have, BEFORE this entity's fields_to_write/idem_key are
+        # finalized -- a field entirely present on hosted is dropped here so
+        # it never contributes to entities_with_nothing_to_apply miscounting
+        # it as "planned" nor to a redundant idempotency_key/write below.
+        schema_info = get_schema_declared_fields(
+            entity_type, base_url, token, reconcile_schema_cache
+        )
+        before_field_names = set(fields_to_write.keys())
+        fields_to_write = reduce_array_fields_to_missing_entries(
+            entity_id, entity_type, fields_to_write, schema_info, base_url, token
+        )
+        total_array_fields_already_present += len(
+            before_field_names - set(fields_to_write.keys())
+        )
+        if not fields_to_write:
+            entities_with_nothing_to_apply += 1
+            continue
+        idem_key = build_reconcile_idempotency_key(
+            cutover_date, entity_id, sorted(fields_to_write.keys())
+        )
         total_fields_planned += len(fields_to_write)
         # hosted_value_hash per writable field, for the apply-time drift
         # re-check (recheck_hosted_drift) -- built from the SAME writable
@@ -992,8 +1231,21 @@ def run_reconciliation(
             for f in filter_writable_fields(entity_record)
             if f["name"] in fields_to_write
         }
+        array_field_names = {
+            name
+            for name in fields_to_write
+            if name in schema_info.get("merge_array_fields", set())
+            or isinstance(fields_to_write[name], list)
+        }
         planned.append(
-            (entity_id, entity_type, fields_to_write, expected_hashes, idem_key)
+            (
+                entity_id,
+                entity_type,
+                fields_to_write,
+                expected_hashes,
+                idem_key,
+                array_field_names,
+            )
         )
 
     log_path = args.log
@@ -1007,6 +1259,7 @@ def run_reconciliation(
             fields_to_write,
             expected_hashes,
             idem_key,
+            array_field_names,
         ) in planned:
             field_names = sorted(fields_to_write.keys())
             if not apply_mode:
@@ -1029,7 +1282,12 @@ def run_reconciliation(
                 continue
 
             drift_now = recheck_hosted_drift(
-                entity_id, field_names, expected_hashes, base_url, token
+                entity_id,
+                field_names,
+                expected_hashes,
+                base_url,
+                token,
+                array_field_names=array_field_names,
             )
             if drift_now:
                 apply_time_drift_fields += len(drift_now)
@@ -1092,6 +1350,9 @@ def run_reconciliation(
     )
     print(
         f"Fields skipped (local value drifted from reconciliation.json): {total_fields_drifted_local}"
+    )
+    print(
+        f"Array fields already fully present on hosted (observations-based, neotoma#2341): {total_array_fields_already_present}"
     )
     if apply_mode:
         print(
@@ -1575,6 +1836,17 @@ def recheck_fields_against_current_hosted(
     Does nothing for a CREATE action (there's no existing hosted state to
     re-diff against) or for `current_owner` (already re-decided fresh by
     its own dedicated lazy check in the apply loop; left untouched here).
+
+    `owner_history` is a merge_array-reducer field (neotoma#2341): its
+    presence is decided from hosted's OBSERVATIONS via
+    hosted_array_field_present_keys, never from the snapshot the entity GET
+    returns, because that snapshot never reflects a merge_array write. Only
+    the entries genuinely missing from hosted's observations are kept; if
+    none are missing, the field is dropped from the write entirely (an empty
+    merge_array write is still a write -- neotoma#2033 -- so "nothing new"
+    must mean "field absent from the payload", not "field present with an
+    empty/unchanged list"). `gate_status` uses last_write, not merge_array,
+    so it is unaffected by this bug and keeps reading the snapshot.
     """
     if action != "merge" or not fields:
         return fields
@@ -1612,23 +1884,51 @@ def recheck_fields_against_current_hosted(
             rechecked[LEGACY_GATE_STATUS_FIELD] = merged_now
 
     if "owner_history" in fields:
-        hosted_owner_history_now = hosted_snapshot_now.get("owner_history") if isinstance(hosted_snapshot_now.get("owner_history"), list) else []
         local_owner_history = local_state.get("owner_history") if isinstance(local_state.get("owner_history"), list) else []
-        merged_now = merge_owner_history(hosted_owner_history_now, local_owner_history)
-        if merged_now == hosted_owner_history_now:
+        hosted_present_keys = hosted_array_field_present_keys(
+            entity_id, "owner_history", base_url, token
+        )
+        missing_entries = plan_array_field_missing_entries(
+            local_owner_history, hosted_present_keys
+        )
+        if not missing_entries:
             rechecked.pop("owner_history", None)
         else:
-            rechecked["owner_history"] = merged_now
+            # Send hosted's CURRENT full history (from the snapshot -- this
+            # is still the correct base to append onto; only PRESENCE is
+            # decided from observations) plus only the genuinely-missing
+            # local entries, matching merge_owner_history's "hosted first,
+            # new entries appended" shape.
+            hosted_owner_history_now = (
+                hosted_snapshot_now.get("owner_history")
+                if isinstance(hosted_snapshot_now.get("owner_history"), list)
+                else []
+            )
+            rechecked["owner_history"] = list(hosted_owner_history_now) + missing_entries
 
     return rechecked
 
 
 def plan_gate_restore_for_entity(
-    entity_id: str, local_state: dict, hosted_entity: dict | None
+    entity_id: str,
+    local_state: dict,
+    hosted_entity: dict | None,
+    base_url: str | None = None,
+    token: str | None = None,
 ) -> dict:
     """Compute one issue's gate-restore plan. Returns a dict describing the
     action (create/merge/noop) and, for merge/create, the full field set to
-    send plus a human-readable list of per-gate changes -- no I/O.
+    send plus a human-readable list of per-gate changes.
+
+    `owner_history` presence is decided from hosted's OBSERVATIONS (never the
+    snapshot -- neotoma#2341, see hosted_array_field_present_keys), which
+    means this function makes ONE extra read (POST /list_observations,
+    paginated) per entity that has a hosted_entity and local owner_history
+    entries to check. `base_url`/`token` are optional so existing pure-unit
+    tests that only cover gate_status (last_write, unaffected by this bug)
+    can keep calling this without a live/mocked HTTP layer; when omitted,
+    owner_history falls back to the snapshot-only comparison (the pre-fix
+    behavior) -- every real caller in this module passes them.
     """
     local_gate_status = (
         local_state.get(LEGACY_GATE_STATUS_FIELD)
@@ -1682,10 +1982,23 @@ def plan_gate_restore_for_entity(
     merged_gate_status, gate_changes = merge_gate_status(
         hosted_gate_status, local_gate_status
     )
-    merged_owner_history = merge_owner_history(
-        hosted_owner_history, local_owner_history
-    )
-    owner_history_changed = merged_owner_history != hosted_owner_history
+
+    if base_url is not None and token is not None:
+        hosted_present_keys = hosted_array_field_present_keys(
+            entity_id, "owner_history", base_url, token
+        )
+        missing_entries = plan_array_field_missing_entries(
+            local_owner_history, hosted_present_keys
+        )
+        owner_history_changed = bool(missing_entries)
+        merged_owner_history = list(hosted_owner_history) + missing_entries
+    else:
+        # No hosted/token supplied (pure-unit-test call site) -- fall back
+        # to the snapshot-only comparison; every real caller passes both.
+        merged_owner_history = merge_owner_history(
+            hosted_owner_history, local_owner_history
+        )
+        owner_history_changed = merged_owner_history != hosted_owner_history
 
     fields = {}
     if gate_changes:
@@ -1858,7 +2171,9 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
                 if hosted_entity is not None:
                     entity_id = canon_id  # write onto hosted's own id, not local's
 
-        plan = plan_gate_restore_for_entity(entity_id, local_state, hosted_entity)
+        plan = plan_gate_restore_for_entity(
+            entity_id, local_state, hosted_entity, base_url=base_url, token=token
+        )
         plan["repo"] = repo
         plan["github_number"] = github_number
         plan["label"] = format_issue_label(repo, github_number, entity_id)
@@ -2360,6 +2675,17 @@ def main() -> None:
     plan = []
     entity_cache: dict[str, bool] = {}
     schema_cache: dict[str, dict] = {}
+    # merge_array presence tracking for class-a (neotoma#2341): when a
+    # newly-missing entity has MULTIPLE post-cutover local observations that
+    # each touch the same array field (a real shape in this data -- one
+    # /store call per local observation row), the first write's entries must
+    # not be re-sent by a later observation for the same (entity_id, field)
+    # in the SAME run. Seeded from hosted's observations at first use (in
+    # case a prior partial run already created the entity and wrote some
+    # entries) and then updated locally as this run's own writes land, so it
+    # never needs a fresh hosted read for every observation of the same
+    # entity/field.
+    array_field_sent_keys: dict[tuple[str, str], set] = {}
 
     # Fetch each observation's entity_type's hosted schema ONCE up front
     # (GET /schemas/<type>, cached in schema_cache) -- used for both
@@ -2655,6 +2981,76 @@ def main() -> None:
                     http_status=None,
                 )
                 continue
+
+            # merge_array presence check (neotoma#2341), class-a path: even
+            # though this observation's entity is "a_missing" (probed 404
+            # before ANY write this run), a SECOND post-cutover local
+            # observation for the SAME newly-created entity can carry the
+            # same array-field entries as the first one this run already
+            # sent -- the probe only ran once, before either write, so it
+            # cannot see that. Reduce any schema-declared merge_array (or
+            # locally list-typed) field in this payload down to entries not
+            # already sent this run / present on hosted; drop the field
+            # entirely (never send an empty array write -- neotoma#2033) if
+            # nothing is left, and skip this whole observation's write only
+            # if that leaves it with no entity fields and no other kind of
+            # change to make.
+            if kind == "observation":
+                (entity_record_for_reduction,) = payload["entities"]
+                schema_info_for_reduction = schema_cache.get(
+                    entity_type, {"has_schema": False, "declared_fields": set(), "merge_array_fields": set()}
+                )
+                merge_array_field_names = schema_info_for_reduction.get("merge_array_fields", set())
+                array_keys_in_payload = [
+                    k
+                    for k, v in entity_record_for_reduction.items()
+                    if k not in ("entity_type", "target_id")
+                    and (k in merge_array_field_names or isinstance(v, list))
+                ]
+                for field_name in array_keys_in_payload:
+                    cache_key = (target_desc, field_name)
+                    if cache_key not in array_field_sent_keys:
+                        array_field_sent_keys[cache_key] = hosted_array_field_present_keys(
+                            target_desc, field_name, base_url, token
+                        )
+                    already_present = array_field_sent_keys[cache_key]
+                    local_value = entity_record_for_reduction[field_name]
+                    if not isinstance(local_value, list):
+                        # Declared/observed as array elsewhere but this
+                        # observation's value isn't a list -- fail closed,
+                        # drop rather than guess.
+                        entity_record_for_reduction.pop(field_name, None)
+                        continue
+                    missing_entries = plan_array_field_missing_entries(
+                        local_value, already_present
+                    )
+                    if not missing_entries:
+                        entity_record_for_reduction.pop(field_name, None)
+                    else:
+                        entity_record_for_reduction[field_name] = missing_entries
+                        already_present.update(
+                            array_entry_dedupe_key(e) for e in missing_entries
+                        )
+                remaining_entity_keys = {
+                    k
+                    for k in entity_record_for_reduction
+                    if k not in ("entity_type", "target_id")
+                }
+                if array_keys_in_payload and not remaining_entity_keys:
+                    print(f"SKIP (array fields already fully present on hosted): {prefix}")
+                    log_action(
+                        log_fh,
+                        kind=kind,
+                        local_id=local_id,
+                        entity_id=target_desc,
+                        entity_type=entity_type,
+                        entity_class=entity_class,
+                        stripped_keys=stripped_keys,
+                        action="skipped_array_fields_present",
+                        idempotency_key=idem_key,
+                        http_status=None,
+                    )
+                    continue
 
             print(f"APPLYING: {prefix}")
             if kind == "observation":
