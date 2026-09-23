@@ -1876,7 +1876,7 @@ applied to the registry's names rather than to this file's terms, which is where
 enforcement (an audit of every vocabulary entry) does not reach. This term names what invariant 6 already
 forbids without a noun for it: a registered second type for one of the design's singletons is the parallel
 mechanism that invariant forbids, and a redundant type is that defect stated generally, for any pair of
-types rather than for the singletons alone (decision 111).
+types rather than for the singletons alone (decision 112).
 **See:** [`principles.md#12-as-few-terms-as-the-design-needs-and-no-fewer-no-term-overlaps-another`](principles.md#12-as-few-terms-as-the-design-needs-and-no-fewer-no-term-overlaps-another),
 [`principles.md#6-extend-the-mechanism-that-already-generalizes-do-not-build-a-parallel-one`](principles.md#6-extend-the-mechanism-that-already-generalizes-do-not-build-a-parallel-one),
 [`data_model.md#the-registry-is-closed-by-default-and-registering-outside-the-declared-set-is-a-governance-write`](data_model.md#the-registry-is-closed-by-default-and-registering-outside-the-declared-set-is-a-governance-write).
