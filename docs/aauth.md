@@ -76,9 +76,24 @@ The header is therefore the identity for this context, and it resolves per agent
 
 This mirrors `_token_for_agent_on_repo`'s tiering for GitHub, deliberately: the two credential systems
 should degrade the same way. Tier 2 is a real fallback for an **advisory** agent, whose product (a PR
-comment) survives an unattributed run. It is **not** acceptable for an agent that owns a pre-impl gate,
-whose product is a durable write: `skill_runner.run_skill(..., owns_pending_gate=True)` **refuses to
-dispatch** rather than produce a verdict Neotoma will discard.
+comment) survives an unattributed run. For an agent that owns a pre-impl gate (product: a durable
+write), `skill_runner.run_skill(..., owns_pending_gate=True)` applies an interim policy knob:
+
+| `ATELES_GATE_OWNER_IDENTITY_POLICY` | Behaviour when no `<ROLE>_NEOTOMA_TOKEN` |
+|---|---|
+| `allow_unattributed` (**production default** until [#1181](https://github.com/markmhendrickson/ateles/issues/1181)) | Proceed on the shared daemon bearer with a greppable WARN |
+| `refuse` | Refuse to dispatch (identity-error `SkillResult`); panel surfaces **GATE WRITEBACK DENIED** |
+
+Empty or invalid env values are treated as `allow_unattributed` (with a WARN naming the bad value).
+Operator decision: [issuecomment-5797786740](https://github.com/markmhendrickson/ateles/issues/1196#issuecomment-5797786740).
+
+To reproduce fail-closed locally:
+
+```bash
+export ATELES_GATE_OWNER_IDENTITY_POLICY=refuse
+```
+
+Unset (or default) = production allow until #1181 lands.
 
 **To give a gate-owning role its own identity:** provision `<ROLE>_NEOTOMA_TOKEN` for
 `<role>@ateles-swarm`, and file an `agent_grant` matching that sub with `retrieve` + `correct` on `issue`

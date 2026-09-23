@@ -93,9 +93,12 @@ from review_panel import (
     select_panel,
 )
 from skill_runner import (
+    GATE_OWNER_IDENTITY_ALLOW,
+    GATE_OWNER_IDENTITY_REFUSE,
     NEOTOMA_IDENTITY_UNAVAILABLE,
     REVIEW_VERDICT_TOKENS,
     SkillResult,
+    gate_owner_identity_policy,
     run_skill,
     usable_providers,
     write_dispatch_failure_log,
@@ -508,6 +511,28 @@ def parse_pending_gates(stdout: str) -> set[str]:
     if not m:
         return set()
     return {g.strip().lower() for g in m.group(1).split(",") if g.strip()}
+
+
+def owns_pending_gate(*, gate_or_lens: str, pending_gates: set[str]) -> bool:
+    """Shared owns decision for every ``run_skill`` entrance (ateles#1196).
+
+    True iff ``gate_or_lens`` is non-empty AND present in ``pending_gates``.
+    Behaviour-identical to the historical panel predicate
+    ``lens.lens in pending_gates`` (empty gate / advisory lens → False).
+    """
+    key = (gate_or_lens or "").strip().lower()
+    if not key:
+        return False
+    return key in pending_gates
+
+
+def pending_gates_from_status(gate_status: dict[str, str] | None) -> set[str]:
+    """Gates whose live status is not in :data:`CLEARED_GATE_STATES`."""
+    pending: set[str] = set()
+    for gate, status in (gate_status or {}).items():
+        if (status or "pending").strip().lower() not in CLEARED_GATE_STATES:
+            pending.add(str(gate).strip().lower())
+    return pending
 
 
 # Vanellus / panelist verdict token (SWARM_GITHUB_CONTRACT, skill_runner.py):
@@ -2748,6 +2773,7 @@ class SwarmDispatcher:
                     # someone acting on them, not another opinion. Re-paneling
                     # would also spend a full panel run per stuck PR across a
                     # 23-PR backlog.
+                    # owns_pending_gate=False — Mode B impl later; not #795 preflight.
                     result = await run_skill(
                         "cicada",
                         self._cicada_fix_prompt(
@@ -2761,6 +2787,7 @@ class SwarmDispatcher:
                         github_token=_token_for_agent_on_repo("cicada", repository),
                         include_github_contract=True,
                         notifier=self.notifier,
+                        owns_pending_gate=False,
                     )
                     if not result.ok:
                         raise RuntimeError(
@@ -3050,6 +3077,15 @@ class SwarmDispatcher:
         # Same reading list the panel loop keys to the PR's paths (fail-open:
         # a fetch failure yields [] and the lens gets the kernel only).
         changed_files = await self._changed_files(trigger)
+        parent = self._parent_issue_number(pr.get("body") or "", repository)
+        # ateles#1196: same owns decision as the panel path — live pending set
+        # for the parent issue (tenant composite), not a silent default False.
+        owns = await self._resolve_owns_pending_gate(
+            repository,
+            parent,
+            gate_or_lens=lens.lens,
+            entrance="missing_lens_redispatch",
+        )
         try:
             result = await run_skill(
                 lens.agent,
@@ -3057,9 +3093,11 @@ class SwarmDispatcher:
                     trigger,
                     lens,
                     "",
-                    None,
+                    parent,
                     has_worktree=bool(worktree),
+                    owns_pending_gate=owns,
                     changed_files=changed_files,
+                    reviewed_head=reviewed_head,
                 ),
                 github_token=_token_for_agent_on_repo(lens.agent, repository),
                 include_github_contract=True,
@@ -3068,11 +3106,14 @@ class SwarmDispatcher:
                 preferred_provider=resolve_lens_provider(
                     lens, available_providers=usable_providers()
                 ),
+                owns_pending_gate=owns,
+                dispatch_entrance="missing_lens_redispatch",
             )
         finally:
             await cleanup_pr_worktree(worktree)
 
         if not result.ok:
+            # Identity-error under refuse must fail resume (no silent success).
             raise RuntimeError(
                 f"lens '{lens_name}' run failed: "
                 f"{result.error or f'rc={result.returncode}'}"
@@ -3673,12 +3714,14 @@ class SwarmDispatcher:
         ref = f"{trigger.repository}#{trigger.number}"
 
         # 1. Lanius: new-issue protocol (init gate_status, assign Pavo, label).
+        # owns_pending_gate=False — triage/init, not a gate-owner writeback.
         lanius = await run_skill(
             "lanius",
             self._lanius_issue_prompt(trigger),
             github_token=_token_for_agent_on_repo("lanius", trigger.repository),
             include_github_contract=True,
             notifier=self.notifier,
+            owns_pending_gate=False,
         )
         if not lanius.ok:
             self.notifier.send(
@@ -3704,6 +3747,14 @@ class SwarmDispatcher:
         completed: list[str] = []
         for section in sections:
             spec_so_far = assemble_spec_markdown(state.sections or {})
+            # ateles#1196: gate-owning sections compute owns against live pending;
+            # eng never appears in gate_status → False.
+            owns = await self._resolve_owns_pending_gate(
+                trigger.repository,
+                trigger.number,
+                gate_or_lens=section.lens,
+                entrance="spec_pipeline",
+            )
             result = await run_skill(
                 section.agent,
                 self._spec_section_prompt(
@@ -3717,6 +3768,8 @@ class SwarmDispatcher:
                 ),
                 include_github_contract=True,
                 notifier=self.notifier,
+                owns_pending_gate=owns,
+                dispatch_entrance="spec_pipeline",
             )
             section_text = self._extract_section_text(result.stdout, section)
             # Persist ADDITIVELY: correct only this section's field. Even when
@@ -3791,6 +3844,66 @@ class SwarmDispatcher:
                 handler=DAEMON_NAME,
                 dedupe_key=spec_ready_key,
             )
+
+    async def _resolve_owns_pending_gate(
+        self,
+        repository: str,
+        issue_number: int | None,
+        *,
+        gate_or_lens: str,
+        entrance: str,
+    ) -> bool:
+        """Compute ``owns_pending_gate`` against live pending gates (ateles#1196).
+
+        Loads ``IssueGateStore`` for ``(repository, issue_number)`` — tenant
+        composite, never issue number alone. On unread/failure:
+        * ``allow_unattributed`` (prod default): empty set for the flag + WARN
+        * ``refuse``: non-empty ``gate_or_lens`` → True (fail closed)
+        """
+        pending: set[str] = set()
+        read_ok = False
+        if issue_number is not None:
+            ref = f"{repository}#{issue_number}"
+            try:
+                store = IssueGateStore(
+                    self.config.neotoma_base_url, self.config.neotoma_token
+                )
+                state = await store.load(repository, issue_number)
+                if state.triaged:
+                    read_ok = True
+                    pending = pending_gates_from_status(state.gate_status)
+                else:
+                    log.warning(
+                        f"[{DAEMON_NAME}] {ref}: gate state unread for "
+                        f"owns_pending_gate ({entrance}) — entity not triaged"
+                    )
+            except Exception as exc:  # noqa: BLE001 — never crash the pipeline
+                log.warning(
+                    f"[{DAEMON_NAME}] {ref}: gate state unread for "
+                    f"owns_pending_gate ({entrance}): {exc}"
+                )
+        else:
+            log.warning(
+                f"[{DAEMON_NAME}] {repository}: gate state unread for "
+                f"owns_pending_gate ({entrance}) — no parent/issue number"
+            )
+
+        if not read_ok:
+            policy = gate_owner_identity_policy()
+            if policy == GATE_OWNER_IDENTITY_REFUSE:
+                # Fail closed: non-empty gate/lens cannot skip the preflight.
+                return bool((gate_or_lens or "").strip())
+            # allow_unattributed: treat pending as empty for the flag only.
+            log.warning(
+                f"[{DAEMON_NAME}] {repository}: owns_pending_gate computed "
+                f"against empty set ({entrance}); "
+                f"gate_owner_identity_policy={GATE_OWNER_IDENTITY_ALLOW}"
+            )
+            return False
+
+        return owns_pending_gate(
+            gate_or_lens=gate_or_lens, pending_gates=pending
+        )
 
     async def _refresh_pending_gates(
         self, repository: str, parent: int | None, snapshot: set[str]
@@ -4026,12 +4139,14 @@ class SwarmDispatcher:
         referencing this issue — so the caller can notify honestly instead of a
         false "PR gate pipeline now owns it".
         """
+        # owns_pending_gate=False — build handoff, not a gate-owner writeback.
         result = await run_skill(
             "cicada",
             self._cicada_build_prompt(trigger, state),
             github_token=_token_for_agent_on_repo("cicada", trigger.repository),
             include_github_contract=True,
             notifier=self.notifier,
+            owns_pending_gate=False,
         )
         if not result.ok:
             log.error(
@@ -4272,12 +4387,14 @@ class SwarmDispatcher:
 
         # 1. Lanius: enforce PR gate inheritance against the parent issue.
         _lanius_token = _token_for_agent_on_repo("lanius", trigger.repository)
+        # owns_pending_gate=False — inheritance report only.
         lanius = await run_skill(
             "lanius",
             self._lanius_pr_prompt(trigger, parent),
             github_token=_lanius_token,
             include_github_contract=True,
             notifier=self.notifier,
+            owns_pending_gate=False,
         )
         verdict = parse_gate_verdict(lanius.stdout)
         if verdict is None:
@@ -4292,6 +4409,7 @@ class SwarmDispatcher:
                 f"(lanius.ok={lanius.ok}) — retrying once with an explicit "
                 "reminder"
             )
+            # owns_pending_gate=False — inheritance retry only.
             lanius = await run_skill(
                 "lanius",
                 self._lanius_pr_prompt(trigger, parent)
@@ -4305,6 +4423,7 @@ class SwarmDispatcher:
                 github_token=_lanius_token,
                 include_github_contract=True,
                 notifier=self.notifier,
+                owns_pending_gate=False,
             )
             verdict = parse_gate_verdict(lanius.stdout)
 
@@ -4437,6 +4556,9 @@ class SwarmDispatcher:
                     trigger.repository, trigger.number, lens.agent
                 )
             try:
+                owns = owns_pending_gate(
+                    gate_or_lens=lens.lens, pending_gates=pending_gates
+                )
                 result = await run_skill(
                     lens.agent,
                     self._panelist_prompt(
@@ -4445,7 +4567,7 @@ class SwarmDispatcher:
                         expectations.get(lens.agent, ""),
                         parent,
                         has_worktree=bool(qa_worktree),
-                        owns_pending_gate=lens.lens in pending_gates,
+                        owns_pending_gate=owns,
                         changed_files=changed_files,
                         reviewed_head=review_head,
                     ),
@@ -4458,11 +4580,9 @@ class SwarmDispatcher:
                     preferred_provider=resolve_lens_provider(
                         lens, available_providers=usable_providers()
                     ),
-                    # ateles#795: a lens seated because it OWNS a pending gate
-                    # must be able to write that gate as itself. Passing the
-                    # flag lets the runner refuse up front rather than produce a
-                    # verdict Neotoma will discard.
-                    owns_pending_gate=lens.lens in pending_gates,
+                    # ateles#795/#1196: shared owns helper; entrance for WARN.
+                    owns_pending_gate=owns,
+                    dispatch_entrance="panel",
                 )
             finally:
                 await cleanup_pr_worktree(qa_worktree)
@@ -4600,6 +4720,7 @@ class SwarmDispatcher:
                 reason="PR head changed during review or could not be verified",
             )
             return
+        # owns_pending_gate=False — aggregation; not #795 pre-impl owner.
         vanellus_result = await run_skill(
             "vanellus",
             self._vanellus_prompt(
@@ -4613,6 +4734,7 @@ class SwarmDispatcher:
             github_token=_token_for_agent_on_repo("vanellus", trigger.repository),
             include_github_contract=True,
             notifier=self.notifier,
+            owns_pending_gate=False,
         )
 
         # 4a-0. Session/usage-limit guard (checked BEFORE auth, since a limit
@@ -5307,12 +5429,14 @@ class SwarmDispatcher:
                 f"- [{f.category}] {f.summary}\n  {f.detail}".rstrip()
                 for f in by_lens[lens]
             )
+            # owns_pending_gate=False — guidance only; no gate writeback.
             result = await run_skill(
                 agent,
                 self._fix_guidance_prompt(trigger, lens, agent, findings_text),
                 github_token=_token_for_agent_on_repo(agent, trigger.repository),
                 include_github_contract=True,
                 notifier=self.notifier,
+                owns_pending_gate=False,
             )
             if result.ok and result.stdout.strip():
                 guidance_blocks.append(
@@ -5333,12 +5457,14 @@ class SwarmDispatcher:
         head_before = await self._pr_head_sha(trigger)
 
         # Hand the consolidated guidance to Cicada to implement + push.
+        # owns_pending_gate=False — Mode B impl later; not this preflight.
         cicada_result = await run_skill(
             "cicada",
             self._cicada_fix_prompt(trigger, parent, this_round, consolidated),
             github_token=_token_for_agent_on_repo("cicada", trigger.repository),
             include_github_contract=True,
             notifier=self.notifier,
+            owns_pending_gate=False,
         )
         # An auth-expired claude call can exit 0 with the 401 in stdout, so a
         # bare `ok` is not enough — reframe an auth failure as an infra page.
@@ -5759,12 +5885,14 @@ class SwarmDispatcher:
         this_round = prior_rounds + 1
         await self._record_fix_round(trigger, this_round)
         head_before = await self._pr_head_sha(trigger)
+        # owns_pending_gate=False — Mode B CI fix; not this preflight.
         cicada_result = await run_skill(
             "cicada",
             self._cicada_ci_fix_prompt(trigger, parent, this_round),
             github_token=_token_for_agent_on_repo("cicada", trigger.repository),
             include_github_contract=True,
             notifier=self.notifier,
+            owns_pending_gate=False,
         )
         if detect_auth_failure(cicada_result.stdout, cicada_result.stderr):
             await self._handle_panel_auth_failure(trigger, "cicada")
@@ -8007,12 +8135,14 @@ class SwarmDispatcher:
             delivery_id=f"entity-backfill-{issue_number}",
             action="opened",
         )
+        # owns_pending_gate=False — entity bootstrap triage.
         result = await run_skill(
             "lanius",
             self._lanius_issue_prompt(trigger),
             github_token=_token_for_agent_on_repo("lanius", repository),
             include_github_contract=True,
             notifier=self.notifier,
+            owns_pending_gate=False,
         )
         if not result.ok:
             log.error(

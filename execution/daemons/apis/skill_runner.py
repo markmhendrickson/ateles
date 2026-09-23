@@ -185,6 +185,36 @@ def gate_writeback_allowlist(tools: list[str]) -> list[str]:
 # CLAUDE.md "fail closed on the field that carries the safety meaning".
 NEOTOMA_IDENTITY_UNAVAILABLE = "per-agent Neotoma identity unavailable"
 
+# Interim gate-owner identity policy (ateles#1196).
+# Operator decision (issuecomment-5797786740, 2026-09-23): production default
+# is allow_unattributed until ateles#1181 lands; refuse remains a testable
+# alternate. Prose source of truth: docs/aauth.md (not this comment).
+GATE_OWNER_IDENTITY_POLICY_ENV = "ATELES_GATE_OWNER_IDENTITY_POLICY"
+GATE_OWNER_IDENTITY_ALLOW = "allow_unattributed"
+GATE_OWNER_IDENTITY_REFUSE = "refuse"
+GATE_OWNER_IDENTITY_ALLOWED = frozenset(
+    {GATE_OWNER_IDENTITY_ALLOW, GATE_OWNER_IDENTITY_REFUSE}
+)
+
+
+def gate_owner_identity_policy() -> str:
+    """Return ``allow_unattributed`` or ``refuse``.
+
+    Empty or invalid env → production default ``allow_unattributed`` with a
+    one-shot WARN naming the bad value and the allowed tokens.
+    """
+    raw = os.environ.get(GATE_OWNER_IDENTITY_POLICY_ENV, "").strip()
+    if not raw:
+        return GATE_OWNER_IDENTITY_ALLOW
+    if raw in GATE_OWNER_IDENTITY_ALLOWED:
+        return raw
+    log.warning(
+        f"[apis] invalid {GATE_OWNER_IDENTITY_POLICY_ENV}={raw!r}; "
+        f"treating as {GATE_OWNER_IDENTITY_ALLOW} "
+        f"(allowed: {', '.join(sorted(GATE_OWNER_IDENTITY_ALLOWED))})"
+    )
+    return GATE_OWNER_IDENTITY_ALLOW
+
 
 def neotoma_token_env_name(role: str) -> str:
     """Env var holding *role*'s own Neotoma bearer, e.g. `ACCIPITER_NEOTOMA_TOKEN`."""
@@ -1296,6 +1326,7 @@ async def _run_skill_once(
     include_github_contract: bool = False,
     cwd: str | None = None,
     owns_pending_gate: bool = False,
+    dispatch_entrance: str | None = None,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
@@ -1356,28 +1387,37 @@ async def _run_skill_once(
         log.error(f"[apis] {skill} dispatch skipped — {msg}")
         return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
-    # ateles#795 — a gate owner that cannot be ATTRIBUTED must not run silently.
-    # Running it anyway burns a full review whose verdict Neotoma will refuse,
-    # and leaves `gate_status.<lens>` at `pending` — the state that is
-    # indistinguishable from a review that never ran, which is the whole defect.
-    # Refusing BEFORE the subprocess turns that invisible loss into a named,
-    # loud failure the panel surfaces on the PR. Only gate owners are refused;
-    # an advisory lens still runs on the shared bearer exactly as before.
+    # ateles#795 / #1196 — a gate owner that cannot be ATTRIBUTED: either refuse
+    # (ATELES_GATE_OWNER_IDENTITY_POLICY=refuse) or proceed with a loud WARN
+    # (production default allow_unattributed until #1181). Only gate owners hit
+    # this branch; an advisory lens still runs on the shared bearer as before.
     if owns_pending_gate:
         _, _own_identity = neotoma_token_for_agent(_role)
         identity_error = gate_writeback_identity_error(
             _role, is_own_identity=_own_identity
         )
         if identity_error:
-            log.error(f"[apis] {skill} dispatch refused — {identity_error}")
-            return SkillResult(
-                skill,
-                False,
-                None,
-                "",
-                "",
-                error=identity_error,
-                provider=provider,
+            policy = gate_owner_identity_policy()
+            if policy == GATE_OWNER_IDENTITY_REFUSE:
+                log.error(f"[apis] {skill} dispatch refused — {identity_error}")
+                return SkillResult(
+                    skill,
+                    False,
+                    None,
+                    "",
+                    "",
+                    error=identity_error,
+                    provider=provider,
+                )
+            token_env = neotoma_token_env_name(_role)
+            entrance = dispatch_entrance or "unknown"
+            log.warning(
+                f"[apis] {skill} dispatch proceeding unattributed — "
+                f"gate_owner_identity_policy={GATE_OWNER_IDENTITY_ALLOW} "
+                f"owns_pending_gate=true role={_role} entrance={entrance} "
+                f"token_env={token_env} missing; until ateles#1181 set "
+                f"{GATE_OWNER_IDENTITY_POLICY_ENV}={GATE_OWNER_IDENTITY_REFUSE} "
+                "to block"
             )
 
     try:
@@ -1967,6 +2007,7 @@ async def run_skill(
     provider: str | None = None,
     preferred_provider: str | None = None,
     owns_pending_gate: bool = False,
+    dispatch_entrance: str | None = None,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
 
@@ -1979,9 +2020,13 @@ async def run_skill(
     Passing ``provider`` pins the invocation to one adapter, primarily for
     diagnostics and focused tests.
 
-    ``owns_pending_gate`` (ateles#795): the run must be able to record a durable
-    verdict as ITSELF. Without its own Neotoma credential the run is refused
-    rather than started, so a verdict cannot evaporate into a `pending` gate.
+    ``owns_pending_gate`` (ateles#795 / #1196): whether this entrance is a
+    gate-owner writeback path. When True and the role has no own Neotoma
+    token, behaviour is gated by ``ATELES_GATE_OWNER_IDENTITY_POLICY``
+    (default ``allow_unattributed`` until #1181; ``refuse`` for fail-closed).
+
+    ``dispatch_entrance`` is an internal WARN-field label only
+    (``panel`` / ``missing_lens_redispatch`` / ``spec_pipeline``); not an API surface.
     """
     async def attempt(selected: str) -> SkillResult:
         return await _run_skill_once(
@@ -1990,6 +2035,7 @@ async def run_skill(
             notifier=notifier, github_token=github_token,
             include_github_contract=include_github_contract, cwd=cwd,
             owns_pending_gate=owns_pending_gate,
+            dispatch_entrance=dispatch_entrance,
         )
 
     return await _run_provider_attempts(

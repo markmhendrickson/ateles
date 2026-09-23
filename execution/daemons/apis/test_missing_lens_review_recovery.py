@@ -421,3 +421,126 @@ async def test_zero_headroom_lens_preference_uses_remaining_provider(
     monkeypatch.setattr(d, "_post_missing_panel_comments", noop)
 
     await d._redispatch_missing_lens("o/r", _pr(), "security")
+
+
+# ── ateles#1196: owns_pending_gate parity with the panel path ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_redispatch_missing_lens_passes_owns_pending_gate_true_when_parent_gate_pending(
+    monkeypatch,
+):
+    d = _dispatcher()
+    captured: dict = {}
+
+    class _Ok:
+        ok = True
+        stdout = "**APPROVE**"
+        error = None
+        returncode = 0
+
+    async def fake_run_skill(agent, prompt, **kwargs):  # noqa: ANN001
+        captured["kwargs"] = kwargs
+        return _Ok()
+
+    async def fake_resolve(repo, issue_number, *, gate_or_lens, entrance):  # noqa: ANN001
+        assert entrance == "missing_lens_redispatch"
+        assert gate_or_lens == "arch"
+        assert issue_number == 80
+        return True
+
+    def tracking_prompt(trigger, lens, expectation, parent=None, **kwargs):  # noqa: ANN001
+        captured["parent"] = parent
+        captured["prompt_kwargs"] = kwargs
+        return "prompt"
+
+    async def noop(*a, **k):  # noqa: ANN001
+        return None
+
+    async def no_files(*a, **k):  # noqa: ANN001
+        return []
+
+    monkeypatch.setattr(sd, "run_skill", fake_run_skill)
+    monkeypatch.setattr(d, "_resolve_owns_pending_gate", fake_resolve)
+    monkeypatch.setattr(d, "_panelist_prompt", tracking_prompt)
+    monkeypatch.setattr(d, "_changed_files", no_files)
+    monkeypatch.setattr(d, "_persist_panel_reviews", noop)
+    monkeypatch.setattr(d, "_post_missing_panel_comments", noop)
+    monkeypatch.setattr(sd, "_token_for_agent_on_repo", lambda *a: "t")
+
+    pr = _pr()
+    pr["body"] = "Closes #80"
+    await d._redispatch_missing_lens("o/r", pr, "arch")
+
+    assert captured["kwargs"]["owns_pending_gate"] is True
+    assert captured["kwargs"]["dispatch_entrance"] == "missing_lens_redispatch"
+    assert captured["parent"] == 80
+    assert captured["prompt_kwargs"]["owns_pending_gate"] is True
+    assert captured["prompt_kwargs"]["reviewed_head"] == "a" * 40
+
+
+@pytest.mark.asyncio
+async def test_redispatch_and_panel_same_flag_for_same_lens_pending_set():
+    """P0 regression for #1196: same (lens, pending) → same boolean."""
+    pending = {"arch", "pm"}
+    for lens_name in ("arch", "pm", "security", "ux"):
+        flag = sd.owns_pending_gate(gate_or_lens=lens_name, pending_gates=pending)
+        # Panel predicate was historically `lens.lens in pending_gates`.
+        assert flag is (lens_name in pending)
+
+
+@pytest.mark.asyncio
+async def test_redispatch_under_refuse_does_not_count_silent_success(monkeypatch):
+    d = _dispatcher()
+    monkeypatch.setenv(
+        skill_runner.GATE_OWNER_IDENTITY_POLICY_ENV,
+        skill_runner.GATE_OWNER_IDENTITY_REFUSE,
+    )
+
+    class _IdentityFail:
+        ok = False
+        stdout = ""
+        stderr = ""
+        error = skill_runner.gate_writeback_identity_error(
+            "waxwing", is_own_identity=False
+        )
+        returncode = None
+
+    async def fake_run_skill(*a, **k):  # noqa: ANN001
+        assert k.get("owns_pending_gate") is True
+        return _IdentityFail()
+
+    async def fake_resolve(*a, **k):  # noqa: ANN001
+        return True
+
+    async def must_not_persist(*a, **k):  # noqa: ANN001
+        raise AssertionError("must not persist after identity refusal")
+
+    async def no_files(*a, **k):  # noqa: ANN001
+        return []
+
+    monkeypatch.setattr(sd, "run_skill", fake_run_skill)
+    monkeypatch.setattr(d, "_resolve_owns_pending_gate", fake_resolve)
+    monkeypatch.setattr(d, "_changed_files", no_files)
+    monkeypatch.setattr(d, "_persist_panel_reviews", must_not_persist)
+    monkeypatch.setattr(d, "_post_missing_panel_comments", must_not_persist)
+    monkeypatch.setattr(sd, "_token_for_agent_on_repo", lambda *a: "t")
+
+    pr = _pr()
+    pr["body"] = "Closes #80"
+    with pytest.raises(RuntimeError, match="run failed"):
+        await d._redispatch_missing_lens("o/r", pr, "arch")
+
+    # Sweep counters: a failed redispatch must not count as resumed.
+    async def fake_candidates(repo):  # noqa: ANN001
+        return [(_pr(), ["arch"])]
+
+    monkeypatch.setattr(d, "_prs_with_missing_lens", fake_candidates)
+
+    async def failing_redispatch(*a, **k):  # noqa: ANN001
+        raise RuntimeError("identity refused")
+
+    monkeypatch.setattr(d, "_redispatch_missing_lens", failing_redispatch)
+    summary = await d.resume_missing_lens_reviews(["o/r"])
+    assert summary.get("resumed", 0) == 0
+    assert summary.get("failed", 0) >= 1
