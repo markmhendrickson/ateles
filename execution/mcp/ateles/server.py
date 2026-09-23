@@ -144,6 +144,69 @@ conversation.
 """
 
 
+# ── Rule delivery into the instructions block (foundation phase E2, task 3) ──
+#
+# The five rules above are STATIC — they ship with the code and say how to use
+# this server. They are not the swarm's governing rules, which live on the
+# record as `agent_policy` rows and change without a deploy.
+#
+# Phase E2's exit gate requires a rule written to its authoritative type to be
+# observed in an agent's resolved context on BOTH transports: a dispatched
+# invocation, and a session resumed past a compaction boundary. The dispatch
+# side is `AgentLoader.render_policy_prompt` (ateles#1118). THIS is the session
+# side, and the `instructions` block is the channel the plan names — the only
+# one clearing both constraints:
+#
+#   * a SessionStart hook is SKIPPED at launch (including --continue/--resume)
+#     and caps at 10,000 characters;
+#   * CLAUDE.md is re-injected from disk, but WHICH disk is undetermined —
+#     220 copies in 26 versions were measured on this machine (ateles#1124);
+#   * MCP `instructions` has no documented cap and is re-attached at EVERY
+#     compaction from the LIVE connection, so a server unreachable at startup
+#     recovers at the next boundary.
+#
+# Reuses the dispatch renderer rather than reimplementing the resolve
+# (CLAUDE.md: extend the mechanism that already generalizes). One resolve, one
+# scoping predicate (`policy_binds_agent`), two transports.
+SESSION_PRINCIPAL = os.environ.get("ATELES_SESSION_PRINCIPAL", "ateles@ateles-swarm")
+
+
+def render_server_instructions(principal: str = "") -> str:
+    """Static operating rules, plus the live rules bound to `principal`.
+
+    Fail-SOFT by design, and the asymmetry is deliberate: an unreachable or
+    empty record must not strip the static rules a session needs to use this
+    server at all. But it must not pass SILENTLY either — the loader logs the
+    unpopulated-scoping-field case loudly (ateles#1118), and a resolve that
+    raises is logged here. Absence of rules is reported, never inferred.
+    """
+    sub = principal or SESSION_PRINCIPAL
+    try:
+        if str(_REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(_REPO_ROOT))
+        from lib.daemon_runtime.agent_loader import AgentLoader
+
+        block = AgentLoader(sub.split("@")[0]).render_policy_prompt()
+    except Exception as exc:  # noqa: BLE001 — never block the server on this
+        log.error(
+            "[ateles-mcp] could not resolve agent_policy for %r: %s — serving "
+            "the static operating rules WITHOUT the swarm's governing rules. "
+            "Sessions will not see rules written to the record.",
+            sub,
+            exc,
+        )
+        return SERVER_INSTRUCTIONS
+    if not block:
+        log.warning(
+            "[ateles-mcp] no agent_policy rows bind %r — serving static rules "
+            "only. If rules exist on the record, check `scope` and `agent_sub` "
+            "(docs/foundation/data_model.md).",
+            sub,
+        )
+        return SERVER_INSTRUCTIONS
+    return SERVER_INSTRUCTIONS + block
+
+
 # ── Neotoma HTTP helpers ─────────────────────────────────────────────────────
 
 def _headers() -> dict[str, str]:
@@ -2072,7 +2135,7 @@ TOOL_HANDLERS = {
 async def main():
     denial_store = _require_checkpoint_release_state()
     log.info("Checkpoint denial store ready at %s", denial_store)
-    server = Server("ateles", instructions=SERVER_INSTRUCTIONS)
+    server = Server("ateles", instructions=render_server_instructions())
 
     @server.list_tools()
     async def handle_list_tools() -> list[Tool]:
