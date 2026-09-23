@@ -1401,3 +1401,78 @@ class TestSwarmObservability(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInstructionsCarryLiveRules:
+    """Foundation phase E2, task 3 — the SESSION transport.
+
+    The exit gate requires a rule written to `agent_policy` to be observed in
+    an agent's resolved context on BOTH transports. Dispatch is
+    `AgentLoader.render_policy_prompt` (ateles#1118). This is the session side:
+    the MCP `instructions` block, which is re-attached at every compaction
+    from the live connection.
+
+    RED before this change: `instructions` was a hardcoded five-rule literal
+    that never read `agent_policy`, so nothing written to the record reached a
+    session — the nonce below could not appear at any value.
+    """
+
+    NONCE = "NONCE-e2-session-transport-7f3a91"
+
+    def _patch_loader(self, monkeypatch, block):
+        import lib.daemon_runtime.agent_loader as al
+
+        monkeypatch.setattr(
+            al.AgentLoader, "render_policy_prompt", lambda self: block
+        )
+
+    def test_nonce_written_to_the_record_reaches_the_instructions_block(
+        self, monkeypatch
+    ):
+        self._patch_loader(
+            monkeypatch, f"\n\n## Active agent policies (apply these)\n- (mandatory, active) {self.NONCE}"
+        )
+        out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert self.NONCE in out, "a rule on the record did not reach the session"
+
+    def test_static_operating_rules_survive_alongside_the_live_rules(
+        self, monkeypatch
+    ):
+        # The static block tells a session how to USE this server; losing it
+        # to make room for live rules would trade one delivery failure for
+        # another.
+        self._patch_loader(monkeypatch, "\n\n## Active agent policies\n- (mandatory, active) x")
+        out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert "Dispatch, don't do inline" in out
+        assert "Checkpoint protocol" in out
+
+    def test_an_unreachable_record_still_serves_the_static_rules(
+        self, monkeypatch
+    ):
+        import lib.daemon_runtime.agent_loader as al
+
+        def boom(self):
+            raise RuntimeError("neotoma unreachable")
+
+        monkeypatch.setattr(al.AgentLoader, "render_policy_prompt", boom)
+        out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert "Dispatch, don't do inline" in out
+        assert out == srv.SERVER_INSTRUCTIONS
+
+    def test_an_unreachable_record_is_logged_not_silent(self, monkeypatch, caplog):
+        import lib.daemon_runtime.agent_loader as al
+
+        def boom(self):
+            raise RuntimeError("neotoma unreachable")
+
+        monkeypatch.setattr(al.AgentLoader, "render_policy_prompt", boom)
+        with caplog.at_level("ERROR"):
+            srv.render_server_instructions("ateles@ateles-swarm")
+        assert any("could not resolve agent_policy" in r.message for r in caplog.records)
+
+    def test_no_bound_rows_is_a_warning_not_a_silent_pass(self, monkeypatch, caplog):
+        self._patch_loader(monkeypatch, "")
+        with caplog.at_level("WARNING"):
+            out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert out == srv.SERVER_INSTRUCTIONS
+        assert any("no agent_policy rows bind" in r.message for r in caplog.records)
