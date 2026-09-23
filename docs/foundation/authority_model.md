@@ -1170,6 +1170,98 @@ requires the proxy to hold a credential.
 since that would make pass-through unimplementable rather than merely costly, and a rule nothing can satisfy
 relocates the reach rather than bounding it.
 
+## Agent inventory, review, disablement, and retirement
+
+**The rules in this section.**
+
+- The [agent inventory](vocabulary.md#agent-inventory) is a derived read at two grains: agent governance and deployment/runtime evidence.
+- No stored status or canonical sequence of lifecycle phases authorizes work; an operator-facing label is a non-authoritative rendering only.
+- Each of the four execution mechanisms asks its own decision and reads only the evidence that decision requires.
+- Access and purpose review is ordinary recurring work; continued authority is bound through grant expiry and `action_policy` conditions, never a second permission field.
+- Reconciliation fails closed at the predicate whose safety meaning is unresolved, and never turns detection into authority to remediate.
+- Disablement ends present eligibility and authority; retirement additionally makes future use terminal while preserving the principal and its history.
+
+**Ruled (decision 115, 2026-09-22): facets and mechanism-specific decisions are authoritative; review and reconciliation extend the work, authority, adapter, and gate mechanisms already defined here. There is no canonical lifecycle phase, `agent.status`, `review_current`, or global mismatch block.** Registered as ruled in `conformance.md#the-register-of-open-design-decisions`.
+
+**Two grains, not one flattened row.** The agent-governance grain answers who the principal is and what it
+may do: the `agent` entity, live credential and acts-as `principal_binding` edges where applicable, current
+scoped grants, roster resolution for roles, the live access-and-purpose-review task, and the ended relations
+that make disablement or retirement readable. The deployment/runtime grain answers what was intended and
+what is independently observable: the `deployment_configuration`, the host and binding it names, process and
+checkout artifacts observed through the host adapter, their coverage and freshness, and `agent_session`
+observations. A session is attribution and activity evidence; it is never proof that a process exists or
+that the loaded checkout matches the declaration (`adapters.md#whether-the-host-a-daemon-runs-on-is-an-external-system`).
+
+These grains stay separate because their cardinalities differ. One principal may have several credentials,
+roles, grants, and deployments, and one deployment may produce many runtime observations. Flattening them
+into one row either discards that multiplicity or makes a maintained summary the source of truth. The
+inventory instead reduces the source records at read time, as of the time and freshness bound its reader
+declares. Any operator-facing presentation of that read is non-authoritative: it must not flatten the two
+grains or multiple deployments into one cell, and it must keep `Permit`, `Deny`, `Indeterminate`, and a
+valid empty distinguishable from one another. Presentation never authorizes a claim, admission, action,
+routing, or deployment decision. There is no ordered path every agent traverses and no transition writer
+keeping one true. Scenario walkthrough: [`scenarios.md#k-agent-inventory-two-deployments-empty-indeterminate-and-deny`](scenarios.md#k-agent-inventory-two-deployments-empty-indeterminate-and-deny).
+
+**The decisions are mechanism-specific.** The four mechanisms in
+`work_model.md#the-four-execution-mechanisms` do not share a universal `may_accept_work` predicate:
+
+| Mechanism | Decision it actually makes | Evidence that decides it |
+|---|---|---|
+| task path | whether this principal may claim this task now | the existing claim predicate: task and checkpoint state, assignment where present, lease state, and the requesting principal's current grant |
+| engine step path | whether this principal may claim this step now | the declaration, current batch state, owner role, roster resolution, required prior verdicts, and a current grant; the claim creates the lease rather than requiring a process to have existed beforehand |
+| self-triggering daemon | whether each read, write, task creation, or proposed effect is admitted | the daemon claims no task; the requesting principal's grant admits each read or write, and every effect remains an action through its `action_policy` |
+| interactive session | whether each write or action is admitted, and how unfinished work survives | the principal's grant and the action gate; the session holds no lease, and unfinished work is recovered through the declared digestion workflow |
+
+Runtime and deployment evidence is therefore not smuggled into every claim. A workflow or `action_policy`
+may declare that a particular external or lossy effect requires a matching deployment and fresh independent
+host evidence; that condition is evaluated for that action. A roster role that resolves to no principal is
+already `unspawnable_assignee`, and a principal that claims successfully but cannot start a runner takes the
+existing failure path. A daemon's observed process and checkout are inventory evidence and operational
+assurance; their presence cannot grant a capability and their absence cannot revoke one.
+
+**Access and purpose review is one live recurring task per reviewed agent.** The task `REFERS_TO` the
+`agent`, carries the instance-selected recurrence and `due_date`, and follows decision 30 exactly: its last
+batch creates and reads back the next task before closing, and the next task `FOLLOWS` the completed one.
+The instance chooses the interval in the recurrence rule each task carries; the foundation supplies no
+global cadence. Its declared reads name the agent, bindings, grants, roster seats, deployment configuration,
+host artifacts, sessions, actions, denials, findings, and prior review task that its judgement requires,
+with freshness stated for external evidence.
+
+The review's verdict says whether the purpose still holds and which separately gated changes are required:
+continue, attenuate a grant, change routing or deployment, disable, or retire. The verdict itself changes
+none of them. Where review is a condition of continued authority, the grant expires no later than the next
+required review; where a class needs a more recent judgement, that requirement is a condition on the
+`action_policy` for that class. An overdue task therefore never becomes a universal `review_current = false`:
+the expired grant denies at the authority check, or the unmet action-policy condition denies that action.
+A failed or skipped review never silently renews authority. An instance may use an `intake_rule` to create
+an additional review task after a material change, but the event list and cadence are instance policy, not
+a second foundation scheduler.
+
+**Reconciliation is predicate-scoped and fail-closed.** The inventory exposes contradictions and missing
+evidence; the existing enforcement point decides the smallest question that evidence bears on. A finding
+or checkpoint makes the mismatch visible. It never supplies permission to fix it, and stopping, restarting,
+redeploying, revoking, or changing a grant remains a separate action under its own gate.
+
+| Evidence read | Reduction at the affected decision |
+|---|---|
+| credential binding missing, expired, or resolving inconsistently | identity is `Indeterminate` or `Deny`; admission, attribution, and any dependent claim or action refuse |
+| grant absent, expired, revoked, or outside scope | the requested claim, read, write, or action denies before its effect |
+| workflow role resolves to no roster principal | the step is not claimable and raises the existing `unspawnable_assignee` checkpoint; no agent is guessed |
+| independent host evidence missing or stale while self-report is fresh | runtime assurance is `Indeterminate`; only a decision whose declared condition requires it holds or denies, and evidence refresh is ordinary work |
+| process observed with no declared deployment or principal | observation confers no authority; create a finding and task, deny any effect at the ordinary gates, and gate containment or stop separately |
+| disabled or retired agent still observed running | ended grants and routing keep claims and effects denied; raise a critical finding, while the process stop remains a separately permitted action |
+| deployment declared and no process observed | availability finding and retry or escalation; unrelated principals and actions do not block |
+| observed checkout or configuration differs from the declaration | the deployment-match condition is `Indeterminate` or `Deny` for action classes that require it; diagnostics remain possible where the grant permits them |
+| review task overdue | no new global predicate: grant expiry or the action class's review condition denies exactly the continuation it governs |
+
+**Disablement and retirement are different derived outcomes.** Disablement ends current grants and roster
+eligibility and, where applicable, ends the declared deployment intent. It denies new claims and effects,
+but does not claim that a process stopped; independent host observation and a separately gated stop are what
+answer that. Retirement is terminal for future use: the retirement task has closed, authority, routing, and
+deployment relations are ended, and no later workflow may treat the same principal as eligible. The `agent`
+entity, bindings, sessions, verdicts, actions, and observations remain so attribution and history survive.
+Neither outcome is a stored lifecycle status, and deleting the principal is not retirement.
+
 ## Attribution
 
 Every write carries the agent that made it (a per-agent signature) and the principal it acted for; a shared

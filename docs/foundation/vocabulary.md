@@ -1533,6 +1533,18 @@ the pair the model names is [operator](#operator) and agent — the human princi
 **Never:** "agent_definition".
 **Not for:** worker for an agent (the process running an agent is a runner).
 
+### agent inventory
+**Definition:** a [derived read](#derived-read) over two grains of evidence for an [agent](#agent): the
+[principal](#principal)'s governance evidence (bindings, [grants](#grant), roster eligibility, review work, and ended
+relations) and each deployment's independently observed runtime evidence (declaration, process, checkout,
+coverage, [freshness](#freshness), and agent sessions). It answers one mechanism-specific decision at a time.
+**See:** [`authority_model.md#agent-inventory-review-disablement-and-retirement`](authority_model.md#agent-inventory-review-disablement-and-retirement).
+**Never:** —
+**Not for:** a lifecycle status or canonical lifecycle phase; a row maintained by a watchdog; a fixed set of
+display labels (ready/restricted/drifted/indeterminate/retired) until a consumer surface owns that
+vocabulary; a display label used as claim, admission, routing, action, or deployment authority; a claim
+that an `agent_session` proves a process is running.
+
 ### tenant
 **Definition:** the isolation boundary, an organization or a solo [operator](#operator), that no read, write, routing,
 or key crosses.

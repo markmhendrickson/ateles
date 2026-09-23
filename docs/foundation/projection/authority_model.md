@@ -5,7 +5,7 @@
 
 Every rule `authority_model.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`authority_model.md`](../authority_model.md) and are not repeated here (decision 66).
 
-21 rules.
+26 rules.
 
 ## [The tuple](../authority_model.md#the-tuple)
 
@@ -54,3 +54,11 @@ Every rule `authority_model.md` owns, one entry each: the rule's own statement f
 ## [Initiative, proposal, reprioritization](../authority_model.md#initiative-proposal-reprioritization)
 
 - **AU-20** — initiative approval is the checkpoint; what stops is a task, confirmed by the owner seat through the checkpoint and read back, proposing a grant capability; a budget attenuates, consumption is derived, and what is metered is per class on the policy; credit is a read model *[M (51 to 54 ruled 2026-09-06 — `authority_model.md#initiative-proposal-reprioritization`)]*
+
+## [Agent inventory, review, disablement, and retirement](../authority_model.md#agent-inventory-review-disablement-and-retirement)
+
+- **AU-22** — the inventory is a two-grain derived read; no stored status or canonical phase authorizes anything *[M (decision 115)]*
+- **AU-23** — decisions are mechanism-specific and runtime evidence is never a universal claim predicate *[M (decision 115)]*
+- **AU-24** — access and purpose review is ordinary recurring work and binds only through grant expiry or an `action_policy` condition *[M (decision 115; ruling 30 supplies recurrence)]*
+- **AU-25** — reconciliation fails closed at the affected predicate, availability-only drift does not block unrelated work, and remediation is separately gated *[M (decision 115)]*
+- **AU-26** — disablement and retirement are derived from ended authority/routing/deployment relations; neither claims process shutdown; retirement preserves attribution and history *[M (decision 115)]*
