@@ -745,6 +745,30 @@ def test_checked_in_ateles_inventory_builds_and_checks(tmp_path):
     assert (tmp_path / "ateles" / "design" / "index.html").exists()
 
 
+@pytest.mark.parametrize("product", ("ateles", "neotoma"))
+def test_check_exits_nonzero_when_brand_review_is_incomplete(
+    tmp_path, product, capsys
+):
+    """Exposing surface: build_site.check must fail closed on incomplete review."""
+    contract_path = _GEN_DIR / "brand_systems" / f"{product}.json"
+    original = contract_path.read_text()
+    try:
+        broken = json.loads(original)
+        next(
+            item
+            for item in broken["completeness"]["deliverables"]
+            if item["id"] == "cinematic.inputs"
+        )["render"]["proofs"] = []
+        contract_path.write_text(json.dumps(broken, indent=2) + "\n")
+        assert build_site.check(product, tmp_path) == 1
+        captured = capsys.readouterr()
+        combined = captured.out + captured.err
+        assert "BRAND_REVIEW_INCOMPLETE" in combined
+        assert f"product={product}" in combined
+    finally:
+        contract_path.write_text(original)
+
+
 @pytest.mark.parametrize(
     ("product", "routes"),
     [
@@ -1211,6 +1235,21 @@ def test_brand_route_projects_complete_public_safe_contract(tmp_path, product):
     assert "README.md" not in document
     assert "<details" not in document.casefold()
     assert build_site._public_copy_leaks(Path("brand/index.html"), document) == []
+    schema = json.loads(
+        (_GEN_DIR / "brand_systems" / "schema.v1.json").read_text()
+    )
+    assert 'data-brand-review-summary="COMPLETE"' in document
+    assert document.index("Review-completeness summary") < document.index(
+        'class="candidate-brand-canvas"'
+    )
+    for requirement in schema["x-review-deliverables"]:
+        deliverable_id = requirement["id"]
+        anchor = deliverable_id.replace(".", "-").replace("_", "-")
+        assert f'id="review-{anchor}"' in document
+        assert f'data-brand-deliverable="{deliverable_id}"' in document
+        assert f'data-brand-proof="{deliverable_id}"' in document
+    assert "Completeness does not mean brand approval" in document
+    assert "permission to begin cinematic production" in document
 
 
 @pytest.mark.parametrize(

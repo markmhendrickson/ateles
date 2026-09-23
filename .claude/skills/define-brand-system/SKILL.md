@@ -89,6 +89,12 @@ Write or correct the existing product brand_guideline; never create a parallel s
 
 Status remains provisional until operator approval.
 
+### Review-completeness gate
+
+Treat the schema-owned `x-review-deliverables` array as the required review inventory; do not duplicate that list in skill prose or validator code. Every provisional or awaiting-approval deliverable must provide all four proofs: a concrete artifact, a traceable source, a rendered specimen on `/brand/`, and current validation evidence. Three of four is incomplete. Derive completeness on every run instead of trusting stored `overall_status`, and report all findings in stable product/deliverable/reason order.
+
+A complete review contract is not operator brand approval, application to public routes, or permission to begin cinematic production. Awaiting-approval cinematic inputs must render their approval block and remain blocked until the named approver acts.
+
 ### 8. Review projections and approval gate
 
 Render an internal review page that may name references and link evidence without exposing confidential data or internal record identifiers. Render a separate public-safe projection that excludes confidential, unsupported, stale, or internal-only claims.

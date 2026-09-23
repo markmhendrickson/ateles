@@ -292,9 +292,9 @@ observation_ids:
 
 - **APPROVED · contrast:** Meet WCAG contrast for text and meaningful graphics in every approved colorway; media copy needs a tested safe field.
 - **APPROVED · images of text:** Use semantic text; only essential logotypes may be images of text and need accessible names.
-- **APPROVED · semantic headings:** Use one H1 and ordered semantic headings; size never substitutes for level.
-- **APPROVED · relative sizing:** Use relative responsive sizing and preserve resize/reflow without two-dimensional page scrolling.
 - **APPROVED · reduced motion static equivalence:** Honor reduced motion and provide a static state carrying every meaning expressed by motion.
+- **APPROVED · relative sizing:** Use relative responsive sizing and preserve resize/reflow without two-dimensional page scrolling.
+- **APPROVED · semantic headings:** Use one H1 and ordered semantic headings; size never substitutes for level.
 
 ## Research provenance and review
 
@@ -472,6 +472,31 @@ Overall: **PROVISIONAL**
 - PROVISIONAL · market_reference_ledger
 - PROVISIONAL · differentiation_matrix
 - PROVISIONAL · aesthetic_territory
+
+### Review deliverables
+
+- **rationale.category · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **rationale.brand · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **language.phrases · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **language.terminology · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **language.voice · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **visual.palette · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **visual.materiality · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **visual.motion · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **visual.accessibility · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **typography.loaded_faces · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **identity.mark_family · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **identity.measurements · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **production.copy_to_visual_matrix · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **production.contradiction_audit · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **research.market_references · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **research.review_cadence · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **foundation.concept_inventory · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **foundation.concept_viewer · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **assets.non_cinematic_stills · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **assets.posters · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **assets.storyboards · PROVISIONAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Maintain evidence and rerun the completeness check.
+- **cinematic.inputs · AWAITING_APPROVAL:** source Neotoma canonical brand guideline; validated 2026-09-23; next action: Approve or revise the provisional brand system before cinematic generation.
 
 ### Missing
 

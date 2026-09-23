@@ -122,6 +122,14 @@ jobs:
       # scripts/lint.sh bare-python regression eval.
       - name: Run execution/scripts tests
         run: uv run --extra dev python -m pytest execution/scripts/ -q
+      - name: Check offline brand reviews and both product sites
+        run: |
+          python3 execution/scripts/site_generator/render_brand_systems.py --local --check
+          out="$(mktemp -d)"
+          python3 execution/scripts/site_generator/build_site.py ateles --out "$out"
+          python3 execution/scripts/site_generator/build_site.py ateles --check --out "$out"
+          python3 execution/scripts/site_generator/build_site.py neotoma --out "$out"
+          python3 execution/scripts/site_generator/build_site.py neotoma --check --out "$out"
       # ateles#727 / #731 (qa lens): CLAUDE.md Verification discipline effect
       # test was committed but collected by no lane — same defect class as
       # roster-in-lint.sh-only, anthus (#584/#596), execution/scripts (#524/#527).

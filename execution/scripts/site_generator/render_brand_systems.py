@@ -25,6 +25,11 @@ DOC_DIR = REPO_ROOT / "docs" / "brand"
 sys.path.insert(0, str(REPO_ROOT / "execution" / "scripts"))
 from neotoma_mirror_lib import load_env, request, unwrap_snapshot  # noqa: E402
 from url_policy import local_asset_url, public_href  # noqa: E402
+from brand_review_completeness import (  # noqa: E402
+    COMPLETE,
+    review_contract,
+    review_paths,
+)
 
 SCHEMA_ENTITY_ID = "ent_73da44b2d434cbafe5d8ecb9"
 DEFAULT_GUIDELINE_ENTITY_IDS = {
@@ -825,6 +830,19 @@ def render_markdown(contract: dict) -> str:
     )
     for item in completeness.get("dimensions") or []:
         lines.append(f"- {_status(item['status'])} · {item['name']}")
+    lines.extend(["", "### Review deliverables", ""])
+    for item in completeness.get("deliverables") or []:
+        validation = item.get("validation") or {}
+        source = item.get("source") or {}
+        next_action = (item.get("approval_block") or {}).get(
+            "next_action"
+        ) or "Maintain evidence and rerun the completeness check."
+        lines.append(
+            f"- **{item.get('id')} · {_status(item.get('lifecycle_state'))}:** "
+            f"source {source.get('label') or 'missing'}; "
+            f"validated {validation.get('checked_at') or 'missing'}; "
+            f"next action: {next_action}"
+        )
     lines.extend(
         ["", "### Missing", "", *_bullets(completeness.get("missing_items") or []), ""]
     )
@@ -833,7 +851,7 @@ def render_markdown(contract: dict) -> str:
 
 def _schema_document(snapshot: dict) -> dict:
     schema = _as_json_object(snapshot.get("content"), "schema content")
-    if schema.get("$id") != "urn:ateles:brand-system:1.2.0":
+    if schema.get("$id") != "urn:ateles:brand-system:1.3.0":
         raise BrandSystemError("unexpected brand schema identifier")
     return schema
 
@@ -904,12 +922,44 @@ def check_all(schema: dict, contracts: dict[str, dict]) -> bool:
     return ok
 
 
+def check_completeness(schema: dict, contracts: dict[str, dict]) -> bool:
+    """Print every product finding instead of aborting at the first failure."""
+    reports = [
+        review_contract(schema, contract, product=product)
+        for product, contract in contracts.items()
+    ]
+    for report in reports:
+        print(report.format())
+    return all(report.status == COMPLETE for report in reports)
+
+
+def check_local_completeness() -> bool:
+    reports = review_paths(
+        OUT_DIR / "schema.v1.json",
+        [OUT_DIR / f"{product}.json" for product in KNOWN_PRODUCTS],
+    )
+    for report in reports:
+        print(report.format())
+    return all(report.status == COMPLETE for report in reports)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="validate checked-in mirrors without Neotoma credentials",
+    )
     args = parser.parse_args()
+    if args.local:
+        return 0 if check_local_completeness() else 1
+    if not check_local_completeness():
+        return 1
     base_url, token = load_env()
     schema, contracts = fetch_all(base_url, token)
+    if not check_completeness(schema, contracts):
+        return 1
     if args.check:
         if check_all(schema, contracts):
             print("brand system mirror check OK — disk matches Neotoma")
