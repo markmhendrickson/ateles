@@ -50,6 +50,40 @@ except ImportError:  # pragma: no cover
 
 log = logging.getLogger(__name__)
 
+# ateles#1118. `docs/foundation/data_model.md` declares the scoping contract for
+# `agent_policy`, and this is the one implementation of it — three readers
+# (`AgentLoader`, `generalizer.fetch_agent_policies`, `revert_auto_policy`) must
+# agree, and a copied predicate is how they drift (CLAUDE.md: derive from the
+# single source, never copy a set of values into code).
+#
+# The design's words: `scope` is CLOSED to `global`, `swarm`, `agent`;
+# `agent_sub` is "the one field that scopes a rule to an agent"; and a rule of
+# `scope: agent` with no `agent_sub` is refused at the write.
+#
+# The defect this closes: the loader required `agent_sub` equality
+# UNCONDITIONALLY, so the 12 `scope: global` rows reached NO agent rather than
+# every agent — the opposite of what global means.
+POLICY_SCOPES_REACHING_EVERY_AGENT = frozenset({"global", "swarm"})
+
+
+def policy_binds_agent(snap: dict, agent_sub: str) -> bool:
+    """Whether one `agent_policy` row binds the agent named by `agent_sub`.
+
+    - `global` / `swarm` reach every agent, with or without an `agent_sub`.
+    - `agent` binds only the agent its `agent_sub` names.
+    - An UNRECOGNISED or absent `scope` binds nobody unless `agent_sub`
+      matches exactly. `scope` is the field carrying the reach of a rule, so
+      an unreadable value fails CLOSED to the narrowest reading rather than
+      silently broadcasting a rule to the whole swarm (`principles.md`,
+      principle 5: fail closed on the field that carries the safety meaning).
+    """
+    scope = str(snap.get("scope") or "").strip().lower()
+    if scope in POLICY_SCOPES_REACHING_EVERY_AGENT:
+        return True
+    row_sub = str(snap.get("agent_sub") or "").strip()
+    return bool(row_sub) and row_sub == agent_sub
+
+
 NEOTOMA_BASE_URL = os.environ.get(
     "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
 )
@@ -443,16 +477,41 @@ class AgentLoader:
             return []
 
         out: list[dict] = []
+        rows = 0
+        scoping_populated = 0
         for e in data.get("entities", []):
             # /entities/query returns the field dict either flat under
             # "snapshot" or nested one level deeper; accept both.
             outer = e.get("snapshot") or {}
             snap = outer.get("snapshot", outer) if isinstance(outer, dict) else {}
-            if snap.get("agent_sub") != agent_sub:
+            if not snap:
+                continue
+            rows += 1
+            if str(snap.get("agent_sub") or "").strip():
+                scoping_populated += 1
+            if not policy_binds_agent(snap, agent_sub):
                 continue
             if snap.get("status") not in ("active", "provisional"):
                 continue
             out.append(snap)
+
+        # ateles#1118: the loud-failure path above fires on an EXCEPTION only.
+        # A 200 returning rows that all fail the filter was indistinguishable
+        # from an agent that legitimately has no policies — and most agents
+        # legitimately have none, so the empty result looked correct while
+        # every agent loaded zero. `agent_sub` was populated 0 of 25 rows.
+        #
+        # Distinguishing the two cases is the point: an empty result is only
+        # trustworthy when the field the filter reads is populated SOMEWHERE.
+        if rows and not scoping_populated:
+            log.error(
+                f"[{self.agent_name}] agent_policy returned {rows} row(s) but "
+                "`agent_sub` is unpopulated on EVERY one — the filter matched "
+                "nothing because the scoping field is empty, not because this "
+                "agent has no policies. Dispatching WITHOUT policies. Backfill "
+                "`agent_sub` (docs/foundation/data_model.md names it the one "
+                "field that scopes a rule to an agent)."
+            )
         return out
 
     def render_policy_prompt(self) -> str:

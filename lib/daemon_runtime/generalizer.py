@@ -38,8 +38,10 @@ import httpx
 
 try:  # package import (production) and bare import (in-dir pytest) both work
     from .drift import DriftCluster, DriftSignal, cluster_signals, contradicts
+    from .agent_loader import policy_binds_agent
 except ImportError:  # pragma: no cover
     from drift import DriftCluster, DriftSignal, cluster_signals, contradicts
+    from agent_loader import policy_binds_agent
 
 log = logging.getLogger("daemon_runtime.generalizer")
 
@@ -277,7 +279,7 @@ async def fetch_agent_policies(agent_sub: str, bearer: str) -> list[dict]:
     out: list[dict] = []
     for e in (data or {}).get("entities", []):
         snap = e.get("snapshot") or {}
-        if snap.get("agent_sub") != agent_sub:
+        if not policy_binds_agent(snap, agent_sub):
             continue
         if snap.get("status") == "retired":
             continue
@@ -323,11 +325,20 @@ async def create_provisional_policy(cluster: DriftCluster, bearer: str) -> str |
         "entity_type": "agent_policy",
         "scope": "agent",
         "agent_sub": agent_sub,
-        # `domain` engages agent_policy's canonical_name_fields
-        # [domain, rule_kind, description] so policies resolve by content —
-        # same theme dedupes, different themes stay distinct (not coalesced).
-        "domain": agent_sub,
-        "rule_kind": "prefer",  # never auto-create deny/require
+        # `domain` is the SUBJECT a rule is about, for grouping rules a reader
+        # selects together — "never an agent identifier, which is
+        # `agent_sub`'s" (docs/foundation/data_model.md). Writing the agent id
+        # here to engage canonical_name_fields put an identifier in a
+        # subject field and produced the two live rows ateles#1118 found
+        # smuggling `<agent>@ateles-swarm` through `domain`. The cluster's own
+        # theme is the actual subject, and it dedupes the same way.
+        "domain": cluster.theme_key,
+        # `rule_kind` is CLOSED to `mandatory` | `advisory`; absence or any
+        # other value reads as `mandatory`, the restrictive branch. An
+        # auto-generated policy must never land there by default, so it is
+        # explicitly `advisory` — "prefer" was outside the closed set and
+        # would have read as mandatory.
+        "rule_kind": "advisory",  # never auto-create a mandatory rule
         "description": f"[auto] {rule_text}",
         "rule": rule_text,
         "overridable_by": ", ".join(OVERRIDABLE_BY),
