@@ -56,7 +56,11 @@ TABLE_END_MARKER = "## Direction of truth per class of record"
 EXPECTED_DASH_CHECKS = {
     "Undefined-word candidates",  # advisory only; shares the vocabulary exit code and never fails it
     "Workflow tables",  # contract; no script on disk yet
-    "Data-model tables",  # contract; no script on disk yet
+    # Script exists and runs in scripts/lint.sh; NOT in foundation-checks.yml, because adding a
+    # workflow step needs a token with `workflow` scope. The cell stays `—` rather than claiming a
+    # gate it does not have — wiring the step is the follow-up, and this entry moves off the list
+    # then, as the comment above describes.
+    "Data-model tables",
     "Rule coverage",  # contract; no script on disk yet
     "Plan decision citations",  # path-filtered only — no step invokes it
 }
