@@ -1211,6 +1211,21 @@ def test_brand_route_projects_complete_public_safe_contract(tmp_path, product):
     assert "README.md" not in document
     assert "<details" not in document.casefold()
     assert build_site._public_copy_leaks(Path("brand/index.html"), document) == []
+    schema = json.loads(
+        (_GEN_DIR / "brand_systems" / "schema.v1.json").read_text()
+    )
+    assert 'data-brand-review-summary="COMPLETE"' in document
+    assert document.index("Review-completeness summary") < document.index(
+        'class="candidate-brand-canvas"'
+    )
+    for requirement in schema["x-review-deliverables"]:
+        deliverable_id = requirement["id"]
+        anchor = deliverable_id.replace(".", "-").replace("_", "-")
+        assert f'id="review-{anchor}"' in document
+        assert f'data-brand-deliverable="{deliverable_id}"' in document
+        assert f'data-brand-proof="{deliverable_id}"' in document
+    assert "Completeness does not mean brand approval" in document
+    assert "permission to begin cinematic production" in document
 
 
 @pytest.mark.parametrize(

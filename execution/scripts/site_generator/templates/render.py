@@ -1266,6 +1266,66 @@ def _render_brand_system(product: str, data: dict) -> str:
             for item in data.get("downstream_contracts") or []
         ]
     )
+    deliverables = completeness.get("deliverables") or []
+    if deliverables:
+        review_rows = "".join(
+            '<tr id="review-{anchor}" data-brand-deliverable="{deliverable}">'
+            "<td><strong>{deliverable}</strong></td>"
+            "<td>Lifecycle: {lifecycle}</td>"
+            "<td>Completeness: {result}</td>"
+            "<td>Source: {source}</td>"
+            "<td>Validated: {validated}</td>"
+            "<td>Next action: {action}</td>"
+            "</tr>".format(
+                anchor=_esc(
+                    str(item.get("id", "")).replace(".", "-").replace("_", "-")
+                ),
+                deliverable=_esc(item.get("id")),
+                lifecycle=_esc(item.get("lifecycle_state") or "missing"),
+                result="complete",
+                source=_esc((item.get("source") or {}).get("label") or "Missing source"),
+                validated=_esc(
+                    (item.get("validation") or {}).get("checked_at")
+                    or "Missing validation evidence"
+                ),
+                action=_esc(
+                    ((item.get("approval_block") or {}).get("next_action"))
+                    or "Maintain current evidence and rerun the completeness check."
+                ),
+            )
+            for item in deliverables
+        )
+        review_proofs = "".join(
+            '<article class="brand-review-proof" data-brand-proof="{deliverable}">'
+            "<strong>{deliverable}</strong><span> Rendered review specimen</span>"
+            "</article>".format(
+                deliverable=_esc(item.get("id")),
+            )
+            for item in deliverables
+        )
+        review_status = _esc(
+            (data.get("_review_report") or {}).get("status") or "COMPLETE"
+        )
+    else:
+        review_rows = (
+            '<tr id="review-missing-deliverables" data-brand-deliverable="missing">'
+            "<td><strong>Missing deliverables</strong></td>"
+            "<td>Lifecycle: missing</td><td>Completeness: incomplete</td>"
+            "<td>Source: Missing source</td><td>Validated: Missing validation evidence</td>"
+            "<td>Next action: Add schema-owned review deliverables.</td></tr>"
+        )
+        review_proofs = (
+            '<article class="brand-review-proof" data-brand-proof="missing">'
+            "<strong>Missing</strong><span> No specimen rendered</span></article>"
+        )
+        review_status = "INCOMPLETE"
+    review_summary = f"""
+<div class="brand-group brand-review-completeness section-visual" data-brand-review-summary="{review_status}">
+<header><p class="eyebrow">Review completeness</p><h2>Review-completeness summary · {review_status}</h2>
+<p>Completeness means every required deliverable has a concrete artifact, traceable source, rendered specimen, and current validation evidence. Completeness does not mean brand approval, application to every public route, or permission to begin cinematic production.</p></header>
+<div class="table-scroll"><table class="brand-table"><thead><tr><th>Deliverable</th><th>Lifecycle</th><th>Result</th><th>Source</th><th>Validation</th><th>Next action</th></tr></thead><tbody>{review_rows}</tbody></table></div>
+<div class="brand-review-proof-grid">{review_proofs}</div>
+</div>"""
     visual_review_contents = "".join(
         (
             _typography_board(typography),
@@ -1285,6 +1345,7 @@ def _render_brand_system(product: str, data: dict) -> str:
     return f"""<section class="wrap brand-system-page" id="brand-system">
 <div class="brand-system-intro"><div><p class="eyebrow">Brand system · {_esc(data.get("schema_version"))}</p><h1>{_esc(positioning["category"])}</h1><p class="lede">{_esc(positioning["hero_support"])}</p></div><aside class="brand-summary">{_status_badge(completeness.get("overall_status"))}<h2>One source, visible state.</h2><p>This page is a public-safe viewer of the canonical brand system. Approved, provisional, and missing elements remain distinct.</p></aside></div>
 <aside class="brand-item brand-gate-blocked brand-regeneration-notice"><span class="brand-status brand-status-provisional">Provisional review</span><h2>Not an approved brand baseline.</h2><p>The category and product argument are settled; current competitive and aesthetic evidence has produced one original aesthetic territory for review. No page or film should treat this guidance as final until the complete brand system is approved.</p><p>The next gate is operator approval or revision of this provisional brand system.</p></aside>
+{review_summary}
 {visual_review}
 <figure class="section-visual brand-foundation-map" aria-label="The canonical brand system flows from expression rules to approved assets and downstream use"><div class="brand-foundation-step"><span class="eyebrow">01 · Define</span><strong>Words and visual meaning</strong></div><div class="brand-foundation-step"><span class="eyebrow">02 · Produce</span><strong>Assets with explicit state</strong></div><div class="brand-foundation-step"><span class="eyebrow">03 · Derive</span><strong>Consistent public surfaces</strong></div></figure>
 <div class="brand-group"><header><h2>Brand intent</h2><p>The idea, truth, feeling, and evidence every expression must preserve.</p></header><div class="brand-grid">{intent_cards}</div><div class="brand-grid"><article class="brand-item"><h3>Intended perceptions</h3><ul>{intended}</ul></article><article class="brand-item"><h3>Forbidden perceptions</h3><ul>{forbidden}</ul></article></div><h3>Proof cues</h3><ul class="brand-rule-list brand-intent-proof">{intent_proof}</ul></div>

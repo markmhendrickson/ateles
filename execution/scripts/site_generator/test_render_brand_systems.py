@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -299,3 +300,16 @@ def test_renderer_check_is_deterministic_except_fetch_timestamp(schema, contract
     changed = copy.deepcopy(contract)
     changed["positioning"]["product_promise"] = "stale"
     assert renderer._normalized(contract) != renderer._normalized(changed)
+
+
+def test_local_cli_check_surfaces_both_complete_products():
+    result = subprocess.run(
+        [sys.executable, str(GEN_DIR / "render_brand_systems.py"), "--local", "--check"],
+        cwd=GEN_DIR.parents[2],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "BRAND_REVIEW_COMPLETE product=ateles failures=0" in result.stdout
+    assert "BRAND_REVIEW_COMPLETE product=neotoma failures=0" in result.stdout

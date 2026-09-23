@@ -117,6 +117,8 @@ BRAND_SYSTEMS_DIR = GEN_DIR / "brand_systems"
 DEFAULT_OUT_DIR = REPO_ROOT / "dist" / "site"
 
 sys.path.insert(0, str(GEN_DIR))
+from brand_review_completeness import COMPLETE, review_contract  # noqa: E402
+from render_brand_systems import BrandSystemError, validate_brand_system  # noqa: E402
 from templates import render as tpl  # noqa: E402
 from url_policy import local_asset_url, public_href  # noqa: E402
 
@@ -187,6 +189,24 @@ def resolve_section(product: str, section: dict) -> dict:
                 "_resolved": False,
                 "_blocker": f"brand system {source} has an unsafe source boundary",
             }
+        try:
+            schema = json.loads((BRAND_SYSTEMS_DIR / "schema.v1.json").read_text())
+            validate_brand_system(data, schema)
+        except (OSError, json.JSONDecodeError, BrandSystemError) as exc:
+            return {
+                "_resolved": False,
+                "_blocker": f"brand system validation unavailable: {exc}",
+            }
+        report = review_contract(schema, data, product=product)
+        if report.status != COMPLETE:
+            return {
+                "_resolved": False,
+                "_blocker": report.format(),
+            }
+        data["_review_report"] = {
+            "status": report.status,
+            "failures": len(report.findings),
+        }
         return {"_resolved": True, "origin": origin, "data": data}
 
     if origin == "page_specific":
@@ -489,8 +509,9 @@ def _collect_brand_assets(product: str) -> tuple[dict[Path, bytes], list[str]]:
             blockers.append(f"brand asset escapes repository: {repository_value}")
             continue
         if not repository_path.exists():
-            if status == "approved":
-                blockers.append(f"approved brand asset is missing: {repository_value}")
+            blockers.append(
+                f"contract-required brand asset is missing ({status}): {repository_value}"
+            )
             continue
         assets[Path(*public_path.parts[1:])] = repository_path.read_bytes()
     return assets, blockers
@@ -636,6 +657,35 @@ def _validate_site(
             if path and path not in routes:
                 blockers.append(f"{rel}: unresolved internal link {href}")
         blockers.extend(_public_copy_leaks(rel, html))
+
+    brand_html = rendered.get(Path("brand") / "index.html")
+    if isinstance(brand_html, str):
+        summary_at = brand_html.find('data-brand-review-summary="')
+        specimen_at = brand_html.find('class="candidate-brand-canvas"')
+        if summary_at < 0:
+            blockers.append("brand/index.html: missing Review-completeness summary")
+        elif specimen_at >= 0 and summary_at > specimen_at:
+            blockers.append(
+                "brand/index.html: Review-completeness summary must precede specimens"
+            )
+        try:
+            schema = json.loads((BRAND_SYSTEMS_DIR / "schema.v1.json").read_text())
+            ids = [item["id"] for item in schema["x-review-deliverables"]]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            blockers.append("brand/index.html: review schema unavailable")
+            ids = []
+        for deliverable_id in ids:
+            anchor = (
+                f'review-{deliverable_id.replace(".", "-").replace("_", "-")}'
+            )
+            if f'id="{anchor}"' not in brand_html:
+                blockers.append(
+                    f"brand/index.html: missing review anchor {anchor}"
+                )
+            if f'data-brand-proof="{deliverable_id}"' not in brand_html:
+                blockers.append(
+                    f"brand/index.html: missing proof marker {deliverable_id}"
+                )
 
     homepage = next(
         (page for page in inventory["pages"] if page["slug"] == "index"), None

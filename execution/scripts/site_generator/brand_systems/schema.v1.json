@@ -247,7 +247,7 @@
       "type": "object"
     }
   },
-  "$id": "urn:ateles:brand-system:1.2.0",
+  "$id": "urn:ateles:brand-system:1.3.0",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Canonical expression contract with explicit intent, current competitive and aesthetic evidence, one original provisional territory with rejected alternatives and convergence tests, complete state-aware logo and typography systems, accessibility requirements, and a fail-closed approval gate.",
@@ -260,10 +260,74 @@
     },
     "completeness": {
       "additionalProperties": true,
+      "properties": {
+        "contract_version": {
+          "const": "1.0"
+        },
+        "deliverables": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "approval_block": {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "artifact": {
+                "type": "object"
+              },
+              "id": {
+                "type": "string"
+              },
+              "lifecycle_state": {
+                "enum": [
+                  "approved",
+                  "provisional",
+                  "awaiting_approval",
+                  "missing",
+                  "retired"
+                ]
+              },
+              "render": {
+                "type": "object"
+              },
+              "source": {
+                "type": "object"
+              },
+              "validation": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "id",
+              "lifecycle_state",
+              "source",
+              "artifact",
+              "render",
+              "validation",
+              "approval_block"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "dimensions": {
+          "type": "array"
+        },
+        "missing_items": {
+          "type": "array"
+        },
+        "overall_status": {
+          "type": "string"
+        }
+      },
       "required": [
         "overall_status",
         "dimensions",
-        "missing_items"
+        "missing_items",
+        "contract_version",
+        "deliverables"
       ],
       "type": "object"
     },
@@ -914,6 +978,405 @@
     "completeness",
     "updated_at"
   ],
-  "title": "Reusable product brand system v1.2",
-  "type": "object"
+  "title": "Reusable product brand system v1.3",
+  "type": "object",
+  "x-review-deliverables": [
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "rationale.category",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-rationale-category"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "rationale.brand",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-rationale-brand"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "language.phrases",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-language-phrases"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "language.terminology",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-language-terminology"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "language.voice",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-language-voice"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "visual.palette",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-visual-palette"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "visual.materiality",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-visual-materiality"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "visual.motion",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-visual-motion"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "visual.accessibility",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-visual-accessibility"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "typography.loaded_faces",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-typography-loaded-faces"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "identity.mark_family",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-identity-mark-family"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "identity.measurements",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-identity-measurements"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "production.copy_to_visual_matrix",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-production-copy-to-visual-matrix"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "production.contradiction_audit",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-production-contradiction-audit"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "research.market_references",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-research-market-references"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "research.review_cadence",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-research-review-cadence"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "foundation.concept_inventory",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-foundation-concept-inventory"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "foundation.concept_viewer",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-foundation-concept-viewer"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "assets.non_cinematic_stills",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-assets-non-cinematic-stills"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "assets.posters",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-assets-posters"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "assets.storyboards",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-assets-storyboards"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    },
+    {
+      "artifact_kind": "structured_value",
+      "fix": "add concrete source-backed evidence and rerender /brand/",
+      "fix_owner": "canonical brand guideline owner",
+      "id": "cinematic.inputs",
+      "max_age_days": 90,
+      "min_cardinality": 1,
+      "render_proofs": [
+        "review-row",
+        "specimen-cinematic-inputs",
+        "approval-blocked"
+      ],
+      "required_checks": [
+        "source_resolves",
+        "artifact_exists",
+        "not_placeholder",
+        "rendered"
+      ]
+    }
+  ]
 }

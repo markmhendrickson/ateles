@@ -199,7 +199,8 @@ if [ -n "$NEOTOMA_BASE_URL" ]; then
     echo "  - Checking brand-system mirrors are in sync with Neotoma..."
     python3 execution/scripts/site_generator/render_brand_systems.py --check || ERRORS=$((ERRORS + 1))
 else
-    echo "  - Skipping live Neotoma mirror checks (NEOTOMA_BASE_URL unset); offline brand-schema tests still bind in CI"
+    echo "  - Checking brand-review completeness from offline mirrors..."
+    python3 execution/scripts/site_generator/render_brand_systems.py --local --check || ERRORS=$((ERRORS + 1))
 fi
 
 # Site build contract (execution/scripts/site_generator/build_site.py).
@@ -207,13 +208,15 @@ fi
 # bytes against a second in-memory render. This catches missing sources,
 # unsupported content origins, non-deterministic output, and check drift
 # without requiring the generated dist/ tree to be committed.
-echo "  - Building and checking the Ateles static site from repo sources..."
+echo "  - Building and checking both static sites from repo sources..."
 SITE_BUILD_CHECK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ateles-site-check.XXXXXX")"
-if python3 execution/scripts/site_generator/build_site.py ateles --out "$SITE_BUILD_CHECK_DIR"; then
-    python3 execution/scripts/site_generator/build_site.py ateles --check --out "$SITE_BUILD_CHECK_DIR" || ERRORS=$((ERRORS + 1))
-else
-    ERRORS=$((ERRORS + 1))
-fi
+for PRODUCT in ateles neotoma; do
+    if python3 execution/scripts/site_generator/build_site.py "$PRODUCT" --out "$SITE_BUILD_CHECK_DIR"; then
+        python3 execution/scripts/site_generator/build_site.py "$PRODUCT" --check --out "$SITE_BUILD_CHECK_DIR" || ERRORS=$((ERRORS + 1))
+    else
+        ERRORS=$((ERRORS + 1))
+    fi
+done
 rm -rf "$SITE_BUILD_CHECK_DIR"
 
 echo ""
