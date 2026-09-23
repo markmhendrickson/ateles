@@ -1467,6 +1467,39 @@ async def handle_checkpoint_brief(
     title = snapshot.get("title", "(untitled)")
 
     if resolution == "rejected":
+        # A decline is a decision only the checkpoint's resolver principal may
+        # make, exactly like an approval. Without this, `read_checkpoint_resolution`
+        # reading the mutable `status` field was sufficient to decline any held
+        # task with no attribution at all — worse than the approve path, which
+        # already required an authenticated principal.
+        brief_user_id = fetch_entity_user_id(entity_id)
+        authorization = read_authenticated_checkpoint_authorization(
+            entity_id, checkpoint_record
+        )
+        required_approver_sub = str(
+            (authorization or {}).get("required_approver_sub") or ""
+        ).strip()
+        rejection = (
+            read_authenticated_checkpoint_resolution(
+                entity_id,
+                checkpoint_record,
+                required_approver_sub=required_approver_sub,
+                expected_user_id=brief_user_id or "",
+                expected_resolution="rejected",
+            )
+            if authorization is not None and brief_user_id
+            else None
+        )
+        if rejection is None:
+            log.warning(
+                f"[{DAEMON_NAME}] checkpoint {entity_id} rejection is missing, "
+                "unreadable, untrusted, or does not match the required resolver "
+                "principal — closing without declining the task"
+            )
+            _deny_checkpoint_release(
+                entity_id, reason="unattributed or untrusted rejection"
+            )
+            return False
         mark_task_declined(
             task_id,
             reason=f"operator rejected checkpoint {entity_id}",
@@ -1581,7 +1614,8 @@ async def handle_checkpoint_brief(
         successful_recurrences=_successful_recurrences(task_snapshot),
     )
     exact_authority = (
-        authorization.get("task_entity_id") == task_id
+        current_policy.loaded
+        and authorization.get("task_entity_id") == task_id
         and authorization.get("user_id") == brief_user_id == task_user_id
         and authorization.get("task_revision") == entity_record_digest(task_record)
         and authorization.get("task_observation_count")
@@ -1598,12 +1632,18 @@ async def handle_checkpoint_brief(
         and current_decision.blast_radius.value == blast_radius
     )
     if not exact_authority:
+        reason = (
+            "execution policy is currently unreadable — refusing to release "
+            "under indeterminate policy state"
+            if not current_policy.loaded
+            else "task or execution policy changed after approval"
+        )
         _require_fresh_release_authority(
             entity_id,
             task_id=task_id,
             task_snapshot=task_snapshot,
             notifier=notifier,
-            reason="task or execution policy changed after approval",
+            reason=reason,
         )
         return False
 

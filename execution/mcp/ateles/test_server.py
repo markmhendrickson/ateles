@@ -498,6 +498,66 @@ class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["new_status"], "rejected")
         self.assertIn("task marked declined", result["action_taken"])
         self.assertEqual(mock_correct.call_count, 2)
+        # Reject must be signed exactly like approve — an unsigned reject was
+        # the "reject is worse" half of the confused-deputy defect: the prior
+        # implementation passed required_principal_sub=None for reject, so
+        # the checkpoint status write carried no resolver attribution at all.
+        status_write_call = mock_correct.call_args_list[0]
+        self.assertEqual(
+            status_write_call.kwargs.get("required_principal_sub"),
+            srv._checkpoint_required_approver_sub(),
+        )
+
+    @patch("server._post")
+    def test_reject_status_write_fails_closed_without_resolver_signer(self, mock_post):
+        """Sink-level: an unsigned/unavailable resolver must refuse the reject
+        write outright — red before the fix, since the old code passed
+        required_principal_sub=None on reject and never reached this check.
+        """
+        with patch(
+            "lib.daemon_runtime.aauth_signer.AAuthSigner.from_key_file",
+            side_effect=AssertionError("stub signer — key not provisioned"),
+        ):
+            with patch.object(
+                srv, "_load_checkpoint_resolver_signer", return_value=None
+            ):
+                ok = srv._correct(
+                    "ent_cp",
+                    "checkpoint_brief",
+                    "status",
+                    "rejected",
+                    "idem-reject",
+                    required_principal_sub=srv._checkpoint_required_approver_sub(),
+                )
+        self.assertFalse(ok)
+        mock_post.assert_not_called()
+
+    @patch("server._post")
+    def test_reject_status_write_fails_closed_on_wrong_signer(self, mock_post):
+        """A resolver signer whose authenticated sub does not match the
+        checkpoint's required approver must not be able to sign a reject."""
+
+        class _WrongSigner:
+            is_stub = False
+            sub = "someone-else@ateles-swarm"
+
+            def headers(self, method, path):
+                return {"X-AAuth-Token": "must-not-be-used"}
+
+        with patch(
+            "lib.daemon_runtime.aauth_signer.AAuthSigner.from_key_file",
+            return_value=_WrongSigner(),
+        ):
+            ok = srv._correct(
+                "ent_cp",
+                "checkpoint_brief",
+                "status",
+                "rejected",
+                "idem-reject",
+                required_principal_sub="ateles@ateles-swarm",
+            )
+        self.assertFalse(ok)
+        mock_post.assert_not_called()
 
     @patch("server._correct")
     @patch("server._get")
@@ -809,6 +869,14 @@ class TestNeotomaEndpoints(unittest.TestCase):
     def test_checkpoint_approval_correction_is_signed_by_required_principal(
         self, mock_post
     ):
+        """The resolver signer is always loaded from the FIXED process key name
+        (never derived from `required_principal_sub`), and the write proceeds
+        only when that independently-authenticated principal happens to equal
+        the required approver. Loading a signer keyed by the value being
+        checked would let a caller who merely knows the required sub manufacture
+        a matching signature (the confused-deputy defect this test used to pin).
+        """
+
         class _Signer:
             is_stub = False
             sub = "ateles@ateles-swarm"
@@ -831,7 +899,7 @@ class TestNeotomaEndpoints(unittest.TestCase):
             )
 
         self.assertTrue(ok)
-        signer_loader.assert_called_once_with("ateles")
+        signer_loader.assert_called_once_with(srv.CHECKPOINT_RESOLVER_KEY_NAME)
         self.assertEqual(
             mock_post.call_args.kwargs["extra_headers"]["X-AAuth-Token"],
             "signed-approval",
@@ -868,6 +936,48 @@ class TestNeotomaEndpoints(unittest.TestCase):
                     )
                 )
         mock_post.assert_not_called()
+
+    @patch("server._post")
+    def test_resolver_signer_name_never_derives_from_required_principal(
+        self, mock_post
+    ):
+        """A caller who merely knows (or guesses) `required_principal_sub` must
+        not be able to make `_correct` load a signer of their choosing — the
+        key file name loaded is always the fixed resolver identity, regardless
+        of what value is passed as the required principal.
+        """
+
+        class _Signer:
+            is_stub = False
+            sub = "attacker-controlled@ateles-swarm"
+
+            def headers(self, method, path):
+                return {"X-AAuth-Token": "should-not-be-trusted"}
+
+        mock_post.return_value = {"ok": True}
+        with patch(
+            "lib.daemon_runtime.aauth_signer.AAuthSigner.from_key_file",
+            return_value=_Signer(),
+        ) as signer_loader:
+            ok = srv._correct(
+                "ent_cp",
+                "checkpoint_brief",
+                "status",
+                "approved",
+                "idem-approval",
+                required_principal_sub="attacker-controlled@ateles-swarm",
+            )
+
+        # The signer loaded is always the fixed resolver key, never a name
+        # derived from the (attacker-influenced) required_principal_sub value.
+        signer_loader.assert_called_once_with(srv.CHECKPOINT_RESOLVER_KEY_NAME)
+        self.assertNotEqual(signer_loader.call_args.args[0], "attacker-controlled")
+        # In THIS test the stub signer happens to report a matching sub, so
+        # the write proceeds — the point is the key file name is fixed, not
+        # that a matching sub is refused (that is covered by the "wrong
+        # signer" test above). This isolates: does the loader get steered by
+        # caller input?
+        self.assertTrue(ok)
 
     def test_single_entity_fetch_uses_entities_id_path(self):
         with patch("server._request", return_value={}) as mock_request:

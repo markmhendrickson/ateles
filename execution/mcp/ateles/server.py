@@ -286,6 +286,41 @@ def _snapshot_of(entity: dict) -> dict:
     return snapshot
 
 
+# The MCP process's own resolver identity — a fixed key file name that is a
+# property of THIS PROCESS, never derived from a value the caller supplies or
+# that a checkpoint declares. Loading a signer keyed by whatever
+# `required_principal_sub` happens to say (the prior defect) lets anyone who
+# can read that one value manufacture a signature that satisfies the check
+# reading it back — the signer and the thing it is checked against would come
+# from the same source. Naming the key file after the resolver ROLE, exactly
+# like every other daemon's fixed `AAuthSigner.from_key_file(DAEMON_NAME)`
+# call, means the credential is either present on this host or it is not; no
+# caller-supplied string can substitute for it.
+CHECKPOINT_RESOLVER_KEY_NAME = os.environ.get(
+    "APIS_CHECKPOINT_RESOLVER_KEY_NAME", "checkpoint_resolver"
+).strip()
+
+
+def _load_checkpoint_resolver_signer():
+    """Load the MCP process's own resolver signer (cached per call).
+
+    Always loads the SAME fixed key file regardless of any caller input.
+    Returns None when unavailable or a stub — approve/reject must both fail
+    closed rather than proceed unauthenticated.
+    """
+    from lib.daemon_runtime.aauth_signer import AAuthSigner
+
+    signer = AAuthSigner.from_key_file(CHECKPOINT_RESOLVER_KEY_NAME)
+    if signer.is_stub:
+        log.error(
+            "checkpoint resolver signer unavailable (key=%s) — refusing to "
+            "resolve without an authenticated resolver principal",
+            CHECKPOINT_RESOLVER_KEY_NAME,
+        )
+        return None
+    return signer
+
+
 def _correct(
     entity_id: str,
     entity_type: str,
@@ -307,14 +342,13 @@ def _correct(
         required_sub = str(required_principal_sub).strip()
         if not required_sub or "@" not in required_sub:
             return False
-        from lib.daemon_runtime.aauth_signer import AAuthSigner
-
-        signer_name = required_sub.split("@", 1)[0]
-        signer = AAuthSigner.from_key_file(signer_name)
-        if signer.is_stub or signer.sub != required_sub:
+        signer = _load_checkpoint_resolver_signer()
+        if signer is None:
+            return False
+        if signer.sub != required_sub:
             log.error(
-                "checkpoint resolution signer unavailable or mismatched "
-                "(required=%s actual=%s)",
+                "checkpoint resolver principal does not match the required "
+                "approver (required=%s actual=%s) — refusing to sign",
                 required_sub,
                 signer.sub,
             )
@@ -322,7 +356,7 @@ def _correct(
         signed_headers = signer.headers("POST", "/correct")
         if not signed_headers.get("X-AAuth-Token"):
             log.error(
-                "checkpoint resolution signer produced no authenticated token "
+                "checkpoint resolver signer produced no authenticated token "
                 "for %s",
                 required_sub,
             )
@@ -820,9 +854,11 @@ async def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
     new_status = "approved" if action_lower == "approve" else "rejected"
     idem_key = f"resolve-checkpoint-{checkpoint_id}-{new_status}"
 
-    required_principal_sub = (
-        _checkpoint_required_approver_sub() if action_lower == "approve" else None
-    )
+    # Both accept and reject are decisions only the checkpoint's resolver
+    # principal may make, so both are signed identically. An unsigned reject
+    # would let anyone who can call this tool decline a task without ever
+    # authenticating as the principal the checkpoint names.
+    required_principal_sub = _checkpoint_required_approver_sub()
     ok = _correct(
         checkpoint_id,
         "checkpoint_brief",

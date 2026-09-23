@@ -919,7 +919,15 @@ def test_checkpoint_brief_carries_authenticated_immutable_authority(monkeypatch)
         "last_observation_at": "2026-09-21T00:00:00Z",
         "snapshot": {"title": "Bounded work", "status": "awaiting_approval"},
     }
-    policy = _default()
+    # Authority creation requires a live (loaded=True) policy — see
+    # test_authority_creation_refuses_unloaded_policy below for the fallback
+    # case. _default() is deliberately loaded=False for the shared gate-math
+    # fixtures elsewhere in this file, so this test builds its own.
+    policy = ExecutionPolicy(
+        entity_id="default",
+        low_blast_action_types=frozenset({"local_edit"}),
+        loaded=True,
+    )
     decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
 
     brief_id = write_checkpoint_brief(
@@ -947,6 +955,168 @@ def test_checkpoint_brief_carries_authenticated_immutable_authority(monkeypatch)
     assert authority["policy_revision"] == gating_module.execution_policy_revision(
         policy
     )
+
+
+def test_authority_creation_refuses_unloaded_policy(monkeypatch):
+    """Sink-level: fresh AAuth-backed checkpoint authority must never be minted
+    from ExecutionPolicy(loaded=False) (the unreachable/malformed-policy
+    fallback). Before this check existed, an operator approval signed under a
+    stable "fallback" revision hash could still mint authority even though the
+    real policy was never actually read — Indeterminate policy state becoming
+    Permit authority (docs/foundation/principles.md #5, #7).
+
+    Red before the fix: `write_checkpoint_brief` had no `policy.loaded` check
+    at all, so this call would have proceeded straight to the (mocked) POST
+    and returned "ent_cp" instead of None.
+    """
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    posted: list[dict] = []
+
+    class _Signer:
+        is_stub = False
+
+        def headers(self, method, path):
+            return {"X-AAuth-Token": "signed"}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"entities": [{"entity_id": "ent_cp"}]}
+
+    def post(*args, **kwargs):
+        posted.append(kwargs["json"])
+        return _Response()
+
+    monkeypatch.setattr(gating_module.httpx, "post", post)
+    from lib.daemon_runtime import aauth_signer
+
+    monkeypatch.setattr(
+        aauth_signer.AAuthSigner, "from_key_file", lambda handler: _Signer()
+    )
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 1,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "snapshot": {"title": "Bounded work", "status": "awaiting_approval"},
+    }
+    unloaded_policy = ExecutionPolicy(entity_id="default", loaded=False)
+    decision = evaluate_gate(
+        confidence=0.3, action_type="local_edit", policy=unloaded_policy
+    )
+
+    brief_id = write_checkpoint_brief(
+        task_entity_id="ent_task",
+        decision=decision,
+        title="Should not be authorized",
+        plan_summary="Bounded work",
+        handler="apis",
+        user_id="tenant-a",
+        action_type="local_edit",
+        task_record=task_record,
+        policy=unloaded_policy,
+    )
+
+    assert brief_id is None
+    assert posted == []  # never even attempted the write
+
+
+def test_authority_creation_proceeds_under_loaded_policy(monkeypatch):
+    """Companion to the refusal test above: a genuinely loaded policy is not
+    collateral damage from the new check."""
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    posted: list[dict] = []
+
+    class _Signer:
+        is_stub = False
+
+        def headers(self, method, path):
+            return {"X-AAuth-Token": "signed"}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"entities": [{"entity_id": "ent_cp"}]}
+
+    def post(*args, **kwargs):
+        posted.append(kwargs["json"])
+        return _Response()
+
+    monkeypatch.setattr(gating_module.httpx, "post", post)
+    from lib.daemon_runtime import aauth_signer
+
+    monkeypatch.setattr(
+        aauth_signer.AAuthSigner, "from_key_file", lambda handler: _Signer()
+    )
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_id": entity_id,
+            "entity_type": "checkpoint_" + "brief",
+            "snapshot": posted[0]["entities"][0],
+            "provenance": {
+                field: "obs-create"
+                for field in (
+                    "body",
+                    "task_entity_id",
+                    "policy_entity_id",
+                    "blast_radius",
+                    "gate_action",
+                    "handler",
+                )
+            },
+        },
+    )
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity_observations",
+        lambda entity_id: [
+            {
+                "id": "obs-create",
+                "fields": posted[0]["entities"][0],
+                "user_id": "tenant-a",
+                "provenance": {
+                    "agent_sub": "apis@ateles-swarm",
+                    "agent_thumbprint": "thumbprint",
+                    "attribution_tier": "software",
+                },
+            }
+        ],
+    )
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 1,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "snapshot": {"title": "Bounded work", "status": "awaiting_approval"},
+    }
+    loaded_policy = ExecutionPolicy(
+        entity_id="default",
+        low_blast_action_types=frozenset({"local_edit"}),
+        loaded=True,
+    )
+    decision = evaluate_gate(
+        confidence=0.3, action_type="local_edit", policy=loaded_policy
+    )
+
+    brief_id = write_checkpoint_brief(
+        task_entity_id="ent_task",
+        decision=decision,
+        title="Fine to authorize",
+        plan_summary="Bounded work",
+        handler="apis",
+        user_id="tenant-a",
+        action_type="local_edit",
+        task_record=task_record,
+        policy=loaded_policy,
+    )
+
+    assert brief_id == "ent_cp"
 
 
 def test_checkpoint_brief_requires_authorization_snapshot_readback(monkeypatch):

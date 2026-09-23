@@ -743,21 +743,30 @@ def read_authenticated_checkpoint_resolution(
     *,
     required_approver_sub: str,
     expected_user_id: str,
+    expected_resolution: str = "approved",
 ) -> dict | None:
-    """Read an approval only from its authenticated principal observation.
+    """Read a resolution only from its authenticated principal observation.
 
     The checkpoint snapshot's ``status`` is reducer output and therefore says
-    only what value won, not who supplied it.  Release authority comes from the
-    immutable observation named by that field's provenance.  Missing,
-    unreadable, untrusted, cross-tenant, or wrong-principal attribution is not
-    an approval.
+    only what value won, not who supplied it.  Release (or decline) authority
+    comes from the immutable observation named by that field's provenance.
+    Missing, unreadable, untrusted, cross-tenant, wrong-principal, or
+    wrong-resolution attribution is not a valid resolution.
+
+    ``expected_resolution`` distinguishes an approval from a rejection —
+    both must be attributed to the checkpoint's required resolver principal
+    before either accept or reject is acted on. Defaults to ``"approved"``
+    for the original approval-only callers.
     """
+    resolution = str(expected_resolution or "").strip().lower()
+    if resolution not in ("approved", "rejected"):
+        return None
     required_sub = str(required_approver_sub or "").strip()
     tenant_id = str(expected_user_id or "").strip()
     if not required_sub or not tenant_id:
         return None
     snapshot = _snapshot_of(checkpoint_record)
-    if read_checkpoint_resolution(snapshot) != "approved":
+    if read_checkpoint_resolution(snapshot) != resolution:
         return None
     provenance = checkpoint_record.get("provenance")
     if not isinstance(provenance, dict):
@@ -777,7 +786,7 @@ def read_authenticated_checkpoint_resolution(
         return None
     fields = observation.get("fields")
     auth = observation.get("provenance")
-    if not isinstance(fields, dict) or read_checkpoint_resolution(fields) != "approved":
+    if not isinstance(fields, dict) or read_checkpoint_resolution(fields) != resolution:
         return None
     if str(observation.get("user_id") or "").strip() != tenant_id:
         return None
@@ -861,6 +870,21 @@ def write_checkpoint_brief(
             or not user_id
         ):
             log.warning("[gating] incomplete task provenance for checkpoint authority")
+            return None
+        if not policy.loaded:
+            # An unreadable/malformed policy resolves to a conservative
+            # fallback (ExecutionPolicy(loaded=False)) so gate EVALUATION never
+            # crashes — but minting fresh AAuth-backed authority from that
+            # fallback would let the operator approve a decision that was never
+            # actually checked against the real policy. Indeterminate policy
+            # state must not become Permit authority; refuse creation and let
+            # the caller retry once the real policy is readable again.
+            log.warning(
+                "[gating] refusing to create checkpoint authority for task %s "
+                "under an unloaded (fallback) execution_policy — policy state "
+                "is indeterminate, not a decision to authorize",
+                task_entity_id,
+            )
             return None
         encoded_authorization = build_checkpoint_authorization_envelope(
             task_record=task_record,

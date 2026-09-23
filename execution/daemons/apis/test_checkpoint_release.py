@@ -949,6 +949,81 @@ async def test_bound_approval_rejects_same_policy_id_content_reclassification(
 
 
 @pytest.mark.asyncio
+async def test_unloaded_live_policy_refuses_release_despite_bound_authority(
+    monkeypatch, release_store
+):
+    """Sink-level: the take must require ExecutionPolicy.loaded=True at
+    release time, not only at creation. `execution_policy_revision()` hashes
+    the ``loaded=False`` fallback into a STABLE revision string, so a policy
+    that was readable at approval time but becomes unreadable before take
+    (Neotoma outage, malformed policy edit) would otherwise still exact-match
+    every other field name-for-name and reach `dispatch_task(gate_override=True)`
+    — Indeterminate policy state minting a release from a currently-fallback
+    read, contradicting docs/foundation/principles.md #5 and #7.
+
+    Red before the fix: `exact_authority` never read `current_policy.loaded`,
+    so this scenario dispatched.
+    """
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    # Pin authorization_revision explicitly on BOTH policies to the same value,
+    # so execution_policy_revision() returns an identical string for each
+    # (it prefers authorization_revision over hashing `loaded` into the
+    # content digest — see execution_policy_revision()). That isolates the
+    # scenario to exactly what it claims: every other exact-authority field
+    # matches name-for-name, and only `current_policy.loaded` differs.
+    shared_revision = "pinned-revision-for-test"
+    policy = ExecutionPolicy(
+        entity_id="default",
+        low_blast_action_types=frozenset({"local_edit"}),
+        high_blast_action_types=frozenset(),
+        loaded=True,
+        authorization_revision=shared_revision,
+    )
+    _bind_v2_authorization(
+        monkeypatch,
+        records,
+        brief_id,
+        task_id,
+        action_type="local_edit",
+        policy=policy,
+    )
+    brief["status"] = "approved"
+
+    # Simulate the live policy becoming unreadable between approval and take.
+    unloaded_same_shape = ExecutionPolicy(
+        entity_id=policy.entity_id,
+        confidence_threshold=policy.confidence_threshold,
+        blast_radius_default=policy.blast_radius_default,
+        high_blast_action_types=policy.high_blast_action_types,
+        low_blast_action_types=policy.low_blast_action_types,
+        loaded=False,
+        authorization_revision=shared_revision,
+    )
+    assert gating_module.execution_policy_revision(
+        policy
+    ) == gating_module.execution_policy_revision(unloaded_same_shape), (
+        "test setup invariant: revisions must match so only `loaded` differs"
+    )
+    monkeypatch.setattr(
+        apis, "resolve_policy_for_agent", lambda skill: unloaded_same_shape
+    )
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert brief["resolved_dispatched"] is False
+    assert brief["status"] == "approved_requires_fresh_approval"
+
+
+@pytest.mark.asyncio
 async def test_recomputed_sibling_digest_cannot_rewrite_approved_authority(
     monkeypatch, release_store
 ):
@@ -1560,3 +1635,131 @@ async def test_reject_still_declines_without_dispatch(monkeypatch, release_store
     assert result["new_status"] == "rejected"
     assert records[task_id]["snapshot"]["status"] == "declined"
     assert dispatches == []
+
+
+@pytest.mark.asyncio
+async def test_authenticated_rejection_declines_task_through_sink(
+    monkeypatch, release_store
+):
+    """Sink-level: `handle_checkpoint_brief` must decline the task when the
+    rejection is attributed to the checkpoint's required resolver principal —
+    the positive case the fail-closed tests below are contrasted against."""
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "rejected"
+    checkpoint_record = records[brief_id]
+    checkpoint_record["provenance"] = {"status": "obs-reject"}
+    observations = [
+        {
+            "id": "obs-reject",
+            "fields": {"status": "rejected"},
+            "user_id": "tenant-a",
+            "provenance": {
+                "agent_sub": "ateles@ateles-swarm",
+                "agent_thumbprint": "operator-interface-key",
+                "attribution_tier": "software",
+            },
+        }
+    ]
+    monkeypatch.setattr(
+        apis,
+        "read_authenticated_checkpoint_resolution",
+        gating_module.read_authenticated_checkpoint_resolution,
+    )
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity_observations",
+        lambda checkpoint_id: observations,
+    )
+
+    def decline(task_entity_id, *, reason, handler):
+        records[task_entity_id]["snapshot"]["status"] = "declined"
+        return True
+
+    monkeypatch.setattr(apis, "mark_task_declined", decline)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is True
+    assert records[task_id]["snapshot"]["status"] == "declined"
+    assert brief["resolved_dispatched"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rejection_failure",
+    ["missing", "unreadable", "mismatched"],
+)
+async def test_unattributed_rejection_never_declines_task(
+    rejection_failure, monkeypatch, release_store
+):
+    """Sink-level: an unsigned or wrong-principal rejection must NOT decline
+    the held task. Before this check existed, `handle_checkpoint_brief` read
+    only the mutable `status` field (`read_checkpoint_resolution`) to decide
+    "rejected" and called `mark_task_declined` with no attribution at all —
+    worse than the approve path, which already required an authenticated
+    principal. Any caller able to flip `status` to "rejected" (e.g. an
+    unattributed or replayed write) could decline an operator-held task.
+    """
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "rejected"
+    checkpoint_record = records[brief_id]
+    checkpoint_record["provenance"] = {"status": "obs-reject"}
+    observations = [
+        {
+            "id": "obs-reject",
+            "fields": {"status": "rejected"},
+            "user_id": "tenant-a",
+            "provenance": {
+                "agent_sub": "ateles@ateles-swarm",
+                "agent_thumbprint": "operator-interface-key",
+                "attribution_tier": "software",
+            },
+        }
+    ]
+    if rejection_failure == "missing":
+        checkpoint_record["provenance"] = {}
+    elif rejection_failure == "unreadable":
+        observations = []
+    else:
+        observations[0]["provenance"]["agent_sub"] = "other@ateles-swarm"
+
+    monkeypatch.setattr(
+        apis,
+        "read_authenticated_checkpoint_resolution",
+        gating_module.read_authenticated_checkpoint_resolution,
+    )
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity_observations",
+        lambda checkpoint_id: observations,
+    )
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+async def test_rejection_with_no_authorization_envelope_never_declines_task(
+    monkeypatch, release_store
+):
+    """A checkpoint with no AAuth-backed authorization observation at all
+    (e.g. a pre-migration legacy brief) must not be declinable either — the
+    same standard approve already applies via `authorization_bound`."""
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "rejected"
+    brief.pop("body", None)  # no v2 authorization envelope at all
+    monkeypatch.setattr(
+        apis,
+        "read_authenticated_checkpoint_authorization",
+        lambda checkpoint_id, record: None,
+    )
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
