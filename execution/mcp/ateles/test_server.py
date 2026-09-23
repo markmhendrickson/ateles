@@ -1476,3 +1476,81 @@ class TestInstructionsCarryLiveRules:
             out = srv.render_server_instructions("ateles@ateles-swarm")
         assert out == srv.SERVER_INSTRUCTIONS
         assert any("no agent_policy rows bind" in r.message for r in caplog.records)
+
+
+class TestSessionPathExercisesTheRealResolve:
+    """Loxia on #1184: every other server test patches `render_policy_prompt`
+    wholesale, so the REAL resolve — and the `agent_sub` the session path
+    derives — was never exercised. A `scope: agent` row would silently miss
+    if the loader compared against the bare name rather than the full
+    principal, and no test would notice.
+
+    These patch only the HTTP layer, so the loader's own scoping runs.
+    """
+
+    def _rows(self, *snaps):
+        return {"entities": [{"snapshot": s} for s in snaps]}
+
+    def _patch_http(self, monkeypatch, payload):
+        import lib.daemon_runtime.agent_loader as al
+
+        class _R:
+            status_code = 200
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return payload
+
+        monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+        monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: False)
+        monkeypatch.setattr(al.httpx, "post", lambda url, **kw: _R())
+
+    def test_agent_scoped_row_for_this_principal_reaches_the_block(
+        self, monkeypatch
+    ):
+        # THE case Loxia flagged: `scope: agent` binds by the FULL sub. If the
+        # session path passed the bare name through, this row would miss.
+        self._patch_http(
+            monkeypatch,
+            self._rows(
+                {
+                    "scope": "agent",
+                    "agent_sub": "ateles@ateles-swarm",
+                    "status": "active",
+                    "rule": "AGENT-SCOPED-NONCE-4c1d",
+                }
+            ),
+        )
+        out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert "AGENT-SCOPED-NONCE-4c1d" in out
+
+    def test_another_agents_scoped_row_does_not_reach_this_session(
+        self, monkeypatch
+    ):
+        self._patch_http(
+            monkeypatch,
+            self._rows(
+                {
+                    "scope": "agent",
+                    "agent_sub": "pavo@ateles-swarm",
+                    "status": "active",
+                    "rule": "PAVO-ONLY-NONCE",
+                }
+            ),
+        )
+        out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert "PAVO-ONLY-NONCE" not in out
+
+    def test_global_row_reaches_the_block_through_the_real_resolve(
+        self, monkeypatch
+    ):
+        self._patch_http(
+            monkeypatch,
+            self._rows(
+                {"scope": "global", "status": "active", "rule": "GLOBAL-NONCE-9b2e"}
+            ),
+        )
+        out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert "GLOBAL-NONCE-9b2e" in out

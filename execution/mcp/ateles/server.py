@@ -182,7 +182,8 @@ def render_server_instructions(principal: str = "") -> str:
     """
     sub = principal or SESSION_PRINCIPAL
     try:
-        sys.path.insert(0, str(_REPO_ROOT)) if str(_REPO_ROOT) not in sys.path else None
+        if str(_REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(_REPO_ROOT))
         from lib.daemon_runtime.agent_loader import AgentLoader
 
         block = AgentLoader(sub.split("@")[0]).render_policy_prompt()
@@ -204,7 +205,6 @@ def render_server_instructions(principal: str = "") -> str:
         )
         return SERVER_INSTRUCTIONS
     return SERVER_INSTRUCTIONS + block
-
 
 
 # ── Neotoma HTTP helpers ─────────────────────────────────────────────────────
