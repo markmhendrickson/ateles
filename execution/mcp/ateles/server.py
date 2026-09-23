@@ -2,12 +2,14 @@
 """
 ateles — MCP server for Ateles swarm routing and checkpoint management.
 
-Provides seven tools that wrap multi-step Neotoma/GitHub query patterns into
+Provides eight tools that wrap multi-step Neotoma/GitHub query patterns into
 single calls, so any connected agent gets reliable swarm interaction without
 re-deriving the roster/policy/checkpoint dance — or the entity-read plus
 log-grep dance — each session.
 
 Tools:
+  bootstrap_session    — load canonical Ateles/operator/workstream context and
+                         select the verified execution mode
   get_swarm_roster    — full roster (roles → agent names)
   route_task          — resolve owning agent + definition + execution policy
   list_checkpoints    — pending checkpoint_briefs awaiting operator
@@ -77,18 +79,22 @@ AGENT_POLICY_OVERRIDES: dict[str, str] = {
 SERVER_INSTRUCTIONS = """\
 You are connected to Ateles. Follow these operating rules:
 
-1. **Dispatch, don't do inline.** When route_task identifies an owning agent, \
+1. **Bootstrap first.** At the start of an operator session, call \
+bootstrap_session with the current harness, workstream when known, and whether \
+native subagents are available. Apply the returned canonical Ateles prompt and \
+report the selected execution mode and reason.
+2. **Dispatch, don't do inline.** When route_task identifies an owning agent, \
 delegate to that agent rather than doing the work yourself.
-2. **Monitor dispatched work.** After dispatching a task via route_task, track \
+3. **Monitor dispatched work.** After dispatching a task via route_task, track \
 its status in Neotoma (retrieve the task entity periodically). Report completion, \
 failure, or checkpoint escalation back to the operator — do not fire-and-forget.
-3. **Consent gate.** Never send anything public, email anyone, or take an \
+4. **Consent gate.** Never send anything public, email anyone, or take an \
 irreversible external action without operator approval.
-4. **Checkpoint protocol.** Pending checkpoints (list_checkpoints) are the \
+5. **Checkpoint protocol.** Pending checkpoints (list_checkpoints) are the \
 operator's decision queue. Present each with its blast radius, confidence vs \
 threshold, and reason. Act on the operator's decision via resolve_checkpoint — \
 do NOT execute the held task yourself.
-5. **Neotoma first.** Durable memory lives in Neotoma. Store, don't leave in \
+6. **Neotoma first.** Durable memory lives in Neotoma. Store, don't leave in \
 conversation.
 """
 
@@ -320,6 +326,347 @@ def _get_swarm_roster() -> dict:
         "swarm_domain": snap.get("swarm_domain", ""),
         "roles": roles,
     }
+
+
+_BOOTSTRAP_METHOD_TYPES = frozenset({
+    "skill",
+    "standing_rule",
+    "task_policy",
+    "workflow",
+    "workflow_definition",
+    "agent_policy",
+    "agent_strategy",
+})
+
+
+def _entity_id(entity: dict) -> str:
+    return str(entity.get("entity_id") or entity.get("id") or "")
+
+
+def _find_named_entity(
+    entity_type: str,
+    *,
+    name_field: str,
+    name: str,
+    limit: int = 10,
+) -> tuple[dict | None, str | None]:
+    """Resolve one canonical context entity without trusting search ordering."""
+    entities = _retrieve_entities(
+        entity_type,
+        search=name,
+        snapshot_filters={name_field: {"op": "eq", "value": name}},
+        limit=limit,
+    )
+    matches = [
+        entity
+        for entity in entities
+        if str(_snapshot_of(entity).get(name_field, "")).strip().lower()
+        == name.strip().lower()
+    ]
+    if len(matches) == 1:
+        return matches[0], None
+    if not matches:
+        return None, f"no {entity_type} with {name_field}={name!r}"
+    return None, (
+        f"{len(matches)} {entity_type} entities have {name_field}={name!r}; "
+        "startup cannot choose between them"
+    )
+
+
+def _resolve_workstream(ref: str | None) -> tuple[dict | None, str | None]:
+    """Resolve an exact task/plan entity or report ambiguity instead of guessing."""
+    ref = (ref or "").strip()
+    if not ref:
+        return None, "no workstream_ref supplied"
+    if ref.startswith("ent_"):
+        entity = _get(f"/entities/{ref}")
+        if entity is None:
+            return None, f"workstream {ref} was unreadable or not found"
+        if str(entity.get("entity_type", "")) not in {"task", "plan"}:
+            return None, (
+                f"workstream {ref} is {entity.get('entity_type')!r}, expected task or plan"
+            )
+        return entity, None
+
+    candidates: list[dict] = []
+    for entity_type in ("task", "plan"):
+        candidates.extend(_retrieve_entities(entity_type, search=ref, limit=5))
+    # Neotoma search can return loose matches. Prefer one exact title/name;
+    # otherwise never bind one workstream merely because it happened to rank first.
+    exact = []
+    for entity in candidates:
+        snap = _snapshot_of(entity)
+        names = (snap.get("title"), snap.get("name"), entity.get("canonical_name"))
+        if any(str(value or "").strip().lower() == ref.lower() for value in names):
+            exact.append(entity)
+    matches = exact or candidates
+    unique = {_entity_id(entity): entity for entity in matches if _entity_id(entity)}
+    if len(unique) == 1:
+        return next(iter(unique.values())), None
+    if not unique:
+        return None, f"no task or plan matched workstream_ref={ref!r}"
+    choices = [
+        {
+            "entity_id": entity_id,
+            "entity_type": entity.get("entity_type", ""),
+            "title": _snapshot_of(entity).get("title")
+            or _snapshot_of(entity).get("name")
+            or entity.get("canonical_name", ""),
+        }
+        for entity_id, entity in list(unique.items())[:5]
+    ]
+    return None, f"ambiguous workstream_ref={ref!r}; candidates={choices}"
+
+
+def _bootstrap_context(entity: dict, fields: tuple[str, ...]) -> dict:
+    snap = _snapshot_of(entity)
+    return {
+        "entity_id": _entity_id(entity),
+        "entity_type": entity.get("entity_type", ""),
+        **{field: snap[field] for field in fields if field in snap},
+    }
+
+
+def _load_workstream_edges(entity_id: str, *, limit: int = 30) -> tuple[list[dict], str | None]:
+    """Read task/plan lineage and hydrate the bounded method-bearing subset."""
+    if not entity_id:
+        return [], None
+    data = _get(f"/entities/{entity_id}/relationships")
+    if data is None:
+        return [], _describe_transport_error() or "relationship read failed"
+
+    raw_edges: list[tuple[str, dict]] = []
+    for direction in ("outgoing", "incoming"):
+        for edge in data.get(direction, []) if isinstance(data, dict) else []:
+            if isinstance(edge, dict):
+                raw_edges.append((direction, edge))
+
+    seen: set[tuple[str, str, str]] = set()
+    pending: list[tuple[str, dict, str]] = []
+    for direction, edge in raw_edges[:limit]:
+        other_id = (
+            edge.get("target_entity_id")
+            if direction == "outgoing"
+            else edge.get("source_entity_id")
+        )
+        if not other_id:
+            continue
+        key = (direction, str(edge.get("relationship_type", "")), str(other_id))
+        if key in seen:
+            continue
+        seen.add(key)
+        pending.append((direction, edge, str(other_id)))
+
+    # A single hosted entity read can take seconds. Hydrating a task with many
+    # relationships serially would make the bootstrap unusable, so use the
+    # same bounded fan-out pattern as the queue observer in this module.
+    related: dict[str, dict | None] = {}
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(pending)))) as pool:
+        futures = {
+            pool.submit(_get, f"/entities/{other_id}"): other_id
+            for _, _, other_id in pending
+        }
+        for future in as_completed(futures):
+            other_id = futures[future]
+            try:
+                related[other_id] = future.result()
+            except Exception:
+                related[other_id] = None
+
+    hydrated: list[dict] = []
+    for direction, edge, other_id in pending:
+        other = related.get(other_id)
+        item = {
+            "direction": direction,
+            "relationship_type": edge.get("relationship_type", ""),
+            "entity_id": other_id,
+        }
+        if other:
+            item.update(_bootstrap_context(other, (
+                "title", "name", "status", "version", "content_hash",
+                "description", "summary", "content", "body", "skill_markdown",
+            )))
+        hydrated.append(item)
+    return hydrated, None
+
+
+def _bootstrap_session(
+    harness: str,
+    workstream_ref: str | None = None,
+    native_delegation_available: bool = False,
+) -> dict:
+    """Load the canonical operator-session context and select an honest backend.
+
+    This is the deliberately thin pre-foundation bootstrap. It never accepts a
+    caller-supplied principal, never writes a second task/run record, and never
+    promotes daemon liveness into proof that the foundation execution contract
+    exists. Until a record-backed readiness verifier is exposed by the shared
+    operation layer, execution stays ``harness_local``.
+    """
+    harness = (harness or "unknown").strip().lower() or "unknown"
+    startup_blockers: list[str] = []
+
+    agent_name = os.environ.get("ATELES_TOP_LEVEL_AGENT_NAME", "ateles")
+    profile_key = os.environ.get("ATELES_OPERATOR_PROFILE_KEY", "default")
+
+    # Independent record reads run together. This keeps session startup bounded
+    # by the slowest context lookup rather than the sum of every lookup.
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        agent_future = pool.submit(
+            _find_named_entity,
+            "agent_definition",
+            name_field="name",
+            name=agent_name,
+        )
+        profile_future = pool.submit(
+            _find_named_entity,
+            "operator_profile",
+            name_field="profile_key",
+            name=profile_key,
+        )
+        roster_future = pool.submit(_get_swarm_roster)
+        workstream_future = pool.submit(_resolve_workstream, workstream_ref)
+        identity_future = pool.submit(_get, "/session")
+        health_future = pool.submit(_get_dispatch_health)
+
+        agent, agent_error = agent_future.result()
+        profile, profile_error = profile_future.result()
+        roster = roster_future.result()
+        workstream, workstream_error = workstream_future.result()
+        session_identity = identity_future.result() or {}
+        health = health_future.result()
+
+    if agent_error:
+        startup_blockers.append(agent_error)
+    if profile_error:
+        startup_blockers.append(profile_error)
+    if "error" in roster:
+        startup_blockers.append(str(roster["error"]))
+    if workstream_error and workstream_ref:
+        startup_blockers.append(workstream_error)
+
+    edges: list[dict] = []
+    edge_error = None
+    if workstream:
+        edges, edge_error = _load_workstream_edges(_entity_id(workstream))
+
+    methods = ([
+        {
+            "source": "top_level_agent",
+            **_bootstrap_context(agent, (
+                "name", "description", "prompt_markdown", "version", "content_hash",
+            )),
+        }
+    ] if agent else []) + [
+        edge for edge in edges if edge.get("entity_type") in _BOOTSTRAP_METHOD_TYPES
+    ]
+    lineage = [
+        edge for edge in edges
+        if edge.get("relationship_type") in {"PART_OF", "DEPENDS_ON", "REFERS_TO"}
+    ]
+
+    # `/session` is Neotoma's record-side attribution decision. The bootstrap
+    # does not accept a principal name/id from its caller. A future central
+    # dispatch path may select `swarm` only when this admission and the bound
+    # workflow's foundation evidence are both positively verified.
+    aauth = session_identity.get("aauth") if isinstance(session_identity, dict) else {}
+    record_admitted = bool(
+        isinstance(aauth, dict) and aauth.get("verified") and aauth.get("admitted")
+    )
+    related_workflows = [
+        edge for edge in edges
+        if edge.get("entity_type") == "workflow" and edge.get("status") == "active"
+    ]
+    failed_checks: dict[str, str] = {}
+    if not record_admitted:
+        failed_checks["record_admission"] = (
+            "Neotoma /session did not report an AAuth-verified, admitted principal"
+        )
+    if len(related_workflows) != 1:
+        failed_checks["bound_workflow"] = (
+            "the workstream does not resolve to exactly one active workflow entity"
+        )
+    # Phase H has not yet supplied a record-backed aggregate that proves the
+    # admission, lease, attempt, and recovery checks together. Daemon/process
+    # presence is reported separately and cannot satisfy this check.
+    failed_checks["foundation_evidence"] = (
+        "no record-backed foundation readiness verdict is exposed by the current "
+        "Ateles operation layer"
+    )
+
+    # The failed foundation-evidence check makes the current choice necessarily
+    # local. Keeping the branch explicit avoids a later refactor accidentally
+    # treating a running daemon as sufficient for `swarm`.
+    mode = "harness_local"
+    available = bool(native_delegation_available and not startup_blockers)
+    if startup_blockers:
+        reason = "startup context is incomplete; execution is held"
+    elif native_delegation_available:
+        reason = (
+            "foundation swarm readiness is not proven; use this harness's native "
+            "subagents and keep task/evidence lineage in Neotoma"
+        )
+    else:
+        reason = (
+            "foundation swarm readiness is not proven and this client reports no "
+            "native delegation; central submission and inspection remain available"
+        )
+
+    result: dict[str, Any] = {
+        "bootstrap_version": "1",
+        "harness": harness,
+        "top_level_agent": (
+            _bootstrap_context(agent, (
+                "name", "description", "prompt_markdown", "context_entity_types",
+                "operational_entity_types", "tool_allowlist", "tier", "aauth_sub",
+                "agent_grant", "version", "status",
+            )) if agent else None
+        ),
+        "operator_profile": (
+            _bootstrap_context(profile, (
+                "profile_key", "name", "preferred_name", "preferred_address",
+                "communication_style", "signoff", "consent_gate",
+            )) if profile else None
+        ),
+        "swarm_roster": roster,
+        "workstream": (
+            _bootstrap_context(workstream, (
+                "title", "name", "status", "priority", "description", "summary",
+                "next_steps", "decisions", "todos", "blocked_reason",
+            )) if workstream else None
+        ),
+        "relevant_methods": methods,
+        "lineage": lineage,
+        "record_identity": {
+            "source": "Neotoma /session",
+            "user_id": session_identity.get("user_id"),
+            "attribution": session_identity.get("attribution"),
+            "aauth": session_identity.get("aauth"),
+            "principal_supplied_by_caller": False,
+        },
+        "execution": {
+            "mode": mode,
+            "supported_modes": ["harness_local", "swarm"],
+            "available": available,
+            "reason": reason,
+            "failed_checks": failed_checks,
+            "dispatcher_health": health,
+            "durable_swarm_claim": False,
+            "lineage_requirement": (
+                "Record the task, parent, evidence, native run handle, and outcome "
+                "in Neotoma; do not label a native run as a swarm lease or attempt."
+            ),
+            "next_action": (
+                "delegate_harness_local" if available else "submit_or_inspect_only"
+            ),
+        },
+        "startup_blockers": startup_blockers,
+    }
+    if edge_error:
+        result["relationship_read_error"] = edge_error
+    if workstream_error and not workstream_ref:
+        result["workstream_notice"] = workstream_error
+    return result
 
 
 # Action types no agent may execute, whatever the policy sets say. Kept in
@@ -1399,6 +1746,47 @@ def _get_dispatch_health() -> dict:
 
 TOOLS = [
     Tool(
+        name="bootstrap_session",
+        description=(
+            "Start an operator session as the canonical top-level Ateles agent. "
+            "Loads the Ateles agent_definition, operator profile, swarm roster, "
+            "an optional task/plan workstream, its relevant methods and lineage, "
+            "then reports the explicit execution mode and the checks behind it. "
+            "Before foundation readiness is proven this returns harness_local; "
+            "daemon presence alone never selects swarm. Read-only: it does not "
+            "create a parallel task, policy, lease, attempt, or evidence record."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "harness": {
+                    "type": "string",
+                    "description": (
+                        "Current client/harness name, used only to qualify the local "
+                        "execution handle; it never grants authority."
+                    ),
+                },
+                "workstream_ref": {
+                    "type": "string",
+                    "description": (
+                        "Optional exact task/plan entity id or title. Ambiguous text "
+                        "is reported and never guessed."
+                    ),
+                },
+                "native_delegation_available": {
+                    "type": "boolean",
+                    "description": (
+                        "Whether this harness exposes native subagents. This affects "
+                        "local execution availability, never swarm readiness."
+                    ),
+                    "default": False,
+                },
+            },
+            "required": ["harness"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
         name="get_swarm_roster",
         description=(
             "Returns the full Ateles swarm roster: a map of roles to agent names, "
@@ -1542,6 +1930,11 @@ TOOLS = [
 ]
 
 TOOL_HANDLERS = {
+    "bootstrap_session": lambda args: _bootstrap_session(
+        args["harness"],
+        args.get("workstream_ref"),
+        bool(args.get("native_delegation_available", False)),
+    ),
     "get_swarm_roster": lambda args: _get_swarm_roster(),
     "route_task": lambda args: _route_task(
         args["task_description"], args.get("action_type")

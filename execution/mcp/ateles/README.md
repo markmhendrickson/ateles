@@ -10,6 +10,7 @@ Registered in `~/.claude.json` as the `ateles` server, launched via
 
 | Tool | Writes? | Purpose |
 |---|---|---|
+| `bootstrap_session` | no | Load the canonical Ateles/operator/workstream context and report the verified execution mode |
 | `get_swarm_roster` | no | Full roster: roles → agent names |
 | `route_task` | no | Resolve owning agent + definition + execution policy from a task description |
 | `list_checkpoints` | no | Pending `checkpoint_brief`s awaiting the operator |
@@ -17,6 +18,28 @@ Registered in `~/.claude.json` as the `ateles` server, launched via
 | `get_gate_status` | no | An issue's `gate_status`, `current_owner`, blocking gates, recent `owner_history`, and pipeline state |
 | `list_pipeline_queue` | no | What holds the issue-pipeline slot, what is queued, and how long each has waited |
 | `get_dispatch_health` | no | Dispatcher liveness, recent pipeline activity, recent dispatch failures |
+
+## Top-level session bootstrap
+
+Every MCP-connected harness can use `bootstrap_session` as the same opening
+operation. It retrieves the canonical `ateles` agent definition, the default
+operator profile, the swarm roster, and an optional task or plan from Neotoma.
+It also follows the workstream's direct relationships to return method-bearing
+entities and task/evidence lineage. A text workstream reference must resolve to
+one task or plan; ambiguity is returned to the caller rather than guessed.
+
+The bootstrap currently selects `harness_local`. Foundation swarm execution is
+not yet proven by a record-backed readiness verdict, and daemon liveness alone
+is deliberately insufficient. A harness that exposes native subagents may use
+them while preserving the task, parent, evidence, native run handle, and result
+in Neotoma. The local run is never described as a durable swarm lease or
+attempt. A tools-only client can still inspect and submit central work; its
+local execution reports held.
+
+The tool takes no principal id. Neotoma resolves admission from the credential
+Ateles presents, and `/session` is reported as the record-side attribution
+check. This bootstrap is read-only and does not create another task, policy,
+claim, attempt, or evidence store.
 
 ### Read-only by construction
 
