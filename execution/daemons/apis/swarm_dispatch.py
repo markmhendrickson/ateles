@@ -4085,7 +4085,13 @@ class SwarmDispatcher:
         return int(m.group(1)) if m else None
 
     async def _merge_pr(
-        self, repo: str, pr_number: int, method: str = "squash"
+        self,
+        repo: str,
+        pr_number: int,
+        method: str = "squash",
+        *,
+        expected_head: str = "",
+        require_default_base: bool = False,
     ) -> tuple[bool, str]:
         """Merge a PR via the GitHub REST API. Returns (merged, detail).
 
@@ -4098,12 +4104,52 @@ class SwarmDispatcher:
         """
         method = method if method in ("squash", "merge", "rebase") else "squash"
         api = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/merge"
+        expected = _normalise_full_sha(expected_head)
         try:
             async with httpx.AsyncClient(timeout=60) as client:
+                headers = self._github_headers(repo)
+                if expected:
+                    pr_response = await client.get(
+                        f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
+                        headers=headers,
+                    )
+                    pr_response.raise_for_status()
+                    pr = pr_response.json() or {}
+                    live_head = _normalise_full_sha(
+                        str((pr.get("head") or {}).get("sha") or "")
+                    )
+                    if live_head != expected:
+                        return (
+                            False,
+                            "reviewed head changed before merge: "
+                            f"{expected[:12]} -> {live_head[:12] or 'unreadable'}",
+                        )
+                    if require_default_base:
+                        repo_response = await client.get(
+                            f"https://api.github.com/repos/{repo}", headers=headers
+                        )
+                        repo_response.raise_for_status()
+                        default_branch = str(
+                            (repo_response.json() or {}).get("default_branch") or ""
+                        )
+                        base_branch = str((pr.get("base") or {}).get("ref") or "")
+                        if not default_branch or base_branch != default_branch:
+                            return (
+                                False,
+                                "auto-merge requires the live PR base to equal "
+                                f"the repository default branch ({base_branch!r} "
+                                f"!= {default_branch!r})",
+                            )
+
+                payload = {"merge_method": method}
+                if expected:
+                    # GitHub rejects the merge atomically if the head moves
+                    # after the preflight GET and before this PUT.
+                    payload["sha"] = expected
                 resp = await client.put(
                     api,
-                    headers=self._github_headers(repo),
-                    json={"merge_method": method},
+                    headers=headers,
+                    json=payload,
                 )
         except Exception as exc:  # noqa: BLE001 — never raise into the caller
             return False, f"merge request error: {exc}"
@@ -4473,11 +4519,6 @@ class SwarmDispatcher:
                 parent,
                 [p.lens for p in panel],
                 reviews,
-                auto_merge=self.config.auto_merge,
-                # ateles#594 gap 3: the autonomy clause must be derived from
-                # gate state too, not the flag alone. Lanius's fail-open-for-
-                # review path (above) is correct, but that fail-open must not
-                # propagate into merge AUTHORIZATION language.
                 pending_gates=pending_gates,
                 reviewed_head=review_head,
             ),
@@ -4623,7 +4664,34 @@ class SwarmDispatcher:
                 )
             return
 
-        await self._gate_merge_readiness(trigger, parent, panel)
+        # Close the receipt-to-readiness race.  The formal-review path checked
+        # the live head before posting, but a push can land after that GET and
+        # after GitHub returns the review readback.  Re-read immediately before
+        # readiness and invalidate the now-stale receipt on any mismatch.
+        readiness_head = _normalise_full_sha(
+            (await self._pr_head_sha(trigger)) or ""
+        )
+        if readiness_head != aggregation_head:
+            await self._handle_panel_session_limit(
+                trigger,
+                parent,
+                "panel",
+                "",
+                "",
+                reason=(
+                    "PR head changed after binding review or could not be "
+                    "verified before merge readiness"
+                ),
+            )
+            return
+
+        await self._gate_merge_readiness(
+            trigger,
+            parent,
+            panel,
+            reviewed_head=aggregation_head,
+            binding_receipt=binding_receipt,
+        )
 
     async def _emit_formal_review(
         self, t: SwarmTrigger, verdict: str | None, body: str,
@@ -5256,22 +5324,48 @@ class SwarmDispatcher:
         parent: int | None,
         panel: list[Lens],
         ci_state: str | None = None,
+        *,
+        reviewed_head: str = "",
+        binding_receipt: ReviewBindingReceipt | None = None,
     ) -> None:
-        """File the merge checkpoint + notify ONLY when review is clear AND CI green.
+        """Advance only after exact-head review proof and green CI.
 
-        Previously this fired unconditionally after review. Now the operator's
-        merge-ready email is a truthful signal: it means the PR is actually
-        ready. When CI is not green, hold quietly (digest note) rather than
-        paging the operator prematurely. A completed check re-invokes this via
-        the ci_status path; a re-push re-runs the whole panel.
+        In operator-gated mode this files the checkpoint and truthful merge-ready
+        notification. In auto-merge mode it additionally requires a verified
+        distinct native-review receipt, rechecks the live head, and delegates
+        the final merge to GitHub with that head as an atomic precondition.
+        When CI is not green, hold quietly rather than paging prematurely.
 
         `ci_state` may be passed by a caller that already computed it (the
         ci_status path) to avoid a redundant _required_ci_state fetch (3 GitHub
         API round-trips); when None we compute it here as before.
         """
         ref = f"{trigger.repository}#{trigger.number}"
+        expected_head = _normalise_full_sha(reviewed_head)
+        if expected_head:
+            live_head = _normalise_full_sha(
+                (await self._pr_head_sha(trigger)) or ""
+            )
+            if live_head != expected_head:
+                log.error(
+                    f"[{DAEMON_NAME}] {ref}: reviewed head "
+                    f"{expected_head[:12]} no longer matches live head "
+                    f"{live_head[:12] or 'unreadable'} — readiness held"
+                )
+                return
+
         if self.config.auto_merge:
-            return  # auto-merge path: Vanellus handles merge, no checkpoint.
+            proves_approval = getattr(binding_receipt, "proves_approval", None)
+            if not (
+                expected_head
+                and callable(proves_approval)
+                and proves_approval(head_sha=expected_head)
+            ):
+                log.error(
+                    f"[{DAEMON_NAME}] {ref}: auto-merge held without a verified "
+                    "distinct exact-head APPROVED receipt"
+                )
+                return
 
         ci = ci_state if ci_state is not None else await self._required_ci_state(trigger)
         if ci == "failing":
@@ -5290,6 +5384,30 @@ class SwarmDispatcher:
                 priority=Priority.INFO,
                 handler=DAEMON_NAME,
             )
+            return
+
+        if self.config.auto_merge:
+            merged, detail = await self._merge_pr(
+                trigger.repository,
+                trigger.number,
+                "squash",
+                expected_head=expected_head,
+                require_default_base=True,
+            )
+            if merged:
+                self.notifier.send(
+                    f"PR {ref} MERGED automatically after verified distinct "
+                    f"exact-head approval and green CI ({detail[:12]}).",
+                    priority=Priority.INFO,
+                    handler=DAEMON_NAME,
+                )
+            else:
+                self.record_merge_refusal(
+                    repository=trigger.repository,
+                    number=trigger.number,
+                    reason=detail,
+                    auto_merge=True,
+                )
             return
 
         await self._store_merge_checkpoint(trigger, parent, [p.lens for p in panel])
@@ -5988,9 +6106,87 @@ class SwarmDispatcher:
                 "— leaving to the review path"
             )
             return
+        binding_receipt = None
+        if self.config.auto_merge:
+            binding_receipt = await self._binding_approval_receipt_from_github(
+                trigger.repository,
+                pr_number,
+                current_head,
+                pr_author=str((pr.get("user") or {}).get("login") or ""),
+            )
+            if binding_receipt is None:
+                log.info(
+                    f"[{DAEMON_NAME}] {ref}: CI green + comment verdict clear, "
+                    "but no distinct exact-head APPROVED native review — "
+                    "auto-merge held"
+                )
+                return
         log.info(f"[{DAEMON_NAME}] {ref}: CI green + review clear — gating readiness")
         # Pass the CI state we already computed so the gate does not re-fetch it.
-        await self._gate_merge_readiness(pr_trigger, parent, panel=[], ci_state=ci)
+        await self._gate_merge_readiness(
+            pr_trigger,
+            parent,
+            panel=[],
+            ci_state=ci,
+            reviewed_head=current_head,
+            binding_receipt=binding_receipt,
+        )
+
+    async def _binding_approval_receipt_from_github(
+        self,
+        repository: str,
+        pr_number: int,
+        head_sha: str,
+        *,
+        pr_author: str = "",
+    ) -> ReviewBindingReceipt | None:
+        """Reconstruct a durable distinct-reviewer receipt for CI loop closure."""
+        expected_head = _normalise_full_sha(head_sha)
+        expected_login = agent_github_login("vanellus")
+        if (
+            not expected_head
+            or not expected_login
+            or not pr_author
+            or expected_login.casefold() == pr_author.casefold()
+        ):
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                reviews = await self._all_pr_reviews(
+                    repository, pr_number, client
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {repository}#{pr_number}: native review "
+                f"readback failed ({exc}) — auto-merge held"
+            )
+            return None
+
+        matching = [
+            review
+            for review in reviews
+            if str((review.get("user") or {}).get("login") or "").casefold()
+            == expected_login.casefold()
+            and _normalise_full_sha(str(review.get("commit_id") or ""))
+            == expected_head
+        ]
+        if not matching:
+            return None
+        latest = max(
+            matching,
+            key=lambda review: (
+                str(review.get("submitted_at") or ""),
+                int(review.get("id") or 0),
+            ),
+        )
+        if str(latest.get("state") or "").upper() != "APPROVED":
+            return None
+        return ReviewBindingReceipt(
+            review_id=str(latest.get("id") or ""),
+            reviewer_login=expected_login,
+            commit_id=expected_head,
+            state="APPROVED",
+        )
 
     async def _resolve_review_verdict(
         self, t: SwarmTrigger, stdout: str, *,
@@ -8253,7 +8449,6 @@ class SwarmDispatcher:
         parent: int | None,
         lenses: list[str],
         reviews: list[tuple[str, str]] | None = None,
-        auto_merge: bool = False,
         pending_gates: set[str] | None = None,
         reviewed_head: str | None = None,
     ) -> str:
@@ -8307,7 +8502,11 @@ class SwarmDispatcher:
             "dispatcher parses it and posts the comment for you if your gh "
             "call fails).\n\n"
             + merge_authorization_clause(
-                auto_merge=auto_merge, pending_gates=pending_gates
+                # A Vanellus aggregation prompt is necessarily pre-receipt:
+                # the dispatcher emits the native review only after this skill
+                # returns.  Keep merge forbidden here under every flag state;
+                # post-receipt auto-merge is dispatcher-owned.
+                auto_merge=False, pending_gates=pending_gates
             )
         )
 

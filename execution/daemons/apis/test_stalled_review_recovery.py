@@ -244,7 +244,7 @@ def _stalled_recovery_dispatcher(monkeypatch, *, vanellus_stdout):
     ):
         return None
 
-    async def fake_gate(self, trigger, parent, panel):  # noqa: ANN001
+    async def fake_gate(self, trigger, parent, panel, **kwargs):  # noqa: ANN001
         return None
 
     async def fake_post_missing_vanellus(  # noqa: ANN001

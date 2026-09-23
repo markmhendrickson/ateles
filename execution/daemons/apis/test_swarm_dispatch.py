@@ -8,6 +8,7 @@ Also covers the checkbox definition-of-done changes:
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -911,10 +912,9 @@ def _pr_dispatcher_with_stubs(
     which downstream path (_route_blocking_findings vs _gate_merge_readiness)
     fired, without doing real work in either.
 
-    `auto_merge` drives the flag that decides whether a merge-ready PR gets a
-    checkpoint at all, so a test can assert routing still happens under the
-    autonomous posture — the case where a missed blocker is silent rather than
-    merely wrong.
+    `auto_merge` drives the post-receipt dispatcher path, so a test can assert
+    routing still happens under the autonomous posture — the case where a
+    missed blocker is silent rather than merely wrong.
     """
 
     async def fake_run_skill(skill, prompt, **kwargs):
@@ -935,7 +935,7 @@ def _pr_dispatcher_with_stubs(
         calls.append(("route_head", kwargs.get("reviewed_head")))
         calls.append(("route", verdict))
 
-    async def fake_gate(self, trigger, parent, panel):
+    async def fake_gate(self, trigger, parent, panel, **kwargs):
         calls.append(("gate", None))
 
     async def fake_post_missing_vanellus(self, trigger, result, **kwargs):
@@ -1042,6 +1042,37 @@ def test_handle_pr_clear_verdict_without_verified_approval_holds_readiness(monke
     assert ("gate", None) not in calls
 
 
+def test_handle_pr_push_after_binding_receipt_holds_readiness(monkeypatch):
+    """The receipt is stale if the PR head moves before readiness is filed."""
+    calls = []
+    live = {"head": "b" * 40}
+    dispatcher = _pr_dispatcher_with_stubs(
+        monkeypatch,
+        vanellus_stdout="**APPROVE**\nlgtm",
+        calls=calls,
+    )
+
+    async def current_head(trigger):
+        return live["head"]
+
+    async def approve_then_push(trigger, verdict, body, **kwargs):
+        reviewed_head = live["head"]
+        live["head"] = "c" * 40
+        return ReviewBindingReceipt(
+            review_id="rev-race",
+            reviewer_login="markmhendrickson-ateles-vanellus",
+            commit_id=reviewed_head,
+            state="APPROVED",
+        )
+
+    monkeypatch.setattr(dispatcher, "_pr_head_sha", current_head)
+    monkeypatch.setattr(dispatcher, "_emit_formal_review", approve_then_push)
+
+    asyncio.run(dispatcher._handle_pr(_trigger(body="Closes #80.")))
+
+    assert ("gate", None) not in calls
+
+
 def test_handle_pr_holds_before_aggregation_when_durable_readback_fails(monkeypatch):
     calls = []
     d = _pr_dispatcher_with_stubs(
@@ -1135,7 +1166,7 @@ def _gate_blocked_dispatcher(monkeypatch, *, calls, auto_rereview):
     async def fake_route(self, trigger, parent, reviews, verdict, **kwargs):
         calls.append(("route", verdict))
 
-    async def fake_gate(self, trigger, parent, panel):
+    async def fake_gate(self, trigger, parent, panel, **kwargs):
         calls.append(("gate", None))
 
     async def fake_noop(self, *a, **k):
@@ -1552,6 +1583,83 @@ def test_gate_readiness_ci_pending_holds_without_paging(monkeypatch):
     assert not any("READY TO MERGE" in m for m in d.notifier.sent)
 
 
+def test_auto_merge_runs_only_with_verified_receipt_and_atomic_head(monkeypatch):
+    merged = []
+    head = "b" * 40
+
+    async def fake_head(self, trigger):
+        return head
+
+    async def fake_ci(self, trigger):
+        return "green"
+
+    async def fake_merge(
+        self,
+        repository,
+        number,
+        method,
+        *,
+        expected_head="",
+        require_default_base=False,
+    ):
+        merged.append(
+            (repository, number, method, expected_head, require_default_base)
+        )
+        return True, "d" * 40
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_merge_pr", fake_merge)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
+    receipt = ReviewBindingReceipt(
+        review_id="rev-auto",
+        reviewer_login="markmhendrickson-ateles-vanellus",
+        commit_id=head,
+        state="APPROVED",
+    )
+
+    asyncio.run(
+        dispatcher._gate_merge_readiness(
+            _trigger(head_sha=head),
+            parent=80,
+            panel=[],
+            reviewed_head=head,
+            binding_receipt=receipt,
+        )
+    )
+
+    assert merged == [("owner/repo", 87, "squash", head, True)]
+    assert any("MERGED automatically" in message for message in dispatcher.notifier.sent)
+
+
+def test_auto_merge_without_verified_receipt_stays_held(monkeypatch):
+    merged = []
+    head = "b" * 40
+
+    async def fake_head(self, trigger):
+        return head
+
+    async def fake_merge(self, *args, **kwargs):
+        merged.append((args, kwargs))
+        return True, "d" * 40
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+    monkeypatch.setattr(SwarmDispatcher, "_merge_pr", fake_merge)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
+
+    asyncio.run(
+        dispatcher._gate_merge_readiness(
+            _trigger(head_sha=head),
+            parent=80,
+            panel=[],
+            reviewed_head=head,
+            binding_receipt=None,
+        )
+    )
+
+    assert merged == []
+
+
 # ── _required_ci_state (CI detection — status API + check-runs precedence) ───
 
 
@@ -1763,7 +1871,7 @@ def _wire_ci_status(monkeypatch, *, ci_state, review_clear, pr_head="abc123",
     async def fake_route(self, trigger, parent):
         calls.append(("route", trigger.number))
 
-    async def fake_gate(self, trigger, parent, panel, ci_state=None):
+    async def fake_gate(self, trigger, parent, panel, ci_state=None, **kwargs):
         calls.append(("gate", trigger.number))
 
     monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
@@ -1851,7 +1959,7 @@ def test_ci_status_fetch_pr_failure_notifies_operator(monkeypatch):
     async def fake_route(self, trigger, parent):
         calls.append(("route", trigger.number))
 
-    async def fake_gate(self, trigger, parent, panel, ci_state=None):
+    async def fake_gate(self, trigger, parent, panel, ci_state=None, **kwargs):
         calls.append(("gate", trigger.number))
 
     monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr_fails)
@@ -1893,7 +2001,7 @@ def test_ci_status_green_threads_ci_state_into_gate(monkeypatch):
     async def fake_clear(self, repo, num, head_sha=""):
         return True
 
-    async def fake_gate(self, trigger, parent, panel, ci_state=None):
+    async def fake_gate(self, trigger, parent, panel, ci_state=None, **kwargs):
         seen["ci_state"] = ci_state
 
     monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
@@ -4773,6 +4881,41 @@ def test_merge_pr_helper_bad_method_defaults_squash(monkeypatch):
     assert client.put_calls[0]["json"]["merge_method"] == "squash"
 
 
+def test_merge_pr_expected_head_is_preflighted_and_sent_atomically(monkeypatch):
+    head = "b" * 40
+
+    class _AtomicMergeClient(_MergeAwareClient):
+        async def get(self, url, **kwargs):
+            if url.endswith("/pulls/87"):
+                return _MergeResp(
+                    200,
+                    {"head": {"sha": head}, "base": {"ref": "main"}},
+                )
+            if url.endswith("/repos/owner/repo"):
+                return _MergeResp(200, {"default_branch": "main"})
+            raise AssertionError(f"unexpected GET {url}")
+
+    client = _AtomicMergeClient(merge_status=200, merged=True)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    ok, _detail = asyncio.run(
+        dispatcher._merge_pr(
+            "owner/repo",
+            87,
+            "squash",
+            expected_head=head,
+            require_default_base=True,
+        )
+    )
+
+    assert ok is True
+    assert client.put_calls[0]["json"] == {
+        "merge_method": "squash",
+        "sha": head,
+    }
+
+
 # ── /reject command ──────────────────────────────────────────────────────────
 
 
@@ -7618,37 +7761,38 @@ def test_handle_pr_defers_when_no_verdict_anywhere(monkeypatch):
     assert not any(c[0] == "route" for c in calls), calls
 
 
-# ── Vanellus merge authorization tracks APIS_AUTONOMY_AUTO_MERGE (ateles#333) ──
+# ── Vanellus aggregation never owns the merge boundary ─────────────────────
 #
-# Regression guard for a real defect: _vanellus_prompt injected an unconditional
-# "DO NOT MERGE ... This overrides any merge instruction in your standing
-# protocol" while _gate_merge_readiness returns EARLY when auto_merge is on (so
-# no checkpoint is filed either). With the flag on, the dispatcher stepped aside
-# expecting Vanellus to merge while simultaneously forbidding it — nothing
-# merged and nothing was escalated, strictly worse than the flag being off.
+# Aggregation runs before the dispatcher has a verified distinct native-review
+# receipt.  It must remain read-only with respect to merge authority under both
+# flag states; the dispatcher owns auto-merge after receipt and head checks.
 
 
-def test_vanellus_prompt_forbids_merge_when_auto_merge_off():
+def test_vanellus_aggregation_prompt_forbids_merge():
     prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(
-        _trigger(), 80, ["pm"], None, auto_merge=False
+        _trigger(), 80, ["pm"], None
     )
     assert "DO NOT MERGE" in prompt
     assert "operator-gated" in prompt
     assert "YOU MAY MERGE" not in prompt
 
 
-def test_vanellus_prompt_authorizes_merge_when_auto_merge_on():
-    prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(
-        _trigger(), 80, ["pm"], None, auto_merge=True
+def test_vanellus_aggregation_prompt_has_no_merge_authority_input():
+    assert (
+        "auto_merge"
+        not in inspect.signature(
+            swarm_dispatch.SwarmDispatcher._vanellus_prompt
+        ).parameters
     )
-    assert "YOU MAY MERGE" in prompt
-    # The unconditional prohibition must be gone, or the flag is inert.
-    assert "DO NOT MERGE. Merge is operator-gated" not in prompt
-    # Hard stops must still be stated so autonomy is bounded, not blanket.
-    assert "gate inheritance" in prompt
-    assert "branch-protection" in prompt
-    assert "APPROVE with Blocking: 0" in prompt
-    assert "Releases remain human-gated" in prompt
+    prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(
+        _trigger(), 80, ["pm"], None
+    )
+    # The aggregation invocation happens before the dispatcher can post and
+    # verify a distinct exact-head native review.  It must therefore never be
+    # entrusted with the merge, even when auto-merge is configured.  The
+    # dispatcher owns the post-receipt auto-merge boundary instead.
+    assert "YOU MAY MERGE" not in prompt
+    assert "DO NOT MERGE" in prompt
 
 
 def test_vanellus_prompt_defaults_to_forbidding_merge():
@@ -7914,6 +8058,47 @@ def test_binding_review_rejects_unexpected_token_identity(monkeypatch, caplog):
     assert receipt is None
     assert posts == []
     assert "unexpected login" in log_text
+
+
+def test_ci_receipt_reconstruction_requires_latest_exact_head_approval(monkeypatch):
+    head = "b" * 40
+    reviewer = agent_github_login("vanellus")
+
+    class _ReviewClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, **kwargs):
+            return _MergeResp(
+                200,
+                [
+                    {
+                        "id": 1,
+                        "user": {"login": reviewer},
+                        "commit_id": head,
+                        "state": "APPROVED",
+                        "submitted_at": "2026-09-23T00:00:00Z",
+                    },
+                    {
+                        "id": 2,
+                        "user": {"login": reviewer},
+                        "commit_id": head,
+                        "state": "CHANGES_REQUESTED",
+                        "submitted_at": "2026-09-23T00:01:00Z",
+                    },
+                ],
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: _ReviewClient())
+    receipt = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._binding_approval_receipt_from_github(
+            "owner/repo", 87, head, pr_author="someone"
+        )
+    )
+    assert receipt is None
 
 
 # ── parent-issue link resolution (ateles#434 / #613 / #300) ─────────────────
