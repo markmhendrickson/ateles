@@ -222,6 +222,15 @@ def strip_quoted(text: str) -> str:
 # since a message with no blank line at all would otherwise be scanned whole.
 CLOSING_BLOCK_MAX = 2500
 
+# How many trailing blocks count as "the closing section". ONE was too narrow
+# (Loxia, PR #1175): a genuine permission question followed by a footer
+# paragraph or a bullet list escaped entirely — and a closing decisions
+# section followed by bullets is the house style, so that false NEGATIVE was
+# more likely than the false positive being fixed. Three blocks covers a
+# question plus a short footer while staying far short of the old
+# whole-2500-character window that matched quotations paragraphs back.
+CLOSING_BLOCKS = 3
+
 
 def closing_section(text: str) -> str:
     """The tail of the message, where decisions are carried. Bounded.
@@ -232,7 +241,7 @@ def closing_section(text: str) -> str:
     """
     stripped = strip_quoted(text).rstrip()
     blocks = [b for b in re.split(r"\n\s*\n", stripped) if b.strip()]
-    tail = blocks[-1] if blocks else ""
+    tail = "\n\n".join(blocks[-CLOSING_BLOCKS:]) if blocks else ""
     return tail[-CLOSING_BLOCK_MAX:] if len(tail) > CLOSING_BLOCK_MAX else tail
 
 

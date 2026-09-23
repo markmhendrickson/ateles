@@ -441,3 +441,36 @@ class TestQuotedProseDoesNotFire:
     def test_consent_gated_question_at_the_end_still_allowed(self):
         text = "All checks are green.\n\nWant me to merge and deploy it?"
         assert dsg.findings(text) == []
+
+
+class TestTrailingFooterStillCaught:
+    """Loxia's non-blocking finding on PR #1175, acted on.
+
+    Scoping to the single final block traded a false POSITIVE for a false
+    NEGATIVE: a genuine permission question followed by a footer paragraph
+    or a bullet list escaped entirely. A closing decisions section followed
+    by bullets is the house style, so that shape is likelier than the one
+    being fixed. `CLOSING_BLOCKS` covers it.
+    """
+
+    def test_question_then_footer_paragraph_still_blocks(self):
+        text = (
+            "Work is done.\n\nWant me to file the issue?\n\n"
+            "Everything else is green and the branch is pushed."
+        )
+        assert dsg.findings(text) != []
+
+    def test_question_then_bullet_list_still_blocks(self):
+        text = (
+            "Decisions:\n\nWant me to file the issue?\n\n"
+            "- #1118 next\n- #1123 blocked"
+        )
+        assert dsg.findings(text) != []
+
+    def test_quotation_far_above_the_closing_blocks_is_still_allowed(self):
+        text = (
+            'The gate blocked a turn containing "Want me to" in a table.\n\n'
+            + "\n\n".join(f"Paragraph {i} of narrative." for i in range(6))
+            + "\n\nOn balance the matcher was too broad."
+        )
+        assert dsg.findings(text) == []
