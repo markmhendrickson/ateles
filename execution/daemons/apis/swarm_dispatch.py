@@ -84,6 +84,13 @@ from review_learning import (
     parse_findings,
     propose_skill_updates,
 )
+from review_markers import (
+    BLOCKING_MARKER_RE as _BLOCKING_MARKER_RE,
+    LENS_MARKER_RE as _LENS_MARKER_RE,
+    REVIEW_VERDICT_RE as _REVIEW_VERDICT,
+    body_has_blocking_findings,
+    parse_review_verdict,
+)
 from review_panel import (
     LENSES,
     Lens,
@@ -510,27 +517,10 @@ def parse_pending_gates(stdout: str) -> set[str]:
     return {g.strip().lower() for g in m.group(1).split(",") if g.strip()}
 
 
-# Vanellus / panelist verdict token (SWARM_GITHUB_CONTRACT, skill_runner.py):
-# a review comment carries exactly one of these bold verdict tokens.
-#
-# ateles#938: this regex is built from `skill_runner.REVIEW_VERDICT_TOKENS` —
-# the SAME tuple that renders the "Verdict vocabulary" section of
-# SWARM_GITHUB_CONTRACT (the text a dispatched agent actually reads) — rather
-# than a second, hand-typed alternation. The bug this closes: the contract
-# instructed `SIGNED_OFF` (skill_runner.SWARM_GITHUB_CONTRACT, and every
-# Neotoma-mirrored SKILL.md that cites it) while this regex, maintained
-# separately, stopped at four tokens. An agent that did exactly what the
-# gate-writeback instruction requires — confirm its own `gate_status` write via
-# read-back, then emit `**SIGNED_OFF**` — produced a token this regex could not
-# see, so the verdict came back `None`, routed as "unparseable", and escalated
-# to the operator. Deriving both sides from one tuple makes that drift
-# structurally impossible: extend `REVIEW_VERDICT_TOKENS` and this regex gains
-# the token for free. `test_instructed_review_verdict_tokens_subseteq_parser`
-# plants the regression — remove a token from the tuple only and CI fails.
-_REVIEW_VERDICT = re.compile(
-    r"\*\*(" + "|".join(re.escape(tok) for tok in REVIEW_VERDICT_TOKENS) + r")\*\*",
-    re.I,
-)
+# Vanellus / panelist verdict token parsers live in review_markers.py (shared
+# with the PreToolUse approve guard — principles #9 / ateles#1198). The
+# ateles#938 contract still holds: REVIEW_VERDICT_RE is built from
+# skill_runner.REVIEW_VERDICT_TOKENS there.
 
 
 # Vanellus writes this verbatim when a declared lens produced no verdict for a
@@ -731,19 +721,7 @@ def is_missing_lens_candidate(aggregation_body: str) -> bool:
     )
 
 
-def parse_review_verdict(stdout: str) -> str | None:
-    """Extract the aggregated review verdict from Vanellus's output.
-
-    Returns one of "approve" | "request_changes" | "comment" | "blocked", or
-    None when no verdict token is present (treat None as not-clear — never
-    silently proceed to a merge-ready signal on an unparseable verdict).
-
-    Vanellus is instructed to repeat its full aggregated verdict inline in
-    stdout (swarm_dispatch `_vanellus_prompt`), so the token is reliably here
-    even when its `gh` comment post fails.
-    """
-    m = _REVIEW_VERDICT.search(stdout or "")
-    return m.group(1).lower() if m else None
+# parse_review_verdict imported from review_markers (re-exported for tests).
 
 
 def review_verdict_is_clear(verdict: str | None) -> bool:
@@ -831,30 +809,7 @@ _MERGE_REFUSED_RE = re.compile(
 )
 
 
-def body_has_blocking_findings(body: str | None) -> bool:
-    """True when a review body carries at least one `[BLOCKING]` finding.
-
-    ateles#595. `[BLOCKING] <category>: <summary>` is the structured field the
-    review contract already defines (skill_runner.py) for exactly this purpose,
-    so it — not the lens's self-reported verdict token — is the authority on
-    whether a review blocks.
-
-    Anchored to the marker rather than a substring search: `[NON-BLOCKING]`
-    CONTAINS `BLOCKING`, so a naive `in` check would promote every advisory note
-    into a merge-blocking REQUEST_CHANGES and jam the queue this fix exists to
-    unjam. Reuses review_learning's marker shape so the two cannot drift.
-    """
-    if not body:
-        return False
-    return bool(_BLOCKING_MARKER_RE.search(body))
-
-
-# `[BLOCKING] category: summary`, optionally wrapped in markdown emphasis as
-# lenses actually write it (`**[BLOCKING] credential-scope:**` on ateles#558).
-# The negative lookbehind on `NON-` is the whole trick — see the docstring.
-_BLOCKING_MARKER_RE = re.compile(
-    r"(?<!NON-)(?<!NON_)\[BLOCKING\]", re.IGNORECASE
-)
+# body_has_blocking_findings / _BLOCKING_MARKER_RE imported from review_markers.
 
 
 def verdict_to_review_event(verdict: str | None, body: str | None = None) -> str:
@@ -1406,10 +1361,7 @@ _AGGREGATION_SUPERSEDED_RE = re.compile(
     r"<!--\s*vanellus-aggregation-superseded\s+by=(?P<sha>[0-9a-f]{40})\s*-->",
     re.IGNORECASE,
 )
-_LENS_MARKER_RE = re.compile(
-    r"<!--\s*review:(?P<lens>[a-z0-9_-]+)\s+commit=(?P<sha>[0-9a-f]{40})\s*-->",
-    re.IGNORECASE,
-)
+# _LENS_MARKER_RE imported from review_markers (alias above).
 _LENS_SUPERSEDED_RE = re.compile(
     r"<!--\s*review:(?P<lens>[a-z0-9_-]+)-superseded\s+"
     r"by=(?P<sha>[0-9a-f]{40})\s*-->", re.IGNORECASE,

@@ -169,3 +169,66 @@ text-bearing-leader exemptions, override scoping (including that an exported
 value does not approve), and fail-open on malformed input. The suite pipes
 synthetic JSON to the hook's stdin and never runs `git` — writing it does not
 stash anything.
+
+## `gh_approve_verdict_guard.py` (PreToolUse)
+
+Blocks approving a PR on the operator's behalf unless every seated review lens
+has a **clean current-head verdict**. Motivated by ateles#1181 (2026-09-23): a
+false approve claimed four lenses had cleared the head; none had, and security's
+live verdict was `[BLOCKING]`. In-place-edited comments hide staleness when
+judged by creation order; "panel ran" is not "panel clean."
+
+Mental model: **current-head all-clear, or don't approve.**
+
+**Fires on:** `PreToolUse`, matcher `Edit|Write|NotebookEdit|Bash` (acts only on
+`Bash`), for scoped repos `markmhendrickson/ateles` and
+`markmhendrickson/neotoma` only.
+
+| Call shape | Result |
+|---|---|
+| `gh pr review <n> --approve` / `-a` (scoped repo) | evaluate panel |
+| `gh api …/pulls/<n>/reviews` with `event=APPROVE` | evaluate panel |
+| Approve on any other owner/repo | allow (silent exit 0; no panel I/O) |
+| `--comment` / `--request-changes` / `gh pr merge` / reads | allow (no match) |
+| Non-`Bash` tool | allow |
+
+**Allow:** every lens from `review_panel.select_panel` (dynamic — changed files
++ gate contributors + pending gates; never a hardcoded roster) has a
+latest-edited `<!-- review:<lens> commit=<head> -->` marker at the live
+`head.sha`, and none is `REQUEST_CHANGES` or carries `[BLOCKING]`. `COMMENT` /
+`BLOCKED` / `SIGNED_OFF` at head without `[BLOCKING]` do not block on the token
+alone. Allow path is **silent** (exit 0, no success banner).
+
+**Deny contract** (lead with `Refused:`):
+
+```
+Refused: approve blocked for markmhendrickson/ateles#1181 at head abcdef0…
+  missing: pm last_reviewed=1111111…
+  missing: qa last_reviewed=1111111…
+  missing: content last_reviewed=1111111…
+  blocking: security verdict=REQUEST_CHANGES last_reviewed=1111111…
+Next: re-drive seated lenses (or /swarm-run) until each has <!-- review:<lens> commit=abcdef0… --> and none is REQUEST_CHANGES / [BLOCKING]; then retry approve.
+Background: ateles#1181 (2026-09-23 stale-marker false approve).
+```
+
+Unreadable head / panel / markers → deny with `verdict data unreadable: <cause>`
+(never silent allow). Empty / unresolved seated panel and ambiguous dual markers
+at the same `updated_at` are unreadable.
+
+**No ambient override env.** Escape hatch = human GitHub UI approve, or
+temporarily unregister this hook. Deliberately no `ATELES_ALLOW_GH_APPROVE`
+(gmail-gate lesson: an exported permit would silently approve every call).
+
+**Fail-closed divergence from siblings:** `gh_identity_guard` and
+`gmail_send_gate` fail-open on unparseable stdin / internal errors. This guard's
+safety field *is* the verdict data — matched scoped approve + bad stdin /
+API failure / unparseable marker → deny (principles.md#5).
+
+**Shared parsers:** marker regex and verdict tokens come from
+`execution/daemons/apis/review_markers.py` (same source Apis uses). Seated set
+from `select_panel` only (principles.md#9).
+
+**Tests:** `test_gh_approve_verdict_guard.py` — #1181 shape (decision + message),
+happy path, in-place edit (`updated_at` wins), block branches, fail-closed,
+matcher positives/negatives, golden `select_panel` equality, no-override
+absence.
