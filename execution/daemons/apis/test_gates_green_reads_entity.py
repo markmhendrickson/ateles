@@ -34,8 +34,11 @@ class _Notifier:
     def __init__(self) -> None:
         self.sent: list[str] = []
 
-    def send(self, msg: str, priority=None, handler=None) -> None:  # noqa: ANN001
+    def send(self, msg: str, priority=None, handler=None, **kwargs) -> None:  # noqa: ANN001
         self.sent.append(msg)
+
+    def clear_dedupe(self, key: str) -> None:
+        return None
 
 
 class _Ok:
