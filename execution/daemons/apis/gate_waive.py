@@ -701,6 +701,12 @@ class IssueGateState:
     # two `*_unreadable` flags above: `found` keeps its meaning and callers
     # that must tell the cases apart read this flag alongside it.
     read_failed: bool = False
+    # True when the read returned a well-formed page whose row for this issue
+    # carried no snapshot object (`{}`, a null snapshot, a string or a list),
+    # so the gate state is unknown. Set together with `read_failed`; `sign_off`
+    # reports it as unreadable state rather than a missing entity
+    # (independent security run at b76b1376 on PR #1181, NON-BLOCKING).
+    row_unreadable: bool = False
     # Per-field REDUCER provenance ({field_name: observation_id}), read
     # straight off the snapshot the same way `agent_loader.py`'s
     # `_parse`/`lib.daemon_runtime.gating.read_authenticated_checkpoint_*`
@@ -774,6 +780,19 @@ def _entity_page(data: object) -> list[dict] | None:
     if cursor is not None and not isinstance(cursor, str):
         return None
     return entities
+
+
+def _row_snapshot(entity: dict) -> dict | None:
+    """One row's field map, or None when the row carries no snapshot object.
+
+    Some responses nest the field map one level deeper
+    (``snapshot.snapshot``); that inner map is used when it is an object.
+    """
+    snap = entity.get("snapshot")
+    if not isinstance(snap, dict):
+        return None
+    inner = snap.get("snapshot")
+    return inner if isinstance(inner, dict) else snap
 
 
 class IssueGateStore:
@@ -921,6 +940,9 @@ class IssueGateStore:
         """
         state = IssueGateState(repo=repo, issue_number=issue_number)
         entities: list[dict] = []
+        # The server said a row matched the filter and none did (independent
+        # security run at b76b1376 on PR #1181, NON-BLOCKING).
+        filtered_unmatched = False
         for number_field in ("number", "github_number", "issue_number"):
             data = await self._post(
                 "entities/query",
@@ -938,27 +960,37 @@ class IssueGateStore:
             if page is None:
                 state.read_failed = True
                 return state
-            entities = page
-            if entities:
+            if any(_row_snapshot(entity) is None for entity in page):
+                # A row the filter returned for this issue with no snapshot
+                # object is this issue's state, unreadable — never "absent".
+                state.read_failed = True
+                state.row_unreadable = True
+                return state
+            entities = [
+                entity
+                for entity in page
+                if self._matches(_row_snapshot(entity) or {}, repo, issue_number)
+            ]
+            if page:
+                filtered_unmatched = not entities
                 break
         if not entities:
             # Fall back to an unfiltered scan for entities whose snapshot does
             # not carry the composite fields (e.g. legacy rows keyed by
-            # local_issue_id or title). Bounded and paged, so a miss here means
-            # the entity genuinely is not there; a failed or exhausted scan
-            # returns None, which is a failed read, not an absent entity.
+            # local_issue_id or title), and for a filtered page with no
+            # matching row. Bounded and paged, so a miss here means the entity
+            # genuinely is not there; a failed or exhausted scan returns None,
+            # which is a failed read, not an absent entity. A miss after the
+            # filter returned only non-matching rows is a failed read too: the
+            # server and the scan disagree about this issue.
             scanned = await self._scan_for_issue(repo, issue_number)
-            if scanned is None:
+            if scanned is None or (not scanned and filtered_unmatched):
                 state.read_failed = True
                 return state
             entities = scanned
         for entity in entities:
-            snap = entity.get("snapshot") or {}
-            # Some responses nest the field map one level deeper.
-            inner = snap.get("snapshot")
-            if isinstance(inner, dict):
-                snap = inner
-            if not self._matches(snap, repo, issue_number):
+            snap = _row_snapshot(entity)
+            if snap is None or not self._matches(snap, repo, issue_number):
                 continue
             state.entity_id = str(
                 entity.get("entity_id") or entity.get("id") or snap.get("entity_id") or ""
@@ -1015,10 +1047,14 @@ class IssueGateStore:
             if page is None:
                 return None
             for entity in page:
-                snap = entity.get("snapshot") or {}
-                inner = snap.get("snapshot")
-                if isinstance(inner, dict):
-                    snap = inner
+                raw = entity.get("snapshot")
+                if raw is None:
+                    continue  # no snapshot to identify this row by
+                snap = _row_snapshot(entity)
+                if snap is None:
+                    # A snapshot that is present but not an object could be
+                    # this issue's, so the scan cannot say it is absent.
+                    return None
                 if self._matches(snap, repo, issue_number):
                     return [entity]
             cursor = data.get("next_cursor") or ""
@@ -1303,6 +1339,22 @@ class IssueGateStore:
             return outcome
 
         state = await self.load(repo, issue_number)
+        if state.row_unreadable:
+            # The row for this issue carried no snapshot object: its state is
+            # unknown, not absent (independent security run at b76b1376 on PR
+            # #1181). Nothing is written, as for an unparseable gate_status.
+            outcome.error = SIGN_OFF_UNREADABLE_STATE
+            outcome.observed_state = "unreadable"
+            log.error(
+                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: %s "
+                "(the issue row carries no snapshot object)",
+                repo,
+                issue_number,
+                gate,
+                lens_agent,
+                SIGN_OFF_UNREADABLE_STATE,
+            )
+            return outcome
         if not state.found:
             outcome.error = SIGN_OFF_ENTITY_NOT_FOUND
             outcome.observed_state = "no issue entity"

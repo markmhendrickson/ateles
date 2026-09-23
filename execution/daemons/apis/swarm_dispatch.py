@@ -686,6 +686,20 @@ def gate_cleared_unverified_marker(gate: str, head: str) -> str:
     """The idempotency marker for one reverted gate at one head."""
     return f"{GATE_CLEARED_UNVERIFIED_MARKER} gate={gate} head={head or 'unknown'} -->"
 
+
+# PR #1181 ux review at b76b1376: a gate-owning lens's reply refused ONLY
+# because its verdict is not at the fixed position (`lens_own_verdict`), with
+# no blocking token or finding in it. A fifth shape: the lens ran and said
+# nothing blocking, but its verdict cannot be read. Keyed per gate and per
+# head, like the reverted-gate notice above.
+GATE_VERDICT_UNREADABLE_MARKER = "<!-- apis-gate-verdict-unreadable"
+GATE_VERDICT_UNREADABLE_REASON = "gate_verdict_unreadable_format"
+
+
+def gate_verdict_unreadable_marker(gate: str, head: str) -> str:
+    """The idempotency marker for one unreadable gate verdict at one head."""
+    return f"{GATE_VERDICT_UNREADABLE_MARKER} gate={gate} head={head or 'unknown'} -->"
+
 # The durable outcomes of a merge attempt. `authorized_but_unable` is the state
 # ateles#565 says is missing: the autonomy flag AUTHORIZED the merge and a
 # separate control denied the mechanism. From the outside that was previously
@@ -1041,6 +1055,88 @@ def sign_off_is_warranted(stdout: str | None, *, lens_agent: str) -> bool:
     if output_has_blocking_verdict(stdout):
         return False
     return not body_has_blocking_findings(stdout)
+
+
+def gate_verdict_format_rejected(stdout: str | None, *, lens_agent: str) -> bool:
+    """True when *stdout* is refused ONLY because no verdict sits at the fixed
+    position: `lens_own_verdict` reads nothing, and the reply carries no
+    blocking verdict token and no `[BLOCKING]` finding.
+
+    That reply is neither a pass nor a "no": the lens ran and blocked
+    nothing, but its verdict cannot be read. PR #1181 ux review at b76b1376
+    (BLOCKING): it used to leave the gate pending with nothing on the PR,
+    looking exactly like a lens that objected. It decides only whether a
+    notice is posted, never whether a gate clears; `sign_off_is_warranted`
+    alone decides that.
+    """
+    if lens_own_verdict(stdout, lens_agent=lens_agent) is not None:
+        return False
+    if output_has_blocking_verdict(stdout):
+        return False
+    return not body_has_blocking_findings(stdout)
+
+
+_PLAIN_REVIEW_LINE_RE = re.compile(r"^review:[a-z0-9_-]+$", re.I)
+
+
+def describe_gate_verdict_position(stdout: str | None, *, lens_agent: str) -> str:
+    """What stands where the header and verdict should be, as one fixed phrase.
+
+    For the `observed` field of the unreadable-verdict notice. It returns one
+    of a closed set of phrases and never any text from the reply, which the
+    lens may have copied from author-controlled issue or PR text. Descriptive
+    only: it walks the same positions `lens_own_verdict` reads, and nothing
+    decides a gate from it.
+    """
+    text = stdout or ""
+    if not text.strip():
+        return "the reply is empty"
+    lines = _split_lines_keeping_breaks(text)
+    count = len(lines)
+
+    def next_non_blank(i: int) -> int:
+        while i < count and not lines[i][0].strip():
+            i += 1
+        return i
+
+    header_at = next_non_blank(0)
+    if _LEADING_REVIEW_MARKER_RE.match(lines[header_at][0].strip()):
+        header_at = next_non_blank(header_at + 1)
+    if header_at >= count:
+        return "nothing follows the review marker"
+    raw_header = lines[header_at][0]
+    first = _normalize_for_blocking_scan(raw_header).strip()
+    if _PLAIN_REVIEW_LINE_RE.match(first):
+        return "a plain `review:` line comes before the lens header"
+    header = _OWN_HEADER_RE.match(first)
+    if not header:
+        return "first line is not the lens header"
+    if header.group("name").strip().lower() != (lens_agent or "").strip().lower():
+        return "first line is another agent's header"
+    verdict_at = next_non_blank(header_at + 1)
+    if verdict_at >= count:
+        return "no verdict line follows the header"
+    if any(brk not in _PLAIN_LINE_BREAKS for _, brk in lines[: verdict_at + 1] if brk):
+        return "the header or verdict line ends in a character other than a newline"
+    raw_verdict = lines[verdict_at][0]
+    if not (_starts_a_markdown_line(raw_header) and _starts_a_markdown_line(raw_verdict)):
+        return "the header or verdict line is indented as code"
+    if not _VERDICT_LINE_RE.match(_normalize_for_blocking_scan(raw_verdict).strip()):
+        return "the line after the header is not a verdict line"
+    return "the reply carries a second header or a second verdict line"
+
+
+def gate_verdict_format_next_action(header: str) -> str:
+    """`next_action` for `gate_verdict_unreadable_format`: the exact shape."""
+    return (
+        f"Reformat the reply: line 1 is the lens header `{header}` (only the "
+        "`<!-- review:<lens> commit=<sha> -->` marker may come before it); "
+        "line 2 is the verdict alone, `**SIGNED_OFF**` or `**APPROVE**` to "
+        "pass, or `**BLOCKED**` / `**REQUEST_CHANGES**` plus a `[BLOCKING] "
+        "<category>: <summary>` line to block; everything else goes after "
+        "line 2 · re-dispatch the lens (on a PR, a push or a close and reopen "
+        "re-runs the panel); the gate stays pending until then"
+    )
 
 
 # GitHub's Reviews API accepts exactly these three events.
@@ -4486,6 +4582,9 @@ class SwarmDispatcher:
         completed: list[str] = []
         # (lens, agent, error_class, observed_state) per failed sign_off.
         failed_sign_offs: list[tuple[str, str, str, str]] = []
+        # (gate, agent, header, observed) when the pm reply is refused only
+        # for its format (PR #1181 ux review at b76b1376).
+        unreadable_verdicts: list[tuple[str, str, str, str]] = []
         for section in sections:
             spec_so_far = assemble_spec_markdown(state.sections or {})
             result = await run_skill(
@@ -4575,6 +4674,19 @@ class SwarmDispatcher:
                         "finding) — leaving gate pending, no sign_off "
                         "attempted"
                     )
+                    if gate_verdict_format_rejected(
+                        result.stdout, lens_agent=section.agent
+                    ):
+                        unreadable_verdicts.append(
+                            (
+                                "pm",
+                                section.agent,
+                                attribution_header(section.agent, "pm gate owner"),
+                                describe_gate_verdict_position(
+                                    result.stdout, lens_agent=section.agent
+                                ),
+                            )
+                        )
                 else:
                     gate_store = IssueGateStore(
                         self.config.neotoma_base_url,
@@ -4622,6 +4734,16 @@ class SwarmDispatcher:
         if failed_sign_offs:
             await self._surface_failed_sign_offs(
                 trigger, None, failed_sign_offs
+            )
+        if unreadable_verdicts:
+            # Keyed on the same content-derived "head" the pm sign_off names.
+            await self._surface_unreadable_gate_verdicts(
+                trigger,
+                None,
+                unreadable_verdicts,
+                content_digest(
+                    [trigger.repository, trigger.number, trigger.title, trigger.body]
+                ),
             )
 
         await spec_store.mark_mirrored(state)
@@ -5548,6 +5670,9 @@ class SwarmDispatcher:
         # template via `_surface_gate_launch_refusals` rather than the generic
         # incomplete-panel notice.
         gate_launch_refusals: list[tuple[str, str, str]] = []
+        # (gate, agent, header, observed) for each gate-owning lens whose reply
+        # was refused only for its format (PR #1181 ux review at b76b1376).
+        unreadable_verdicts: list[tuple[str, str, str, str]] = []
         for lens in panel:
             # Whether this seat's clean verdict is signed for its gate, decided
             # from the LIVE record (and the pre-panel re-proof), never from
@@ -5630,6 +5755,21 @@ class SwarmDispatcher:
                             "blocking finding) — leaving gate pending, no "
                             "sign_off attempted"
                         )
+                        if gate_verdict_format_rejected(
+                            result.stdout, lens_agent=lens.agent
+                        ):
+                            unreadable_verdicts.append(
+                                (
+                                    lens.gate,
+                                    lens.agent,
+                                    attribution_header(
+                                        lens.agent, f"{lens.lens} lens panelist"
+                                    ),
+                                    describe_gate_verdict_position(
+                                        result.stdout, lens_agent=lens.agent
+                                    ),
+                                )
+                            )
                     else:
                         store = IssueGateStore(
                             self.config.neotoma_base_url,
@@ -5708,6 +5848,13 @@ class SwarmDispatcher:
         if gate_launch_refusals:
             await self._surface_gate_launch_refusals(
                 trigger, parent, gate_launch_refusals
+            )
+        # 2a-quinquies. Surface any gate verdict refused only for its format
+        # (PR #1181 ux review at b76b1376) — the lens blocked nothing, and its
+        # verdict is not where the dispatcher reads it.
+        if unreadable_verdicts:
+            await self._surface_unreadable_gate_verdicts(
+                trigger, parent, unreadable_verdicts, review_head
             )
 
         # 2b. Persist the captured reviews and backfill any review:<lens>
@@ -9797,30 +9944,54 @@ class SwarmDispatcher:
         lens_marker = compose_lens_review_marker(lens.lens, marker_head)
         if not marker_head:
             lens_marker = f"<!-- review:{lens.lens} commit=<full40hex> -->"
-        if is_provisioned(lens.agent):
-            comment_identity_block = (
-                f"Post your review as a PR comment using the gh CLI. The comment "
-                f"MUST begin with the line `{lens_marker}`, followed by "
-                f"`review:{lens.lens}`. If the SHA is not supplied above, fetch "
-                "the PR's current `headRefOid` and substitute the full 40-hex SHA. "
-                + _agent_prompt_instruction(lens.agent, _panelist_role)
-                + " Repeat the full review text in your reply here (the "
-                "dispatcher parses it and posts the comment for you if your gh "
-                "call fails)."
+        # The comment and the reply start the same way (ux review at b76b1376
+        # on PR #1181, BLOCKING): this block used to ask for the marker, then
+        # a plain `review:<lens>` line, then the header, and to "repeat the
+        # full review text" in the reply, which is a reply the fixed-position
+        # rule (`lens_own_verdict`) refuses. A gate-owning seat writes its
+        # header even on its own account, since the dispatcher reads the
+        # verdict from it; any other seat on its own account may omit it.
+        _header_line = (
+            ""
+            if is_provisioned(lens.agent) and not gate_writeback_block
+            else attribution_header(lens.agent, _panelist_role)
+        )
+        _start_lines = "\n".join(
+            line for line in (lens_marker, _header_line, "**<VERDICT>**") if line
+        )
+        if _header_line:
+            _position = (
+                "The marker is the only line allowed before your header, in the "
+                "comment and in your reply: after it, "
+                f"{GATE_VERDICT_POSITION_RULE}. Do not put a `review:{lens.lens}` "
+                "line, a heading, or any other text above the header."
             )
         else:
-            comment_identity_block = (
-                f"Post your review as a PR comment using the gh CLI. The comment "
-                f"MUST begin with the line `{lens_marker}`, followed by "
-                f"`review:{lens.lens}` and then "
-                f"`{attribution_header(lens.agent, _panelist_role)}` "
-                "If the SHA is not supplied above, fetch the PR's current "
-                "`headRefOid` and substitute the full 40-hex SHA. "
-                "so readers can tell which agent authored it (the GitHub account "
-                "is shared). Repeat the full review text in your reply here (the "
-                "dispatcher parses it and posts the comment for you if your gh "
-                "call fails)."
+            _position = (
+                "The marker is the only line allowed before your verdict line, "
+                "in the comment and in your reply."
             )
+        _account = (
+            f"You are posting as your own GitHub account "
+            f"(`{agent_github_login(lens.agent)}`). "
+            if is_provisioned(lens.agent)
+            else "The GitHub account is shared, so the header is your identity. "
+        )
+        comment_identity_block = (
+            "Post your review as a PR comment using the gh CLI. "
+            + _account
+            + "The comment and the reply you return here both start with these "
+            "lines, and nothing before them:\n\n"
+            f"```\n{_start_lines}\n```\n\n"
+            "Replace `**<VERDICT>**` with your bold verdict token. "
+            + _position
+            + " If the SHA is not supplied above, fetch the PR's current "
+            "`headRefOid` and substitute the full 40-hex SHA in the marker. "
+            "Write the rest of your review after the verdict line, and repeat "
+            "the whole comment in your reply here, starting with those same "
+            "lines (the dispatcher parses the reply and posts the comment for "
+            "you if your gh call fails)."
+        )
         return (
             f"Invoke the {lens.agent} agent per your appended system prompt.\n\n"
             f"You are a review panelist on PR {t.repository}#{t.number}: "
@@ -11190,6 +11361,114 @@ class SwarmDispatcher:
             )
         except Exception as exc:  # notifier must never crash the pipeline
             log.error(f"[{DAEMON_NAME}] reverted-gate notification failed: {exc}")
+
+    async def _surface_unreadable_gate_verdicts(
+        self,
+        t: SwarmTrigger,
+        parent: int | None,
+        entries: list[tuple[str, str, str, str]],
+        head: str,
+    ) -> None:
+        """Say on the PR/issue that a gate verdict was refused for its format.
+
+        PR #1181 ux review at b76b1376 (BLOCKING): a gate-owning lens whose
+        reply `gate_verdict_format_rejected` (no verdict at the fixed
+        position, and nothing blocking in it) left the gate pending with only
+        a daemon log line, which on the PR looks exactly like a lens that
+        objected. Posts the Design `**BLOCKED**` template with its own reason
+        token, `gate_verdict_unreadable_format`, so it reads as neither a
+        REQUEST_CHANGES nor a failed write.
+
+        `entries` holds ``(gate, agent, header, observed)``: *header* is the
+        exact header the lens should have written, and *observed* one of the
+        fixed phrases from `describe_gate_verdict_position`, never text from
+        the reply. Once per gate per head (`gate_verdict_unreadable_marker`),
+        counted only in the dispatcher's own comments across every page, the
+        same dedup as `_surface_unverified_signed_off_gates`. Best-effort;
+        never raises.
+        """
+        entries = [e for e in (entries or []) if e and e[0]]
+        if not entries:
+            return
+        repo_token = _token_for_repo(t.repository)
+        if not repo_token:
+            return
+        url = (
+            f"https://api.github.com/repos/{t.repository}/issues/"
+            f"{t.number}/comments"
+        )
+        reason = GATE_VERDICT_UNREADABLE_REASON
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                me = await client.get(
+                    "https://api.github.com/user",
+                    headers=self._github_headers(t.repository),
+                )
+                me.raise_for_status()
+                own_login = str((me.json() or {}).get("login") or "").casefold()
+                if not own_login:
+                    raise RuntimeError("the dispatcher's own GitHub login is unreadable")
+                comments = await self._all_issue_comments(t.repository, t.number, client)
+                existing = "\n".join(
+                    (c.get("body") or "")
+                    for c in comments
+                    if str((c.get("user") or {}).get("login") or "").casefold() == own_login
+                )
+                fresh = sorted(
+                    {
+                        e[0]: e
+                        for e in entries
+                        if gate_verdict_unreadable_marker(e[0], head) not in existing
+                    }.values()
+                )
+                if not fresh:
+                    return  # already surfaced for every gate at this head
+                blocks = "\n\n".join(
+                    "**BLOCKED**\n"
+                    f"- reason: `{reason}`\n"
+                    f"- gate: `{gate}` (lens: `{agent}`)\n"
+                    "- attempted: none — the verdict could not be read, so no "
+                    "sign-off was attempted\n"
+                    f"- observed: {observed}\n"
+                    f"- next_action: {gate_verdict_format_next_action(header)}"
+                    for gate, agent, header, observed in fresh
+                )
+                body = (
+                    "\n".join(gate_verdict_unreadable_marker(e[0], head) for e in fresh)
+                    + "\n**🤖 Apis — Ateles swarm, swarm dispatcher**\n\n"
+                    "A gate-owning lens reviewed and its verdict could not be "
+                    "read, so the gate stays pending:\n\n"
+                    f"{blocks}\n\n"
+                    "This is not a REQUEST_CHANGES: the reply carried no "
+                    "blocking verdict and no `[BLOCKING]` finding. The "
+                    "dispatcher reads a gate verdict only from a fixed "
+                    "position, the lens's header on the reply's first line "
+                    "and its verdict on the next, and this reply did not put "
+                    "them there. Merge and build hand-off treat the gate as "
+                    "pending until a readable clear verdict arrives.\n\n"
+                    "Posted once per gate per head (PR #1181 ux review)."
+                )
+                post = await client.post(
+                    url, json={"body": body}, headers=self._github_headers(t.repository)
+                )
+                post.raise_for_status()
+        except Exception as exc:
+            log.error(
+                f"[{DAEMON_NAME}] unreadable-verdict comment failed for "
+                f"{t.repository}#{t.number}: {type(exc).__name__}"
+            )
+            return
+        try:
+            self.notifier.send(
+                f"{t.repository}#{t.number}: "
+                f"{', '.join(f'`{e[0]}`' for e in fresh)} verdict could not be "
+                "read (not at the fixed position, nothing blocking) — gate "
+                "left pending. See the PR/issue comment.",
+                priority=Priority.WARN,
+                handler=DAEMON_NAME,
+            )
+        except Exception as exc:  # notifier must never crash the pipeline
+            log.error(f"[{DAEMON_NAME}] unreadable-verdict notification failed: {exc}")
 
     async def _surface_gate_launch_refusals(
         self,

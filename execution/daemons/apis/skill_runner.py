@@ -511,7 +511,8 @@ the same issue or PR. Use `gh api -X PATCH repos/<owner>/<repo>/issues/comments/
 ### PR review head and supersession
 
 Every PR verdict is scoped to the exact artifact it reviewed. Put the full current
-40-hex head SHA in an HTML marker at the start of the comment:
+40-hex head SHA in ONE HTML marker line at the start of the comment, above the header:
+the first form for a lens review, the second for a Vanellus aggregation, never both.
 
 ```
 <!-- review:<lens> commit=<full40hex> -->
