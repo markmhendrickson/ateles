@@ -119,6 +119,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 import urllib.error
@@ -997,6 +998,735 @@ def run_reconciliation(args, conn, base_url, token, cutover_date, apply_mode, en
     print(f"Action log: {log_path}")
 
 
+# --- Gate restore (--gate-restore, operator-approved 2026-09-23) -----------
+#
+# Separate from both the class-a replay and the --reconcile-file pass above:
+# restores `issue` entities' gate fields (gate_status, owner_history,
+# current_owner) that Cursor-dispatched swarm agents wrote to the LOCAL
+# fork(s) by mistake (an MCP config pointing at a local dev build instead of
+# hosted) back onto the hosted instance. Operator approved this specific
+# write on 2026-09-23: issue entities' gate fields only -- no other field is
+# ever read or written by this mode.
+#
+# Method: scan both local DBs (read-only) for issue observations with
+# created_at > cutover that touch any of the three gate fields, fold them
+# forward per entity_id (last observation wins per field, across BOTH dbs
+# combined and sorted by created_at) to get each issue's latest local state,
+# then for each issue GET hosted by entity id (falling back to a
+# best-effort canonical repo+number match only if that 404s), and MERGE:
+#   - gate_status: per-gate, keep local only if hosted's gate is absent or
+#     strictly less advanced by GATE_STATUS_RANK; a status not on the rank
+#     table is treated conservatively (never used to justify an overwrite
+#     unless hosted's own value for that gate is literally absent).
+#   - owner_history: union entries deduped on (agent, timestamp-or-note),
+#     sorted by time.
+#   - current_owner: local wins only if local's latest write of that field
+#     is newer than hosted's latest write of it (compared via each side's
+#     own observation/provenance history).
+# gate_status/current_owner use `strategy: last_write` on the hosted schema
+# (fetched from GET /schemas/issue, not assumed), so the full merged map
+# must always be sent -- a store call replaces the field, it does not patch
+# individual keys within it.
+
+GATE_STATUS_RANK = {
+    "pending": 0,
+    "in_review": 1,
+    "legacy-uninitialized": 1,
+    "changes_requested": 2,
+    "blocked": 2,
+    "spec_signed": 2,
+    "skipped": 3,
+    "waived": 3,
+    "approved_awaiting_merge": 3,
+    "signed_off": 4,
+    "not_required": 4,
+}
+
+
+def gate_status_rank(value) -> int | None:
+    """Return GATE_STATUS_RANK[value], or None for an unranked/unknown status.
+
+    None is a deliberate "I don't know how advanced this is" signal, not a
+    rank of 0 -- treating an unrecognized status as rank 0 would let it be
+    silently overwritten by anything, and treating it as infinitely advanced
+    would let it silently block every local value. Callers that see None
+    fall back to the "hosted absent" test only (see merge_gate_status).
+    """
+    if not isinstance(value, str):
+        return None
+    return GATE_STATUS_RANK.get(value)
+
+
+def merge_gate_status(hosted_gate_status: dict, local_gate_status: dict) -> tuple[dict, list[tuple[str, object, object]]]:
+    """Merge one issue's gate_status maps. Returns (merged, changes).
+
+    changes is a list of (gate_name, hosted_value, new_value) for every gate
+    whose value actually changes -- used for the dry-run report and the
+    sanity gate. NEVER downgrades a hosted gate (a local rank <= hosted rank
+    is skipped) and NEVER touches a gate absent from local_gate_status at
+    all (hosted's untouched gates are carried through unchanged). A gate
+    with an unranked local status is taken only when hosted has no value at
+    all for that gate; an unranked hosted status is left alone regardless
+    of what local says (fail closed: don't overwrite a status we can't
+    rank the advancement of).
+    """
+    merged = dict(hosted_gate_status or {})
+    changes: list[tuple[str, object, object]] = []
+    for gate, local_val in (local_gate_status or {}).items():
+        hosted_val = merged.get(gate)
+        if gate not in merged:
+            merged[gate] = local_val
+            changes.append((gate, None, local_val))
+            continue
+        if hosted_val == local_val:
+            continue
+        hosted_rank = gate_status_rank(hosted_val)
+        local_rank = gate_status_rank(local_val)
+        if hosted_rank is None:
+            # Hosted holds a status this table doesn't recognize -- fail
+            # closed, never overwrite it from local.
+            continue
+        if local_rank is None:
+            # Local holds an unranked status but hosted has a ranked one --
+            # never overwrite a known-ranked hosted value with an unranked
+            # local one.
+            continue
+        if local_rank > hosted_rank:
+            merged[gate] = local_val
+            changes.append((gate, hosted_val, local_val))
+        # local_rank <= hosted_rank: never downgrade, skip.
+    return merged, changes
+
+
+def _owner_history_entry_key(entry) -> tuple:
+    """Dedup key for one owner_history entry: (agent, action, gate, timestamp-or-note).
+
+    Real data (confirmed against local-fork rows, e.g. entity
+    ent_f89b4fe5636ac3275d629c3e) shows the SAME agent can log MULTIPLE
+    distinct entries at the exact same `at` timestamp -- a `signed_off` and
+    a `handed_off` row for the same gate handoff both stamped at the moment
+    the transition happened. A key of (agent, at) alone collapses these
+    into one, discarding a real, distinct entry -- confirmed against real
+    data: one entity's 355-entry local owner_history deduped down to 7
+    under (agent, at) alone, which is data loss, not deduplication. Adding
+    `action` and `gate` (both present on every real entry inspected)
+    distinguishes exactly this case while still deduping TRUE duplicates
+    (the same action+gate+agent+at appearing in both local DBs from the
+    same underlying write). Falls back to the full entry's JSON
+    representation when agent/action/gate/at/note are all absent, which
+    keeps the key always hashable and always distinguishing for any
+    still-unanticipated entry shape.
+    """
+    if not isinstance(entry, dict):
+        return (json.dumps(entry, sort_keys=True),)
+    agent = entry.get("agent")
+    action = entry.get("action")
+    gate = entry.get("gate")
+    ts = entry.get("at") or entry.get("note")
+    if agent is None and action is None and gate is None and ts is None:
+        return (json.dumps(entry, sort_keys=True),)
+    return (agent, action, gate, ts)
+
+
+def merge_owner_history(hosted_history, local_history) -> list:
+    """Union owner_history entries, dedup ONLY within local, then append onto
+    hosted's history verbatim. Sorted by time within each side, hosted first.
+
+    Deliberately does NOT dedup across hosted's own existing entries: real
+    hosted data (entity ent_fec57fb48b3485bff6a24412) already carries an
+    internal near-duplicate pair (the same agent/action/gate/at, one with an
+    extra `note` field) -- a pre-existing hosted data quality issue, not
+    something this replay caused or should silently collapse. This
+    function's job is restoring local entries hosted is MISSING, never
+    editing hosted's own history downward -- so the invariant
+    len(merged) >= max(len(local), len(hosted)) always holds: every hosted
+    entry survives untouched, and only genuinely-new local entries (deduped
+    against each other AND against hosted, so a local entry hosted already
+    has verbatim is not appended a second time) are added on top.
+    """
+    hosted_history = hosted_history if isinstance(hosted_history, list) else []
+    local_history = local_history if isinstance(local_history, list) else []
+
+    hosted_keys = {_owner_history_entry_key(e) for e in hosted_history}
+    seen_local_keys: set = set()
+    new_from_local = []
+    for entry in local_history:
+        key = _owner_history_entry_key(entry)
+        if key in hosted_keys or key in seen_local_keys:
+            continue
+        seen_local_keys.add(key)
+        new_from_local.append(entry)
+
+    new_from_local.sort(key=lambda e: (e.get("at") or "") if isinstance(e, dict) else "")
+    return list(hosted_history) + new_from_local
+
+
+def latest_field_write_ts(conn: sqlite3.Connection, entity_id: str, field_name: str, cutover_ts: str) -> str | None:
+    """Latest created_at (post-cutover) among this entity's LOCAL observations
+    that set `field_name` -- used to compare against hosted's own latest
+    write of current_owner (see merge_current_owner) to decide which side's
+    value is actually newer, rather than assuming local always wins.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT fields, created_at FROM observations WHERE entity_id = ? AND created_at > ? "
+        "ORDER BY created_at DESC",
+        (entity_id, cutover_ts),
+    )
+    for fields_json, created_at in cur.fetchall():
+        if is_schema_lag_background_rewrite(fields_json):
+            continue
+        try:
+            fields = json.loads(fields_json) if fields_json else {}
+        except (TypeError, ValueError):
+            continue
+        if isinstance(fields, dict) and field_name in fields:
+            return created_at
+    return None
+
+
+def hosted_latest_field_write_ts(entity_id: str, field_name: str, base_url: str, token: str) -> str | None:
+    """Latest observed_at for `field_name` on hosted, via GET /entities/<id>/history
+    if available, falling back to the entity's own last_observation_at when a
+    per-field history endpoint isn't available. Returns None on any failure
+    (fail closed -- an unknown hosted timestamp means we cannot prove local
+    is newer, so merge_current_owner will not overwrite it).
+    """
+    status, body = http_request(
+        "GET", base_url, f"/entities/{entity_id}/field_history?field={field_name}",
+        token, retries=1, retry_backoff_seconds=1.0,
+    )
+    if status == 200 and isinstance(body, dict):
+        history = body.get("history") or body.get("observations") or []
+        if isinstance(history, list) and history:
+            timestamps = [h.get("observed_at") or h.get("created_at") for h in history if isinstance(h, dict)]
+            timestamps = [t for t in timestamps if t]
+            if timestamps:
+                return max(timestamps)
+    # No per-field history route (or it errored/404s) -- fall back to the
+    # entity snapshot's own last_observation_at as a conservative proxy for
+    # "when was this entity, including this field, last written on hosted".
+    status2, body2 = http_request(
+        "GET", base_url, f"/entities/{entity_id}", token, retries=1, retry_backoff_seconds=1.0
+    )
+    if status2 == 200 and isinstance(body2, dict):
+        return body2.get("last_observation_at")
+    return None
+
+
+def merge_current_owner(
+    hosted_current_owner, local_current_owner, local_ts: str | None, hosted_ts: str | None
+) -> tuple[object, bool]:
+    """Decide current_owner. Returns (value_to_use, changed).
+
+    Local wins ONLY when local_current_owner is present AND local_ts is
+    present AND (hosted_ts is absent OR local_ts > hosted_ts) -- i.e. we can
+    positively show local's write is newer. Any missing timestamp fails
+    closed to keeping hosted's value, since we cannot prove local is newer
+    without it.
+    """
+    if local_current_owner is None:
+        return hosted_current_owner, False
+    if local_ts is None:
+        return hosted_current_owner, False
+    if hosted_ts is not None and local_ts <= hosted_ts:
+        return hosted_current_owner, False
+    if hosted_current_owner == local_current_owner:
+        return hosted_current_owner, False
+    return local_current_owner, True
+
+
+def local_gate_state_for_entity(conn: sqlite3.Connection, entity_id: str, cutover_ts: str) -> dict:
+    """Fold-forward this entity's LOCAL post-cutover observations for exactly
+    the three gate fields plus its identifying fields (repo, github_number,
+    local_issue_id, title) -- last write wins per field, schema_lag_bg_*
+    rewrites excluded, same convention as local_post_cutover_field_state.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT fields, created_at FROM observations WHERE entity_id = ? AND entity_type = 'issue' "
+        "AND created_at > ? ORDER BY created_at ASC",
+        (entity_id, cutover_ts),
+    )
+    state: dict = {}
+    tracked = {"gate_status", "owner_history", "current_owner", "repo", "github_number", "local_issue_id", "title"}
+    for fields_json, _created_at in cur.fetchall():
+        if is_schema_lag_background_rewrite(fields_json):
+            continue
+        if not fields_json:
+            continue
+        try:
+            fields = json.loads(fields_json)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(fields, dict):
+            continue
+        for k, v in fields.items():
+            if k in tracked:
+                state[k] = v
+    return state
+
+
+def scan_local_gate_candidates(db_paths: list[str], cutover_ts: str) -> dict:
+    """Scan BOTH local DBs for issue entities with post-cutover writes to any
+    gate field, and fold each entity's state forward ACROSS BOTH DBs
+    combined (not per-db) so an entity touched in both gets one merged
+    local view, ordered by created_at across the union.
+
+    Returns entity_id -> {gate_status, owner_history, current_owner, repo,
+    github_number, local_issue_id, title} (only keys actually seen).
+    """
+    combined_rows: list[tuple[str, str, str]] = []  # (entity_id, fields_json, created_at)
+    for db_path in db_paths:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT entity_id, fields, created_at FROM observations "
+            "WHERE entity_type = 'issue' AND created_at > ? "
+            "AND (fields LIKE '%gate_status%' OR fields LIKE '%owner_history%' OR fields LIKE '%current_owner%') "
+            "ORDER BY created_at ASC",
+            (cutover_ts,),
+        )
+        combined_rows.extend(cur.fetchall())
+        conn.close()
+    combined_rows.sort(key=lambda r: r[2])
+
+    tracked = {"gate_status", "owner_history", "current_owner", "repo", "github_number", "local_issue_id", "title"}
+    states: dict[str, dict] = {}
+    for entity_id, fields_json, _created_at in combined_rows:
+        if is_schema_lag_background_rewrite(fields_json):
+            continue
+        try:
+            fields = json.loads(fields_json) if fields_json else {}
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(fields, dict):
+            continue
+        st = states.setdefault(entity_id, {})
+        for k, v in fields.items():
+            if k in tracked:
+                st[k] = v
+    # Only keep entities that actually set at least one of the 3 gate fields
+    # (an entity whose only tracked-field write was e.g. repo/title without
+    # ever touching gate_status/owner_history/current_owner has nothing to
+    # restore).
+    gate_field_names = {"gate_status", "owner_history", "current_owner"}
+    return {eid: st for eid, st in states.items() if gate_field_names & set(st.keys())}
+
+
+def canonical_identity_lookup(entity_type: str, repo, github_number, base_url: str, token: str) -> str | None:
+    """Best-effort lookup of a hosted entity id by (repo, github_number) when
+    a direct GET by local entity_id 404s. Tries POST /retrieve_entity_by_identifier
+    with the schema's declared composite identifier shape; returns None (not
+    an error) on any non-200 or unparseable response -- callers treat that
+    as "no canonical match found" and fall through to class-a create.
+    """
+    if not repo or github_number is None:
+        return None
+    payload = {
+        "entity_type": entity_type,
+        "identifier": f"{github_number}|{repo}",
+    }
+    status, body = http_request(
+        "POST", base_url, "/retrieve_entity_by_identifier", token, payload, retries=2, retry_backoff_seconds=2.0
+    )
+    if status == 200 and isinstance(body, dict):
+        entities = body.get("entities")
+        if isinstance(entities, list) and entities:
+            eid = entities[0].get("entity_id")
+            if isinstance(eid, str) and eid and eid != "PLACEHOLDER":
+                return eid
+    return None
+
+
+def get_hosted_entity(entity_id: str, base_url: str, token: str) -> dict | None:
+    status, body = http_request("GET", base_url, f"/entities/{entity_id}", token, retries=3, retry_backoff_seconds=2.0)
+    if status == 200 and isinstance(body, dict):
+        return body
+    return None
+
+
+def build_gate_restore_idempotency_key(entity_id: str, merged_payload: dict) -> str:
+    """migrate-gates-<entity_id>-<sha of the merged payload> -- deterministic
+    so re-running after a partial failure (or a verification pass) sends the
+    SAME key for the SAME merged result and resolves to a no-op on hosted,
+    while a genuinely different merged result (e.g. a gate that was
+    downgraded then re-upgraded) gets its own key.
+    """
+    payload_repr = json.dumps(merged_payload, sort_keys=True, ensure_ascii=False)
+    payload_hash = hashlib.sha256(payload_repr.encode("utf-8")).hexdigest()[:16]
+    return f"migrate-gates-{entity_id}-{payload_hash}"
+
+
+def plan_gate_restore_for_entity(
+    entity_id: str, local_state: dict, hosted_entity: dict | None
+) -> dict:
+    """Compute one issue's gate-restore plan. Returns a dict describing the
+    action (create/merge/noop) and, for merge/create, the full field set to
+    send plus a human-readable list of per-gate changes -- no I/O.
+    """
+    local_gate_status = local_state.get("gate_status") if isinstance(local_state.get("gate_status"), dict) else {}
+    local_owner_history = local_state.get("owner_history") if isinstance(local_state.get("owner_history"), list) else []
+    local_current_owner = local_state.get("current_owner")
+
+    if hosted_entity is None:
+        fields = {}
+        if local_gate_status:
+            fields["gate_status"] = local_gate_status
+        if local_owner_history:
+            fields["owner_history"] = local_owner_history
+        if local_current_owner is not None:
+            fields["current_owner"] = local_current_owner
+        for idfield in ("repo", "github_number", "local_issue_id", "title"):
+            if local_state.get(idfield) is not None:
+                fields[idfield] = local_state[idfield]
+        return {
+            "action": "create",
+            "entity_id": entity_id,
+            "fields": fields,
+            "gate_changes": [(g, None, v) for g, v in sorted(local_gate_status.items())],
+            "owner_history_changed": bool(local_owner_history),
+            "current_owner_change": (None, local_current_owner) if local_current_owner is not None else None,
+        }
+
+    hosted_snapshot = hosted_entity.get("snapshot") or {}
+    hosted_gate_status = hosted_snapshot.get("gate_status") if isinstance(hosted_snapshot.get("gate_status"), dict) else {}
+    hosted_owner_history = hosted_snapshot.get("owner_history") if isinstance(hosted_snapshot.get("owner_history"), list) else []
+    hosted_current_owner = hosted_snapshot.get("current_owner")
+
+    merged_gate_status, gate_changes = merge_gate_status(hosted_gate_status, local_gate_status)
+    merged_owner_history = merge_owner_history(hosted_owner_history, local_owner_history)
+    owner_history_changed = merged_owner_history != hosted_owner_history
+
+    fields = {}
+    if gate_changes:
+        fields["gate_status"] = merged_gate_status
+    if owner_history_changed:
+        fields["owner_history"] = merged_owner_history
+
+    return {
+        "action": "merge" if fields else "noop_pending_owner",
+        "entity_id": entity_id,
+        "fields": fields,
+        "gate_changes": gate_changes,
+        "owner_history_changed": owner_history_changed,
+        "hosted_gate_status": hosted_gate_status,
+        "hosted_owner_history": hosted_owner_history,
+        "hosted_current_owner": hosted_current_owner,
+        "local_current_owner": local_current_owner,
+        "local_gate_status": local_gate_status,
+        "local_owner_history": local_owner_history,
+    }
+
+
+def format_issue_label(repo, github_number, entity_id: str) -> str:
+    if repo and github_number is not None:
+        return f"{repo}#{github_number}"
+    return entity_id
+
+
+def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
+    db_paths = [p.strip() for p in args.gate_restore_db.split(",") if p.strip()]
+    cutover_ts = args.cutover
+    run_ts = datetime.now(timezone.utc).isoformat()
+    print(f"Gate-restore cutover: {cutover_ts}")
+    print(f"Gate-restore run started at: {run_ts} (writes from agent runs after this instant are NOT covered)")
+    print(f"Scanning local DBs: {db_paths}")
+    print()
+
+    candidates = scan_local_gate_candidates(db_paths, cutover_ts)
+    print(f"Issues with post-cutover local gate-field writes: {len(candidates)}")
+
+    if args.entity_ids:
+        allowlist = {e.strip() for e in args.entity_ids.split(",") if e.strip()}
+        candidates = {eid: st for eid, st in candidates.items() if eid in allowlist}
+        print(f"--entity-ids restricts this run to: {sorted(allowlist)}")
+        print(f"Candidates after --entity-ids restriction: {len(candidates)}")
+
+    schema_info_cache: dict = {}
+    get_schema_declared_fields("issue", base_url, token, schema_info_cache)
+
+    # --- Identity filter (operator instruction 2026-09-23) ----------------
+    # Only restore issues that have a resolvable (repo, github_number) AND
+    # that identity actually exists on GitHub. This is checked BEFORE any
+    # hosted GET or plan is built -- it is a precondition on the candidate
+    # itself, not on what hosted happens to hold. `gh api
+    # repos/<repo>/issues/<n>` confirms existence AND gives state (open/
+    # closed) in the SAME call, so this replaces the separate closed-check
+    # that used to run after the sanity gate: an issue that is CLOSED never
+    # even becomes a plan, and is logged as a skip alongside every other
+    # identity failure. One call per candidate, strictly sequential (load
+    # rule: concurrency 1), so this is the dominant cost of a dry run --
+    # accepted, since correctness here is the point of this filter.
+    skips_no_identity = []
+    skips_not_found_on_github = []
+    skips_closed = []
+    filtered_candidates: dict[str, dict] = {}
+    for entity_id, local_state in sorted(candidates.items()):
+        repo = local_state.get("repo")
+        github_number = local_state.get("github_number")
+
+        if (not repo or github_number is None) and entity_id != "test":
+            # This entity's gate-field-bearing observations didn't happen to
+            # also carry repo/github_number in the SAME observation (they're
+            # separate fields on the same entity, written at different
+            # times) -- but the entity may still have a resolvable identity
+            # on hosted (its snapshot folds in fields from ALL of its
+            # observations, not just the gate-bearing ones this scan
+            # matched). One extra read-only GET, only for entities missing
+            # identity locally, recovers it rather than skipping a real
+            # issue for a scan artifact. `entity_id == "test"` is excluded
+            # from this fallback outright -- it is test/junk data, not a
+            # real issue, and a GET for it would be wasted.
+            hosted_probe = get_hosted_entity(entity_id, base_url, token)
+            if hosted_probe:
+                probe_snapshot = hosted_probe.get("snapshot") or {}
+                repo = repo or probe_snapshot.get("repo") or probe_snapshot.get("repository")
+                github_number = github_number if github_number is not None else (
+                    probe_snapshot.get("github_number") or probe_snapshot.get("issue_number")
+                )
+
+        label = format_issue_label(repo, github_number, entity_id)
+
+        if not repo or github_number is None or not isinstance(repo, str) or "/" not in repo:
+            skips_no_identity.append((entity_id, label, "no resolvable repo+github_number"))
+            continue
+
+        gh_info = github_issue_lookup(repo, int(github_number))
+        if gh_info is None:
+            skips_not_found_on_github.append((entity_id, label, "gh api lookup failed or issue not found"))
+            continue
+        if gh_info.get("state") == "closed":
+            skips_closed.append((entity_id, label, "issue is CLOSED on GitHub"))
+            continue
+
+        # Write the (possibly hosted-recovered) identity back onto
+        # local_state so the plan-building loop below -- which re-reads
+        # local_state.get("repo")/("github_number") independently -- sees
+        # the same resolved identity this filter just validated, rather
+        # than re-deriving from local_state's original (possibly empty)
+        # values.
+        local_state = dict(local_state)
+        local_state["repo"] = repo
+        local_state["github_number"] = github_number
+        filtered_candidates[entity_id] = local_state
+
+    print(f"Skipped (no resolvable repo+github_number): {len(skips_no_identity)}")
+    print(f"Skipped (not found on GitHub):               {len(skips_not_found_on_github)}")
+    print(f"Skipped (CLOSED on GitHub):                  {len(skips_closed)}")
+    for _eid, label, reason in skips_no_identity + skips_not_found_on_github + skips_closed:
+        print(f"  SKIP {label}: {reason}")
+    print(f"Candidates passing identity filter: {len(filtered_candidates)}")
+    print()
+
+    plans = []
+    creations = 0
+    merges = 0
+    noops = 0
+
+    for entity_id, local_state in sorted(filtered_candidates.items()):
+        hosted_entity = get_hosted_entity(entity_id, base_url, token)
+        repo = local_state.get("repo")
+        github_number = local_state.get("github_number")
+
+        if hosted_entity is None:
+            canon_id = canonical_identity_lookup("issue", repo, github_number, base_url, token)
+            if canon_id and canon_id != entity_id:
+                hosted_entity = get_hosted_entity(canon_id, base_url, token)
+                if hosted_entity is not None:
+                    entity_id = canon_id  # write onto hosted's own id, not local's
+
+        plan = plan_gate_restore_for_entity(entity_id, local_state, hosted_entity)
+        plan["repo"] = repo
+        plan["github_number"] = github_number
+        plan["label"] = format_issue_label(repo, github_number, entity_id)
+
+        if plan["action"] == "create":
+            creations += 1
+        elif plan["action"] == "merge":
+            merges += 1
+        else:
+            noops += 1
+        plans.append(plan)
+
+    changed_plans = [p for p in plans if p["action"] in ("create", "merge")]
+
+    # --- Print dry-run report --------------------------------------------
+    dry_lines = []
+    for p in changed_plans:
+        label = p["label"]
+        if p["action"] == "create":
+            dry_lines.append(f"{label}: CREATE issue entity {p['entity_id']} with gate fields {sorted(p['fields'].keys())}")
+            for gate, old, new in p["gate_changes"]:
+                dry_lines.append(f"  {label}: gate {gate}: (none) -> {new}")
+        else:
+            for gate, old, new in p["gate_changes"]:
+                dry_lines.append(f"{label}: gate {gate}: {old!r} -> {new!r}")
+            if p["owner_history_changed"]:
+                before_n = len(p.get("hosted_owner_history") or [])
+                after_n = len(p["fields"].get("owner_history") or [])
+                dry_lines.append(f"{label}: owner_history: {before_n} entries -> {after_n} entries (union)")
+
+    report_text = "\n".join(dry_lines) if dry_lines else "(no changes)"
+    print()
+    print("=== Dry-run report ===")
+    print(report_text)
+
+    dry_run_log_path = args.gate_restore_dry_log
+    if dry_run_log_path:
+        import os as _os
+        _os.makedirs(_os.path.dirname(dry_run_log_path), exist_ok=True)
+        with open(dry_run_log_path, "w", encoding="utf-8") as f:
+            f.write(report_text + "\n")
+        print(f"Dry-run report saved to: {dry_run_log_path}")
+
+    # --- Sanity gate --------------------------------------------------
+    # Note: the CLOSED-on-GitHub check happens earlier, in the identity
+    # filter above -- an issue confirmed CLOSED there never becomes a plan,
+    # so changed_plans here can never contain one. That filter also refuses
+    # anything without a resolvable, GitHub-confirmed (repo, github_number)
+    # identity, so there is nothing further to check here beyond the count.
+    print()
+    print("=== Sanity gate ===")
+    print(f"Issues scanned (post-cutover, gate-field-bearing):        {len(candidates)}")
+    print(f"Issues passing identity filter (open, on GitHub):         {len(filtered_candidates)}")
+    print(f"Issues to CREATE on hosted (class-a, no hosted issue):    {creations}")
+    print(f"Issues to MERGE on hosted (class-b, gate field upgrade):  {merges}")
+    print(f"Issues with nothing to change:                            {noops}")
+
+    total_changes = creations + merges
+    if total_changes > 150:
+        print(
+            f"STOPPING: dry run proposes {total_changes} issue changes, over the "
+            "150-issue sanity threshold. Not applying. Review the dry-run report "
+            f"at {dry_run_log_path} before re-running.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not apply_mode:
+        print()
+        print("This was a DRY RUN. No data was written to hosted Neotoma.")
+        return
+
+    print()
+    print("Sanity gate passed. Proceeding to apply.")
+    print()
+
+    log_path = args.log
+    applied = 0
+    failed = 0
+    skipped_closed = 0
+    with open(log_path, "a", encoding="utf-8") as log_fh:
+        for p in changed_plans:
+            entity_id = p["entity_id"]
+            label = p["label"]
+            fields = dict(p["fields"])
+
+            # current_owner is decided lazily here (needs a per-field
+            # timestamp comparison, which is an extra hosted round-trip we
+            # only pay for entities that are actually about to be written).
+            if p["action"] == "merge" and local_state_current_owner_present(p):
+                local_ts = None
+                for conn_path in db_paths:
+                    conn = sqlite3.connect(f"file:{conn_path}?mode=ro", uri=True)
+                    ts = latest_field_write_ts(conn, entity_id, "current_owner", cutover_ts)
+                    conn.close()
+                    if ts and (local_ts is None or ts > local_ts):
+                        local_ts = ts
+                hosted_ts = hosted_latest_field_write_ts(entity_id, "current_owner", base_url, token)
+                new_owner, changed = merge_current_owner(
+                    p.get("hosted_current_owner"), p.get("local_current_owner"), local_ts, hosted_ts
+                )
+                if changed:
+                    fields["current_owner"] = new_owner
+                    print(f"{label}: current_owner: {p.get('hosted_current_owner')!r} -> {new_owner!r} (local write newer)")
+
+            if not fields:
+                continue
+
+            merged_payload_for_key = fields
+            idem_key = build_gate_restore_idempotency_key(entity_id, merged_payload_for_key)
+            store_payload = {
+                "entities": [build_entity_record("issue", entity_id, fields)],
+                "idempotency_key": idem_key,
+                "observation_source": "import",
+            }
+            status, resp = http_request("POST", base_url, "/store", token, store_payload)
+            ok = status in (200, 201)
+            print(f"{'APPLIED' if ok else 'ERROR'}: {label} entity={entity_id} status={status}")
+            log_action(
+                log_fh,
+                kind="gate_restore",
+                local_id=entity_id,
+                entity_id=entity_id,
+                entity_type="issue",
+                entity_class=p["action"],
+                repo=p.get("repo"),
+                github_number=p.get("github_number"),
+                fields_written=sorted(fields.keys()),
+                action="applied" if ok else "apply_failed",
+                idempotency_key=idem_key,
+                http_status=status,
+            )
+            if not ok:
+                failed += 1
+                print(
+                    "  Stopping: an error occurred mid-run. Not attempting cleanup.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            applied += 1
+            time.sleep(0.1)
+
+    print()
+    print("=== Gate-restore apply summary ===")
+    print(f"Applied: {applied}")
+    print(f"Failed:  {failed}")
+    print(f"Skipped (CLOSED on GitHub, gate change refused): {skipped_closed}")
+    print(f"Action log: {log_path}")
+
+
+def local_state_current_owner_present(plan: dict) -> bool:
+    return plan.get("local_current_owner") is not None
+
+
+def github_issue_lookup(repo: str, number: int) -> dict | None:
+    """Read-only `gh api repos/<repo>/issues/<number>` lookup -- ONE call per
+    issue, run strictly sequentially by the caller (never in parallel; load
+    rule: concurrency 1 applies to hosted Neotoma, and this script treats
+    GitHub the same way out of caution). Returns {"state": "open"|"closed",
+    ...} on success, or None if the issue does not exist, the lookup fails
+    (network, `gh` not authenticated, malformed repo/number), or the
+    response is unparseable.
+
+    None is a distinct outcome from state=="closed": a candidate whose
+    GitHub existence cannot be confirmed is skipped for "not found on
+    GitHub" (identity filter, operator instruction 2026-09-23), never
+    silently treated as open. This is the SAME identity check used to
+    filter out the ~106 unlabelled/test-junk entities the first dry run
+    surfaced (no resolvable repo+github_number, or a repo+github_number
+    that doesn't resolve to a real GitHub issue) -- `gh api` 404s on a
+    nonexistent issue/repo, which this function reports as None just like
+    any other lookup failure.
+    """
+    if not repo or number is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["gh", "api", f"repos/{repo}/issues/{number}"],
+            capture_output=True, text=True, timeout=20,
+        )
+        if result.returncode != 0:
+            return None
+        data = json.loads(result.stdout)
+        if not isinstance(data, dict) or "state" not in data:
+            return None
+        return data
+    except Exception:
+        return None
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -1015,14 +1745,18 @@ def main() -> None:
     )
     ap.add_argument(
         "--db",
-        required=True,
+        required=False,
+        default=None,
         help="Path to the LOCAL SQLite copy to replay from. Must be a read-only, "
-        "frozen fork; never a live writable database.",
+        "frozen fork; never a live writable database. Not used by --gate-restore, "
+        "which takes --gate-restore-db instead (it reads from BOTH local DBs).",
     )
     ap.add_argument(
         "--cutover",
-        required=True,
-        help="ISO-8601 cutover timestamp. Only rows with created_at > this value are considered.",
+        required=False,
+        default=None,
+        help="ISO-8601 cutover timestamp. Only rows with created_at > this value are considered. "
+        "Required by every mode including --gate-restore.",
     )
     ap.add_argument(
         "--only-missing",
@@ -1113,6 +1847,31 @@ def main() -> None:
             "computed."
         ),
     )
+    ap.add_argument(
+        "--gate-restore",
+        dest="gate_restore",
+        action="store_true",
+        default=False,
+        help=(
+            "Restore issue entities' gate fields (gate_status, owner_history, "
+            "current_owner) from both local DBs onto hosted (operator-approved "
+            "2026-09-23). When set, this run performs ONLY the gate-restore pass "
+            "instead of the class-a replay or --reconcile-file. Requires "
+            "--cutover; reads --gate-restore-db instead of --db."
+        ),
+    )
+    ap.add_argument(
+        "--gate-restore-db",
+        dest="gate_restore_db",
+        default=f"{os.path.expanduser('~')}/data/neotoma.prod.db,{os.path.expanduser('~')}/data/neotoma.db",
+        help="Comma-separated local DB paths to scan for --gate-restore (default: both known local forks).",
+    )
+    ap.add_argument(
+        "--gate-restore-dry-log",
+        dest="gate_restore_dry_log",
+        default=None,
+        help="Path to save the --gate-restore dry-run report to (in addition to printing it).",
+    )
     args = ap.parse_args()
 
     if args.extend_schemas is None:
@@ -1131,6 +1890,21 @@ def main() -> None:
 
     base_url = get_base_url()
     token = get_token()
+
+    if args.gate_restore:
+        if not args.cutover:
+            print("ERROR: --gate-restore requires --cutover.", file=sys.stderr)
+            sys.exit(1)
+        run_gate_restore(args, base_url, token, apply_mode)
+        return
+
+    if not args.db:
+        print("ERROR: --db is required unless --gate-restore is set.", file=sys.stderr)
+        sys.exit(1)
+    if not args.cutover:
+        print("ERROR: --cutover is required.", file=sys.stderr)
+        sys.exit(1)
+
     conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
 
     entity_ids = None

@@ -707,4 +707,388 @@ def test_plan_class_b_reconciliation_nothing_to_apply_when_all_same():
 def test_value_hash_stable_for_same_value_differs_for_different_value():
     assert value_hash("same") == value_hash("same")
     assert value_hash("a") != value_hash("b")
+
+
+# --- --gate-restore (operator-approved 2026-09-23) --------------------------
+
+from neotoma_local_fork_replay import (  # noqa: E402
+    GATE_STATUS_RANK,
+    canonical_identity_lookup,
+    format_issue_label,
+    gate_status_rank,
+    merge_current_owner,
+    merge_gate_status,
+    merge_owner_history,
+    plan_gate_restore_for_entity,
+    scan_local_gate_candidates,
+)
+
+
+def test_gate_status_rank_orders_pending_below_signed_off():
+    assert gate_status_rank("pending") < gate_status_rank("signed_off")
+    assert gate_status_rank("pending") < gate_status_rank("changes_requested")
+    assert gate_status_rank("changes_requested") < gate_status_rank("signed_off")
+
+
+def test_gate_status_rank_unknown_status_is_none():
+    assert gate_status_rank("some_future_status_not_in_the_table") is None
+    assert gate_status_rank(None) is None
+
+
+def test_merge_gate_status_upgrades_pending_to_signed_off():
+    merged, changes = merge_gate_status({"pm": "pending"}, {"pm": "signed_off"})
+    assert merged["pm"] == "signed_off"
+    assert changes == [("pm", "pending", "signed_off")]
+
+
+def test_merge_gate_status_never_downgrades_hosted():
+    # Hosted already signed_off; local (stale local-fork write) says pending.
+    # This is exactly the "never downgrade hosted" rule from the brief.
+    merged, changes = merge_gate_status({"pm": "signed_off"}, {"pm": "pending"})
+    assert merged["pm"] == "signed_off"
+    assert changes == []
+
+
+def test_merge_gate_status_equal_rank_is_a_noop():
+    # not_required and signed_off share the top rank in GATE_STATUS_RANK --
+    # neither should overwrite the other when they're already equal, and a
+    # local value of DIFFERENT top-rank status than hosted's own top-rank
+    # status is also not a change (equal rank means no ordering to apply).
+    merged, changes = merge_gate_status({"legal": "not_required"}, {"legal": "not_required"})
+    assert changes == []
+    merged2, changes2 = merge_gate_status({"qa": "signed_off"}, {"qa": "not_required"})
+    assert changes2 == []  # equal rank, hosted's actual value is kept
+    assert merged2["qa"] == "signed_off"
+
+
+def test_merge_gate_status_never_touches_a_gate_absent_from_local():
+    # Hosted has gates local never mentions -- those must pass through
+    # completely unchanged (the brief: "never touch a gate that doesn't
+    # appear locally").
+    merged, changes = merge_gate_status(
+        {"pm": "signed_off", "arch": "pending", "qa": "pending"}, {"pm": "signed_off"}
+    )
+    assert merged == {"pm": "signed_off", "arch": "pending", "qa": "pending"}
+    assert changes == []
+
+
+def test_merge_gate_status_adds_gate_hosted_never_had():
+    merged, changes = merge_gate_status({"pm": "pending"}, {"ux": "signed_off"})
+    assert merged == {"pm": "pending", "ux": "signed_off"}
+    assert changes == [("ux", None, "signed_off")]
+
+
+def test_merge_gate_status_unranked_hosted_value_is_never_overwritten():
+    # Fail-closed case: hosted holds a status this table doesn't recognize.
+    # Even a "clearly more advanced" local value must not overwrite it,
+    # since we cannot prove the ordering.
+    merged, changes = merge_gate_status(
+        {"pm": "some_new_status_the_rank_table_predates"}, {"pm": "signed_off"}
+    )
+    assert changes == []
+    assert merged["pm"] == "some_new_status_the_rank_table_predates"
+
+
+def test_merge_owner_history_unions_and_dedupes_new_local_entries():
+    hosted = [{"agent": "lanius", "action": "triaged", "at": "2026-09-23T10:00:00Z"}]
+    local = [
+        {"agent": "lanius", "action": "triaged", "at": "2026-09-23T10:00:00Z"},  # true dup of hosted's entry
+        {"agent": "pavo", "action": "claimed", "at": "2026-09-23T09:00:00Z"},  # genuinely new
+    ]
+    merged = merge_owner_history(hosted, local)
+    assert len(merged) == 2  # deduped (the true dup), not 3
+    # Hosted's own entries are never reordered; new local entries are
+    # appended after, sorted among themselves.
+    assert merged[0]["agent"] == "lanius"
+    assert merged[1]["agent"] == "pavo"
+
+
+def test_merge_owner_history_never_shrinks_hosted_even_with_hosted_internal_duplicates():
+    # Regression: real hosted data (entity ent_fec57fb48b3485bff6a24412) already
+    # carries an internal near-duplicate pair of its own (same agent/action/
+    # gate/at, differing only by an extra `note` field on one). A merge must
+    # NEVER edit hosted's history downward to "clean up" a pre-existing
+    # hosted data-quality issue -- that is out of scope for this replay and
+    # was flagged as a possible union bug before this test pinned the fix.
+    hosted = [
+        {"agent": "lanius", "action": "triaged", "at": "2026-09-15T09:47:10Z"},
+        {"agent": "pavo", "action": "seeded_missing_entity", "at": "2026-09-15T09:53:49Z"},
+        {
+            "agent": "pavo",
+            "action": "seeded_missing_entity",
+            "at": "2026-09-15T09:53:49Z",
+            "note": "Lanius linked entity but 404 on production; Pavo seeded for gate tracking",
+        },
+        {"agent": "pavo", "gate": "pm", "action": "signed_off", "actor": "pavo", "at": "2026-09-15T09:54:18Z"},
+    ]
+    local = [{"agent": "lanius", "action": "triaged", "at": "2026-09-15T09:46:34Z"}]
+    merged = merge_owner_history(hosted, local)
+    assert len(merged) >= max(len(local), len(hosted))
+    assert len(merged) == 5  # all 4 hosted entries survive untouched + 1 new local entry
+    for h in hosted:
+        assert h in merged
+
+
+def test_merge_owner_history_invariant_never_shrinks_regardless_of_inputs():
+    # General form of the regression above: for ANY hosted/local pair
+    # (including hosted holding its own internal duplicates, or local being
+    # empty), the merge must never produce fewer entries than the larger of
+    # the two inputs.
+    cases = [
+        ([], []),
+        ([{"agent": "a", "action": "x", "at": "t1"}], []),
+        ([], [{"agent": "a", "action": "x", "at": "t1"}]),
+        (
+            [{"agent": "a", "action": "x", "at": "t1"}, {"agent": "a", "action": "x", "at": "t1"}],
+            [{"agent": "b", "action": "y", "at": "t2"}],
+        ),
+    ]
+    for hosted, local in cases:
+        merged = merge_owner_history(hosted, local)
+        assert len(merged) >= max(len(hosted), len(local)), (hosted, local, merged)
+
+
+def test_merge_owner_history_dedupes_legacy_entries_with_no_timestamp_on_note():
+    entry = {"action": "legacy_gate_init", "agent": "lanius", "note": "backfill for #2139"}
+    merged = merge_owner_history([entry], [dict(entry)])
+    assert len(merged) == 1
+
+
+def test_merge_owner_history_keeps_distinct_entries_with_same_agent_and_timestamp():
+    # Regression: real local-fork data (entity ent_f89b4fe5636ac3275d629c3e)
+    # has the SAME agent logging a signed_off AND a handed_off entry at the
+    # EXACT same `at` timestamp (the instant a gate transition happened). A
+    # dedup key of (agent, at) alone collapsed a 355-entry owner_history
+    # down to 7 -- real data loss, caught before the --apply run. The key
+    # must also weigh `action` (and `gate`, where present) so these two
+    # entries are kept as distinct.
+    same_ts = "2026-09-15T11:28:10.641829+00:00"
+    signed_off = {"action": "signed_off", "agent": "pavo", "at": same_ts, "gate": "pm"}
+    handed_off = {
+        "action": "handed_off",
+        "agent": "pavo",
+        "assigned_owner": "accipiter",
+        "at": same_ts,
+        "gate": "pm",
+        "next_gates": ["ux", "arch"],
+    }
+    merged = merge_owner_history([], [signed_off, handed_off])
+    assert len(merged) == 2
+    actions = {e["action"] for e in merged}
+    assert actions == {"signed_off", "handed_off"}
+
+
+def test_merge_owner_history_still_dedupes_true_duplicates_across_dbs():
+    # The SAME write appearing in both local DBs (the common case for the
+    # non-schema_lag_bg_* rows this entity replay covers) must still
+    # collapse to one entry, not be kept twice.
+    entry = {"action": "signed_off", "agent": "pavo", "at": "2026-09-15T11:28:10Z", "gate": "pm"}
+    merged = merge_owner_history([dict(entry)], [dict(entry)])
+    assert len(merged) == 1
+
+
+def test_merge_current_owner_local_wins_when_strictly_newer():
+    value, changed = merge_current_owner("pavo", "vanellus", "2026-09-23T12:00:00Z", "2026-09-23T10:00:00Z")
+    assert value == "vanellus"
+    assert changed is True
+
+
+def test_merge_current_owner_hosted_wins_when_hosted_is_newer():
+    value, changed = merge_current_owner("pavo", "vanellus", "2026-09-23T09:00:00Z", "2026-09-23T10:00:00Z")
+    assert value == "pavo"
+    assert changed is False
+
+
+def test_merge_current_owner_fails_closed_on_missing_local_timestamp():
+    # Cannot prove local is newer without its own write timestamp -- must
+    # not overwrite hosted.
+    value, changed = merge_current_owner("pavo", "vanellus", None, "2026-09-23T10:00:00Z")
+    assert value == "pavo"
+    assert changed is False
+
+
+def test_merge_current_owner_local_wins_when_hosted_has_no_timestamp_at_all():
+    value, changed = merge_current_owner(None, "vanellus", "2026-09-23T12:00:00Z", None)
+    assert value == "vanellus"
+    assert changed is True
+
+
+def test_plan_gate_restore_missing_issue_creates_with_identifying_and_gate_fields():
+    local_state = {
+        "gate_status": {"pm": "signed_off", "ux": "signed_off"},
+        "owner_history": [{"agent": "lanius", "action": "triaged", "at": "2026-09-23T10:00:00Z"}],
+        "current_owner": "pavo",
+        "repo": "markmhendrickson/ateles",
+        "github_number": 1172,
+        "title": "Some issue title",
+    }
+    plan = plan_gate_restore_for_entity("ent_missing", local_state, hosted_entity=None)
+    assert plan["action"] == "create"
+    assert plan["fields"]["gate_status"] == {"pm": "signed_off", "ux": "signed_off"}
+    assert plan["fields"]["owner_history"] == local_state["owner_history"]
+    assert plan["fields"]["current_owner"] == "pavo"
+    assert plan["fields"]["repo"] == "markmhendrickson/ateles"
+    assert plan["fields"]["github_number"] == 1172
+    # No target_id/entity_type reserved-key collision -- those are added by
+    # build_entity_record at write time, not baked into the plan's fields.
+    assert "entity_type" not in plan["fields"]
+    assert "target_id" not in plan["fields"]
+
+
+def test_plan_gate_restore_merge_only_touches_gates_present_locally():
+    local_state = {"gate_status": {"pm": "signed_off"}}
+    hosted_entity = {
+        "snapshot": {
+            "gate_status": {"pm": "pending", "arch": "pending"},
+            "owner_history": [],
+            "current_owner": None,
+        }
+    }
+    plan = plan_gate_restore_for_entity("ent_1178", local_state, hosted_entity)
+    assert plan["action"] == "merge"
+    assert plan["fields"]["gate_status"] == {"pm": "signed_off", "arch": "pending"}
+    assert plan["gate_changes"] == [("pm", "pending", "signed_off")]
+    assert "owner_history" not in plan["fields"]  # unchanged, not resent
+
+
+def test_plan_gate_restore_noop_when_hosted_already_equal_or_ahead():
+    local_state = {"gate_status": {"pm": "pending"}}
+    hosted_entity = {"snapshot": {"gate_status": {"pm": "signed_off"}, "owner_history": [], "current_owner": None}}
+    plan = plan_gate_restore_for_entity("ent_x", local_state, hosted_entity)
+    assert plan["fields"] == {}
+    assert plan["action"] != "create"
+
+
+def test_scan_local_gate_candidates_folds_forward_across_both_dbs():
+    import sqlite3 as _sqlite3
+
+    db1 = _sqlite3.connect(":memory:")
+    db1.execute(
+        "CREATE TABLE observations (id TEXT, entity_id TEXT, entity_type TEXT, fields TEXT, created_at TEXT)"
+    )
+    db1.execute(
+        "INSERT INTO observations VALUES (?,?,?,?,?)",
+        ("o1", "ent_a", "issue", json.dumps({"gate_status": {"pm": "pending"}, "repo": "x/y", "github_number": 1}), "2026-09-23T09:00:00Z"),
+    )
+    db1.commit()
+
+    # scan_local_gate_candidates opens real files via sqlite3.connect(f"file:{path}?mode=ro", uri=True),
+    # so exercise it against real temp db files rather than :memory: connections.
+    import tempfile
+    import os as _os
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p1 = _os.path.join(tmpdir, "db1.db")
+        p2 = _os.path.join(tmpdir, "db2.db")
+        c1 = _sqlite3.connect(p1)
+        c1.execute(
+            "CREATE TABLE observations (id TEXT, entity_id TEXT, entity_type TEXT, fields TEXT, created_at TEXT)"
+        )
+        c1.execute(
+            "INSERT INTO observations VALUES (?,?,?,?,?)",
+            ("o1", "ent_a", "issue", json.dumps({"gate_status": {"pm": "pending"}, "repo": "x/y", "github_number": 1}), "2026-09-23T09:00:00Z"),
+        )
+        c1.commit()
+        c1.close()
+
+        c2 = _sqlite3.connect(p2)
+        c2.execute(
+            "CREATE TABLE observations (id TEXT, entity_id TEXT, entity_type TEXT, fields TEXT, created_at TEXT)"
+        )
+        c2.execute(
+            "INSERT INTO observations VALUES (?,?,?,?,?)",
+            ("o2", "ent_a", "issue", json.dumps({"gate_status": {"pm": "signed_off"}}), "2026-09-23T10:00:00Z"),
+        )
+        c2.commit()
+        c2.close()
+
+        candidates = scan_local_gate_candidates([p1, p2], "2026-08-04T08:51:43.023Z")
+        assert "ent_a" in candidates
+        # The later write (db2, 10:00) wins over the earlier one (db1, 9:00)
+        # for the SAME key, matching "fold forward across both DBs sorted by
+        # created_at, last write wins per field".
+        assert candidates["ent_a"]["gate_status"] == {"pm": "signed_off"}
+        # Identifying fields from the earlier observation are still carried.
+        assert candidates["ent_a"]["repo"] == "x/y"
+        assert candidates["ent_a"]["github_number"] == 1
+
+
+def test_format_issue_label_uses_repo_and_number_when_present():
+    assert format_issue_label("markmhendrickson/ateles", 1172, "ent_x") == "markmhendrickson/ateles#1172"
+    assert format_issue_label(None, None, "ent_x") == "ent_x"
+
+
+def test_canonical_identity_lookup_returns_matched_entity_id(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    def fake_http_request(method, base_url, path, token, body=None, retries=0, retry_backoff_seconds=1.0):
+        assert path == "/retrieve_entity_by_identifier"
+        assert body == {"entity_type": "issue", "identifier": "1172|markmhendrickson/ateles"}
+        return 200, {"entities": [{"entity_id": "ent_canonical_match"}]}
+
+    monkeypatch.setattr(_mod, "http_request", fake_http_request)
+    result = canonical_identity_lookup(
+        "issue", "markmhendrickson/ateles", 1172, "https://hosted.example", "tok"
+    )
+    assert result == "ent_canonical_match"
+
+
+def test_canonical_identity_lookup_returns_none_on_no_match():
+    import neotoma_local_fork_replay as _mod
+
+    def fake_http_request(method, base_url, path, token, body=None, retries=0, retry_backoff_seconds=1.0):
+        return 200, {"entities": [], "total": 0}
+
+    import pytest as _pytest
+
+    monkeypatch = _pytest.MonkeyPatch()
+    monkeypatch.setattr(_mod, "http_request", fake_http_request)
+    try:
+        result = canonical_identity_lookup(
+            "issue", "markmhendrickson/ateles", 9999999, "https://hosted.example", "tok"
+        )
+        assert result is None
+    finally:
+        monkeypatch.undo()
+
+
+def test_canonical_identity_lookup_returns_none_without_repo_or_number():
+    assert canonical_identity_lookup("issue", None, 1172, "https://hosted.example", "tok") is None
+    assert canonical_identity_lookup("issue", "markmhendrickson/ateles", None, "https://hosted.example", "tok") is None
+
+
+def test_github_issue_lookup_returns_state_on_success(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+    import subprocess as _subprocess
+
+    class FakeResult:
+        returncode = 0
+        stdout = json.dumps({"number": 1172, "state": "open", "title": "x"})
+
+    def fake_run(args, capture_output, text, timeout):
+        assert args == ["gh", "api", "repos/markmhendrickson/ateles/issues/1172"]
+        return FakeResult()
+
+    monkeypatch.setattr(_subprocess, "run", fake_run)
+    result = _mod.github_issue_lookup("markmhendrickson/ateles", 1172)
+    assert result["state"] == "open"
+
+
+def test_github_issue_lookup_returns_none_on_nonzero_exit(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+    import subprocess as _subprocess
+
+    class FakeResult:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(_subprocess, "run", lambda *a, **k: FakeResult())
+    assert _mod.github_issue_lookup("markmhendrickson/ateles", 999999999) is None
+
+
+def test_github_issue_lookup_returns_none_without_repo_or_number():
+    import neotoma_local_fork_replay as _mod
+
+    assert _mod.github_issue_lookup(None, 1172) is None
+    assert _mod.github_issue_lookup("markmhendrickson/ateles", None) is None
     assert value_hash({"k": 1}) == value_hash({"k": 1})
