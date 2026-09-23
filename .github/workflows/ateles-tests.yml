@@ -28,6 +28,8 @@ on:
       - "lib/approval/**"
       - "lib/transcript_clarity.py"
       - "lib/test_transcript_clarity.py"
+      - "lib/recording_storage/**"
+      - "lib/test_recording_storage.py"
       - "execution/scripts/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -116,6 +118,11 @@ jobs:
         run: uv run --extra dev python -m pytest lib/approval/ -q
       - name: Run transcript clarity lib tests
         run: uv run --extra dev python -m pytest lib/test_transcript_clarity.py -q
+      # ateles#1019: hybrid recording storage contract (fake adapter only).
+      # Own step so a contract regression is attributable, matching the
+      # transcript-clarity / approval lib pattern (#584/#524 lane gaps).
+      - name: Run recording storage contract tests
+        run: uv run --extra dev python -m pytest lib/test_recording_storage.py -q
       # ateles#524 (qa lens, PR #527 round 2): execution/scripts/ has its own
       # test_*.py files (SOPS token fallback, Loxia review, agent-doc render,
       # transcription) but no lane ran them — this closes that gap. Also
