@@ -17,31 +17,65 @@ environment, as a second deliberate guard against accidental invocation).
 Method
 ------
 Goes through the public Neotoma HTTP API (POST /store, POST
-/create_relationship), NOT any in-process storage function, because:
-  - Entity ids and observation ids on hosted are deterministic hashes
-    derived from (entity_type, canonical_name) and (source_id,
-    interpretation_id, entity_id, fields, idempotency_key) respectively.
-    Submitting the same content through /store with a deterministic
-    idempotency_key derived from the LOCAL observation's own id resolves to
-    the same ids and is safe to re-run.
-  - The public /store schema does not accept a client-supplied observed_at
-    override or raw id override -- only idempotency_key, source_priority,
-    observation_source. This script still submits observed_at as a
-    field-level value inside the request body where the schema allows it,
-    and logs the server's own response so a caller can check afterward
-    whether the value was honored or the server stamped "now" instead.
-  - create_relationship has no timestamp override at all -- replayed
-    relationships get a new created_at on hosted. This is a known, accepted
-    provenance gap.
+/create_relationship), NOT any in-process storage function.
+
+Request shapes below are taken directly from the neotoma repo source (read
+at the time this script was hardened, commit a80340c66):
+  - src/shared/action_schemas.ts:723-763 StoreRequestSchema -- entities is
+    `z.array(z.record(z.unknown()))` (a flat, arbitrary-key record per
+    entity); idempotency_key (action_schemas.ts:733), source_priority
+    (:729), and observation_source (:730) are TOP-LEVEL request fields, not
+    per-entity. There is no `observed_at` field anywhere on this schema.
+  - src/actions.ts:7646-7708 (the /store entity-resolution loop) reads
+    exactly three reserved keys off each entity record -- `entity_type`
+    (required), `target_id` (optional: forces "extend this exact entity_id"
+    / bypasses canonical-name derivation), and `intent` (optional:
+    "create_new" forces strict mode) -- and treats every OTHER key on the
+    record as entity field data (actions.ts:7690-7698). There is no
+    `entity_id` hint field: passing one puts a literal "entity_id" key into
+    the entity's fields and the server returns an UNKNOWN_FIELD warning.
+  - Entity identity/id resolution (src/services/entity_resolution.ts:
+    954-1038): the server resolves the entity id either from a schema's
+    declared `canonical_name_fields` (deterministic hash) or, when the
+    caller passes `target_id`, by extending that exact id
+    (identityBasis: "target_id", entity_resolution.ts:1033-1038). This
+    script always passes `target_id` = the LOCAL entity_id, so a replayed
+    entity lands on the SAME id it had locally rather than depending on
+    canonical-name derivation agreeing (it usually does, since ids are
+    themselves canonical-name hashes, but target_id makes it explicit and
+    authoritative).
+  - observed_at is server-stamped at insert time
+    (actions.ts:7158/8031 `observed_at: new Date().toISOString()`); the
+    public /store schema has no client override for it. This script does
+    NOT attempt to send it -- there is no schema slot for it, and flattening
+    it onto the entity record would corrupt the entity's field data (this
+    is exactly the bug an earlier version of this script had: passing
+    observed_at as a "field" caused the server to store a literal
+    "observed_at" key in entity fields, flagged as UNKNOWN_FIELD).
+  - src/shared/action_schemas.ts:120-127 CreateRelationshipRequestSchema --
+    relationship_type, source_entity_id, target_entity_id, source_id
+    (optional; a source/provenance pointer, NOT an idempotency key),
+    metadata, user_id. There is no idempotency_key field on this schema at
+    all. Re-running create_relationship for the same (relationship_type,
+    source_entity_id, target_entity_id) triple is idempotent by construction:
+    src/actions.ts:9763-9803 keys the stored row on
+    `relationship_key = f"{type}:{source}:{target}"`
+    (src/actions.ts:5790-5791), so a duplicate call reuses the same row
+    rather than creating a second edge.
 
 Idempotency key scheme
 -----------------------
-  observations:              "migrate-<cutover-date>-obs-<local_observation_id>"
-  relationship_observations: "migrate-<cutover-date>-rel-<local_relationship_observation_id>"
-  sources:                   "migrate-<cutover-date>-src-<local_source_id>"
+  observations: "migrate-<cutover-date>-obs-<local_observation_id>"
+                (one /store call per local observation row; the
+                idempotency_key is the top-level request field)
+  relationships: no idempotency_key -- idempotent via relationship_key
+                 (relationship_type:source_entity_id:target_entity_id)
+  sources:       "migrate-<cutover-date>-src-<local_source_id>" (reserved;
+                 source blob replay is not implemented -- see below)
 
-Re-running with --apply after a partial failure is safe: the server treats
-a duplicate idempotency_key as a no-op / returns the existing row.
+Re-running with --apply after a partial failure is safe: a duplicate
+observation idempotency_key is a no-op / returns the existing row, and a
+duplicate relationship triple resolves to the existing relationship_key.
 
 --only-missing mode (default whenever --apply is used)
 --------------------------------------------------------
@@ -178,6 +212,27 @@ def load_candidates(conn: sqlite3.Connection, cutover_ts: str, entity_ids=None):
     return obs, rels, srcs
 
 
+def build_entity_record(entity_type: str, target_id: str, fields: dict) -> dict:
+    """Build one element of a /store request's `entities` array.
+
+    Per neotoma src/actions.ts:7646-7708, the server reads exactly three
+    reserved keys off this record -- entity_type, target_id, intent -- and
+    treats every other key as entity field data. `target_id` forces the
+    write onto that exact hosted entity_id (entity_resolution.ts:998-1038,
+    identityBasis "target_id") rather than depending on canonical-name
+    derivation. No other metadata (entity_id, observed_at,
+    observation_source, source_priority, idempotency_key) belongs on this
+    record -- each of those lives at the top level of the /store request
+    body instead (StoreRequestSchema, action_schemas.ts:723-763), and the
+    schema has no per-entity slot for any of them. A key with no home in
+    the schema is dropped rather than flattened onto the entity, since a
+    flattened stray key becomes a real (wrong) field on the entity.
+    """
+    record = {"entity_type": entity_type, "target_id": target_id}
+    record.update(fields)
+    return record
+
+
 def build_observation_payload(row, cutover_date: str):
     (
         local_id,
@@ -197,19 +252,17 @@ def build_observation_payload(row, cutover_date: str):
     ) = row
     fields = json.loads(fields_json) if fields_json else {}
     idem_key = f"migrate-{cutover_date}-obs-{local_id}"
+    # observed_at is intentionally NOT included anywhere in this payload:
+    # /store has no client-supplied observed_at override (it is
+    # server-stamped at insert, action_schemas.ts has no such field), and
+    # earlier versions of this script corrupted entity field data by
+    # flattening observed_at onto the entity record instead of dropping it.
     return (
         {
-            "entities": [
-                {
-                    "entity_type": entity_type,
-                    "entity_id": entity_id,  # hint; server resolves canonically
-                    "fields": fields,
-                    "observed_at": observed_at,  # best-effort; public schema may not honor this
-                    "idempotency_key": idem_key,
-                    "observation_source": observation_source or "import",
-                    "source_priority": source_priority,
-                }
-            ]
+            "entities": [build_entity_record(entity_type, entity_id, fields)],
+            "idempotency_key": idem_key,
+            "observation_source": observation_source or "import",
+            "source_priority": source_priority,
         },
         idem_key,
     )
@@ -232,14 +285,23 @@ def build_relationship_payload(row, cutover_date: str):
         user_id,
     ) = row
     metadata = json.loads(metadata_json) if metadata_json else {}
-    idem_key = f"migrate-{cutover_date}-rel-{local_id}"
+    # CreateRelationshipRequestSchema (action_schemas.ts:120-127) has no
+    # idempotency_key field. Re-running create_relationship for the same
+    # (relationship_type, source_entity_id, target_entity_id) triple is
+    # idempotent by construction: the stored row is keyed on
+    # relationship_key = f"{type}:{source}:{target}" (actions.ts:5790-5791),
+    # so a duplicate call resolves to the existing row rather than creating
+    # a second edge. observed_at has no home on this schema either and is
+    # dropped -- relationships get a server-stamped created_at, a known,
+    # accepted provenance gap (see module docstring).
+    idem_key = (
+        f"migrate-{cutover_date}-rel-{local_id}"  # used only for our own action log
+    )
     return {
         "relationship_type": rel_type,
         "source_entity_id": source_entity_id,
         "target_entity_id": target_entity_id,
         "metadata": metadata,
-        "observed_at": observed_at,  # no server-side timestamp override; logged as gap
-        "idempotency_key": idem_key,
     }, idem_key
 
 
@@ -459,9 +521,18 @@ def main() -> None:
                 continue
 
             ok = status in (200, 201)
+            unknown_field_warnings = []
+            if ok and isinstance(resp, dict):
+                for w in resp.get("store_warnings") or []:
+                    if isinstance(w, dict) and w.get("code") == "UNKNOWN_FIELD":
+                        unknown_field_warnings.append(w.get("entity_id") or target_desc)
             if not ok:
                 print(
                     f"  ERROR status={status} resp_keys={sorted(resp.keys()) if isinstance(resp, dict) else type(resp).__name__}"
+                )
+            elif unknown_field_warnings:
+                print(
+                    f"  OK status={status} but UNKNOWN_FIELD store_warnings present -- STOPPING"
                 )
             else:
                 print(f"  OK status={status}")
@@ -472,6 +543,7 @@ def main() -> None:
                 entity_id=target_desc,
                 entity_type=entity_type,
                 entity_class=entity_class,
+                unknown_field_warning_count=len(unknown_field_warnings),
                 action="applied" if ok else "apply_failed",
                 idempotency_key=idem_key,
                 http_status=status,
@@ -479,6 +551,13 @@ def main() -> None:
             if not ok:
                 print(
                     "  Stopping: an error occurred mid-run. Not attempting cleanup.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if unknown_field_warnings:
+                print(
+                    "  Stopping: UNKNOWN_FIELD store_warnings on a write means a field "
+                    "the payload sent has no home on the schema. Not attempting cleanup.",
                     file=sys.stderr,
                 )
                 sys.exit(1)
