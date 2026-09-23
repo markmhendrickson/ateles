@@ -969,7 +969,8 @@ after the table.
 | `scenarios.md#h-an-action-discovered-mid-workflow-at-never-high-and-low` | GW-36, GW-38, GW-40, GW-44, PR-5 |
 | `scenarios.md#i-neotoma-unreachable-halt` | FP-1 to FP-5, FP-15, FP-20, WM-18, AU-1, PR-2, PR-7 |
 | `scenarios.md#j-a-task-created-routed-by-intake-and-entering-its-successor` | WM-12, WM-13, WM-27, GW-31, GW-32, WF-3, WF-5, WF-6, WF-7 |
-| `scenarios.md#what-the-scenarios-do-not-show` | each absence is a row's red condition: WM-1 (a router), WM-3 (delivery by any path but a claim), WM-17 (a process returning a lease), WM-33 (an artifact as a step's subject), GW-3 (a per-step status row), WM-35 (a parent claimed), GW-44 (an action outside the gate), WM-9 (a stored liveness flag), GW-38 (a gate consulted on anything but an action), WM-13 (a non-intake batch with no intake before it), GW-31 (two successors), GW-49 (a second queue), GW-32 (an entity above the batches) |
+| `scenarios.md#k-agent-inventory-two-deployments-empty-indeterminate-and-deny` | AU-22, AU-23, AU-24, AU-25, AU-26, PR-7 |
+| `scenarios.md#what-the-scenarios-do-not-show` | each absence is a row's red condition: WM-1 (a router), WM-3 (delivery by any path but a claim), WM-17 (a process returning a lease), WM-33 (an artifact as a step's subject), GW-3 (a per-step status row), WM-35 (a parent claimed), GW-44 (an action outside the gate), WM-9 (a stored liveness flag), GW-38 (a gate consulted on anything but an action), WM-13 (a non-intake batch with no intake before it), GW-31 (two successors), GW-49 (a second queue), GW-32 (an entity above the batches), AU-22 (stored agent.status / flattened deployments / inventory-authorized remediation) |
 
 **Rulings no walkthrough shows**, each a scenario that document could add and each already a row here: a
 step holding on a discovered condition and the three ways the hold ends (decision 13; WM-31, WM-31a); a

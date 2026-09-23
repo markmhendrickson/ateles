@@ -1196,9 +1196,11 @@ These grains stay separate because their cardinalities differ. One principal may
 roles, grants, and deployments, and one deployment may produce many runtime observations. Flattening them
 into one row either discards that multiplicity or makes a maintained summary the source of truth. The
 inventory instead reduces the source records at read time, as of the time and freshness bound its reader
-declares. An operator view may render labels such as *ready*, *restricted*, *drifted*, *indeterminate*, or
-*retired*, but the label is not an input to a claim, admission, action, routing, or deployment decision.
-There is no ordered path every agent traverses and no transition writer keeping one true.
+declares. Any operator-facing presentation of that read is non-authoritative: it must not flatten the two
+grains or multiple deployments into one cell, and it must keep `Permit`, `Deny`, `Indeterminate`, and a
+valid empty distinguishable from one another. Presentation never authorizes a claim, admission, action,
+routing, or deployment decision. There is no ordered path every agent traverses and no transition writer
+keeping one true. Worked walkthrough: [`scenarios.md#k-agent-inventory-two-deployments-empty-indeterminate-and-deny`](scenarios.md#k-agent-inventory-two-deployments-empty-indeterminate-and-deny).
 
 **The decisions are mechanism-specific.** The four mechanisms in
 `work_model.md#the-four-execution-mechanisms` do not share a universal `may_accept_work` predicate:

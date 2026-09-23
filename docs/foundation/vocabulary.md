@@ -1540,9 +1540,10 @@ relations) and each deployment's independently observed runtime evidence (declar
 coverage, [freshness](#freshness), and agent sessions). It answers one mechanism-specific decision at a time.
 **See:** [`authority_model.md#agent-inventory-review-disablement-and-retirement`](authority_model.md#agent-inventory-review-disablement-and-retirement).
 **Never:** —
-**Not for:** a lifecycle status or canonical lifecycle phase; a row maintained by a watchdog; a display
-label used as claim, admission, routing, action, or deployment authority; a claim that an `agent_session`
-proves a process is running.
+**Not for:** a lifecycle status or canonical lifecycle phase; a row maintained by a watchdog; a fixed set of
+display labels (ready/restricted/drifted/indeterminate/retired) until a consumer surface owns that
+vocabulary; a display label used as claim, admission, routing, action, or deployment authority; a claim
+that an `agent_session` proves a process is running.
 
 ### tenant
 **Definition:** the isolation boundary, an organization or a solo [operator](#operator), that no read, write, routing,

@@ -363,13 +363,71 @@ flowchart TD
 [`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`](gates_and_workflows.md#sequencing-is-data-successors-and-the-chain),
 [`workflows.md#intake`](workflows.md#intake); `principles.md` invariant 11.
 
+## (k) Agent inventory: two deployments, empty, Indeterminate, and Deny
+
+Principal `agent:cicada@ateles-swarm` has two declared deployments. `deploy-fresh` has independent host
+evidence that is fresh and complete. `deploy-stale` is declared, but its host evidence is stale or
+unreachable and coverage is only partial. The inventory reader presents the governance grain once and the
+runtime grain **per deployment**, side by side — never collapsing both deployments into one runtime cell,
+and never inventing a stored `agent.status`.
+
+The reader asks one mechanism-specific question: may this principal claim task `task:refresh-host-evidence`
+now (task path), or — equivalently for an effect — does this action's `action_policy` require matching
+fresh host evidence on the deployment named by the effect? Governance shows live grants and roster
+eligibility. Runtime on `deploy-fresh` is readable and fresh; runtime on `deploy-stale` is not.
+
+**Valid empty.** `deploy-fresh` is declared and no process is observed. That is an availability finding and
+retry or escalation for that deployment only. Unrelated principals and actions do not block
+(`[COPY: availability finding for deploy-fresh — no process observed]`). The mismatch table's
+"deployment declared and no process observed" row is the reduction; empty availability is not `Deny`.
+
+**Indeterminate.** Independent host evidence for `deploy-stale` is missing or stale while a self-report is
+fresh. Runtime assurance for that deployment is `Indeterminate`. Only a decision whose declared condition
+requires that evidence holds or denies; other decisions that do not require it proceed. The recorded
+decision keeps the third value — presentation must not coerce it to healthy or to plain `Deny`
+(`[COPY: runtime assurance Indeterminate on deploy-stale — host evidence stale]`). Evidence refresh is
+ordinary work.
+
+**Deny.** The principal's grant for the asked claim is absent, expired, or revoked — or the principal is
+disabled/retired while still observed. The claim or effect refuses at the ordinary gate; a finding is
+raised (`[COPY: claim denied — grant expired for cicada@ateles-swarm]`). Stop or remediation is **not**
+implied by the inventory read.
+
+**Safe next action.** Refresh host evidence for `deploy-stale`, raise a finding, open a disablement
+workflow, or take a separately permitted stop — each under its own gate. None of those follow-ups is
+authorized by reading the inventory.
+
+```mermaid
+flowchart TD
+    A[agent:cicada@ateles-swarm] --> G[governance grain: bindings, grants, roster, review, ended relations]
+    A --> D1[deploy-fresh runtime]
+    A --> D2[deploy-stale runtime]
+    D1 --> E1{process observed?}
+    E1 -->|no| V[valid empty: availability finding; unrelated work unblocked]
+    E1 -->|yes, fresh| P[Permit where the asked decision's conditions hold]
+    D2 --> E2{independent host evidence fresh?}
+    E2 -->|missing/stale/partial| I[Indeterminate: only conditioned decisions hold/deny]
+    G --> Q{one mechanism decision: claim or action_policy}
+    Q -->|grant absent/expired/revoked or ended eligibility| DN[Deny at ordinary gate; finding; no implied stop]
+    Q -->|conditions met on required evidence| P
+    I --> N[next action separately gated: refresh evidence / finding / disablement / stop]
+    DN --> N
+    V --> N
+```
+
+**Invariants:** [`authority_model.md#agent-inventory-review-disablement-and-retirement`](authority_model.md#agent-inventory-review-disablement-and-retirement),
+[`vocabulary.md#agent-inventory`](vocabulary.md#agent-inventory),
+[`principles.md#7-unknown-stays-distinct-from-a-conclusion`](principles.md#7-unknown-stays-distinct-from-a-conclusion),
+[`authority_model.md#the-tuple`](authority_model.md#the-tuple) (`Indeterminate` is not coerced to Permit or Deny in presentation).
+
 ## What the scenarios do not show
 
 None of them shows a router choosing a lease holder, work reaching an agent by any path but its own claim, a
 process returning a lapsed lease, a pull request or an issue as the subject of a step, a per-step status
 row, a parent task being claimed, an action taken outside the gate, a stored liveness flag, a gate
 consulted on anything but an `action`, a task in any workflow but intake with no intake batch before it, a
-batch naming two successors, a second queue for task-level failure beside the checkpoint queue, or an
-entity above the batches holding a sequence of workflows. Each absence is an invariant; a change that
-needs one of these to appear is a change to the foundation, made through a PR that says so
-(`conformance.md`).
+batch naming two successors, a second queue for task-level failure beside the checkpoint queue, an
+entity above the batches holding a sequence of workflows, a stored `agent.status` or universal
+`may_accept_work`, an inventory read that authorizes stop or remediation, or a single runtime cell that
+flattens two deployments. Each absence is an invariant; a change that needs one of these to appear is a
+change to the foundation, made through a PR that says so (`conformance.md`).
