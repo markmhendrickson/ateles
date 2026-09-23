@@ -554,7 +554,7 @@ runs through a second type, which stays true whether the per-type check is decla
   register at all is a boundary the instance declares** — the rule, and what a write outside the declared
   set is, are stated at
   `#the-registry-is-closed-by-default-and-registering-outside-the-declared-set-is-a-governance-write`
-  (decision 112).
+  (decision 113).
 - **A schema version does not migrate values already sitting in `raw_fragments`.** Declaring a field
   changes what *subsequent* writes may land in it; every earlier write that carried that field is still in
   `raw_fragments`, and stays there until something reads it out and re-writes it as the declared field.
@@ -576,7 +576,7 @@ runs through a second type, which stays true whether the per-type check is decla
 
 ## The registry is closed by default, and registering outside the declared set is a governance write
 
-**Ruled (decision 112, 2026-09-18).** Registered in
+**Ruled (decision 113, 2026-09-18).** Registered in
 `conformance.md#the-register-of-open-design-decisions`. An instance **declares the set of entity types it
 holds**, and a registration outside that set is a governance write — refused at the record like any other,
 and admitted only through the engine's grant on a permit (decision 56). The declared set is the boundary;
@@ -631,7 +631,7 @@ type minted mechanically by a process nobody decided to give a type to.
 
 ## What the declared boundary refuses when the instance cannot evaluate it
 
-**Ruled (decision 113, 2026-09-18).** Registered in
+**Ruled (decision 114, 2026-09-18).** Registered in
 `conformance.md#the-register-of-open-design-decisions`. The rule is scoped to the step it can be stated
 about, and the scoping is the ruling rather than a caveat on it.
 
@@ -660,7 +660,7 @@ must be treated as the restrictive value of that property — so that a type dec
 a type whose declaration merely failed to load are not indistinguishable — is a separate question from
 this one, on the same principle 5 reasoning and with a different subject. It is not ruled here because it
 is not the boundary's question, and the corpus must not appear to have ruled it by proximity. Recorded as
-gap G33 in `migration.md#gaps-and-contradictions-the-mapping-exposed`, which is where a condition the
+gap G34 in `migration.md#gaps-and-contradictions-the-mapping-exposed`, which is where a condition the
 design has not yet stated belongs while it is unstated.
 
 **The options considered.** One rule over the boundary and every type-keyed gate alike, on the argument
@@ -670,7 +670,7 @@ rule that holds (invariant 1); scoping the rule to the boundary and saying nothi
 rejected as the reporting-without-binding shape, since a reader would take the silence for indifference
 rather than for an open question; and deferring the whole rule until the property question is ruled —
 rejected because the boundary's own failure direction is settled, needs nothing from that question, and is
-the half that decision 112's closure actually depends on. **What would have decided it otherwise:** whether
+the half that decision 113's closure actually depends on. **What would have decided it otherwise:** whether
 the boundary and the type properties are read in one step or two. They are two — a set consulted once
 against a declaration, and a resolution per type — which is what makes the scoping honest rather than
 merely cautious.
