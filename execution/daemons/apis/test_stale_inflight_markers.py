@@ -48,8 +48,11 @@ class _Notifier:
     def __init__(self) -> None:
         self.sent: list[str] = []
 
-    def send(self, message, priority=None, handler=None):
+    def send(self, message, priority=None, handler=None, **kwargs):
         self.sent.append(message)
+
+    def clear_dedupe(self, key):
+        pass
 
 
 def _dispatcher() -> sd.SwarmDispatcher:

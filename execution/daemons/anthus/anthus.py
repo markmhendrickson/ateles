@@ -523,19 +523,41 @@ async def _fetch_comments(snap: dict) -> list:
 
 async def _handle_escalation(event: NeotomaEvent) -> None:
     """Surface escalation entities to Ateles via Notifier."""
-    severity = event.snapshot.get("severity", "unknown")
-    summary = event.snapshot.get("summary", event.entity_id)
-    blocking = event.snapshot.get("blocking", False)
+    status = (event.snapshot.get("status") or "").lower()
+    dedupe_key = f"escalation:{event.entity_id}"
+    if status in ("resolved", "closed"):
+        _notifier.clear_dedupe(dedupe_key)
+        return
 
+    severity = event.snapshot.get("severity", "unknown")
+    blocking = event.snapshot.get("blocking", False)
+    summary = (event.snapshot.get("summary") or "").strip()
+    title = (event.snapshot.get("title") or "").strip()
+    reason = (event.snapshot.get("reason") or "").strip()
+    linked_task = (event.snapshot.get("linked_task_title") or "").strip()
+
+    text = summary or title or reason or linked_task
     priority = Priority.BLOCKER if blocking else Priority.OPERATOR_DECISION
+    email_eligible = bool(text)
+    if not text:
+        log.warning(
+            f"[{DAEMON_NAME}] escalation {event.entity_id} has no actionable "
+            "text; email_eligible=False"
+        )
+        text = f"Escalation {event.entity_id} (no summary in snapshot)"
+    else:
+        text = f"{text} (escalation {event.entity_id})"
+
     log.info(
         f"[{DAEMON_NAME}] escalation {event.entity_id}: severity={severity} "
         f"blocking={blocking} — notifying"
     )
     _notifier.send(
-        f"Escalation [{severity}]: {summary}",
+        f"Escalation [{severity}]: {text}",
         priority=priority,
         handler=DAEMON_NAME,
+        dedupe_key=dedupe_key,
+        email_eligible=email_eligible,
     )
 
 
