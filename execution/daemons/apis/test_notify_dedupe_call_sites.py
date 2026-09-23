@@ -20,11 +20,12 @@ from execution.daemons.apis.test_swarm_dispatch import (
     _trigger,
 )
 
-# Daytime in Europe/Madrid → outside the 22:00–08:00 silence window.
+# Empty silence window — CI and local night runs must not hold operator_decision
+# sends (the previous Madrid 22:00–08:00 window failed pytest after 22:00).
 _NEVER_SILENT = {
     "timezone": "Europe/Madrid",
-    "silence_start": "22:00",
-    "silence_end": "08:00",
+    "silence_start": "",
+    "silence_end": "",
 }
 
 
@@ -38,6 +39,7 @@ def _notifier(tmp_path, sent, *, deliver_kw=None):
 
     n = Notifier(rubric=_NEVER_SILENT)
     n._dedupe_path = tmp_path / "dedupe.json"
+    n._digest_path = tmp_path / "digest.json"
     n._deliver = _deliver
     return n
 
@@ -561,6 +563,11 @@ def _pr_dispatcher_binding_fail(monkeypatch, tmp_path, sent, *, claim_returns=Tr
         SwarmDispatcher, "_preregistered_expectations", lambda self, r, p: _async_return({})
     )
     monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_binding_review_escalation_already_claimed",
+        lambda self, t: _async_return(False),
+    )
 
     async def fake_emit(self, trigger, verdict, body, **kwargs):
         return None

@@ -1917,11 +1917,13 @@ def test_route_findings_exhausted_dedup_suppresses_renotify(monkeypatch, tmp_pat
     )
 
     sent = []
+    # Empty silence window: production Madrid 22:00–08:00 holds
+    # OPERATOR_DECISION and fails these effect tests after 22:00 local.
     notifier = Notifier(
         rubric={
             "timezone": "Europe/Madrid",
-            "silence_start": "22:00",
-            "silence_end": "08:00",
+            "silence_start": "",
+            "silence_end": "",
         }
     )
     notifier._dedupe_path = tmp_path / "dedupe.json"
@@ -2014,12 +2016,18 @@ def test_route_findings_unparseable_dedup_suppresses_renotify(monkeypatch, tmp_p
     notifier = Notifier(
         rubric={
             "timezone": "Europe/Madrid",
-            "silence_start": "22:00",
-            "silence_end": "08:00",
+            "silence_start": "",
+            "silence_end": "",
         }
     )
     notifier._dedupe_path = tmp_path / "dedupe2.json"
+    notifier._digest_path = tmp_path / "digest2.json"
     notifier._deliver = lambda m, **kw: (sent.append(m), True)[1]
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_blocking_findings_from_reviewed_head_comments",
+        lambda self, t, h: _async_return({}),
+    )
     d = SwarmDispatcher(notifier, _config())
     trig = _trigger()
     for _ in range(2):

@@ -6242,22 +6242,25 @@ class SwarmDispatcher:
             )
             # Reason-specific emit aborts already claim binding-review-{reason};
             # do not also claim binding-review-unverified or re-page.
+            # Claim is the GitHub marker; notifier.send always runs (notifier
+            # dedupe owns once-per-condition) — same contract as
+            # process-blocked / unparseable / auto-fix-exhausted.
             if not await self._binding_review_escalation_already_claimed(trigger):
-                if await self._claim_escalation(
+                await self._claim_escalation(
                     trigger, "binding-review-unverified"
-                ):
-                    self.notifier.send(
-                        f"PR {trigger.repository}#{trigger.number}: standing "
-                        "self-review defect (ateles#1139 — reviewer token must "
-                        "differ from PR author): GitHub did not confirm an "
-                        "exact-head APPROVED review from a distinct binding "
-                        "principal. "
-                        "https://github.com/markmhendrickson/ateles/issues/1139 "
-                        "— merge readiness is held closed.",
-                        priority=Priority.OPERATOR_DECISION,
-                        handler=DAEMON_NAME,
-                        dedupe_key="self-review-refused",
-                    )
+                )
+                self.notifier.send(
+                    f"PR {trigger.repository}#{trigger.number}: standing "
+                    "self-review defect (ateles#1139 — reviewer token must "
+                    "differ from PR author): GitHub did not confirm an "
+                    "exact-head APPROVED review from a distinct binding "
+                    "principal. "
+                    "https://github.com/markmhendrickson/ateles/issues/1139 "
+                    "— merge readiness is held closed.",
+                    priority=Priority.OPERATOR_DECISION,
+                    handler=DAEMON_NAME,
+                    dedupe_key="self-review-refused",
+                )
             return
 
         self.notifier.clear_dedupe("self-review-refused")
