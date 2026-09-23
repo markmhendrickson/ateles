@@ -50,11 +50,13 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import jwt as pyjwt
 
 from gate_waive import (
     CLEARED_GATE_STATES,
@@ -2691,6 +2693,89 @@ def _token_for_repo(repo: str) -> str:
     )
 
 
+def _reviewer_app_private_key_pem() -> str:
+    raw = (os.environ.get("ATELES_REVIEWER_APP_PRIVATE_KEY") or "").strip()
+    return raw.replace("\\n", "\n")
+
+
+def _binding_review_credential_mode() -> str:
+    """Return ``app``, ``pat``, or ``unset`` for binding review POST credentials."""
+    app_id = (os.environ.get("ATELES_REVIEWER_APP_ID") or "").strip()
+    if app_id and _reviewer_app_private_key_pem():
+        return "app"
+    if (os.environ.get("VANELLUS_AGENT_PAT") or "").strip():
+        return "pat"
+    return "unset"
+
+
+_REVIEWER_APP_INSTALLATION_TOKEN_CACHE: tuple[str, datetime] | None = None
+
+
+def _clear_reviewer_app_installation_token_cache() -> None:
+    global _REVIEWER_APP_INSTALLATION_TOKEN_CACHE
+    _REVIEWER_APP_INSTALLATION_TOKEN_CACHE = None
+
+
+def _mint_reviewer_app_jwt() -> str:
+    app_id = (os.environ.get("ATELES_REVIEWER_APP_ID") or "").strip()
+    pem = _reviewer_app_private_key_pem()
+    now = int(time.time())
+    return pyjwt.encode(
+        {"iat": now - 60, "exp": now + 600, "iss": app_id},
+        pem,
+        algorithm="RS256",
+    )
+
+
+async def _mint_reviewer_app_installation_token(
+    repository: str,
+    client: httpx.AsyncClient,
+) -> str | None:
+    """Mint a short-lived installation token for the reviewer GitHub App."""
+    global _REVIEWER_APP_INSTALLATION_TOKEN_CACHE
+    if _REVIEWER_APP_INSTALLATION_TOKEN_CACHE is not None:
+        token, expires_at = _REVIEWER_APP_INSTALLATION_TOKEN_CACHE
+        if datetime.now(timezone.utc) < expires_at - timedelta(minutes=1):
+            return token
+        _REVIEWER_APP_INSTALLATION_TOKEN_CACHE = None
+
+    try:
+        app_jwt = _mint_reviewer_app_jwt()
+    except Exception:
+        return None
+    jwt_headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {app_jwt}",
+    }
+    installation_id = (
+        os.environ.get("ATELES_REVIEWER_APP_INSTALLATION_ID") or ""
+    ).strip()
+    if not installation_id:
+        inst_resp = await client.get(
+            f"https://api.github.com/repos/{repository}/installation",
+            headers=jwt_headers,
+        )
+        if inst_resp.status_code >= 400:
+            return None
+        installation_id = str((inst_resp.json() or {}).get("id") or "")
+    if not installation_id:
+        return None
+    tok_resp = await client.post(
+        f"https://api.github.com/app/installations/{installation_id}/access_tokens",
+        headers=jwt_headers,
+    )
+    if tok_resp.status_code >= 400:
+        return None
+    payload = tok_resp.json() or {}
+    token = str(payload.get("token") or "")
+    expires_raw = str(payload.get("expires_at") or "")
+    if not token or not expires_raw:
+        return None
+    expires_at = datetime.fromisoformat(expires_raw.replace("Z", "+00:00"))
+    _REVIEWER_APP_INSTALLATION_TOKEN_CACHE = (token, expires_at)
+    return token
+
+
 @dataclass(frozen=True)
 class ReviewBindingReceipt:
     """Read-back proof that a binding GitHub review landed as intended."""
@@ -2699,15 +2784,20 @@ class ReviewBindingReceipt:
     reviewer_login: str
     commit_id: str
     state: str
+    principal: str = ""
 
-    def proves_approval(self, *, head_sha: str) -> bool:
-        return (
-            bool(_normalise_github_review_id(self.review_id))
-            and self.reviewer_login.casefold()
-            == agent_github_login("vanellus").casefold()
-            and self.commit_id == _normalise_full_sha(head_sha)
-            and self.state == "APPROVED"
-        )
+    def proves_approval(self, *, head_sha: str, pr_author: str = "") -> bool:
+        if not _normalise_github_review_id(self.review_id):
+            return False
+        if not self.reviewer_login:
+            return False
+        if self.commit_id != _normalise_full_sha(head_sha):
+            return False
+        if self.state != "APPROVED":
+            return False
+        if pr_author and self.reviewer_login.casefold() == pr_author.casefold():
+            return False
+        return True
 
 
 @dataclass
@@ -6140,25 +6230,34 @@ class SwarmDispatcher:
         proves_approval = getattr(binding_receipt, "proves_approval", None)
         if not (
             callable(proves_approval)
-            and proves_approval(head_sha=aggregation_head)
+            and proves_approval(
+                head_sha=aggregation_head,
+                pr_author=trigger.author or "",
+            )
         ):
             log.error(
                 f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: clear "
                 "panel verdict lacks a verified exact-head APPROVED receipt "
                 "from the distinct Vanellus principal — merge readiness held"
             )
-            await self._claim_escalation(trigger, "binding-review-unverified")
-            self.notifier.send(
-                f"PR {trigger.repository}#{trigger.number}: standing "
-                "self-review defect (ateles#1139 — reviewer token must differ "
-                "from PR author): GitHub did not confirm an exact-head APPROVED "
-                "review from the dedicated Vanellus identity. "
-                "https://github.com/markmhendrickson/ateles/issues/1139 — "
-                "merge readiness is held closed.",
-                priority=Priority.OPERATOR_DECISION,
-                handler=DAEMON_NAME,
-                dedupe_key="self-review-refused",
-            )
+            # Reason-specific emit aborts already claim binding-review-{reason};
+            # do not also claim binding-review-unverified or re-page.
+            if not await self._binding_review_escalation_already_claimed(trigger):
+                if await self._claim_escalation(
+                    trigger, "binding-review-unverified"
+                ):
+                    self.notifier.send(
+                        f"PR {trigger.repository}#{trigger.number}: standing "
+                        "self-review defect (ateles#1139 — reviewer token must "
+                        "differ from PR author): GitHub did not confirm an "
+                        "exact-head APPROVED review from a distinct binding "
+                        "principal. "
+                        "https://github.com/markmhendrickson/ateles/issues/1139 "
+                        "— merge readiness is held closed.",
+                        priority=Priority.OPERATOR_DECISION,
+                        handler=DAEMON_NAME,
+                        dedupe_key="self-review-refused",
+                    )
             return
 
         self.notifier.clear_dedupe("self-review-refused")
@@ -6190,6 +6289,66 @@ class SwarmDispatcher:
             panel,
             reviewed_head=aggregation_head,
             binding_receipt=binding_receipt,
+            pr_author=trigger.author or "",
+        )
+
+    def _log_binding_review_not_submitted(
+        self,
+        ref: str,
+        reason: str,
+        *,
+        fields: str = "",
+        hint: str,
+    ) -> None:
+        log.error(
+            f"[{DAEMON_NAME}] {ref}: review_not_submitted reason={reason} "
+            f"{fields} review_gate=not_satisfied hint={hint}"
+        )
+
+    async def _binding_review_escalation_already_claimed(
+        self, trigger: SwarmTrigger
+    ) -> bool:
+        """True when any ``binding-review-*`` escalation marker exists on the PR."""
+        marker_prefix = "<!-- apis-escalated:binding-review-"
+        list_url = (
+            f"https://api.github.com/repos/{trigger.repository}/issues/"
+            f"{trigger.number}/comments"
+        )
+        headers = self._github_headers(trigger.repository)
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    list_url, params={"per_page": 100}, headers=headers
+                )
+                resp.raise_for_status()
+                for comment in resp.json():
+                    if marker_prefix in comment.get("body", ""):
+                        return True
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                f"binding-review escalation probe failed ({exc}) — "
+                "assuming not claimed"
+            )
+        return False
+
+    async def _abort_binding_review(
+        self,
+        trigger: SwarmTrigger,
+        reason: str,
+        *,
+        fields: str = "",
+        hint: str,
+        escalation_detail: str | None = None,
+    ) -> None:
+        ref = f"{trigger.repository}#{trigger.number}"
+        self._log_binding_review_not_submitted(
+            ref, reason, fields=fields, hint=hint
+        )
+        await self._claim_escalation(
+            trigger,
+            f"binding-review-{reason}",
+            detail=escalation_detail,
         )
 
     async def _emit_formal_review(
@@ -6207,12 +6366,12 @@ class SwarmDispatcher:
         routinely fail their own `gh` calls, and of the lens agents only Vanellus
         and Waxwing even hold `gh pr review` grants.
 
-        Binding events (APPROVE / REQUEST_CHANGES) require the dedicated
-        ``VANELLUS_AGENT_PAT``.  The dispatcher verifies that token's login,
-        verifies it differs from the immutable PR author, verifies the live PR
-        head still equals the panel-reviewed head, posts that exact commit_id,
-        then reads the created review back and checks reviewer, commit, and
-        state.  Only that readback produces a :class:`ReviewBindingReceipt`.
+        Binding events (APPROVE / REQUEST_CHANGES) use the reviewer GitHub App
+        installation token when ``ATELES_REVIEWER_APP_*`` is configured, else
+        ``VANELLUS_AGENT_PAT``.  Shared author tokens are never used.  The
+        dispatcher verifies distinct principal, live head, posts that
+        commit_id, then reads the created review back.  Only that readback
+        produces a :class:`ReviewBindingReceipt`.
 
         Best-effort for routing — returns None on any failure and never raises.
         A blocking verdict still routes findings, but a clear verdict cannot
@@ -6250,16 +6409,7 @@ class SwarmDispatcher:
             _REVIEW_EVENT_APPROVE,
             _REVIEW_EVENT_REQUEST_CHANGES,
         }
-        if binding_event:
-            token = os.environ.get("VANELLUS_AGENT_PAT", "")
-            if not token:
-                log.error(
-                    f"[{DAEMON_NAME}] VANELLUS_AGENT_PAT unset — binding "
-                    f"formal review {event} skipped for {ref}; shared-token "
-                    "fallback is forbidden"
-                )
-                return None
-        else:
+        if not binding_event:
             token = _token_for_repo(t.repository) or self.config.github_token
             if not token:
                 log.warning(
@@ -6267,81 +6417,263 @@ class SwarmDispatcher:
                     f"for {ref}"
                 )
                 return None
-
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {token}",
-        }
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                if binding_event:
-                    identity_resp = await client.get(
-                        "https://api.github.com/user", headers=headers
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {token}",
+            }
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+                    if resp.status_code >= 400:
+                        detail = (resp.text or "")[:240]
+                        raise RuntimeError(f"HTTP {resp.status_code}: {detail}")
+                    review_id = _normalise_github_review_id(
+                        (resp.json() or {}).get("id")
                     )
-                    identity_resp.raise_for_status()
-                    reviewer_login = str(
-                        (identity_resp.json() or {}).get("login") or ""
-                    )
-                    expected_login = agent_github_login("vanellus")
-                    if reviewer_login.casefold() != expected_login.casefold():
-                        raise RuntimeError(
-                            "VANELLUS_AGENT_PAT resolved to unexpected login "
-                            f"{reviewer_login!r}; expected {expected_login!r}"
-                        )
-
-                    pr_resp = await client.get(
-                        f"https://api.github.com/repos/{t.repository}/pulls/"
-                        f"{t.number}",
-                        headers=headers,
-                    )
-                    pr_resp.raise_for_status()
-                    pr = pr_resp.json() or {}
-                    live_head = _normalise_full_sha(
-                        str((pr.get("head") or {}).get("sha") or "")
-                    )
-                    pr_author = str((pr.get("user") or {}).get("login") or "")
-                    if live_head != head_sha:
-                        raise RuntimeError(
-                            f"PR head changed from reviewed {head_sha[:12]} to "
-                            f"{live_head[:12] or 'unreadable'}"
-                        )
-                    if not pr_author:
-                        raise RuntimeError("PR author could not be read")
-                    if reviewer_login.casefold() == pr_author.casefold():
-                        raise RuntimeError(
-                            f"reviewer {reviewer_login!r} is the PR author; "
-                            "binding self-review refused"
-                        )
-
-                resp = await client.post(url, json=payload, headers=headers)
-                if resp.status_code >= 400:
-                    detail = (resp.text or "")[:240]
-                    raise RuntimeError(f"HTTP {resp.status_code}: {detail}")
-                review_id = _normalise_github_review_id(
-                    (resp.json() or {}).get("id")
-                )
-                if not binding_event:
                     log.info(
                         f"[{DAEMON_NAME}] posted formal GitHub review {event} "
                         f"on {ref} (id={review_id}, verdict={verdict})"
                     )
                     return None
-                if not review_id:
-                    raise RuntimeError(
-                        "GitHub review response carried an invalid review id"
+            except Exception as exc:
+                log.warning(
+                    f"[{DAEMON_NAME}] formal review post failed on {ref} "
+                    f"({event}): {exc}"
+                )
+                return None
+
+        credential_mode = _binding_review_credential_mode()
+        if credential_mode == "unset":
+            await self._abort_binding_review(
+                t,
+                "unset",
+                fields="credential=ATELES_REVIEWER_APP_ID|VANELLUS_AGENT_PAT",
+                hint=(
+                    "set ATELES_REVIEWER_APP_ID+ATELES_REVIEWER_APP_PRIVATE_KEY "
+                    "(preferred) or VANELLUS_AGENT_PAT in secrets manifest"
+                ),
+            )
+            return None
+
+        principal = "bot" if credential_mode == "app" else "pat"
+        pat_reviewer_login = ""
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                if credential_mode == "app":
+                    token = await _mint_reviewer_app_installation_token(
+                        t.repository, client
                     )
+                    if not token:
+                        await self._abort_binding_review(
+                            t,
+                            "app_mint_failed",
+                            hint=(
+                                "verify ATELES_REVIEWER_APP_PRIVATE_KEY is valid "
+                                "PEM and the App is installed on this repo; check "
+                                "ATELES_REVIEWER_APP_INSTALLATION_ID if set"
+                            ),
+                            escalation_detail=(
+                                f"Binding review not submitted (`reason=app_mint_failed`) "
+                                f"on PR #{t.number}. Fix: verify the reviewer App's "
+                                "private key and installation. No approval will be "
+                                "attempted with the author's own token."
+                            ),
+                        )
+                        return None
+                else:
+                    token = (os.environ.get("VANELLUS_AGENT_PAT") or "").strip()
+                    headers_pat = {
+                        "Accept": "application/vnd.github+json",
+                        "Authorization": f"Bearer {token}",
+                    }
+                    identity_resp = await client.get(
+                        "https://api.github.com/user", headers=headers_pat
+                    )
+                    if identity_resp.status_code >= 400:
+                        await self._abort_binding_review(
+                            t,
+                            "readback fail",
+                            fields="expected_head="
+                            f"{head_sha} got=unreadable_pat_identity",
+                            hint=(
+                                "review row did not match expected principal/head "
+                                "— check App installation token has pull-request "
+                                "write scope"
+                            ),
+                        )
+                        return None
+                    pat_reviewer_login = str(
+                        (identity_resp.json() or {}).get("login") or ""
+                    )
+                    if not pat_reviewer_login:
+                        await self._abort_binding_review(
+                            t,
+                            "readback fail",
+                            fields=f"expected_head={head_sha} got=empty_pat_login",
+                            hint=(
+                                "review row did not match expected principal/head "
+                                "— check App installation token has pull-request "
+                                "write scope"
+                            ),
+                        )
+                        return None
+
+                headers = {
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {token}",
+                }
+                pr_resp = await client.get(
+                    f"https://api.github.com/repos/{t.repository}/pulls/"
+                    f"{t.number}",
+                    headers=headers,
+                )
+                if pr_resp.status_code >= 400:
+                    await self._abort_binding_review(
+                        t,
+                        "readback fail",
+                        fields=f"expected_head={head_sha} got=pr_unreadable",
+                        hint=(
+                            "review row did not match expected principal/head "
+                            "— check App installation token has pull-request "
+                            "write scope"
+                        ),
+                    )
+                    return None
+                pr = pr_resp.json() or {}
+                pr_state = str(pr.get("state") or "").lower()
+                if pr_state != "open" or pr.get("merged_at"):
+                    await self._abort_binding_review(
+                        t,
+                        "pr_closed",
+                        hint="no action — review not applicable to closed PR",
+                    )
+                    return None
+                live_head = _normalise_full_sha(
+                    str((pr.get("head") or {}).get("sha") or "")
+                )
+                pr_author = str((pr.get("user") or {}).get("login") or "")
+                if live_head != head_sha:
+                    self._log_binding_review_not_submitted(
+                        ref,
+                        "readback fail",
+                        fields=(
+                            f"expected_head={head_sha} got={live_head or 'unreadable'} "
+                            "head changed"
+                        ),
+                        hint=(
+                            "review row did not match expected principal/head "
+                            "— check App installation token has pull-request "
+                            "write scope"
+                        ),
+                    )
+                    await self._claim_escalation(t, "binding-review-readback fail")
+                    return None
+                if not pr_author:
+                    await self._abort_binding_review(
+                        t,
+                        "readback fail",
+                        fields=f"expected_head={head_sha} got=missing_pr_author",
+                        hint=(
+                            "review row did not match expected principal/head "
+                            "— check App installation token has pull-request "
+                            "write scope"
+                        ),
+                    )
+                    return None
+                if (
+                    credential_mode == "pat"
+                    and pat_reviewer_login.casefold() == pr_author.casefold()
+                ):
+                    await self._abort_binding_review(
+                        t,
+                        "same_login",
+                        fields=(
+                            f"reviewer_login={pat_reviewer_login} "
+                            f"author_login={pr_author}"
+                        ),
+                        hint=(
+                            "configure a reviewer identity distinct from the author "
+                            "— see docs/agents/vanellus.md#binding-review"
+                        ),
+                    )
+                    return None
+
+                resp = await client.post(url, json=payload, headers=headers)
+                if resp.status_code == 422:
+                    body_text = resp.text or ""
+                    lower = body_text.casefold()
+                    if "own pull request" in lower or "your own pull" in lower:
+                        await self._abort_binding_review(
+                            t,
+                            "same_login",
+                            fields=(
+                                f"reviewer_login={pat_reviewer_login or pr_author} "
+                                f"author_login={pr_author}"
+                            ),
+                            hint=(
+                                "configure a reviewer identity distinct from the "
+                                "author — see docs/agents/vanellus.md#binding-review"
+                            ),
+                        )
+                        return None
+                    if "closed" in lower or "merged" in lower:
+                        await self._abort_binding_review(
+                            t,
+                            "pr_closed",
+                            hint="no action — review not applicable to closed PR",
+                        )
+                        return None
+                if resp.status_code >= 400:
+                    await self._abort_binding_review(
+                        t,
+                        "readback fail",
+                        fields=f"expected_head={head_sha} got=http_{resp.status_code}",
+                        hint=(
+                            "review row did not match expected principal/head "
+                            "— check App installation token has pull-request "
+                            "write scope"
+                        ),
+                    )
+                    return None
+
+                review_id = _normalise_github_review_id(
+                    (resp.json() or {}).get("id")
+                )
+                if not review_id:
+                    await self._abort_binding_review(
+                        t,
+                        "readback fail",
+                        fields=f"expected_head={head_sha} got=invalid_review_id",
+                        hint=(
+                            "review row did not match expected principal/head "
+                            "— check App installation token has pull-request "
+                            "write scope"
+                        ),
+                    )
+                    return None
 
                 readback_resp = await client.get(
                     f"{url}/{review_id}", headers=headers
                 )
-                readback_resp.raise_for_status()
+                if readback_resp.status_code >= 400:
+                    await self._abort_binding_review(
+                        t,
+                        "readback fail",
+                        fields=f"expected_head={head_sha} got=readback_http",
+                        hint=(
+                            "review row did not match expected principal/head "
+                            "— check App installation token has pull-request "
+                            "write scope"
+                        ),
+                    )
+                    return None
                 readback = readback_resp.json() or {}
                 actual_review_id = _normalise_github_review_id(
                     readback.get("id")
                 )
-                actual_login = str(
-                    (readback.get("user") or {}).get("login") or ""
-                )
+                user = readback.get("user") or {}
+                actual_login = str(user.get("login") or "")
+                user_type = str(user.get("type") or "")
                 actual_commit = _normalise_full_sha(
                     str(readback.get("commit_id") or "")
                 )
@@ -6351,41 +6683,52 @@ class SwarmDispatcher:
                     if event == _REVIEW_EVENT_APPROVE
                     else "CHANGES_REQUESTED"
                 )
-                if actual_review_id != review_id:
-                    raise RuntimeError(
-                        "review readback id mismatch: "
-                        f"{actual_review_id!r} != {review_id!r}"
+                readback_ok = (
+                    actual_review_id == review_id
+                    and actual_commit == head_sha
+                    and actual_state == expected_state
+                    and actual_login
+                    and actual_login.casefold() != pr_author.casefold()
+                )
+                if credential_mode == "app":
+                    readback_ok = (
+                        readback_ok
+                        and user_type.casefold() == "bot"
                     )
-                if actual_login.casefold() != reviewer_login.casefold():
-                    raise RuntimeError(
-                        "review readback principal mismatch: "
-                        f"{actual_login!r} != {reviewer_login!r}"
+                else:
+                    readback_ok = (
+                        readback_ok
+                        and actual_login.casefold()
+                        == pat_reviewer_login.casefold()
                     )
-                if actual_commit != head_sha:
-                    raise RuntimeError(
-                        "review readback commit mismatch: "
-                        f"{actual_commit!r} != {head_sha!r}"
+                if not readback_ok:
+                    got_hint = actual_state or actual_login or "mismatch"
+                    await self._abort_binding_review(
+                        t,
+                        "readback fail",
+                        fields=f"expected_head={head_sha} got={got_hint}",
+                        hint=(
+                            "review row did not match expected principal/head "
+                            "— check App installation token has pull-request "
+                            "write scope"
+                        ),
                     )
-                if actual_state != expected_state:
-                    raise RuntimeError(
-                        "review readback state mismatch: "
-                        f"{actual_state!r} != {expected_state!r}"
-                    )
+                    return None
+
                 receipt = ReviewBindingReceipt(
                     review_id=actual_review_id,
                     reviewer_login=actual_login,
                     commit_id=actual_commit,
                     state=actual_state,
+                    principal=principal,
                 )
                 log.info(
-                    f"[{DAEMON_NAME}] verified binding GitHub review {event} "
-                    f"on {ref} (id={review_id}, reviewer={actual_login}, "
-                    f"commit={actual_commit[:12]}, state={actual_state})"
+                    f"[{DAEMON_NAME}] review_submitted event={event} "
+                    f"reviewer_login={actual_login} author_login={pr_author} "
+                    f"principal={principal}"
                 )
                 return receipt
         except Exception as exc:
-            # Never change blocker routing because GitHub posting failed. The
-            # clear path independently requires the receipt and therefore holds.
             log.warning(
                 f"[{DAEMON_NAME}] binding formal review post failed on {ref} "
                 f"({event}): {exc}"
@@ -6520,7 +6863,13 @@ class SwarmDispatcher:
 
     _ESCALATION_MARKER = "<!-- apis-escalated:{kind} -->"
 
-    async def _claim_escalation(self, trigger: SwarmTrigger, kind: str) -> bool:
+    async def _claim_escalation(
+        self,
+        trigger: SwarmTrigger,
+        kind: str,
+        *,
+        detail: str | None = None,
+    ) -> bool:
         """First-caller-wins guard for a once-per-PR operator escalation.
 
         A PR re-review fires on every push/label/reopen, so an operator
@@ -6559,6 +6908,8 @@ class SwarmDispatcher:
                     f"🔔 Escalated to the operator (`{kind}`). Further PR events "
                     "will not re-notify for this same condition."
                 )
+                if detail:
+                    body = f"{body}\n\n{detail}"
                 resp = await client.post(
                     list_url, json={"body": body}, headers=headers
                 )
@@ -6863,6 +7214,7 @@ class SwarmDispatcher:
         *,
         reviewed_head: str = "",
         binding_receipt: ReviewBindingReceipt | None = None,
+        pr_author: str = "",
     ) -> None:
         """Advance only after exact-head review proof and green CI.
 
@@ -6895,7 +7247,7 @@ class SwarmDispatcher:
             if not (
                 expected_head
                 and callable(proves_approval)
-                and proves_approval(head_sha=expected_head)
+                and proves_approval(head_sha=expected_head, pr_author=pr_author)
             ):
                 log.error(
                     f"[{DAEMON_NAME}] {ref}: auto-merge held without a verified "
@@ -7823,13 +8175,7 @@ class SwarmDispatcher:
     ) -> ReviewBindingReceipt | None:
         """Reconstruct a durable distinct-reviewer receipt for CI loop closure."""
         expected_head = _normalise_full_sha(head_sha)
-        expected_login = agent_github_login("vanellus")
-        if (
-            not expected_head
-            or not expected_login
-            or not pr_author
-            or expected_login.casefold() == pr_author.casefold()
-        ):
+        if not expected_head or not pr_author:
             return None
         try:
             async with httpx.AsyncClient(timeout=30) as client:
@@ -7843,31 +8189,63 @@ class SwarmDispatcher:
             )
             return None
 
+        def _at_head_distinct(review: dict) -> bool:
+            login = str((review.get("user") or {}).get("login") or "")
+            if not login or login.casefold() == pr_author.casefold():
+                return False
+            if _normalise_full_sha(str(review.get("commit_id") or "")) != expected_head:
+                return False
+            return bool(_normalise_github_review_id(review.get("id")))
+
+        at_head = [review for review in reviews if _at_head_distinct(review)]
+        if not at_head:
+            return None
+
+        latest_per_login: dict[str, dict] = {}
+        for review in at_head:
+            login = str((review.get("user") or {}).get("login") or "")
+            key = (
+                str(review.get("submitted_at") or ""),
+                int(_normalise_github_review_id(review.get("id"))),
+            )
+            prev = latest_per_login.get(login.casefold())
+            if prev is None or key > (
+                str(prev.get("submitted_at") or ""),
+                int(_normalise_github_review_id(prev.get("id"))),
+            ):
+                latest_per_login[login.casefold()] = review
+
         matching = [
             review
-            for review in reviews
-            if str((review.get("user") or {}).get("login") or "").casefold()
-            == expected_login.casefold()
-            and _normalise_full_sha(str(review.get("commit_id") or ""))
-            == expected_head
-            and _normalise_github_review_id(review.get("id"))
+            for review in latest_per_login.values()
+            if str(review.get("state") or "").upper() == "APPROVED"
         ]
         if not matching:
             return None
+
+        def _is_bot(review: dict) -> bool:
+            return (
+                str((review.get("user") or {}).get("type") or "").casefold()
+                == "bot"
+            )
+
+        bots = [review for review in matching if _is_bot(review)]
+        candidates = bots if bots else matching
         latest = max(
-            matching,
+            candidates,
             key=lambda review: (
                 str(review.get("submitted_at") or ""),
                 int(_normalise_github_review_id(review.get("id"))),
             ),
         )
-        if str(latest.get("state") or "").upper() != "APPROVED":
-            return None
+        reviewer_login = str((latest.get("user") or {}).get("login") or "")
+        principal = "bot" if _is_bot(latest) else "pat"
         return ReviewBindingReceipt(
             review_id=_normalise_github_review_id(latest.get("id")),
-            reviewer_login=expected_login,
+            reviewer_login=reviewer_login,
             commit_id=expected_head,
             state="APPROVED",
+            principal=principal,
         )
 
     async def _resolve_review_verdict(

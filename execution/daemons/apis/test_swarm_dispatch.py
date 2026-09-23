@@ -9521,21 +9521,82 @@ def test_unreadable_head_sha_does_not_invent_a_failure(monkeypatch):
 # ── distinct-principal binding review ───────────────────────────────────────
 
 
+def _reviewer_app_test_pem():
+    # Non-PEM placeholder only — binding unit tests mock mint/JWT. A literal
+    # PKCS#8 block trips gitleaks `private-key` even when synthetic.
+    return "TEST_REVIEWER_APP_KEY_MATERIAL_NOT_A_PEM"
+
+
+def _configure_binding_credentials(
+    monkeypatch,
+    *,
+    mode="pat",
+    pem=None,
+    installation_id="424242",
+    clear_shared=True,
+):
+    """mode: pat | app | both | unset"""
+    for name in (
+        "ATELES_REVIEWER_APP_ID",
+        "ATELES_REVIEWER_APP_PRIVATE_KEY",
+        "ATELES_REVIEWER_APP_INSTALLATION_ID",
+        "VANELLUS_AGENT_PAT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    swarm_dispatch._clear_reviewer_app_installation_token_cache()
+    if clear_shared:
+        monkeypatch.delenv("ATELES_AGENT_PAT", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    if mode in ("app", "both"):
+        monkeypatch.setenv("ATELES_REVIEWER_APP_ID", "123456")
+        monkeypatch.setenv(
+            "ATELES_REVIEWER_APP_PRIVATE_KEY", pem or _reviewer_app_test_pem()
+        )
+        if installation_id is not None:
+            monkeypatch.setenv(
+                "ATELES_REVIEWER_APP_INSTALLATION_ID", str(installation_id)
+            )
+    if mode in ("pat", "both"):
+        monkeypatch.setenv("VANELLUS_AGENT_PAT", "test-vanellus-token")
+
+
 def _emit_binding_review(
     monkeypatch,
     caplog,
     *,
+    mode="pat",
     post_status=200,
-    reviewer="markmhendrickson-ateles-vanellus",
-    author="someone",
+    reviewer="distinct-reviewer",
+    author="octo-author",
     live_head="a" * 40,
+    reviewed_head=None,
     readback_state="CHANGES_REQUESTED",
     verdict="request_changes",
     post_review_id=999,
     readback_review_id=999,
+    user_type="User",
+    pr_state="open",
+    mint_ok=True,
+    installation_lookup=False,
 ):
-    """Drive the binding native-review path without a live credential."""
+    """Drive the binding native-review path without live credentials."""
     posts = []
+    get_user_calls = []
+    auth_bearers = []
+
+    _configure_binding_credentials(monkeypatch, mode=mode)
+    if mode in ("app", "both"):
+
+        async def _fake_app_token(repository, client):
+            if not mint_ok:
+                return None
+            return "ghs_installation_token"
+
+        monkeypatch.setattr(
+            swarm_dispatch,
+            "_mint_reviewer_app_installation_token",
+            _fake_app_token,
+        )
 
     class _Resp:
         def __init__(self, status, payload=None, text=""):
@@ -9558,26 +9619,52 @@ def _emit_binding_review(
             return False
 
         async def get(self, url, headers=None, **kwargs):
+            auth_bearers.append((headers or {}).get("Authorization"))
             if url.endswith("/user"):
+                get_user_calls.append(url)
                 return _Resp(200, {"login": reviewer})
+            if "/reviews/" in url:
+                rid = url.rsplit("/reviews/", 1)[-1]
+                if rid.isdigit():
+                    return _Resp(
+                        200,
+                        {
+                            "id": readback_review_id,
+                            "user": {"login": reviewer, "type": user_type},
+                            "commit_id": live_head,
+                            "state": readback_state,
+                        },
+                    )
             if url.endswith("/pulls/87"):
                 return _Resp(
                     200,
-                    {"head": {"sha": live_head}, "user": {"login": author}},
-                )
-            if url.endswith("/reviews/999"):
-                return _Resp(
-                    200,
                     {
-                        "id": readback_review_id,
-                        "user": {"login": reviewer},
-                        "commit_id": live_head,
-                        "state": readback_state,
+                        "state": pr_state,
+                        "merged_at": None,
+                        "head": {"sha": live_head},
+                        "user": {"login": author},
                     },
                 )
+            if url.endswith("/installation"):
+                if not mint_ok:
+                    return _Resp(404, {})
+                return _Resp(200, {"id": 424242})
+            if "/issues/87/comments" in url:
+                return _Resp(200, [])
             raise AssertionError(f"unexpected GET {url}")
 
         async def post(self, url, headers=None, **kwargs):
+            auth_bearers.append((headers or {}).get("Authorization"))
+            if "/access_tokens" in url:
+                if not mint_ok:
+                    return _Resp(401, {})
+                return _Resp(
+                    200,
+                    {
+                        "token": "ghs_installation_token",
+                        "expires_at": "2099-01-01T00:00:00Z",
+                    },
+                )
             posts.append((kwargs.get("json") or {}).get("event"))
             return _Resp(
                 post_status,
@@ -9590,26 +9677,39 @@ def _emit_binding_review(
             )
 
     monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", lambda **kw: _Client())
-    monkeypatch.setenv("VANELLUS_AGENT_PAT", "test-vanellus-token")
-
     notifier = _StubNotifier()
     d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="tok"))
+    panel_head = reviewed_head if reviewed_head is not None else live_head
     with caplog.at_level(logging.INFO):
         receipt = asyncio.run(
             d._emit_formal_review(
-                _trigger(author=author), verdict, "panel findings"
+                _trigger(author=author, head_sha=panel_head),
+                verdict,
+                "panel findings",
+                reviewed_head=panel_head,
             )
         )
-    return receipt, notifier, caplog.text, posts
+    ctx = {
+        "get_user_calls": get_user_calls,
+        "auth_bearers": auth_bearers,
+        "installation_lookup": installation_lookup,
+    }
+    return receipt, notifier, caplog.text, posts, ctx
 
 
 def test_binding_review_requires_dedicated_vanellus_token(monkeypatch):
-    monkeypatch.delenv("VANELLUS_AGENT_PAT", raising=False)
+    _configure_binding_credentials(monkeypatch, mode="unset")
+    monkeypatch.setenv("ATELES_AGENT_PAT", "shared-author")
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-shared")
     posts = []
 
     class _Client:
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): return False
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
         async def post(self, *a, **k):
             posts.append(k)
             raise AssertionError("binding review must not use a shared token")
@@ -9625,66 +9725,146 @@ def test_binding_review_requires_dedicated_vanellus_token(monkeypatch):
     assert posts == []
 
 
-def test_binding_review_rejects_same_pr_author(monkeypatch, caplog):
-    receipt, _notifier, log_text, posts = _emit_binding_review(
-        monkeypatch,
-        caplog,
-        reviewer="markmhendrickson-ateles-vanellus",
-        author="markmhendrickson-ateles-vanellus",
+def test_binding_review_both_credentials_unset(monkeypatch, caplog):
+    _configure_binding_credentials(monkeypatch, mode="unset")
+    monkeypatch.setenv("ATELES_AGENT_PAT", "shared-author")
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-shared")
+    receipt, _, log_text, posts, _ = _emit_binding_review(
+        monkeypatch, caplog, mode="unset"
     )
     assert receipt is None
     assert posts == []
-    assert "PR author" in log_text
+    assert "reason=unset" in log_text
+
+
+def test_binding_review_rejects_same_pr_author(monkeypatch, caplog):
+    receipt, _, log_text, posts, _ = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        reviewer="octo-author",
+        author="octo-author",
+    )
+    assert receipt is None
+    assert posts == []
+    assert "reason=same_login" in log_text
+
+
+def test_binding_review_same_login_pat(monkeypatch, caplog):
+    test_binding_review_rejects_same_pr_author(monkeypatch, caplog)
 
 
 def test_binding_review_422_is_not_downgraded_to_comment(monkeypatch, caplog):
-    receipt, _notifier, log_text, posts = _emit_binding_review(
+    receipt, _, log_text, posts, _ = _emit_binding_review(
         monkeypatch, caplog, post_status=422
     )
     assert receipt is None
     assert posts == ["REQUEST_CHANGES"]
     assert "COMMENT" not in posts
-    assert "binding formal review post failed" in log_text
+    assert "reason=same_login" in log_text
+
+
+def test_binding_review_422_own_pr_is_same_login(monkeypatch, caplog):
+    test_binding_review_422_is_not_downgraded_to_comment(monkeypatch, caplog)
+
+
+def test_binding_review_422_closed_is_pr_closed(monkeypatch, caplog):
+    receipt, _, log_text, posts, _ = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        post_status=422,
+        pr_state="open",
+    )
+
+    class _Resp:
+        def __init__(self, status, payload=None, text=""):
+            self.status_code = status
+            self._payload = payload or {}
+            self.text = text
+
+        def json(self):
+            return self._payload
+
+    class _Client422Closed:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kwargs):
+            if url.endswith("/user"):
+                return _Resp(200, {"login": "distinct-reviewer"})
+            if "/pulls/87" in url:
+                return _Resp(
+                    200,
+                    {
+                        "state": "open",
+                        "head": {"sha": "a" * 40},
+                        "user": {"login": "octo-author"},
+                    },
+                )
+            if "/issues/87/comments" in url:
+                return _Resp(200, [])
+            raise AssertionError(url)
+
+        async def post(self, url, headers=None, **kwargs):
+            return _Resp(422, {}, text='["pull request is closed"]')
+
+    _configure_binding_credentials(monkeypatch, mode="pat")
+    monkeypatch.setattr(
+        swarm_dispatch.httpx, "AsyncClient", lambda **kw: _Client422Closed()
+    )
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    with caplog.at_level(logging.INFO):
+        receipt = asyncio.run(
+            d._emit_formal_review(_trigger(), "approve", "**APPROVE**")
+        )
+    assert receipt is None
+    assert "reason=pr_closed" in caplog.text
 
 
 def test_accepted_binding_review_returns_exact_readback_receipt(monkeypatch, caplog):
-    receipt, notifier, log_text, posts = _emit_binding_review(monkeypatch, caplog)
+    receipt, notifier, log_text, posts, _ = _emit_binding_review(
+        monkeypatch, caplog
+    )
     assert posts == ["REQUEST_CHANGES"]
     assert notifier.sent == []
     assert receipt is not None
     assert receipt.review_id == "999"
-    assert receipt.reviewer_login == "markmhendrickson-ateles-vanellus"
+    assert receipt.reviewer_login == "distinct-reviewer"
     assert receipt.commit_id == "a" * 40
     assert receipt.state == "CHANGES_REQUESTED"
-    assert "verified binding GitHub review" in log_text
+    assert "review_submitted event=REQUEST_CHANGES" in log_text
+    assert "principal=pat" in log_text
 
 
 @pytest.mark.parametrize("review_id", [None, "", 0, -1, "not-an-id"])
 def test_binding_review_rejects_invalid_created_review_id(
     monkeypatch, caplog, review_id
 ):
-    receipt, _notifier, log_text, posts = _emit_binding_review(
+    receipt, _, log_text, posts, _ = _emit_binding_review(
         monkeypatch, caplog, post_review_id=review_id
     )
     assert posts == ["REQUEST_CHANGES"]
     assert receipt is None
-    assert "review id" in log_text.lower()
+    assert "reason=readback fail" in log_text
 
 
-def test_binding_review_rejects_mismatched_readback_review_id(
-    monkeypatch, caplog
-):
-    receipt, _notifier, log_text, posts = _emit_binding_review(
+def test_binding_review_rejects_mismatched_readback_review_id(monkeypatch, caplog):
+    receipt, _, log_text, posts, _ = _emit_binding_review(
         monkeypatch, caplog, post_review_id=999, readback_review_id=1000
     )
     assert posts == ["REQUEST_CHANGES"]
     assert receipt is None
-    assert "readback id mismatch" in log_text.lower()
+    assert "reason=readback fail" in log_text
 
 
 def test_binding_review_rejects_stale_live_head(monkeypatch, caplog):
-    receipt, _notifier, log_text, posts = _emit_binding_review(
-        monkeypatch, caplog, live_head="b" * 40
+    receipt, _, log_text, posts, _ = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        reviewed_head="a" * 40,
+        live_head="b" * 40,
     )
     assert receipt is None
     assert posts == []
@@ -9692,7 +9872,7 @@ def test_binding_review_rejects_stale_live_head(monkeypatch, caplog):
 
 
 def test_binding_approve_receipt_proves_exact_head_approval(monkeypatch, caplog):
-    receipt, _notifier, _log_text, posts = _emit_binding_review(
+    receipt, _, _log_text, posts, _ = _emit_binding_review(
         monkeypatch,
         caplog,
         verdict="approve",
@@ -9700,11 +9880,24 @@ def test_binding_approve_receipt_proves_exact_head_approval(monkeypatch, caplog)
     )
     assert posts == ["APPROVE"]
     assert receipt is not None
-    assert receipt.proves_approval(head_sha="a" * 40)
+    assert receipt.proves_approval(head_sha="a" * 40, pr_author="octo-author")
+    assert not receipt.proves_approval(
+        head_sha="a" * 40, pr_author=receipt.reviewer_login
+    )
+
+
+def test_proves_approval_author_never_proves():
+    receipt = ReviewBindingReceipt(
+        review_id="1",
+        reviewer_login="octo-author",
+        commit_id="a" * 40,
+        state="APPROVED",
+    )
+    assert not receipt.proves_approval(head_sha="a" * 40, pr_author="octo-author")
 
 
 def test_binding_review_rejects_wrong_readback_state(monkeypatch, caplog):
-    receipt, _notifier, log_text, posts = _emit_binding_review(
+    receipt, _, log_text, posts, _ = _emit_binding_review(
         monkeypatch,
         caplog,
         verdict="approve",
@@ -9712,23 +9905,277 @@ def test_binding_review_rejects_wrong_readback_state(monkeypatch, caplog):
     )
     assert posts == ["APPROVE"]
     assert receipt is None
-    assert "state mismatch" in log_text
+    assert "reason=readback fail" in log_text
 
 
 def test_binding_review_rejects_unexpected_token_identity(monkeypatch, caplog):
-    receipt, _notifier, log_text, posts = _emit_binding_review(
+    receipt, _, log_text, posts, _ = _emit_binding_review(
         monkeypatch,
         caplog,
         reviewer="ateles-agent",
+        author="octo-author",
+    )
+    assert receipt is not None
+    assert posts == ["REQUEST_CHANGES"]
+    assert "unexpected login" not in log_text
+
+
+def test_binding_review_pat_approve_when_app_unset(monkeypatch, caplog):
+    receipt, _, log_text, posts, ctx = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        mode="pat",
+        verdict="approve",
+        readback_state="APPROVED",
+    )
+    assert receipt is not None
+    assert posts == ["APPROVE"]
+    assert ctx["get_user_calls"]
+    assert "principal=pat" in log_text
+
+
+def test_binding_review_pat_request_changes_when_app_unset(monkeypatch, caplog):
+    test_accepted_binding_review_returns_exact_readback_receipt(monkeypatch, caplog)
+
+
+def test_binding_review_app_approve_distinct_bot(monkeypatch, caplog):
+    receipt, _, log_text, posts, ctx = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        mode="app",
+        reviewer="bot-login[bot]",
+        user_type="Bot",
+        verdict="approve",
+        readback_state="APPROVED",
+    )
+    assert receipt is not None
+    assert posts == ["APPROVE"]
+    assert not ctx["get_user_calls"]
+    assert "principal=bot" in log_text
+
+
+def test_binding_review_app_request_changes_distinct_bot(monkeypatch, caplog):
+    receipt, _, log_text, posts, ctx = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        mode="app",
+        reviewer="bot-login[bot]",
+        user_type="Bot",
+    )
+    assert receipt is not None
+    assert not ctx["get_user_calls"]
+    assert "principal=bot" in log_text
+
+
+def test_binding_review_app_never_calls_get_user(monkeypatch, caplog):
+    _, _, _, _, ctx = _emit_binding_review(monkeypatch, caplog, mode="app")
+    assert ctx["get_user_calls"] == []
+
+
+def test_binding_review_app_installation_id_from_env_or_api(monkeypatch, caplog):
+    _configure_binding_credentials(monkeypatch, mode="app", installation_id="999001")
+    lookups = []
+
+    class _Resp:
+        def __init__(self, status, payload=None, text=""):
+            self.status_code = status
+            self._payload = payload or {}
+            self.text = text
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kwargs):
+            if url.endswith("/installation"):
+                lookups.append(url)
+                raise AssertionError("installation lookup must be skipped")
+            if "/reviews/" in url:
+                return _Resp(
+                    200,
+                    {
+                        "id": 999,
+                        "user": {"login": "bot-login[bot]", "type": "Bot"},
+                        "commit_id": "a" * 40,
+                        "state": "APPROVED",
+                    },
+                )
+            if "/reviews/" in url:
+                return _Resp(
+                    200,
+                    {
+                        "id": 999,
+                        "user": {"login": "bot-login[bot]", "type": "Bot"},
+                        "commit_id": "a" * 40,
+                        "state": "APPROVED",
+                    },
+                )
+            if url.endswith("/pulls/87"):
+                return _Resp(
+                    200,
+                    {
+                        "state": "open",
+                        "head": {"sha": "a" * 40},
+                        "user": {"login": "octo-author"},
+                    },
+                )
+            if "/issues/87/comments" in url:
+                return _Resp(200, [])
+            raise AssertionError(url)
+
+        async def post(self, url, headers=None, **kwargs):
+            if "/access_tokens" in url:
+                assert "/installations/999001/" in url
+                return _Resp(
+                    200,
+                    {
+                        "token": "ghs_installation_token",
+                        "expires_at": "2099-01-01T00:00:00Z",
+                    },
+                )
+            return _Resp(200, {"id": 999})
+
+    monkeypatch.setattr(swarm_dispatch, "_mint_reviewer_app_jwt", lambda: "fake.jwt")
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", lambda **kw: _Client())
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    with caplog.at_level(logging.INFO):
+        receipt = asyncio.run(
+            d._emit_formal_review(_trigger(head_sha="a" * 40), "approve", "**APPROVE**")
+        )
+    assert receipt is not None
+    assert lookups == []
+
+
+def test_binding_review_app_preferred_over_pat(monkeypatch, caplog):
+    _, _, _, _, ctx = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        mode="both",
+        reviewer="bot-login[bot]",
+        user_type="Bot",
+        verdict="approve",
+        readback_state="APPROVED",
+    )
+    assert ctx["get_user_calls"] == []
+    assert any(
+        b and "ghs_installation_token" in b for b in ctx["auth_bearers"]
+    )
+
+
+def test_binding_review_app_mint_failed(monkeypatch, caplog):
+    receipt, _, log_text, posts, _ = _emit_binding_review(
+        monkeypatch, caplog, mode="app", mint_ok=False
     )
     assert receipt is None
     assert posts == []
-    assert "unexpected login" in log_text
+    assert "reason=app_mint_failed" in log_text
+
+
+def test_binding_review_readback_gates_receipt(monkeypatch, caplog):
+    test_binding_review_rejects_wrong_readback_state(monkeypatch, caplog)
+
+
+def test_formal_review_comment_keeps_repo_token(monkeypatch, caplog):
+    monkeypatch.setenv("ATELES_AGENT_PAT", "shared-author-token")
+    monkeypatch.delenv("VANELLUS_AGENT_PAT", raising=False)
+    monkeypatch.delenv("ATELES_REVIEWER_APP_ID", raising=False)
+    auth = []
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"id": 1}
+
+        def raise_for_status(self):
+            return None
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, **kwargs):
+            auth.append((headers or {}).get("Authorization"))
+            return _Resp()
+
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", lambda **kw: _Client())
+    d = SwarmDispatcher(_StubNotifier(), _config(github_token="cfg-token"))
+    with caplog.at_level(logging.INFO):
+        asyncio.run(d._emit_formal_review(_trigger(), "comment", "**COMMENT**"))
+    assert auth == ["Bearer shared-author-token"]
+    assert "reason=unset" not in caplog.text
+
+
+def test_binding_review_author_token_or_comment_stays_review_required():
+    comment_event = swarm_dispatch.verdict_to_review_event("comment", body="**COMMENT**")
+    approve_event = swarm_dispatch.verdict_to_review_event("approve", body="**APPROVE**")
+    assert comment_event == "COMMENT"
+    assert approve_event == "APPROVE"
+
+
+def test_binding_review_no_double_escalation_on_clear_panel(monkeypatch):
+    claims = []
+
+    async def fake_claim(self, trigger, kind, *, detail=None):
+        claims.append(kind)
+        return True
+
+    async def fake_already(self, trigger):
+        return any(k.startswith("binding-review-") for k in claims)
+
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_binding_review_escalation_already_claimed", fake_already
+    )
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    trigger = _trigger()
+    asyncio.run(
+        d._abort_binding_review(
+            trigger,
+            "unset",
+            fields="credential=ATELES_REVIEWER_APP_ID|VANELLUS_AGENT_PAT",
+            hint="set secrets",
+        )
+    )
+    if not asyncio.run(d._binding_review_escalation_already_claimed(trigger)):
+        asyncio.run(d._claim_escalation(trigger, "binding-review-unverified"))
+    assert claims == ["binding-review-unset"]
+    assert "binding-review-unverified" not in claims
+
+
+def test_vanellus_review_docs_match_binding_lines():
+    text = open(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "..",
+            "docs",
+            "agents",
+            "vanellus.md",
+        ),
+        encoding="utf-8",
+    ).read()
+    assert "## Binding review" in text
+    assert "#binding-review" in text
+    assert "reason=unset" in text
+    assert "principal=bot" in text
+    assert "principal=pat" in text
+    assert "cosmetic-pending" not in text
 
 
 def test_ci_receipt_reconstruction_requires_latest_exact_head_approval(monkeypatch):
     head = "b" * 40
-    reviewer = agent_github_login("vanellus")
+    reviewer = "markmhendrickson-ateles-vanellus"
 
     class _ReviewClient:
         async def __aenter__(self):
@@ -9767,12 +10214,54 @@ def test_ci_receipt_reconstruction_requires_latest_exact_head_approval(monkeypat
     assert receipt is None
 
 
+def test_binding_approval_receipt_from_github_prefers_bot(monkeypatch):
+    head = "c" * 40
+
+    class _ReviewClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, **kwargs):
+            return _MergeResp(
+                200,
+                [
+                    {
+                        "id": 1,
+                        "user": {"login": "human-reviewer", "type": "User"},
+                        "commit_id": head,
+                        "state": "APPROVED",
+                        "submitted_at": "2026-09-23T00:00:00Z",
+                    },
+                    {
+                        "id": 2,
+                        "user": {"login": "bot-login[bot]", "type": "Bot"},
+                        "commit_id": head,
+                        "state": "APPROVED",
+                        "submitted_at": "2026-09-23T00:00:01Z",
+                    },
+                ],
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: _ReviewClient())
+    receipt = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._binding_approval_receipt_from_github(
+            "owner/repo", 87, head, pr_author="octo-author"
+        )
+    )
+    assert receipt is not None
+    assert receipt.reviewer_login == "bot-login[bot]"
+    assert receipt.principal == "bot"
+
+
 @pytest.mark.parametrize("review_id", [None, "", 0, -1, "not-an-id", True])
 def test_ci_receipt_reconstruction_rejects_missing_or_invalid_review_id(
     monkeypatch, review_id
 ):
     head = "b" * 40
-    reviewer = agent_github_login("vanellus")
+    reviewer = "distinct-reviewer"
 
     class _ReviewClient:
         async def __aenter__(self):
@@ -9802,7 +10291,6 @@ def test_ci_receipt_reconstruction_rejects_missing_or_invalid_review_id(
         )
     )
     assert receipt is None
-
 
 # ── parent-issue link resolution (ateles#434 / #613 / #300) ─────────────────
 #
