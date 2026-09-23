@@ -154,7 +154,9 @@ def get_token() -> str:
     return tok
 
 
-def get_schema_declared_fields(entity_type: str, base_url: str, token: str, cache: dict):
+def get_schema_declared_fields(
+    entity_type: str, base_url: str, token: str, cache: dict
+):
     """Fetch and cache a hosted entity type's declared field names.
 
     GET /schemas/<entity_type> is a read -- never a write -- and is fetched
@@ -169,7 +171,12 @@ def get_schema_declared_fields(entity_type: str, base_url: str, token: str, cach
     if entity_type in cache:
         return cache[entity_type]
     status, body = http_request(
-        "GET", base_url, f"/schemas/{entity_type}", token, retries=3, retry_backoff_seconds=2.0
+        "GET",
+        base_url,
+        f"/schemas/{entity_type}",
+        token,
+        retries=3,
+        retry_backoff_seconds=2.0,
     )
     if status == 200 and isinstance(body, dict):
         fields = body.get("schema_definition", {}).get("fields", {})
@@ -197,7 +204,9 @@ ALWAYS_STRIP_FIELD_KEYS = {"_migration_run_id"}
 CONDITIONALLY_RESERVED_FIELD_KEYS = {"entity_id", "idempotency_key", "canonical_name"}
 
 
-def strip_reserved_fields(entity_type: str, fields: dict, schema_info: dict) -> tuple[dict, list[str]]:
+def strip_reserved_fields(
+    entity_type: str, fields: dict, schema_info: dict
+) -> tuple[dict, list[str]]:
     """Remove reserved/bogus keys from an entity's field payload.
 
     Returns (cleaned_fields, stripped_key_names). Two categories are
@@ -322,7 +331,12 @@ def http_request(
 
 def entity_exists(entity_id: str, base_url: str, token: str) -> bool:
     status, _ = http_request(
-        "GET", base_url, f"/entities/{entity_id}", token, retries=3, retry_backoff_seconds=2.0
+        "GET",
+        base_url,
+        f"/entities/{entity_id}",
+        token,
+        retries=3,
+        retry_backoff_seconds=2.0,
     )
     return status == 200
 
@@ -337,7 +351,9 @@ def load_candidates(conn: sqlite3.Connection, cutover_ts: str, entity_ids=None):
         (cutover_ts,),
     )
     all_obs = cur.fetchall()
-    excluded_schema_lag = [row for row in all_obs if is_schema_lag_background_rewrite(row[9])]
+    excluded_schema_lag = [
+        row for row in all_obs if is_schema_lag_background_rewrite(row[9])
+    ]
     obs = [row for row in all_obs if not is_schema_lag_background_rewrite(row[9])]
     if entity_ids:
         obs = [row for row in obs if row[1] in entity_ids]
@@ -425,7 +441,9 @@ def build_observation_payload(row, cutover_date: str, schema_info: dict | None =
     )
 
 
-def predict_unknown_fields(entity_type: str, fields: dict, schema_info: dict) -> list[str]:
+def predict_unknown_fields(
+    entity_type: str, fields: dict, schema_info: dict
+) -> list[str]:
     """Pre-flight prediction of which of an entity's (already-stripped)
     field keys would come back as UNKNOWN_FIELD store_warnings.
 
@@ -505,7 +523,9 @@ def infer_field_type(value) -> str:
     return "string"
 
 
-def plan_schema_extensions(entity_type: str, sample_values_by_field: dict, schema_info: dict):
+def plan_schema_extensions(
+    entity_type: str, sample_values_by_field: dict, schema_info: dict
+):
     """Compute the fields_to_add plan for one entity_type from observed values.
 
     `sample_values_by_field` maps field_name -> a representative value seen
@@ -517,7 +537,11 @@ def plan_schema_extensions(entity_type: str, sample_values_by_field: dict, schem
     always False: an auto-extension must never turn into a constraint that
     could reject an unrelated future write that happens to omit the field.
     """
-    declared = schema_info.get("declared_fields", set()) if schema_info.get("has_schema") else set()
+    declared = (
+        schema_info.get("declared_fields", set())
+        if schema_info.get("has_schema")
+        else set()
+    )
     return [
         {"field_name": name, "field_type": infer_field_type(value), "required": False}
         for name, value in sorted(sample_values_by_field.items())
@@ -525,7 +549,9 @@ def plan_schema_extensions(entity_type: str, sample_values_by_field: dict, schem
     ]
 
 
-def build_update_schema_incremental_payload(entity_type: str, fields_to_add: list[dict]) -> dict:
+def build_update_schema_incremental_payload(
+    entity_type: str, fields_to_add: list[dict]
+) -> dict:
     """Build a POST /update_schema_incremental body that can ONLY add fields.
 
     Deliberately omits fields_to_remove and canonical_name_fields -- both
@@ -585,10 +611,14 @@ def extend_hosted_schema(
     """
     if schema_info.get("has_schema"):
         payload = build_update_schema_incremental_payload(entity_type, fields_to_add)
-        status, resp = http_request("POST", base_url, "/update_schema_incremental", token, payload)
+        status, resp = http_request(
+            "POST", base_url, "/update_schema_incremental", token, payload
+        )
     else:
         payload = build_register_schema_payload(entity_type, fields_to_add)
-        status, resp = http_request("POST", base_url, "/register_schema", token, payload)
+        status, resp = http_request(
+            "POST", base_url, "/register_schema", token, payload
+        )
     ok = status in (200, 201) and isinstance(resp, dict) and not resp.get("error")
     return ok, resp
 
@@ -632,7 +662,9 @@ def load_reconciliation_file(path: str) -> list[dict]:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, list):
-        raise ValueError(f"{path}: expected a JSON list of entity records, got {type(data).__name__}")
+        raise ValueError(
+            f"{path}: expected a JSON list of entity records, got {type(data).__name__}"
+        )
     return data
 
 
@@ -653,7 +685,9 @@ def filter_writable_fields(entity_record: dict) -> list[dict]:
     return [f for f in fields if f.get("classification") in WRITABLE_CLASSIFICATIONS]
 
 
-def local_post_cutover_field_state(conn: sqlite3.Connection, entity_id: str, cutover_ts: str) -> dict:
+def local_post_cutover_field_state(
+    conn: sqlite3.Connection, entity_id: str, cutover_ts: str
+) -> dict:
     """field_name -> latest post-cutover local value for one entity.
 
     Mirrors scratchpad/reconcile/03_reconcile.py:local_post_cutover_state:
@@ -710,7 +744,9 @@ def value_hash(value) -> str:
     return hashlib.sha256(s.encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
-def build_reconcile_idempotency_key(cutover_date: str, entity_id: str, field_names: list[str]) -> str:
+def build_reconcile_idempotency_key(
+    cutover_date: str, entity_id: str, field_names: list[str]
+) -> str:
     """Deterministic idempotency_key for one entity's reconciliation store.
 
     migrate-<cutover-date>-recon-<entity_id>-<hash of the field set>. The
@@ -773,12 +809,18 @@ def plan_class_b_reconciliation_for_entity(
 
     idem_key = None
     if fields_to_write:
-        idem_key = build_reconcile_idempotency_key(cutover_date, entity_id, sorted(fields_to_write.keys()))
+        idem_key = build_reconcile_idempotency_key(
+            cutover_date, entity_id, sorted(fields_to_write.keys())
+        )
     return entity_id, entity_type, fields_to_write, drifted_fields, idem_key
 
 
 def recheck_hosted_drift(
-    entity_id: str, field_names: list[str], expected_hashes: dict, base_url: str, token: str
+    entity_id: str,
+    field_names: list[str],
+    expected_hashes: dict,
+    base_url: str,
+    token: str,
 ) -> list[str]:
     """Re-fetch hosted's CURRENT value for each field and compare hashes.
 
@@ -790,7 +832,14 @@ def recheck_hosted_drift(
     never a write -- and only the fields this entity's plan actually
     touches are compared.
     """
-    status, body = http_request("GET", base_url, f"/entities/{entity_id}", token, retries=3, retry_backoff_seconds=2.0)
+    status, body = http_request(
+        "GET",
+        base_url,
+        f"/entities/{entity_id}",
+        token,
+        retries=3,
+        retry_backoff_seconds=2.0,
+    )
     if status != 200 or not isinstance(body, dict):
         # Can't verify -- treat every field as drifted (fail closed: skip
         # rather than write over a state we could not just confirm).
@@ -798,7 +847,9 @@ def recheck_hosted_drift(
     hosted_fields = body.get("fields") or body.get("entity", {}).get("fields") or {}
     drifted = []
     for name in field_names:
-        current_hash = value_hash(hosted_fields.get(name)) if name in hosted_fields else None
+        current_hash = (
+            value_hash(hosted_fields.get(name)) if name in hosted_fields else None
+        )
         if current_hash != expected_hashes.get(name):
             drifted.append(name)
     return drifted
@@ -847,7 +898,9 @@ def log_action(log_fh, **fields) -> None:
     log_fh.flush()
 
 
-def build_store_payload_for_reconcile(entity_id: str, entity_type: str, fields_to_write: dict, idem_key: str) -> dict:
+def build_store_payload_for_reconcile(
+    entity_id: str, entity_type: str, fields_to_write: dict, idem_key: str
+) -> dict:
     """Build one /store request body for a class-b reconciliation write.
 
     Same shape discipline as build_observation_payload: target_id forces
@@ -863,7 +916,9 @@ def build_store_payload_for_reconcile(entity_id: str, entity_type: str, fields_t
     }
 
 
-def run_reconciliation(args, conn, base_url, token, cutover_date, apply_mode, entity_ids) -> None:
+def run_reconciliation(
+    args, conn, base_url, token, cutover_date, apply_mode, entity_ids
+) -> None:
     """--reconcile-file mode: write class-b LOCAL_ONLY/LOCAL_NEWER fields to hosted.
 
     Entirely separate from the class-a observation/relationship replay --
@@ -892,7 +947,9 @@ def run_reconciliation(args, conn, base_url, token, cutover_date, apply_mode, en
     total_fields_drifted_local = 0
     for entity_record in entities:
         entity_id, entity_type, fields_to_write, drifted_fields, idem_key = (
-            plan_class_b_reconciliation_for_entity(entity_record, conn, args.cutover, cutover_date)
+            plan_class_b_reconciliation_for_entity(
+                entity_record, conn, args.cutover, cutover_date
+            )
         )
         total_fields_drifted_local += len(drifted_fields)
         if not fields_to_write:
@@ -908,14 +965,22 @@ def run_reconciliation(args, conn, base_url, token, cutover_date, apply_mode, en
             for f in filter_writable_fields(entity_record)
             if f["name"] in fields_to_write
         }
-        planned.append((entity_id, entity_type, fields_to_write, expected_hashes, idem_key))
+        planned.append(
+            (entity_id, entity_type, fields_to_write, expected_hashes, idem_key)
+        )
 
     log_path = args.log
     applied_entities = 0
     applied_fields = 0
     apply_time_drift_fields = 0
     with open(log_path, "a", encoding="utf-8") as log_fh:
-        for entity_id, entity_type, fields_to_write, expected_hashes, idem_key in planned:
+        for (
+            entity_id,
+            entity_type,
+            fields_to_write,
+            expected_hashes,
+            idem_key,
+        ) in planned:
             field_names = sorted(fields_to_write.keys())
             if not apply_mode:
                 print(
@@ -936,7 +1001,9 @@ def run_reconciliation(args, conn, base_url, token, cutover_date, apply_mode, en
                 )
                 continue
 
-            drift_now = recheck_hosted_drift(entity_id, field_names, expected_hashes, base_url, token)
+            drift_now = recheck_hosted_drift(
+                entity_id, field_names, expected_hashes, base_url, token
+            )
             if drift_now:
                 apply_time_drift_fields += len(drift_now)
                 for name in drift_now:
@@ -956,7 +1023,9 @@ def run_reconciliation(args, conn, base_url, token, cutover_date, apply_mode, en
             if not fields_to_write:
                 continue
 
-            payload = build_store_payload_for_reconcile(entity_id, entity_type, fields_to_write, idem_key)
+            payload = build_store_payload_for_reconcile(
+                entity_id, entity_type, fields_to_write, idem_key
+            )
             status, resp = http_request("POST", base_url, "/store", token, payload)
             ok = status in (200, 201)
             print(
@@ -987,14 +1056,26 @@ def run_reconciliation(args, conn, base_url, token, cutover_date, apply_mode, en
 
     print()
     print("=== Reconciliation summary ===")
-    print(f"Entities with nothing to apply (SAME/HOSTED_NEWER only): {entities_with_nothing_to_apply}")
+    print(
+        f"Entities with nothing to apply (SAME/HOSTED_NEWER only): {entities_with_nothing_to_apply}"
+    )
     print(f"Entities planned to write:                               {len(planned)}")
-    print(f"Fields planned to write:                                 {total_fields_planned}")
-    print(f"Fields skipped (local value drifted from reconciliation.json): {total_fields_drifted_local}")
+    print(
+        f"Fields planned to write:                                 {total_fields_planned}"
+    )
+    print(
+        f"Fields skipped (local value drifted from reconciliation.json): {total_fields_drifted_local}"
+    )
     if apply_mode:
-        print(f"Entities applied:                                        {applied_entities}")
-        print(f"Fields applied:                                          {applied_fields}")
-        print(f"Fields skipped (hosted drifted since reconciliation was computed): {apply_time_drift_fields}")
+        print(
+            f"Entities applied:                                        {applied_entities}"
+        )
+        print(
+            f"Fields applied:                                          {applied_fields}"
+        )
+        print(
+            f"Fields skipped (hosted drifted since reconciliation was computed): {apply_time_drift_fields}"
+        )
     print(f"Action log: {log_path}")
 
 
@@ -1028,6 +1109,10 @@ def run_reconciliation(args, conn, base_url, token, cutover_date, apply_mode, en
 # must always be sent -- a store call replaces the field, it does not patch
 # individual keys within it.
 
+LEGACY_GATE_STATUS_FIELD = (
+    "gate_status"  # vocab-ok: compatibility read/write for the one-off migration
+)
+
 GATE_STATUS_RANK = {
     "pending": 0,
     "in_review": 1,
@@ -1057,7 +1142,9 @@ def gate_status_rank(value) -> int | None:
     return GATE_STATUS_RANK.get(value)
 
 
-def merge_gate_status(hosted_gate_status: dict, local_gate_status: dict) -> tuple[dict, list[tuple[str, object, object]]]:
+def merge_gate_status(
+    hosted_gate_status: dict, local_gate_status: dict
+) -> tuple[dict, list[tuple[str, object, object]]]:
     """Merge one issue's gate_status maps. Returns (merged, changes).
 
     changes is a list of (gate_name, hosted_value, new_value) for every gate
@@ -1157,11 +1244,15 @@ def merge_owner_history(hosted_history, local_history) -> list:
         seen_local_keys.add(key)
         new_from_local.append(entry)
 
-    new_from_local.sort(key=lambda e: (e.get("at") or "") if isinstance(e, dict) else "")
+    new_from_local.sort(
+        key=lambda e: (e.get("at") or "") if isinstance(e, dict) else ""
+    )
     return list(hosted_history) + new_from_local
 
 
-def latest_field_write_ts(conn: sqlite3.Connection, entity_id: str, field_name: str, cutover_ts: str) -> str | None:
+def latest_field_write_ts(
+    conn: sqlite3.Connection, entity_id: str, field_name: str, cutover_ts: str
+) -> str | None:
     """Latest created_at (post-cutover) among this entity's LOCAL observations
     that set `field_name` -- used to compare against hosted's own latest
     write of current_owner (see merge_current_owner) to decide which side's
@@ -1185,7 +1276,9 @@ def latest_field_write_ts(conn: sqlite3.Connection, entity_id: str, field_name: 
     return None
 
 
-def hosted_latest_field_write_ts(entity_id: str, field_name: str, base_url: str, token: str) -> str | None:
+def hosted_latest_field_write_ts(
+    entity_id: str, field_name: str, base_url: str, token: str
+) -> str | None:
     """Latest observed_at for `field_name` on hosted, via GET /entities/<id>/history
     if available, falling back to the entity's own last_observation_at when a
     per-field history endpoint isn't available. Returns None on any failure
@@ -1193,13 +1286,21 @@ def hosted_latest_field_write_ts(entity_id: str, field_name: str, base_url: str,
     is newer, so merge_current_owner will not overwrite it).
     """
     status, body = http_request(
-        "GET", base_url, f"/entities/{entity_id}/field_history?field={field_name}",
-        token, retries=1, retry_backoff_seconds=1.0,
+        "GET",
+        base_url,
+        f"/entities/{entity_id}/field_history?field={field_name}",
+        token,
+        retries=1,
+        retry_backoff_seconds=1.0,
     )
     if status == 200 and isinstance(body, dict):
         history = body.get("history") or body.get("observations") or []
         if isinstance(history, list) and history:
-            timestamps = [h.get("observed_at") or h.get("created_at") for h in history if isinstance(h, dict)]
+            timestamps = [
+                h.get("observed_at") or h.get("created_at")
+                for h in history
+                if isinstance(h, dict)
+            ]
             timestamps = [t for t in timestamps if t]
             if timestamps:
                 return max(timestamps)
@@ -1207,7 +1308,12 @@ def hosted_latest_field_write_ts(entity_id: str, field_name: str, base_url: str,
     # entity snapshot's own last_observation_at as a conservative proxy for
     # "when was this entity, including this field, last written on hosted".
     status2, body2 = http_request(
-        "GET", base_url, f"/entities/{entity_id}", token, retries=1, retry_backoff_seconds=1.0
+        "GET",
+        base_url,
+        f"/entities/{entity_id}",
+        token,
+        retries=1,
+        retry_backoff_seconds=1.0,
     )
     if status2 == 200 and isinstance(body2, dict):
         return body2.get("last_observation_at")
@@ -1215,7 +1321,10 @@ def hosted_latest_field_write_ts(entity_id: str, field_name: str, base_url: str,
 
 
 def merge_current_owner(
-    hosted_current_owner, local_current_owner, local_ts: str | None, hosted_ts: str | None
+    hosted_current_owner,
+    local_current_owner,
+    local_ts: str | None,
+    hosted_ts: str | None,
 ) -> tuple[object, bool]:
     """Decide current_owner. Returns (value_to_use, changed).
 
@@ -1236,7 +1345,9 @@ def merge_current_owner(
     return local_current_owner, True
 
 
-def local_gate_state_for_entity(conn: sqlite3.Connection, entity_id: str, cutover_ts: str) -> dict:
+def local_gate_state_for_entity(
+    conn: sqlite3.Connection, entity_id: str, cutover_ts: str
+) -> dict:
     """Fold-forward this entity's LOCAL post-cutover observations for exactly
     the three gate fields plus its identifying fields (repo, github_number,
     local_issue_id, title) -- last write wins per field, schema_lag_bg_*
@@ -1249,7 +1360,15 @@ def local_gate_state_for_entity(conn: sqlite3.Connection, entity_id: str, cutove
         (entity_id, cutover_ts),
     )
     state: dict = {}
-    tracked = {"gate_status", "owner_history", "current_owner", "repo", "github_number", "local_issue_id", "title"}
+    tracked = {
+        LEGACY_GATE_STATUS_FIELD,
+        "owner_history",
+        "current_owner",
+        "repo",
+        "github_number",
+        "local_issue_id",
+        "title",
+    }
     for fields_json, _created_at in cur.fetchall():
         if is_schema_lag_background_rewrite(fields_json):
             continue
@@ -1276,22 +1395,32 @@ def scan_local_gate_candidates(db_paths: list[str], cutover_ts: str) -> dict:
     Returns entity_id -> {gate_status, owner_history, current_owner, repo,
     github_number, local_issue_id, title} (only keys actually seen).
     """
-    combined_rows: list[tuple[str, str, str]] = []  # (entity_id, fields_json, created_at)
+    combined_rows: list[
+        tuple[str, str, str]
+    ] = []  # (entity_id, fields_json, created_at)
     for db_path in db_paths:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         cur = conn.cursor()
         cur.execute(
             "SELECT entity_id, fields, created_at FROM observations "
             "WHERE entity_type = 'issue' AND created_at > ? "
-            "AND (fields LIKE '%gate_status%' OR fields LIKE '%owner_history%' OR fields LIKE '%current_owner%') "
+            "AND (fields LIKE ? OR fields LIKE '%owner_history%' OR fields LIKE '%current_owner%') "
             "ORDER BY created_at ASC",
-            (cutover_ts,),
+            (cutover_ts, f"%{LEGACY_GATE_STATUS_FIELD}%"),
         )
         combined_rows.extend(cur.fetchall())
         conn.close()
     combined_rows.sort(key=lambda r: r[2])
 
-    tracked = {"gate_status", "owner_history", "current_owner", "repo", "github_number", "local_issue_id", "title"}
+    tracked = {
+        LEGACY_GATE_STATUS_FIELD,
+        "owner_history",
+        "current_owner",
+        "repo",
+        "github_number",
+        "local_issue_id",
+        "title",
+    }
     states: dict[str, dict] = {}
     for entity_id, fields_json, _created_at in combined_rows:
         if is_schema_lag_background_rewrite(fields_json):
@@ -1310,11 +1439,13 @@ def scan_local_gate_candidates(db_paths: list[str], cutover_ts: str) -> dict:
     # (an entity whose only tracked-field write was e.g. repo/title without
     # ever touching gate_status/owner_history/current_owner has nothing to
     # restore).
-    gate_field_names = {"gate_status", "owner_history", "current_owner"}
+    gate_field_names = {LEGACY_GATE_STATUS_FIELD, "owner_history", "current_owner"}
     return {eid: st for eid, st in states.items() if gate_field_names & set(st.keys())}
 
 
-def canonical_identity_lookup(entity_type: str, repo, github_number, base_url: str, token: str) -> str | None:
+def canonical_identity_lookup(
+    entity_type: str, repo, github_number, base_url: str, token: str
+) -> str | None:
     """Best-effort lookup of a hosted entity id by (repo, github_number) when
     a direct GET by local entity_id 404s. Tries POST /retrieve_entity_by_identifier
     with the schema's declared composite identifier shape; returns None (not
@@ -1328,7 +1459,13 @@ def canonical_identity_lookup(entity_type: str, repo, github_number, base_url: s
         "identifier": f"{github_number}|{repo}",
     }
     status, body = http_request(
-        "POST", base_url, "/retrieve_entity_by_identifier", token, payload, retries=2, retry_backoff_seconds=2.0
+        "POST",
+        base_url,
+        "/retrieve_entity_by_identifier",
+        token,
+        payload,
+        retries=2,
+        retry_backoff_seconds=2.0,
     )
     if status == 200 and isinstance(body, dict):
         entities = body.get("entities")
@@ -1340,7 +1477,14 @@ def canonical_identity_lookup(entity_type: str, repo, github_number, base_url: s
 
 
 def get_hosted_entity(entity_id: str, base_url: str, token: str) -> dict | None:
-    status, body = http_request("GET", base_url, f"/entities/{entity_id}", token, retries=3, retry_backoff_seconds=2.0)
+    status, body = http_request(
+        "GET",
+        base_url,
+        f"/entities/{entity_id}",
+        token,
+        retries=3,
+        retry_backoff_seconds=2.0,
+    )
     if status == 200 and isinstance(body, dict):
         return body
     return None
@@ -1365,14 +1509,22 @@ def plan_gate_restore_for_entity(
     action (create/merge/noop) and, for merge/create, the full field set to
     send plus a human-readable list of per-gate changes -- no I/O.
     """
-    local_gate_status = local_state.get("gate_status") if isinstance(local_state.get("gate_status"), dict) else {}
-    local_owner_history = local_state.get("owner_history") if isinstance(local_state.get("owner_history"), list) else []
+    local_gate_status = (
+        local_state.get(LEGACY_GATE_STATUS_FIELD)
+        if isinstance(local_state.get(LEGACY_GATE_STATUS_FIELD), dict)
+        else {}
+    )
+    local_owner_history = (
+        local_state.get("owner_history")
+        if isinstance(local_state.get("owner_history"), list)
+        else []
+    )
     local_current_owner = local_state.get("current_owner")
 
     if hosted_entity is None:
         fields = {}
         if local_gate_status:
-            fields["gate_status"] = local_gate_status
+            fields[LEGACY_GATE_STATUS_FIELD] = local_gate_status
         if local_owner_history:
             fields["owner_history"] = local_owner_history
         if local_current_owner is not None:
@@ -1384,23 +1536,39 @@ def plan_gate_restore_for_entity(
             "action": "create",
             "entity_id": entity_id,
             "fields": fields,
-            "gate_changes": [(g, None, v) for g, v in sorted(local_gate_status.items())],
+            "gate_changes": [
+                (g, None, v) for g, v in sorted(local_gate_status.items())
+            ],
             "owner_history_changed": bool(local_owner_history),
-            "current_owner_change": (None, local_current_owner) if local_current_owner is not None else None,
+            "current_owner_change": (None, local_current_owner)
+            if local_current_owner is not None
+            else None,
         }
 
     hosted_snapshot = hosted_entity.get("snapshot") or {}
-    hosted_gate_status = hosted_snapshot.get("gate_status") if isinstance(hosted_snapshot.get("gate_status"), dict) else {}
-    hosted_owner_history = hosted_snapshot.get("owner_history") if isinstance(hosted_snapshot.get("owner_history"), list) else []
+    hosted_gate_status = (
+        hosted_snapshot.get(LEGACY_GATE_STATUS_FIELD)
+        if isinstance(hosted_snapshot.get(LEGACY_GATE_STATUS_FIELD), dict)
+        else {}
+    )
+    hosted_owner_history = (
+        hosted_snapshot.get("owner_history")
+        if isinstance(hosted_snapshot.get("owner_history"), list)
+        else []
+    )
     hosted_current_owner = hosted_snapshot.get("current_owner")
 
-    merged_gate_status, gate_changes = merge_gate_status(hosted_gate_status, local_gate_status)
-    merged_owner_history = merge_owner_history(hosted_owner_history, local_owner_history)
+    merged_gate_status, gate_changes = merge_gate_status(
+        hosted_gate_status, local_gate_status
+    )
+    merged_owner_history = merge_owner_history(
+        hosted_owner_history, local_owner_history
+    )
     owner_history_changed = merged_owner_history != hosted_owner_history
 
     fields = {}
     if gate_changes:
-        fields["gate_status"] = merged_gate_status
+        fields[LEGACY_GATE_STATUS_FIELD] = merged_gate_status
     if owner_history_changed:
         fields["owner_history"] = merged_owner_history
 
@@ -1430,7 +1598,9 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
     cutover_ts = args.cutover
     run_ts = datetime.now(timezone.utc).isoformat()
     print(f"Gate-restore cutover: {cutover_ts}")
-    print(f"Gate-restore run started at: {run_ts} (writes from agent runs after this instant are NOT covered)")
+    print(
+        f"Gate-restore run started at: {run_ts} (writes from agent runs after this instant are NOT covered)"
+    )
     print(f"Scanning local DBs: {db_paths}")
     print()
 
@@ -1481,20 +1651,38 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
             hosted_probe = get_hosted_entity(entity_id, base_url, token)
             if hosted_probe:
                 probe_snapshot = hosted_probe.get("snapshot") or {}
-                repo = repo or probe_snapshot.get("repo") or probe_snapshot.get("repository")
-                github_number = github_number if github_number is not None else (
-                    probe_snapshot.get("github_number") or probe_snapshot.get("issue_number")
+                repo = (
+                    repo
+                    or probe_snapshot.get("repo")
+                    or probe_snapshot.get("repository")
+                )
+                github_number = (
+                    github_number
+                    if github_number is not None
+                    else (
+                        probe_snapshot.get("github_number")
+                        or probe_snapshot.get("issue_number")
+                    )
                 )
 
         label = format_issue_label(repo, github_number, entity_id)
 
-        if not repo or github_number is None or not isinstance(repo, str) or "/" not in repo:
-            skips_no_identity.append((entity_id, label, "no resolvable repo+github_number"))
+        if (
+            not repo
+            or github_number is None
+            or not isinstance(repo, str)
+            or "/" not in repo
+        ):
+            skips_no_identity.append(
+                (entity_id, label, "no resolvable repo+github_number")
+            )
             continue
 
         gh_info = github_issue_lookup(repo, int(github_number))
         if gh_info is None:
-            skips_not_found_on_github.append((entity_id, label, "gh api lookup failed or issue not found"))
+            skips_not_found_on_github.append(
+                (entity_id, label, "gh api lookup failed or issue not found")
+            )
             continue
         if gh_info.get("state") == "closed":
             skips_closed.append((entity_id, label, "issue is CLOSED on GitHub"))
@@ -1512,9 +1700,13 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
         filtered_candidates[entity_id] = local_state
 
     print(f"Skipped (no resolvable repo+github_number): {len(skips_no_identity)}")
-    print(f"Skipped (not found on GitHub):               {len(skips_not_found_on_github)}")
+    print(
+        f"Skipped (not found on GitHub):               {len(skips_not_found_on_github)}"
+    )
     print(f"Skipped (CLOSED on GitHub):                  {len(skips_closed)}")
-    for _eid, label, reason in skips_no_identity + skips_not_found_on_github + skips_closed:
+    for _eid, label, reason in (
+        skips_no_identity + skips_not_found_on_github + skips_closed
+    ):
         print(f"  SKIP {label}: {reason}")
     print(f"Candidates passing identity filter: {len(filtered_candidates)}")
     print()
@@ -1530,7 +1722,9 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
         github_number = local_state.get("github_number")
 
         if hosted_entity is None:
-            canon_id = canonical_identity_lookup("issue", repo, github_number, base_url, token)
+            canon_id = canonical_identity_lookup(
+                "issue", repo, github_number, base_url, token
+            )
             if canon_id and canon_id != entity_id:
                 hosted_entity = get_hosted_entity(canon_id, base_url, token)
                 if hosted_entity is not None:
@@ -1556,7 +1750,9 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
     for p in changed_plans:
         label = p["label"]
         if p["action"] == "create":
-            dry_lines.append(f"{label}: CREATE issue entity {p['entity_id']} with gate fields {sorted(p['fields'].keys())}")
+            dry_lines.append(
+                f"{label}: CREATE issue entity {p['entity_id']} with gate fields {sorted(p['fields'].keys())}"
+            )
             for gate, old, new in p["gate_changes"]:
                 dry_lines.append(f"  {label}: gate {gate}: (none) -> {new}")
         else:
@@ -1565,7 +1761,9 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
             if p["owner_history_changed"]:
                 before_n = len(p.get("hosted_owner_history") or [])
                 after_n = len(p["fields"].get("owner_history") or [])
-                dry_lines.append(f"{label}: owner_history: {before_n} entries -> {after_n} entries (union)")
+                dry_lines.append(
+                    f"{label}: owner_history: {before_n} entries -> {after_n} entries (union)"
+                )
 
     report_text = "\n".join(dry_lines) if dry_lines else "(no changes)"
     print()
@@ -1575,6 +1773,7 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
     dry_run_log_path = args.gate_restore_dry_log
     if dry_run_log_path:
         import os as _os
+
         _os.makedirs(_os.path.dirname(dry_run_log_path), exist_ok=True)
         with open(dry_run_log_path, "w", encoding="utf-8") as f:
             f.write(report_text + "\n")
@@ -1588,8 +1787,12 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
     # identity, so there is nothing further to check here beyond the count.
     print()
     print("=== Sanity gate ===")
-    print(f"Issues scanned (post-cutover, gate-field-bearing):        {len(candidates)}")
-    print(f"Issues passing identity filter (open, on GitHub):         {len(filtered_candidates)}")
+    print(
+        f"Issues scanned (post-cutover, gate-field-bearing):        {len(candidates)}"
+    )
+    print(
+        f"Issues passing identity filter (open, on GitHub):         {len(filtered_candidates)}"
+    )
     print(f"Issues to CREATE on hosted (class-a, no hosted issue):    {creations}")
     print(f"Issues to MERGE on hosted (class-b, gate field upgrade):  {merges}")
     print(f"Issues with nothing to change:                            {noops}")
@@ -1630,31 +1833,46 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
                 local_ts = None
                 for conn_path in db_paths:
                     conn = sqlite3.connect(f"file:{conn_path}?mode=ro", uri=True)
-                    ts = latest_field_write_ts(conn, entity_id, "current_owner", cutover_ts)
+                    ts = latest_field_write_ts(
+                        conn, entity_id, "current_owner", cutover_ts
+                    )
                     conn.close()
                     if ts and (local_ts is None or ts > local_ts):
                         local_ts = ts
-                hosted_ts = hosted_latest_field_write_ts(entity_id, "current_owner", base_url, token)
+                hosted_ts = hosted_latest_field_write_ts(
+                    entity_id, "current_owner", base_url, token
+                )
                 new_owner, changed = merge_current_owner(
-                    p.get("hosted_current_owner"), p.get("local_current_owner"), local_ts, hosted_ts
+                    p.get("hosted_current_owner"),
+                    p.get("local_current_owner"),
+                    local_ts,
+                    hosted_ts,
                 )
                 if changed:
                     fields["current_owner"] = new_owner
-                    print(f"{label}: current_owner: {p.get('hosted_current_owner')!r} -> {new_owner!r} (local write newer)")
+                    print(
+                        f"{label}: current_owner: {p.get('hosted_current_owner')!r} -> {new_owner!r} (local write newer)"
+                    )
 
             if not fields:
                 continue
 
             merged_payload_for_key = fields
-            idem_key = build_gate_restore_idempotency_key(entity_id, merged_payload_for_key)
+            idem_key = build_gate_restore_idempotency_key(
+                entity_id, merged_payload_for_key
+            )
             store_payload = {
                 "entities": [build_entity_record("issue", entity_id, fields)],
                 "idempotency_key": idem_key,
                 "observation_source": "import",
             }
-            status, resp = http_request("POST", base_url, "/store", token, store_payload)
+            status, resp = http_request(
+                "POST", base_url, "/store", token, store_payload
+            )
             ok = status in (200, 201)
-            print(f"{'APPLIED' if ok else 'ERROR'}: {label} entity={entity_id} status={status}")
+            print(
+                f"{'APPLIED' if ok else 'ERROR'}: {label} entity={entity_id} status={status}"
+            )
             log_action(
                 log_fh,
                 kind="gate_restore",
@@ -1715,7 +1933,9 @@ def github_issue_lookup(repo: str, number: int) -> dict | None:
     try:
         result = subprocess.run(
             ["gh", "api", f"repos/{repo}/issues/{number}"],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True,
+            text=True,
+            timeout=20,
         )
         if result.returncode != 0:
             return None
@@ -1927,9 +2147,7 @@ def main() -> None:
 
     print(f"Loaded from {args.db}:")
     print(f"  observations candidates (class a+b):   {len(obs)}")
-    print(
-        f"  excluded schema_lag_bg_* rewrites:     {len(excluded_schema_lag)}"
-    )
+    print(f"  excluded schema_lag_bg_* rewrites:     {len(excluded_schema_lag)}")
     print(f"  relationship_observations candidates:  {len(rels)}")
     print(f"  sources candidates:                    {len(srcs)}")
     print(
@@ -1967,16 +2185,28 @@ def main() -> None:
         for row in obs:
             entity_type = row[2]
             fields_json = row[9]
-            schema_info = schema_cache.get(entity_type, {"has_schema": False, "declared_fields": set()})
+            schema_info = schema_cache.get(
+                entity_type, {"has_schema": False, "declared_fields": set()}
+            )
             fields = json.loads(fields_json) if fields_json else {}
-            stripped_fields, _stripped = strip_reserved_fields(entity_type, fields, schema_info)
+            stripped_fields, _stripped = strip_reserved_fields(
+                entity_type, fields, schema_info
+            )
             for name, value in stripped_fields.items():
-                declared = schema_info.get("declared_fields", set()) if schema_info.get("has_schema") else set()
+                declared = (
+                    schema_info.get("declared_fields", set())
+                    if schema_info.get("has_schema")
+                    else set()
+                )
                 if name not in declared:
-                    undeclared_samples.setdefault(entity_type, {}).setdefault(name, value)
+                    undeclared_samples.setdefault(entity_type, {}).setdefault(
+                        name, value
+                    )
 
         for entity_type, samples in sorted(undeclared_samples.items()):
-            schema_info = schema_cache.get(entity_type, {"has_schema": False, "declared_fields": set()})
+            schema_info = schema_cache.get(
+                entity_type, {"has_schema": False, "declared_fields": set()}
+            )
             fields_to_add = plan_schema_extensions(entity_type, samples, schema_info)
             if not fields_to_add:
                 continue
@@ -1987,7 +2217,9 @@ def main() -> None:
                     f"{[f['field_name'] + ':' + f['field_type'] for f in fields_to_add]}"
                 )
                 continue
-            ok, resp = extend_hosted_schema(entity_type, fields_to_add, schema_info, base_url, token)
+            ok, resp = extend_hosted_schema(
+                entity_type, fields_to_add, schema_info, base_url, token
+            )
             if not ok:
                 print(
                     f"  ERROR extending schema for {entity_type}: "
@@ -1996,7 +2228,9 @@ def main() -> None:
                 )
                 sys.exit(1)
             expected_names = [f["field_name"] for f in fields_to_add]
-            verified, missing = verify_schema_extension_applied(entity_type, expected_names, base_url, token)
+            verified, missing = verify_schema_extension_applied(
+                entity_type, expected_names, base_url, token
+            )
             if not verified:
                 print(
                     f"  ERROR: schema extension for {entity_type} reported success but "
@@ -2011,7 +2245,10 @@ def main() -> None:
             # as unknown and stops stripping them as conditionally-reserved.
             fresh_info = get_schema_declared_fields(entity_type, base_url, token, {})
             schema_cache[entity_type] = fresh_info
-            schema_extension_results[entity_type] = {"applied": True, "fields": expected_names}
+            schema_extension_results[entity_type] = {
+                "applied": True,
+                "fields": expected_names,
+            }
             print(f"EXTENDED AND VERIFIED: {entity_type} += {expected_names}")
 
     stats = {
@@ -2026,21 +2263,29 @@ def main() -> None:
 
     for row in obs:
         local_id, entity_id, entity_type = row[0], row[1], row[2]
-        schema_info = schema_cache.get(entity_type, {"has_schema": False, "declared_fields": set()})
+        schema_info = schema_cache.get(
+            entity_type, {"has_schema": False, "declared_fields": set()}
+        )
         payload, idem_key, stripped_keys = build_observation_payload(
             row, cutover_date, schema_info=schema_info
         )
         (entity_record,) = payload["entities"]
         entity_fields = {
-            k: v for k, v in entity_record.items() if k not in ("entity_type", "target_id")
+            k: v
+            for k, v in entity_record.items()
+            if k not in ("entity_type", "target_id")
         }
         if not schema_info.get("has_schema"):
             stats["no_schema_type_counts"][entity_type] = (
                 stats["no_schema_type_counts"].get(entity_type, 0) + 1
             )
-        predicted_unknown = predict_unknown_fields(entity_type, entity_fields, schema_info)
+        predicted_unknown = predict_unknown_fields(
+            entity_type, entity_fields, schema_info
+        )
         if predicted_unknown:
-            bucket = stats["predicted_unknown_field_warnings"].setdefault(entity_type, {})
+            bucket = stats["predicted_unknown_field_warnings"].setdefault(
+                entity_type, {}
+            )
             for k in predicted_unknown:
                 bucket[k] = bucket.get(k, 0) + 1
         stats["entities_touched"].add(entity_id)
@@ -2290,32 +2535,56 @@ def main() -> None:
 
     print()
     print("=== Summary ===")
-    print(f"Entities touched (distinct entity_id across observations): {len(stats['entities_touched'])}")
+    print(
+        f"Entities touched (distinct entity_id across observations): {len(stats['entities_touched'])}"
+    )
     print(f"Observations planned:                                      {len(obs)}")
-    print(f"Observations excluded (schema_lag_bg_* rewrites):          {len(excluded_schema_lag)}")
-    print(f"Relationships among replayed entities (both endpoints):    {stats['relationships_among_replayed']}")
-    print(f"Relationships to a hosted-existing entity (one endpoint):  {stats['relationships_to_hosted_existing']}")
-    print(f"Relationships deferred (neither endpoint replayed here):   {stats['relationships_deferred']}")
+    print(
+        f"Observations excluded (schema_lag_bg_* rewrites):          {len(excluded_schema_lag)}"
+    )
+    print(
+        f"Relationships among replayed entities (both endpoints):    {stats['relationships_among_replayed']}"
+    )
+    print(
+        f"Relationships to a hosted-existing entity (one endpoint):  {stats['relationships_to_hosted_existing']}"
+    )
+    print(
+        f"Relationships deferred (neither endpoint replayed here):   {stats['relationships_deferred']}"
+    )
     print(f"Sources deferred (blob replay unimplemented):              {len(srcs)}")
     if stats["no_schema_type_counts"]:
         print("Entity types with no hosted schema (class-a obs count):")
-        for et, n in sorted(stats["no_schema_type_counts"].items(), key=lambda x: -x[1]):
+        for et, n in sorted(
+            stats["no_schema_type_counts"].items(), key=lambda x: -x[1]
+        ):
             print(f"  {et}: {n}")
     if stats["predicted_unknown_field_warnings"]:
         print("Predicted UNKNOWN_FIELD store_warnings (pre-flight, by type):")
         for et, fields in sorted(stats["predicted_unknown_field_warnings"].items()):
-            field_summary = ", ".join(f"{k}x{v}" for k, v in sorted(fields.items(), key=lambda x: -x[1]))
+            field_summary = ", ".join(
+                f"{k}x{v}" for k, v in sorted(fields.items(), key=lambda x: -x[1])
+            )
             print(f"  {et}: {field_summary}")
     else:
         print("Predicted UNKNOWN_FIELD store_warnings (pre-flight): none")
     if schema_extension_plan:
-        label = "Applied schema extensions" if apply_mode else "Planned schema extensions (dry-run, not sent)"
+        label = (
+            "Applied schema extensions"
+            if apply_mode
+            else "Planned schema extensions (dry-run, not sent)"
+        )
         print(f"{label} (by type):")
         for et, fields_to_add in sorted(schema_extension_plan.items()):
-            field_summary = ", ".join(f"{f['field_name']}:{f['field_type']}" for f in fields_to_add)
+            field_summary = ", ".join(
+                f"{f['field_name']}:{f['field_type']}" for f in fields_to_add
+            )
             print(f"  {et}: {field_summary}")
     else:
-        print("Schema extensions: none planned" if args.extend_schemas else "Schema extensions: --extend-schemas not set")
+        print(
+            "Schema extensions: none planned"
+            if args.extend_schemas
+            else "Schema extensions: --extend-schemas not set"
+        )
     print()
     print(f"Total planned operations: {len(plan)}")
     print(f"Action log: {log_path}")

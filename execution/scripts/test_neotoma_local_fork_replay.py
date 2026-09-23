@@ -140,7 +140,9 @@ def test_build_entity_record_flattens_fields_alongside_reserved_keys():
 
 
 def test_observation_payload_top_level_keys_are_all_declared_on_store_schema():
-    payload, idem_key, _stripped = build_observation_payload(OBSERVATION_ROW, "20260804")
+    payload, idem_key, _stripped = build_observation_payload(
+        OBSERVATION_ROW, "20260804"
+    )
     unknown = set(payload.keys()) - STORE_REQUEST_TOP_LEVEL_KEYS
     assert not unknown, (
         f"payload has keys StoreRequestSchema does not declare: {unknown}"
@@ -224,7 +226,9 @@ def test_build_entity_record_round_trips_arbitrary_field_shapes(fields):
 
 
 def test_is_schema_lag_background_rewrite_true_for_schema_lag_bg_prefix():
-    fields_json = json.dumps({"_migration_run_id": "schema_lag_bg_2026-09-06T16:58:38.065Z"})
+    fields_json = json.dumps(
+        {"_migration_run_id": "schema_lag_bg_2026-09-06T16:58:38.065Z"}
+    )
     assert is_schema_lag_background_rewrite(fields_json) is True
 
 
@@ -238,8 +242,12 @@ def test_is_schema_lag_background_rewrite_false_when_no_migration_run_id():
     assert is_schema_lag_background_rewrite(fields_json) is False
 
 
-@pytest.mark.parametrize("bad_input", [None, "", "not json", "{", json.dumps(["a", "list"])])
-def test_is_schema_lag_background_rewrite_false_on_malformed_or_missing_input(bad_input):
+@pytest.mark.parametrize(
+    "bad_input", [None, "", "not json", "{", json.dumps(["a", "list"])]
+)
+def test_is_schema_lag_background_rewrite_false_on_malformed_or_missing_input(
+    bad_input,
+):
     # Malformed/absent fields_json must never raise or be mistaken for a
     # schema_lag rewrite -- default to NOT excluding when unsure, since
     # excluding a real observation silently would be the worse failure.
@@ -300,7 +308,10 @@ def test_strip_reserved_fields_drops_conditionally_reserved_keys_when_no_hosted_
 
 
 def test_strip_reserved_fields_leaves_ordinary_fields_untouched():
-    schema_info = {"has_schema": True, "declared_fields": {"title", "status", "priority"}}
+    schema_info = {
+        "has_schema": True,
+        "declared_fields": {"title", "status", "priority"},
+    }
     cleaned, stripped = strip_reserved_fields(
         "task", {"title": "x", "status": "open", "priority": 1}, schema_info
     )
@@ -313,7 +324,11 @@ def test_conditionally_reserved_keys_constant_matches_documented_set():
     # silently drifting apart from what strip_reserved_fields's docstring
     # (and the task brief) actually names.
     assert ALWAYS_STRIP_FIELD_KEYS == {"_migration_run_id"}
-    assert CONDITIONALLY_RESERVED_FIELD_KEYS == {"entity_id", "idempotency_key", "canonical_name"}
+    assert CONDITIONALLY_RESERVED_FIELD_KEYS == {
+        "entity_id",
+        "idempotency_key",
+        "canonical_name",
+    }
 
 
 def test_build_observation_payload_applies_schema_driven_stripping():
@@ -328,13 +343,22 @@ def test_build_observation_payload_applies_schema_driven_stripping():
         "2026-08-05T00:00:00.000Z",
         100,
         100,
-        json.dumps({"title": "y", "status": "open", "entity_id": "ent_bogus", "_migration_run_id": "schema_lag_bg_z"}),
+        json.dumps(
+            {
+                "title": "y",
+                "status": "open",
+                "entity_id": "ent_bogus",
+                "_migration_run_id": "schema_lag_bg_z",
+            }
+        ),
         "2026-08-05T00:00:00.000Z",
         "user-1",
         None,
         "import",
     )
-    payload, _idem_key, stripped = build_observation_payload(row, "20260804", schema_info=schema_info)
+    payload, _idem_key, stripped = build_observation_payload(
+        row, "20260804", schema_info=schema_info
+    )
     (entity,) = payload["entities"]
     assert entity["title"] == "y"
     assert entity["status"] == "open"
@@ -347,7 +371,9 @@ def test_build_observation_payload_without_schema_info_does_not_strip():
     # Backward-compatible default: callers that don't pass schema_info (the
     # pre-existing OBSERVATION_ROW fixture tests above) keep the original
     # unconditional pass-through behavior.
-    payload, _idem_key, stripped = build_observation_payload(OBSERVATION_ROW, "20260804")
+    payload, _idem_key, stripped = build_observation_payload(
+        OBSERVATION_ROW, "20260804"
+    )
     assert stripped == []
 
 
@@ -356,26 +382,31 @@ def test_build_observation_payload_without_schema_info_does_not_strip():
 
 def test_predict_unknown_fields_returns_empty_when_no_hosted_schema():
     schema_info = {"has_schema": False, "declared_fields": set()}
-    result = predict_unknown_fields("symptom_report", {"summary": "x", "weird": 1}, schema_info)
+    result = predict_unknown_fields(
+        "symptom_report", {"summary": "x", "weird": 1}, schema_info
+    )
     assert result == []
 
 
 def test_predict_unknown_fields_flags_fields_the_schema_does_not_declare():
     schema_info = {"has_schema": True, "declared_fields": {"title", "status"}}
     result = predict_unknown_fields(
-        "task", {"title": "x", "status": "open", "reviewing_agent": "cicada"}, schema_info
+        "task",
+        {"title": "x", "status": "open", "reviewing_agent": "cicada"},
+        schema_info,
     )
     assert result == ["reviewing_agent"]
 
 
 def test_predict_unknown_fields_empty_when_all_fields_declared():
     schema_info = {"has_schema": True, "declared_fields": {"title", "status"}}
-    result = predict_unknown_fields("task", {"title": "x", "status": "open"}, schema_info)
+    result = predict_unknown_fields(
+        "task", {"title": "x", "status": "open"}, schema_info
+    )
     assert result == []
 
 
 def test_unknown_fields_cli_flag_defaults_to_stop():
-    import argparse
     import subprocess
     import sys as _sys
 
@@ -399,7 +430,9 @@ def test_extend_schemas_and_reconcile_file_flags_present_in_help():
     import sys as _sys
 
     script = str(Path(__file__).resolve().parent / "neotoma_local_fork_replay.py")
-    result = subprocess.run([_sys.executable, script, "--help"], capture_output=True, text=True, timeout=10)
+    result = subprocess.run(
+        [_sys.executable, script, "--help"], capture_output=True, text=True, timeout=10
+    )
     assert result.returncode == 0
     assert "--extend-schemas" in result.stdout
     assert "--reconcile-file" in result.stdout
@@ -432,7 +465,11 @@ def test_infer_field_type_only_ever_returns_a_valid_field_type_choice():
 
 def test_plan_schema_extensions_only_includes_undeclared_fields():
     schema_info = {"has_schema": True, "declared_fields": {"title"}}
-    samples = {"title": "already declared", "reviewing_agent": "cicada", "pr_number": 42}
+    samples = {
+        "title": "already declared",
+        "reviewing_agent": "cicada",
+        "pr_number": 42,
+    }
     plan = plan_schema_extensions("note", samples, schema_info)
     names = {f["field_name"] for f in plan}
     assert names == {"reviewing_agent", "pr_number"}
@@ -494,9 +531,13 @@ def test_update_schema_incremental_payload_top_level_keys_are_all_declared():
 
 
 def test_register_schema_payload_sets_identity_opt_out_never_canonical_name_fields():
-    fields_to_add = [{"field_name": "summary", "field_type": "string", "required": False}]
+    fields_to_add = [
+        {"field_name": "summary", "field_type": "string", "required": False}
+    ]
     payload = build_register_schema_payload("symptom_report", fields_to_add)
-    assert payload["schema_definition"]["identity_opt_out"] == "heuristic_canonical_name"
+    assert (
+        payload["schema_definition"]["identity_opt_out"] == "heuristic_canonical_name"
+    )
     assert "canonical_name_fields" not in payload["schema_definition"]
     assert payload["schema_definition"]["fields"] == {"summary": {"type": "string"}}
     assert payload["activate"] is True
@@ -556,7 +597,9 @@ def test_filter_writable_fields_empty_when_no_fields_key():
 
 def test_build_reconcile_idempotency_key_deterministic_for_same_field_set():
     k1 = build_reconcile_idempotency_key("20260804", "ent_x", ["b", "c"])
-    k2 = build_reconcile_idempotency_key("20260804", "ent_x", ["c", "b"])  # order shouldn't matter
+    k2 = build_reconcile_idempotency_key(
+        "20260804", "ent_x", ["c", "b"]
+    )  # order shouldn't matter
     assert k1 == k2
     assert k1.startswith("migrate-20260804-recon-ent_x-")
 
@@ -568,7 +611,9 @@ def test_build_reconcile_idempotency_key_differs_for_different_field_sets():
 
 
 def test_build_store_payload_for_reconcile_uses_target_id_and_top_level_idempotency_key():
-    payload = build_store_payload_for_reconcile("ent_x", "issue", {"body": "new text"}, "migrate-20260804-recon-ent_x-abc123")
+    payload = build_store_payload_for_reconcile(
+        "ent_x", "issue", {"body": "new text"}, "migrate-20260804-recon-ent_x-abc123"
+    )
     (entity,) = payload["entities"]
     assert entity["target_id"] == "ent_x"
     assert entity["entity_type"] == "issue"
@@ -621,8 +666,10 @@ def test_plan_class_b_reconciliation_reads_latest_local_value_per_field(tmp_path
             }
         ],
     }
-    entity_id, entity_type, fields_to_write, drifted, idem_key = plan_class_b_reconciliation_for_entity(
-        entity_record, conn, "2026-08-04T08:51:43.023Z", "20260804"
+    entity_id, entity_type, fields_to_write, drifted, idem_key = (
+        plan_class_b_reconciliation_for_entity(
+            entity_record, conn, "2026-08-04T08:51:43.023Z", "20260804"
+        )
     )
     assert fields_to_write == {"body": "second draft"}
     assert drifted == []
@@ -638,7 +685,13 @@ def test_plan_class_b_reconciliation_skips_when_local_value_hash_mismatches():
     )
     conn.execute(
         "INSERT INTO observations VALUES (?, ?, ?, ?, ?)",
-        ("obs-1", "ent_x", "issue", json.dumps({"body": "actual current value"}), "2026-08-05T00:00:00.000Z"),
+        (
+            "obs-1",
+            "ent_x",
+            "issue",
+            json.dumps({"body": "actual current value"}),
+            "2026-08-05T00:00:00.000Z",
+        ),
     )
     conn.commit()
     entity_record = {
@@ -653,8 +706,10 @@ def test_plan_class_b_reconciliation_skips_when_local_value_hash_mismatches():
             }
         ],
     }
-    entity_id, entity_type, fields_to_write, drifted, idem_key = plan_class_b_reconciliation_for_entity(
-        entity_record, conn, "2026-08-04T08:51:43.023Z", "20260804"
+    entity_id, entity_type, fields_to_write, drifted, idem_key = (
+        plan_class_b_reconciliation_for_entity(
+            entity_record, conn, "2026-08-04T08:51:43.023Z", "20260804"
+        )
     )
     assert fields_to_write == {}
     assert drifted == ["body"]
@@ -673,11 +728,18 @@ def test_plan_class_b_reconciliation_skips_field_with_no_post_cutover_local_stat
         "id": "ent_x",
         "entity_type": "issue",
         "fields": [
-            {"name": "closed_at", "classification": "LOCAL_ONLY", "local_value_hash": "abc", "hosted_value_hash": "def"}
+            {
+                "name": "closed_at",
+                "classification": "LOCAL_ONLY",
+                "local_value_hash": "abc",
+                "hosted_value_hash": "def",
+            }
         ],
     }
-    entity_id, entity_type, fields_to_write, drifted, idem_key = plan_class_b_reconciliation_for_entity(
-        entity_record, conn, "2026-08-04T08:51:43.023Z", "20260804"
+    entity_id, entity_type, fields_to_write, drifted, idem_key = (
+        plan_class_b_reconciliation_for_entity(
+            entity_record, conn, "2026-08-04T08:51:43.023Z", "20260804"
+        )
     )
     assert fields_to_write == {}
     assert drifted == ["closed_at"]
@@ -694,10 +756,15 @@ def test_plan_class_b_reconciliation_nothing_to_apply_when_all_same():
     entity_record = {
         "id": "ent_x",
         "entity_type": "issue",
-        "fields": [{"name": "a", "classification": "SAME"}, {"name": "b", "classification": "HOSTED_NEWER"}],
+        "fields": [
+            {"name": "a", "classification": "SAME"},
+            {"name": "b", "classification": "HOSTED_NEWER"},
+        ],
     }
-    entity_id, entity_type, fields_to_write, drifted, idem_key = plan_class_b_reconciliation_for_entity(
-        entity_record, conn, "2026-08-04T08:51:43.023Z", "20260804"
+    entity_id, entity_type, fields_to_write, drifted, idem_key = (
+        plan_class_b_reconciliation_for_entity(
+            entity_record, conn, "2026-08-04T08:51:43.023Z", "20260804"
+        )
     )
     assert fields_to_write == {}
     assert drifted == []
@@ -712,7 +779,7 @@ def test_value_hash_stable_for_same_value_differs_for_different_value():
 # --- --gate-restore (operator-approved 2026-09-23) --------------------------
 
 from neotoma_local_fork_replay import (  # noqa: E402
-    GATE_STATUS_RANK,
+    LEGACY_GATE_STATUS_FIELD,
     canonical_identity_lookup,
     format_issue_label,
     gate_status_rank,
@@ -722,6 +789,13 @@ from neotoma_local_fork_replay import (  # noqa: E402
     plan_gate_restore_for_entity,
     scan_local_gate_candidates,
 )
+
+
+def test_legacy_gate_status_field_name_is_explicit_compatibility_contract():
+    assert (
+        LEGACY_GATE_STATUS_FIELD
+        == "gate_status"  # vocab-ok: hosted legacy-field contract
+    )
 
 
 def test_gate_status_rank_orders_pending_below_signed_off():
@@ -754,7 +828,9 @@ def test_merge_gate_status_equal_rank_is_a_noop():
     # neither should overwrite the other when they're already equal, and a
     # local value of DIFFERENT top-rank status than hosted's own top-rank
     # status is also not a change (equal rank means no ordering to apply).
-    merged, changes = merge_gate_status({"legal": "not_required"}, {"legal": "not_required"})
+    merged, changes = merge_gate_status(
+        {"legal": "not_required"}, {"legal": "not_required"}
+    )
     assert changes == []
     merged2, changes2 = merge_gate_status({"qa": "signed_off"}, {"qa": "not_required"})
     assert changes2 == []  # equal rank, hosted's actual value is kept
@@ -792,8 +868,16 @@ def test_merge_gate_status_unranked_hosted_value_is_never_overwritten():
 def test_merge_owner_history_unions_and_dedupes_new_local_entries():
     hosted = [{"agent": "lanius", "action": "triaged", "at": "2026-09-23T10:00:00Z"}]
     local = [
-        {"agent": "lanius", "action": "triaged", "at": "2026-09-23T10:00:00Z"},  # true dup of hosted's entry
-        {"agent": "pavo", "action": "claimed", "at": "2026-09-23T09:00:00Z"},  # genuinely new
+        {
+            "agent": "lanius",
+            "action": "triaged",
+            "at": "2026-09-23T10:00:00Z",
+        },  # true dup of hosted's entry
+        {
+            "agent": "pavo",
+            "action": "claimed",
+            "at": "2026-09-23T09:00:00Z",
+        },  # genuinely new
     ]
     merged = merge_owner_history(hosted, local)
     assert len(merged) == 2  # deduped (the true dup), not 3
@@ -812,19 +896,31 @@ def test_merge_owner_history_never_shrinks_hosted_even_with_hosted_internal_dupl
     # was flagged as a possible union bug before this test pinned the fix.
     hosted = [
         {"agent": "lanius", "action": "triaged", "at": "2026-09-15T09:47:10Z"},
-        {"agent": "pavo", "action": "seeded_missing_entity", "at": "2026-09-15T09:53:49Z"},
+        {
+            "agent": "pavo",
+            "action": "seeded_missing_entity",
+            "at": "2026-09-15T09:53:49Z",
+        },
         {
             "agent": "pavo",
             "action": "seeded_missing_entity",
             "at": "2026-09-15T09:53:49Z",
             "note": "Lanius linked entity but 404 on production; Pavo seeded for gate tracking",
         },
-        {"agent": "pavo", "gate": "pm", "action": "signed_off", "actor": "pavo", "at": "2026-09-15T09:54:18Z"},
+        {
+            "agent": "pavo",
+            "gate": "pm",
+            "action": "signed_off",
+            "actor": "pavo",
+            "at": "2026-09-15T09:54:18Z",
+        },
     ]
     local = [{"agent": "lanius", "action": "triaged", "at": "2026-09-15T09:46:34Z"}]
     merged = merge_owner_history(hosted, local)
     assert len(merged) >= max(len(local), len(hosted))
-    assert len(merged) == 5  # all 4 hosted entries survive untouched + 1 new local entry
+    assert (
+        len(merged) == 5
+    )  # all 4 hosted entries survive untouched + 1 new local entry
     for h in hosted:
         assert h in merged
 
@@ -839,7 +935,10 @@ def test_merge_owner_history_invariant_never_shrinks_regardless_of_inputs():
         ([{"agent": "a", "action": "x", "at": "t1"}], []),
         ([], [{"agent": "a", "action": "x", "at": "t1"}]),
         (
-            [{"agent": "a", "action": "x", "at": "t1"}, {"agent": "a", "action": "x", "at": "t1"}],
+            [
+                {"agent": "a", "action": "x", "at": "t1"},
+                {"agent": "a", "action": "x", "at": "t1"},
+            ],
             [{"agent": "b", "action": "y", "at": "t2"}],
         ),
     ]
@@ -849,7 +948,11 @@ def test_merge_owner_history_invariant_never_shrinks_regardless_of_inputs():
 
 
 def test_merge_owner_history_dedupes_legacy_entries_with_no_timestamp_on_note():
-    entry = {"action": "legacy_gate_init", "agent": "lanius", "note": "backfill for #2139"}
+    entry = {
+        "action": "legacy_gate_init",
+        "agent": "lanius",
+        "note": "backfill for #2139",
+    }
     merged = merge_owner_history([entry], [dict(entry)])
     assert len(merged) == 1
 
@@ -882,19 +985,28 @@ def test_merge_owner_history_still_dedupes_true_duplicates_across_dbs():
     # The SAME write appearing in both local DBs (the common case for the
     # non-schema_lag_bg_* rows this entity replay covers) must still
     # collapse to one entry, not be kept twice.
-    entry = {"action": "signed_off", "agent": "pavo", "at": "2026-09-15T11:28:10Z", "gate": "pm"}
+    entry = {
+        "action": "signed_off",
+        "agent": "pavo",
+        "at": "2026-09-15T11:28:10Z",
+        "gate": "pm",
+    }
     merged = merge_owner_history([dict(entry)], [dict(entry)])
     assert len(merged) == 1
 
 
 def test_merge_current_owner_local_wins_when_strictly_newer():
-    value, changed = merge_current_owner("pavo", "vanellus", "2026-09-23T12:00:00Z", "2026-09-23T10:00:00Z")
+    value, changed = merge_current_owner(
+        "pavo", "vanellus", "2026-09-23T12:00:00Z", "2026-09-23T10:00:00Z"
+    )
     assert value == "vanellus"
     assert changed is True
 
 
 def test_merge_current_owner_hosted_wins_when_hosted_is_newer():
-    value, changed = merge_current_owner("pavo", "vanellus", "2026-09-23T09:00:00Z", "2026-09-23T10:00:00Z")
+    value, changed = merge_current_owner(
+        "pavo", "vanellus", "2026-09-23T09:00:00Z", "2026-09-23T10:00:00Z"
+    )
     assert value == "pavo"
     assert changed is False
 
@@ -902,7 +1014,9 @@ def test_merge_current_owner_hosted_wins_when_hosted_is_newer():
 def test_merge_current_owner_fails_closed_on_missing_local_timestamp():
     # Cannot prove local is newer without its own write timestamp -- must
     # not overwrite hosted.
-    value, changed = merge_current_owner("pavo", "vanellus", None, "2026-09-23T10:00:00Z")
+    value, changed = merge_current_owner(
+        "pavo", "vanellus", None, "2026-09-23T10:00:00Z"
+    )
     assert value == "pavo"
     assert changed is False
 
@@ -915,8 +1029,10 @@ def test_merge_current_owner_local_wins_when_hosted_has_no_timestamp_at_all():
 
 def test_plan_gate_restore_missing_issue_creates_with_identifying_and_gate_fields():
     local_state = {
-        "gate_status": {"pm": "signed_off", "ux": "signed_off"},
-        "owner_history": [{"agent": "lanius", "action": "triaged", "at": "2026-09-23T10:00:00Z"}],
+        LEGACY_GATE_STATUS_FIELD: {"pm": "signed_off", "ux": "signed_off"},
+        "owner_history": [
+            {"agent": "lanius", "action": "triaged", "at": "2026-09-23T10:00:00Z"}
+        ],
         "current_owner": "pavo",
         "repo": "markmhendrickson/ateles",
         "github_number": 1172,
@@ -924,7 +1040,10 @@ def test_plan_gate_restore_missing_issue_creates_with_identifying_and_gate_field
     }
     plan = plan_gate_restore_for_entity("ent_missing", local_state, hosted_entity=None)
     assert plan["action"] == "create"
-    assert plan["fields"]["gate_status"] == {"pm": "signed_off", "ux": "signed_off"}
+    assert plan["fields"][LEGACY_GATE_STATUS_FIELD] == {
+        "pm": "signed_off",
+        "ux": "signed_off",
+    }
     assert plan["fields"]["owner_history"] == local_state["owner_history"]
     assert plan["fields"]["current_owner"] == "pavo"
     assert plan["fields"]["repo"] == "markmhendrickson/ateles"
@@ -936,24 +1055,33 @@ def test_plan_gate_restore_missing_issue_creates_with_identifying_and_gate_field
 
 
 def test_plan_gate_restore_merge_only_touches_gates_present_locally():
-    local_state = {"gate_status": {"pm": "signed_off"}}
+    local_state = {LEGACY_GATE_STATUS_FIELD: {"pm": "signed_off"}}
     hosted_entity = {
         "snapshot": {
-            "gate_status": {"pm": "pending", "arch": "pending"},
+            LEGACY_GATE_STATUS_FIELD: {"pm": "pending", "arch": "pending"},
             "owner_history": [],
             "current_owner": None,
         }
     }
     plan = plan_gate_restore_for_entity("ent_1178", local_state, hosted_entity)
     assert plan["action"] == "merge"
-    assert plan["fields"]["gate_status"] == {"pm": "signed_off", "arch": "pending"}
+    assert plan["fields"][LEGACY_GATE_STATUS_FIELD] == {
+        "pm": "signed_off",
+        "arch": "pending",
+    }
     assert plan["gate_changes"] == [("pm", "pending", "signed_off")]
     assert "owner_history" not in plan["fields"]  # unchanged, not resent
 
 
 def test_plan_gate_restore_noop_when_hosted_already_equal_or_ahead():
-    local_state = {"gate_status": {"pm": "pending"}}
-    hosted_entity = {"snapshot": {"gate_status": {"pm": "signed_off"}, "owner_history": [], "current_owner": None}}
+    local_state = {LEGACY_GATE_STATUS_FIELD: {"pm": "pending"}}
+    hosted_entity = {
+        "snapshot": {
+            LEGACY_GATE_STATUS_FIELD: {"pm": "signed_off"},
+            "owner_history": [],
+            "current_owner": None,
+        }
+    }
     plan = plan_gate_restore_for_entity("ent_x", local_state, hosted_entity)
     assert plan["fields"] == {}
     assert plan["action"] != "create"
@@ -968,7 +1096,19 @@ def test_scan_local_gate_candidates_folds_forward_across_both_dbs():
     )
     db1.execute(
         "INSERT INTO observations VALUES (?,?,?,?,?)",
-        ("o1", "ent_a", "issue", json.dumps({"gate_status": {"pm": "pending"}, "repo": "x/y", "github_number": 1}), "2026-09-23T09:00:00Z"),
+        (
+            "o1",
+            "ent_a",
+            "issue",
+            json.dumps(
+                {
+                    LEGACY_GATE_STATUS_FIELD: {"pm": "pending"},
+                    "repo": "x/y",
+                    "github_number": 1,
+                }
+            ),
+            "2026-09-23T09:00:00Z",
+        ),
     )
     db1.commit()
 
@@ -986,7 +1126,19 @@ def test_scan_local_gate_candidates_folds_forward_across_both_dbs():
         )
         c1.execute(
             "INSERT INTO observations VALUES (?,?,?,?,?)",
-            ("o1", "ent_a", "issue", json.dumps({"gate_status": {"pm": "pending"}, "repo": "x/y", "github_number": 1}), "2026-09-23T09:00:00Z"),
+            (
+                "o1",
+                "ent_a",
+                "issue",
+                json.dumps(
+                    {
+                        LEGACY_GATE_STATUS_FIELD: {"pm": "pending"},
+                        "repo": "x/y",
+                        "github_number": 1,
+                    }
+                ),
+                "2026-09-23T09:00:00Z",
+            ),
         )
         c1.commit()
         c1.close()
@@ -997,7 +1149,13 @@ def test_scan_local_gate_candidates_folds_forward_across_both_dbs():
         )
         c2.execute(
             "INSERT INTO observations VALUES (?,?,?,?,?)",
-            ("o2", "ent_a", "issue", json.dumps({"gate_status": {"pm": "signed_off"}}), "2026-09-23T10:00:00Z"),
+            (
+                "o2",
+                "ent_a",
+                "issue",
+                json.dumps({LEGACY_GATE_STATUS_FIELD: {"pm": "signed_off"}}),
+                "2026-09-23T10:00:00Z",
+            ),
         )
         c2.commit()
         c2.close()
@@ -1007,23 +1165,31 @@ def test_scan_local_gate_candidates_folds_forward_across_both_dbs():
         # The later write (db2, 10:00) wins over the earlier one (db1, 9:00)
         # for the SAME key, matching "fold forward across both DBs sorted by
         # created_at, last write wins per field".
-        assert candidates["ent_a"]["gate_status"] == {"pm": "signed_off"}
+        assert candidates["ent_a"][LEGACY_GATE_STATUS_FIELD] == {"pm": "signed_off"}
         # Identifying fields from the earlier observation are still carried.
         assert candidates["ent_a"]["repo"] == "x/y"
         assert candidates["ent_a"]["github_number"] == 1
 
 
 def test_format_issue_label_uses_repo_and_number_when_present():
-    assert format_issue_label("markmhendrickson/ateles", 1172, "ent_x") == "markmhendrickson/ateles#1172"
+    assert (
+        format_issue_label("markmhendrickson/ateles", 1172, "ent_x")
+        == "markmhendrickson/ateles#1172"
+    )
     assert format_issue_label(None, None, "ent_x") == "ent_x"
 
 
 def test_canonical_identity_lookup_returns_matched_entity_id(monkeypatch):
     import neotoma_local_fork_replay as _mod
 
-    def fake_http_request(method, base_url, path, token, body=None, retries=0, retry_backoff_seconds=1.0):
+    def fake_http_request(
+        method, base_url, path, token, body=None, retries=0, retry_backoff_seconds=1.0
+    ):
         assert path == "/retrieve_entity_by_identifier"
-        assert body == {"entity_type": "issue", "identifier": "1172|markmhendrickson/ateles"}
+        assert body == {
+            "entity_type": "issue",
+            "identifier": "1172|markmhendrickson/ateles",
+        }
         return 200, {"entities": [{"entity_id": "ent_canonical_match"}]}
 
     monkeypatch.setattr(_mod, "http_request", fake_http_request)
@@ -1036,7 +1202,9 @@ def test_canonical_identity_lookup_returns_matched_entity_id(monkeypatch):
 def test_canonical_identity_lookup_returns_none_on_no_match():
     import neotoma_local_fork_replay as _mod
 
-    def fake_http_request(method, base_url, path, token, body=None, retries=0, retry_backoff_seconds=1.0):
+    def fake_http_request(
+        method, base_url, path, token, body=None, retries=0, retry_backoff_seconds=1.0
+    ):
         return 200, {"entities": [], "total": 0}
 
     import pytest as _pytest
@@ -1053,8 +1221,16 @@ def test_canonical_identity_lookup_returns_none_on_no_match():
 
 
 def test_canonical_identity_lookup_returns_none_without_repo_or_number():
-    assert canonical_identity_lookup("issue", None, 1172, "https://hosted.example", "tok") is None
-    assert canonical_identity_lookup("issue", "markmhendrickson/ateles", None, "https://hosted.example", "tok") is None
+    assert (
+        canonical_identity_lookup("issue", None, 1172, "https://hosted.example", "tok")
+        is None
+    )
+    assert (
+        canonical_identity_lookup(
+            "issue", "markmhendrickson/ateles", None, "https://hosted.example", "tok"
+        )
+        is None
+    )
 
 
 def test_github_issue_lookup_returns_state_on_success(monkeypatch):
