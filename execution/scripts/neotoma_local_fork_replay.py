@@ -1578,26 +1578,38 @@ def recheck_fields_against_current_hosted(
     """
     if action != "merge" or not fields:
         return fields
-    if "gate_status" not in fields and "owner_history" not in fields:
+    if LEGACY_GATE_STATUS_FIELD not in fields and "owner_history" not in fields:
         return fields
 
     hosted_now = get_hosted_entity(entity_id, base_url, token)
     if hosted_now is None:
         # Entity vanished between planning and apply (shouldn't happen for
         # a merge target, but fail closed: send nothing rather than guess).
-        return {k: v for k, v in fields.items() if k not in ("gate_status", "owner_history")}
+        return {
+            k: v
+            for k, v in fields.items()
+            if k not in (LEGACY_GATE_STATUS_FIELD, "owner_history")
+        }
 
     hosted_snapshot_now = hosted_now.get("snapshot") or {}
     rechecked = dict(fields)
 
-    if "gate_status" in fields:
-        hosted_gate_status_now = hosted_snapshot_now.get("gate_status") if isinstance(hosted_snapshot_now.get("gate_status"), dict) else {}
-        local_gate_status = local_state.get("gate_status") if isinstance(local_state.get("gate_status"), dict) else {}
+    if LEGACY_GATE_STATUS_FIELD in fields:
+        hosted_gate_status_now = (
+            hosted_snapshot_now.get(LEGACY_GATE_STATUS_FIELD)
+            if isinstance(hosted_snapshot_now.get(LEGACY_GATE_STATUS_FIELD), dict)
+            else {}
+        )
+        local_gate_status = (
+            local_state.get(LEGACY_GATE_STATUS_FIELD)
+            if isinstance(local_state.get(LEGACY_GATE_STATUS_FIELD), dict)
+            else {}
+        )
         merged_now, changes_now = merge_gate_status(hosted_gate_status_now, local_gate_status)
         if not changes_now:
-            rechecked.pop("gate_status", None)
+            rechecked.pop(LEGACY_GATE_STATUS_FIELD, None)
         else:
-            rechecked["gate_status"] = merged_now
+            rechecked[LEGACY_GATE_STATUS_FIELD] = merged_now
 
     if "owner_history" in fields:
         hosted_owner_history_now = hosted_snapshot_now.get("owner_history") if isinstance(hosted_snapshot_now.get("owner_history"), list) else []
@@ -2007,7 +2019,9 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
             # already-applied batch converge to zero writes instead of
             # creating a fresh (duplicate-content) observation every time.
             local_state_for_recheck = candidates.get(entity_id) or filtered_candidates.get(entity_id) or {}
-            issues_recheck_request = p["action"] == "merge" and ("gate_status" in fields or "owner_history" in fields)
+            issues_recheck_request = p["action"] == "merge" and (
+                LEGACY_GATE_STATUS_FIELD in fields or "owner_history" in fields
+            )
             fields = recheck_fields_against_current_hosted(
                 entity_id, p["action"], fields, local_state_for_recheck, base_url, token
             )

@@ -1363,36 +1363,42 @@ def test_recheck_drops_gate_status_when_no_longer_a_change(monkeypatch):
 
     # Hosted has ALREADY absorbed the local pm signoff (e.g. from an
     # earlier pass of this same script) by the time this recheck runs.
-    hosted_entity = {"snapshot": {"gate_status": {"pm": "signed_off"}, "owner_history": []}}
+    hosted_entity = {
+        "snapshot": {LEGACY_GATE_STATUS_FIELD: {"pm": "signed_off"}, "owner_history": []}
+    }
     monkeypatch.setattr(_mod, "get_hosted_entity", lambda *a, **k: hosted_entity)
 
-    local_state = {"gate_status": {"pm": "signed_off"}}
-    fields = {"gate_status": {"pm": "pending"}}  # stale plan-time value, no longer accurate
+    local_state = {LEGACY_GATE_STATUS_FIELD: {"pm": "signed_off"}}
+    fields = {LEGACY_GATE_STATUS_FIELD: {"pm": "pending"}}  # stale plan-time value
     result = recheck_fields_against_current_hosted(
         "ent_x", "merge", fields, local_state, "https://hosted.example", "tok"
     )
-    assert "gate_status" not in result
+    assert LEGACY_GATE_STATUS_FIELD not in result
 
 
 def test_recheck_keeps_gate_status_when_still_a_real_change(monkeypatch):
     import neotoma_local_fork_replay as _mod
 
-    hosted_entity = {"snapshot": {"gate_status": {"pm": "pending"}, "owner_history": []}}
+    hosted_entity = {
+        "snapshot": {LEGACY_GATE_STATUS_FIELD: {"pm": "pending"}, "owner_history": []}
+    }
     monkeypatch.setattr(_mod, "get_hosted_entity", lambda *a, **k: hosted_entity)
 
-    local_state = {"gate_status": {"pm": "signed_off"}}
-    fields = {"gate_status": {"pm": "signed_off"}}
+    local_state = {LEGACY_GATE_STATUS_FIELD: {"pm": "signed_off"}}
+    fields = {LEGACY_GATE_STATUS_FIELD: {"pm": "signed_off"}}
     result = recheck_fields_against_current_hosted(
         "ent_x", "merge", fields, local_state, "https://hosted.example", "tok"
     )
-    assert result["gate_status"] == {"pm": "signed_off"}
+    assert result[LEGACY_GATE_STATUS_FIELD] == {"pm": "signed_off"}
 
 
 def test_recheck_drops_owner_history_when_hosted_already_has_every_local_entry(monkeypatch):
     import neotoma_local_fork_replay as _mod
 
     entry = {"agent": "pavo", "action": "signed_off", "gate": "pm", "at": "2026-09-23T10:00:00Z"}
-    hosted_entity = {"snapshot": {"gate_status": {}, "owner_history": [entry]}}
+    hosted_entity = {
+        "snapshot": {LEGACY_GATE_STATUS_FIELD: {}, "owner_history": [entry]}
+    }
     monkeypatch.setattr(_mod, "get_hosted_entity", lambda *a, **k: hosted_entity)
 
     local_state = {"owner_history": [dict(entry)]}
@@ -1406,7 +1412,9 @@ def test_recheck_drops_owner_history_when_hosted_already_has_every_local_entry(m
 def test_recheck_keeps_owner_history_with_genuinely_new_entries(monkeypatch):
     import neotoma_local_fork_replay as _mod
 
-    hosted_entity = {"snapshot": {"gate_status": {}, "owner_history": []}}
+    hosted_entity = {
+        "snapshot": {LEGACY_GATE_STATUS_FIELD: {}, "owner_history": []}
+    }
     monkeypatch.setattr(_mod, "get_hosted_entity", lambda *a, **k: hosted_entity)
 
     new_entry = {"agent": "pavo", "action": "signed_off", "gate": "pm", "at": "2026-09-23T10:00:00Z"}
@@ -1424,9 +1432,17 @@ def test_recheck_is_a_noop_for_create_action():
     # attempted (not exercised directly here since get_hosted_entity isn't
     # monkeypatched -- an unpatched network call would raise/hang, so this
     # test asserting a clean return IS the proof no call was made).
-    fields = {"gate_status": {"pm": "signed_off"}, "owner_history": [{"agent": "x"}]}
+    fields = {
+        LEGACY_GATE_STATUS_FIELD: {"pm": "signed_off"},
+        "owner_history": [{"agent": "x"}],
+    }
     result = recheck_fields_against_current_hosted(
-        "ent_x", "create", fields, {"gate_status": {"pm": "signed_off"}}, "https://hosted.example", "tok"
+        "ent_x",
+        "create",
+        fields,
+        {LEGACY_GATE_STATUS_FIELD: {"pm": "signed_off"}},
+        "https://hosted.example",
+        "tok",
     )
     assert result == fields
 
@@ -1443,11 +1459,15 @@ def test_recheck_fails_closed_when_hosted_entity_vanishes(monkeypatch):
     import neotoma_local_fork_replay as _mod
 
     monkeypatch.setattr(_mod, "get_hosted_entity", lambda *a, **k: None)
-    fields = {"gate_status": {"pm": "signed_off"}, "owner_history": [{"agent": "x"}], "current_owner": "waxwing"}
+    fields = {
+        LEGACY_GATE_STATUS_FIELD: {"pm": "signed_off"},
+        "owner_history": [{"agent": "x"}],
+        "current_owner": "waxwing",
+    }
     result = recheck_fields_against_current_hosted(
         "ent_x", "merge", fields, {}, "https://hosted.example", "tok"
     )
-    assert "gate_status" not in result
+    assert LEGACY_GATE_STATUS_FIELD not in result
     assert "owner_history" not in result
     assert result.get("current_owner") == "waxwing"  # untouched by this function
     assert value_hash({"k": 1}) == value_hash({"k": 1})
