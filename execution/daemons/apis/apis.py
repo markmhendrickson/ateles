@@ -47,6 +47,21 @@ Environment variables:
   APIS_ALLOW_METERED_HARNESS  "1" permits usage-based API-key fallback. Default 0:
                               API keys are removed and capped plans fail over/queue.
   APIS_DISPATCH_TIMEOUT       Per-dispatch timeout in seconds (default: 1800)
+  APIS_CHECKPOINT_DENIAL_DIR  Required absolute shared-state directory for
+                              durable replay-denial markers
+  APIS_CHECKPOINT_REQUIRED_APPROVER_SUB
+                              AAuth subject whose signed status observation may
+                              release a checkpoint (default: ateles@ateles-swarm)
+  APIS_CHECKPOINT_REQUIRED_APPROVER_JKT
+                              Required RFC 7638 thumbprint for that resolver;
+                              missing configuration mints no release authority
+  APIS_CHECKPOINT_PRODUCER_JKT
+                              Required RFC 7638 thumbprint of apis.jwk.json;
+                              missing or mismatched configuration mints no
+                              checkpoint authority
+  APIS_CHECKPOINT_PRODUCER_ISS
+                              Issuer for Apis's RFC 9421 checkpoint-creation
+                              proof (default: https://markmhendrickson.com)
   ATELES_REPO_PATH            Local path to ateles clone (default: ~/repos/ateles)
 
 Task reconciliation sweep (ateles#586 — see task_reconciler.py):
@@ -70,8 +85,10 @@ GitHub trigger layer (ateles#80 — see github_gateway.py / swarm_dispatch.py):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
+import stat
 import sys
 import time
 from pathlib import Path
@@ -91,6 +108,7 @@ if _NEOTOMA_ENV_FILE.exists():
             if _v[:1] not in ('"', "'") and " #" in _v:
                 _v = _v.split(" #", 1)[0].strip()
             os.environ.setdefault(_k.strip(), _v.strip('"').strip("'"))
+
 
 # Pick the bearer token that matches the instance we actually target. The shared
 # ~/.config/neotoma/.env carries a LOCAL-scoped NEOTOMA_BEARER_TOKEN (the local
@@ -162,6 +180,9 @@ _DAEMON_DIR = Path(__file__).resolve().parent
 if str(_DAEMON_DIR) not in sys.path:
     sys.path.insert(0, str(_DAEMON_DIR))
 
+from checkpoint_denial_store import (  # noqa: E402
+    require_checkpoint_denial_store as _require_checkpoint_denial_store,
+)
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
     AgentLoader,
@@ -174,6 +195,7 @@ from lib.daemon_runtime import (  # noqa: E402
     send_run_email,
     write_assessment,
     GateAction,
+    GateDecision,
     NeotomaEvent,
     SSEClient,
     evaluate_gate,
@@ -183,9 +205,18 @@ from lib.daemon_runtime import (  # noqa: E402
 )
 from lib.daemon_runtime.gating import (  # noqa: E402
     checkpoint_already_dispatched,
+    close_checkpoint_without_release,
+    entity_record_digest,
+    execution_policy_revision,
+    fetch_checkpoint_record,
+    fetch_entity_user_id,
+    fetch_task_record,
     fetch_task_snapshot,
     mark_task_declined,
+    read_authenticated_checkpoint_authorization,
+    read_authenticated_checkpoint_resolution,
     read_checkpoint_resolution,
+    require_fresh_checkpoint_approval,
     stamp_checkpoint_dispatched,
 )
 from lib.daemon_runtime.task_lifecycle import (  # noqa: E402
@@ -207,6 +238,34 @@ logging.basicConfig(
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
 log = logging.getLogger("apis")
+
+# A checkpoint release only needs to wait until the task transition that
+# authorizes execution is durably read back.  The harness run itself can last
+# much longer than an MCP request, so detached runs need a strong reference and
+# an exception-draining callback for the rest of the daemon process lifetime.
+_background_dispatch_tasks: set[asyncio.Task[None]] = set()
+_background_checkpoint_tasks: set[asyncio.Task[None]] = set()
+
+
+def _background_dispatch_done(task: asyncio.Task[None]) -> None:
+    _background_dispatch_tasks.discard(task)
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        log.warning("[%s] detached dispatch was cancelled", DAEMON_NAME)
+    except Exception:
+        log.exception("[%s] detached dispatch failed", DAEMON_NAME)
+
+
+def _background_checkpoint_done(task: asyncio.Task[None]) -> None:
+    _background_checkpoint_tasks.discard(task)
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        log.warning("[%s] fresh-checkpoint creation was cancelled", DAEMON_NAME)
+    except Exception:
+        log.exception("[%s] fresh-checkpoint creation failed", DAEMON_NAME)
+
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DAEMON_NAME = "apis"
@@ -339,6 +398,7 @@ def _resolve_confidence(
     )
     return result.value, True
 
+
 ATELES_REPO = Path(
     os.environ.get("ATELES_REPO_PATH", str(Path.home() / "repos" / "ateles"))
 )
@@ -440,10 +500,14 @@ def _seen_created(entity_id: str) -> bool:
     if len(_created_seen) >= _CREATED_SEEN_MAX:
         # Drop the oldest half rather than clearing: clearing would let the
         # entire recent burst through again in one go.
-        for eid in sorted(_created_seen, key=_created_seen.get)[: _CREATED_SEEN_MAX // 2]:
+        for eid in sorted(_created_seen, key=_created_seen.get)[
+            : _CREATED_SEEN_MAX // 2
+        ]:
             _created_seen.pop(eid, None)
     _created_seen[entity_id] = time.time()
     return False
+
+
 from task_watchdog import TaskWatchdog  # noqa: E402
 
 
@@ -507,6 +571,7 @@ async def dispatch_task(
     notifier: Notifier,
     gate_override: bool = False,
     snapshot_hydrated: bool | None = None,
+    detach_after_accept: bool = False,
 ) -> None:
     """
     Route a task to the appropriate T4 skill and spawn it via a bundled-plan CLI.
@@ -528,6 +593,10 @@ async def dispatch_task(
             read, so the escalation is deferred. None means "not applicable"
             (callers that fetched the snapshot themselves, e.g. the reconciler
             and the watchdog, which only ever hold real query results).
+        detach_after_accept: Return after the approved task has durably entered
+            EXECUTING, while completing the harness run in the background.
+            Used by the request/response checkpoint-release path so client
+            cancellation cannot abort work that the operator already released.
     """
     title = snapshot.get("title", "(untitled)")
     current_status = snapshot.get("status")
@@ -634,7 +703,9 @@ async def dispatch_task(
             f"(assigned_to={assigned_to}) — parking for the operator, not spawning"
         )
         set_task_status(
-            entity_id, TaskStatus.AWAITING_INPUT, handler=DAEMON_NAME,
+            entity_id,
+            TaskStatus.AWAITING_INPUT,
+            handler=DAEMON_NAME,
             from_status=current_status,
             reason=f"human-owned (assigned_to={assigned_to})",
             key_suffix=trigger,
@@ -673,9 +744,7 @@ async def dispatch_task(
             if _unroutable.note_unreadable(entity_id):
                 report = _unroutable.drain_unreadable()
                 if report:
-                    notifier.send(
-                        report, priority=Priority.WARN, handler=DAEMON_NAME
-                    )
+                    notifier.send(report, priority=Priority.WARN, handler=DAEMON_NAME)
             return
 
         # No inferable owner. Previously this was a silent log-and-skip — the task
@@ -689,7 +758,9 @@ async def dispatch_task(
             "— unroutable (no owner)"
         )
         set_task_status(
-            entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
+            entity_id,
+            TaskStatus.BLOCKED,
+            handler=DAEMON_NAME,
             from_status=current_status,
             reason=f"no route/owner (tags={existing_tags}, assigned_to={assigned_to})",
             key_suffix=trigger,
@@ -698,9 +769,7 @@ async def dispatch_task(
         if _unroutable.note(entity_id, title, existing_tags, assigned_to):
             report = _unroutable.drain()
             if report:
-                notifier.send(
-                    report, priority=Priority.BLOCKER, handler=DAEMON_NAME
-                )
+                notifier.send(report, priority=Priority.BLOCKER, handler=DAEMON_NAME)
         return
 
     job = _activity.started(f"routing task {entity_id} → {skill}: {title[:60]}")
@@ -708,9 +777,26 @@ async def dispatch_task(
     # Lifecycle: the dispatcher resolved an owner — record ROUTED so the task can
     # never read "pending" while it is actually in flight.
     set_task_status(
-        entity_id, TaskStatus.ROUTED, handler=DAEMON_NAME,
-        from_status=current_status, key_suffix=trigger,
+        entity_id,
+        TaskStatus.ROUTED,
+        handler=DAEMON_NAME,
+        from_status=current_status,
+        # An approved release consumes the prior hold. Supplying the empty
+        # reason produces taskreason-apis-{task_id}-routed-approved.
+        reason="" if gate_override else None,
+        key_suffix=trigger,
     )
+    if gate_override and not _release_lifecycle_proven(entity_id, TaskStatus.ROUTED):
+        log.warning(
+            f"[{DAEMON_NAME}] approved task {entity_id} did not read back as "
+            "routed with its hold cleared — not spawning"
+        )
+        notifier.send(
+            f"Approved task {entity_id} could not enter routed state — manual recovery needed",
+            priority=Priority.BLOCKER,
+            handler=DAEMON_NAME,
+        )
+        return
 
     # ── Readiness gate (E4) ───────────────────────────────────────────────────
     # Runs BEFORE the execution gate: is the task well-specified enough to start?
@@ -727,16 +813,21 @@ async def dispatch_task(
             write_assessment(entity_id, assessment)
             ask = missing_request(assessment, title)
             set_task_status(
-                entity_id, TaskStatus.AWAITING_INPUT, handler=DAEMON_NAME,
+                entity_id,
+                TaskStatus.AWAITING_INPUT,
+                handler=DAEMON_NAME,
                 from_status=TaskStatus.ROUTED.value,
                 reason=f"readiness {assessment.score:.2f}<{assessment.threshold:.2f}: "
-                       f"missing {', '.join(assessment.missing)}",
+                f"missing {', '.join(assessment.missing)}",
                 key_suffix=trigger,
             )
             if RUN_EMAIL:
                 send_run_email(
-                    task_id=entity_id, run_key=f"{trigger}-readiness",
-                    stage="kickoff", title=title, body=ask,
+                    task_id=entity_id,
+                    run_key=f"{trigger}-readiness",
+                    stage="kickoff",
+                    title=title,
+                    body=ask,
                 )
             notifier.send(
                 f"NOT READY — needs input: {title[:70]}\n{ask}\n  task={entity_id}",
@@ -788,21 +879,58 @@ async def dispatch_task(
             f"→ {decision.action.value} ({decision.reason})"
         )
         if decision.action != GateAction.AUTO_EXECUTE:
-            brief_id = write_checkpoint_brief(
-                task_entity_id=entity_id,
-                decision=decision,
-                title=title,
-                plan_summary=(
-                    f"Assigned to {skill}. Action: {action_type or 'unknown'}. "
-                    f"Trigger: {trigger}. {decision.reason}."
-                ),
+            # Freeze the task before creating the authority the operator will
+            # approve.  The authenticated checkpoint binds the complete
+            # read-back record after this hold lands; creating it first would
+            # make our own lifecycle writes invalidate it immediately.
+            set_task_status(
+                entity_id,
+                TaskStatus.AWAITING_APPROVAL,
                 handler=DAEMON_NAME,
-                alternatives=(
-                    ["Re-scope to a lower-blast action", "Provide missing inputs", "Decline"]
-                    if decision.action == GateAction.CHECKPOINT_WITH_ALTERNATIVES
-                    else None
-                ),
+                from_status=TaskStatus.ROUTED.value,
+                reason=decision.reason,
+                key_suffix=trigger,
             )
+            task_record = fetch_task_record(entity_id)
+            held_snapshot = _record_snapshot(task_record)
+            hold_proven = (
+                held_snapshot is not None
+                and normalize_status(held_snapshot.get("status"))
+                == TaskStatus.AWAITING_APPROVAL.value
+                and held_snapshot.get("blocked_reason") == decision.reason
+            )
+            tenant_id = str(fetch_entity_user_id(entity_id) or "").strip()
+            brief_id = None
+            if hold_proven and tenant_id and task_record is not None:
+                brief_id = write_checkpoint_brief(
+                    task_entity_id=entity_id,
+                    decision=decision,
+                    title=title,
+                    plan_summary=(
+                        f"Assigned to {skill}. Action: {action_type or 'unknown'}. "
+                        f"Trigger: {trigger}. {decision.reason}."
+                    ),
+                    handler=DAEMON_NAME,
+                    user_id=tenant_id,
+                    action_type=action_type,
+                    task_record=task_record,
+                    policy=policy,
+                    alternatives=(
+                        [
+                            "Re-scope to a lower-blast action",
+                            "Provide missing inputs",
+                            "Decline",
+                        ]
+                        if decision.action == GateAction.CHECKPOINT_WITH_ALTERNATIVES
+                        else None
+                    ),
+                )
+            if not hold_proven or not tenant_id or not brief_id:
+                log.error(
+                    f"[{DAEMON_NAME}] task {entity_id} was held but its "
+                    "authenticated checkpoint could not be proven — refusing "
+                    "execution"
+                )
             notifier.send(
                 f"PLAN checkpoint: {title[:70]}\n"
                 f"  agent={skill} blast={decision.blast_radius.value} "
@@ -814,11 +942,6 @@ async def dispatch_task(
             log.info(
                 f"[{DAEMON_NAME}] HELD task {entity_id} for operator approval "
                 f"(checkpoint_brief={brief_id})"
-            )
-            set_task_status(
-                entity_id, TaskStatus.AWAITING_APPROVAL, handler=DAEMON_NAME,
-                from_status=TaskStatus.ROUTED.value, reason=decision.reason,
-                key_suffix=trigger,
             )
             job.escalated(
                 f"task {entity_id} → {skill} held for operator "
@@ -835,113 +958,464 @@ async def dispatch_task(
     _gate_label = "override" if gate_override else "auto-execute"
     if DRY_RUN:
         log.info(f"[{DAEMON_NAME}] DRY RUN — skipping {skill} dispatch for {entity_id}")
-        job.finished(f"task {entity_id} → {skill} routed (dry-run, gate: {_gate_label})")
+        job.finished(
+            f"task {entity_id} → {skill} routed (dry-run, gate: {_gate_label})"
+        )
         return
 
     # Lifecycle: about to spawn the T4 agent.
     set_task_status(
-        entity_id, TaskStatus.EXECUTING, handler=DAEMON_NAME,
-        from_status=TaskStatus.ROUTED.value, key_suffix=trigger,
+        entity_id,
+        TaskStatus.EXECUTING,
+        handler=DAEMON_NAME,
+        from_status=TaskStatus.ROUTED.value,
+        key_suffix=trigger,
     )
-
-    # E1/E2: this run's thread. run_key keys it to the attempt so SSE replays reuse
-    # it while a genuine retry opens a fresh run.
-    run_key = f"{trigger}-{snapshot.get('attempt', snapshot.get('attempt_count', 0))}"
-
-    # E1: open one conversation for this execution run (flag-gated, fail-open).
-    run_conversation_id: str | None = None
-    if RUN_CONVERSATIONS:
-        run_conversation_id = create_run_conversation(
-            task_id=entity_id,
-            plan_id=snapshot.get("plan_id") or None,
-            agent=skill,
-            run_key=run_key,
-            title=f"{skill} run · {title[:60]}",
-        )
-        if run_conversation_id:
-            log.info(
-                f"[{DAEMON_NAME}] run conversation {run_conversation_id} opened "
-                f"for task {entity_id} (run={run_key})"
-            )
-
-    def _run_stage(role: str, content: str, stage: str) -> None:
-        """Record one run-thread event: append to the run conversation (E1) AND
-        send it on the run's Gmail thread (E2). Both flag-gated + fail-open. Apis
-        OWNS the run thread, so it is populated regardless of whether the spawned
-        agent finalizes into it; the agent's own /end (advised via prompt) layers
-        on top and is not relied upon for binding.
-        """
-        if run_conversation_id:
-            append_turn(
-                conversation_id=run_conversation_id, role=role, content=content,
-                sender_kind="orchestrator",
-                idempotency_key=f"runturn-{entity_id}-{stage}-{trigger}",
-            )
-        if RUN_EMAIL:
-            send_run_email(
-                task_id=entity_id, run_key=run_key, stage=stage, title=title,
-                body=content,
-            )
-
-    _run_stage("user",
-               f"Dispatched {skill} for task {entity_id} (trigger={trigger}): {title}",
-               stage="kickoff")
-
-    try:
-        result = await _spawn_harness_skill(
-            skill, entity_id, snapshot, trigger, notifier, role=role,
-            run_conversation_id=run_conversation_id,
-        )
-    except Exception as exc:
-        # Unexpected crash in the spawn machinery itself → record as a failed run.
-        _run_stage("assistant", f"{skill} dispatch crashed: {type(exc).__name__}: {exc}",
-                   stage="crash")
-        set_task_status(
-            entity_id, TaskStatus.FAILED, handler=DAEMON_NAME,
-            from_status=TaskStatus.EXECUTING.value,
-            reason=f"dispatch raised {type(exc).__name__}: {exc}",
-            key_suffix=trigger,
-        )
-        job.failed(f"task {entity_id} → {skill} dispatch failed: {type(exc).__name__}")
-        raise
-
-    if result.ok:
-        _run_stage("assistant", f"{skill} completed (trigger={trigger}).",
-                   stage="done")
-        set_task_status(
-            entity_id, TaskStatus.DONE, handler=DAEMON_NAME,
-            from_status=TaskStatus.EXECUTING.value,
-            result=f"{skill} completed (trigger={trigger})",
-            key_suffix=trigger,
-        )
-        job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
-    else:
-        reason = result.error or f"rc={result.returncode}"
-        _run_stage("assistant", f"{skill} failed (trigger={trigger}): {reason}",
-                   stage="failed")
-        # FAILED (not BLOCKED): the stall watchdog (plan task ent_3cdd75…) owns
-        # retry-with-backoff and escalation-on-exhaustion out-of-band, so the SSE
-        # loop is never blocked by an inline sleep. Notify now so failures are not
-        # silent in the interim before the watchdog ships.
-        set_task_status(
-            entity_id, TaskStatus.FAILED, handler=DAEMON_NAME,
-            from_status=TaskStatus.EXECUTING.value, reason=reason,
-            key_suffix=trigger,
+    if gate_override and not _release_lifecycle_proven(entity_id, TaskStatus.EXECUTING):
+        log.warning(
+            f"[{DAEMON_NAME}] approved task {entity_id} did not read back as "
+            "executing — not spawning"
         )
         notifier.send(
-            f"{skill} failed on {entity_id} ({reason}) — task marked FAILED",
+            f"Approved task {entity_id} could not enter executing state — manual recovery needed",
             priority=Priority.BLOCKER,
             handler=DAEMON_NAME,
         )
-        job.failed(f"task {entity_id} → {skill} failed: {reason[:60]}")
+        return
+
+    async def _finish_dispatch() -> None:
+        # E1/E2: this run's thread. run_key keys it to the attempt so SSE
+        # replays reuse it while a genuine retry opens a fresh run.
+        run_key = (
+            f"{trigger}-{snapshot.get('attempt', snapshot.get('attempt_count', 0))}"
+        )
+
+        # E1: open one conversation for this execution run (flag-gated,
+        # fail-open).
+        run_conversation_id: str | None = None
+        if RUN_CONVERSATIONS:
+            run_conversation_id = create_run_conversation(
+                task_id=entity_id,
+                plan_id=snapshot.get("plan_id") or None,
+                agent=skill,
+                run_key=run_key,
+                title=f"{skill} run · {title[:60]}",
+            )
+            if run_conversation_id:
+                log.info(
+                    f"[{DAEMON_NAME}] run conversation {run_conversation_id} opened "
+                    f"for task {entity_id} (run={run_key})"
+                )
+
+        def _run_stage(role: str, content: str, stage: str) -> None:
+            """Record one run-thread event in Neotoma and Gmail."""
+            if run_conversation_id:
+                append_turn(
+                    conversation_id=run_conversation_id,
+                    role=role,
+                    content=content,
+                    sender_kind="orchestrator",
+                    idempotency_key=f"runturn-{entity_id}-{stage}-{trigger}",
+                )
+            if RUN_EMAIL:
+                send_run_email(
+                    task_id=entity_id,
+                    run_key=run_key,
+                    stage=stage,
+                    title=title,
+                    body=content,
+                )
+
+        _run_stage(
+            "user",
+            f"Dispatched {skill} for task {entity_id} (trigger={trigger}): {title}",
+            stage="kickoff",
+        )
+
+        try:
+            result = await _spawn_harness_skill(
+                skill,
+                entity_id,
+                snapshot,
+                trigger,
+                notifier,
+                role=role,
+                run_conversation_id=run_conversation_id,
+            )
+        except Exception as exc:
+            # Unexpected crash in the spawn machinery itself → record as a
+            # failed run.
+            _run_stage(
+                "assistant",
+                f"{skill} dispatch crashed: {type(exc).__name__}: {exc}",
+                stage="crash",
+            )
+            set_task_status(
+                entity_id,
+                TaskStatus.FAILED,
+                handler=DAEMON_NAME,
+                from_status=TaskStatus.EXECUTING.value,
+                reason=f"dispatch raised {type(exc).__name__}: {exc}",
+                key_suffix=trigger,
+            )
+            job.failed(
+                f"task {entity_id} → {skill} dispatch failed: {type(exc).__name__}"
+            )
+            raise
+
+        if result.ok:
+            _run_stage(
+                "assistant", f"{skill} completed (trigger={trigger}).", stage="done"
+            )
+            set_task_status(
+                entity_id,
+                TaskStatus.DONE,
+                handler=DAEMON_NAME,
+                from_status=TaskStatus.EXECUTING.value,
+                result=f"{skill} completed (trigger={trigger})",
+                key_suffix=trigger,
+            )
+            job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
+        else:
+            reason = result.error or f"rc={result.returncode}"
+            _run_stage(
+                "assistant",
+                f"{skill} failed (trigger={trigger}): {reason}",
+                stage="failed",
+            )
+            # FAILED (not BLOCKED): the stall watchdog owns retry-with-backoff
+            # and escalation-on-exhaustion out-of-band.
+            set_task_status(
+                entity_id,
+                TaskStatus.FAILED,
+                handler=DAEMON_NAME,
+                from_status=TaskStatus.EXECUTING.value,
+                reason=reason,
+                key_suffix=trigger,
+            )
+            notifier.send(
+                f"{skill} failed on {entity_id} ({reason}) — task marked FAILED",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+            job.failed(f"task {entity_id} → {skill} failed: {reason[:60]}")
+
+    if detach_after_accept:
+        task = asyncio.create_task(
+            _finish_dispatch(), name=f"apis-dispatch-{entity_id}-{trigger}"
+        )
+        _background_dispatch_tasks.add(task)
+        task.add_done_callback(_background_dispatch_done)
+        return
+
+    await _finish_dispatch()
 
 
 # ── Checkpoint resolution ───────────────────────────────────────────────────
 
 
+def _record_snapshot(record: dict | None) -> dict | None:
+    """Unwrap an entity record without treating a failed read as empty data."""
+    if not isinstance(record, dict):
+        return None
+    snapshot = record.get("snapshot")
+    if isinstance(snapshot, dict) and isinstance(snapshot.get("snapshot"), dict):
+        return snapshot["snapshot"]
+    if isinstance(snapshot, dict):
+        return snapshot
+    return None
+
+
+def _release_lifecycle_proven(task_id: str, expected_status: TaskStatus) -> bool:
+    """Read back the lifecycle fields that authorize an approved-task spawn."""
+    snapshot = fetch_task_snapshot(task_id)
+    if snapshot is None:
+        return False
+    return (
+        normalize_status(snapshot.get("status")) == expected_status.value
+        and snapshot.get("blocked_reason") == ""
+    )
+
+
+def _checkpoint_denial_marker(checkpoint_id: str) -> Path | None:
+    configured = os.environ.get("APIS_CHECKPOINT_DENIAL_DIR", "").strip()
+    if not configured:
+        log.critical(
+            "[%s] APIS_CHECKPOINT_DENIAL_DIR is not configured; durable "
+            "cross-process denial fallback is unavailable",
+            DAEMON_NAME,
+        )
+        return None
+    root = Path(configured)
+    if not root.is_absolute():
+        log.critical(
+            "[%s] APIS_CHECKPOINT_DENIAL_DIR must be an absolute shared-state path",
+            DAEMON_NAME,
+        )
+        return None
+    digest = hashlib.sha256(checkpoint_id.encode()).hexdigest()
+    return root / f"{digest}.denied"
+
+
+def _valid_checkpoint_denial_marker(marker: Path) -> bool:
+    try:
+        mode = os.lstat(marker).st_mode
+    except OSError:
+        return False
+    return stat.S_ISREG(mode) and not stat.S_ISLNK(mode)
+
+
+def _checkpoint_denial_persisted(checkpoint_id: str) -> bool:
+    marker = _checkpoint_denial_marker(checkpoint_id)
+    return marker is not None and _valid_checkpoint_denial_marker(marker)
+
+
+def _persist_checkpoint_denial(checkpoint_id: str) -> bool:
+    """Persist a cross-process replay deny when Neotoma writes both fail."""
+    marker = _checkpoint_denial_marker(checkpoint_id)
+    if marker is None:
+        return False
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        parent_mode = os.lstat(marker.parent).st_mode
+        if not stat.S_ISDIR(parent_mode) or stat.S_ISLNK(parent_mode):
+            log.error("[%s] denial marker root is not a real directory", DAEMON_NAME)
+            return False
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(marker, flags, 0o600)
+    except FileExistsError:
+        return _valid_checkpoint_denial_marker(marker)
+    except OSError:
+        log.exception(
+            "[%s] could not create durable checkpoint denial marker", DAEMON_NAME
+        )
+        return False
+    try:
+        os.write(fd, b"denied\n")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        dir_flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            dir_flags |= os.O_DIRECTORY
+        dir_fd = os.open(marker.parent, dir_flags)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        log.exception("[%s] could not fsync denial marker directory", DAEMON_NAME)
+        return False
+    return _valid_checkpoint_denial_marker(marker)
+
+
+def _deny_checkpoint_release(checkpoint_id: str, *, reason: str) -> None:
+    """Consume a denied approval with durable cross-process fallbacks."""
+    if close_checkpoint_without_release(
+        checkpoint_id, handler=DAEMON_NAME, reason=reason
+    ):
+        return
+
+    # If the purpose-built terminal state cannot be proven, consume the replay
+    # claim as a last-resort durable deny. This field normally means a dispatch
+    # happened, so use it only on terminalization failure and log the degraded
+    # representation loudly. If that write also fails, a host-persistent
+    # marker blocks this approval across daemon restarts and consumer processes.
+    if stamp_checkpoint_dispatched(checkpoint_id, handler=DAEMON_NAME):
+        log.error(
+            f"[{DAEMON_NAME}] checkpoint {checkpoint_id} denial could not be "
+            "terminalized; consumed replay claim as a fail-closed fallback"
+        )
+    elif _persist_checkpoint_denial(checkpoint_id):
+        log.critical(
+            f"[{DAEMON_NAME}] checkpoint {checkpoint_id} denial could not be "
+            "persisted in Neotoma; wrote a durable host denial marker"
+        )
+    else:
+        raise RuntimeError(
+            f"checkpoint {checkpoint_id} denial could not be persisted safely"
+        )
+
+
+def _file_fresh_checkpoint(
+    *,
+    prior_checkpoint_id: str,
+    task_id: str,
+    task_snapshot: dict,
+    notifier: Notifier,
+) -> str | None:
+    """Create a replacement checkpoint under the current live policy."""
+    assigned_to = _canonical_assignee(task_snapshot.get("assigned_to"))
+    skill = assigned_to
+    if not skill:
+        tags = task_snapshot.get("tags", []) or []
+        if isinstance(tags, str):
+            import json as _json
+
+            try:
+                tags = _json.loads(tags)
+            except (ValueError, TypeError):
+                tags = []
+        skill = _resolve_skill(tags, assigned_to=assigned_to)
+    action_type = _infer_action_type(skill or "", task_snapshot)
+    policy = resolve_policy_for_agent(skill)
+    decision = evaluate_gate(
+        confidence=_read_confidence(task_snapshot),
+        action_type=action_type,
+        policy=policy,
+        successful_recurrences=_successful_recurrences(task_snapshot),
+    )
+    if decision.action == GateAction.AUTO_EXECUTE:
+        decision = GateDecision(
+            action=GateAction.CHECKPOINT,
+            blast_radius=decision.blast_radius,
+            confidence=decision.confidence,
+            threshold=decision.threshold,
+            policy_id=decision.policy_id,
+            reason="task authorization context changed; fresh approval required",
+            confidence_unscored=decision.confidence_unscored,
+        )
+    task_record = fetch_task_record(task_id)
+    tenant_id = str(fetch_entity_user_id(task_id) or "").strip()
+    if task_record is None or not tenant_id:
+        log.error(
+            f"[{DAEMON_NAME}] cannot create fresh authority for {task_id}: "
+            "task revision or tenant provenance is unavailable"
+        )
+        return None
+    context = hashlib.sha256(
+        (
+            f"{prior_checkpoint_id}\0{action_type or ''}\0{policy.entity_id}\0"
+            f"{entity_record_digest(task_record)}\0{execution_policy_revision(policy)}"
+        ).encode()
+    ).hexdigest()[:20]
+    brief_id = write_checkpoint_brief(
+        task_entity_id=task_id,
+        decision=decision,
+        title=str(task_snapshot.get("title") or "Re-approve changed task"),
+        plan_summary=(
+            "The task authorization context changed after the prior approval. "
+            f"Current action: {action_type or 'unknown'}. {decision.reason}."
+        ),
+        handler=DAEMON_NAME,
+        user_id=tenant_id,
+        action_type=action_type,
+        idempotency_context=f"fresh-{context}",
+        task_record=task_record,
+        policy=policy,
+    )
+    if brief_id:
+        notifier.send(
+            f"Fresh approval required for changed task {task_id}\n  brief={brief_id}",
+            priority=Priority.BLOCKER,
+            handler=DAEMON_NAME,
+        )
+    return brief_id
+
+
+def _require_fresh_release_authority(
+    checkpoint_id: str,
+    *,
+    task_id: str,
+    task_snapshot: dict,
+    notifier: Notifier,
+    reason: str,
+) -> str | None:
+    """Create replacement authority before retiring the stale approval."""
+    replacement_id = _file_fresh_checkpoint(
+        prior_checkpoint_id=checkpoint_id,
+        task_id=task_id,
+        task_snapshot=task_snapshot,
+        notifier=notifier,
+    )
+    if not replacement_id:
+        notifier.send(
+            f"Fresh checkpoint for changed task {task_id} could not be persisted; "
+            "retry is required; the prior approval remains retriable and no work "
+            "was released",
+            priority=Priority.BLOCKER,
+            handler=DAEMON_NAME,
+        )
+        return None
+    retired = require_fresh_checkpoint_approval(
+        checkpoint_id, handler=DAEMON_NAME, reason=reason
+    )
+    if not retired and not _persist_checkpoint_denial(checkpoint_id):
+        raise RuntimeError(
+            f"checkpoint {checkpoint_id} stale authority could not be retired safely"
+        )
+    return replacement_id
+
+
+def migrate_checkpoint_authority(
+    checkpoint_id: str, *, notifier: Notifier
+) -> str | None:
+    """Replace one approved unsigned brief with a fresh v2 approval request.
+
+    This is deliberately a migration, not a release: the replacement binds the
+    current complete task and policy revisions in an AAuth-backed observation
+    and remains awaiting_operator until the operator approves that exact state.
+    """
+    checkpoint_record = fetch_checkpoint_record(checkpoint_id)
+    snapshot = _record_snapshot(checkpoint_record)
+    if snapshot is None or read_checkpoint_resolution(snapshot) != "approved":
+        log.error(
+            "[%s] checkpoint %s is not an approved checkpoint",
+            DAEMON_NAME,
+            checkpoint_id,
+        )
+        return None
+    if checkpoint_already_dispatched(snapshot) or _checkpoint_denial_persisted(
+        checkpoint_id
+    ):
+        log.error(
+            "[%s] checkpoint %s is already consumed",
+            DAEMON_NAME,
+            checkpoint_id,
+        )
+        return None
+    if read_authenticated_checkpoint_authorization(checkpoint_id, checkpoint_record):
+        log.error(
+            "[%s] checkpoint %s already has v2 authority",
+            DAEMON_NAME,
+            checkpoint_id,
+        )
+        return None
+    task_id = str(snapshot.get("task_entity_id") or "").strip()
+    task_record = fetch_task_record(task_id) if task_id else None
+    task_snapshot = _record_snapshot(task_record)
+    brief_user_id = fetch_entity_user_id(checkpoint_id)
+    task_user_id = fetch_entity_user_id(task_id) if task_id else None
+    if (
+        task_snapshot is None
+        or not brief_user_id
+        or not task_user_id
+        or brief_user_id != task_user_id
+    ):
+        log.error(
+            "[%s] checkpoint %s lacks matching task and tenant provenance",
+            DAEMON_NAME,
+            checkpoint_id,
+        )
+        return None
+    return _require_fresh_release_authority(
+        checkpoint_id,
+        task_id=task_id,
+        task_snapshot=task_snapshot,
+        notifier=notifier,
+        reason="legacy approval migrated to v2 authority; fresh approval required",
+    )
+
+
 async def handle_checkpoint_brief(
-    entity_id: str, snapshot: dict, notifier: Notifier
-) -> None:
+    entity_id: str,
+    snapshot: dict,
+    notifier: Notifier,
+    detach_after_accept: bool = False,
+) -> bool:
     """
     React to a checkpoint_brief the gate raised once the operator resolves it.
 
@@ -950,25 +1424,47 @@ async def handle_checkpoint_brief(
     rejected → mark the task declined; do not execute.
     pending/unknown → no-op (waiting on the operator).
 
-    Idempotency: after acting, the brief is stamped resolved_dispatched=true; a
+    Idempotency: after deciding the resolution is actionable, the consumer must
+    acquire the existing resolved_dispatched stamp before it dispatches. A
     replayed approved/rejected event whose brief carries that stamp is a no-op.
     Re-dispatch is also safe because the task skill owns its own idempotency, but
     the stamp avoids spawning the work twice on SSE redelivery.
     """
+    # SSE carries the snapshot from the status correction event. The inline MCP
+    # consumer may already have stamped and dispatched after that event was
+    # emitted, so the event snapshot is stale by construction. Refresh before
+    # the replay guard; failure is unknown and therefore holds.
+    checkpoint_record = fetch_checkpoint_record(entity_id)
+    current_snapshot = _record_snapshot(checkpoint_record)
+    if current_snapshot is None:
+        log.warning(
+            f"[{DAEMON_NAME}] checkpoint_brief {entity_id} could not be refreshed "
+            "— not acting on a potentially stale resolution"
+        )
+        return False
+    snapshot = current_snapshot
+
+    if _checkpoint_denial_persisted(entity_id):
+        log.critical(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} has a durable denial marker "
+            "— refusing replay"
+        )
+        return False
+
     resolution = read_checkpoint_resolution(snapshot)
     if resolution is None:
         log.info(
             f"[{DAEMON_NAME}] checkpoint_brief {entity_id} still pending "
             f"(status={snapshot.get('status')!r}) — no action"
         )
-        return
+        return False
 
     if checkpoint_already_dispatched(snapshot):
         log.info(
             f"[{DAEMON_NAME}] checkpoint_brief {entity_id} already dispatched "
             f"(resolution={resolution}) — no-op on replay"
         )
-        return
+        return False
 
     task_id = snapshot.get("task_entity_id")
     if not task_id:
@@ -976,24 +1472,65 @@ async def handle_checkpoint_brief(
             f"[{DAEMON_NAME}] checkpoint_brief {entity_id} {resolution} but has no "
             "task_entity_id — cannot act"
         )
-        return
+        return False
 
     title = snapshot.get("title", "(untitled)")
 
     if resolution == "rejected":
-        mark_task_declined(
-            task_id, reason=f"operator rejected checkpoint {entity_id}", handler=DAEMON_NAME
+        authorization = read_authenticated_checkpoint_authorization(
+            entity_id, checkpoint_record
         )
-        stamp_checkpoint_dispatched(entity_id, handler=DAEMON_NAME)
+        brief_user_id = fetch_entity_user_id(entity_id)
+        task_user_id = fetch_entity_user_id(task_id)
+        required_approver_sub = str(
+            (authorization or {}).get("required_approver_sub") or ""
+        ).strip()
+        required_approver_jkt = str(
+            (authorization or {}).get("required_approver_jkt") or ""
+        ).strip()
+        authenticated_rejection = read_authenticated_checkpoint_resolution(
+            entity_id,
+            checkpoint_record,
+            required_approver_sub=required_approver_sub,
+            required_approver_jkt=required_approver_jkt,
+            expected_user_id=str(brief_user_id or ""),
+            expected_resolution="rejected",
+        )
+        if (
+            authorization is None
+            or not brief_user_id
+            or not task_user_id
+            or brief_user_id != task_user_id
+            or authenticated_rejection is None
+        ):
+            log.warning(
+                f"[{DAEMON_NAME}] checkpoint {entity_id} rejection lacks "
+                "authenticated resolver authority — task remains held"
+            )
+            _deny_checkpoint_release(
+                entity_id,
+                reason="rejection lacks authenticated required-resolver authority",
+            )
+            return False
+        if not mark_task_declined(
+            task_id,
+            reason=f"operator rejected checkpoint {entity_id}",
+            handler=DAEMON_NAME,
+        ):
+            return False
+        if not stamp_checkpoint_dispatched(entity_id, handler=DAEMON_NAME):
+            return False
         notifier.send(
             f"Checkpoint rejected: {title[:70]}\n  task={task_id} declined",
             priority=Priority.INFO,
             handler=DAEMON_NAME,
         )
-        return
+        return True
 
-    # approved → re-dispatch with the gate bypassed
-    task_snapshot = fetch_task_snapshot(task_id)
+    # approved → fetch the live task before deciding whether the old approval
+    # still authorizes its current action.
+    task_record = fetch_task_record(task_id)
+    task_snapshot = _record_snapshot(task_record)
     if task_snapshot is None:
         log.warning(
             f"[{DAEMON_NAME}] checkpoint {entity_id} approved but task {task_id} "
@@ -1004,23 +1541,200 @@ async def handle_checkpoint_brief(
             priority=Priority.WARN,
             handler=DAEMON_NAME,
         )
-        return
+        return False
+
+    brief_user_id = fetch_entity_user_id(entity_id)
+    task_user_id = fetch_entity_user_id(task_id)
+    if not brief_user_id or not task_user_id or brief_user_id != task_user_id:
+        log.warning(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} and task {task_id} do not have "
+            "matching present tenant provenance — closing without dispatch"
+        )
+        _deny_checkpoint_release(
+            entity_id, reason="missing or mismatched tenant provenance"
+        )
+        return False
+
+    gate_action = str(snapshot.get("gate_action", "")).strip().lower()
+    blast_radius = str(snapshot.get("blast_radius", "")).strip().lower()
+    releasable_actions = {
+        GateAction.CHECKPOINT.value,
+        GateAction.CHECKPOINT_WITH_ALTERNATIVES.value,
+    }
+    assigned_to = _canonical_assignee(task_snapshot.get("assigned_to"))
+    safety_skill = assigned_to
+    if not safety_skill:
+        task_tags = task_snapshot.get("tags", []) or []
+        if isinstance(task_tags, str):
+            import json as _json
+
+            try:
+                task_tags = _json.loads(task_tags)
+            except (ValueError, TypeError):
+                task_tags = []
+        safety_skill = _resolve_skill(task_tags, assigned_to=assigned_to)
+
+    current_action_type = _infer_action_type(safety_skill or "", task_snapshot)
+    if current_action_type == "operator_only":
+        log.warning(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} references operator-only task "
+            f"{task_id} — closing resolution without dispatch"
+        )
+        _deny_checkpoint_release(entity_id, reason="referenced task is operator_only")
+        return False
+
+    # A malformed safety classification is terminally non-releasable even if
+    # the authorization envelope is also absent or stale.  Consume it through
+    # the durable denial path before considering migration or replacement.
+    if gate_action not in releasable_actions:
+        log.info(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
+            f"gate_action={gate_action!r} — closing resolution without dispatch"
+        )
+        _deny_checkpoint_release(
+            entity_id, reason=f"non-releasable gate_action={gate_action!r}"
+        )
+        return False
+    if blast_radius not in {"low", "high"}:
+        log.info(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
+            f"blast_radius={blast_radius!r} — closing resolution without dispatch"
+        )
+        _deny_checkpoint_release(
+            entity_id, reason=f"non-releasable blast_radius={blast_radius!r}"
+        )
+        return False
+
+    authorization = read_authenticated_checkpoint_authorization(
+        entity_id, checkpoint_record
+    )
+    authorization_bound = authorization is not None
+    if not authorization_bound:
+        _require_fresh_release_authority(
+            entity_id,
+            task_id=task_id,
+            task_snapshot=task_snapshot,
+            notifier=notifier,
+            reason=("checkpoint has no current AAuth-backed authorization observation"),
+        )
+        return False
+
+    auth_action_type = str(authorization.get("action_type") or "").strip().lower()
+    current_policy = resolve_policy_for_agent(safety_skill)
+    if not current_policy.loaded:
+        _require_fresh_release_authority(
+            entity_id,
+            task_id=task_id,
+            task_snapshot=task_snapshot,
+            notifier=notifier,
+            reason=(
+                "authoritative execution policy is unavailable; fallback policy "
+                "cannot release authority"
+            ),
+        )
+        return False
+    current_decision = evaluate_gate(
+        confidence=_read_confidence(task_snapshot),
+        action_type=current_action_type,
+        policy=current_policy,
+        successful_recurrences=_successful_recurrences(task_snapshot),
+    )
+    exact_authority = (
+        authorization.get("task_entity_id") == task_id
+        and authorization.get("user_id") == brief_user_id == task_user_id
+        and authorization.get("task_revision") == entity_record_digest(task_record)
+        and authorization.get("task_observation_count")
+        == task_record.get("observation_count")
+        and authorization.get("task_last_observation_at")
+        == task_record.get("last_observation_at")
+        and auth_action_type == current_action_type
+        and authorization.get("policy_entity_id") == current_policy.entity_id
+        and authorization.get("policy_revision")
+        == execution_policy_revision(current_policy)
+        and authorization.get("gate_action") == gate_action
+        and authorization.get("blast_radius") == blast_radius
+        and current_decision.action.value == gate_action
+        and current_decision.blast_radius.value == blast_radius
+    )
+    if not exact_authority:
+        _require_fresh_release_authority(
+            entity_id,
+            task_id=task_id,
+            task_snapshot=task_snapshot,
+            notifier=notifier,
+            reason="task or execution policy changed after approval",
+        )
+        return False
+
+    required_approver_sub = str(
+        authorization.get("required_approver_sub") or ""
+    ).strip()
+    required_approver_jkt = str(
+        authorization.get("required_approver_jkt") or ""
+    ).strip()
+    approval = read_authenticated_checkpoint_resolution(
+        entity_id,
+        checkpoint_record,
+        required_approver_sub=required_approver_sub,
+        required_approver_jkt=required_approver_jkt,
+        expected_user_id=brief_user_id,
+    )
+    if approval is None:
+        _require_fresh_release_authority(
+            entity_id,
+            task_id=task_id,
+            task_snapshot=task_snapshot,
+            notifier=notifier,
+            reason=(
+                "approval attribution is missing, unreadable, untrusted, or "
+                "does not match the required approver principal"
+            ),
+        )
+        return False
 
     log.info(
         f"[{DAEMON_NAME}] checkpoint {entity_id} APPROVED — re-dispatching task "
         f"{task_id} with gate override"
     )
+    # The stamp is the existing replay claim. If it does not land, this attempt
+    # owns nothing and must not dispatch; a later consumer delivery may retry.
+    if not stamp_checkpoint_dispatched(entity_id, handler=DAEMON_NAME):
+        log.warning(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} could not be stamped as "
+            "dispatched — not releasing task"
+        )
+        return False
+    await dispatch_task(
+        task_id,
+        task_snapshot,
+        trigger="approved",
+        notifier=notifier,
+        gate_override=True,
+        detach_after_accept=detach_after_accept,
+    )
+    final_task = fetch_task_snapshot(task_id)
+    if final_task is None or final_task.get("blocked_reason") != "":
+        return False
+    final_status = normalize_status(final_task.get("status"))
+    if DRY_RUN:
+        accepted = final_status == TaskStatus.ROUTED.value
+    else:
+        accepted = final_status in {
+            TaskStatus.EXECUTING.value,
+            TaskStatus.VERIFIED.value,
+            TaskStatus.DONE.value,
+        }
+    if not accepted:
+        return False
+
+    # This message is an externally visible success claim. Emit it only after
+    # both the replay claim and the released task lifecycle have been read back.
     notifier.send(
         f"Checkpoint approved: {title[:70]}\n  re-dispatching task {task_id}",
         priority=Priority.INFO,
         handler=DAEMON_NAME,
     )
-    # Stamp before dispatch so an SSE replay can't double-spawn the work; the task
-    # skill's own idempotency covers the rare stamp-succeeded-then-dispatch-crashed case.
-    stamp_checkpoint_dispatched(entity_id, handler=DAEMON_NAME)
-    await dispatch_task(
-        task_id, task_snapshot, trigger="approved", notifier=notifier, gate_override=True
-    )
+    return True
 
 
 # ── Event handler ─────────────────────────────────────────────────────────────
@@ -1092,7 +1806,10 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
                 handler=DAEMON_NAME,
             )
         await dispatch_task(
-            entity_id, snapshot, trigger="created", notifier=notifier,
+            entity_id,
+            snapshot,
+            trigger="created",
+            notifier=notifier,
             snapshot_hydrated=event.hydrated,
         )
 
@@ -1101,9 +1818,7 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
         # status transitions are logged for observability only to avoid
         # re-dispatching work already routed at creation.
         if status in ("approved", "ready"):
-            log.info(
-                f"[{DAEMON_NAME}] Task {entity_id} moved to status={status!r}"
-            )
+            log.info(f"[{DAEMON_NAME}] Task {entity_id} moved to status={status!r}")
         # Watch for due-date changes (raw payload may include a changed_fields list)
         changed = event.raw.get("changed_fields") or []
         if "due_date" in changed:
@@ -1121,7 +1836,10 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
                 f"[{DAEMON_NAME}] AUTO_EXECUTE=1 — dispatching due task {entity_id}"
             )
             await dispatch_task(
-                entity_id, snapshot, trigger="due_today", notifier=notifier,
+                entity_id,
+                snapshot,
+                trigger="due_today",
+                notifier=notifier,
                 snapshot_hydrated=event.hydrated,
             )
         else:
@@ -1134,7 +1852,9 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
 
 
 async def main() -> None:
+    denial_store = _require_checkpoint_denial_store()
     log.info(f"[{DAEMON_NAME}] Starting up...")
+    log.info(f"[{DAEMON_NAME}] checkpoint_denial_store={denial_store}")
     log.info(f"[{DAEMON_NAME}] ateles_repo={ATELES_REPO}")
     log.info(
         f"[{DAEMON_NAME}] dry_run={DRY_RUN} auto_execute={AUTO_EXECUTE} "
@@ -1292,9 +2012,7 @@ async def main() -> None:
     #    Each pass re-dispatches PRs whose deferral has matured; if the limit is
     #    still active, the re-run just posts a fresh (later) deferral marker.
     #    Fire-and-forget and fail-open — a broken sweep must never stop the loop.
-    deferred_interval = int(
-        os.environ.get("APIS_DEFERRED_REVIEW_SWEEP_SECONDS", "600")
-    )
+    deferred_interval = int(os.environ.get("APIS_DEFERRED_REVIEW_SWEEP_SECONDS", "600"))
 
     async def deferred_review_sweep() -> None:
         while True:
@@ -1405,9 +2123,7 @@ async def main() -> None:
                     )
                 unread = _unroutable.drain_unreadable()
                 if unread:
-                    notifier.send(
-                        unread, priority=Priority.WARN, handler=DAEMON_NAME
-                    )
+                    notifier.send(unread, priority=Priority.WARN, handler=DAEMON_NAME)
             except Exception as exc:  # noqa: BLE001 — never kill the daemon
                 log.warning(f"[{DAEMON_NAME}] unroutable flush failed: {exc}")
 
