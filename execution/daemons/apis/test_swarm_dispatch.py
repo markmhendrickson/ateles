@@ -1312,7 +1312,7 @@ def _pr_dispatcher_with_stubs(
         event = verdict_to_review_event(verdict, body=body)
         state = "APPROVED" if event == "APPROVE" else "CHANGES_REQUESTED"
         return ReviewBindingReceipt(
-            review_id="rev-1",
+            review_id="101",
             reviewer_login="markmhendrickson-ateles-vanellus",
             commit_id="a" * 40,
             state=state,
@@ -1415,7 +1415,7 @@ def test_handle_pr_push_after_binding_receipt_holds_readiness(monkeypatch):
         reviewed_head = live["head"]
         live["head"] = "c" * 40
         return ReviewBindingReceipt(
-            review_id="rev-race",
+            review_id="102",
             reviewer_login="markmhendrickson-ateles-vanellus",
             commit_id=reviewed_head,
             state="APPROVED",
@@ -1968,7 +1968,7 @@ def test_auto_merge_runs_only_with_verified_receipt_and_atomic_head(monkeypatch)
     monkeypatch.setattr(SwarmDispatcher, "_merge_pr", fake_merge)
     dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
     receipt = ReviewBindingReceipt(
-        review_id="rev-auto",
+        review_id="103",
         reviewer_login="markmhendrickson-ateles-vanellus",
         commit_id=head,
         state="APPROVED",
@@ -1986,6 +1986,47 @@ def test_auto_merge_runs_only_with_verified_receipt_and_atomic_head(monkeypatch)
 
     assert merged == [("owner/repo", 87, "squash", head, True)]
     assert any("MERGED automatically" in message for message in dispatcher.notifier.sent)
+
+
+@pytest.mark.parametrize("review_id", ["", "0", "-1", "not-an-id"])
+def test_auto_merge_rejects_receipt_without_valid_github_review_id(
+    monkeypatch, review_id
+):
+    merged = []
+    head = "b" * 40
+
+    async def fake_head(self, trigger):
+        return head
+
+    async def fake_merge(self, *args, **kwargs):
+        merged.append((args, kwargs))
+        return True, "d" * 40
+
+    async def fake_ci(self, trigger):
+        return "green"
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_merge_pr", fake_merge)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
+    receipt = ReviewBindingReceipt(
+        review_id=review_id,
+        reviewer_login="markmhendrickson-ateles-vanellus",
+        commit_id=head,
+        state="APPROVED",
+    )
+
+    asyncio.run(
+        dispatcher._gate_merge_readiness(
+            _trigger(head_sha=head),
+            parent=80,
+            panel=[],
+            reviewed_head=head,
+            binding_receipt=receipt,
+        )
+    )
+
+    assert merged == []
 
 
 def test_auto_merge_without_verified_receipt_stays_held(monkeypatch):
@@ -2014,6 +2055,67 @@ def test_auto_merge_without_verified_receipt_stays_held(monkeypatch):
     )
 
     assert merged == []
+
+
+def test_auto_merge_atomic_base_refusal_is_recorded_without_success_notice(
+    monkeypatch,
+):
+    head = "b" * 40
+    refusals = []
+
+    async def fake_head(self, trigger):
+        return head
+
+    async def fake_ci(self, trigger):
+        return "green"
+
+    async def atomic_base_unavailable(self, *args, **kwargs):
+        return (
+            False,
+            "GitHub merge API cannot atomically bind the PR base; "
+            "auto-merge held",
+        )
+
+    def fake_refusal(self, **kwargs):
+        refusals.append(kwargs)
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_merge_pr", atomic_base_unavailable)
+    monkeypatch.setattr(SwarmDispatcher, "record_merge_refusal", fake_refusal)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
+    receipt = ReviewBindingReceipt(
+        review_id="123",
+        reviewer_login=agent_github_login("vanellus"),
+        commit_id=head,
+        state="APPROVED",
+    )
+
+    asyncio.run(
+        dispatcher._gate_merge_readiness(
+            _trigger(head_sha=head),
+            parent=80,
+            panel=[],
+            reviewed_head=head,
+            binding_receipt=receipt,
+        )
+    )
+
+    assert refusals == [
+        {
+            "repository": "owner/repo",
+            "number": 87,
+            "reason": (
+                "GitHub merge API cannot atomically bind the PR base; "
+                "auto-merge held"
+            ),
+            "auto_merge": True,
+        }
+    ]
+    assert not any(
+        "MERGED automatically" in message
+        for message in dispatcher.notifier.sent
+    )
 
 
 # ── _required_ci_state (CI detection — status API + check-runs precedence) ───
@@ -2367,6 +2469,39 @@ def test_ci_status_green_threads_ci_state_into_gate(monkeypatch):
     d = SwarmDispatcher(_StubNotifier(), _config())
     asyncio.run(d._handle_ci_status(_ci_status_trigger()))
     assert seen.get("ci_state") == "green"
+
+
+def test_ci_status_auto_merge_reenters_fresh_exact_head_panel(monkeypatch):
+    head = "c" * 40
+    calls = []
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=calls,
+    )
+    d.config.auto_merge = True
+
+    async def fake_handle_pr(self, trigger):
+        calls.append(("fresh-panel", trigger.head_sha))
+
+    async def reconstruction_must_not_run(self, *args, **kwargs):
+        raise AssertionError("delayed CI must not reconstruct merge authority")
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_binding_approval_receipt_from_github",
+        reconstruction_must_not_run,
+    )
+
+    asyncio.run(
+        d._handle_ci_status(_ci_status_trigger(ci_head_sha=head))
+    )
+
+    assert ("fresh-panel", head) in calls
+    assert not any(call[0] == "gate" for call in calls)
 
 
 def test_pr_review_is_clear_reads_newest_first(monkeypatch):
@@ -5261,7 +5396,7 @@ def test_merge_pr_expected_head_is_preflighted_and_sent_atomically(monkeypatch):
             87,
             "squash",
             expected_head=head,
-            require_default_base=True,
+            require_default_base=False,
         )
     )
 
@@ -5270,6 +5405,81 @@ def test_merge_pr_expected_head_is_preflighted_and_sent_atomically(monkeypatch):
         "merge_method": "squash",
         "sha": head,
     }
+
+
+def test_merge_pr_refuses_default_base_requirement_without_atomic_binding(
+    monkeypatch,
+):
+    head = "b" * 40
+
+    class _AtomicMergeClient(_MergeAwareClient):
+        async def get(self, url, **kwargs):
+            if url.endswith("/pulls/87"):
+                return _MergeResp(
+                    200,
+                    {"head": {"sha": head}, "base": {"ref": "main"}},
+                )
+            if url.endswith("/repos/owner/repo"):
+                return _MergeResp(200, {"default_branch": "main"})
+            raise AssertionError(f"unexpected GET {url}")
+
+    client = _AtomicMergeClient(merge_status=200, merged=True)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    ok, detail = asyncio.run(
+        dispatcher._merge_pr(
+            "owner/repo",
+            87,
+            "squash",
+            expected_head=head,
+            require_default_base=True,
+        )
+    )
+
+    assert ok is False
+    assert "cannot atomically bind the PR base" in detail
+    assert client.put_calls == []
+
+
+def test_merge_pr_rejects_malformed_expected_head_without_mutation(monkeypatch):
+    client = _MergeAwareClient(merge_status=200, merged=True)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    ok, detail = asyncio.run(
+        dispatcher._merge_pr(
+            "owner/repo",
+            87,
+            "squash",
+            expected_head="not-a-sha",
+            require_default_base=True,
+        )
+    )
+
+    assert ok is False
+    assert "cannot atomically bind the PR base" in detail
+    assert client.put_calls == []
+
+
+def test_merge_pr_rejects_malformed_optional_head_precondition(monkeypatch):
+    client = _MergeAwareClient(merge_status=200, merged=True)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    ok, detail = asyncio.run(
+        dispatcher._merge_pr(
+            "owner/repo",
+            87,
+            "squash",
+            expected_head="not-a-sha",
+            require_default_base=False,
+        )
+    )
+
+    assert ok is False
+    assert detail == "invalid expected PR head; merge held"
+    assert client.put_calls == []
 
 
 # ── /reject command ──────────────────────────────────────────────────────────
@@ -8247,6 +8457,8 @@ def _emit_binding_review(
     live_head="a" * 40,
     readback_state="CHANGES_REQUESTED",
     verdict="request_changes",
+    post_review_id=999,
+    readback_review_id=999,
 ):
     """Drive the binding native-review path without a live credential."""
     posts = []
@@ -8283,7 +8495,7 @@ def _emit_binding_review(
                 return _Resp(
                     200,
                     {
-                        "id": 999,
+                        "id": readback_review_id,
                         "user": {"login": reviewer},
                         "commit_id": live_head,
                         "state": readback_state,
@@ -8295,6 +8507,7 @@ def _emit_binding_review(
             posts.append((kwargs.get("json") or {}).get("event"))
             return _Resp(
                 post_status,
+                {"id": post_review_id},
                 text=(
                     '["Review Can not request changes on your own pull request"]'
                     if post_status == 422
@@ -8372,6 +8585,29 @@ def test_accepted_binding_review_returns_exact_readback_receipt(monkeypatch, cap
     assert "verified binding GitHub review" in log_text
 
 
+@pytest.mark.parametrize("review_id", [None, "", 0, -1, "not-an-id"])
+def test_binding_review_rejects_invalid_created_review_id(
+    monkeypatch, caplog, review_id
+):
+    receipt, _notifier, log_text, posts = _emit_binding_review(
+        monkeypatch, caplog, post_review_id=review_id
+    )
+    assert posts == ["REQUEST_CHANGES"]
+    assert receipt is None
+    assert "review id" in log_text.lower()
+
+
+def test_binding_review_rejects_mismatched_readback_review_id(
+    monkeypatch, caplog
+):
+    receipt, _notifier, log_text, posts = _emit_binding_review(
+        monkeypatch, caplog, post_review_id=999, readback_review_id=1000
+    )
+    assert posts == ["REQUEST_CHANGES"]
+    assert receipt is None
+    assert "readback id mismatch" in log_text.lower()
+
+
 def test_binding_review_rejects_stale_live_head(monkeypatch, caplog):
     receipt, _notifier, log_text, posts = _emit_binding_review(
         monkeypatch, caplog, live_head="b" * 40
@@ -8445,6 +8681,43 @@ def test_ci_receipt_reconstruction_requires_latest_exact_head_approval(monkeypat
                         "state": "CHANGES_REQUESTED",
                         "submitted_at": "2026-09-23T00:01:00Z",
                     },
+                ],
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: _ReviewClient())
+    receipt = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._binding_approval_receipt_from_github(
+            "owner/repo", 87, head, pr_author="someone"
+        )
+    )
+    assert receipt is None
+
+
+@pytest.mark.parametrize("review_id", [None, "", 0, -1, "not-an-id", True])
+def test_ci_receipt_reconstruction_rejects_missing_or_invalid_review_id(
+    monkeypatch, review_id
+):
+    head = "b" * 40
+    reviewer = agent_github_login("vanellus")
+
+    class _ReviewClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, **kwargs):
+            return _MergeResp(
+                200,
+                [
+                    {
+                        "id": review_id,
+                        "user": {"login": reviewer},
+                        "commit_id": head,
+                        "state": "APPROVED",
+                        "submitted_at": "2026-09-23T00:00:00Z",
+                    }
                 ],
             )
 

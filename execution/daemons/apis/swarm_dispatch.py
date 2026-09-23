@@ -1421,6 +1421,17 @@ def _normalise_full_sha(value: str) -> str:
     return sha if _FULL_SHA_RE.fullmatch(sha) else ""
 
 
+def _normalise_github_review_id(value: object) -> str:
+    """Return a positive GitHub review id, or ``""`` when it is not valid."""
+    if isinstance(value, bool):
+        return ""
+    try:
+        review_id = int(str(value).strip())
+    except (TypeError, ValueError):
+        return ""
+    return str(review_id) if review_id > 0 else ""
+
+
 def compose_lens_review_marker(lens: str, commit_sha: str) -> str:
     """Head-scoped lens marker, or a detectable legacy line if head is unknown."""
     sha = _normalise_full_sha(commit_sha)
@@ -1846,7 +1857,8 @@ class ReviewBindingReceipt:
 
     def proves_approval(self, *, head_sha: str) -> bool:
         return (
-            self.reviewer_login.casefold()
+            bool(_normalise_github_review_id(self.review_id))
+            and self.reviewer_login.casefold()
             == agent_github_login("vanellus").casefold()
             and self.commit_id == _normalise_full_sha(head_sha)
             and self.state == "APPROVED"
@@ -4105,6 +4117,14 @@ class SwarmDispatcher:
         method = method if method in ("squash", "merge", "rebase") else "squash"
         api = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/merge"
         expected = _normalise_full_sha(expected_head)
+        if require_default_base and not expected:
+            return (
+                False,
+                "GitHub merge API cannot atomically bind the PR base; "
+                "auto-merge held",
+            )
+        if expected_head and not expected:
+            return False, "invalid expected PR head; merge held"
         try:
             async with httpx.AsyncClient(timeout=60) as client:
                 headers = self._github_headers(repo)
@@ -4140,6 +4160,17 @@ class SwarmDispatcher:
                                 f"the repository default branch ({base_branch!r} "
                                 f"!= {default_branch!r})",
                             )
+                        # GitHub's PR merge API accepts an expected head SHA,
+                        # but no expected base ref/OID. A concurrent PR-base
+                        # retarget can therefore land between these diagnostic
+                        # reads and the merge PUT without changing the head.
+                        # Autonomous merge must remain closed until the
+                        # mutation itself can bind both sides.
+                        return (
+                            False,
+                            "GitHub merge API cannot atomically bind the PR "
+                            "base; auto-merge held",
+                        )
 
                 payload = {"merge_method": method}
                 if expected:
@@ -4818,21 +4849,28 @@ class SwarmDispatcher:
                 if resp.status_code >= 400:
                     detail = (resp.text or "")[:240]
                     raise RuntimeError(f"HTTP {resp.status_code}: {detail}")
-                review_id = (resp.json() or {}).get("id")
+                review_id = _normalise_github_review_id(
+                    (resp.json() or {}).get("id")
+                )
                 if not binding_event:
                     log.info(
                         f"[{DAEMON_NAME}] posted formal GitHub review {event} "
                         f"on {ref} (id={review_id}, verdict={verdict})"
                     )
                     return None
-                if review_id is None:
-                    raise RuntimeError("GitHub review response omitted id")
+                if not review_id:
+                    raise RuntimeError(
+                        "GitHub review response carried an invalid review id"
+                    )
 
                 readback_resp = await client.get(
                     f"{url}/{review_id}", headers=headers
                 )
                 readback_resp.raise_for_status()
                 readback = readback_resp.json() or {}
+                actual_review_id = _normalise_github_review_id(
+                    readback.get("id")
+                )
                 actual_login = str(
                     (readback.get("user") or {}).get("login") or ""
                 )
@@ -4845,6 +4883,11 @@ class SwarmDispatcher:
                     if event == _REVIEW_EVENT_APPROVE
                     else "CHANGES_REQUESTED"
                 )
+                if actual_review_id != review_id:
+                    raise RuntimeError(
+                        "review readback id mismatch: "
+                        f"{actual_review_id!r} != {review_id!r}"
+                    )
                 if actual_login.casefold() != reviewer_login.casefold():
                     raise RuntimeError(
                         "review readback principal mismatch: "
@@ -4861,7 +4904,7 @@ class SwarmDispatcher:
                         f"{actual_state!r} != {expected_state!r}"
                     )
                 receipt = ReviewBindingReceipt(
-                    review_id=str(review_id),
+                    review_id=actual_review_id,
                     reviewer_login=actual_login,
                     commit_id=actual_commit,
                     state=actual_state,
@@ -5989,9 +6032,11 @@ class SwarmDispatcher:
 
           - required CI failed → route back to Cicada for a fix (bounded, shared
             with the push path via _route_ci_failure);
-          - required CI green AND the panel verdict is already clear → run the
-            readiness gate so the operator gets the (now-truthful) merge-ready
-            signal.
+          - required CI green AND the panel verdict is already clear → in
+            operator-gated mode, run readiness so the operator gets the
+            (now-truthful) merge-ready signal; in auto-merge mode, re-run the
+            exact-head panel so canonical durability is freshly proved with
+            its expected lens set before readiness is reachable.
 
         Guards: resolve the PR from the check_suite's associated PRs; SKIP if the
         suite's head_sha is not the PR's CURRENT head (a stale check for a
@@ -6106,21 +6151,22 @@ class SwarmDispatcher:
                 "— leaving to the review path"
             )
             return
-        binding_receipt = None
         if self.config.auto_merge:
-            binding_receipt = await self._binding_approval_receipt_from_github(
-                trigger.repository,
-                pr_number,
-                current_head,
-                pr_author=str((pr.get("user") or {}).get("login") or ""),
+            # A delayed CI event no longer has the expected panel manifest in
+            # memory. The canonical rows identify what exists, but they do not
+            # persist the expected lens set, so a query cannot distinguish a
+            # legitimate reduced panel from a silently omitted review. Re-run
+            # the exact-head PR path instead: it selects the expected panel,
+            # writes and reads back pull_request, pr_review, and
+            # security_finding state, and only then reaches readiness with the
+            # fresh binding receipt it created. Never reconstruct GitHub
+            # approval and merge directly from this delayed callback.
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: CI green + review clear — re-running "
+                "the exact-head panel to re-prove canonical durability"
             )
-            if binding_receipt is None:
-                log.info(
-                    f"[{DAEMON_NAME}] {ref}: CI green + comment verdict clear, "
-                    "but no distinct exact-head APPROVED native review — "
-                    "auto-merge held"
-                )
-                return
+            await self._handle_pr(pr_trigger)
+            return
         log.info(f"[{DAEMON_NAME}] {ref}: CI green + review clear — gating readiness")
         # Pass the CI state we already computed so the gate does not re-fetch it.
         await self._gate_merge_readiness(
@@ -6129,7 +6175,7 @@ class SwarmDispatcher:
             panel=[],
             ci_state=ci,
             reviewed_head=current_head,
-            binding_receipt=binding_receipt,
+            binding_receipt=None,
         )
 
     async def _binding_approval_receipt_from_github(
@@ -6169,6 +6215,7 @@ class SwarmDispatcher:
             == expected_login.casefold()
             and _normalise_full_sha(str(review.get("commit_id") or ""))
             == expected_head
+            and _normalise_github_review_id(review.get("id"))
         ]
         if not matching:
             return None
@@ -6176,13 +6223,13 @@ class SwarmDispatcher:
             matching,
             key=lambda review: (
                 str(review.get("submitted_at") or ""),
-                int(review.get("id") or 0),
+                int(_normalise_github_review_id(review.get("id"))),
             ),
         )
         if str(latest.get("state") or "").upper() != "APPROVED":
             return None
         return ReviewBindingReceipt(
-            review_id=str(latest.get("id") or ""),
+            review_id=_normalise_github_review_id(latest.get("id")),
             reviewer_login=expected_login,
             commit_id=expected_head,
             state="APPROVED",
