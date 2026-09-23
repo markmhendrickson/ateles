@@ -115,12 +115,30 @@ from .session_finalize import (
     load_end_skill,
 )
 from .sse_client import NeotomaEvent, SSEClient, hydrate_snapshot
+from .artifact_contract import (
+    ARTIFACT_CONTRACTS,
+    ArtifactContract,
+    ArtifactHeader,
+    InvalidRef,
+    ParsedRef,
+    artifact_gate_reason,
+    body_shape_for_dispatch,
+    classify_artifact_body,
+    gate_satisfaction_rules,
+    infer_body_shape,
+    looks_like_pr_or_commit_ref,
+    parse_artifact_header,
+    parse_github_ref,
+    role_required_artifact,
+    stdout_tail_for_reason,
+)
 from .task_lifecycle import (
     MAX_ATTEMPTS,
     TaskStatus,
     attempts_exhausted,
     backoff_seconds,
     can_transition,
+    complete_task_with_result,
     set_task_status,
 )
 
@@ -169,10 +187,27 @@ __all__ = [
     # task lifecycle (state machine)
     "TaskStatus",
     "set_task_status",
+    "complete_task_with_result",
     "can_transition",
     "backoff_seconds",
     "attempts_exhausted",
     "MAX_ATTEMPTS",
+    # artifact contracts (ateles#1155 — Apis + Anthus one source)
+    "ARTIFACT_CONTRACTS",
+    "ArtifactContract",
+    "ArtifactHeader",
+    "ParsedRef",
+    "InvalidRef",
+    "role_required_artifact",
+    "gate_satisfaction_rules",
+    "parse_artifact_header",
+    "classify_artifact_body",
+    "looks_like_pr_or_commit_ref",
+    "parse_github_ref",
+    "body_shape_for_dispatch",
+    "infer_body_shape",
+    "artifact_gate_reason",
+    "stdout_tail_for_reason",
     # session finalize (/end convergence)
     "build_finalize_payload",
     "finalize_session",

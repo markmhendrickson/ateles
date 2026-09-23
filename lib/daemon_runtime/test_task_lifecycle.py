@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from lib.daemon_runtime import task_lifecycle as tl
-from lib.daemon_runtime.task_lifecycle import (
+import task_lifecycle as tl
+from task_lifecycle import (
     MAX_ATTEMPTS,
     TaskStatus,
     attempts_exhausted,
@@ -118,3 +118,86 @@ def test_set_status_fail_open_on_http_error(monkeypatch):
     monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "test-token")
     monkeypatch.setattr(tl.httpx, "post", boom)
     assert tl.set_task_status("ent_t", TaskStatus.ROUTED, handler="apis") is False
+
+
+# ── complete_task_with_result (ateles#1155) ─────────────────────────────────
+
+
+def _lifecycle_under_test():
+    """Load the worktree module by path.
+
+    An editable install of ``ateles`` can shadow ``lib.daemon_runtime`` with a
+    checkout that lacks ``complete_task_with_result``. Bare ``import
+    task_lifecycle`` then aliases the installed module. File-path load keeps
+    these tests honest against the code under review.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / "task_lifecycle.py"
+    spec = importlib.util.spec_from_file_location(
+        "task_lifecycle_under_test", path
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_complete_writes_result_before_status(monkeypatch):
+    """Order is the point, not a coincidence of the implementation.
+
+    `set_task_status` writes `status` first and its companions after, so a
+    process killed between the two leaves a task reading DONE with no artifact
+    reference — terminal, and silent about what finished it. The deliverable
+    gate in Apis completes through this function instead, so the reference the
+    completion rests on is durable before the task is closed.
+    """
+    tl_local = _lifecycle_under_test()
+    calls = _capture(monkeypatch)
+    # Re-bind capture onto the file-loaded module.
+    monkeypatch.setattr(tl_local, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append({"url": url, "json": json, "headers": headers})
+        return _Resp()
+
+    monkeypatch.setattr(tl_local.httpx, "post", fake_post)
+    ok = tl_local.complete_task_with_result(
+        "ent_t",
+        handler="apis",
+        result="[cicada] pull_request_link: markmhendrickson/ateles#999",
+        from_status="executing",
+    )
+    assert ok is True
+    assert [c["json"]["field"] for c in calls] == ["result", "status"]
+    assert calls[1]["json"]["value"] == tl_local.TaskStatus.DONE.value
+
+
+def test_complete_idempotency_key_carries_artifact_identity(monkeypatch):
+    """Two attempts naming different artifacts must not dedupe into one write."""
+    tl_local = _lifecycle_under_test()
+    calls: list[dict] = []
+    monkeypatch.setattr(tl_local, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append({"url": url, "json": json, "headers": headers})
+        return _Resp()
+
+    monkeypatch.setattr(tl_local.httpx, "post", fake_post)
+    for ref in ("owner/repo#1", "owner/repo#2"):
+        tl_local.complete_task_with_result(
+            "ent_t", handler="apis", result=ref, artifact_identity=ref,
+        )
+    keys = [c["json"]["idempotency_key"] for c in calls]
+    assert len(set(keys)) == len(keys), keys
+    assert all("owner/repo#" in k for k in keys)
+
+
+def test_complete_fail_open_without_token(monkeypatch):
+    tl_local = _lifecycle_under_test()
+    monkeypatch.setattr(tl_local, "NEOTOMA_BEARER_TOKEN", "")
+    assert (
+        tl_local.complete_task_with_result("ent_t", handler="apis", result="x")
+        is False
+    )

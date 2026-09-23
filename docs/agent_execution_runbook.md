@@ -319,6 +319,96 @@ Use these concrete commands:
 
 Keep command aliases in your ops shell profile so incident handling is repeatable and fast.
 
+## Direct-task artifact completion
+
+A harness exiting 0 is process success, not deliverable success. Until
+ateles#1155 Apis wrote `status: done` on `result.ok` alone, plus a manufactured
+`result` of `<skill> completed (trigger=<trigger>)` — so Cicada could exit 0
+having written `[cicada] pull_request_link: BLOCKED — missing context`, or no
+header at all, and the task went terminal claiming a completion Apis never
+observed, in the one field a reader would check for the PR.
+
+Apis direct-task completion and Anthus gate satisfaction now parse the **same**
+header grammar, `[<role>] <artifact_kind>: <body>`, from the same declaration:
+`lib/daemon_runtime/artifact_contract.py`. Anthus derives its
+`GATE_SATISFACTION_RULES` from it and Apis looks up the dispatched role in it,
+so the two cannot drift — a comment claiming parity is not parity (principle 9),
+and `lib/daemon_runtime/test_artifact_contract_parity.py` binds it.
+
+### Fail-closed order
+
+Each step refuses before the next is attempted, so nothing external is called on
+a body that has already failed a cheaper check.
+
+1. Look up the contract for the dispatched role — a **miss** takes the legacy
+   path unchanged (see below)
+2. Parse the header — stdout is authoritative, stderr consulted only when
+   stdout carries no match; the **last** match in the text wins
+3. Classify the body — `BLOCKED` / empty / valid
+4. Check the body shape against this dispatch mode
+5. Canonicalize the ref and resolve it out of process (`gh` via argv, never
+   `shell=True`, never an HTTP URL probe) — only for contracts whose
+   `resolver_policy` is `github_ref`
+6. Write `result` (the agent's exact matched header line), **then** `status:
+   done` — `complete_task_with_result` fixes that order, because a task reading
+   DONE with no artifact reference is terminal and silent about what finished it
+
+### Registry miss is the legacy path, deliberately
+
+A role absent from `ARTIFACT_CONTRACTS` completes exactly as before, manufactured
+result string included. Gating a role whose artifact nobody has declared would
+fail every one of its dispatches — a dispatcher that refuses live work, which is
+a larger outage than the false completions this closes. Adding a contract is
+what opts a role in.
+
+### Cause codes (`[ARTIFACT_GATE] <code> role=… kind=…`)
+
+| Code | Task status | Meaning |
+|---|---|---|
+| `missing_header` | FAILED | Required header absent from both streams. The reason carries a secret-redacted 2KB tail of stdout so the operator can see what the agent did say |
+| `empty_body` | FAILED | Header present, nothing after the colon |
+| `blocked` | BLOCKED | Agent wrote `BLOCKED` / `BLOCKED — …`; the reason retains the body verbatim, because it names what the agent needs |
+| `wrong_body_for_dispatch` | FAILED | The body answers a different question, e.g. `ENG_SPEC_SECTION` on a generic Cicada direct-impl. Refused before any resolve |
+| `invalid_ref_shape` | FAILED | Foreign host, cross-repo against `dispatch_repo`, shell metacharacters, or an ambiguous bare `#N` / short SHA with no `dispatch_repo` to anchor it. Refused before any resolve |
+| `unresolvable_ref` | FAILED | Shape is sound but the resolve returned false — the ref names nothing reachable |
+
+`BLOCKED` is a status, not a failure: FAILED is the stall watchdog's
+retry-with-backoff lane, and retrying an agent that has just stated what it is
+missing burns harness capacity and changes nothing. BLOCKED is the state
+operator remediation reopens.
+
+Operator-facing hint text is not written yet; reasons carry placeholders for it
+— `[COPY: hint missing_header]`, `[COPY: hint empty_body]`,
+`[COPY: hint blocked]`, `[COPY: hint wrong_body_for_dispatch]`,
+`[COPY: hint invalid_ref_shape]`, `[COPY: hint unresolvable_ref]`.
+
+### Examples
+
+Accepted:
+
+- `[cicada] pull_request_link: https://github.com/markmhendrickson/ateles/pull/999`
+  → `done`, with `result` set to that exact line
+- `[cicada] pull_request_link: #999` with `dispatch_repo` on the snapshot →
+  resolved against that repo
+- `[cicada] pull_request_link: ENG_SPEC_SECTION …` → `done` **only** on an
+  explicit `ordered_spec` / `eng_lens` dispatch
+
+Refused:
+
+- `[cicada] pull_request_link: BLOCKED — missing context` → `blocked`
+- harness ok, stdout with no header → `failed`, `missing_header`
+- `[cicada] pull_request_link: ENG_SPEC_SECTION …` on a generic direct-impl
+  dispatch → `failed`, `wrong_body_for_dispatch`
+- `[cicada] pull_request_link: https://evil.example/o/r/pull/1` → `failed`,
+  `invalid_ref_shape`, and the resolver is never called
+
+`dispatch_repo` is read from the task snapshot, first present of `repo`,
+`dispatch_repo`, `github_repo`, `repository`; `dispatch_mode` from
+`dispatch_mode`, `spawn_mode`, or an `ordered_spec` / `eng_lens` tag.
+
+See also: `docs/smoke_test_runbook.md`, `docs/swarm_smoke_test_plan.md`,
+`docs/agents/cicada.md`, `.claude/skills/cicada/SKILL.md`.
+
 ## Escalation Matrix
 
 - Sev 1 (full outage): immediate failover and live incident channel

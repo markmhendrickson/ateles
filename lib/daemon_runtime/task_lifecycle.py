@@ -328,6 +328,53 @@ def set_task_status(
     return ok
 
 
+def complete_task_with_result(
+    task_entity_id: str,
+    *,
+    handler: str,
+    result: str,
+    from_status: str | None = None,
+    key_suffix: str = "",
+    artifact_identity: str = "",
+) -> bool:
+    """Persist ``result`` BEFORE status=DONE (ateles#1155 fail-closed order).
+
+    Callers that gate completion on a deliverable must not write DONE first —
+    a crashed status-before-result path leaves a terminal task with no artifact
+    reference. Idempotency keys include handler, task, trigger suffix, and the
+    canonical artifact identity so replay of one attempt is stable while a
+    genuine retry (new key_suffix) is a new mutation.
+    """
+    value = TaskStatus.DONE.value
+    if from_status is not None and not can_transition(from_status, value):
+        log.info(
+            "[lifecycle] unusual transition %s→%s for task %s (writing anyway)",
+            normalize(from_status), value, task_entity_id,
+        )
+    suffix = f"-{key_suffix}" if key_suffix else ""
+    art = f"-{artifact_identity}" if artifact_identity else ""
+    result_ok = _correct(
+        task_entity_id,
+        "result",
+        result,
+        idempotency_key=f"taskresult-{handler}-{task_entity_id}-{value}{suffix}{art}",
+    )
+    if not result_ok:
+        log.warning(
+            "[lifecycle] refusing DONE for task %s — result write failed "
+            "(artifact must land before terminal status)",
+            task_entity_id,
+        )
+        return False
+    status_ok = _correct(
+        task_entity_id,
+        "status",
+        value,
+        idempotency_key=f"taskstatus-{handler}-{task_entity_id}-{value}{suffix}{art}",
+    )
+    return bool(status_ok)
+
+
 # ── Self-test (pure logic; run once the model/classifier outage clears) ───────
 
 

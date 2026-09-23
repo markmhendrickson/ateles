@@ -43,6 +43,8 @@ Dedicated to swarm smoke tests. Isolated from `harness-sandbox` (graveyard of cl
 | T1.11 | Cicada | Fix typo in README | `[cicada] pull_request_link: #N` |
 | T1.12 | Vanellus | Review PR #N | `[vanellus] merge_decision:` |
 
+Artifact headers use one shared grammar for **Anthus gate satisfaction** and **Apis direct-task completion** — see `docs/agent_execution_runbook.md#direct-task-artifact-completion`.
+
 **Pass criteria:**
 
 1. Every agent produces a comment with the correct artifact header

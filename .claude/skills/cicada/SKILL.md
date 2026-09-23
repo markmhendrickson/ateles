@@ -141,7 +141,7 @@ Where:
 - `<NAME>` and `<ARTIFACT_KIND>` for this agent are fixed: **`[cicada] pull_request_link:`**
 - `<body>` is your structured result inline (short form OK), OR the literal token `BLOCKED — <one-line reason>` when you cannot produce the artifact (missing data, scope mismatch, wrong agent for the task, etc.).
 
-Emit the header on every response — including refusals and out-of-scope responses. Anthus parses it to advance gate state.
+Emit the header on every response — including refusals and out-of-scope responses. Anthus parses it to advance gate state. **Apis direct-task completion** uses the same header: without a resolvable `pull_request_link` (or an explicit ordered-spec `ENG_SPEC_SECTION`), a harness exit 0 does not mark the task `DONE` — see `docs/agent_execution_runbook.md#direct-task-artifact-completion`.
 
 **Mode A header.** In `eng`-lens mode there is no PR to link, and emitting `BLOCKED` reads downstream as a build failure (it has caused exactly that misdiagnosis). Instead report the section you authored:
 
