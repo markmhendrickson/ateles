@@ -438,6 +438,46 @@ def test_extend_schemas_and_reconcile_file_flags_present_in_help():
     assert "--reconcile-file" in result.stdout
 
 
+def test_apply_without_confirm_env_refuses_before_touching_hosted():
+    """The double guard: --apply alone must refuse, even with no --db given --
+    it must fail closed before reaching any hosted call or the --db check."""
+    import os as _os
+    import subprocess
+    import sys as _sys
+
+    script = str(Path(__file__).resolve().parent / "neotoma_local_fork_replay.py")
+    env = dict(_os.environ)
+    env.pop("MIGRATE_CONFIRM_APPLY", None)
+    result = subprocess.run(
+        [_sys.executable, script, "--apply"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
+    )
+    assert result.returncode == 1
+    assert "MIGRATE_CONFIRM_APPLY=yes" in result.stderr
+
+
+def test_apply_with_wrong_confirm_value_still_refuses():
+    import os as _os
+    import subprocess
+    import sys as _sys
+
+    script = str(Path(__file__).resolve().parent / "neotoma_local_fork_replay.py")
+    env = dict(_os.environ)
+    env["MIGRATE_CONFIRM_APPLY"] = "true"  # anything other than the literal "yes"
+    result = subprocess.run(
+        [_sys.executable, script, "--apply"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
+    )
+    assert result.returncode == 1
+    assert "MIGRATE_CONFIRM_APPLY=yes" in result.stderr
+
+
 # --- infer_field_type / plan_schema_extensions ------------------------------
 
 
@@ -1648,7 +1688,7 @@ def test_get_schema_declared_fields_captures_merge_array_reducer(monkeypatch):
             "reducer_config": {
                 "merge_policies": {
                     "owner_history": {"strategy": "merge_array"},
-                    "gate_status": {"strategy": "last_write"},
+                    "gate_status": {"strategy": "last_write"},  # vocab-ok: hosted legacy-field contract
                 }
             },
         }
@@ -1656,7 +1696,7 @@ def test_get_schema_declared_fields_captures_merge_array_reducer(monkeypatch):
     monkeypatch.setattr(_mod, "http_request", fake_http_request)
     info = _mod.get_schema_declared_fields("issue", "https://hosted.example", "tok", {})
     assert info["merge_array_fields"] == {"owner_history"}
-    assert "gate_status" not in info["merge_array_fields"]
+    assert "gate_status" not in info["merge_array_fields"]  # vocab-ok: hosted legacy-field contract
 
 
 def test_get_schema_declared_fields_merge_array_empty_when_no_hosted_schema(monkeypatch):
