@@ -113,6 +113,40 @@ def _config(**overrides):
     )
 
 
+def _expected_pr_review(**overrides):
+    review = {
+        "entity_type": "pr_review",
+        "repository": "owner/repo",
+        "pr_number": 87,
+        "pr_title": "A pull request",
+        "review_lens": "qa",
+        "reviewer_agent": "phoenicurus",
+        "head_sha": "b" * 40,
+        "verdict": "approve",
+        "status": "live",
+        "review_round": 3,
+        "content": "**APPROVE**",
+        "blocking_findings": [],
+        "nonblocking_findings": [
+            {
+                "id": "finding-1",
+                "category": "coverage",
+                "summary": "retain regression coverage",
+                "files": ["execution/daemons/apis/test_swarm_dispatch.py"],
+            }
+        ],
+        "finding_ids": ["finding-1"],
+        "generated_by": "phoenicurus",
+        "generated_at": "2026-09-23T00:00:00+00:00",
+    }
+    review.update(overrides)
+    return review
+
+
+def _snapshot_for_review(review):
+    return {key: value for key, value in review.items() if key != "entity_type"}
+
+
 # ── content_digest ──────────────────────────────────────────────────────────
 
 
@@ -171,6 +205,7 @@ def test_panel_reviews_use_verified_pre_panel_head_not_stale_trigger(monkeypatch
         self, trigger, lenses, current_sha, *, priors=None, new_ids_by_lens=None
     ):
         superseded.append((current_sha, new_ids_by_lens))
+        return True
 
     async def fake_confirm(self, trigger, entities, store_result, reviewed_head):
         return self._new_pr_review_ids_by_lens(entities, store_result)
@@ -230,6 +265,7 @@ def test_panel_reviews_seed_round_from_max_of_all_live_priors(monkeypatch):
         self, trigger, lenses, current_sha, *, priors=None, new_ids_by_lens=None
     ):
         superseded.append((priors, new_ids_by_lens))
+        return True
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
     monkeypatch.setattr(SwarmDispatcher, "_prior_live_reviews", fake_priors)
@@ -330,8 +366,12 @@ def test_security_finding_missing_readback_fails_closed(monkeypatch):
 def test_replacement_ids_require_exact_head_live_readback(monkeypatch):
     reviewed_head = "b" * 40
     entities = [
-        {"review_lens": "qa"},
-        {"review_lens": "security"},
+        _expected_pr_review(),
+        _expected_pr_review(
+            review_lens="security",
+            reviewer_agent="falco",
+            generated_by="falco",
+        ),
     ]
     store_result = {
         "entities": [
@@ -346,24 +386,13 @@ def test_replacement_ids_require_exact_head_live_readback(monkeypatch):
             "entities": [
                 {
                     "entity_id": "ent_qa_new",
-                    "snapshot": {
-                        "repository": "owner/repo",
-                        "pr_number": 87,
-                        "review_lens": "qa",
-                        "head_sha": reviewed_head,
-                        "status": "live",
-                    },
+                    "snapshot": _snapshot_for_review(entities[0]),
                 },
                 {
                     "entity_id": "ent_security_new",
-                    "snapshot": {
-                        "repository": "owner/repo",
-                        "pr_number": 87,
-                        "review_lens": "security",
-                        # Wrong-head readback must not authorize supersession.
-                        "head_sha": "c" * 40,
-                        "status": "live",
-                    },
+                    "snapshot": _snapshot_for_review(
+                        {**entities[1], "head_sha": "c" * 40}
+                    ),
                 },
             ]
         }
@@ -376,6 +405,155 @@ def test_replacement_ids_require_exact_head_live_readback(monkeypatch):
     )
 
     assert confirmed == {"qa": "ent_qa_new"}
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "repository",
+        "pr_number",
+        "pr_title",
+        "review_lens",
+        "reviewer_agent",
+        "head_sha",
+        "verdict",
+        "status",
+        "review_round",
+        "content",
+        "blocking_findings",
+        "nonblocking_findings",
+        "finding_ids",
+        "generated_by",
+        "generated_at",
+    ],
+)
+def test_replacement_ids_require_every_expected_declared_field(
+    monkeypatch, missing_field
+):
+    reviewed_head = "b" * 40
+    entity = _expected_pr_review()
+    snapshot = _snapshot_for_review(entity)
+    snapshot.pop(missing_field)
+
+    async def fake_post(self, path, payload):
+        assert path == "entities/query"
+        return {"entities": [{"entity_id": "ent_qa_new", "snapshot": snapshot}]}
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    confirmed = asyncio.run(
+        SwarmDispatcher(
+            _StubNotifier(), _config()
+        )._confirmed_new_pr_review_ids_by_lens(
+            _trigger(),
+            [entity],
+            {"entities": [{"observation_index": 0, "entity_id": "ent_qa_new"}]},
+            reviewed_head,
+        )
+    )
+
+    assert confirmed == {}
+
+
+@pytest.mark.parametrize(
+    "schema_loss",
+    [
+        {"unknown_fields_count": 1},
+        {"unknown_fields": ["verdict"]},
+    ],
+)
+def test_panel_review_store_schema_loss_fails_before_supersession(
+    monkeypatch, schema_loss
+):
+    calls = []
+
+    async def fake_store(self, entities, idempotency_key):
+        if entities and entities[0]["entity_type"] == "pr_review":
+            return {
+                "entities": [{"observation_index": 0, "entity_id": "ent_new"}],
+                **schema_loss,
+            }
+        return {}
+
+    async def unexpected_confirm(*args, **kwargs):
+        calls.append("confirm")
+        return {"qa": "ent_new"}
+
+    async def unexpected_supersede(*args, **kwargs):
+        calls.append("supersede")
+        return True
+
+    async def confirmed(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_confirmed_new_pr_review_ids_by_lens", unexpected_confirm
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher, "_supersede_prior_reviews", unexpected_supersede
+    )
+    monkeypatch.setattr(SwarmDispatcher, "_persist_security_findings", confirmed)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_and_confirm_pull_request", confirmed)
+
+    durable = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_panel_reviews(
+            _trigger(),
+            [("qa", "**APPROVE**")],
+            {"qa": "phoenicurus"},
+            reviewed_head="b" * 40,
+        )
+    )
+
+    assert durable is False
+    assert calls == []
+
+
+def test_unverified_supersession_keeps_panel_durability_closed(monkeypatch):
+    async def fake_store(self, entities, idempotency_key):
+        if entities and entities[0]["entity_type"] == "pr_review":
+            return {"entities": [{"observation_index": 0, "entity_id": "ent_new"}]}
+        return {}
+
+    async def fake_priors(self, trigger, lenses, current_sha):
+        return {
+            "qa": [
+                {
+                    "entity_id": "ent_prior",
+                    "snapshot": {"review_lens": "qa", "review_round": 2},
+                }
+            ]
+        }
+
+    async def fake_confirm(self, trigger, entities, store_result, reviewed_head):
+        return {"qa": "ent_new"}
+
+    async def failed_supersession(*args, **kwargs):
+        return False
+
+    async def confirmed(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_prior_live_reviews", fake_priors)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_confirmed_new_pr_review_ids_by_lens", fake_confirm
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher, "_supersede_prior_reviews", failed_supersession
+    )
+    monkeypatch.setattr(SwarmDispatcher, "_persist_security_findings", confirmed)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_and_confirm_pull_request", confirmed)
+
+    durable = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_panel_reviews(
+            _trigger(),
+            [("qa", "**APPROVE**")],
+            {"qa": "phoenicurus"},
+            reviewed_head="b" * 40,
+        )
+    )
+
+    assert durable is False
 
 
 def test_failed_replacement_store_leaves_all_prior_reviews_live(monkeypatch):
@@ -500,25 +678,48 @@ def test_reviewed_head_blocker_recovery_ignores_stale_webhook_head(monkeypatch):
 
 def test_supersede_prior_review_writes_status_pointer_and_edge(monkeypatch):
     calls = []
+    current_sha = "b" * 40
 
     async def fake_post(self, path, payload):
         calls.append((path, payload))
-        return {}
+        if path == "correct":
+            return {"observation_id": f"obs-{payload['field']}"}
+        if path == "create_relationship":
+            return {"relationship_key": "SUPERSEDES:ent_new:ent_prior"}
+        if path == "get_entity_snapshot":
+            return {
+                "entity_id": "ent_prior",
+                "snapshot": {
+                    "status": "superseded",
+                    "superseded_by": current_sha,
+                },
+            }
+        if path == "relationships/snapshot":
+            return {
+                "snapshot": {
+                    "relationship_type": "SUPERSEDES",
+                    "source_entity_id": "ent_new",
+                    "target_entity_id": "ent_prior",
+                    "is_live": 1,
+                }
+            }
+        raise AssertionError(path)
 
     monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
     prior = {
         "entity_id": "ent_prior",
         "snapshot": {"review_lens": "qa", "head_sha": "a" * 40},
     }
-    asyncio.run(
+    confirmed = asyncio.run(
         SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
             _trigger(),
             ["qa"],
-            "b" * 40,
+            current_sha,
             priors={"qa": [prior]},
             new_ids_by_lens={"qa": "ent_new"},
         )
     )
+    assert confirmed is True
     assert [(path, payload.get("field")) for path, payload in calls[:2]] == [
         ("correct", "status"),
         ("correct", "superseded_by"),
@@ -531,6 +732,136 @@ def test_supersede_prior_review_writes_status_pointer_and_edge(monkeypatch):
             "relationship_type": "SUPERSEDES",
         },
     )
+    assert calls[3] == ("get_entity_snapshot", {"entity_id": "ent_prior"})
+    assert calls[4] == (
+        "relationships/snapshot",
+        {
+            "source_entity_id": "ent_new",
+            "target_entity_id": "ent_prior",
+            "relationship_type": "SUPERSEDES",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "failed_operation",
+    ["status_correction", "superseded_by_correction", "edge_creation"],
+)
+def test_supersede_prior_reviews_fails_closed_on_each_write_failure(
+    monkeypatch, failed_operation
+):
+    current_sha = "b" * 40
+
+    async def fake_post(self, path, payload):
+        if path == "correct" and payload["field"] == "status":
+            return (
+                None
+                if failed_operation == "status_correction"
+                else {"observation_id": "status"}
+            )
+        if path == "correct" and payload["field"] == "superseded_by":
+            return (
+                None
+                if failed_operation == "superseded_by_correction"
+                else {"observation_id": "pointer"}
+            )
+        if path == "create_relationship":
+            return (
+                None
+                if failed_operation == "edge_creation"
+                else {"relationship_key": "edge"}
+            )
+        if path == "get_entity_snapshot":
+            return {
+                "snapshot": {
+                    "status": "superseded",
+                    "superseded_by": current_sha,
+                }
+            }
+        if path == "relationships/snapshot":
+            return {
+                "snapshot": {
+                    "relationship_type": "SUPERSEDES",
+                    "source_entity_id": "ent_new",
+                    "target_entity_id": "ent_prior",
+                    "is_live": 1,
+                }
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
+            _trigger(),
+            ["qa"],
+            current_sha,
+            priors={
+                "qa": [
+                    {
+                        "entity_id": "ent_prior",
+                        "snapshot": {"review_lens": "qa"},
+                    }
+                ]
+            },
+            new_ids_by_lens={"qa": "ent_new"},
+        )
+    )
+
+    assert confirmed is False
+
+
+@pytest.mark.parametrize("failed_readback", ["entity", "edge"])
+def test_supersede_prior_reviews_fails_closed_on_readback_failure(
+    monkeypatch, failed_readback
+):
+    current_sha = "b" * 40
+
+    async def fake_post(self, path, payload):
+        if path == "correct":
+            return {"observation_id": payload["field"]}
+        if path == "create_relationship":
+            return {"relationship_key": "edge"}
+        if path == "get_entity_snapshot":
+            if failed_readback == "entity":
+                return {"snapshot": {"status": "live"}}
+            return {
+                "snapshot": {
+                    "status": "superseded",
+                    "superseded_by": current_sha,
+                }
+            }
+        if path == "relationships/snapshot":
+            if failed_readback == "edge":
+                return None
+            return {
+                "snapshot": {
+                    "relationship_type": "SUPERSEDES",
+                    "source_entity_id": "ent_new",
+                    "target_entity_id": "ent_prior",
+                    "is_live": 1,
+                }
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
+            _trigger(),
+            ["qa"],
+            current_sha,
+            priors={
+                "qa": [
+                    {
+                        "entity_id": "ent_prior",
+                        "snapshot": {"review_lens": "qa"},
+                    }
+                ]
+            },
+            new_ids_by_lens={"qa": "ent_new"},
+        )
+    )
+
+    assert confirmed is False
 
 
 def test_supersede_prior_reviews_requires_confirmed_replacement_id(monkeypatch):
@@ -546,7 +877,7 @@ def test_supersede_prior_reviews_requires_confirmed_replacement_id(monkeypatch):
         "snapshot": {"review_lens": "qa", "head_sha": "a" * 40},
     }
 
-    asyncio.run(
+    confirmed = asyncio.run(
         SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
             _trigger(),
             ["qa"],
@@ -556,6 +887,7 @@ def test_supersede_prior_reviews_requires_confirmed_replacement_id(monkeypatch):
         )
     )
 
+    assert confirmed is False
     assert calls == []
 
 
@@ -564,9 +896,31 @@ def test_supersede_prior_reviews_demotes_every_live_row_for_confirmed_lens(
 ):
     calls = []
 
+    current_sha = "b" * 40
+
     async def fake_post(self, path, payload):
         calls.append((path, payload))
-        return {}
+        if path == "correct":
+            return {"observation_id": payload["field"]}
+        if path == "create_relationship":
+            return {"relationship_key": "edge"}
+        if path == "get_entity_snapshot":
+            return {
+                "snapshot": {
+                    "status": "superseded",
+                    "superseded_by": current_sha,
+                }
+            }
+        if path == "relationships/snapshot":
+            return {
+                "snapshot": {
+                    "relationship_type": "SUPERSEDES",
+                    "source_entity_id": payload["source_entity_id"],
+                    "target_entity_id": payload["target_entity_id"],
+                    "is_live": 1,
+                }
+            }
+        raise AssertionError(path)
 
     monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
     qa_priors = [
@@ -584,17 +938,19 @@ def test_supersede_prior_reviews_demotes_every_live_row_for_confirmed_lens(
         "snapshot": {"review_lens": "security", "review_round": 4},
     }
 
-    asyncio.run(
+    confirmed = asyncio.run(
         SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
             _trigger(),
             ["qa", "security"],
-            "b" * 40,
+            current_sha,
             priors={"qa": qa_priors, "security": [security_prior]},
             # A partial replacement response confirms QA only. Security must
             # remain live until its own replacement is durably read back.
             new_ids_by_lens={"qa": "ent_qa_new"},
         )
     )
+
+    assert confirmed is False
 
     corrected_ids = [
         payload["entity_id"] for path, payload in calls if path == "correct"

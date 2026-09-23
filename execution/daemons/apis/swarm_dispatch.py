@@ -8777,18 +8777,31 @@ class SwarmDispatcher:
                     f"{content_digest(digest_basis)}"
                 ),
             )
-            confirmed_ids = await self._confirmed_new_pr_review_ids_by_lens(
-                t, entities, store_result, sha
-            )
-            await self._supersede_prior_reviews(
-                t,
-                [entity["review_lens"] for entity in entities],
-                sha,
-                priors=priors,
-                new_ids_by_lens=confirmed_ids,
-            )
             expected_lenses = {entity["review_lens"] for entity in entities}
+            review_store_confirmed = bool(store_result) and not (
+                self._store_result_has_unknown_fields(store_result)
+            )
+            if review_store_confirmed:
+                confirmed_ids = await self._confirmed_new_pr_review_ids_by_lens(
+                    t, entities, store_result, sha
+                )
+            else:
+                confirmed_ids = {}
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: pr_review "
+                    "store failed or reported undeclared fields; prior reviews "
+                    "remain live"
+                )
             reviews_confirmed = set(confirmed_ids) == expected_lenses
+            supersession_confirmed = False
+            if reviews_confirmed:
+                supersession_confirmed = await self._supersede_prior_reviews(
+                    t,
+                    [entity["review_lens"] for entity in entities],
+                    sha,
+                    priors=priors,
+                    new_ids_by_lens=confirmed_ids,
+                )
             security_confirmed = await self._persist_security_findings(
                 t, reviews, sha, verified_at=now
             )
@@ -8797,6 +8810,7 @@ class SwarmDispatcher:
             )
             durability_confirmed = (
                 reviews_confirmed
+                and supersession_confirmed
                 and security_confirmed
                 and pull_request_confirmed
             )
@@ -9136,9 +9150,16 @@ class SwarmDispatcher:
         A successful HTTP response is not evidence that Neotoma stored the
         declared fields.  Superseding the prior live review is destructive to
         the gate, so each lens remains untouched unless the entity ID returned
-        by ``/store`` can be read back with the expected PR, lens, head and live
-        status.
+        by ``/store`` can be read back with every declared value supplied to
+        ``/store``.
         """
+        if not store_result or self._store_result_has_unknown_fields(store_result):
+            log.error(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: pr_review store "
+                "failed or reported undeclared fields; prior reviews remain live"
+            )
+            return {}
+
         stored_ids = self._new_pr_review_ids_by_lens(entities, store_result)
         if not stored_ids:
             log.error(
@@ -9168,22 +9189,30 @@ class SwarmDispatcher:
 
         expected_head = _normalise_full_sha(reviewed_head)
         confirmed: dict[str, str] = {}
-        expected_by_id = {entity_id: lens for lens, entity_id in stored_ids.items()}
+        expected_by_id = {
+            entity_id: entity
+            for entity in entities
+            if (entity_id := stored_ids.get(str(entity.get("review_lens") or "")))
+        }
         for row in data.get("entities", []):
             entity_id = str(row.get("entity_id") or row.get("id") or "")
-            lens = expected_by_id.get(entity_id)
-            if not lens:
+            expected = expected_by_id.get(entity_id)
+            if not expected:
+                continue
+            if (
+                _normalise_full_sha(str(expected.get("head_sha") or ""))
+                != expected_head
+            ):
                 continue
             snapshot = row.get("snapshot") or {}
-            if (
-                snapshot.get("repository") == t.repository
-                and str(snapshot.get("pr_number")) == str(t.number)
-                and snapshot.get("review_lens") == lens
-                and _normalise_full_sha(snapshot.get("head_sha") or "")
-                == expected_head
-                and snapshot.get("status") == "live"
+            expected_snapshot = {
+                key: value for key, value in expected.items() if key != "entity_type"
+            }
+            if all(
+                key in snapshot and snapshot[key] == value
+                for key, value in expected_snapshot.items()
             ):
-                confirmed[lens] = entity_id
+                confirmed[str(expected["review_lens"])] = entity_id
 
         missing = sorted(set(stored_ids) - set(confirmed))
         if missing:
@@ -9202,8 +9231,8 @@ class SwarmDispatcher:
         *,
         priors: dict[str, list[dict]] | None = None,
         new_ids_by_lens: dict[str, str] | None = None,
-    ) -> None:
-        """Demote every prior row only for durably confirmed replacements."""
+    ) -> bool:
+        """Demote prior rows only when every write is durably read back."""
         if priors is not None:
             prior_entities = [
                 entity
@@ -9227,8 +9256,14 @@ class SwarmDispatcher:
             lens = snapshot.get("review_lens")
             new_id = new_ids_by_lens.get(lens)
             if not entity_id or not new_id:
-                continue
-            await self._neotoma_post(
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: cannot "
+                    f"supersede prior review {entity_id or '<missing id>'} "
+                    f"for lens {lens or '<missing lens>'}; replacement is not "
+                    "durably identified"
+                )
+                return False
+            status_result = await self._neotoma_post(
                 "correct",
                 {
                     "entity_id": entity_id,
@@ -9240,7 +9275,13 @@ class SwarmDispatcher:
                     ),
                 },
             )
-            await self._neotoma_post(
+            if not status_result:
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: failed to "
+                    f"mark prior review {entity_id} superseded"
+                )
+                return False
+            pointer_result = await self._neotoma_post(
                 "correct",
                 {
                     "entity_id": entity_id,
@@ -9252,7 +9293,13 @@ class SwarmDispatcher:
                     ),
                 },
             )
-            await self._neotoma_post(
+            if not pointer_result:
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: failed to "
+                    f"record replacement head on prior review {entity_id}"
+                )
+                return False
+            edge_result = await self._neotoma_post(
                 "create_relationship",
                 {
                     "source_entity_id": new_id,
@@ -9260,6 +9307,50 @@ class SwarmDispatcher:
                     "relationship_type": "SUPERSEDES",
                 },
             )
+            if not edge_result:
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: failed to "
+                    f"link replacement review {new_id} to {entity_id}"
+                )
+                return False
+
+            entity_readback = await self._neotoma_post(
+                "get_entity_snapshot", {"entity_id": entity_id}
+            )
+            readback_snapshot = (entity_readback or {}).get("snapshot") or {}
+            if (
+                readback_snapshot.get("status") != "superseded"
+                or readback_snapshot.get("superseded_by") != current_sha
+            ):
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: prior review "
+                    f"{entity_id} supersession corrections were not read back"
+                )
+                return False
+
+            edge_readback = await self._neotoma_post(
+                "relationships/snapshot",
+                {
+                    "source_entity_id": new_id,
+                    "target_entity_id": entity_id,
+                    "relationship_type": "SUPERSEDES",
+                },
+            )
+            edge_snapshot = (edge_readback or {}).get("snapshot") or {}
+            if not (
+                edge_snapshot.get("relationship_type") == "SUPERSEDES"
+                and edge_snapshot.get("source_entity_id") == new_id
+                and edge_snapshot.get("target_entity_id") == entity_id
+                # SQLite-backed Neotoma serializes this boolean as integer 1.
+                and edge_snapshot.get("is_live") == 1
+            ):
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: SUPERSEDES "
+                    f"edge {new_id} -> {entity_id} was not read back live"
+                )
+                return False
+
+        return True
 
     async def _post_missing_panel_comments(
         self,
