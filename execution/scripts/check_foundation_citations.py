@@ -4,13 +4,14 @@
 ``conformance.md#mechanical-checks-on-this-directory`` registers this script under *Decision
 citations*, and states what fails on it in two clauses:
 
-    a commit hash in any document here but ``status.md``; an issue or pull-request number outside
-    the positions ``#phases-and-implementation-state`` names
+    a commit hash in any document here but ``status.md`` and ``skill_inventory.md``; an issue or
+    pull-request number outside the positions ``#phases-and-implementation-state`` names
 
 That section gives both clauses their syntactic form, so that this lint can read the rule rather
 than a reviewer sensing it:
 
-    a commit hash appears in no document in this directory but ``status.md``; an issue or
+    a commit hash appears in no document in this directory but ``status.md`` and
+    ``skill_inventory.md``; an issue or
     pull-request number appears only in a document's ``**Derived from:**`` header, in a
     ``Sources:`` clause, or in its *Scope*, *Contradictions this document settles*, *Prior art*, or
     *Beyond the sources* section — the positions where a document names what it derived from — and a
@@ -20,6 +21,9 @@ The underlying rule is the first of the two in that section: a foundation docume
 "today", "on main", a commit hash, a count, or an open-issue reference as evidence a defect is live;
 an issue or PR is cited only as the record of a decision, never as state. ``status.md`` is the one
 document that records what a checkout implements, so it is exempt from both clauses.
+``skill_inventory.md`` is exempt on the same ground as a measurement, not as design: its content
+hashes are 12-hex runs the commit-hash clause cannot tell from a git hash, and rewriting them
+would destroy the measurement.
 
 Stdlib only; registered in ``conformance.md#mechanical-checks-on-this-directory``.
 
@@ -53,7 +57,8 @@ If that check is wanted, it belongs in its own registered row, and its handling 
 register row has to be argued in the register rather than chosen by a script.
 
 **Historical narration is not distinguished from live claims**, and does not need to be under the
-rule as written: a commit hash is banned outright outside ``status.md``, and an issue number is
+rule as written: a commit hash is banned outright outside ``status.md`` and
+``skill_inventory.md``, and an issue number is
 judged by where it sits. A sentence recounting what a past pull request decided is legitimate in a
 ``Sources:`` clause and fails in the body, whichever tense it uses.
 """
@@ -68,7 +73,11 @@ from pathlib import Path
 FOUNDATION_DIR = Path("docs/foundation")
 
 # status.md is the one document that records what a checkout implements, and both clauses exempt it.
-EXEMPT = {"status.md"}
+# skill_inventory.md is the same class of document — a dated, regenerated measurement report, not
+# design prose — and its hex hashes are a different thing than the rule this clause polices: a
+# content hash (name + body, per skill), not a git commit hash citing a fix as landed. The regex
+# cannot tell the two apart by shape, so the document is exempted the same way status.md is.
+EXEMPT = {"status.md", "skill_inventory.md"}
 
 # The sections in which a document names what it derived from. conformance.md#phases-and-implementation-state
 # enumerates these four by name; matched on the heading text, case-insensitively, so that a document
@@ -165,14 +174,14 @@ def check(root: Path) -> list[str]:
             if _SOURCES_RE.search(line):
                 in_sources = True
 
-            # Clause 1: a commit hash appears in no document here but status.md. Unconditional —
-            # the rule names no position where one is allowed.
+            # Clause 1: a commit hash appears in no document here but status.md and
+            # skill_inventory.md. Unconditional — the rule names no position where one is allowed.
             for h in _HASH_RE.findall(line):
                 if _ALL_DIGITS.match(h):
                     continue  # a run of digits is a number; clause 2 judges it by position
                 violations.append(
                     f"{rel}:{no}: commit hash {h} — a commit hash appears in no document "
-                    f"in this directory but status.md "
+                    f"in this directory but status.md and skill_inventory.md "
                     f"(conformance.md#phases-and-implementation-state)"
                 )
 

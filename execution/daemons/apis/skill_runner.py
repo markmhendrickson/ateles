@@ -654,6 +654,18 @@ def _write_harness_event(
     base_url = _require_neotoma_base_url()
     token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     if not token:
+        # Best-effort diagnostic write: log loudly and skip rather than raise.
+        # Every caller of this function already wraps it in
+        # `try/except Exception: log.debug(...)`, so a raise here would only
+        # get demoted to a debug line indistinguishable from a transient
+        # network blip — losing the signal instead of surfacing it. Logging
+        # at WARNING here, before returning, is what actually makes an empty
+        # token visible: the audit trail has a hole, but dispatch (the thing
+        # this event is only OBSERVING) is not the thing failing.
+        log.warning(
+            "[apis] NEOTOMA_BEARER_TOKEN is not set; skipping harness_event "
+            f"write (event_type={event_type}, task_entity_id={task_entity_id})"
+        )
         return
 
     event_at = datetime.now(timezone.utc).isoformat()
@@ -1487,18 +1499,39 @@ async def _run_skill_once(
         # exactly as before; a gate owner that needs attribution has already been
         # refused upstream by the `owns_pending_gate` preflight.
         _neotoma_token, _ = neotoma_token_for_agent(_role)
+        if not _neotoma_token:
+            # Unlike the harness_event writer above, this is not a
+            # best-effort diagnostic — it constructs the MCP config the
+            # spawned child actually connects with. Neotoma's /mcp endpoint
+            # requires auth (verified live: an unauthenticated POST to
+            # /mcp returns HTTP 401 with "Unauthorized: Authentication
+            # required"), so a missing token here is not a degraded-but-
+            # usable config — it is a config that guarantees the child's
+            # own MCP handshake fails, far from this call site and with no
+            # indication the cause was an empty env var in the parent.
+            # Raise here, matching _require_neotoma_base_url's convention,
+            # so the failure is attributed to its actual cause. This applies
+            # regardless of which tier (role-owned or shared daemon bearer)
+            # neotoma_token_for_agent() resolved from — both can be empty.
+            raise RuntimeError(
+                "NEOTOMA_BEARER_TOKEN is not set; refusing to construct an "
+                "--mcp-config for the dispatched child. Neotoma's /mcp "
+                "endpoint requires authentication, so a config built "
+                "without a bearer token would only fail later, inside the "
+                "child's own MCP handshake, with no trace back to this "
+                "cause. Under launchd the plist supplies this; for an "
+                "ad-hoc run, export it or source ~/.config/neotoma/.env "
+                "first."
+            )
         _mcp_cfg: dict = {
             "mcpServers": {
                 "mcpsrv_neotoma": {
                     "type": "http",
                     "url": f"{_neotoma_base}/mcp",
+                    "headers": {"Authorization": f"Bearer {_neotoma_token}"},
                 }
             }
         }
-        if _neotoma_token:
-            _mcp_cfg["mcpServers"]["mcpsrv_neotoma"]["headers"] = {
-                "Authorization": f"Bearer {_neotoma_token}"
-            }
 
         # Write the MCP config to a mode-0600 temp file to avoid argv exposure.
         try:
@@ -1597,7 +1630,30 @@ async def _run_skill_once(
     # (all SSE task-path and non-GitHub call sites), this block is skipped and
     # the child inherits the daemon's ambient tokens unchanged — exact
     # current behaviour, no regression.
-    if github_token:
+    #
+    # github_token == "" (requested but resolved EMPTY) is a distinct, more
+    # dangerous case and must NOT take the same silent-skip path as None.
+    # `_token_for_agent_on_repo`/`_token_for_repo` return "" (not None) when
+    # every configured PAT env var is unset — and a truthiness check here
+    # (`if github_token:`) previously treated "" identically to "not
+    # requested", so the child silently inherited the daemon's AMBIENT
+    # environment instead. On a host where `gh` has an active keyring
+    # session, that ambient identity is the operator's own personal GitHub
+    # account, not the agent's — this produced a PR opened as
+    # markmhendrickson instead of the intended agent identity, with no error
+    # anywhere in the path. Fail loudly instead of falling back.
+    if github_token is not None:
+        if not github_token:
+            raise RuntimeError(
+                "[apis] github_token was explicitly requested for this dispatch "
+                "but resolved to an EMPTY string (no <AGENT>_AGENT_PAT, "
+                "ATELES_AGENT_PAT, NEOTOMA_AGENT_PAT, or GITHUB_TOKEN configured "
+                "for this agent/repo). Refusing to spawn the child with the "
+                "daemon's ambient GitHub identity — that silent fallback is "
+                "exactly what let a PR land under the operator's own account "
+                "instead of the agent's. Provision the missing PAT before "
+                "retrying; never proceed unauthenticated or on keyring fallback."
+            )
         subprocess_env["GITHUB_TOKEN"] = github_token
         subprocess_env["GH_TOKEN"] = github_token
 

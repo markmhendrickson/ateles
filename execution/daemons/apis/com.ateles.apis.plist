@@ -57,6 +57,10 @@
         <string>claude,codex,cursor</string>
         <key>APIS_ALLOW_METERED_HARNESS</key>
         <string>0</string>
+        <!-- Absolute, restart-persistent replay-denial state. Apis validates
+             this directory is writable and not a symlink before startup. -->
+        <key>APIS_CHECKPOINT_DENIAL_DIR</key>
+        <string>/var/tmp/ateles/checkpoint-denials</string>
     </dict>
 </dict>
 </plist>

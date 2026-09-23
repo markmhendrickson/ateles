@@ -8,6 +8,7 @@ Also covers the checkbox definition-of-done changes:
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ from swarm_dispatch import (
     _SWARM_RUN_CMD,
     _VANELLUS_COMMENT_MARKER,
     DispatchConfig,
+    ReviewBindingReceipt,
     SwarmDispatcher,
     _agent_prompt_instruction,
     _is_bot_author,
@@ -111,6 +113,40 @@ def _config(**overrides):
     )
 
 
+def _expected_pr_review(**overrides):
+    review = {
+        "entity_type": "pr_review",
+        "repository": "owner/repo",
+        "pr_number": 87,
+        "pr_title": "A pull request",
+        "review_lens": "qa",
+        "reviewer_agent": "phoenicurus",
+        "head_sha": "b" * 40,
+        "verdict": "approve",
+        "status": "live",
+        "review_round": 3,
+        "content": "**APPROVE**",
+        "blocking_findings": [],
+        "nonblocking_findings": [
+            {
+                "id": "finding-1",
+                "category": "coverage",
+                "summary": "retain regression coverage",
+                "files": ["execution/daemons/apis/test_swarm_dispatch.py"],
+            }
+        ],
+        "finding_ids": ["finding-1"],
+        "generated_by": "phoenicurus",
+        "generated_at": "2026-09-23T00:00:00+00:00",
+    }
+    review.update(overrides)
+    return review
+
+
+def _snapshot_for_review(review):
+    return {key: value for key, value in review.items() if key != "entity_type"}
+
+
 # ── content_digest ──────────────────────────────────────────────────────────
 
 
@@ -123,6 +159,815 @@ def test_content_digest_changes_when_content_changes():
     a = [{"entity_type": "harness_event", "occurred_at": "2026-06-12T10:00:00Z"}]
     b = [{"entity_type": "harness_event", "occurred_at": "2026-06-12T10:00:01Z"}]
     assert content_digest(a) != content_digest(b)
+
+
+def test_pr_harness_event_also_upserts_canonical_pull_request(monkeypatch):
+    stored = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.append((entities, idempotency_key))
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    trigger = _trigger(
+        body="Closes #1141.",
+        head_ref="fix/checkpoint-release",
+        base_ref="main",
+    )
+    asyncio.run(SwarmDispatcher(_StubNotifier(), _config())._log_harness_event(trigger))
+
+    entities, _ = stored[0]
+    pull_request = next(
+        entity for entity in entities if entity["entity_type"] == "pull_request"
+    )
+    assert pull_request["repository"] == "owner/repo"
+    assert pull_request["number"] == 87
+    assert pull_request["head_sha"] == "a" * 40
+    assert pull_request["parent_issue_number"] == 1141
+
+
+def test_panel_reviews_use_verified_pre_panel_head_not_stale_trigger(monkeypatch):
+    stored = []
+    superseded = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.append((entities, idempotency_key))
+        return {
+            "entities": [
+                {"observation_index": index, "entity_id": f"ent_{index}"}
+                for index, _ in enumerate(entities)
+            ]
+        }
+
+    async def no_priors(self, trigger, lenses, current_sha):
+        return {}
+
+    async def fake_supersede(
+        self, trigger, lenses, current_sha, *, priors=None, new_ids_by_lens=None
+    ):
+        superseded.append((current_sha, new_ids_by_lens))
+        return True
+
+    async def fake_confirm(self, trigger, entities, store_result, reviewed_head):
+        return self._new_pr_review_ids_by_lens(entities, store_result)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_prior_live_reviews", no_priors)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_confirmed_new_pr_review_ids_by_lens", fake_confirm
+    )
+    monkeypatch.setattr(SwarmDispatcher, "_supersede_prior_reviews", fake_supersede)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    reviewed_head = "b" * 40
+    asyncio.run(
+        dispatcher._persist_panel_reviews(
+            _trigger(head_sha="a" * 40),
+            [("security", "**REQUEST_CHANGES**\n[BLOCKING] auth: pin producer")],
+            {"security": "falco"},
+            reviewed_head=reviewed_head,
+        )
+    )
+
+    reviews = stored[0][0]
+    assert reviews[0]["entity_type"] == "pr_review"
+    assert reviews[0]["head_sha"] == reviewed_head
+    assert reviews[0]["review_round"] == 1
+    assert superseded == [(reviewed_head, {"security": "ent_0"})]
+
+
+def test_panel_reviews_seed_round_from_max_of_all_live_priors(monkeypatch):
+    stored = []
+    superseded = []
+    reviewed_head = "b" * 40
+    priors = {
+        "qa": [
+            {
+                "entity_id": "ent_round_7",
+                "snapshot": {"review_lens": "qa", "review_round": 7},
+            },
+            {
+                "entity_id": "ent_round_3",
+                "snapshot": {"review_lens": "qa", "review_round": 3},
+            },
+        ]
+    }
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.append(entities)
+        return {"entities": [{"observation_index": 0, "entity_id": "ent_new"}]}
+
+    async def fake_priors(self, trigger, lenses, current_sha):
+        return priors
+
+    async def fake_confirm(self, trigger, entities, store_result, reviewed_head):
+        return {"qa": "ent_new"}
+
+    async def fake_supersede(
+        self, trigger, lenses, current_sha, *, priors=None, new_ids_by_lens=None
+    ):
+        superseded.append((priors, new_ids_by_lens))
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_prior_live_reviews", fake_priors)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_confirmed_new_pr_review_ids_by_lens", fake_confirm
+    )
+    monkeypatch.setattr(SwarmDispatcher, "_supersede_prior_reviews", fake_supersede)
+
+    asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_panel_reviews(
+            _trigger(),
+            [("qa", "**APPROVE**")],
+            {"qa": "phoenicurus"},
+            reviewed_head=reviewed_head,
+        )
+    )
+
+    assert stored[0][0]["review_round"] == 8
+    assert superseded == [(priors, {"qa": "ent_new"})]
+
+
+def test_security_findings_store_only_declared_fields_and_require_readback(monkeypatch):
+    stored = []
+    reviewed_head = "b" * 40
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+        return {
+            "entities": [
+                {"observation_index": index, "entity_id": f"ent_security_{index}"}
+                for index, _ in enumerate(entities)
+            ]
+        }
+
+    async def fake_post(self, path, payload):
+        canonical = payload["snapshot_filters"]["canonical_name"]["value"]
+        entity = next(row for row in stored if row["canonical_name"] == canonical)
+        return {
+            "entities": [
+                {"entity_id": "ent_security_0", "snapshot": dict(entity)}
+            ]
+        }
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_security_findings(
+            _trigger(),
+            [
+                (
+                    "security",
+                    "**REQUEST_CHANGES**\n"
+                    "[BLOCKING] auth: pin producer JKT\n"
+                    "Evidence in `execution/auth.py`.",
+                )
+            ],
+            reviewed_head,
+        )
+    )
+
+    assert confirmed is True
+    assert len(stored) == 1
+    assert set(stored[0]) == {
+        "entity_type",
+        "canonical_name",
+        "title",
+        "severity",
+        "notes",
+        "status",
+        "class_description",
+        "class_sweep_record",
+        "regression_test_path",
+        "remediation_refs",
+        "source_audit",
+        "verified_at",
+    }
+
+
+def test_security_finding_missing_readback_fails_closed(monkeypatch):
+    async def fake_store(self, entities, idempotency_key):
+        return {"entities": [{"observation_index": 0, "entity_id": "ent_new"}]}
+
+    async def no_readback(self, path, payload):
+        return {"entities": []}
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", no_readback)
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_security_findings(
+            _trigger(),
+            [("security", "[NON-BLOCKING] hardening: tighten timeout")],
+            "b" * 40,
+        )
+    )
+    assert confirmed is False
+
+
+def test_replacement_ids_require_exact_head_live_readback(monkeypatch):
+    reviewed_head = "b" * 40
+    entities = [
+        _expected_pr_review(),
+        _expected_pr_review(
+            review_lens="security",
+            reviewer_agent="falco",
+            generated_by="falco",
+        ),
+    ]
+    store_result = {
+        "entities": [
+            {"observation_index": 0, "entity_id": "ent_qa_new"},
+            {"observation_index": 1, "entity_id": "ent_security_new"},
+        ]
+    }
+
+    async def fake_post(self, path, payload):
+        assert path == "entities/query"
+        return {
+            "entities": [
+                {
+                    "entity_id": "ent_qa_new",
+                    "snapshot": _snapshot_for_review(entities[0]),
+                },
+                {
+                    "entity_id": "ent_security_new",
+                    "snapshot": _snapshot_for_review(
+                        {**entities[1], "head_sha": "c" * 40}
+                    ),
+                },
+            ]
+        }
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._confirmed_new_pr_review_ids_by_lens(
+            _trigger(), entities, store_result, reviewed_head
+        )
+    )
+
+    assert confirmed == {"qa": "ent_qa_new"}
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "repository",
+        "pr_number",
+        "pr_title",
+        "review_lens",
+        "reviewer_agent",
+        "head_sha",
+        "verdict",
+        "status",
+        "review_round",
+        "content",
+        "blocking_findings",
+        "nonblocking_findings",
+        "finding_ids",
+        "generated_by",
+        "generated_at",
+    ],
+)
+def test_replacement_ids_require_every_expected_declared_field(
+    monkeypatch, missing_field
+):
+    reviewed_head = "b" * 40
+    entity = _expected_pr_review()
+    snapshot = _snapshot_for_review(entity)
+    snapshot.pop(missing_field)
+
+    async def fake_post(self, path, payload):
+        assert path == "entities/query"
+        return {"entities": [{"entity_id": "ent_qa_new", "snapshot": snapshot}]}
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    confirmed = asyncio.run(
+        SwarmDispatcher(
+            _StubNotifier(), _config()
+        )._confirmed_new_pr_review_ids_by_lens(
+            _trigger(),
+            [entity],
+            {"entities": [{"observation_index": 0, "entity_id": "ent_qa_new"}]},
+            reviewed_head,
+        )
+    )
+
+    assert confirmed == {}
+
+
+@pytest.mark.parametrize(
+    "schema_loss",
+    [
+        {"unknown_fields_count": 1},
+        {"unknown_fields": ["verdict"]},
+    ],
+)
+def test_panel_review_store_schema_loss_fails_before_supersession(
+    monkeypatch, schema_loss
+):
+    calls = []
+
+    async def fake_store(self, entities, idempotency_key):
+        if entities and entities[0]["entity_type"] == "pr_review":
+            return {
+                "entities": [{"observation_index": 0, "entity_id": "ent_new"}],
+                **schema_loss,
+            }
+        return {}
+
+    async def unexpected_confirm(*args, **kwargs):
+        calls.append("confirm")
+        return {"qa": "ent_new"}
+
+    async def unexpected_supersede(*args, **kwargs):
+        calls.append("supersede")
+        return True
+
+    async def confirmed(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_confirmed_new_pr_review_ids_by_lens", unexpected_confirm
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher, "_supersede_prior_reviews", unexpected_supersede
+    )
+    monkeypatch.setattr(SwarmDispatcher, "_persist_security_findings", confirmed)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_and_confirm_pull_request", confirmed)
+
+    durable = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_panel_reviews(
+            _trigger(),
+            [("qa", "**APPROVE**")],
+            {"qa": "phoenicurus"},
+            reviewed_head="b" * 40,
+        )
+    )
+
+    assert durable is False
+    assert calls == []
+
+
+def test_unverified_supersession_keeps_panel_durability_closed(monkeypatch):
+    async def fake_store(self, entities, idempotency_key):
+        if entities and entities[0]["entity_type"] == "pr_review":
+            return {"entities": [{"observation_index": 0, "entity_id": "ent_new"}]}
+        return {}
+
+    async def fake_priors(self, trigger, lenses, current_sha):
+        return {
+            "qa": [
+                {
+                    "entity_id": "ent_prior",
+                    "snapshot": {"review_lens": "qa", "review_round": 2},
+                }
+            ]
+        }
+
+    async def fake_confirm(self, trigger, entities, store_result, reviewed_head):
+        return {"qa": "ent_new"}
+
+    async def failed_supersession(*args, **kwargs):
+        return False
+
+    async def confirmed(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_prior_live_reviews", fake_priors)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_confirmed_new_pr_review_ids_by_lens", fake_confirm
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher, "_supersede_prior_reviews", failed_supersession
+    )
+    monkeypatch.setattr(SwarmDispatcher, "_persist_security_findings", confirmed)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_and_confirm_pull_request", confirmed)
+
+    durable = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_panel_reviews(
+            _trigger(),
+            [("qa", "**APPROVE**")],
+            {"qa": "phoenicurus"},
+            reviewed_head="b" * 40,
+        )
+    )
+
+    assert durable is False
+
+
+def test_failed_replacement_store_leaves_all_prior_reviews_live(monkeypatch):
+    corrections = []
+    prior = {
+        "entity_id": "ent_prior",
+        "snapshot": {"review_lens": "qa", "review_round": 2},
+    }
+
+    async def failed_store(self, entities, idempotency_key):
+        return None
+
+    async def fake_priors(self, trigger, lenses, current_sha):
+        return {"qa": [prior]}
+
+    async def fake_post(self, path, payload):
+        corrections.append((path, payload))
+        return {}
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", failed_store)
+    monkeypatch.setattr(SwarmDispatcher, "_prior_live_reviews", fake_priors)
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+
+    asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_panel_reviews(
+            _trigger(),
+            [("qa", "**APPROVE**")],
+            {"qa": "phoenicurus"},
+            reviewed_head="b" * 40,
+        )
+    )
+
+    assert corrections == []
+
+
+def test_panelist_prompt_uses_verified_pre_panel_head_not_stale_trigger():
+    stale_head = "a" * 40
+    reviewed_head = "b" * 40
+
+    prompt = SwarmDispatcher._panelist_prompt(
+        _trigger(head_sha=stale_head),
+        _sample_lens(),
+        "",
+        reviewed_head=reviewed_head,
+    )
+
+    assert f"<!-- review:qa commit={reviewed_head} -->" in prompt
+    assert f"<!-- review:qa commit={stale_head} -->" not in prompt
+
+
+def test_vanellus_prompt_uses_verified_pre_panel_head_not_stale_trigger():
+    stale_head = "a" * 40
+    reviewed_head = "b" * 40
+
+    prompt = SwarmDispatcher._vanellus_prompt(
+        _trigger(head_sha=stale_head),
+        parent=80,
+        lenses=["security"],
+        reviewed_head=reviewed_head,
+    )
+
+    assert f"<!-- vanellus-aggregation commit={reviewed_head} -->" in prompt
+    assert f"<!-- vanellus-aggregation commit={stale_head} -->" not in prompt
+
+
+def test_panel_reviews_without_verified_head_fail_closed(monkeypatch, caplog):
+    stored = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    with caplog.at_level("ERROR"):
+        asyncio.run(
+            dispatcher._persist_panel_reviews(
+                _trigger(),
+                [("qa", "**APPROVE**")],
+                {"qa": "phoenicurus"},
+                reviewed_head="",
+            )
+        )
+
+    assert not [row for row in stored if row["entity_type"] == "pr_review"]
+    assert [row["entity_type"] for row in stored] == ["harness_event"]
+    assert "refusing to persist pr_review" in caplog.text
+
+
+def test_reviewed_head_blocker_recovery_ignores_stale_webhook_head(monkeypatch):
+    reviewed_head = "b" * 40
+    stale_head = "a" * 40
+
+    async def fake_comments(self, repository, number, client):
+        return [
+            {
+                "body": (
+                    f"<!-- review:security commit={stale_head} -->\n"
+                    "review:security\n**REQUEST_CHANGES**\n"
+                    "[BLOCKING] stale: wrong head"
+                )
+            },
+            {
+                "body": (
+                    f"<!-- review:security commit={reviewed_head} -->\n"
+                    "review:security\n**REQUEST_CHANGES**\n"
+                    "[BLOCKING] auth: pin producer JKT"
+                )
+            },
+        ]
+
+    monkeypatch.setattr(SwarmDispatcher, "_all_issue_comments", fake_comments)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    recovered = asyncio.run(
+        dispatcher._blocking_findings_from_reviewed_head_comments(
+            _trigger(head_sha=stale_head), reviewed_head
+        )
+    )
+    assert [finding.summary for finding in recovered["security"]] == [
+        "pin producer JKT"
+    ]
+
+
+def test_supersede_prior_review_writes_status_pointer_and_edge(monkeypatch):
+    calls = []
+    current_sha = "b" * 40
+
+    async def fake_post(self, path, payload):
+        calls.append((path, payload))
+        if path == "correct":
+            return {"observation_id": f"obs-{payload['field']}"}
+        if path == "create_relationship":
+            return {"relationship_key": "SUPERSEDES:ent_new:ent_prior"}
+        if path == "get_entity_snapshot":
+            return {
+                "entity_id": "ent_prior",
+                "snapshot": {
+                    "status": "superseded",
+                    "superseded_by": current_sha,
+                },
+            }
+        if path == "relationships/snapshot":
+            return {
+                "snapshot": {
+                    "relationship_type": "SUPERSEDES",
+                    "source_entity_id": "ent_new",
+                    "target_entity_id": "ent_prior",
+                    "is_live": 1,
+                }
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    prior = {
+        "entity_id": "ent_prior",
+        "snapshot": {"review_lens": "qa", "head_sha": "a" * 40},
+    }
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
+            _trigger(),
+            ["qa"],
+            current_sha,
+            priors={"qa": [prior]},
+            new_ids_by_lens={"qa": "ent_new"},
+        )
+    )
+    assert confirmed is True
+    assert [(path, payload.get("field")) for path, payload in calls[:2]] == [
+        ("correct", "status"),
+        ("correct", "superseded_by"),
+    ]
+    assert calls[2] == (
+        "create_relationship",
+        {
+            "source_entity_id": "ent_new",
+            "target_entity_id": "ent_prior",
+            "relationship_type": "SUPERSEDES",
+        },
+    )
+    assert calls[3] == ("get_entity_snapshot", {"entity_id": "ent_prior"})
+    assert calls[4] == (
+        "relationships/snapshot",
+        {
+            "source_entity_id": "ent_new",
+            "target_entity_id": "ent_prior",
+            "relationship_type": "SUPERSEDES",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "failed_operation",
+    ["status_correction", "superseded_by_correction", "edge_creation"],
+)
+def test_supersede_prior_reviews_fails_closed_on_each_write_failure(
+    monkeypatch, failed_operation
+):
+    current_sha = "b" * 40
+
+    async def fake_post(self, path, payload):
+        if path == "correct" and payload["field"] == "status":
+            return (
+                None
+                if failed_operation == "status_correction"
+                else {"observation_id": "status"}
+            )
+        if path == "correct" and payload["field"] == "superseded_by":
+            return (
+                None
+                if failed_operation == "superseded_by_correction"
+                else {"observation_id": "pointer"}
+            )
+        if path == "create_relationship":
+            return (
+                None
+                if failed_operation == "edge_creation"
+                else {"relationship_key": "edge"}
+            )
+        if path == "get_entity_snapshot":
+            return {
+                "snapshot": {
+                    "status": "superseded",
+                    "superseded_by": current_sha,
+                }
+            }
+        if path == "relationships/snapshot":
+            return {
+                "snapshot": {
+                    "relationship_type": "SUPERSEDES",
+                    "source_entity_id": "ent_new",
+                    "target_entity_id": "ent_prior",
+                    "is_live": 1,
+                }
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
+            _trigger(),
+            ["qa"],
+            current_sha,
+            priors={
+                "qa": [
+                    {
+                        "entity_id": "ent_prior",
+                        "snapshot": {"review_lens": "qa"},
+                    }
+                ]
+            },
+            new_ids_by_lens={"qa": "ent_new"},
+        )
+    )
+
+    assert confirmed is False
+
+
+@pytest.mark.parametrize("failed_readback", ["entity", "edge"])
+def test_supersede_prior_reviews_fails_closed_on_readback_failure(
+    monkeypatch, failed_readback
+):
+    current_sha = "b" * 40
+
+    async def fake_post(self, path, payload):
+        if path == "correct":
+            return {"observation_id": payload["field"]}
+        if path == "create_relationship":
+            return {"relationship_key": "edge"}
+        if path == "get_entity_snapshot":
+            if failed_readback == "entity":
+                return {"snapshot": {"status": "live"}}
+            return {
+                "snapshot": {
+                    "status": "superseded",
+                    "superseded_by": current_sha,
+                }
+            }
+        if path == "relationships/snapshot":
+            if failed_readback == "edge":
+                return None
+            return {
+                "snapshot": {
+                    "relationship_type": "SUPERSEDES",
+                    "source_entity_id": "ent_new",
+                    "target_entity_id": "ent_prior",
+                    "is_live": 1,
+                }
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
+            _trigger(),
+            ["qa"],
+            current_sha,
+            priors={
+                "qa": [
+                    {
+                        "entity_id": "ent_prior",
+                        "snapshot": {"review_lens": "qa"},
+                    }
+                ]
+            },
+            new_ids_by_lens={"qa": "ent_new"},
+        )
+    )
+
+    assert confirmed is False
+
+
+def test_supersede_prior_reviews_requires_confirmed_replacement_id(monkeypatch):
+    calls = []
+
+    async def fake_post(self, path, payload):
+        calls.append((path, payload))
+        return {}
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    prior = {
+        "entity_id": "ent_prior",
+        "snapshot": {"review_lens": "qa", "head_sha": "a" * 40},
+    }
+
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
+            _trigger(),
+            ["qa"],
+            "b" * 40,
+            priors={"qa": [prior]},
+            new_ids_by_lens={},
+        )
+    )
+
+    assert confirmed is False
+    assert calls == []
+
+
+def test_supersede_prior_reviews_demotes_every_live_row_for_confirmed_lens(
+    monkeypatch,
+):
+    calls = []
+
+    current_sha = "b" * 40
+
+    async def fake_post(self, path, payload):
+        calls.append((path, payload))
+        if path == "correct":
+            return {"observation_id": payload["field"]}
+        if path == "create_relationship":
+            return {"relationship_key": "edge"}
+        if path == "get_entity_snapshot":
+            return {
+                "snapshot": {
+                    "status": "superseded",
+                    "superseded_by": current_sha,
+                }
+            }
+        if path == "relationships/snapshot":
+            return {
+                "snapshot": {
+                    "relationship_type": "SUPERSEDES",
+                    "source_entity_id": payload["source_entity_id"],
+                    "target_entity_id": payload["target_entity_id"],
+                    "is_live": 1,
+                }
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    qa_priors = [
+        {
+            "entity_id": "ent_qa_round_7",
+            "snapshot": {"review_lens": "qa", "review_round": 7},
+        },
+        {
+            "entity_id": "ent_qa_round_3",
+            "snapshot": {"review_lens": "qa", "review_round": 3},
+        },
+    ]
+    security_prior = {
+        "entity_id": "ent_security_round_4",
+        "snapshot": {"review_lens": "security", "review_round": 4},
+    }
+
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
+            _trigger(),
+            ["qa", "security"],
+            current_sha,
+            priors={"qa": qa_priors, "security": [security_prior]},
+            # A partial replacement response confirms QA only. Security must
+            # remain live until its own replacement is durably read back.
+            new_ids_by_lens={"qa": "ent_qa_new"},
+        )
+    )
+
+    assert confirmed is False
+
+    corrected_ids = [
+        payload["entity_id"] for path, payload in calls if path == "correct"
+    ]
+    assert corrected_ids == [
+        "ent_qa_round_3",
+        "ent_qa_round_3",
+        "ent_qa_round_7",
+        "ent_qa_round_7",
+    ]
+    assert "ent_security_round_4" not in corrected_ids
+    relationship_targets = [
+        payload["target_entity_id"]
+        for path, payload in calls
+        if path == "create_relationship"
+    ]
+    assert relationship_targets == ["ent_qa_round_3", "ent_qa_round_7"]
 
 
 # ── parse_gate_verdict ──────────────────────────────────────────────────────
@@ -416,16 +1261,16 @@ def test_signed_off_head_pinning_fails_closed_on_stale_or_missing_commit():
 
 
 def _pr_dispatcher_with_stubs(
-    monkeypatch, *, vanellus_stdout, calls, auto_merge=False
+    monkeypatch, *, vanellus_stdout, calls, auto_merge=False,
+    binding_receipt=True,
 ):
     """Dispatcher whose _handle_pr reaches the verdict branch, then records
     which downstream path (_route_blocking_findings vs _gate_merge_readiness)
     fired, without doing real work in either.
 
-    `auto_merge` drives the flag that decides whether a merge-ready PR gets a
-    checkpoint at all, so a test can assert routing still happens under the
-    autonomous posture — the case where a missed blocker is silent rather than
-    merely wrong.
+    `auto_merge` drives the post-receipt dispatcher path, so a test can assert
+    routing still happens under the autonomous posture — the case where a
+    missed blocker is silent rather than merely wrong.
     """
 
     async def fake_run_skill(skill, prompt, **kwargs):
@@ -442,13 +1287,14 @@ def _pr_dispatcher_with_stubs(
     async def fake_changed_files(self, trigger):
         return ["src/x.ts"]
 
-    async def fake_route(self, trigger, parent, reviews, verdict):
+    async def fake_route(self, trigger, parent, reviews, verdict, **kwargs):
+        calls.append(("route_head", kwargs.get("reviewed_head")))
         calls.append(("route", verdict))
 
-    async def fake_gate(self, trigger, parent, panel):
+    async def fake_gate(self, trigger, parent, panel, **kwargs):
         calls.append(("gate", None))
 
-    async def fake_post_missing_vanellus(self, trigger, result):
+    async def fake_post_missing_vanellus(self, trigger, result, **kwargs):
         return None
 
     async def fake_emit_review(self, trigger, verdict, body, **kwargs):
@@ -461,9 +1307,19 @@ def _pr_dispatcher_with_stubs(
         # COMMENT here while GitHub received REQUEST_CHANGES — the stub silently
         # hid the very disagreement these tests exist to catch.
         calls.append(("review", verdict_to_review_event(verdict, body=body)))
-        return "rev-1"
+        if not binding_receipt:
+            return None
+        event = verdict_to_review_event(verdict, body=body)
+        state = "APPROVED" if event == "APPROVE" else "CHANGES_REQUESTED"
+        return ReviewBindingReceipt(
+            review_id="101",
+            reviewer_login="markmhendrickson-ateles-vanellus",
+            commit_id="a" * 40,
+            state=state,
+        )
 
     async def fake_persist(self, *a, **k):
+        calls.append(("persist_head", k.get("reviewed_head")))
         return None
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
@@ -497,6 +1353,26 @@ def test_handle_pr_blocking_verdict_routes_findings(monkeypatch):
     assert ("gate", None) not in calls
 
 
+def test_handle_pr_threads_one_live_head_through_persistence_and_recovery(
+    monkeypatch,
+):
+    calls = []
+    live_head = "b" * 40
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch,
+        vanellus_stdout="**REQUEST_CHANGES**\n1 blocking",
+        calls=calls,
+    )
+    monkeypatch.setattr(
+        d, "_pr_head_sha", lambda trigger: _async_return(live_head)
+    )
+    asyncio.run(
+        d._handle_pr(_trigger(body="Closes #80.", head_sha="a" * 40))
+    )
+    assert ("persist_head", live_head) in calls
+    assert ("route_head", live_head) in calls
+
+
 def test_handle_pr_clear_verdict_gates_readiness(monkeypatch):
     calls = []
     d = _pr_dispatcher_with_stubs(
@@ -505,6 +1381,66 @@ def test_handle_pr_clear_verdict_gates_readiness(monkeypatch):
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert ("gate", None) in calls
     assert not any(c[0] == "route" for c in calls)
+
+
+def test_handle_pr_clear_verdict_without_verified_approval_holds_readiness(monkeypatch):
+    """A clear model verdict is prose until GitHub readback proves an exact-head
+    APPROVED review by the distinct Vanellus principal."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch,
+        vanellus_stdout="**APPROVE**\nlgtm",
+        calls=calls,
+        binding_receipt=False,
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("review", "APPROVE") in calls
+    assert ("gate", None) not in calls
+
+
+def test_handle_pr_push_after_binding_receipt_holds_readiness(monkeypatch):
+    """The receipt is stale if the PR head moves before readiness is filed."""
+    calls = []
+    live = {"head": "b" * 40}
+    dispatcher = _pr_dispatcher_with_stubs(
+        monkeypatch,
+        vanellus_stdout="**APPROVE**\nlgtm",
+        calls=calls,
+    )
+
+    async def current_head(trigger):
+        return live["head"]
+
+    async def approve_then_push(trigger, verdict, body, **kwargs):
+        reviewed_head = live["head"]
+        live["head"] = "c" * 40
+        return ReviewBindingReceipt(
+            review_id="102",
+            reviewer_login="markmhendrickson-ateles-vanellus",
+            commit_id=reviewed_head,
+            state="APPROVED",
+        )
+
+    monkeypatch.setattr(dispatcher, "_pr_head_sha", current_head)
+    monkeypatch.setattr(dispatcher, "_emit_formal_review", approve_then_push)
+
+    asyncio.run(dispatcher._handle_pr(_trigger(body="Closes #80.")))
+
+    assert ("gate", None) not in calls
+
+
+def test_handle_pr_holds_before_aggregation_when_durable_readback_fails(monkeypatch):
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+
+    async def durability_failed(self, *args, **kwargs):
+        return False
+
+    monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", durability_failed)
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
 
 
 def test_handle_pr_emits_formal_review_on_blocking_path(monkeypatch):
@@ -583,10 +1519,10 @@ def _gate_blocked_dispatcher(monkeypatch, *, calls, auto_rereview):
     async def fake_changed_files(self, trigger):
         return ["src/x.ts"]
 
-    async def fake_route(self, trigger, parent, reviews, verdict):
+    async def fake_route(self, trigger, parent, reviews, verdict, **kwargs):
         calls.append(("route", verdict))
 
-    async def fake_gate(self, trigger, parent, panel):
+    async def fake_gate(self, trigger, parent, panel, **kwargs):
         calls.append(("gate", None))
 
     async def fake_noop(self, *a, **k):
@@ -1003,6 +1939,185 @@ def test_gate_readiness_ci_pending_holds_without_paging(monkeypatch):
     assert not any("READY TO MERGE" in m for m in d.notifier.sent)
 
 
+def test_auto_merge_runs_only_with_verified_receipt_and_atomic_head(monkeypatch):
+    merged = []
+    head = "b" * 40
+
+    async def fake_head(self, trigger):
+        return head
+
+    async def fake_ci(self, trigger):
+        return "green"
+
+    async def fake_merge(
+        self,
+        repository,
+        number,
+        method,
+        *,
+        expected_head="",
+        require_default_base=False,
+    ):
+        merged.append(
+            (repository, number, method, expected_head, require_default_base)
+        )
+        return True, "d" * 40
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_merge_pr", fake_merge)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
+    receipt = ReviewBindingReceipt(
+        review_id="103",
+        reviewer_login="markmhendrickson-ateles-vanellus",
+        commit_id=head,
+        state="APPROVED",
+    )
+
+    asyncio.run(
+        dispatcher._gate_merge_readiness(
+            _trigger(head_sha=head),
+            parent=80,
+            panel=[],
+            reviewed_head=head,
+            binding_receipt=receipt,
+        )
+    )
+
+    assert merged == [("owner/repo", 87, "squash", head, True)]
+    assert any("MERGED automatically" in message for message in dispatcher.notifier.sent)
+
+
+@pytest.mark.parametrize("review_id", ["", "0", "-1", "not-an-id"])
+def test_auto_merge_rejects_receipt_without_valid_github_review_id(
+    monkeypatch, review_id
+):
+    merged = []
+    head = "b" * 40
+
+    async def fake_head(self, trigger):
+        return head
+
+    async def fake_merge(self, *args, **kwargs):
+        merged.append((args, kwargs))
+        return True, "d" * 40
+
+    async def fake_ci(self, trigger):
+        return "green"
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_merge_pr", fake_merge)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
+    receipt = ReviewBindingReceipt(
+        review_id=review_id,
+        reviewer_login="markmhendrickson-ateles-vanellus",
+        commit_id=head,
+        state="APPROVED",
+    )
+
+    asyncio.run(
+        dispatcher._gate_merge_readiness(
+            _trigger(head_sha=head),
+            parent=80,
+            panel=[],
+            reviewed_head=head,
+            binding_receipt=receipt,
+        )
+    )
+
+    assert merged == []
+
+
+def test_auto_merge_without_verified_receipt_stays_held(monkeypatch):
+    merged = []
+    head = "b" * 40
+
+    async def fake_head(self, trigger):
+        return head
+
+    async def fake_merge(self, *args, **kwargs):
+        merged.append((args, kwargs))
+        return True, "d" * 40
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+    monkeypatch.setattr(SwarmDispatcher, "_merge_pr", fake_merge)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
+
+    asyncio.run(
+        dispatcher._gate_merge_readiness(
+            _trigger(head_sha=head),
+            parent=80,
+            panel=[],
+            reviewed_head=head,
+            binding_receipt=None,
+        )
+    )
+
+    assert merged == []
+
+
+def test_auto_merge_atomic_base_refusal_is_recorded_without_success_notice(
+    monkeypatch,
+):
+    head = "b" * 40
+    refusals = []
+
+    async def fake_head(self, trigger):
+        return head
+
+    async def fake_ci(self, trigger):
+        return "green"
+
+    async def atomic_base_unavailable(self, *args, **kwargs):
+        return (
+            False,
+            "GitHub merge API cannot atomically bind the PR base; "
+            "auto-merge held",
+        )
+
+    def fake_refusal(self, **kwargs):
+        refusals.append(kwargs)
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_merge_pr", atomic_base_unavailable)
+    monkeypatch.setattr(SwarmDispatcher, "record_merge_refusal", fake_refusal)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
+    receipt = ReviewBindingReceipt(
+        review_id="123",
+        reviewer_login=agent_github_login("vanellus"),
+        commit_id=head,
+        state="APPROVED",
+    )
+
+    asyncio.run(
+        dispatcher._gate_merge_readiness(
+            _trigger(head_sha=head),
+            parent=80,
+            panel=[],
+            reviewed_head=head,
+            binding_receipt=receipt,
+        )
+    )
+
+    assert refusals == [
+        {
+            "repository": "owner/repo",
+            "number": 87,
+            "reason": (
+                "GitHub merge API cannot atomically bind the PR base; "
+                "auto-merge held"
+            ),
+            "auto_merge": True,
+        }
+    ]
+    assert not any(
+        "MERGED automatically" in message
+        for message in dispatcher.notifier.sent
+    )
+
+
 # ── _required_ci_state (CI detection — status API + check-runs precedence) ───
 
 
@@ -1214,7 +2329,7 @@ def _wire_ci_status(monkeypatch, *, ci_state, review_clear, pr_head="abc123",
     async def fake_route(self, trigger, parent):
         calls.append(("route", trigger.number))
 
-    async def fake_gate(self, trigger, parent, panel, ci_state=None):
+    async def fake_gate(self, trigger, parent, panel, ci_state=None, **kwargs):
         calls.append(("gate", trigger.number))
 
     monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
@@ -1302,7 +2417,7 @@ def test_ci_status_fetch_pr_failure_notifies_operator(monkeypatch):
     async def fake_route(self, trigger, parent):
         calls.append(("route", trigger.number))
 
-    async def fake_gate(self, trigger, parent, panel, ci_state=None):
+    async def fake_gate(self, trigger, parent, panel, ci_state=None, **kwargs):
         calls.append(("gate", trigger.number))
 
     monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr_fails)
@@ -1344,7 +2459,7 @@ def test_ci_status_green_threads_ci_state_into_gate(monkeypatch):
     async def fake_clear(self, repo, num, head_sha=""):
         return True
 
-    async def fake_gate(self, trigger, parent, panel, ci_state=None):
+    async def fake_gate(self, trigger, parent, panel, ci_state=None, **kwargs):
         seen["ci_state"] = ci_state
 
     monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
@@ -1354,6 +2469,505 @@ def test_ci_status_green_threads_ci_state_into_gate(monkeypatch):
     d = SwarmDispatcher(_StubNotifier(), _config())
     asyncio.run(d._handle_ci_status(_ci_status_trigger()))
     assert seen.get("ci_state") == "green"
+
+
+def test_ci_status_auto_merge_reenters_fresh_exact_head_panel(monkeypatch):
+    head = "c" * 40
+    calls = []
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=calls,
+    )
+    d.config.auto_merge = True
+
+    async def fake_handle_pr(self, trigger):
+        calls.append(("fresh-panel", trigger.head_sha))
+
+    async def reconstruction_must_not_run(self, *args, **kwargs):
+        raise AssertionError("delayed CI must not reconstruct merge authority")
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_binding_approval_receipt_from_github",
+        reconstruction_must_not_run,
+    )
+
+    asyncio.run(
+        d._handle_ci_status(_ci_status_trigger(ci_head_sha=head))
+    )
+
+    assert ("fresh-panel", head) in calls
+    assert not any(call[0] == "gate" for call in calls)
+
+
+def test_ci_status_concurrent_same_head_coalesces_fresh_panel_but_logs_deliveries(
+    monkeypatch,
+):
+    """Two live deliveries may describe one completed PR head.
+
+    Every GitHub delivery must retain its own harness audit row, while only one
+    full panel may create durable reviews, a native approval, and notifications
+    for the shared (repository, PR, live-head) attempt.
+    """
+    head = "c" * 40
+    calls = []
+    delivery_logs = []
+    fetch_count = 0
+    second_fetch_completed = asyncio.Event()
+    release_panel = asyncio.Event()
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=calls,
+    )
+    d.config.auto_merge = True
+
+    async def fake_log_harness_event(self, trigger):
+        delivery_logs.append(trigger.delivery_id)
+
+    async def fake_fetch_pr(self, repo, num):
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 2:
+            second_fetch_completed.set()
+        return {
+            "number": num,
+            "state": "open",
+            "draft": False,
+            "title": "t",
+            "body": "Closes #80",
+            "html_url": "u",
+            "head": {"sha": head, "ref": "feat/x"},
+            "base": {"ref": "main"},
+        }
+
+    async def fake_handle_pr(self, trigger):
+        calls.append(("fresh-panel", trigger.head_sha, trigger.delivery_id))
+        await release_panel.wait()
+
+    monkeypatch.setattr(SwarmDispatcher, "_log_harness_event", fake_log_harness_event)
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+
+    async def run_concurrently():
+        first = asyncio.create_task(
+            d.handle_trigger(_ci_status_trigger(ci_head_sha=head, delivery_id="ci-a"))
+        )
+        while not calls:
+            await asyncio.sleep(0)
+        second = asyncio.create_task(
+            d.handle_trigger(_ci_status_trigger(ci_head_sha=head, delivery_id="ci-b"))
+        )
+        await second_fetch_completed.wait()
+        # Let the second delivery advance past its live-head read. Without a
+        # coalescing claim it enters the full panel before the first is released.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert calls == [("fresh-panel", head, "")]
+        release_panel.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(run_concurrently())
+
+    # handle_trigger audits deliveries before CI-head coalescing. The
+    # synthesized pr_synchronize trigger deliberately keeps delivery_id empty:
+    # panel storage is canonical by PR/head/content, never by whichever
+    # equivalent check-suite delivery won the in-process claim.
+    assert delivery_logs == ["ci-a", "ci-b"]
+    assert calls == [("fresh-panel", head, "")]
+
+
+def test_ci_status_same_conclusion_rechecks_after_leader_finds_aggregate_pending(
+    monkeypatch,
+):
+    """Suite B completion must close a loop suite A found still pending."""
+    head = "b" * 40
+    ci_states = iter(("pending", "green"))
+    first_ci_read = asyncio.Event()
+    release_first_ci_read = asyncio.Event()
+    second_live_head_read = asyncio.Event()
+    panels = []
+    fetch_count = 0
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="pending",
+        review_clear=True,
+        pr_head=head,
+        calls=[],
+    )
+    d.config.auto_merge = True
+
+    async def fake_fetch_pr(self, repo, num):
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 2:
+            second_live_head_read.set()
+        return {
+            "number": num,
+            "state": "open",
+            "draft": False,
+            "title": "t",
+            "body": "Closes #80",
+            "html_url": "u",
+            "head": {"sha": head, "ref": "feat/x"},
+            "base": {"ref": "main"},
+        }
+
+    async def fake_ci(self, trigger):
+        state = next(ci_states)
+        if state == "pending":
+            first_ci_read.set()
+            await release_first_ci_read.wait()
+        return state
+
+    async def fake_handle_pr(self, trigger):
+        panels.append(trigger.head_sha)
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+
+    async def run_concurrently():
+        suite_a = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(
+                    ci_head_sha=head,
+                    ci_conclusion="success",
+                    delivery_id="suite-a",
+                )
+            )
+        )
+        await first_ci_read.wait()
+        suite_b = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(
+                    ci_head_sha=head,
+                    ci_conclusion="success",
+                    delivery_id="suite-b",
+                )
+            )
+        )
+        await second_live_head_read.wait()
+        await asyncio.sleep(0)
+        release_first_ci_read.set()
+        await asyncio.gather(suite_a, suite_b)
+
+    asyncio.run(run_concurrently())
+    assert panels == [head]
+    assert fetch_count == 3
+
+
+def test_ci_status_same_conclusion_retries_after_leader_exception(monkeypatch):
+    """A failed leader cannot make its same-conclusion waiter disappear."""
+    head = "a" * 40
+    first_panel_entered = asyncio.Event()
+    release_failing_panel = asyncio.Event()
+    second_live_head_read = asyncio.Event()
+    panel_calls = 0
+    fetch_count = 0
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=[],
+    )
+    d.config.auto_merge = True
+
+    async def fake_fetch_pr(self, repo, num):
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 2:
+            second_live_head_read.set()
+        return {
+            "number": num,
+            "state": "open",
+            "draft": False,
+            "title": "t",
+            "body": "Closes #80",
+            "html_url": "u",
+            "head": {"sha": head, "ref": "feat/x"},
+            "base": {"ref": "main"},
+        }
+
+    async def fake_handle_pr(self, trigger):
+        nonlocal panel_calls
+        panel_calls += 1
+        if panel_calls == 1:
+            first_panel_entered.set()
+            await release_failing_panel.wait()
+            raise RuntimeError("leader panel failed")
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+
+    async def run_concurrently():
+        leader = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(
+                    ci_head_sha=head,
+                    ci_conclusion="success",
+                    delivery_id="leader",
+                )
+            )
+        )
+        await first_panel_entered.wait()
+        waiter = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(
+                    ci_head_sha=head,
+                    ci_conclusion="success",
+                    delivery_id="waiter",
+                )
+            )
+        )
+        await second_live_head_read.wait()
+        await asyncio.sleep(0)
+        release_failing_panel.set()
+        results = await asyncio.gather(leader, waiter, return_exceptions=True)
+        assert isinstance(results[0], RuntimeError)
+        assert results[1] is None
+
+    asyncio.run(run_concurrently())
+    assert panel_calls == 2
+    assert fetch_count == 3
+
+
+def test_ci_status_same_conclusion_retries_after_leader_cancellation(monkeypatch):
+    head = "9" * 40
+    first_panel_entered = asyncio.Event()
+    second_live_head_read = asyncio.Event()
+    panel_calls = 0
+    fetch_count = 0
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=[],
+    )
+    d.config.auto_merge = True
+
+    async def fake_fetch_pr(self, repo, num):
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 2:
+            second_live_head_read.set()
+        return {
+            "number": num,
+            "state": "open",
+            "draft": False,
+            "title": "t",
+            "body": "Closes #80",
+            "html_url": "u",
+            "head": {"sha": head, "ref": "feat/x"},
+            "base": {"ref": "main"},
+        }
+
+    async def fake_handle_pr(self, trigger):
+        nonlocal panel_calls
+        panel_calls += 1
+        if panel_calls == 1:
+            first_panel_entered.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+
+    async def run_concurrently():
+        leader = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(ci_head_sha=head, delivery_id="leader")
+            )
+        )
+        await first_panel_entered.wait()
+        waiter = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(ci_head_sha=head, delivery_id="waiter")
+            )
+        )
+        await second_live_head_read.wait()
+        await asyncio.sleep(0)
+        leader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+        await waiter
+
+    asyncio.run(run_concurrently())
+    assert panel_calls == 2
+    assert fetch_count == 3
+
+
+def test_ci_status_same_head_runs_again_after_inflight_claim_finishes(monkeypatch):
+    """The claim coalesces overlap; it must not permanently consume a head."""
+    head = "d" * 40
+    calls = []
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=calls,
+    )
+    d.config.auto_merge = True
+
+    async def fake_handle_pr(self, trigger):
+        calls.append(("fresh-panel", trigger.head_sha))
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+
+    async def run_sequentially():
+        await d._handle_ci_status(_ci_status_trigger(ci_head_sha=head))
+        await d._handle_ci_status(_ci_status_trigger(ci_head_sha=head))
+
+    asyncio.run(run_sequentially())
+    assert calls == [("fresh-panel", head), ("fresh-panel", head)]
+
+
+def test_ci_status_different_conclusion_waits_then_rechecks(monkeypatch):
+    """A changed conclusion is serialized, not discarded as a duplicate."""
+    head = "f" * 40
+    events = []
+    ci_states = iter(("green", "failing"))
+    first_panel_entered = asyncio.Event()
+    second_live_head_read = asyncio.Event()
+    release_first_panel = asyncio.Event()
+    fetch_count = 0
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=[],
+    )
+    d.config.auto_merge = True
+
+    async def fake_fetch_pr(self, repo, num):
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 2:
+            second_live_head_read.set()
+        return {
+            "number": num,
+            "state": "open",
+            "draft": False,
+            "title": "t",
+            "body": "Closes #80",
+            "html_url": "u",
+            "head": {"sha": head, "ref": "feat/x"},
+            "base": {"ref": "main"},
+        }
+
+    async def fake_ci(self, trigger):
+        return next(ci_states)
+
+    async def fake_handle_pr(self, trigger):
+        events.append("panel-start")
+        first_panel_entered.set()
+        await release_first_panel.wait()
+        events.append("panel-finish")
+
+    async def fake_route(self, trigger, parent):
+        events.append("route-failure")
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_route_ci_failure", fake_route)
+
+    async def run_concurrently():
+        first = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(ci_head_sha=head, ci_conclusion="success")
+            )
+        )
+        await first_panel_entered.wait()
+        second = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(ci_head_sha=head, ci_conclusion="failure")
+            )
+        )
+        await second_live_head_read.wait()
+        await asyncio.sleep(0)
+        assert events == ["panel-start"]
+        release_first_panel.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(run_concurrently())
+    assert events == ["panel-start", "panel-finish", "route-failure"]
+    # The changed conclusion re-enters through the public handler and therefore
+    # re-reads the live PR/head after waiting for the first claim.
+    assert fetch_count == 3
+
+
+def test_ci_status_claim_is_released_when_claimed_work_raises(monkeypatch):
+    head = "1" * 40
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=[],
+    )
+    d.config.auto_merge = True
+
+    async def failing_panel(self, trigger):
+        raise RuntimeError("panel failed")
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", failing_panel)
+
+    with pytest.raises(RuntimeError, match="panel failed"):
+        asyncio.run(d._handle_ci_status(_ci_status_trigger(ci_head_sha=head)))
+
+    assert d._ci_head_claims == {}
+
+
+def test_ci_status_concurrent_different_prs_do_not_share_claim(monkeypatch):
+    """Coalescing is scoped to repository, PR number, and exact live head."""
+    head = "e" * 40
+    entered = []
+    both_entered = asyncio.Event()
+    release_panels = asyncio.Event()
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=[],
+    )
+    d.config.auto_merge = True
+
+    async def fake_handle_pr(self, trigger):
+        entered.append(trigger.number)
+        if len(entered) == 2:
+            both_entered.set()
+        await release_panels.wait()
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+
+    async def run_concurrently():
+        first = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(number=87, ci_pr_numbers=[87], ci_head_sha=head)
+            )
+        )
+        second = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(number=88, ci_pr_numbers=[88], ci_head_sha=head)
+            )
+        )
+        await asyncio.wait_for(both_entered.wait(), timeout=1)
+        release_panels.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(run_concurrently())
+    assert sorted(entered) == [87, 88]
 
 
 def test_pr_review_is_clear_reads_newest_first(monkeypatch):
@@ -2589,10 +4203,10 @@ def test_confirm_gates_clear_on_pr_comment_retriggers_pr_pipeline(monkeypatch):
     async def fake_store(self, entities, idempotency_key):
         pass
 
-    async def fake_post_missing(self, t, reviews, agents_by_lens):
+    async def fake_post_missing(self, t, reviews, agents_by_lens, **kwargs):
         pass
 
-    async def fake_persist(self, t, reviews, agents_by_lens):
+    async def fake_persist(self, t, reviews, agents_by_lens, **kwargs):
         pass
 
     async def fake_merge_checkpoint(self, t, parent, lenses):
@@ -3096,10 +4710,10 @@ def test_github_trigger_pr_pipeline_passes_contract(monkeypatch):
     async def fake_store(self, entities, idempotency_key):
         pass
 
-    async def fake_post_missing(self, t, reviews, agents_by_lens):
+    async def fake_post_missing(self, t, reviews, agents_by_lens, **kwargs):
         pass
 
-    async def fake_persist(self, t, reviews, agents_by_lens):
+    async def fake_persist(self, t, reviews, agents_by_lens, **kwargs):
         pass
 
     async def fake_merge_checkpoint(self, t, parent, lenses):
@@ -4224,6 +5838,116 @@ def test_merge_pr_helper_bad_method_defaults_squash(monkeypatch):
     assert client.put_calls[0]["json"]["merge_method"] == "squash"
 
 
+def test_merge_pr_expected_head_is_preflighted_and_sent_atomically(monkeypatch):
+    head = "b" * 40
+
+    class _AtomicMergeClient(_MergeAwareClient):
+        async def get(self, url, **kwargs):
+            if url.endswith("/pulls/87"):
+                return _MergeResp(
+                    200,
+                    {"head": {"sha": head}, "base": {"ref": "main"}},
+                )
+            if url.endswith("/repos/owner/repo"):
+                return _MergeResp(200, {"default_branch": "main"})
+            raise AssertionError(f"unexpected GET {url}")
+
+    client = _AtomicMergeClient(merge_status=200, merged=True)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    ok, _detail = asyncio.run(
+        dispatcher._merge_pr(
+            "owner/repo",
+            87,
+            "squash",
+            expected_head=head,
+            require_default_base=False,
+        )
+    )
+
+    assert ok is True
+    assert client.put_calls[0]["json"] == {
+        "merge_method": "squash",
+        "sha": head,
+    }
+
+
+def test_merge_pr_refuses_default_base_requirement_without_atomic_binding(
+    monkeypatch,
+):
+    head = "b" * 40
+
+    class _AtomicMergeClient(_MergeAwareClient):
+        async def get(self, url, **kwargs):
+            if url.endswith("/pulls/87"):
+                return _MergeResp(
+                    200,
+                    {"head": {"sha": head}, "base": {"ref": "main"}},
+                )
+            if url.endswith("/repos/owner/repo"):
+                return _MergeResp(200, {"default_branch": "main"})
+            raise AssertionError(f"unexpected GET {url}")
+
+    client = _AtomicMergeClient(merge_status=200, merged=True)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    ok, detail = asyncio.run(
+        dispatcher._merge_pr(
+            "owner/repo",
+            87,
+            "squash",
+            expected_head=head,
+            require_default_base=True,
+        )
+    )
+
+    assert ok is False
+    assert "cannot atomically bind the PR base" in detail
+    assert client.put_calls == []
+
+
+def test_merge_pr_rejects_malformed_expected_head_without_mutation(monkeypatch):
+    client = _MergeAwareClient(merge_status=200, merged=True)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    ok, detail = asyncio.run(
+        dispatcher._merge_pr(
+            "owner/repo",
+            87,
+            "squash",
+            expected_head="not-a-sha",
+            require_default_base=True,
+        )
+    )
+
+    assert ok is False
+    assert "cannot atomically bind the PR base" in detail
+    assert client.put_calls == []
+
+
+def test_merge_pr_rejects_malformed_optional_head_precondition(monkeypatch):
+    client = _MergeAwareClient(merge_status=200, merged=True)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    ok, detail = asyncio.run(
+        dispatcher._merge_pr(
+            "owner/repo",
+            87,
+            "squash",
+            expected_head="not-a-sha",
+            require_default_base=False,
+        )
+    )
+
+    assert ok is False
+    assert detail == "invalid expected PR head; merge held"
+    assert client.put_calls == []
+
+
 # ── /reject command ──────────────────────────────────────────────────────────
 
 
@@ -4721,6 +6445,27 @@ def test_vanellus_fallback_posts_when_comment_missing(monkeypatch):
     )
 
 
+def test_vanellus_fallback_uses_verified_head_not_stale_trigger(monkeypatch):
+    client = _FakeHttpxClientForVanellus(existing_bodies=[])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    stale_head = "a" * 40
+    reviewed_head = "b" * 40
+
+    asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._post_missing_vanellus_comment(
+            _trigger(head_sha=stale_head),
+            SkillResult("vanellus", True, 0, "**APPROVE**", ""),
+            reviewed_head=reviewed_head,
+        )
+    )
+
+    assert len(client.post_calls) == 1
+    posted_body = client.post_calls[0]["json"]["body"]
+    assert f"<!-- vanellus-aggregation commit={reviewed_head} -->" in posted_body
+    assert f"<!-- vanellus-aggregation commit={stale_head} -->" not in posted_body
+
+
 def test_vanellus_fallback_skips_when_comment_already_present(monkeypatch):
     """When Vanellus's comment IS present, no duplicate is posted."""
     existing_body = compose_vanellus_fallback_comment(
@@ -4784,21 +6529,27 @@ def test_vanellus_fallback_non_fatal_when_post_raises(monkeypatch):
 
 def test_handle_pr_calls_vanellus_fallback_after_run(monkeypatch):
     """_handle_pr must call _post_missing_vanellus_comment after the Vanellus run."""
-    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40))
+    stale_head = "a" * 40
+    reviewed_head = "b" * 40
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_pr_head_sha",
+        lambda self, t: _async_return(reviewed_head),
+    )
 
     fallback_calls: list[tuple] = []
-    skill_calls: list[str] = []
+    skill_calls: list[tuple[str, str]] = []
 
     async def fake_run_skill(skill, prompt, **kwargs):
-        skill_calls.append(skill)
+        skill_calls.append((skill, prompt))
         if skill == "lanius":
             return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
         if skill == "vanellus":
             return SkillResult(skill, True, 0, "VERDICT: all clear.", "")
         return SkillResult(skill, True, 0, "ok", "")
 
-    async def fake_vanellus_fallback(self, t, result):
-        fallback_calls.append((t.number, result.stdout))
+    async def fake_vanellus_fallback(self, t, result, **kwargs):
+        fallback_calls.append((t.number, result.stdout, kwargs.get("reviewed_head")))
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(
@@ -4808,8 +6559,8 @@ def test_handle_pr_calls_vanellus_fallback_after_run(monkeypatch):
     async def fake_changed_files(self, t): return []
     async def fake_preregistered(self, repo, number): return {}
     async def fake_store(self, entities, idempotency_key): pass
-    async def fake_post_missing(self, t, reviews, agents_by_lens): pass
-    async def fake_persist(self, t, reviews, agents_by_lens): pass
+    async def fake_post_missing(self, t, reviews, agents_by_lens, **kwargs): pass
+    async def fake_persist(self, t, reviews, agents_by_lens, **kwargs): pass
     async def fake_merge_checkpoint(self, t, parent, lenses): pass
 
     monkeypatch.setattr(SwarmDispatcher, "_changed_files", fake_changed_files)
@@ -4820,14 +6571,23 @@ def test_handle_pr_calls_vanellus_fallback_after_run(monkeypatch):
     monkeypatch.setattr(SwarmDispatcher, "_store_merge_checkpoint", fake_merge_checkpoint)
 
     dispatcher = SwarmDispatcher(_StubNotifier(), _config())
-    asyncio.run(dispatcher._handle_pr(_trigger()))
+    asyncio.run(dispatcher._handle_pr(_trigger(head_sha=stale_head)))
 
     assert len(fallback_calls) == 1, (
         f"_post_missing_vanellus_comment must be called exactly once; got {fallback_calls}"
     )
-    pr_number, captured_stdout = fallback_calls[0]
+    pr_number, captured_stdout, fallback_head = fallback_calls[0]
     assert pr_number == 87
     assert captured_stdout == "VERDICT: all clear."
+    assert fallback_head == reviewed_head
+    review_prompts = [
+        prompt for skill, prompt in skill_calls if skill not in {"lanius", "vanellus"}
+    ]
+    assert review_prompts
+    assert all(f"commit={reviewed_head}" in prompt for prompt in review_prompts)
+    vanellus_prompt = next(prompt for skill, prompt in skill_calls if skill == "vanellus")
+    assert f"commit={reviewed_head}" in vanellus_prompt
+    assert f"commit={stale_head}" not in vanellus_prompt
 
 
 # ── QE3: eval-authoring affordance — PR-branch worktree ───────────────────────
@@ -6484,7 +8244,7 @@ def test_handle_pr_reports_successful_and_failed_lenses(monkeypatch):
     persisted = []
     deferred = {}
 
-    async def fake_persist(self, trigger, reviews, agents):
+    async def fake_persist(self, trigger, reviews, agents, **kwargs):
         persisted.extend(reviews)
 
     async def fake_deferral(self, *args, **kwargs):
@@ -7033,37 +8793,38 @@ def test_handle_pr_defers_when_no_verdict_anywhere(monkeypatch):
     assert not any(c[0] == "route" for c in calls), calls
 
 
-# ── Vanellus merge authorization tracks APIS_AUTONOMY_AUTO_MERGE (ateles#333) ──
+# ── Vanellus aggregation never owns the merge boundary ─────────────────────
 #
-# Regression guard for a real defect: _vanellus_prompt injected an unconditional
-# "DO NOT MERGE ... This overrides any merge instruction in your standing
-# protocol" while _gate_merge_readiness returns EARLY when auto_merge is on (so
-# no checkpoint is filed either). With the flag on, the dispatcher stepped aside
-# expecting Vanellus to merge while simultaneously forbidding it — nothing
-# merged and nothing was escalated, strictly worse than the flag being off.
+# Aggregation runs before the dispatcher has a verified distinct native-review
+# receipt.  It must remain read-only with respect to merge authority under both
+# flag states; the dispatcher owns auto-merge after receipt and head checks.
 
 
-def test_vanellus_prompt_forbids_merge_when_auto_merge_off():
+def test_vanellus_aggregation_prompt_forbids_merge():
     prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(
-        _trigger(), 80, ["pm"], None, auto_merge=False
+        _trigger(), 80, ["pm"], None
     )
     assert "DO NOT MERGE" in prompt
     assert "operator-gated" in prompt
     assert "YOU MAY MERGE" not in prompt
 
 
-def test_vanellus_prompt_authorizes_merge_when_auto_merge_on():
-    prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(
-        _trigger(), 80, ["pm"], None, auto_merge=True
+def test_vanellus_aggregation_prompt_has_no_merge_authority_input():
+    assert (
+        "auto_merge"
+        not in inspect.signature(
+            swarm_dispatch.SwarmDispatcher._vanellus_prompt
+        ).parameters
     )
-    assert "YOU MAY MERGE" in prompt
-    # The unconditional prohibition must be gone, or the flag is inert.
-    assert "DO NOT MERGE. Merge is operator-gated" not in prompt
-    # Hard stops must still be stated so autonomy is bounded, not blanket.
-    assert "gate inheritance" in prompt
-    assert "branch-protection" in prompt
-    assert "APPROVE with Blocking: 0" in prompt
-    assert "Releases remain human-gated" in prompt
+    prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(
+        _trigger(), 80, ["pm"], None
+    )
+    # The aggregation invocation happens before the dispatcher can post and
+    # verify a distinct exact-head native review.  It must therefore never be
+    # entrusted with the merge, even when auto-merge is configured.  The
+    # dispatcher owns the post-receipt auto-merge boundary instead.
+    assert "YOU MAY MERGE" not in prompt
+    assert "DO NOT MERGE" in prompt
 
 
 def test_vanellus_prompt_defaults_to_forbidding_merge():
@@ -7149,12 +8910,23 @@ def test_unreadable_head_sha_does_not_invent_a_failure(monkeypatch):
     assert not any("without pushing any commit" in m for m in notifier.sent)
 
 
-# ── self-review 422 downgrade is loud, not silent ───────────────────────────
+# ── distinct-principal binding review ───────────────────────────────────────
 
 
-def _emit_review_with_422(monkeypatch, caplog, *, first_status):
-    """Drive _emit_formal_review where the first POST returns `first_status`
-    and any retry succeeds. Returns (notifier, log_text)."""
+def _emit_binding_review(
+    monkeypatch,
+    caplog,
+    *,
+    post_status=200,
+    reviewer="markmhendrickson-ateles-vanellus",
+    author="someone",
+    live_head="a" * 40,
+    readback_state="CHANGES_REQUESTED",
+    verdict="request_changes",
+    post_review_id=999,
+    readback_review_id=999,
+):
+    """Drive the binding native-review path without a live credential."""
     posts = []
 
     class _Resp:
@@ -7177,54 +8949,251 @@ def _emit_review_with_422(monkeypatch, caplog, *, first_status):
         async def __aexit__(self, *a):
             return False
 
+        async def get(self, url, headers=None, **kwargs):
+            if url.endswith("/user"):
+                return _Resp(200, {"login": reviewer})
+            if url.endswith("/pulls/87"):
+                return _Resp(
+                    200,
+                    {"head": {"sha": live_head}, "user": {"login": author}},
+                )
+            if url.endswith("/reviews/999"):
+                return _Resp(
+                    200,
+                    {
+                        "id": readback_review_id,
+                        "user": {"login": reviewer},
+                        "commit_id": live_head,
+                        "state": readback_state,
+                    },
+                )
+            raise AssertionError(f"unexpected GET {url}")
+
         async def post(self, url, headers=None, **kwargs):
             posts.append((kwargs.get("json") or {}).get("event"))
-            if len(posts) == 1:
-                return _Resp(
-                    first_status,
-                    text='["Review Can not request changes on your own pull request"]',
-                )
-            return _Resp(200)
+            return _Resp(
+                post_status,
+                {"id": post_review_id},
+                text=(
+                    '["Review Can not request changes on your own pull request"]'
+                    if post_status == 422
+                    else ""
+                ),
+            )
 
     monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", lambda **kw: _Client())
-
-    async def fake_claim(self, trigger, kind):
-        return True
-
-    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+    monkeypatch.setenv("VANELLUS_AGENT_PAT", "test-vanellus-token")
 
     notifier = _StubNotifier()
     d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="tok"))
     with caplog.at_level(logging.INFO):
-        asyncio.run(
-            d._emit_formal_review(_trigger(), "request_changes", "panel findings")
+        receipt = asyncio.run(
+            d._emit_formal_review(
+                _trigger(author=author), verdict, "panel findings"
+            )
         )
-    return notifier, caplog.text, posts
+    return receipt, notifier, caplog.text, posts
 
 
-def test_self_review_422_escalates_and_logs_the_downgrade(monkeypatch, caplog):
-    """ateles-agent reviewing an ateles-agent PR: GitHub refuses the verdict,
-    it becomes a non-binding COMMENT, and reviewDecision stays empty forever —
-    11 of 15 unreviewed open PRs on 2026-09-01. That must page the operator,
-    and the log must not claim a REQUEST_CHANGES landed."""
-    notifier, log_text, posts = _emit_review_with_422(
-        monkeypatch, caplog, first_status=422
+def test_binding_review_requires_dedicated_vanellus_token(monkeypatch):
+    monkeypatch.delenv("VANELLUS_AGENT_PAT", raising=False)
+    posts = []
+
+    class _Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **k):
+            posts.append(k)
+            raise AssertionError("binding review must not use a shared token")
+
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", lambda **kw: _Client())
+    d = SwarmDispatcher(
+        _StubNotifier(), DispatchConfig(neotoma_token="", github_token="shared")
     )
-    assert posts[0] == "REQUEST_CHANGES" and posts[1] == "COMMENT"
-    assert any("DIFFERENT GitHub identity" in m for m in notifier.sent), notifier.sent
-    assert Priority.OPERATOR_DECISION in notifier.priorities
-    assert "DOWNGRADED" in log_text
-    assert "posted formal GitHub review COMMENT" in log_text
-
-
-def test_accepted_review_does_not_escalate_or_claim_a_downgrade(monkeypatch, caplog):
-    """The happy path stays quiet and reports the event that actually landed."""
-    notifier, log_text, posts = _emit_review_with_422(
-        monkeypatch, caplog, first_status=200
+    receipt = asyncio.run(
+        d._emit_formal_review(_trigger(), "approve", "**APPROVE**")
     )
+    assert receipt is None
+    assert posts == []
+
+
+def test_binding_review_rejects_same_pr_author(monkeypatch, caplog):
+    receipt, _notifier, log_text, posts = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        reviewer="markmhendrickson-ateles-vanellus",
+        author="markmhendrickson-ateles-vanellus",
+    )
+    assert receipt is None
+    assert posts == []
+    assert "PR author" in log_text
+
+
+def test_binding_review_422_is_not_downgraded_to_comment(monkeypatch, caplog):
+    receipt, _notifier, log_text, posts = _emit_binding_review(
+        monkeypatch, caplog, post_status=422
+    )
+    assert receipt is None
+    assert posts == ["REQUEST_CHANGES"]
+    assert "COMMENT" not in posts
+    assert "binding formal review post failed" in log_text
+
+
+def test_accepted_binding_review_returns_exact_readback_receipt(monkeypatch, caplog):
+    receipt, notifier, log_text, posts = _emit_binding_review(monkeypatch, caplog)
     assert posts == ["REQUEST_CHANGES"]
     assert notifier.sent == []
-    assert "DOWNGRADED" not in log_text
+    assert receipt is not None
+    assert receipt.review_id == "999"
+    assert receipt.reviewer_login == "markmhendrickson-ateles-vanellus"
+    assert receipt.commit_id == "a" * 40
+    assert receipt.state == "CHANGES_REQUESTED"
+    assert "verified binding GitHub review" in log_text
+
+
+@pytest.mark.parametrize("review_id", [None, "", 0, -1, "not-an-id"])
+def test_binding_review_rejects_invalid_created_review_id(
+    monkeypatch, caplog, review_id
+):
+    receipt, _notifier, log_text, posts = _emit_binding_review(
+        monkeypatch, caplog, post_review_id=review_id
+    )
+    assert posts == ["REQUEST_CHANGES"]
+    assert receipt is None
+    assert "review id" in log_text.lower()
+
+
+def test_binding_review_rejects_mismatched_readback_review_id(
+    monkeypatch, caplog
+):
+    receipt, _notifier, log_text, posts = _emit_binding_review(
+        monkeypatch, caplog, post_review_id=999, readback_review_id=1000
+    )
+    assert posts == ["REQUEST_CHANGES"]
+    assert receipt is None
+    assert "readback id mismatch" in log_text.lower()
+
+
+def test_binding_review_rejects_stale_live_head(monkeypatch, caplog):
+    receipt, _notifier, log_text, posts = _emit_binding_review(
+        monkeypatch, caplog, live_head="b" * 40
+    )
+    assert receipt is None
+    assert posts == []
+    assert "head changed" in log_text
+
+
+def test_binding_approve_receipt_proves_exact_head_approval(monkeypatch, caplog):
+    receipt, _notifier, _log_text, posts = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        verdict="approve",
+        readback_state="APPROVED",
+    )
+    assert posts == ["APPROVE"]
+    assert receipt is not None
+    assert receipt.proves_approval(head_sha="a" * 40)
+
+
+def test_binding_review_rejects_wrong_readback_state(monkeypatch, caplog):
+    receipt, _notifier, log_text, posts = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        verdict="approve",
+        readback_state="COMMENTED",
+    )
+    assert posts == ["APPROVE"]
+    assert receipt is None
+    assert "state mismatch" in log_text
+
+
+def test_binding_review_rejects_unexpected_token_identity(monkeypatch, caplog):
+    receipt, _notifier, log_text, posts = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        reviewer="ateles-agent",
+    )
+    assert receipt is None
+    assert posts == []
+    assert "unexpected login" in log_text
+
+
+def test_ci_receipt_reconstruction_requires_latest_exact_head_approval(monkeypatch):
+    head = "b" * 40
+    reviewer = agent_github_login("vanellus")
+
+    class _ReviewClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, **kwargs):
+            return _MergeResp(
+                200,
+                [
+                    {
+                        "id": 1,
+                        "user": {"login": reviewer},
+                        "commit_id": head,
+                        "state": "APPROVED",
+                        "submitted_at": "2026-09-23T00:00:00Z",
+                    },
+                    {
+                        "id": 2,
+                        "user": {"login": reviewer},
+                        "commit_id": head,
+                        "state": "CHANGES_REQUESTED",
+                        "submitted_at": "2026-09-23T00:01:00Z",
+                    },
+                ],
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: _ReviewClient())
+    receipt = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._binding_approval_receipt_from_github(
+            "owner/repo", 87, head, pr_author="someone"
+        )
+    )
+    assert receipt is None
+
+
+@pytest.mark.parametrize("review_id", [None, "", 0, -1, "not-an-id", True])
+def test_ci_receipt_reconstruction_rejects_missing_or_invalid_review_id(
+    monkeypatch, review_id
+):
+    head = "b" * 40
+    reviewer = agent_github_login("vanellus")
+
+    class _ReviewClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, **kwargs):
+            return _MergeResp(
+                200,
+                [
+                    {
+                        "id": review_id,
+                        "user": {"login": reviewer},
+                        "commit_id": head,
+                        "state": "APPROVED",
+                        "submitted_at": "2026-09-23T00:00:00Z",
+                    }
+                ],
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: _ReviewClient())
+    receipt = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._binding_approval_receipt_from_github(
+            "owner/repo", 87, head, pr_author="someone"
+        )
+    )
+    assert receipt is None
 
 
 # ── parent-issue link resolution (ateles#434 / #613 / #300) ─────────────────

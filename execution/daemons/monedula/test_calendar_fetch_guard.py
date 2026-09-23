@@ -98,3 +98,53 @@ def test_successful_fetch_claims_the_day(monkeypatch, tmp_path) -> None:
 
     assert state.exists(), "a successful fetch must claim the day"
     assert state.read_text().strip() == date.today().isoformat()
+
+
+# ── ateles#1127 / #1128: calendar-fetch notify effect (dedupe key) ───────────
+
+
+def test_calendar_fetch_failure_notify_carries_dedupe_key(monkeypatch, tmp_path) -> None:
+    """Fetch-None must `_notify` with `_CALENDAR_FETCH_DEDUPE_KEY` so a still-open
+    outage does not re-fire every launchd tick. Do not assert email_eligible=False
+    on this path — calendar-fetch stays email-eligible by design (PM/QA)."""
+    state = tmp_path / ".monedula_last_run"
+    monkeypatch.setattr(monedula, "STATE_FILE", state)
+    monkeypatch.setattr(monedula, "fetch_yesterday_events", lambda: None)
+    monkeypatch.setattr(handlers, "load_handlers", lambda strandings=None: [])
+
+    notify_calls: list[tuple] = []
+    monkeypatch.setattr(
+        monedula,
+        "_notify",
+        lambda msg, priority="info", **k: notify_calls.append((msg, priority, k)),
+    )
+
+    monedula.main()
+
+    calendar_calls = [
+        c for c in notify_calls if "calendar fetch failed" in c[0].lower()
+    ]
+    assert len(calendar_calls) == 1
+    _msg, priority, kwargs = calendar_calls[0]
+    assert priority == "blocker"
+    assert kwargs.get("dedupe_key") == monedula._CALENDAR_FETCH_DEDUPE_KEY
+    assert kwargs.get("email_eligible") is not False
+
+
+def test_calendar_fetch_dedupe_key_is_cleared_on_success(monkeypatch, tmp_path) -> None:
+    """A successful fetch must release `_CALENDAR_FETCH_DEDUPE_KEY` so a FUTURE
+    failure reports again instead of staying suppressed by a stale key."""
+    state = tmp_path / ".monedula_last_run"
+    monkeypatch.setattr(monedula, "STATE_FILE", state)
+    monkeypatch.setattr(monedula, "fetch_yesterday_events", lambda: [])
+    monkeypatch.setattr(handlers, "load_handlers", lambda strandings=None: [])
+    monkeypatch.setattr(monedula, "fetch_due_payment_tasks", lambda *a, **k: [])
+
+    cleared: list[str] = []
+    monkeypatch.setattr(
+        monedula, "_clear_notify_dedupe", lambda key: cleared.append(key)
+    )
+
+    monedula.main()
+
+    assert monedula._CALENDAR_FETCH_DEDUPE_KEY in cleared

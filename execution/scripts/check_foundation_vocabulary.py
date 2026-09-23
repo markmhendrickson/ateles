@@ -31,6 +31,8 @@ name may be named where it is retired); in vocabulary.md, the continuation lines
 Not-for list, the ``**Related:**`` link lists, and any table row (the Verbs, Owner, and Retired tables name
 banned words on purpose); fenced code blocks are scanned (mermaid labels are prose).
 ``status.md`` is never scanned: it reports the checkout's names, which are the old ones.
+``skill_inventory.md`` is never scanned: it is generated, and its rows are skill names and
+quoted bodies, which carry the vocabulary of the stores they measure.
 
 A third, separate report runs after the Never/Not-for scan: **undefined-word candidates**. The two lists
 above can only ban a word that already has a vocabulary.md entry; they cannot notice a word used
@@ -76,7 +78,15 @@ VOCABULARY = "vocabulary.md"
 # agree with it until that branch merges. Scanning it would fail every such branch for a word the
 # branch has already removed at the only source it controls. The register row itself is scanned in
 # `conformance.md`, which is where a retired name would actually have to be fixed.
-SKIPPED_FILES = {"status.md", "decision_state.md"}
+# `skill_inventory.md` is the same "dated report" class as `status.md` (its own header states
+# "foundation companion; generated, never authored"), plus a stronger reason of its own: its
+# Description column is a VERBATIM quote of each skill's own SKILL.md front matter, drawn from
+# hundreds of independently authored files this repo does not control — including quoted role
+# and procedure names like "worker" and "pipeline" that are this repo's own agent/skill prose, not
+# a foreign vocabulary the ban was written to police. A Never ban is about this corpus's own design
+# prose; the fix for a banned word living in a quoted skill description is renaming that skill, not
+# editing a generated measurement of it.
+SKIPPED_FILES = {"status.md", "decision_state.md", "skill_inventory.md"}
 
 # --- Undefined-term candidates: the checker gap this section closes -------------------------------------
 #

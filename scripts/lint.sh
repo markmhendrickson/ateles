@@ -120,6 +120,13 @@ python3 execution/scripts/check_foundation_decision_101.py || ERRORS=$((ERRORS +
 echo "  - Checking foundation vocabulary (no Never word in the prose)..."
 python3 execution/scripts/check_foundation_vocabulary.py || ERRORS=$((ERRORS + 1))
 
+# Data model coverage: a governance type conformance_suite.md names must have a row in
+# data_model.md#concepts. `agent_policy` was authoritative in conformance.md and declared zero times
+# in data_model.md, with nothing failing — the gap this closes. Exit 2 means the check did not run
+# (its input moved), which is counted as an error and not as a pass.
+echo "  - Checking data model declares every governance type..."
+python3 execution/scripts/render_data_model.py --check || ERRORS=$((ERRORS + 1))
+
 echo "  - Checking vocabulary term links (first mentions link their definition)..."
 python3 execution/scripts/link_vocabulary_terms.py --check || ERRORS=$((ERRORS + 1))
 
@@ -153,6 +160,22 @@ if git rev-parse --verify --quiet origin/main >/dev/null; then
   python3 execution/scripts/render_decision_state.py --check || ERRORS=$((ERRORS + 1))
 else
   echo "  - Skipping decision state (no origin/main to read the register from)"
+fi
+
+# Skill inventory: docs/foundation/skill_inventory.md is stage 0 of the skill
+# migration (migration.md stage 11 migrates skills BY CLASS, so an
+# uninventoried skill is never classified and never migrated). Generated, never
+# authored; --check holds it equal to the measured system.
+#
+# OPT-IN, not default. Unlike the rule inventory this needs no credential --
+# the Neotoma read is a committed snapshot -- but it walks every checkout under
+# ~/repos and ~/agent-work, which is ~60s on this machine and depends on
+# filesystem state no CI runner shares. Running it by default would make an
+# unrelated PR fail because a worktree appeared or vanished, which is a gate
+# that trains people to ignore it. Set ATELES_CHECK_SKILL_INVENTORY=1 to run.
+if [ "${ATELES_CHECK_SKILL_INVENTORY:-0}" = "1" ]; then
+  echo "  - Checking skill inventory is in sync with the measured system..."
+  python3 execution/scripts/render_skill_inventory.py --check || ERRORS=$((ERRORS + 1))
 fi
 
 # tool_allowlist grant grammar (ateles#255 — bash: prefix is silently dropped
