@@ -35,6 +35,8 @@ from unittest import mock
 import pytest
 
 from gate_waive import (
+    SIGN_OFF_ATTRIBUTION_FAILED,
+    SIGN_OFF_CLEARED_UNVERIFIED,
     SIGN_OFF_ENTITY_NOT_FOUND,
     SIGN_OFF_GATE_NOT_PENDING,
     SIGN_OFF_NO_HEAD,
@@ -60,6 +62,15 @@ HEAD = "a" * 40
 # BEFORE the write) without depending on wall-clock time in the test.
 PAST = "2020-01-01T00:00:00+00:00"
 NOW = "2030-01-01T00:00:00+00:00"
+# The RFC 7638 thumbprint every `_identity` key resolves to (see the autouse
+# fixture below). The fake key paths are not real files, so the thumbprint
+# helper is stubbed rather than reading one.
+LENS_TP = "L" * 43
+
+
+@pytest.fixture(autouse=True)
+def _stub_lens_key_thumbprint(monkeypatch):
+    monkeypatch.setattr("gate_waive._lens_key_thumbprint", lambda identity: LENS_TP)
 
 
 def _state(
@@ -91,7 +102,13 @@ def _attributed_observation(
     return {
         "id": observation_id,
         "created_at": observed_at,
-        "provenance": {"agent_sub": lens_sub},
+        "provenance": {
+            "agent_sub": lens_sub,
+            # The lens key's thumbprint and a trusted tier: the attribution
+            # read-back requires both, as the checkpoint verifier does.
+            "agent_thumbprint": LENS_TP,
+            "attribution_tier": "software",
+        },
     }
 
 
@@ -350,10 +367,12 @@ class TestCurrentOwnerAdvance:
             _LoadSequence(
                 [
                     _state({"pm": "pending"}, current_owner="pavo"),
-                    # gate_status landed but current_owner silently dropped —
-                    # the undeclared/dropped-field shape this repo has
-                    # documented before.
-                    _state({"pm": "signed_off"}, current_owner="pavo"),
+                    # current_owner silently dropped — the undeclared/
+                    # dropped-field shape this repo has documented before.
+                    # `current_owner` is read back BEFORE `gate_status` is
+                    # written (the safety field goes last), so the gate is
+                    # still pending here.
+                    _state({"pm": "pending"}, current_owner="pavo"),
                 ]
             ),
         )
@@ -364,6 +383,14 @@ class TestCurrentOwnerAdvance:
 
         assert not outcome.ok
         assert outcome.error == SIGN_OFF_VERIFY_FAILED
+        assert outcome.observed_state == "pending"
+        import gate_waive
+
+        sent = [c.args[2]["field"] for c in gate_waive._ns.signed_request.call_args_list]
+        assert gate_waive.GATE_STATUS_FIELD not in sent, (
+            "a handoff that did not read back must stop the sign-off before "
+            "the gate is written"
+        )
 
     @pytest.mark.asyncio
     async def test_current_owner_is_a_declared_field(self):
@@ -782,6 +809,10 @@ class TestAttributionReadBack:
                 [
                     _state({"arch": "pending"}, field_provenance={}),
                     _state({"arch": "signed_off"}, field_provenance={}),
+                    # The failure is settled: the re-read still shows this
+                    # call's `signed_off`, then the compensating restore lands.
+                    _state({"arch": "signed_off"}, field_provenance={}),
+                    _state({"arch": "pending"}, field_provenance={}),
                 ]
             ),
         )
@@ -792,7 +823,8 @@ class TestAttributionReadBack:
 
         assert not outcome.ok
         assert not outcome.verified
-        assert outcome.error == SIGN_OFF_VERIFY_FAILED
+        assert outcome.error == SIGN_OFF_ATTRIBUTION_FAILED
+        assert outcome.observed_state == "pending"
         # No provenance entry means there is no observation id to look up —
         # the read-back must not even attempt to fetch observations blindly.
         observations_spy.assert_not_called()
@@ -818,7 +850,13 @@ class TestAttributionReadBack:
             store,
             "load",
             _LoadSequence(
-                [_state({"arch": "pending"}), _state({"arch": "signed_off"})]
+                [
+                    _state({"arch": "pending"}),
+                    _state({"arch": "signed_off"}),
+                    # Settling: re-read, compensating restore, read-back.
+                    _state({"arch": "signed_off"}),
+                    _state({"arch": "pending"}),
+                ]
             ),
         )
         # The observation exists and is fresh, but names a DIFFERENT
@@ -836,7 +874,8 @@ class TestAttributionReadBack:
 
         assert not outcome.ok
         assert not outcome.verified
-        assert outcome.error == SIGN_OFF_VERIFY_FAILED
+        assert outcome.error == SIGN_OFF_ATTRIBUTION_FAILED
+        assert outcome.observed_state == "pending"
 
     @pytest.mark.asyncio
     async def test_stale_observation_is_not_verified(self, monkeypatch):
@@ -867,7 +906,12 @@ class TestAttributionReadBack:
 
         assert not outcome.ok
         assert not outcome.verified
-        assert outcome.error == SIGN_OFF_VERIFY_FAILED
+        # The gate read `signed_off` before this call, so there is no prior
+        # value to restore: it still reads cleared, and nothing this call
+        # did verifies that. Reported as such, never as a plain read-back
+        # failure a reader could take for "still pending".
+        assert outcome.error == SIGN_OFF_CLEARED_UNVERIFIED
+        assert outcome.observed_state == "signed_off"
 
     @pytest.mark.asyncio
     async def test_fresh_correctly_attributed_observation_is_verified(
@@ -918,7 +962,13 @@ class TestAttributionReadBack:
             store,
             "load",
             _LoadSequence(
-                [_state({"arch": "pending"}), _state({"arch": "signed_off"})]
+                [
+                    _state({"arch": "pending"}),
+                    _state({"arch": "signed_off"}),
+                    # Settling: re-read, compensating restore, read-back.
+                    _state({"arch": "signed_off"}),
+                    _state({"arch": "pending"}),
+                ]
             ),
         )
         monkeypatch.setattr(
@@ -929,4 +979,5 @@ class TestAttributionReadBack:
 
         assert not outcome.ok
         assert not outcome.verified
-        assert outcome.error == SIGN_OFF_VERIFY_FAILED
+        assert outcome.error == SIGN_OFF_ATTRIBUTION_FAILED
+        assert outcome.observed_state == "pending"

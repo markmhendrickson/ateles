@@ -35,17 +35,26 @@ Shape notes learned from the live prod entity (``ent_4c1f77bc5fc86a2bad2025d6``)
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 
 try:  # package import (normal daemon runtime) with script-import fallback
     from lib.daemon_runtime import neotoma_signed as _ns
+    from lib.daemon_runtime.aauth_httpsig import jwk_thumbprint, public_part_of
+    # The checkpoint verifier's own trusted-tier set, reused rather than
+    # re-typed so the two attribution checks cannot drift apart.
+    from lib.daemon_runtime.gating import _TRUSTED_AAUTH_TIERS
 except ImportError:  # pragma: no cover
     import neotoma_signed as _ns  # type: ignore
+    from aauth_httpsig import jwk_thumbprint, public_part_of  # type: ignore
+    from gating import _TRUSTED_AAUTH_TIERS  # type: ignore
 
 log = logging.getLogger("apis.gate_waive")
 
@@ -360,6 +369,21 @@ SIGN_OFF_GATE_NOT_PENDING = "sign_off: gate not pending for this lens"
 # freshly reconstructed map through it would silently discard whatever
 # sibling gate state it actually held.
 SIGN_OFF_UNREADABLE_STATE = "sign_off: gate_status or owner_history unreadable"
+# The value landed, but the observation behind it does not carry this lens's
+# subject, this lens's key thumbprint, and a trusted attribution tier, or it
+# predates this call. Split out of `SIGN_OFF_VERIFY_FAILED` so the operator is
+# told to look at the signer and the observation's age, not at the schema.
+SIGN_OFF_ATTRIBUTION_FAILED = "sign_off: write not attributed to the lens"
+# A sign-off failed AND the gate still reads `signed_off` afterwards: either the
+# compensating restore could not be confirmed, or the gate already read
+# `signed_off` before this call and this call could not re-sign it. Its own
+# class because it is the one failure where the record reads CLEARED without a
+# verified sign-off behind it, which must never be reported as "still pending".
+SIGN_OFF_CLEARED_UNVERIFIED = "sign_off: gate may read cleared without a verified sign-off"
+# Not a failure: another authority (an operator waive, triage's
+# `not_required`) already cleared the gate, so no lens write was made. Kept
+# distinct from a verified sign-off so nothing credits the lens with it.
+SIGN_OFF_OTHER_AUTHORITY = "sign_off: gate already cleared by another authority"
 
 # Gate states some OTHER authority already set, which `sign_off` must treat as
 # a true no-op (no write attempted at all) rather than something to (re-)sign:
@@ -398,6 +422,10 @@ _SIGN_OFF_OTHER_AUTHORITY_STATES: frozenset[str] = frozenset(
 # live sign-off, exactly as it would for any other undeclared field, not as a
 # schema corruption.
 _SIGN_OFF_DECLARED_FIELDS = frozenset({"gate_status", "owner_history", "current_owner"})
+# The wire name of the safety field, for callers and tests that must name it
+# without spelling the literal (the foundation vocabulary retires the term;
+# this module is where the live Neotoma field is still read and written).
+GATE_STATUS_FIELD = "gate_status"
 
 
 @dataclass
@@ -410,6 +438,59 @@ class SignOffOutcome:
     lens_sub: str = ""
     error: str = ""  # one of the SIGN_OFF_* class constants above, or ""
     verified: bool = False
+    # The gate's value as this call last READ it from the record — after a
+    # failure, the value re-read once the failure was settled (and any
+    # compensating restore attempted). Never an assumed value: the failure
+    # surface prints it as the `observed` field.
+    observed_state: str = ""
+
+
+def _lens_key_thumbprint(identity: dict) -> str | None:
+    """RFC 7638 thumbprint of the lens's own AAuth key, or None if unreadable.
+
+    The attribution read-back compares an observation's `agent_thumbprint`
+    against this, as `gating.read_authenticated_checkpoint_resolution` does
+    for a checkpoint approver: a subject name alone is self-asserted, the key
+    thumbprint is not. Computed from the SAME key file `signed_request` signs
+    with (`identity["key"]`), via `aauth_httpsig.jwk_thumbprint`.
+    """
+    try:
+        jwk = json.loads(Path(identity["key"]).read_text())
+        return jwk_thumbprint(public_part_of(jwk)) or None
+    except Exception:  # noqa: BLE001 — unreadable key means no provable attribution
+        return None
+
+
+def _observation_is_attributed(
+    observation: object, *, lens_sub: str, lens_thumbprint: str, not_before: str
+) -> bool:
+    """True only when *observation* was written by this lens's own key, now.
+
+    The same three provenance conditions
+    `gating.read_authenticated_checkpoint_resolution` requires of a checkpoint
+    approver — subject, key thumbprint, trusted attribution tier — plus
+    freshness (the observation is not older than this call's pre-write read).
+    The tenant check that function also makes has no counterpart here: this
+    store holds no expected tenant id to compare against.
+    """
+    if not isinstance(observation, dict):
+        return False
+    provenance = observation.get("provenance")
+    if not isinstance(provenance, dict):
+        return False
+    observed_at = str(
+        observation.get("created_at")
+        or observation.get("observed_at")
+        or observation.get("timestamp")
+        or ""
+    )
+    return (
+        bool(observed_at)
+        and observed_at >= not_before
+        and str(provenance.get("agent_sub") or "").strip() == lens_sub
+        and str(provenance.get("agent_thumbprint") or "").strip() == lens_thumbprint
+        and provenance.get("attribution_tier") in _TRUSTED_AAUTH_TIERS
+    )
 
 
 # ── Neotoma-backed issue-entity store ────────────────────────────────────────
@@ -916,6 +997,20 @@ class IssueGateStore:
              write landed on this codebase's own documented history of
              undeclared-field drops and fire-and-forget writes.
 
+        WRITE ORDER AND COMPENSATION (Falco's CONFIRMED BLOCKING partial-write
+        finding, PR #1181, first raised at 9c5d199): the safety field is
+        written LAST. `owner_history` (and `current_owner`, read back before
+        going further) land first; `gate_status` is written only once they
+        have. If anything fails at or after the `gate_status` write — the
+        write itself (which may have landed before the transport failed), its
+        read-back, or the attribution proof — a lens-signed compensating
+        correction restores the gate's prior value and is read back. The
+        outcome then carries the value actually re-read (`observed_state`),
+        and when the gate still reads `signed_off` the class is
+        `SIGN_OFF_CLEARED_UNVERIFIED`, never the class of the original
+        failure. Callers treat every failed outcome as NOT cleared whatever a
+        later re-read shows.
+
         Raises nothing: every failure path returns a populated
         ``SignOffOutcome`` so the caller can decide (retry, escalate, leave
         pending) rather than crash the dispatch loop.
@@ -926,22 +1021,30 @@ class IssueGateStore:
         # Constraint 1 — fail closed BEFORE any write attempt if this lens has
         # no signing key. Checking here, not inside the try/except below,
         # keeps "no key" and "signing raised" as distinct, legible classes.
-        if _ns.agent_identity(lens_agent, sub=lens_sub) is None:
+        # The key's thumbprint is resolved here too: without it the
+        # attribution read-back below can never succeed, so a write would only
+        # ever be a write this call must then undo.
+        identity = _ns.agent_identity(lens_agent, sub=lens_sub)
+        lens_thumbprint = _lens_key_thumbprint(identity) if identity is not None else None
+        if identity is None or not lens_thumbprint:
             outcome.error = SIGN_OFF_NO_SIGNING_KEY
+            outcome.observed_state = "not read (refused before any read or write)"
             log.error(
-                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: %s "
+                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: %s%s "
                 "— refusing to fall back to the daemon bearer",
                 repo,
                 issue_number,
                 gate,
                 lens_agent,
                 SIGN_OFF_NO_SIGNING_KEY,
+                "" if identity is None else " (key thumbprint unreadable)",
             )
             return outcome
 
         state = await self.load(repo, issue_number)
         if not state.found:
             outcome.error = SIGN_OFF_ENTITY_NOT_FOUND
+            outcome.observed_state = "no issue entity"
             log.error(
                 "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: %s",
                 repo,
@@ -963,6 +1066,7 @@ class IssueGateStore:
             # before any write is attempted, exactly like the no-signing-key
             # precondition above.
             outcome.error = SIGN_OFF_UNREADABLE_STATE
+            outcome.observed_state = "unreadable"
             log.error(
                 "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: %s "
                 "(gate_status_unreadable=%s, owner_history_unreadable=%s)",
@@ -977,17 +1081,24 @@ class IssueGateStore:
             return outcome
 
         current = (state.gate_status.get(gate) or "").strip().lower()
+        prior_value = current or "pending"
+        outcome.observed_state = prior_value
         if current in _SIGN_OFF_OTHER_AUTHORITY_STATES:
             # A gate some OTHER authority already cleared (operator `waive`,
             # `not_required`/`not_applicable` at triage, `skipped`) is a true
             # no-op: this lens's sign_off must never overwrite a different
             # actor's terminal state, and there is nothing to (re-)sign here —
-            # skip both the write and the read-back below.
+            # skip both the write and the read-back below. `verified` stays
+            # False and the class says why (Falco's non-blocking
+            # misattribution finding, PR #1181): nothing here was signed by
+            # this lens, so nothing may report it as a verified lens sign-off.
             outcome.ok = True
-            outcome.verified = True
+            outcome.verified = False
+            outcome.error = SIGN_OFF_OTHER_AUTHORITY
             log.info(
                 "[apis.gate_waive] sign_off %s#%s gate=%s: already %r "
-                "(other authority) — no-op, no write attempted",
+                "(other authority) — no-op, no write attempted, not a lens "
+                "sign-off",
                 repo,
                 issue_number,
                 gate,
@@ -1043,83 +1154,94 @@ class IssueGateStore:
             }
         ]
         key = f"{repo}#{issue_number}"
-
-        fields_to_write: list[tuple[str, object]] = [
-            ("gate_status", self._encode_gate_status(state, merged_gates)),
-            ("owner_history", merged_history),
-        ]
         next_owner = next_owner.strip()
-        if next_owner:
-            fields_to_write.append(("current_owner", next_owner))
 
-        for field_name, value in fields_to_write:
-            # Constraint 4 — never write a field this module has not confirmed
-            # is declared on the production schema.
-            assert field_name in _SIGN_OFF_DECLARED_FIELDS, (
-                f"sign_off attempted to write undeclared field {field_name!r}"
+        async def _settle(
+            error: str, *, gate_written: bool, history_written: bool
+        ) -> SignOffOutcome:
+            outcome.error = error
+            return await self._settle_failed_sign_off(
+                outcome,
+                repo=repo,
+                issue_number=issue_number,
+                gate=gate,
+                prior_value=prior_value,
+                lens_agent=lens_agent,
+                lens_sub=lens_sub,
+                idempotency_suffix=f"{key}-{now[:16]}",
+                gate_written=gate_written,
+                history_written=history_written,
             )
-            try:
-                status, _resp = await _ns.signed_request(
-                    "POST",
-                    f"{self.base_url}/correct",
-                    {
-                        "entity_id": state.entity_id,
-                        "entity_type": self.ENTITY_TYPE,
-                        "field": field_name,
-                        "value": value,
-                        "idempotency_key": (
-                            f"gate-signoff-{gate}-{key}-{field_name}-{now[:16]}"
-                        ),
-                    },
-                    agent_name=lens_agent,
-                    sub=lens_sub,
+
+        # 1. The non-safety fields first. A failure here leaves `gate_status`
+        #    untouched, so the gate cannot read cleared on a sign-off that
+        #    never completed.
+        history_written = False
+        pre_gate_fields: list[tuple[str, object]] = [("owner_history", merged_history)]
+        if next_owner:
+            pre_gate_fields.append(("current_owner", next_owner))
+        for field_name, value in pre_gate_fields:
+            failure = await self._sign_off_write(
+                state.entity_id,
+                field_name,
+                value,
+                f"gate-signoff-{gate}-{key}-{field_name}-{now[:16]}",
+                lens_agent=lens_agent,
+                lens_sub=lens_sub,
+                context=(repo, issue_number, gate),
+            )
+            if failure:
+                return await _settle(
+                    failure, gate_written=False, history_written=history_written
                 )
-            except Exception as exc:  # noqa: BLE001 — classify, never crash
-                # Error CLASS only in the log line — never the exception's
-                # full text, which can carry a signed-request body, an auth
-                # header, or a filesystem path (Buteo's review, ateles#795).
-                outcome.error = SIGN_OFF_SIGNING_FAILED
+            if field_name == "owner_history":
+                history_written = True
+
+        if next_owner:
+            # Same read-it-back discipline for `current_owner`, BEFORE the
+            # gate is written: a landed handoff POST is not evidence the field
+            # survived (this codebase's documented history of dropped-field
+            # writes), and the gate must not clear on a handoff that did not.
+            handoff = await self.load(repo, issue_number)
+            if not handoff.found or handoff.current_owner.strip() != next_owner:
                 log.error(
-                    "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: "
-                    "%s (%s)",
+                    "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: %s "
+                    "(current_owner read-back=%r, wanted=%r)",
                     repo,
                     issue_number,
                     gate,
                     lens_agent,
-                    field_name,
-                    SIGN_OFF_SIGNING_FAILED,
-                    type(exc).__name__,
+                    SIGN_OFF_VERIFY_FAILED,
+                    handoff.current_owner if handoff.found else "(entity missing)",
+                    next_owner,
                 )
-                return outcome
-            if status < 200 or status >= 300:
-                # Falco's security review, PR #1181 (NON-BLOCKING, defense in
-                # depth): `signed_request` returns its HTTP status rather than
-                # raising on a non-2xx, so a caller that ignores it relies
-                # entirely on the read-back below to catch a rejected write.
-                # The read-back IS fail-closed on its own (constraint 3c), but
-                # treating a non-2xx as an explicit failure CLASS here — rather
-                # than silently falling through to a read-back that happens to
-                # also fail — makes the failure attributable to the write
-                # itself, not to an unrelated-looking verify-failed reread.
-                outcome.error = SIGN_OFF_SIGNING_FAILED
-                log.error(
-                    "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: "
-                    "%s (HTTP %s)",
-                    repo,
-                    issue_number,
-                    gate,
-                    lens_agent,
-                    field_name,
-                    SIGN_OFF_SIGNING_FAILED,
-                    status,
+                return await _settle(
+                    SIGN_OFF_VERIFY_FAILED,
+                    gate_written=False,
+                    history_written=history_written,
                 )
-                return outcome
+
+        # 2. The safety field, last. From here on the gate may read cleared,
+        #    so every failure is settled with a compensating restore.
+        failure = await self._sign_off_write(
+            state.entity_id,
+            "gate_status",
+            self._encode_gate_status(state, merged_gates),
+            f"gate-signoff-{gate}-{key}-gate_status-{now[:16]}",
+            lens_agent=lens_agent,
+            lens_sub=lens_sub,
+            context=(repo, issue_number, gate),
+        )
+        if failure:
+            return await _settle(failure, gate_written=True, history_written=history_written)
 
         # Constraint 3c / CLAUDE.md "read it back" — a successful signed POST
         # is not evidence the write landed.
         reread = await self.load(repo, issue_number)
-        if not reread.found or (reread.gate_status.get(gate) or "").strip().lower() != "signed_off":
-            outcome.error = SIGN_OFF_VERIFY_FAILED
+        if (
+            not reread.found
+            or (reread.gate_status.get(gate) or "").strip().lower() != "signed_off"
+        ):
             log.error(
                 "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: %s "
                 "(read-back state=%r)",
@@ -1130,83 +1252,56 @@ class IssueGateStore:
                 SIGN_OFF_VERIFY_FAILED,
                 reread.gate_status.get(gate) if reread.found else "(entity missing)",
             )
-            return outcome
-
-        # Same read-it-back discipline for `current_owner` when a handoff was
-        # requested — a landed `gate_status` write is not evidence the SAME
-        # POST's `current_owner` field also survived (this codebase's own
-        # documented history of undeclared/dropped-field writes is exactly why
-        # each field gets its own read-back rather than one covering both).
-        if next_owner and reread.current_owner.strip() != next_owner:
-            outcome.error = SIGN_OFF_VERIFY_FAILED
-            log.error(
-                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: %s "
-                "(current_owner read-back=%r, wanted=%r)",
-                repo,
-                issue_number,
-                gate,
-                lens_agent,
-                SIGN_OFF_VERIFY_FAILED,
-                reread.current_owner,
-                next_owner,
+            return await _settle(
+                SIGN_OFF_VERIFY_FAILED, gate_written=True, history_written=history_written
             )
-            return outcome
 
         # Falco's CONFIRMED BLOCKING attribution finding, ateles#795 / PR
-        # #1181: the two checks above prove the VALUE landed, not WHO wrote
-        # it — an already-`signed_off` gate is, by this method's own design,
-        # re-signed rather than skipped (see the docstring's "ALWAYS
-        # RE-SIGNS" note) precisely because a value match proves nothing
-        # about attribution. So the terminal proof here is the immutable
-        # observation `gate_status`'s reducer provenance now names: it must
-        # exist, must be NEWER than this call's own pre-write read (`now`,
-        # captured before any write was attempted), and must carry THIS
-        # lens's own `agent_sub` (`lens_sub`) — never the daemon's. Mirrors
-        # `lib.daemon_runtime.gating.read_authenticated_checkpoint_resolution`,
-        # the existing pattern for exactly this shape of proof (principles
-        # §§6 and 9): resolve the observation id from per-field provenance,
-        # fetch it, and read `provenance.agent_sub` off THAT observation —
-        # never off the mutable snapshot. Missing, unreadable, stale, or
-        # mismatched attribution means `verified=False` (fail closed, per
-        # principles §§5 and 7), even though `outcome.ok` is already True
-        # for the value having landed.
+        # #1181, tightened per the second security run's non-blocking finding:
+        # the checks above prove the VALUE landed, not WHO wrote it. The
+        # terminal proof is the immutable observation `gate_status`'s reducer
+        # provenance now names. It must exist, be NEWER than this call's own
+        # pre-write read (`now`), and carry this lens's subject, this lens's
+        # key thumbprint, and a trusted attribution tier — the conditions
+        # `lib.daemon_runtime.gating.read_authenticated_checkpoint_resolution`
+        # puts on a checkpoint approver (see `_observation_is_attributed`).
         observation_id = reread.field_provenance.get("gate_status", "")
         attributed = False
         if observation_id:
             observations = await self._observations(reread.entity_id)
             observation = next(
-                (o for o in observations if isinstance(o, dict) and o.get("id") == observation_id),
+                (
+                    o
+                    for o in observations
+                    if isinstance(o, dict) and o.get("id") == observation_id
+                ),
                 None,
             )
-            if isinstance(observation, dict):
-                obs_provenance = observation.get("provenance")
-                observed_at = str(
-                    observation.get("created_at")
-                    or observation.get("observed_at")
-                    or observation.get("timestamp")
-                    or ""
+            attributed = _observation_is_attributed(
+                observation,
+                lens_sub=lens_sub,
+                lens_thumbprint=lens_thumbprint,
+                not_before=now,
+            )
+            if not attributed:
+                obs_provenance = (
+                    observation.get("provenance") if isinstance(observation, dict) else None
                 )
-                fresh = bool(observed_at) and observed_at >= now
-                if (
-                    isinstance(obs_provenance, dict)
-                    and str(obs_provenance.get("agent_sub") or "").strip() == lens_sub
-                    and fresh
-                ):
-                    attributed = True
-                else:
-                    log.error(
-                        "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: "
-                        "observation %s attribution did not verify "
-                        "(agent_sub=%r, observed_at=%r, fresh=%s)",
-                        repo,
-                        issue_number,
-                        gate,
-                        lens_agent,
-                        observation_id,
-                        obs_provenance.get("agent_sub") if isinstance(obs_provenance, dict) else None,
-                        observed_at,
-                        fresh,
-                    )
+                obs_provenance = obs_provenance if isinstance(obs_provenance, dict) else {}
+                log.error(
+                    "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: "
+                    "observation %s attribution did not verify "
+                    "(found=%s, agent_sub=%r, thumbprint_match=%s, tier=%r)",
+                    repo,
+                    issue_number,
+                    gate,
+                    lens_agent,
+                    observation_id,
+                    isinstance(observation, dict),
+                    obs_provenance.get("agent_sub"),
+                    str(obs_provenance.get("agent_thumbprint") or "") == lens_thumbprint,
+                    obs_provenance.get("attribution_tier"),
+                )
         else:
             log.error(
                 "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: no "
@@ -1220,18 +1315,19 @@ class IssueGateStore:
             )
 
         if not attributed:
-            # Fail closed (principles §§5, 7): the VALUE landed, but this
-            # call cannot prove IT was the one that put it there, so it must
-            # not report success. `ok=False` routes this through the same
-            # `failed_sign_offs` escalation path as any other sign_off
-            # failure — never a silent partial success.
-            outcome.ok = False
-            outcome.verified = False
-            outcome.error = SIGN_OFF_VERIFY_FAILED
-            return outcome
+            # Fail closed (principles §§5, 7): the VALUE landed, but this call
+            # cannot prove IT put it there, so the gate is restored rather
+            # than left reading cleared on an unattributed write.
+            return await _settle(
+                SIGN_OFF_ATTRIBUTION_FAILED,
+                gate_written=True,
+                history_written=history_written,
+            )
 
         outcome.ok = True
         outcome.verified = True
+        outcome.error = ""
+        outcome.observed_state = "signed_off"
         log.info(
             "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s (sub=%s): "
             "verified signed_off%s",
@@ -1241,6 +1337,233 @@ class IssueGateStore:
             lens_agent,
             lens_sub,
             f", current_owner->{next_owner}" if next_owner else "",
+        )
+        return outcome
+
+    async def _signed_correct(
+        self,
+        entity_id: str,
+        field_name: str,
+        value: object,
+        idempotency_key: str,
+        *,
+        lens_agent: str,
+        lens_sub: str,
+    ) -> tuple[int, dict]:
+        """One lens-signed `correct`, off the event loop.
+
+        `neotoma_signed.signed_request` is SYNCHRONOUS (it runs the node
+        signing helper as a subprocess and returns `(status, body)`). It used
+        to be `await`ed directly, which raised `TypeError` on the returned
+        tuple AFTER the subprocess had already sent the write, so a live
+        sign-off landed its field and then reported a signing failure. It now
+        runs in a worker thread; an awaitable result (a test double written as
+        a coroutine function) is awaited as well.
+        """
+        # Constraint 4 — never write a field this module has not confirmed
+        # is declared on the production schema.
+        assert field_name in _SIGN_OFF_DECLARED_FIELDS, (
+            f"sign_off attempted to write undeclared field {field_name!r}"
+        )
+        result = await asyncio.to_thread(
+            _ns.signed_request,
+            "POST",
+            f"{self.base_url}/correct",
+            {
+                "entity_id": entity_id,
+                "entity_type": self.ENTITY_TYPE,
+                "field": field_name,
+                "value": value,
+                "idempotency_key": idempotency_key,
+            },
+            agent_name=lens_agent,
+            sub=lens_sub,
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    async def _sign_off_write(
+        self,
+        entity_id: str,
+        field_name: str,
+        value: object,
+        idempotency_key: str,
+        *,
+        lens_agent: str,
+        lens_sub: str,
+        context: tuple[str, int, str],
+    ) -> str:
+        """Perform one sign-off write; return "" on 2xx, else a failure class.
+
+        Error CLASS only in the log line — never the exception's full text,
+        which can carry a signed-request body, an auth header, or a
+        filesystem path (Buteo's review, ateles#795). A non-2xx is an explicit
+        failure too (Falco's security review, PR #1181): `signed_request`
+        returns its status rather than raising, and a caller that ignored it
+        would lean entirely on a read-back that happens to also fail.
+        """
+        repo, issue_number, gate = context
+        try:
+            status, _resp = await self._signed_correct(
+                entity_id,
+                field_name,
+                value,
+                idempotency_key,
+                lens_agent=lens_agent,
+                lens_sub=lens_sub,
+            )
+        except Exception as exc:  # noqa: BLE001 — classify, never crash
+            log.error(
+                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: %s (%s)",
+                repo,
+                issue_number,
+                gate,
+                lens_agent,
+                field_name,
+                SIGN_OFF_SIGNING_FAILED,
+                type(exc).__name__,
+            )
+            return SIGN_OFF_SIGNING_FAILED
+        if status < 200 or status >= 300:
+            log.error(
+                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: %s (HTTP %s)",
+                repo,
+                issue_number,
+                gate,
+                lens_agent,
+                field_name,
+                SIGN_OFF_SIGNING_FAILED,
+                status,
+            )
+            return SIGN_OFF_SIGNING_FAILED
+        return ""
+
+    async def _settle_failed_sign_off(
+        self,
+        outcome: SignOffOutcome,
+        *,
+        repo: str,
+        issue_number: int,
+        gate: str,
+        prior_value: str,
+        lens_agent: str,
+        lens_sub: str,
+        idempotency_suffix: str,
+        gate_written: bool,
+        history_written: bool,
+    ) -> SignOffOutcome:
+        """Make a failed sign-off leave the record as it found it, and say so.
+
+        Re-reads the gate. If it reads `signed_off` and did not before this
+        call, this call's own write put it there: a lens-signed compensating
+        correction restores *prior_value* and is read back. The outcome's
+        `observed_state` is always the value actually re-read last, and when
+        that value is still `signed_off` (restore unconfirmed, or the gate
+        already read `signed_off` before this call) the class becomes
+        `SIGN_OFF_CLEARED_UNVERIFIED`. A re-read that fails is reported as
+        what it is, never as `pending`.
+        """
+        outcome.ok = False
+        outcome.verified = False
+        original_error = outcome.error
+
+        reread = await self.load(repo, issue_number)
+        if not reread.found or reread.gate_status_unreadable:
+            outcome.observed_state = (
+                "unreadable" if reread.found else "unknown (re-read found no entity)"
+            )
+            if gate_written or prior_value == "signed_off":
+                outcome.error = SIGN_OFF_CLEARED_UNVERIFIED
+            log.error(
+                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: %s, and the "
+                "settling re-read could not read the gate (%s) — reported as %s",
+                repo,
+                issue_number,
+                gate,
+                lens_agent,
+                original_error,
+                outcome.observed_state,
+                outcome.error,
+            )
+            return outcome
+
+        current = (reread.gate_status.get(gate) or "").strip().lower() or "pending"
+        if current == "signed_off" and prior_value != "signed_off":
+            restored = dict(reread.gate_status)
+            restored[gate] = prior_value
+            failure = await self._sign_off_write(
+                reread.entity_id,
+                "gate_status",
+                self._encode_gate_status(reread, restored),
+                f"gate-signoff-restore-{gate}-{idempotency_suffix}",
+                lens_agent=lens_agent,
+                lens_sub=lens_sub,
+                context=(repo, issue_number, gate),
+            )
+            # Re-read whether or not the restore reported success: a restore
+            # whose transport failed may still have landed, and one that
+            # reported success is not evidence it did.
+            after = await self.load(repo, issue_number)
+            if not after.found or after.gate_status_unreadable:
+                outcome.observed_state = (
+                    "unreadable" if after.found else "unknown (re-read found no entity)"
+                )
+                outcome.error = SIGN_OFF_CLEARED_UNVERIFIED
+                log.error(
+                    "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: %s; "
+                    "restore %s but its read-back failed — reported as %s",
+                    repo,
+                    issue_number,
+                    gate,
+                    lens_agent,
+                    original_error,
+                    "failed" if failure else "sent",
+                    SIGN_OFF_CLEARED_UNVERIFIED,
+                )
+                return outcome
+            current = (after.gate_status.get(gate) or "").strip().lower() or "pending"
+            if history_written and not reread.owner_history_unreadable:
+                # Best-effort audit note beside the `signed_off` history entry
+                # this call already appended, so the history does not assert a
+                # sign-off the gate no longer carries. The gate value, not
+                # this note, is what callers act on.
+                await self._sign_off_write(
+                    reread.entity_id,
+                    "owner_history",
+                    list(reread.owner_history)
+                    + [
+                        {
+                            "gate": gate,
+                            "action": "sign_off_rolled_back",
+                            "actor": lens_agent,
+                            "reason": original_error,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                    ],
+                    f"gate-signoff-rollback-history-{gate}-{idempotency_suffix}",
+                    lens_agent=lens_agent,
+                    lens_sub=lens_sub,
+                    context=(repo, issue_number, gate),
+                )
+
+        outcome.observed_state = current
+        if current == "signed_off":
+            outcome.error = SIGN_OFF_CLEARED_UNVERIFIED
+        log.error(
+            "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: %s — gate re-read "
+            "as %r after settling%s",
+            repo,
+            issue_number,
+            gate,
+            lens_agent,
+            original_error,
+            current,
+            (
+                f"; reported as {SIGN_OFF_CLEARED_UNVERIFIED}"
+                if outcome.error != original_error
+                else ""
+            ),
         )
         return outcome
 

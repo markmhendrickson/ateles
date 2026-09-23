@@ -7203,7 +7203,11 @@ def test_sign_off_is_warranted_requires_explicit_clear_token():
     # The only warranted shapes: an explicit clear token, clean body.
     assert sign_off_is_warranted("**SIGNED_OFF**\nno concerns") is True
     assert sign_off_is_warranted("**APPROVE**\nlgtm") is True
-    assert sign_off_is_warranted("**COMMENT**\nobservation only") is True
+    # `COMMENT` ("observations only") names no gate decision, so it does not
+    # clear a gate (second security run, PR #1181: only an explicit clear
+    # token may). See test_gate_sign_off_fail_closed.py for the mixed-verdict
+    # cases that finding was about.
+    assert sign_off_is_warranted("**COMMENT**\nobservation only") is False
 
 
 def test_pm_unparseable_verdict_does_not_call_sign_off(monkeypatch):
@@ -7362,7 +7366,9 @@ def test_pm_sign_off_failure_is_surfaced_not_swallowed(monkeypatch):
     issue_number, parent, failed = surfaced[0]
     from gate_waive import SIGN_OFF_SIGNING_FAILED
     assert issue_number == 100
-    assert failed == [("pm", "pavo", SIGN_OFF_SIGNING_FAILED)]
+    # (lens, agent, error_class, observed_state): the fake outcome carries no
+    # re-read value, so observed_state is empty and the comment says unknown.
+    assert failed == [("pm", "pavo", SIGN_OFF_SIGNING_FAILED, "")]
 
 
 def test_spec_section_prompt_is_additive_and_no_comment(monkeypatch):
@@ -10573,3 +10579,115 @@ class TestOtherIncompletePanelCausesUnchanged:
         assert "Review incomplete" in body
         assert swarm_dispatch.GATE_LAUNCH_REFUSED_MARKER not in body
         assert "**BLOCKED**" not in body
+
+# ── A failed sign_off is never a cleared gate (PR #1181, second security
+# run BLOCKING B2) ─────────────────────────────────────────────────────────
+# The gate-level half (a fake store whose writes land) lives in
+# test_gate_sign_off_fail_closed.py; these are the two callers.
+
+
+import gate_waive as _gw  # noqa: E402
+
+
+class TestCallersTreatAFailedSignOffAsNotCleared:
+    def test_panel_keeps_a_failed_gate_pending_even_when_the_reread_shows_it_cleared(
+        self, monkeypatch
+    ):
+        calls: list = []
+        captured: dict = {}
+        surfaced: list = []
+
+        async def fake_sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            return _gw.SignOffOutcome(
+                ok=False,
+                gate=gate,
+                lens_agent=lens_agent,
+                error=_gw.SIGN_OFF_VERIFY_FAILED,
+            )
+
+        class _Cleared:
+            found = True
+            gate_status = {"pm": "signed_off", "ux": "signed_off", "arch": "signed_off"}
+            gate_status_unreadable = False
+
+        async def fake_load(self, repo, issue_number):
+            return _Cleared()
+
+        monkeypatch.setattr(swarm_dispatch.IssueGateStore, "sign_off", fake_sign_off)
+        monkeypatch.setattr(swarm_dispatch.IssueGateStore, "load", fake_load)
+        d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls)
+
+        async def fake_run_skill(skill, prompt, **kwargs):
+            if skill == "lanius":
+                return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear\nGATE_PENDING: arch", "")
+            if skill == "waxwing":
+                return SkillResult(skill, True, 0, "**SIGNED_OFF**\nno concerns", "")
+            return SkillResult(skill, True, 0, "**APPROVE**\nlgtm", "")
+
+        original_prompt = SwarmDispatcher._vanellus_prompt
+
+        def spy_prompt(trigger, parent, lenses, reviews=None, pending_gates=None, reviewed_head=None):
+            captured["pending_gates"] = set(pending_gates or ())
+            return original_prompt(
+                trigger, parent, lenses, reviews,
+                pending_gates=pending_gates, reviewed_head=reviewed_head,
+            )
+
+        async def fake_surface(self, trigger, parent, failed):
+            surfaced.extend(failed)
+
+        monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+        monkeypatch.setattr(SwarmDispatcher, "_vanellus_prompt", staticmethod(spy_prompt))
+        monkeypatch.setattr(SwarmDispatcher, "_surface_failed_sign_offs", fake_surface)
+
+        asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+        assert surfaced, "the failed sign_off must be surfaced"
+        assert "arch" in captured.get("pending_gates", set()), (
+            "a failed sign_off must stay pending for merge authorization even "
+            "though the re-read shows the gate cleared"
+        )
+
+    def test_issue_pipeline_does_not_build_on_a_failed_pm_sign_off(self, monkeypatch):
+        build_calls: list = []
+
+        async def fake_run_skill(skill, prompt, **kwargs):
+            if skill == "cicada" and "DO NOT MERGE" in prompt:
+                build_calls.append(skill)
+            if skill == "lanius":
+                return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+            if skill == "pavo":
+                return SkillResult(
+                    skill, True, 0,
+                    "**🤖 Pavo — Ateles swarm, pm gate owner**\n**SIGNED_OFF**\n\n"
+                    "<<<SPEC_SECTION>>>**Scope:** pm section with enough substance "
+                    "to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+                    "",
+                )
+            return SkillResult(skill, True, 0, "text", "")
+
+        _install_pipeline_stubs(monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: [])
+
+        async def failing_sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            return _gw.SignOffOutcome(
+                ok=False, gate=gate, lens_agent=lens_agent,
+                error=_gw.SIGN_OFF_VERIFY_FAILED,
+            )
+
+        async def fake_surface(self, trigger, parent, failed):
+            return None
+
+        async def fake_open_pr(self, trigger, state):
+            build_calls.append("opened")
+            return "https://example.invalid/pr/1"
+
+        monkeypatch.setattr(swarm_dispatch.IssueGateStore, "sign_off", failing_sign_off)
+        monkeypatch.setattr(SwarmDispatcher, "_surface_failed_sign_offs", fake_surface)
+        monkeypatch.setattr(SwarmDispatcher, "_open_implementation_pr", fake_open_pr)
+
+        notifier = _StubNotifier()
+        d = SwarmDispatcher(notifier, _config(auto_build=True))
+        asyncio.run(d._handle_issue_opened(_issue_trigger()))
+
+        assert build_calls == [], "a failed pm sign_off must not count as a cleared gate"
+        assert any("gates not green" in m for m in notifier.sent)
