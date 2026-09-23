@@ -461,3 +461,139 @@ def test_the_diacritic_reason_names_the_actual_evidence():
         "A widać o mnie.", expected_language="en", vad_closed=True
     )
     assert "ć" in (verdict.detail or "")
+
+
+# --- Corpus measurement -----------------------------------------------------
+#
+# The tests above assert the filter's behaviour utterance by utterance. These
+# pin its measured RATES over the operator's whole labelled corpus, so a change
+# that quietly starts eating real speech fails here rather than in production.
+#
+# Measured 2026-09-02 over 33 live JSONL captures (1215 Latin-script rows and
+# 179 non-Latin rows, labelled exactly as the VAD evaluation's corpus.py labels
+# them — see eval/vad-detector-comparison):
+#
+#   non-Latin fabrication caught      179/179   = 100%
+#   substantive Spanish/Catalan lost    0/165   =   0%
+#
+# A caution about the label, recorded so the next reader is not misled by the
+# headline number: the corpus defines "fabrication" AS non-Latin script, which
+# is the same question `script_mismatch` asks. The 100% is therefore CIRCULAR
+# for that arm and is not evidence the screen generalizes. The load-bearing
+# measurement is the second line — real operator speech, in all three of his
+# languages, surviving untouched — and the Latin-script cases below, which the
+# label calls genuine and the screen catches on independent evidence.
+
+_OPERATOR_LANGUAGES = ("en", "es", "ca")
+
+
+# Verbatim Spanish and Catalan from the operator's own captures. These are the
+# trade the screen must never make: a filter that blocks these is worse than the
+# fabrications it removes, because he loses words he actually said.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Pero bueno, ya veremos cómo va la cosa esta semana.",
+        "És que no ho sé, hauríem de mirar-ho amb calma.",
+        "Sí, exacto, eso es lo que quería decir yo también.",
+        "Molt bé, doncs quedem així i ja parlem demà.",
+        "No, porque entonces tendríamos que hacer las cosas otra vez.",
+    ],
+)
+def test_the_operators_own_languages_are_never_filtered(text):
+    """Spanish and Catalan share script with Portuguese and Italian.
+
+    Separating them is the whole difficulty of this screen, and getting it
+    wrong in this direction is the expensive error.
+    """
+    verdict = screen_transcription(
+        text,
+        expected_language="en",
+        window_seconds=8.0,
+        plausible_languages=_OPERATOR_LANGUAGES,
+    )
+    assert not verdict.filtered, f"blocked genuine speech: {verdict.reason}"
+
+
+# Non-Latin script, verbatim from the captures. The high-precision case.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "こんにちは、今日はいい天気ですね。",
+        "안녕하세요 여러분",
+        "Спасибо за просмотр!",
+        "شكرا لمشاهدة الفيديو",
+        "আপনি কেমন আছেন",
+    ],
+)
+def test_non_latin_script_is_always_caught(text):
+    verdict = screen_transcription(
+        text,
+        expected_language="en",
+        window_seconds=8.0,
+        plausible_languages=_OPERATOR_LANGUAGES,
+    )
+    assert verdict.filtered
+    assert verdict.reason in ("script_mismatch", "language_mismatch")
+
+
+# Latin script, but spelled with letters outside the union of en/es/ca. Caught
+# on orthography rather than script — and NOT circular with the corpus label,
+# which files every one of these as "genuine" for being Latin script.
+@pytest.mark.parametrize(
+    ("text", "offender"),
+    [
+        ("A widać o mnie.", "ć"),        # Polish
+        ("Taparvo sessões.", "õ"),       # Portuguese
+        ("Möchtest du ein Feuer?", "ö"),  # German
+        ("Und das hängt an der Korrex auf.", "ä"),
+        ("sì", "ì"),                     # Italian
+    ],
+)
+def test_latin_script_fabrication_is_caught_on_orthography(text, offender):
+    verdict = screen_transcription(
+        text,
+        expected_language="en",
+        window_seconds=8.0,
+        plausible_languages=_OPERATOR_LANGUAGES,
+    )
+    assert verdict.filtered
+    assert verdict.reason == "foreign_diacritic"
+    assert offender in (verdict.detail or "")
+
+
+# The honest limit, asserted rather than described. A Latin-script fabrication
+# spelled with only the letters the operator's own languages use is INVISIBLE to
+# this screen. Both lines below are real fabrications from 2026-09-02 that reach
+# the operator unflagged.
+#
+# This test asserts the GAP so it cannot be quietly claimed as covered. If a
+# later signal closes it, this test fails and is rewritten with the new
+# evidence — which is the intended way to find out that coverage changed.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "O que é que tu fazes?",          # Portuguese, fully grammatical
+        "Tásclaí saicol ochtbhleath",     # Irish-looking
+        "Ma quello che voglio dire",      # Italian, ASCII-only
+    ],
+)
+def test_known_gap_latin_script_fabrication_without_foreign_letters(text):
+    """Documents what this screen does NOT catch.
+
+    Every character here also occurs in English, Spanish or Catalan, so neither
+    the script check nor the diacritic check has anything to fire on. Closing
+    this needs a different kind of evidence — per-segment API confidence, or
+    cross-chunk corroboration — not a stricter alphabet, which would start
+    eating the Spanish and Catalan asserted above.
+    """
+    verdict = screen_transcription(
+        text,
+        expected_language="en",
+        window_seconds=8.0,
+        plausible_languages=_OPERATOR_LANGUAGES,
+    )
+    assert not verdict.filtered, (
+        "the screen now catches a case documented as a gap — re-measure "
+        "against the corpus and update this test with the new evidence"
+    )
