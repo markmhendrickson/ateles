@@ -14,7 +14,7 @@ So this filter looks at the transcription RESULT instead. It complements the
 gate rather than replacing it: the gate still saves the API call on the class it
 can address (true silence), and this catches what arrives past it.
 
-Four signals, ordered by observed catch rate on two days of real chunks:
+Six signals, ordered by observed catch rate on real chunks:
 
 1. ``language_mismatch`` — Whisper reports a detected language. The session's
    language is known. Observed fabrications came back as Georgian, Khmer,
@@ -36,7 +36,16 @@ Four signals, ordered by observed catch rate on two days of real chunks:
    script — so signal 1b passes it through. Measured over 629 real chunks that
    the script check does not catch: 4 flagged, all 4 genuine fabrications, 0
    false positives.
-A sixth signal, ``lone_word_turn``, was built and then REJECTED on measurement.
+6. ``low_confidence`` — the decoder's own mean token logprob. The only signal
+   that sees a Latin-script fabrication whose orthography is entirely ordinary
+   ("Bitte.", "Hallo.", "Rio.", "Takk."), which every text-based signal above
+   structurally cannot. Requires the session to request logprobs; when they are
+   absent the signal is skipped and nothing else changes. Held-out measurement
+   (different audio, frozen threshold): 25/25 Latin-script fabrications caught,
+   0/50 genuine utterances lost, AUC 1.000, classes non-overlapping. See
+   MIN_MEAN_LOGPROB.
+
+A further signal, ``lone_word_turn``, was built and then REJECTED on measurement.
 The reasoning was that server VAD closes a turn on silence, so a complete turn
 of one bare word is noise — and it did catch "Soita." (Finnish) and "Utanfor."
 (Norwegian). But measured against the operator's streaming captures it also
@@ -46,7 +55,7 @@ ordinary in dictation and in technical speech, and a filter that eats them is
 worse than the fabrications it removes. Kept here as a note so it is not
 rediscovered and reintroduced: a lone word is NOT evidence of fabrication.
 
-A seventh, ``short_turn_duration``, was measured on 2026-09-01 and REJECTED for
+Another, ``short_turn_duration``, was measured on 2026-09-01 and REJECTED for
 the same reason. On one capture it looked decisive — both fabrications there ran
 under 1.02s while most real turns ran 3s+. Across the corpus the classes do not
 separate: the shortest REAL turn is "As we go." at 1.03s, two hundredths of a
@@ -436,6 +445,67 @@ def foreign_diacritics(
     return seen
 
 
+# --- 6. Decoder confidence (mean token logprob) -----------------------------
+
+# The signals above all ask a question about the TEXT: what alphabet, what
+# orthography, what repetition. That family has a structural ceiling on the
+# Latin-script gap, because a fabricated "Bitte." and a genuine "Hello." are
+# orthographically indistinguishable — both are well-formed Latin words the
+# session's languages admit.
+#
+# This signal asks a different question: how confident was the decoder. A
+# fabrication is the model resolving noise into the nearest plausible token
+# sequence, and it is measurably unsure while doing so. Genuine speech is not.
+#
+# MEASURED against the live API, not inferred from documentation. The Realtime
+# session exposes per-token logprobs when the session declares
+# ``include: ["item.input_audio_transcription.logprobs"]``; the REST
+# transcription endpoint exposes the same via ``include[]=logprobs``. An earlier
+# conclusion in this workstream held that no per-segment confidence existed —
+# that was wrong, and it was wrong because it was never tested against the
+# socket.
+#
+# Separation on a held-out set (different audio sources, different seed, this
+# threshold frozen before scoring): 25/25 Latin-script fabrications caught,
+# 0/50 genuine utterances lost, AUC 1.000. The classes do not overlap — the
+# worst fabrication scored -2.08, the worst genuine utterance -0.81, a margin of
+# 1.27 nats. That margin is why this is a usable threshold and Silero's p90
+# AUC 0.644 was not.
+#
+# -1.5 sits inside the empty band rather than hard against either class, so
+# neither an unusually mumbled real utterance nor an unusually fluent
+# fabrication lands on the boundary. It is deliberately NOT tuned to the last
+# decimal: a threshold fitted tightly to one corpus is a threshold that moves
+# when the audio does.
+MIN_MEAN_LOGPROB = -1.5
+
+# Below this token count the mean is dominated by a single token's value and
+# stops being an average of anything. Short genuine utterances ("Cool.", "Yes.")
+# are ordinary in conversation, so a one-token mean must not be allowed to
+# convict them. Such rows fall through to the text-based signals above.
+MIN_LOGPROB_TOKENS = 2
+
+
+def mean_token_logprob(logprobs: list | None) -> tuple[float | None, int]:
+    """Mean logprob over the tokens of one transcription result.
+
+    Accepts the API's list of ``{"token", "logprob", "bytes"}`` entries and
+    returns ``(mean, n_tokens)``, or ``(None, 0)`` when the caller did not
+    request logprobs — in which case this signal is simply skipped, so a session
+    that does not send ``include`` behaves exactly as it did before.
+    """
+    if not logprobs:
+        return (None, 0)
+    values = [
+        entry.get("logprob")
+        for entry in logprobs
+        if isinstance(entry, dict) and entry.get("logprob") is not None
+    ]
+    if not values:
+        return (None, 0)
+    return (sum(values) / len(values), len(values))
+
+
 # --- Filter -----------------------------------------------------------------
 
 
@@ -464,6 +534,7 @@ def screen_transcription(
     window_seconds: float | None = None,
     vad_closed: bool = False,  # noqa: ARG001 — see the rejected lone_word_turn note
     plausible_languages: tuple[str, ...] = DEFAULT_PLAUSIBLE_LANGUAGES,
+    logprobs: list | None = None,
 ) -> FilterVerdict:
     """Screen one transcription result for hallucination signatures.
 
@@ -474,6 +545,11 @@ def screen_transcription(
     uses it — the one that did (``lone_word_turn``) was rejected on measurement,
     see the module docstring. It stays in the signature because callers on the
     streaming path already know the answer and a future signal may need it.
+
+    ``logprobs`` is the API's per-token confidence list, when the session asked
+    for it. Omitted or empty, signal 6 is skipped and every other signal behaves
+    exactly as before — so this parameter is additive, never a change in
+    existing verdicts.
     """
     stripped = (text or "").strip()
     if not stripped:
@@ -529,6 +605,22 @@ def screen_transcription(
         return FilterVerdict(
             True, "too_short_for_window",
             f"{len(stripped)} chars in a {window_seconds:.0f}s window",
+        )
+
+    # 5. Low decoder confidence — the only signal that sees a Latin-script
+    # fabrication whose orthography is entirely ordinary ("Bitte.", "Hallo.",
+    # "Rio."). Last because it is the only one needing data the caller may not
+    # have; when logprobs are absent it is skipped and the verdict is unchanged.
+    mean_logprob, n_tokens = mean_token_logprob(logprobs)
+    if (
+        mean_logprob is not None
+        and n_tokens >= MIN_LOGPROB_TOKENS
+        and mean_logprob < MIN_MEAN_LOGPROB
+    ):
+        return FilterVerdict(
+            True, "low_confidence",
+            f"mean logprob {mean_logprob:.2f} over {n_tokens} tokens "
+            f"(floor {MIN_MEAN_LOGPROB})",
         )
 
     return PASS
