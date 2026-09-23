@@ -40,12 +40,26 @@ from gate_waive import (
     SIGN_OFF_NO_HEAD,
     SIGN_OFF_NO_SIGNING_KEY,
     SIGN_OFF_SIGNING_FAILED,
+    SIGN_OFF_UNREADABLE_STATE,
     SIGN_OFF_VERIFY_FAILED,
     IssueGateState,
     IssueGateStore,
+    gate_status_is_unreadable,
+    owner_history_is_unreadable,
+    parse_gate_status,
+    parse_owner_history,
 )
 
 HEAD = "a" * 40
+
+# The attribution read-back (Falco's CONFIRMED BLOCKING finding, ateles#795 /
+# PR #1181) needs a `gate_status` -> observation-id provenance entry AND a
+# matching observation carrying that observation's OWN provenance
+# (`agent_sub`, freshness). `PAST` / `NOW` bound the freshness check the same
+# way `sign_off` itself does (`observed_at >= now`, where `now` is captured
+# BEFORE the write) without depending on wall-clock time in the test.
+PAST = "2020-01-01T00:00:00+00:00"
+NOW = "2030-01-01T00:00:00+00:00"
 
 
 def _state(
@@ -53,6 +67,7 @@ def _state(
     found: bool = True,
     entity_id: str = "ent_1",
     current_owner: str = "",
+    field_provenance: dict | None = None,
 ) -> IssueGateState:
     return IssueGateState(
         repo="o/r",
@@ -61,6 +76,33 @@ def _state(
         gate_status=gate_status or {},
         owner_history=[],
         current_owner=current_owner,
+        field_provenance=(
+            field_provenance
+            if field_provenance is not None
+            else {"gate_status": "obs-1"}  # vocab-ok: live Neotoma wire field name
+        ),
+    )
+
+
+def _attributed_observation(
+    lens_sub: str, *, observation_id: str = "obs-1", observed_at: str = NOW
+) -> dict:
+    """An observation whose OWN provenance names *lens_sub* as the signer."""
+    return {
+        "id": observation_id,
+        "created_at": observed_at,
+        "provenance": {"agent_sub": lens_sub},
+    }
+
+
+def _mock_attributed_observations(monkeypatch, store, lens_sub: str, **kwargs) -> None:
+    """Wire `store._observations` to return one observation attributed to
+    *lens_sub*, so tests that exist to prove something OTHER than the
+    attribution read-back itself do not need to re-derive this shape."""
+    monkeypatch.setattr(
+        store,
+        "_observations",
+        mock.AsyncMock(return_value=[_attributed_observation(lens_sub, **kwargs)]),
     )
 
 
@@ -160,10 +202,12 @@ class TestExplicitSubjectNeverAmbient:
                 [_state({"arch": "pending"}), _state({"arch": "signed_off"})]
             ),
         )
+        _mock_attributed_observations(monkeypatch, store, "waxwing@ateles-swarm")
 
         outcome = await store.sign_off("o/r", 795, "arch", "waxwing", HEAD)
 
         assert outcome.ok
+        assert outcome.verified
         assert outcome.lens_sub == "waxwing@ateles-swarm"
         assert seen_subs, "signed_request was never called"
         for sub in seen_subs:
@@ -199,6 +243,7 @@ class TestOnlyDeclaredFieldsWritten:
             ),
         )
 
+        _mock_attributed_observations(monkeypatch, store, "pavo@ateles-swarm")
         outcome = await store.sign_off("o/r", 795, "pm", "pavo", HEAD)
 
         assert outcome.ok
@@ -242,6 +287,7 @@ class TestCurrentOwnerAdvance:
             ),
         )
 
+        _mock_attributed_observations(monkeypatch, store, "pavo@ateles-swarm")
         outcome = await store.sign_off(
             "o/r", 795, "pm", "pavo", HEAD, next_owner="accipiter"
         )
@@ -278,6 +324,7 @@ class TestCurrentOwnerAdvance:
             ),
         )
 
+        _mock_attributed_observations(monkeypatch, store, "pavo@ateles-swarm")
         outcome = await store.sign_off("o/r", 795, "pm", "pavo", HEAD)
 
         assert outcome.ok
@@ -379,6 +426,7 @@ class TestReadBackAssertion:
                 [_state({"ux": "pending"}), _state({"ux": "signed_off"})]
             ),
         )
+        _mock_attributed_observations(monkeypatch, store, "accipiter@ateles-swarm")
 
         outcome = await store.sign_off("o/r", 795, "ux", "accipiter", HEAD)
 
@@ -461,6 +509,7 @@ class TestSafetyPreconditions:
         monkeypatch.setattr(
             store, "load", _LoadSequence([_state({"arch": "signed_off"})])
         )
+        _mock_attributed_observations(monkeypatch, store, "waxwing@ateles-swarm")
 
         outcome = await store.sign_off("o/r", 795, "arch", "waxwing", HEAD)
 
@@ -567,3 +616,317 @@ class TestNoSecretMaterialInOutcome:
             assert "super-secret-token" not in record.getMessage()
             assert "jwk.json" not in record.getMessage()
             assert "Bearer" not in record.getMessage()
+
+
+# ── Parse-failure denies: unreadable is UNKNOWN, never empty (Falco's ────────
+# CONFIRMED BLOCKING finding, ateles#795 / PR #1181) ─────────────────────────
+#
+# `parse_gate_status`/`parse_owner_history` fold BOTH "genuinely absent" and
+# "present but unparseable" to the same {}/[] — correct for `waive()` (an
+# absent gate is legitimately unsigned), wrong for `sign_off`, which must
+# refuse to write through an unreadable value rather than silently
+# reconstructing a fresh map from the empty parse and discarding whatever
+# sibling gate state it actually held.
+
+
+class TestUnreadableStateIsDistinctFromAbsent:
+    """The pure predicates: absent -> False, unreadable -> True."""
+
+    def test_absent_gate_status_is_not_unreadable(self):
+        assert gate_status_is_unreadable(None) is False
+        assert gate_status_is_unreadable("") is False
+        assert gate_status_is_unreadable({}) is False
+
+    def test_malformed_gate_status_is_unreadable(self):
+        assert gate_status_is_unreadable("not json") is True
+        # Valid JSON, but not an object — a list is not a gate map.
+        assert gate_status_is_unreadable("[1, 2, 3]") is True
+        assert gate_status_is_unreadable(42) is True
+        # Both still fold to {} via the existing parser — the SAME shape as
+        # a legitimately absent field, which is exactly why the two need a
+        # SEPARATE predicate rather than being inferred from the parse output.
+        assert parse_gate_status("not json") == {}
+        assert parse_gate_status(None) == {}
+
+    def test_absent_owner_history_is_not_unreadable(self):
+        assert owner_history_is_unreadable(None) is False
+        assert owner_history_is_unreadable("") is False
+        assert owner_history_is_unreadable([]) is False
+
+    def test_malformed_owner_history_is_unreadable(self):
+        assert owner_history_is_unreadable("not json") is True
+        assert owner_history_is_unreadable('{"not": "a list"}') is True
+        assert owner_history_is_unreadable(7) is True
+        assert parse_owner_history("not json") == []
+
+
+class TestSignOffRefusesOnUnreadableState:
+    """RED on the old behaviour: an unreadable value used to fall through
+    `parse_gate_status`'s {} and be treated as a legitimately-absent (hence
+    pending) gate, so `sign_off` would rebuild a fresh map from the empty
+    parse and WRITE through it — discarding whatever sibling gate state the
+    unreadable value actually held. GREEN here: refuse before any write."""
+
+    @pytest.mark.asyncio
+    async def test_unreadable_gate_status_refuses_before_any_write(self, monkeypatch):
+        store = IssueGateStore("http://x", "daemon-bearer-tok")
+        monkeypatch.setattr(
+            "gate_waive._ns.agent_identity",
+            lambda agent, sub=None: _identity(agent, sub or f"{agent}@ateles-swarm"),
+        )
+        write = mock.AsyncMock()
+        monkeypatch.setattr("gate_waive._ns.signed_request", write)
+        # gate_status was PRESENT (Neotoma returned something) but it is not
+        # valid JSON — the "unreadable" case, distinct from a missing field.
+        bad_state = IssueGateState(
+            repo="o/r",
+            issue_number=795,
+            entity_id="ent_1",
+            gate_status={},  # what parse_gate_status folds the bad value to
+            owner_history=[],
+            gate_status_unreadable=True,
+        )
+        monkeypatch.setattr(store, "load", _LoadSequence([bad_state]))
+
+        outcome = await store.sign_off("o/r", 795, "arch", "waxwing", HEAD)
+
+        assert not outcome.ok
+        assert not outcome.verified
+        assert outcome.error == SIGN_OFF_UNREADABLE_STATE
+        write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unreadable_owner_history_refuses_before_any_write(self, monkeypatch):
+        store = IssueGateStore("http://x", "daemon-bearer-tok")
+        monkeypatch.setattr(
+            "gate_waive._ns.agent_identity",
+            lambda agent, sub=None: _identity(agent, sub or f"{agent}@ateles-swarm"),
+        )
+        write = mock.AsyncMock()
+        monkeypatch.setattr("gate_waive._ns.signed_request", write)
+        bad_state = IssueGateState(
+            repo="o/r",
+            issue_number=795,
+            entity_id="ent_1",
+            gate_status={"arch": "pending"},
+            owner_history=[],
+            owner_history_unreadable=True,
+        )
+        monkeypatch.setattr(store, "load", _LoadSequence([bad_state]))
+
+        outcome = await store.sign_off("o/r", 795, "arch", "waxwing", HEAD)
+
+        assert not outcome.ok
+        assert not outcome.verified
+        assert outcome.error == SIGN_OFF_UNREADABLE_STATE
+        write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_readable_state_is_unaffected(self, monkeypatch):
+        """Control: a genuinely readable (or genuinely absent) state is not
+        refused by this check — it proceeds to the normal precondition path."""
+        store = IssueGateStore("http://x", "daemon-bearer-tok")
+        monkeypatch.setattr(
+            "gate_waive._ns.agent_identity",
+            lambda agent, sub=None: _identity(agent, sub or f"{agent}@ateles-swarm"),
+        )
+        monkeypatch.setattr(
+            "gate_waive._ns.signed_request",
+            mock.AsyncMock(return_value=(200, {})),
+        )
+        monkeypatch.setattr(
+            store,
+            "load",
+            _LoadSequence(
+                [_state({"arch": "pending"}), _state({"arch": "signed_off"})]
+            ),
+        )
+        _mock_attributed_observations(monkeypatch, store, "waxwing@ateles-swarm")
+
+        outcome = await store.sign_off("o/r", 795, "arch", "waxwing", HEAD)
+
+        assert outcome.ok
+        assert outcome.error != SIGN_OFF_UNREADABLE_STATE
+
+
+# ── Attribution read-back: value landing is not attribution (Falco's ────────
+# CONFIRMED BLOCKING finding, ateles#795 / PR #1181) ─────────────────────────
+#
+# The pre-existing read-back (`TestReadBackAssertion` above) proves the VALUE
+# landed. It does NOT prove the reviewing lens was the one who wrote it — an
+# already-`signed_off` gate is, by design, re-signed rather than skipped
+# (`TestSafetyPreconditions::test_already_signed_off_still_performs_the_lens_signed_write`)
+# precisely because a value match proves nothing about who supplied it. These
+# tests exercise the OBSERVATION-level attribution check that closes that gap.
+
+
+class TestAttributionReadBack:
+    @pytest.mark.asyncio
+    async def test_missing_field_provenance_is_not_verified(self, monkeypatch):
+        """No `gate_status` entry in the entity's field-provenance map at all
+        — cannot even identify WHICH observation to check. Must fail closed,
+        never fall back to trusting the snapshot value."""
+        store = IssueGateStore("http://x", "daemon-bearer-tok")
+        monkeypatch.setattr(
+            "gate_waive._ns.agent_identity",
+            lambda agent, sub=None: _identity(agent, sub or f"{agent}@ateles-swarm"),
+        )
+        monkeypatch.setattr(
+            "gate_waive._ns.signed_request",
+            mock.AsyncMock(return_value=(200, {})),
+        )
+        monkeypatch.setattr(
+            store,
+            "load",
+            _LoadSequence(
+                [
+                    _state({"arch": "pending"}, field_provenance={}),
+                    _state({"arch": "signed_off"}, field_provenance={}),
+                ]
+            ),
+        )
+        observations_spy = mock.AsyncMock(return_value=[])
+        monkeypatch.setattr(store, "_observations", observations_spy)
+
+        outcome = await store.sign_off("o/r", 795, "arch", "waxwing", HEAD)
+
+        assert not outcome.ok
+        assert not outcome.verified
+        assert outcome.error == SIGN_OFF_VERIFY_FAILED
+        # No provenance entry means there is no observation id to look up —
+        # the read-back must not even attempt to fetch observations blindly.
+        observations_spy.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unattributed_observation_is_not_verified(self, monkeypatch):
+        """RED on the pre-fix shape: the value read back as `signed_off`, but
+        the observation that produced it is attributed to a DIFFERENT
+        agent_sub (e.g. the daemon's own shared bearer, or a different lens)
+        — the exact unattributed-write-passes-as-verified sink Falco's
+        review named. `verified` must be False even though `ok` was headed
+        toward True on the value check alone."""
+        store = IssueGateStore("http://x", "daemon-bearer-tok")
+        monkeypatch.setattr(
+            "gate_waive._ns.agent_identity",
+            lambda agent, sub=None: _identity(agent, sub or f"{agent}@ateles-swarm"),
+        )
+        monkeypatch.setattr(
+            "gate_waive._ns.signed_request",
+            mock.AsyncMock(return_value=(200, {})),
+        )
+        monkeypatch.setattr(
+            store,
+            "load",
+            _LoadSequence(
+                [_state({"arch": "pending"}), _state({"arch": "signed_off"})]
+            ),
+        )
+        # The observation exists and is fresh, but names a DIFFERENT
+        # agent_sub — e.g. an unattributed shared-bearer write that happened
+        # to land the same value.
+        monkeypatch.setattr(
+            store,
+            "_observations",
+            mock.AsyncMock(
+                return_value=[_attributed_observation("apis@ateles-swarm")]
+            ),
+        )
+
+        outcome = await store.sign_off("o/r", 795, "arch", "waxwing", HEAD)
+
+        assert not outcome.ok
+        assert not outcome.verified
+        assert outcome.error == SIGN_OFF_VERIFY_FAILED
+
+    @pytest.mark.asyncio
+    async def test_stale_observation_is_not_verified(self, monkeypatch):
+        """The named observation exists and IS attributed to the right lens,
+        but it is OLDER than this call's own pre-write read — a prior sign-off
+        this call happened to observe again, not proof of a NEW write. Must
+        not be verified: a re-sign is verified only by the NEW observation."""
+        store = IssueGateStore("http://x", "daemon-bearer-tok")
+        monkeypatch.setattr(
+            "gate_waive._ns.agent_identity",
+            lambda agent, sub=None: _identity(agent, sub or f"{agent}@ateles-swarm"),
+        )
+        monkeypatch.setattr(
+            "gate_waive._ns.signed_request",
+            mock.AsyncMock(return_value=(200, {})),
+        )
+        monkeypatch.setattr(
+            store,
+            "load",
+            # Already signed_off going in — this is the re-sign path.
+            _LoadSequence([_state({"arch": "signed_off"})]),
+        )
+        _mock_attributed_observations(
+            monkeypatch, store, "waxwing@ateles-swarm", observed_at=PAST
+        )
+
+        outcome = await store.sign_off("o/r", 795, "arch", "waxwing", HEAD)
+
+        assert not outcome.ok
+        assert not outcome.verified
+        assert outcome.error == SIGN_OFF_VERIFY_FAILED
+
+    @pytest.mark.asyncio
+    async def test_fresh_correctly_attributed_observation_is_verified(
+        self, monkeypatch
+    ):
+        """The positive control: a re-sign whose NEW observation is fresh
+        AND attributed to the reviewing lens IS verified."""
+        store = IssueGateStore("http://x", "daemon-bearer-tok")
+        monkeypatch.setattr(
+            "gate_waive._ns.agent_identity",
+            lambda agent, sub=None: _identity(agent, sub or f"{agent}@ateles-swarm"),
+        )
+        monkeypatch.setattr(
+            "gate_waive._ns.signed_request",
+            mock.AsyncMock(return_value=(200, {})),
+        )
+        monkeypatch.setattr(
+            store,
+            "load",
+            _LoadSequence([_state({"arch": "signed_off"})]),
+        )
+        _mock_attributed_observations(
+            monkeypatch, store, "waxwing@ateles-swarm", observed_at=NOW
+        )
+
+        outcome = await store.sign_off("o/r", 795, "arch", "waxwing", HEAD)
+
+        assert outcome.ok
+        assert outcome.verified
+        assert outcome.error == ""
+
+    @pytest.mark.asyncio
+    async def test_observations_fetch_failure_is_not_verified(self, monkeypatch):
+        """The observations read itself fails/returns nothing — UNKNOWN
+        attribution, not a pass. `_observations` degrades to [] on any
+        transport error (best-effort read), so this is indistinguishable
+        from "no observations" and must fail closed the same way."""
+        store = IssueGateStore("http://x", "daemon-bearer-tok")
+        monkeypatch.setattr(
+            "gate_waive._ns.agent_identity",
+            lambda agent, sub=None: _identity(agent, sub or f"{agent}@ateles-swarm"),
+        )
+        monkeypatch.setattr(
+            "gate_waive._ns.signed_request",
+            mock.AsyncMock(return_value=(200, {})),
+        )
+        monkeypatch.setattr(
+            store,
+            "load",
+            _LoadSequence(
+                [_state({"arch": "pending"}), _state({"arch": "signed_off"})]
+            ),
+        )
+        monkeypatch.setattr(
+            store, "_observations", mock.AsyncMock(return_value=[])
+        )
+
+        outcome = await store.sign_off("o/r", 795, "arch", "waxwing", HEAD)
+
+        assert not outcome.ok
+        assert not outcome.verified
+        assert outcome.error == SIGN_OFF_VERIFY_FAILED

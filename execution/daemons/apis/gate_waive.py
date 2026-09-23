@@ -73,6 +73,16 @@ def parse_gate_status(raw: object) -> dict[str, str]:
       * a real dict (``{"pm": "signed_off", ...}``),
       * a JSON-encoded string (schema inference typed the field as a string),
       * anything else / missing → ``{}``.
+
+    This function alone cannot distinguish "genuinely absent" from
+    "malformed/unreadable" — both degrade to ``{}`` here, which is correct
+    for `waive()` (an absent gate is simply unsigned and IS a legitimate
+    waive target) but WRONG for `sign_off`, which must refuse to write
+    through an unreadable map rather than silently treating it as empty
+    (Falco's CONFIRMED BLOCKING finding, ateles#795 / PR #1181; see
+    `gate_status_is_unreadable` below, which callers that need the
+    distinction call ALONGSIDE this one rather than this function changing
+    shape for one caller and not the other).
     """
     if isinstance(raw, dict):
         return {str(k): str(v) for k, v in raw.items()}
@@ -91,8 +101,47 @@ def parse_gate_status(raw: object) -> dict[str, str]:
     return {}
 
 
+def gate_status_is_unreadable(raw: object) -> bool:
+    """True when *raw* is PRESENT but could not be parsed as a gate map.
+
+    Distinct from "absent" (``raw`` is ``None`` or ``""``, or already the
+    empty dict ``{}``) — an absent gate_status is a real, legitimate state
+    (a freshly triaged issue that has not been extended with gates yet) that
+    `parse_gate_status` correctly folds to ``{}``. This function names the
+    OTHER case that folds to the exact same ``{}``: invalid JSON, a JSON
+    array/scalar instead of an object, or any other type `parse_gate_status`
+    cannot interpret. `sign_off` must treat unreadable as UNKNOWN and refuse
+    (principles §§5 and 7 — unknown stays distinct from a conclusion, and the
+    restrictive branch is the default for the field that carries the safety
+    meaning), never reconstruct a fresh map from the empty parse and write
+    through it, which would silently discard whatever sibling gate state the
+    unreadable value actually held.
+    """
+    if raw is None:
+        return False
+    if isinstance(raw, dict):
+        return False
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return False
+        try:
+            decoded = json.loads(text)
+        except (ValueError, TypeError):
+            return True
+        return not isinstance(decoded, dict)
+    # Any other type (list, int, bool, ...) was PRESENT but is not a map.
+    return True
+
+
 def parse_owner_history(raw: object) -> list[dict]:
-    """Normalize a stored ``owner_history`` into a list of dicts."""
+    """Normalize a stored ``owner_history`` into a list of dicts.
+
+    See `parse_gate_status`'s docstring: this folds "absent" and "unreadable"
+    to the same ``[]`` for the same reason, and `owner_history_is_unreadable`
+    below is the companion that tells the two apart for a caller (`sign_off`)
+    that must refuse on the latter.
+    """
     if isinstance(raw, list):
         return [entry for entry in raw if isinstance(entry, dict)]
     if isinstance(raw, str) and raw.strip():
@@ -103,6 +152,29 @@ def parse_owner_history(raw: object) -> list[dict]:
         if isinstance(decoded, list):
             return [entry for entry in decoded if isinstance(entry, dict)]
     return []
+
+
+def owner_history_is_unreadable(raw: object) -> bool:
+    """True when *raw* is PRESENT but could not be parsed as a history list.
+
+    Companion to `gate_status_is_unreadable` — see its docstring for why the
+    absent/unreadable distinction matters and why it is named here rather
+    than changing what `parse_owner_history` returns.
+    """
+    if raw is None:
+        return False
+    if isinstance(raw, list):
+        return False
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return False
+        try:
+            decoded = json.loads(text)
+        except (ValueError, TypeError):
+            return True
+        return not isinstance(decoded, list)
+    return True
 
 
 def gates_needing_waive(
@@ -279,6 +351,15 @@ SIGN_OFF_ENTITY_NOT_FOUND = "sign_off: no issue entity"
 SIGN_OFF_NO_HEAD = "sign_off: no head_sha supplied"
 SIGN_OFF_VERIFY_FAILED = "sign_off: write did not read back"
 SIGN_OFF_GATE_NOT_PENDING = "sign_off: gate not pending for this lens"
+# Falco's CONFIRMED BLOCKING finding, ateles#795 / PR #1181: the stored
+# gate_status or owner_history was PRESENT but unparseable (invalid JSON, or
+# decoded to something other than the expected map/list shape) — distinct
+# from a legitimately absent field, which `parse_gate_status`/
+# `parse_owner_history` already fold to {}/[] and `sign_off` is happy to
+# treat as pending. An unreadable value is UNKNOWN, not empty: writing a
+# freshly reconstructed map through it would silently discard whatever
+# sibling gate state it actually held.
+SIGN_OFF_UNREADABLE_STATE = "sign_off: gate_status or owner_history unreadable"
 
 # Gate states some OTHER authority already set, which `sign_off` must treat as
 # a true no-op (no write attempted at all) rather than something to (re-)sign:
@@ -347,6 +428,23 @@ class IssueGateState:
     # True when the stored gate_status was a JSON string (not a dict), so the
     # write-back preserves the stored representation.
     gate_status_was_string: bool = False
+    # True when the RAW stored value for gate_status / owner_history was
+    # PRESENT but could not be parsed (invalid JSON, wrong type) — distinct
+    # from a legitimately absent field, which parses to {} / [] cleanly.
+    # `sign_off` refuses to write when either is True (Falco's CONFIRMED
+    # BLOCKING finding, ateles#795 / PR #1181): a caller must never rebuild a
+    # fresh map from an empty parse of an unreadable value and write through
+    # it, which would silently discard whatever sibling gate state that
+    # value actually held.
+    gate_status_unreadable: bool = False
+    owner_history_unreadable: bool = False
+    # Per-field REDUCER provenance ({field_name: observation_id}), read
+    # straight off the snapshot the same way `agent_loader.py`'s
+    # `_parse`/`lib.daemon_runtime.gating.read_authenticated_checkpoint_*`
+    # already do. This is what lets `sign_off`'s read-back name the EXACT
+    # observation `gate_status` came from, rather than trusting the mutable
+    # snapshot value alone (Falco's CONFIRMED BLOCKING attribution finding).
+    field_provenance: dict[str, str] = field(default_factory=dict)
 
     @property
     def found(self) -> bool:
@@ -431,6 +529,56 @@ class IssueGateStore:
         except Exception as exc:  # noqa: BLE001 — never crash the pipeline
             log.error("[apis.gate_waive] %s failed: %s", path, exc)
             return None
+
+    async def _observations(self, entity_id: str, *, limit: int = 100) -> list[dict]:
+        """Read-only fetch of an entity's observations, newest first.
+
+        Mirrors `lib.daemon_runtime.gating._fetch_entity_observations` — the
+        SAME read-only endpoint (`GET /entities/{id}/observations`) that
+        module already uses to resolve per-field provenance and attribution
+        for checkpoint approvals (`read_authenticated_checkpoint_resolution`).
+        Reused here rather than re-implemented (principles §§6 and 9) because
+        `sign_off`'s attribution read-back (Falco's CONFIRMED BLOCKING
+        finding, ateles#795 / PR #1181) needs exactly the same shape: an
+        observation's own `provenance.agent_sub`, not the mutable entity
+        snapshot the `correct` reducer produces. `gate_waive.py` cannot
+        import that private helper directly (it takes no base_url/token —
+        it reads its own module-level `NEOTOMA_BASE_URL`/
+        `NEOTOMA_BEARER_TOKEN` globals, which would silently point this
+        lens-signed store at the DAEMON's own config instead of the base_url
+        this store was constructed with), so the same GET is issued here
+        under this store's own `base_url`/`token`.
+
+        Best-effort: any transport/parse failure returns ``[]``, which the
+        caller treats as UNKNOWN (unattributed), never as "no observations
+        exist" being evidence of anything — the caller decides what an empty
+        result means, this method only reports what it could read.
+        """
+        if not self.token:
+            log.warning(
+                "[apis.gate_waive] NEOTOMA_BEARER_TOKEN unset — observations "
+                "read skipped for %s",
+                entity_id,
+            )
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    f"{self.base_url}/entities/{entity_id}/observations",
+                    headers=self._headers(),
+                    params={"limit": limit},
+                )
+                resp.raise_for_status()
+                data = resp.json() if resp.content else {}
+                observations = data.get("observations") if isinstance(data, dict) else None
+                return observations if isinstance(observations, list) else []
+        except Exception as exc:  # noqa: BLE001 — never crash the pipeline
+            log.warning(
+                "[apis.gate_waive] could not fetch observations for %s: %s",
+                entity_id,
+                exc,
+            )
+            return []
 
     @staticmethod
     def _matches(snap: dict, repo: str, issue_number: int) -> bool:
@@ -521,10 +669,18 @@ class IssueGateStore:
                 entity.get("entity_id") or entity.get("id") or snap.get("entity_id") or ""
             )
             raw_gates = snap.get("gate_status")
+            raw_history = snap.get("owner_history")
             state.gate_status_was_string = isinstance(raw_gates, str)
             state.gate_status = parse_gate_status(raw_gates)
-            state.owner_history = parse_owner_history(snap.get("owner_history"))
+            state.owner_history = parse_owner_history(raw_history)
+            state.gate_status_unreadable = gate_status_is_unreadable(raw_gates)
+            state.owner_history_unreadable = owner_history_is_unreadable(raw_history)
             state.current_owner = str(snap.get("current_owner") or "")
+            raw_provenance = snap.get("provenance")
+            if isinstance(raw_provenance, dict):
+                state.field_provenance = {
+                    str(k): str(v) for k, v in raw_provenance.items() if v
+                }
             break
         return state
 
@@ -796,6 +952,30 @@ class IssueGateStore:
             )
             return outcome
 
+        if state.gate_status_unreadable or state.owner_history_unreadable:
+            # Falco's CONFIRMED BLOCKING finding, ateles#795 / PR #1181: a
+            # PRESENT-but-unparseable gate_status/owner_history is UNKNOWN,
+            # not empty. `parse_gate_status`/`parse_owner_history` already
+            # folded it to {}/[] above (the shape every other branch below
+            # reads), so — unlike a genuinely absent field — writing through
+            # that empty reconstruction here would silently discard whatever
+            # sibling gate state the unreadable value actually held. Refuse
+            # before any write is attempted, exactly like the no-signing-key
+            # precondition above.
+            outcome.error = SIGN_OFF_UNREADABLE_STATE
+            log.error(
+                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: %s "
+                "(gate_status_unreadable=%s, owner_history_unreadable=%s)",
+                repo,
+                issue_number,
+                gate,
+                lens_agent,
+                SIGN_OFF_UNREADABLE_STATE,
+                state.gate_status_unreadable,
+                state.owner_history_unreadable,
+            )
+            return outcome
+
         current = (state.gate_status.get(gate) or "").strip().lower()
         if current in _SIGN_OFF_OTHER_AUTHORITY_STATES:
             # A gate some OTHER authority already cleared (operator `waive`,
@@ -970,6 +1150,84 @@ class IssueGateStore:
                 reread.current_owner,
                 next_owner,
             )
+            return outcome
+
+        # Falco's CONFIRMED BLOCKING attribution finding, ateles#795 / PR
+        # #1181: the two checks above prove the VALUE landed, not WHO wrote
+        # it — an already-`signed_off` gate is, by this method's own design,
+        # re-signed rather than skipped (see the docstring's "ALWAYS
+        # RE-SIGNS" note) precisely because a value match proves nothing
+        # about attribution. So the terminal proof here is the immutable
+        # observation `gate_status`'s reducer provenance now names: it must
+        # exist, must be NEWER than this call's own pre-write read (`now`,
+        # captured before any write was attempted), and must carry THIS
+        # lens's own `agent_sub` (`lens_sub`) — never the daemon's. Mirrors
+        # `lib.daemon_runtime.gating.read_authenticated_checkpoint_resolution`,
+        # the existing pattern for exactly this shape of proof (principles
+        # §§6 and 9): resolve the observation id from per-field provenance,
+        # fetch it, and read `provenance.agent_sub` off THAT observation —
+        # never off the mutable snapshot. Missing, unreadable, stale, or
+        # mismatched attribution means `verified=False` (fail closed, per
+        # principles §§5 and 7), even though `outcome.ok` is already True
+        # for the value having landed.
+        observation_id = reread.field_provenance.get("gate_status", "")
+        attributed = False
+        if observation_id:
+            observations = await self._observations(reread.entity_id)
+            observation = next(
+                (o for o in observations if isinstance(o, dict) and o.get("id") == observation_id),
+                None,
+            )
+            if isinstance(observation, dict):
+                obs_provenance = observation.get("provenance")
+                observed_at = str(
+                    observation.get("created_at")
+                    or observation.get("observed_at")
+                    or observation.get("timestamp")
+                    or ""
+                )
+                fresh = bool(observed_at) and observed_at >= now
+                if (
+                    isinstance(obs_provenance, dict)
+                    and str(obs_provenance.get("agent_sub") or "").strip() == lens_sub
+                    and fresh
+                ):
+                    attributed = True
+                else:
+                    log.error(
+                        "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: "
+                        "observation %s attribution did not verify "
+                        "(agent_sub=%r, observed_at=%r, fresh=%s)",
+                        repo,
+                        issue_number,
+                        gate,
+                        lens_agent,
+                        observation_id,
+                        obs_provenance.get("agent_sub") if isinstance(obs_provenance, dict) else None,
+                        observed_at,
+                        fresh,
+                    )
+        else:
+            log.error(
+                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s: no "
+                "field-provenance entry for gate_status on read-back — "
+                "cannot attribute the write to %s",
+                repo,
+                issue_number,
+                gate,
+                lens_agent,
+                lens_sub,
+            )
+
+        if not attributed:
+            # Fail closed (principles §§5, 7): the VALUE landed, but this
+            # call cannot prove IT was the one that put it there, so it must
+            # not report success. `ok=False` routes this through the same
+            # `failed_sign_offs` escalation path as any other sign_off
+            # failure — never a silent partial success.
+            outcome.ok = False
+            outcome.verified = False
+            outcome.error = SIGN_OFF_VERIFY_FAILED
             return outcome
 
         outcome.ok = True

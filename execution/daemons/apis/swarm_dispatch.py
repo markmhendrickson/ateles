@@ -820,6 +820,39 @@ def review_blocks_merge(verdict: str | None, body: str | None = None) -> bool:
     return body_has_blocking_findings(body) or not review_verdict_is_clear(verdict)
 
 
+def sign_off_is_warranted(stdout: str | None) -> bool:
+    """True only when *stdout* carries an explicit, clear verdict token.
+
+    The single predicate both dispatcher-side `sign_off` call sites must use
+    (Falco's CONFIRMED BLOCKING finding, ateles#795 / PR #1181): each used to
+    branch on `result.ok and not body_has_blocking_findings(result.stdout)`
+    alone, which never inspects `stdout` for a verdict at all. `result.ok`
+    only means the agent process exited zero; `body_has_blocking_findings`
+    returns `False` for an EMPTY string. Together those two conditions treat
+    a garbled, empty, or unparseable-but-successful run — and a `**BLOCKED**`
+    or `**REQUEST_CHANGES**` verdict with no `[BLOCKING]`-marked finding
+    line — as a clean sign-off-ready verdict, which contradicts
+    `docs/foundation/principles.md#5-fail-closed-on-the-field-that-carries-the-safety-meaning`
+    (absent/unrecognized must resolve to the restrictive branch) and its
+    §7 unknown-stays-distinct sibling.
+
+    Deliberately the SAME predicate as `review_blocks_merge`, inverted, rather
+    than a parallel one (principles §§6 and 9): `not
+    review_blocks_merge(parse_review_verdict(stdout), stdout)`. That predicate
+    already treats a `[BLOCKING]` body marker as an extra veto that can only
+    make a verdict MORE blocking, never less — `body_has_blocking_findings`
+    is passed the SAME `stdout` as both the verdict source and the body
+    cross-check, exactly as `_emit_formal_review` already does for the
+    Vanellus aggregation. `SIGNED_OFF` and `APPROVE` are the only clear
+    tokens the gate-owning contract instructs
+    (`skill_runner._VERDICT_VOCABULARY_LINES`); `BLOCKED`,
+    `REQUEST_CHANGES`, `COMMENT`-with-a-`[BLOCKING]`-line, and no token at
+    all (`None`) are all NOT warranted.
+    """
+    verdict = parse_review_verdict(stdout)
+    return not review_blocks_merge(verdict, stdout)
+
+
 # GitHub's Reviews API accepts exactly these three events.
 _REVIEW_EVENT_APPROVE = "APPROVE"
 _REVIEW_EVENT_REQUEST_CHANGES = "REQUEST_CHANGES"
@@ -4034,6 +4067,20 @@ class SwarmDispatcher:
             )
             # Continue: the additive spec is still useful even if gate init failed.
 
+        # ateles#795, Falco's CONFIRMED BLOCKING finding on PR #1181: the gate
+        # pipeline's own pending-gate signal, reused rather than re-derived
+        # (principles §§6, 9) — the SAME `parse_pending_gates(lanius.stdout)`
+        # the PR-panel loop already uses to decide `owns_pending_gate` for
+        # every lens it seats (`_handle_pr`'s `pending_gates =
+        # parse_pending_gates(lanius.stdout)`). Needed here because ux/arch
+        # are conditional sections in THIS pipeline (`_selected_sections`) and
+        # — unlike pm, which this pipeline always clears via `sign_off` below
+        # — may be seated while their gate is genuinely still pending, in
+        # which case their generated skill (accipiter/waxwing SKILL.md) still
+        # instructs `correct(gate_status...)` and MUST carry the deny even
+        # though this pipeline's own `sign_off` call is scoped to pm alone.
+        pending_gates = parse_pending_gates(lanius.stdout)
+
         # 2. Ordered additive spec sequence. Each selected lens agent runs in
         #    CANONICAL ORDER and contributes exactly ONE section, reading the
         #    accumulated spec-so-far and adding/replacing only its own section.
@@ -4064,16 +4111,24 @@ class SwarmDispatcher:
                 ),
                 include_github_contract=True,
                 notifier=self.notifier,
-                # ateles#795, Falco's REQUEST_CHANGES on PR #1181: this call
-                # site was found NOT passing `owns_pending_gate` at all, so
-                # Pavo's `pm` turn here ran with the gate-owner tool-deny
-                # never applied even though it is exactly the run whose clean
-                # verdict `sign_off` below records (`section.lens == "pm"` is
-                # the SAME predicate that call already gates on). `ux`/`arch`
-                # sections in this pipeline never reach `sign_off` (they
+                # ateles#795, Falco's REQUEST_CHANGES on PR #1181 (amended
+                # further per the CONFIRMED BLOCKING finding on this SAME
+                # PR's later round): pm ALWAYS carries the deny — it is the
+                # one section this pipeline unconditionally clears via
+                # `sign_off` below. ux/arch never reach `sign_off` HERE (they
                 # clear later via the PR panel's own `run_skill` call, which
-                # already threads this correctly) so they stay False here.
-                owns_pending_gate=section.lens == "pm",
+                # already threads `owns_pending_gate=lens.lens in
+                # pending_gates`) — but a conditional section CAN be seated
+                # here while its gate is still genuinely pending (Lanius's
+                # `GATE_PENDING:` report), and its generated skill
+                # (accipiter/waxwing SKILL.md) still instructs
+                # `correct(gate_status...)` regardless of which pipeline
+                # seated it. So the deny must apply whenever THIS section's
+                # lens owns a gate that is pending, not only when this
+                # pipeline is the one that will sign it off.
+                owns_pending_gate=(
+                    section.lens == "pm" or section.lens in pending_gates
+                ),
             )
             section_text = self._extract_section_text(result.stdout, section)
             # Persist ADDITIVELY: correct only this section's field. Even when
@@ -4102,16 +4157,22 @@ class SwarmDispatcher:
             # gate the additive-spec pipeline itself clears (`pm` — ux/arch
             # clear later via that same panel loop once a PR exists to
             # review). Only when this section OWNS a gate (`section.lens`)
-            # and posted a CLEAN verdict this turn (no `[BLOCKING]` finding
-            # in its stdout) — a blocking finding leaves the gate pending
-            # exactly as before. A failed sign_off does not fail the
-            # pipeline: the review itself succeeded, so this is surfaced,
-            # never swallowed.
+            # and `sign_off_is_warranted` finds an explicit CLEAR verdict
+            # token in its stdout (Falco's CONFIRMED BLOCKING finding, PR
+            # #1181: `result.ok` alone says only that the process exited
+            # zero, and `body_has_blocking_findings("")` is False, so the
+            # old `result.ok and not body_has_blocking_findings(...)` check
+            # treated an empty or unparseable-but-successful run — and a
+            # `**BLOCKED**`/`**REQUEST_CHANGES**` verdict with no
+            # `[BLOCKING]`-marked line — as clean). A failed sign_off does
+            # not fail the pipeline: the review itself succeeded, so this is
+            # surfaced, never swallowed.
             if section.lens == "pm" and result.ok:
-                if body_has_blocking_findings(result.stdout):
+                if not sign_off_is_warranted(result.stdout):
                     log.info(
-                        f"[{DAEMON_NAME}] {ref}: pm verdict has blocking "
-                        "findings — leaving gate pending, no sign_off "
+                        f"[{DAEMON_NAME}] {ref}: pm verdict is not an "
+                        "explicit clear (blocked/unparseable/blocking "
+                        "finding) — leaving gate pending, no sign_off "
                         "attempted"
                     )
                 else:
@@ -4900,18 +4961,22 @@ class SwarmDispatcher:
                 # ateles#795 amended ADR: the dispatcher — not the lens's own
                 # MCP session — makes the system-of-record gate write, SIGNED
                 # as the lens. Only for a lens that (a) owns a pending gate and
-                # (b) posted a CLEAN verdict this round (no [BLOCKING] finding
-                # — a blocking finding must leave the gate pending exactly as
-                # before). A failed sign_off does not fail the panel: the
-                # review itself succeeded, and the gate simply stays pending
-                # for the next round, which is the pre-existing degraded state
-                # (never a NEW failure mode) — but it IS surfaced, never
-                # swallowed silently.
+                # (b) `sign_off_is_warranted` finds an explicit CLEAR verdict
+                # token this round (Falco's CONFIRMED BLOCKING finding, PR
+                # #1181: the old `body_has_blocking_findings(result.stdout)`
+                # check alone treats an empty or unparseable stdout, or a
+                # `**BLOCKED**`/`**REQUEST_CHANGES**` verdict carrying no
+                # `[BLOCKING]`-marked line, as clean). A failed sign_off does
+                # not fail the panel: the review itself succeeded, and the
+                # gate simply stays pending for the next round, which is the
+                # pre-existing degraded state (never a NEW failure mode) — but
+                # it IS surfaced, never swallowed silently.
                 if parent and lens.gate and lens.lens in pending_gates:
-                    if body_has_blocking_findings(result.stdout):
+                    if not sign_off_is_warranted(result.stdout):
                         log.info(
-                            f"[{DAEMON_NAME}] {ref}: {lens.lens} verdict has "
-                            "blocking findings — leaving gate pending, no "
+                            f"[{DAEMON_NAME}] {ref}: {lens.lens} verdict is "
+                            "not an explicit clear (blocked/unparseable/"
+                            "blocking finding) — leaving gate pending, no "
                             "sign_off attempted"
                         )
                     else:

@@ -7023,6 +7023,8 @@ def test_pm_clean_verdict_triggers_dispatcher_sign_off(monkeypatch):
         if skill == "pavo":
             return SkillResult(
                 skill, True, 0,
+                "**🤖 Pavo — Ateles swarm, pm gate owner**\n"
+                "**SIGNED_OFF**\n\n"
                 "<<<SPEC_SECTION>>>**Scope:** pm section with enough substance "
                 "to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>\n"
                 "pm gate passes — intent, acceptance criteria, and scope are "
@@ -7074,9 +7076,15 @@ def test_pm_section_run_skill_call_carries_owns_pending_gate(monkeypatch):
     "claude"` refusal, and its `--disallowed-tools` append on claude) — so
     Pavo's `pm` turn here ran with the deny NEVER applied even though it is
     the same run whose clean verdict `sign_off` immediately below records.
-    `ux`/`arch` sections in THIS pipeline never reach `sign_off` (they clear
-    later via the PR panel, which already threads this correctly), so they
-    must stay False here — this is scoped to `pm` exactly.
+    `pm` always carries the deny regardless of Lanius's pending-gate report
+    (this pipeline unconditionally clears it via `sign_off`). This fixture
+    selects NO conditional sections at all
+    (`select_agents=lambda *a, **kw: []`), so ux/arch never run here and this
+    test says nothing about their predicate — see
+    `test_ux_and_arch_issue_spec_runs_carry_the_gate_owner_deny` (Falco's
+    CONFIRMED BLOCKING finding on this same PR's later round) for the case
+    where a conditional section IS seated while its own gate is pending: it
+    must ALSO carry the deny, even though it never reaches `sign_off` here.
     """
     seen_kwargs: dict[str, dict] = {}
 
@@ -7163,6 +7171,141 @@ def test_pm_blocking_verdict_does_not_call_sign_off(monkeypatch):
     assert calls == []
 
 
+def test_sign_off_is_warranted_requires_explicit_clear_token():
+    """Falco's CONFIRMED BLOCKING finding, ateles#795 / PR #1181: the two
+    dispatcher-side sign_off call sites used to branch on
+    `result.ok and not body_has_blocking_findings(result.stdout)` alone,
+    which never actually looks for a verdict token. `body_has_blocking_findings`
+    returns False for an EMPTY string, so an empty or garbled-but-successful
+    run, or a `**BLOCKED**`/`**REQUEST_CHANGES**` verdict with no
+    `[BLOCKING]`-marked finding line, all read as "clean" under the old
+    check. `sign_off_is_warranted` must reject every one of these — RED on
+    the old `result.ok and not body_has_blocking_findings(...)` predicate,
+    GREEN on this one."""
+    from swarm_dispatch import sign_off_is_warranted
+
+    # Unparseable / empty stdout: no verdict token at all.
+    assert sign_off_is_warranted("") is False
+    assert sign_off_is_warranted(None) is False
+    assert sign_off_is_warranted("garbled output, no token, no marker") is False
+
+    # An explicit non-clear token, even with no [BLOCKING] line in the body.
+    assert sign_off_is_warranted("**BLOCKED**\nmissing information") is False
+    assert sign_off_is_warranted("**REQUEST_CHANGES**\nplease fix X") is False
+
+    # A [BLOCKING] finding under a nominally-clear token still refuses
+    # (the body cross-check is an EXTRA veto, never relaxed by the token).
+    assert (
+        sign_off_is_warranted("**APPROVE**\n[BLOCKING] scope: actually missing")
+        is False
+    )
+
+    # The only warranted shapes: an explicit clear token, clean body.
+    assert sign_off_is_warranted("**SIGNED_OFF**\nno concerns") is True
+    assert sign_off_is_warranted("**APPROVE**\nlgtm") is True
+    assert sign_off_is_warranted("**COMMENT**\nobservation only") is True
+
+
+def test_pm_unparseable_verdict_does_not_call_sign_off(monkeypatch):
+    """The exact RED case Falco's finding names: `result.ok=True` with an
+    empty/unparseable stdout used to read as clean (no [BLOCKING] marker in
+    an empty string) and call sign_off. It must not."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "pavo":
+            # ok=True, but stdout carries no verdict token and no spec
+            # section fence either — the "garbled successful run" shape.
+            return SkillResult(skill, True, 0, "", "")
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, *a, **kw):
+            calls.append((a, kw))
+            raise AssertionError(
+                "sign_off must not be called on an unparseable verdict"
+            )
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert calls == []
+
+
+def test_ux_and_arch_issue_spec_runs_carry_the_gate_owner_deny(monkeypatch):
+    """Falco's CONFIRMED BLOCKING finding, ateles#795 / PR #1181: the
+    issue-spec pipeline's `run_skill` call for a spec section previously set
+    `owns_pending_gate=section.lens == "pm"` — hardcoded to pm alone — so a
+    ux or arch section seated in THIS pipeline (a repo whose panel loop never
+    seats them, or one where they are pre-registered here) ran WITHOUT the
+    gate-owner tool-deny even though its generated skill (accipiter/waxwing
+    SKILL.md) still instructs `correct(gate_status...)`. Every lens that owns
+    a pending gate in this pipeline must carry the deny; ux/arch never reach
+    `sign_off` HERE (they clear later via the PR panel loop, which already
+    threads `owns_pending_gate=lens.lens in pending_gates` correctly), but
+    that is a reason they get no *sign_off call*, not a reason to seat them
+    without the deny while a gate is pending."""
+    seen_kwargs: dict[str, dict] = {}
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        seen_kwargs[skill] = kwargs
+        if skill == "lanius":
+            # Both ux and arch are reported as still-pending, which is the
+            # signal `owns_pending_gate` must key on for a conditional
+            # section (mirrors the PR panel's own `parse_pending_gates`
+            # usage).
+            return SkillResult(
+                skill, True, 0, "GATE_INHERITANCE: clear\nGATE_PENDING: ux,arch", ""
+            )
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    # ux (accipiter) and arch (waxwing) are the CONDITIONAL sections
+    # (`SpecSection.always=False` in issue_spec.py) — they only run when
+    # `select_expectation_agents` selects them for this issue. Force both in,
+    # the way `_pr_dispatcher_with_stubs`'s own `select_panel` override does.
+    _selected = [
+        Lens(agent="accipiter", lens="ux", gate="ux", checks="design"),
+        Lens(agent="waxwing", lens="arch", gate="arch", checks="security"),
+    ]
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: _selected
+    )
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert "accipiter" in seen_kwargs, "the ux section (accipiter) must have run"
+    assert "waxwing" in seen_kwargs, "the arch section (waxwing) must have run"
+    assert seen_kwargs["accipiter"]["owns_pending_gate"] is True, (
+        "ux/accipiter owns the ux gate in this pipeline and must carry the "
+        "gate-owner tool-deny — a generated skill that still instructs "
+        "correct(gate_status...) must not be seated without it"
+    )
+    assert seen_kwargs["waxwing"]["owns_pending_gate"] is True, (
+        "arch/waxwing owns the arch gate in this pipeline and must carry the "
+        "gate-owner tool-deny for the same reason"
+    )
+
+
 def test_pm_sign_off_failure_is_surfaced_not_swallowed(monkeypatch):
     """A clean verdict whose dispatcher-side sign_off FAILS must be surfaced
     (via `_surface_failed_sign_offs`), never silently left as a bare
@@ -7173,6 +7316,8 @@ def test_pm_sign_off_failure_is_surfaced_not_swallowed(monkeypatch):
         if skill == "pavo":
             return SkillResult(
                 skill, True, 0,
+                "**🤖 Pavo — Ateles swarm, pm gate owner**\n"
+                "**SIGNED_OFF**\n\n"
                 "<<<SPEC_SECTION>>>**Scope:** pm section with enough substance "
                 "to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>\n"
                 "pm gate passes.",
