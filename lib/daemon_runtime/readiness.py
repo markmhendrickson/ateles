@@ -29,6 +29,11 @@ from dataclasses import dataclass, field
 
 import httpx
 
+try:  # package import (production) and bare import (in-dir pytest) both work
+    from .neotoma_timeout import neotoma_timeout
+except ImportError:  # pragma: no cover
+    from neotoma_timeout import neotoma_timeout  # type: ignore
+
 log = logging.getLogger("daemon_runtime.readiness")
 
 NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com")
@@ -197,7 +202,7 @@ def write_assessment(task_id: str, assessment: ReadinessAssessment) -> str | Non
             f"{NEOTOMA_BASE_URL}/store",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             json=build_assessment_entity(task_id, assessment),
-            timeout=15,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         ents = resp.json().get("entities", [])
