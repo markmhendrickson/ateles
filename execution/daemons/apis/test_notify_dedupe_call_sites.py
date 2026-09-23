@@ -20,11 +20,13 @@ from execution.daemons.apis.test_swarm_dispatch import (
     _trigger,
 )
 
-# Daytime in Europe/Madrid → outside the 22:00–08:00 silence window.
+# Empty silence bounds → ValueError in _in_silence_window → never silent.
+# (A 22:00–08:00 window falsely claimed "daytime" and failed every CI run
+# during Madrid night — same pattern as lib/notify/test_notifier.NO_SILENCE.)
 _NEVER_SILENT = {
     "timezone": "Europe/Madrid",
-    "silence_start": "22:00",
-    "silence_end": "08:00",
+    "silence_start": "",
+    "silence_end": "",
 }
 
 
@@ -38,6 +40,9 @@ def _notifier(tmp_path, sent, *, deliver_kw=None):
 
     n = Notifier(rubric=_NEVER_SILENT)
     n._dedupe_path = tmp_path / "dedupe.json"
+    # Isolate the hold queue too — empty silence drains it on send, and the
+    # default /tmp path is shared with live daemons on the same host.
+    n._digest_path = tmp_path / "digest.json"
     n._deliver = _deliver
     return n
 
