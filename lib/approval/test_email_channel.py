@@ -9,6 +9,8 @@ explicit --to on replies, and fail-open behavior.
 from __future__ import annotations
 
 import subprocess
+from contextlib import contextmanager
+from typing import Any, Iterator
 from unittest.mock import patch
 
 from lib.approval import email_channel as ec
@@ -20,6 +22,26 @@ def _ok(stdout=""):
 
 def _fail(stderr="boom"):
     return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=stderr)
+
+
+@contextmanager
+def _mock_inbox(gws_json: Any = None, *, side_effect: Any = None) -> Iterator[None]:
+    """Patch the inbox path the way production reaches it.
+
+    ``read_replies_with_status`` early-returns ``gws_cli_missing`` when
+    ``_gws()`` is falsy, before any mocked ``gws_json``. Tests that only
+    patch ``gws_json`` therefore pass on a machine with ``gws`` on PATH and
+    fail in CI (ateles#1202). Always stub ``_gws`` present when exercising
+    triage/+read behavior.
+    """
+    kwargs: dict[str, Any] = {}
+    if side_effect is not None:
+        kwargs["side_effect"] = side_effect
+    else:
+        kwargs["return_value"] = gws_json
+    with patch.object(ec, "_gws", return_value="/bin/gws"), \
+         patch.object(ec, "gws_json", **kwargs):
+        yield
 
 
 class TestGate:
@@ -118,7 +140,7 @@ class TestReadReplies:
                 return {"body_text": "APPROVE"}
             return None
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             texts = ec.read_replies(["TOK"])
         # Only the RE: message's body is read; the outbound one is skipped.
         assert len(texts) == 1
@@ -135,13 +157,13 @@ class TestReadReplies:
                                       "from": "op@example.com"}]}
             return {"body_text": "SKIP"}
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             ec.read_replies(["TOK"], on_reply_message=lambda tok, mid: seen.append((tok, mid)))
         assert seen == [("TOK", "m1")]
 
     def test_triage_failure_is_fail_open_empty(self, monkeypatch):
         monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
-        with patch.object(ec, "gws_json", return_value=None):
+        with _mock_inbox(None):
             assert ec.read_replies(["TOK"]) == []
 
     def test_prefers_body_text_over_html(self, monkeypatch):
@@ -156,7 +178,7 @@ class TestReadReplies:
                                       "from": "op@example.com"}]}
             return {"body_text": "approve v0.20.0", "body_html": "<p>ignored</p>"}
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             texts = ec.read_replies(["TOK"])
         assert "approve v0.20.0" in texts[0]
         assert "ignored" not in texts[0]
@@ -176,7 +198,7 @@ class TestReadReplies:
                                       "from": "op@example.com"}]}
             return {"body_html": "<div dir=\"ltr\">approve v0.20.0</div>"}
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             texts = ec.read_replies(["TOK"])
         assert "approve v0.20.0" in texts[0]
         # The real end-to-end guarantee: this HTML-only reply registers as APPROVE.
@@ -286,7 +308,7 @@ class TestSenderVerification:
                 return self._triage(from_addr)
             return {"body_text": "APPROVE"}
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             return ec.read_replies(["TOK"])
 
     # ── The core requirement ────────────────────────────────────────────────
@@ -333,7 +355,7 @@ class TestSenderVerification:
                 return self._triage("op@example.com")
             return {"body_text": "APPROVE"}
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             assert ec.read_replies(["TOK"]) == []
 
     # ── Address-form handling (must not become a bypass) ────────────────────
@@ -373,7 +395,7 @@ class TestSenderVerification:
                 return self._triage("attacker@evil.example")
             return {"body_text": "APPROVE"}
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             ec.read_replies(["TOK"],
                             on_reply_message=lambda t, m: seen.append((t, m)))
         assert seen == []
@@ -392,7 +414,7 @@ class TestSenderVerification:
             reads.append(args)
             return {"body_text": "APPROVE"}
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             ec.read_replies(["TOK"])
         assert reads == []
 
@@ -414,7 +436,7 @@ class TestSenderVerification:
                 return self._triage("not-an-address")
             return {"body_text": "APPROVE"}
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             assert ec.read_replies(["TOK"]) == []
 
 
@@ -424,8 +446,7 @@ class TestReadRepliesWithStatus:
     def test_read_replies_with_status_ok_empty_texts(self, monkeypatch):
         monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
         monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
-        with patch.object(ec, "gws_json", return_value={"messages": []}), \
-             patch.object(ec, "_gws", return_value="/bin/gws"):
+        with _mock_inbox({"messages": []}):
             outcome = ec.read_replies_with_status(["TOK"])
         assert outcome.kind == "ok"
         assert outcome.texts == []
@@ -433,12 +454,22 @@ class TestReadRepliesWithStatus:
     def test_read_replies_with_status_transport_error_is_not_ok(self, monkeypatch):
         monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
         monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
-        with patch.object(ec, "gws_json", return_value=None), \
-             patch.object(ec, "_gws", return_value="/bin/gws"):
+        with _mock_inbox(None):
             outcome = ec.read_replies_with_status(["TOK"])
         assert outcome.kind == "transport_error"
         assert outcome.texts == []
         assert "operator@example.com" not in (outcome.detail or "")
+
+    def test_read_replies_with_status_gws_cli_missing(self, monkeypatch):
+        # Effect: missing gws is transport_error with a specific detail, not
+        # conflated with an empty inbox (the CI false-green ateles#1202 class).
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
+        with patch.object(ec, "_gws", return_value=None):
+            outcome = ec.read_replies_with_status(["TOK"])
+        assert outcome.kind == "transport_error"
+        assert outcome.detail == "gws_cli_missing"
+        assert outcome.texts == []
 
     def test_read_replies_with_status_disabled(self, monkeypatch):
         monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "0")
@@ -448,6 +479,5 @@ class TestReadRepliesWithStatus:
     def test_read_replies_wrapper_preserves_fail_open_list(self, monkeypatch):
         monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
         monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
-        with patch.object(ec, "gws_json", return_value=None), \
-             patch.object(ec, "_gws", return_value="/bin/gws"):
+        with _mock_inbox(None):
             assert ec.read_replies(["TOK"]) == []
