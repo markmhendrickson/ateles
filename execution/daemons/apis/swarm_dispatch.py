@@ -6343,6 +6343,16 @@ class SwarmDispatcher:
             # completion may be the suite that makes the aggregate conclusive.
             return False
 
+        # Condition resolved for this head: allow a later same-head CI
+        # exhaustion to re-notify (ateles#1165). Clear even when review is
+        # not yet clear — that early-return below would otherwise leave the
+        # key stuck until a new head.
+        green_head = _normalise_full_sha(current_head) or current_head
+        if green_head:
+            self.notifier.clear_dedupe(
+                f"ci-exhausted:{trigger.repository}#{pr_number}:{green_head}"
+            )
+
         # CI green: only advance the merge-ready signal if review is ALREADY
         # clear. An unreviewed PR going green is the panel path's job, not ours.
         if not await self._pr_review_is_clear(

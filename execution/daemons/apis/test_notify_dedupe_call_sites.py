@@ -131,16 +131,86 @@ def test_ci_exhausted_clear_on_green_allows_resend(monkeypatch, tmp_path):
             [{"name": "ci", "html_url": "https://github.com/runs/1"}]
         ),
     )
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_store_merge_checkpoint",
+        lambda self, *a, **k: _async_return(None),
+    )
 
     d = _dispatcher(tmp_path, sent)
     asyncio.run(d._route_ci_failure(_trigger(), 80))
     asyncio.run(d._route_ci_failure(_trigger(), 80))
     assert len(sent) == 1
 
-    d.notifier.clear_dedupe(
-        f"ci-exhausted:{_trigger().repository}#{_trigger().number}:{head}"
+    # Merge-readiness green path clears the exhaustion key.
+    asyncio.run(
+        d._gate_merge_readiness(
+            _trigger(), 80, panel=[], ci_state="green", reviewed_head=head
+        )
     )
     asyncio.run(d._route_ci_failure(_trigger(), 80))
+    assert len(sent) >= 2
+
+
+def test_ci_exhausted_clears_when_ci_status_green_even_if_review_uncleared(
+    monkeypatch, tmp_path
+):
+    """CI-status green must clear even when review is not yet clear."""
+    sent = []
+    head = "c" * 40
+
+    async def at_cap(self, trigger):
+        return 2
+
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", at_cap)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return(head)
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_failing_check_runs",
+        lambda self, t: _async_return(
+            [{"name": "ci", "html_url": "https://github.com/runs/1"}]
+        ),
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_required_ci_state",
+        lambda self, t: _async_return("green"),
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_pr_review_is_clear",
+        lambda self, *a, **k: _async_return(False),
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_pr_trigger_from_api",
+        lambda self, repo, pr: _trigger(head_sha=head),
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher, "_parent_issue_number", lambda self, *a, **k: 80
+    )
+
+    d = _dispatcher(tmp_path, sent)
+    asyncio.run(d._route_ci_failure(_trigger(head_sha=head), 80))
+    assert len(sent) == 1
+
+    pr = {
+        "number": 87,
+        "title": "t",
+        "body": "Closes #80.",
+        "user": {"login": "someone"},
+        "html_url": "https://github.com/owner/repo/pull/87",
+        "head": {"ref": "feature", "sha": head},
+        "base": {"ref": "main"},
+    }
+    asyncio.run(
+        d._handle_ci_status_for_current_head(
+            _trigger(kind="ci_status", head_sha=head), pr, head
+        )
+    )
+    asyncio.run(d._route_ci_failure(_trigger(head_sha=head), 80))
     assert len(sent) == 2
 
 
