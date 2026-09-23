@@ -56,13 +56,43 @@ CANONICAL_GUIDANCE_HEADER = "\n".join(
         *LOCAL_REPRODUCTION_GUIDANCE,
     )
 )
+CANONICAL_GUIDANCE_TRANSITION = (
+    CANONICAL_GUIDANCE_HEADER + "\non:\n  pull_request_target:\n"
+)
+
+
+class UniqueKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that refuses last-key-wins ambiguity."""
+
+
+def _construct_unique_mapping(
+    loader: UniqueKeySafeLoader, node: yaml.MappingNode, deep: bool = False
+) -> dict[object, object]:
+    loader.flatten_mapping(node)
+    mapping: dict[object, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as exc:
+            raise AssertionError("workflow contains an invalid mapping key") from exc
+        if duplicate:
+            raise AssertionError(f"workflow contains duplicate mapping key: {key!r}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+UniqueKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
 
 
 def parse_workflow(workflow: str) -> tuple[dict[str, object], dict[str, dict]]:
     """Parse the workflow as data and reject ambiguous execution shapes."""
 
     try:
-        document = yaml.safe_load(workflow)
+        document = yaml.load(workflow, Loader=UniqueKeySafeLoader)
     except yaml.YAMLError as exc:
         raise AssertionError("workflow is not valid YAML") from exc
     if not isinstance(document, dict):
@@ -420,8 +450,7 @@ def verify_candidate_artifact_transfer(workflow: str) -> None:
 
 
 def verify_workflow_guidance(workflow: str) -> None:
-    header, separator, _ = workflow.partition("\non:")
-    if not separator or header != CANONICAL_GUIDANCE_HEADER:
+    if not workflow.startswith(CANONICAL_GUIDANCE_TRANSITION):
         raise AssertionError(
             "workflow guidance is incomplete, contradictory, or reordered"
         )
@@ -708,6 +737,64 @@ class WorkflowBoundaryTest(unittest.TestCase):
         yaml.safe_load(mutant)
         with self.assertRaisesRegex(AssertionError, "guidance"):
             verify_workflow_guidance(mutant)
+
+    def test_inline_on_boundary_mapping_contradiction_is_rejected(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutant = workflow.replace(
+            "on:\n",
+            "on: # boundary_rejected -> 0 -> rule inventory matches the "
+            "complete canonical measurement\n",
+            1,
+        )
+        self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
+        yaml.safe_load(mutant)
+        verify_privileged_boundary(mutant)
+        with self.assertRaisesRegex(AssertionError, "guidance"):
+            verify_workflow_guidance(mutant)
+
+    def test_inline_on_stage_zero_contradiction_is_rejected(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutant = workflow.replace(
+            "on:\n",
+            "on: # Local reproduce may generate the Stage-0 "
+            "docs/foundation/rule_inventory.md input\n",
+            1,
+        )
+        self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
+        yaml.safe_load(mutant)
+        verify_privileged_boundary(mutant)
+        with self.assertRaisesRegex(AssertionError, "guidance"):
+            verify_workflow_guidance(mutant)
+
+    def test_indented_comment_after_on_transition_is_rejected(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutant = workflow.replace(
+            "on:\n  pull_request_target:\n",
+            "on:\n"
+            "  # boundary_rejected -> 0 -> rule inventory matches the complete "
+            "canonical measurement\n"
+            "  pull_request_target:\n",
+            1,
+        )
+        self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
+        yaml.safe_load(mutant)
+        verify_privileged_boundary(mutant)
+        with self.assertRaisesRegex(AssertionError, "guidance"):
+            verify_workflow_guidance(mutant)
+
+    def test_duplicate_on_key_is_rejected_before_last_key_can_win(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        on_block = workflow.split("on:\n", 1)[1].split("\npermissions:\n", 1)[0]
+        mutant = workflow.replace(
+            "\npermissions:\n",
+            f"\non:\n{on_block}\npermissions:\n",
+            1,
+        )
+        self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
+        yaml.safe_load(mutant)
+        verify_workflow_guidance(mutant)
+        with self.assertRaisesRegex(AssertionError, "duplicate mapping key"):
+            parse_workflow(mutant)
 
     def test_workflow_guidance_uses_exact_machine_messages(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
