@@ -172,25 +172,27 @@ def get_schema_declared_fields(
     """Fetch and cache a hosted entity type's declared field names.
 
     GET /schemas/<entity_type> is a read -- never a write -- and is fetched
-    at most once per entity_type per run (results cached in `cache`). A 200
-    means the type has a hosted schema; `schema_definition.fields` gives the
-    declared field names. A 404 means hosted has no schema at all for this
-    type (class-a data of that type can still be replayed -- there is just
-    nothing to check field names against, so every field is "unknown" in
-    the sense that nothing declares it, but that is expected and not an
-    UNKNOWN_FIELD store_warning risk distinct from any other field).
+    at most once per entity_type per run (results cached in `cache`). A
+    CONFIRMED 200 means the type has a hosted schema; `schema_definition.
+    fields` gives the declared field names. A CONFIRMED 404 means hosted has
+    no schema at all for this type (class-a data of that type can still be
+    replayed -- there is just nothing to check field names against, so every
+    field is "unknown" in the sense that nothing declares it, but that is
+    expected and not an UNKNOWN_FIELD store_warning risk distinct from any
+    other field). Raises HostedProbeAmbiguousError on a 5xx/401/403/timeout
+    that survives retrying -- NEVER silently treated as "no schema"
+    (neotoma#2483: that would corrupt every downstream decision this cache
+    feeds -- field stripping, UNKNOWN_FIELD prediction, merge_array
+    detection, schema auto-extension -- all keyed on has_schema/
+    declared_fields/merge_array_fields being a confirmed answer, not a guess
+    made because hosted was unreachable).
     """
     if entity_type in cache:
         return cache[entity_type]
-    status, body = http_request(
-        "GET",
-        base_url,
-        f"/schemas/{entity_type}",
-        token,
-        retries=3,
-        retry_backoff_seconds=2.0,
+    exists, _status, body = probe_status_tristate(
+        "GET", base_url, f"/schemas/{entity_type}", token, max_attempts=3, retry_backoff_seconds=2.0
     )
-    if status == 200 and isinstance(body, dict):
+    if exists and isinstance(body, dict):
         fields = body.get("schema_definition", {}).get("fields", {})
         declared = set(fields.keys()) if isinstance(fields, dict) else set()
         merge_policies = (
@@ -359,16 +361,97 @@ def http_request(
             time.sleep(retry_backoff_seconds)
 
 
-def entity_exists(entity_id: str, base_url: str, token: str) -> bool:
-    status, _ = http_request(
-        "GET",
-        base_url,
-        f"/entities/{entity_id}",
-        token,
-        retries=3,
-        retry_backoff_seconds=2.0,
+class HostedProbeAmbiguousError(RuntimeError):
+    """Raised when a read-only existence/identity probe against hosted got a
+    response that is neither a confirmed 200 (exists) nor a confirmed 404
+    (does not exist) after retrying -- e.g. a 5xx, a timeout, or a 401/403.
+
+    This is the fix for a real incident: hosted crash-looped (Fly exit 134,
+    neotoma#2483) and returned 502s during a run; every probe in this script
+    treated `status == 200` as the ONLY "exists" signal and anything else --
+    including that 502 -- as "missing", which would have made a replay CREATE
+    duplicate entities for issues that already existed on hosted and were
+    merely unreachable at that moment. A probe must never silently classify
+    "hosted is broken right now" as "this entity does not exist". Callers
+    catch this and abort the whole run with a clear error rather than
+    guessing either way.
+    """
+
+
+def probe_status_tristate(
+    method: str,
+    base_url: str,
+    path: str,
+    token: str,
+    body=None,
+    *,
+    max_attempts: int = 3,
+    retry_backoff_seconds: float = 2.0,
+) -> tuple[bool, int, object]:
+    """Tri-state existence/identity probe: (True, 200, resp_body) exists,
+    (False, 404, resp_body) confirmed missing, or raises
+    HostedProbeAmbiguousError after `max_attempts` attempts for every other
+    outcome (5xx, 401, 403, or a connection-level failure/timeout that
+    survived http_request's own connection-retry budget).
+
+    A 5xx/401/403/timeout is retried here (in addition to http_request's own
+    connection-level retry, which only covers DNS/timeout/connection-reset --
+    never a real HTTP status code, since retrying a request the server
+    already answered risks a duplicate side effect on a non-idempotent call).
+    This function is used only for read-only probes in this script (GET
+    existence checks and POST /retrieve_entity_by_identifier, itself a read),
+    so that concern does not apply here. Only 200 and 404 are ever treated as
+    confirmed outcomes; every other status, and every connection-level
+    exception that exhausts retries, raises rather than returning a boolean --
+    there is no silent "assume missing" path. Returning the response body on
+    both confirmed outcomes (not just 200) lets callers avoid a second round
+    trip to fetch what they just probed.
+    """
+    last_status = None
+    last_body = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            status, resp_body = http_request(
+                method, base_url, path, token, body, retries=1, retry_backoff_seconds=retry_backoff_seconds
+            )
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+            last_status, last_body = None, repr(e)
+        else:
+            if status == 200:
+                return True, status, resp_body
+            if status == 404:
+                return False, status, resp_body
+            last_status, last_body = status, resp_body
+        if attempt < max_attempts:
+            print(
+                f"  (ambiguous probe response on {method} {path}: "
+                f"status={last_status} -- retry {attempt}/{max_attempts} in "
+                f"{retry_backoff_seconds:.1f}s)",
+                file=sys.stderr,
+            )
+            time.sleep(retry_backoff_seconds)
+    raise HostedProbeAmbiguousError(
+        f"{method} {path}: got status={last_status!r} body={last_body!r} on every "
+        f"attempt (of {max_attempts}) -- never a confirmed 200 or 404. Aborting "
+        "rather than treating this as 'entity missing' (neotoma#2483: hosted has "
+        "crash-looped and returned 502s before; classifying that as 404 would "
+        "create duplicate entities)."
     )
-    return status == 200
+
+
+def entity_exists(entity_id: str, base_url: str, token: str) -> bool:
+    """True if hosted confirms the entity exists (200), False if hosted
+    confirms it does not (404). Raises HostedProbeAmbiguousError on any other
+    outcome (5xx, 401/403, timeout) after retrying -- NEVER silently
+    classifies an ambiguous/error response as "missing". Callers that need a
+    softer failure mode should catch HostedProbeAmbiguousError explicitly;
+    none in this script currently do, since an unresolvable probe should
+    abort the run (see module-level usage in main()/run_gate_restore()).
+    """
+    exists, _status, _body = probe_status_tristate(
+        "GET", base_url, f"/entities/{entity_id}", token, max_attempts=3, retry_backoff_seconds=2.0
+    )
+    return exists
 
 
 # --- merge_array presence via OBSERVATIONS, not the snapshot (neotoma#2341) -
@@ -402,17 +485,25 @@ def get_hosted_field_observations(
     (whatever type each observation stored under this field key; for an
     array-valued field this is normally a list-of-lists, one list per
     observation that touched the field). Paginates POST /list_observations
-    (limit/offset) until a short page ends it. Read-only. Returns [] on any
-    non-200/unparseable response for any single page (fail toward "found
-    nothing new", never toward silently fabricating presence) rather than
-    raising, since this is a presence check that gates whether a write
-    happens, not a correctness-critical read whose failure should halt the
-    whole run the way a write failure does elsewhere in this script.
+    (limit/offset) until a short page ends it. Read-only.
+
+    Raises HostedProbeAmbiguousError (via probe_status_tristate) if any page
+    gets a 5xx/401/403/timeout that survives retrying -- this function used
+    to return [] on ANY non-200 response, on the reasoning that "fail toward
+    found nothing new" was the safe direction for a presence check. That
+    reasoning was backwards and is the exact class of bug neotoma#2483
+    describes: "found nothing new" here means "hosted's observations contain
+    NONE of this field's local entries", which makes every local entry look
+    missing and sends the WHOLE local array as "new" -- during a hosted
+    outage (5xx) this would duplicate every already-present array entry
+    rather than skip the write, precisely the bug this presence check exists
+    to prevent. An ambiguous read must abort the run, not silently answer
+    "empty".
     """
     values: list = []
     offset = 0
     while True:
-        status, body = http_request(
+        exists, _status, body = probe_status_tristate(
             "POST",
             base_url,
             "/list_observations",
@@ -422,10 +513,14 @@ def get_hosted_field_observations(
                 "limit": LIST_OBSERVATIONS_PAGE_SIZE,
                 "offset": offset,
             },
-            retries=3,
+            max_attempts=3,
             retry_backoff_seconds=2.0,
         )
-        if status != 200 or not isinstance(body, dict):
+        # /list_observations has no 404 case for a valid entity_id (an empty
+        # result is a 200 with an empty `observations` list, not a 404) --
+        # but probe_status_tristate's 404 branch is handled the same way as
+        # "confirmed page ended" for uniformity, not treated as an error.
+        if not isinstance(body, dict):
             break
         page = body.get("observations")
         if not isinstance(page, list) or not page:
@@ -1736,9 +1831,15 @@ def canonical_identity_lookup(
 ) -> str | None:
     """Best-effort lookup of a hosted entity id by (repo, github_number) when
     a direct GET by local entity_id 404s. Tries POST /retrieve_entity_by_identifier
-    with the schema's declared composite identifier shape; returns None (not
-    an error) on any non-200 or unparseable response -- callers treat that
-    as "no canonical match found" and fall through to class-a create.
+    with the schema's declared composite identifier shape; returns None on a
+    CONFIRMED 200-with-no-match (an actual "no canonical entity exists"
+    answer from hosted) -- callers treat that as "no canonical match found"
+    and fall through to class-a create. Raises HostedProbeAmbiguousError
+    (never returns None) on a 5xx/401/403/timeout that survives retrying:
+    an ambiguous response here must not be read as "no match", since that
+    silently sends this run down the class-a CREATE path for an issue that
+    may already exist on hosted under this canonical identity (neotoma#2483 --
+    the same class of bug entity_exists/get_hosted_entity fixed).
 
     identifier format is `<entity_type>:<github_number>|<repo>`, matching the
     `issue` schema's declared canonical_name_fields composite (repo -> the
@@ -1764,16 +1865,19 @@ def canonical_identity_lookup(
         "entity_type": entity_type,
         "identifier": f"{entity_type}:{github_number}|{repo}",
     }
-    status, body = http_request(
-        "POST",
-        base_url,
-        "/retrieve_entity_by_identifier",
-        token,
-        payload,
-        retries=2,
-        retry_backoff_seconds=2.0,
+    # /retrieve_entity_by_identifier answers "no match" with a 200 carrying
+    # an empty `entities` list (per the docstring's confirmed live example),
+    # NOT a 404 -- so this probe's "confirmed" outcome for a genuine miss is
+    # the 200 branch, and probe_status_tristate's 404 branch is not expected
+    # to fire for this route in practice but is still handled the same way
+    # (body inspected, no match -> None) for uniformity/safety. A 5xx/401/403
+    # /timeout still raises via HostedProbeAmbiguousError rather than
+    # silently falling through to "no canonical match" -- see docstring.
+    _exists, _status, body = probe_status_tristate(
+        "POST", base_url, "/retrieve_entity_by_identifier", token, payload,
+        max_attempts=3, retry_backoff_seconds=2.0,
     )
-    if status == 200 and isinstance(body, dict):
+    if isinstance(body, dict):
         entities = body.get("entities")
         if isinstance(entities, list) and entities:
             eid = entities[0].get("id") or entities[0].get("entity_id")
@@ -1783,17 +1887,16 @@ def canonical_identity_lookup(
 
 
 def get_hosted_entity(entity_id: str, base_url: str, token: str) -> dict | None:
-    status, body = http_request(
-        "GET",
-        base_url,
-        f"/entities/{entity_id}",
-        token,
-        retries=3,
-        retry_backoff_seconds=2.0,
+    """Returns the entity dict on a confirmed 200, or None on a CONFIRMED 404
+    (entity genuinely does not exist). Raises HostedProbeAmbiguousError on
+    any other outcome (5xx, 401/403, timeout) after retrying -- callers must
+    not treat that the same as a 404-confirmed absence (neotoma#2483: a 502
+    during a hosted crash-loop is not evidence the entity is missing).
+    """
+    exists, _status, body = probe_status_tristate(
+        "GET", base_url, f"/entities/{entity_id}", token, max_attempts=3, retry_backoff_seconds=2.0
     )
-    if status == 200 and isinstance(body, dict):
-        return body
-    return None
+    return body if exists and isinstance(body, dict) else None
 
 
 def build_gate_restore_idempotency_key(entity_id: str, merged_payload: dict) -> str:

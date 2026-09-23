@@ -1553,16 +1553,25 @@ def test_get_hosted_field_observations_unions_across_pages(monkeypatch):
     assert values == [[entries[0]], [entries[1]], [entries[2]]]
 
 
-def test_get_hosted_field_observations_empty_on_non_200(monkeypatch):
+def test_get_hosted_field_observations_raises_on_ambiguous_500_never_returns_empty(
+    monkeypatch,
+):
+    """Regression test for the bug the coordinator flagged: this function used
+    to return [] on ANY non-200, which for a presence check means "found
+    nothing new" -- during a hosted outage that makes every local array entry
+    look missing and re-sends the WHOLE array, duplicating what's already
+    there. It must now raise HostedProbeAmbiguousError instead of silently
+    answering "empty" (neotoma#2483).
+    """
     import neotoma_local_fork_replay as _mod
 
     monkeypatch.setattr(
         _mod, "http_request", lambda *a, **k: (500, {"error": "boom"})
     )
-    values = get_hosted_field_observations(
-        "ent_x", "owner_history", "https://hosted.example", "tok"
-    )
-    assert values == []
+    with pytest.raises(_mod.HostedProbeAmbiguousError):
+        get_hosted_field_observations(
+            "ent_x", "owner_history", "https://hosted.example", "tok"
+        )
 
 
 def test_hosted_array_field_present_keys_unions_entries_from_every_observation(
@@ -1841,3 +1850,222 @@ def test_get_hosted_field_observations_uses_retries_not_silent_abandon(monkeypat
     # would abandon a transient failure instead of retrying it.
     assert calls[0][1] > 0
     assert calls[0][2] > 0
+
+
+# --- Tri-state existence probe (neotoma#2483) -------------------------------
+#
+# Hosted crash-looped (Fly exit 134) and returned 502s during a live run.
+# entity_exists() and every other probe in this script treated
+# `status == 200` as the ONLY "exists" signal and collapsed anything else,
+# including that 502, into "missing" -- which would make a replay CREATE a
+# duplicate entity for an issue that already existed and was merely
+# unreachable at that moment. The fix: a probe is tri-state. 200 -> exists,
+# 404 -> confirmed missing, anything else (5xx, timeout, 401/403, connection
+# error) -> retry with backoff up to 3 times, then ABORT (raise) rather than
+# ever returning "missing".
+
+from neotoma_local_fork_replay import (  # noqa: E402
+    HostedProbeAmbiguousError,
+    entity_exists,
+    probe_status_tristate,
+)
+
+
+def _fixed_status_responder(status, body):
+    def _fake(method, base_url, path, token, body_=None, **kwargs):
+        return status, body
+
+    return _fake
+
+
+def test_probe_status_tristate_200_returns_exists_true(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod, "http_request", _fixed_status_responder(200, {"id": "ent_x"}))
+    exists, status, body = probe_status_tristate(
+        "GET", "https://hosted.example", "/entities/ent_x", "tok", max_attempts=3
+    )
+    assert exists is True
+    assert status == 200
+    assert body == {"id": "ent_x"}
+
+
+def test_probe_status_tristate_404_returns_exists_false(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod, "http_request", _fixed_status_responder(404, {"error": "not found"}))
+    exists, status, body = probe_status_tristate(
+        "GET", "https://hosted.example", "/entities/ent_x", "tok", max_attempts=3
+    )
+    assert exists is False
+    assert status == 404
+
+
+def test_probe_status_tristate_502_raises_never_returns_false(monkeypatch):
+    """The specific regression case: a 502 (hosted crash-loop / Fly exit 134,
+    neotoma#2483) must abort, never be read as 'entity missing'.
+    """
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod, "http_request", _fixed_status_responder(502, {"error": "bad gateway"}))
+    with pytest.raises(HostedProbeAmbiguousError):
+        probe_status_tristate(
+            "GET", "https://hosted.example", "/entities/ent_x", "tok",
+            max_attempts=3, retry_backoff_seconds=0.001,
+        )
+
+
+def test_probe_status_tristate_timeout_raises_never_returns_false(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    def _raise_timeout(*a, **k):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(_mod, "http_request", _raise_timeout)
+    with pytest.raises(HostedProbeAmbiguousError):
+        probe_status_tristate(
+            "GET", "https://hosted.example", "/entities/ent_x", "tok",
+            max_attempts=3, retry_backoff_seconds=0.001,
+        )
+
+
+def test_probe_status_tristate_401_raises(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod, "http_request", _fixed_status_responder(401, {"error": "unauthorized"}))
+    with pytest.raises(HostedProbeAmbiguousError):
+        probe_status_tristate(
+            "GET", "https://hosted.example", "/entities/ent_x", "tok",
+            max_attempts=3, retry_backoff_seconds=0.001,
+        )
+
+
+def test_probe_status_tristate_retries_before_succeeding(monkeypatch):
+    """A transient 502 that clears on a later attempt must succeed, not abort
+    -- retry-then-succeed is the whole point of the retry budget.
+    """
+    import neotoma_local_fork_replay as _mod
+
+    calls = {"n": 0}
+
+    def _flaky(method, base_url, path, token, body=None, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return 502, {"error": "bad gateway"}
+        return 200, {"id": "ent_x"}
+
+    monkeypatch.setattr(_mod, "http_request", _flaky)
+    exists, status, body = probe_status_tristate(
+        "GET", "https://hosted.example", "/entities/ent_x", "tok",
+        max_attempts=3, retry_backoff_seconds=0.001,
+    )
+    assert exists is True
+    assert calls["n"] == 3
+
+
+def test_probe_status_tristate_retries_up_to_max_attempts_then_raises(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    calls = {"n": 0}
+
+    def _always_502(method, base_url, path, token, body=None, **kwargs):
+        calls["n"] += 1
+        return 502, {"error": "bad gateway"}
+
+    monkeypatch.setattr(_mod, "http_request", _always_502)
+    with pytest.raises(HostedProbeAmbiguousError):
+        probe_status_tristate(
+            "GET", "https://hosted.example", "/entities/ent_x", "tok",
+            max_attempts=3, retry_backoff_seconds=0.001,
+        )
+    assert calls["n"] == 3
+
+
+# --- entity_exists / get_hosted_entity now delegate to the tri-state probe --
+
+
+def test_entity_exists_true_on_confirmed_200(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod, "http_request", _fixed_status_responder(200, {"id": "ent_x"}))
+    assert entity_exists("ent_x", "https://hosted.example", "tok") is True
+
+
+def test_entity_exists_false_on_confirmed_404(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod, "http_request", _fixed_status_responder(404, {}))
+    assert entity_exists("ent_x", "https://hosted.example", "tok") is False
+
+
+def test_entity_exists_raises_on_502_never_returns_false(monkeypatch):
+    """The exact regression: a 502 during a hosted crash-loop must never be
+    classified as 'entity does not exist', because that drives class-a
+    replay to CREATE a duplicate of an entity that actually already exists.
+    """
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod, "http_request", _fixed_status_responder(502, {"error": "bad gateway"}))
+    with pytest.raises(HostedProbeAmbiguousError):
+        entity_exists("ent_x", "https://hosted.example", "tok")
+
+
+def test_entity_exists_raises_on_timeout_never_returns_false(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    def _raise_timeout(*a, **k):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(_mod, "http_request", _raise_timeout)
+    with pytest.raises(HostedProbeAmbiguousError):
+        entity_exists("ent_x", "https://hosted.example", "tok")
+
+
+def test_get_hosted_entity_returns_dict_on_200(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod, "http_request", _fixed_status_responder(200, {"id": "ent_x", "snapshot": {}}))
+    result = _mod.get_hosted_entity("ent_x", "https://hosted.example", "tok")
+    assert result == {"id": "ent_x", "snapshot": {}}
+
+
+def test_get_hosted_entity_returns_none_on_confirmed_404(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod, "http_request", _fixed_status_responder(404, {}))
+    result = _mod.get_hosted_entity("ent_x", "https://hosted.example", "tok")
+    assert result is None
+
+
+def test_get_hosted_entity_raises_on_502_never_returns_none(monkeypatch):
+    """None from get_hosted_entity means 'confirmed absent' throughout this
+    script (e.g. gate-restore's create-vs-merge branch). A 502 must not be
+    conflatable with that -- it must raise instead.
+    """
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod, "http_request", _fixed_status_responder(502, {"error": "bad gateway"}))
+    with pytest.raises(HostedProbeAmbiguousError):
+        _mod.get_hosted_entity("ent_x", "https://hosted.example", "tok")
+
+
+def test_get_schema_declared_fields_raises_on_502_never_silently_no_schema(monkeypatch):
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod, "http_request", _fixed_status_responder(502, {"error": "bad gateway"}))
+    with pytest.raises(HostedProbeAmbiguousError):
+        _mod.get_schema_declared_fields("issue", "https://hosted.example", "tok", {})
+
+
+def test_canonical_identity_lookup_raises_on_502_never_falls_through_to_none(monkeypatch):
+    """A 502 during canonical-identity lookup must not be read as 'no
+    canonical match' -- that would send the run down the class-a CREATE path
+    for an issue that may already exist under this identity.
+    """
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod, "http_request", _fixed_status_responder(502, {"error": "bad gateway"}))
+    with pytest.raises(HostedProbeAmbiguousError):
+        _mod.canonical_identity_lookup(
+            "issue", "markmhendrickson/ateles", 1172, "https://hosted.example", "tok"
+        )
