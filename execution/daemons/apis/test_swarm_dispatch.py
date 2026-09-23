@@ -6774,6 +6774,18 @@ def test_only_qa_lens_gets_a_worktree(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "cleanup_pr_worktree", fake_cleanup)
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
 
+    # dbe4791b added a live `_pr_head_sha` read before the panel loop
+    # (`review_head`), on top of the live `gate_status` reads this test
+    # already runs token-less (which correctly short-circuit to "unknown"
+    # with no token, per `IssueGateStore._post`). Unlike those,
+    # `_pr_head_sha_for` hits the real GitHub API with no local token
+    # short-circuit, so a token-less CI run depends on outbound network
+    # reachability rather than failing closed the same way. Stub it so the
+    # panel loop is reached deterministically regardless of network access.
+    monkeypatch.setattr(
+        SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40)
+    )
+
     # Force a panel that includes phoenicurus + at least one other lens.
     monkeypatch.setattr(
         swarm_dispatch,
