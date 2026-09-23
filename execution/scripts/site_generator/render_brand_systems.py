@@ -691,7 +691,7 @@ def validate_mark_concept_selection(data: dict) -> None:
                 raise_brand_error(
                     f"{prefix}.{asset_field}",
                     f"historical as candidate: {asset_path}",
-                    "Move under marks/historical/ and retired / non-candidate; use marks/concepts/",
+                    "use marks/concepts/ for candidates; keep historical retired/non-candidate",
                 )
             resolved = _repo_file(asset_path)
             if resolved is None:
@@ -761,7 +761,7 @@ def validate_mark_concept_selection(data: dict) -> None:
                 raise_brand_error(
                     f"visual_styles.logo_system.variants.{key}.source_asset",
                     f"historical as candidate: {source_asset}",
-                    "Move under marks/historical/ and retired / non-candidate",
+                    "use marks/concepts/ for candidates; keep historical retired/non-candidate",
                 )
 
     dims = (data.get("completeness") or {}).get("dimensions") or []
@@ -1222,8 +1222,9 @@ def check_local(schema: dict, contracts: dict[str, dict]) -> bool:
                 ok = False
             print(f"OK local validate {product}")
         except BrandSystemError as exc:
-            hint = getattr(exc, "hint", None) or str(exc)
-            print(f"FAIL {product}: {hint}")
+            # Print the full BrandSystemError message (field_path + reason + hint).
+            # Preferring .hint alone drops locating context on the offline --local path.
+            print(f"FAIL {product}: {exc}")
             ok = False
     return ok
 

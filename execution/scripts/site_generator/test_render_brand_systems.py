@@ -411,3 +411,28 @@ def test_local_check_cli_exits_nonzero_on_advancing_family(tmp_path, monkeypatch
     neotoma = json.loads((staging / "neotoma.json").read_text())
     assert renderer.check_local(schema, {"ateles": broken, "neotoma": neotoma}) is False
 
+
+def test_check_local_fail_prints_field_path_reason_and_hint(capsys, schema, contract):
+    """Offline --local FAIL must print the full BrandSystemError triple, not hint-only."""
+    broken = copy.deepcopy(contract)
+    broken["mark_concept_board"]["directions"][1]["memorability"] = ""
+
+    assert renderer.check_local(schema, {"ateles": broken}) is False
+    captured = capsys.readouterr().out
+    fail_lines = [line for line in captured.splitlines() if line.startswith("FAIL ateles:")]
+    assert fail_lines, f"expected FAIL ateles line in stdout, got: {captured!r}"
+    fail_line = fail_lines[0]
+    assert "mark_concept_board.directions" in fail_line
+    assert " — hint: " in fail_line
+    # Reconstruct what hint-only would have printed and assert we did not.
+    try:
+        renderer.validate_brand_system(broken, schema)
+    except renderer.BrandSystemError as exc:
+        hint_only = f"FAIL ateles: {exc.hint}"
+        assert fail_line != hint_only
+        assert exc.field_path and exc.reason and exc.hint
+        assert exc.field_path in fail_line
+        assert exc.hint in fail_line
+    else:
+        raise AssertionError("expected BrandSystemError from broken concept contract")
+

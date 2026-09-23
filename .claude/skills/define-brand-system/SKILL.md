@@ -93,7 +93,7 @@ Each direction must include: `concept_id`, `name`, `status` (`concept` | `select
 
 **Worked example — Neotoma:** `neotoma-layered-ledger` — stacked strata encoding prior versions; assets at `execution/scripts/site_generator/assets/neotoma/marks/concepts/neotoma-layered-ledger/{symbol,favicon}.svg`.
 
-**Error catalog (validator / `--local --check`):**
+**Error catalog (validator / `--local`):**
 
 | Failure | Hint |
 |---|---|
@@ -105,7 +105,7 @@ Each direction must include: `concept_id`, `name`, `status` (`concept` | `select
 | `status: approved` on concept | Use `concept` / `selected` / `rejected` |
 | Duplicate `concept_id` | Make each `concept_id` unique |
 | Missing / placeholder asset | Create filled SVG; replace TODO/empty/stroke-only |
-| Historical as candidate | Move under `marks/historical/` and `retired` / non-candidate |
+| Historical as candidate | use `marks/concepts/` for candidates; keep historical retired/non-candidate |
 | Rubric tautology | Cite concrete adjacent brands / ownable account |
 | Forbidden tropes uncovered | Cover full Ateles/Neotoma forbidden list |
 
