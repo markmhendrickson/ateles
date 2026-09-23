@@ -49,7 +49,7 @@ Environment variables:
   APIS_DISPATCH_TIMEOUT       Per-dispatch timeout in seconds (default: 1800)
   ATELES_REPO_PATH            Local path to ateles clone (default: ~/repos/ateles)
 
-Task dispatch kill switch (see this daemon's README):
+Task dispatch kill switch (see README.md in this directory):
   APIS_TASK_DISPATCH_ENABLED  "1" dispatches tasks from Neotoma `task`/
                               `checkpoint_brief` SSE events, as before. Default
                               "0" (OFF): task events are logged and skipped —
