@@ -1,0 +1,134 @@
+{
+  "product": "neotoma",
+  "design_tokens": "design_tokens/neotoma.json",
+  "_contract": "Four-page product preview. Positioning facts render from generated mirrors; product-only transitions and CTAs live under content/neotoma. The generator never reads Neotoma at build time.",
+  "pages": [
+    {
+      "slug": "index",
+      "path": "/",
+      "nav_label": "Overview",
+      "title": "Neotoma — the system of record for AI agents",
+      "meta_description": "Robust epistemological design for agents: durable facts, corrections, provenance, disagreement, and time.",
+      "template": "product_homepage",
+      "template_entity_id": "ent_a7132845b99eb265fc85749e",
+      "primary_cta": {"label": "Install", "href": "/install/", "scope": "site_wide_primary"},
+      "sections": [
+        {"id": "hero", "origin": "authored", "source": "docs/sites/neotoma/index/hero.json"},
+        {
+          "id": "failures",
+          "origin": "positioning_mirror",
+          "source": "docs/positioning/neotoma/chronic-acute-pain.md",
+          "projection": "content/neotoma/public/home-failures.json",
+          "source_entity_id": "ent_e5aff92972fdfbc4f508a7ba",
+          "presentation": "pain_cards",
+          "headings": ["Body"],
+          "eyebrow": "Why adjacent approaches break",
+          "heading": "Without a record, you stay responsible for continuity.",
+          "lede": "The concrete failures belong here as diagnosis, below the ambition—not as the whole product story.",
+          "source_label": "analysis · chronic / acute"
+        },
+        {"id": "mechanism", "origin": "authored", "source": "docs/sites/neotoma/index/mechanism.json"},
+        {
+          "id": "fit",
+          "origin": "positioning_mirror",
+          "source": "docs/positioning/neotoma/icp-durable-candidate-b.md",
+          "projection": "content/neotoma/public/fit.json",
+          "source_entity_id": "ent_825474455c25f9ea0783ebc6",
+          "headings": ["Archetype", "Core job to be done", "Messaging — bad (anti-profile)"],
+          "eyebrow": "Who it is for—and not for",
+          "heading": "For the operator who wants to own the data, not build the plumbing.",
+          "source_label": "target persona · durable ICP"
+        },
+        {"id": "next", "origin": "page_specific", "source": "content/neotoma/index/next.json"}
+      ]
+    },
+    {
+      "slug": "install",
+      "path": "/install/",
+      "nav_label": "Install",
+      "title": "Install Neotoma — prove one correction holds",
+      "meta_description": "A bounded path to evaluating Neotoma as the system of record for AI agents.",
+      "template": "activation_page",
+      "template_entity_id": "ent_a7132845b99eb265fc85749e",
+      "primary_cta": {"label": "GitHub", "href": "https://github.com/markmhendrickson/neotoma", "scope": "page_scoped"},
+      "sections": [
+        {"id": "start", "origin": "page_specific", "source": "content/neotoma/install/steps.json"},
+        {
+          "id": "entry-point",
+          "origin": "positioning_mirror",
+          "source": "docs/positioning/neotoma/icp-durable-candidate-b.md",
+          "projection": "content/neotoma/public/entry-point.json",
+          "source_entity_id": "ent_825474455c25f9ea0783ebc6",
+          "headings": ["Ideal entry point"],
+          "eyebrow": "The right first workflow",
+          "heading": "Start where state already crosses agents and sessions.",
+          "source_label": "target persona · entry point"
+        },
+        {"id": "repository", "origin": "page_specific", "source": "content/neotoma/install/cta.json"}
+      ]
+    },
+    {
+      "slug": "evaluate",
+      "path": "/evaluate/",
+      "nav_label": "Evaluate",
+      "title": "Evaluate Neotoma — fit, trigger, and anti-profile",
+      "meta_description": "See who Neotoma is for, the failure that makes a record necessary, and who should not use it.",
+      "template": "evaluation_page",
+      "template_entity_id": "ent_a7132845b99eb265fc85749e",
+      "primary_cta": {"label": "Install", "href": "/install/", "scope": "page_scoped"},
+      "sections": [
+        {
+          "id": "profile",
+          "origin": "positioning_mirror",
+          "source": "docs/positioning/neotoma/icp-durable-candidate-b.md",
+          "projection": "content/neotoma/public/evaluate-fit.json",
+          "source_entity_id": "ent_825474455c25f9ea0783ebc6",
+          "headings": ["Archetype", "Stack", "Core job to be done", "Trigger moment", "Messaging — bad (anti-profile)", "Ideal entry point"],
+          "eyebrow": "Evaluate the fit",
+          "heading": "A system of record is valuable only when continuity has consequences.",
+          "source_label": "target persona · durable ICP"
+        },
+        {"id": "try", "origin": "page_specific", "source": "content/neotoma/evaluate/cta.json"}
+      ]
+    },
+    {
+      "slug": "brand",
+      "path": "/brand/",
+      "nav_label": "Brand",
+      "nav_visibility": "hidden",
+      "title": "Neotoma brand system — expression, assets, and production",
+      "meta_description": "The approved and provisional copy, visual, cinematic, and asset system for Neotoma.",
+      "template": "brand_system_viewer",
+      "template_entity_id": null,
+      "primary_cta": {"label": "Install", "href": "/install/", "scope": "page_scoped"},
+      "sections": [
+        {"id": "brand-system", "origin": "brand_system", "source": "brand_systems/neotoma.json"}
+      ]
+    },
+    {
+      "slug": "compare",
+      "path": "/compare/",
+      "nav_label": "Compare",
+      "title": "Compare Neotoma with the tools you already use",
+      "meta_description": "How a durable record differs from prompt files, notes, platform memory, and retrieval-first approaches.",
+      "template": "comparison_page",
+      "template_entity_id": "ent_a7132845b99eb265fc85749e",
+      "primary_cta": {"label": "Install", "href": "/install/", "scope": "page_scoped"},
+      "sections": [
+        {
+          "id": "comparison",
+          "origin": "positioning_mirror",
+          "source": "docs/positioning/neotoma/incumbent.md",
+          "projection": "content/neotoma/public/compare.json",
+          "source_entity_id": "ent_9e105035543fed11658a3fcb",
+          "headings": ["Subject", "Summary", "Conclusion", "Sources"],
+          "eyebrow": "Detailed comparison",
+          "heading": "The incumbent is usually a workaround, not a vendor.",
+          "lede": "This comparison is rendered from the current positioning record, including what Neotoma resolves and what it does not.",
+          "source_label": "research finding · incumbent"
+        },
+        {"id": "decide", "origin": "page_specific", "source": "content/neotoma/compare/cta.json"}
+      ]
+    }
+  ]
+}

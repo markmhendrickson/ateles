@@ -1,0 +1,7 @@
+{
+  "layout": "cta_banner",
+  "eyebrow": "See what runs today",
+  "headline": "Inspect the current reference before relying on it.",
+  "body": "The product direction is broader than today's implementation. The repository shows the current code, checks, and operating instructions.",
+  "primary_cta": {"label": "Open the repository", "href": "https://github.com/markmhendrickson/ateles"}
+}

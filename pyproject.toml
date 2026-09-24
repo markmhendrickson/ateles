@@ -74,7 +74,9 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-cov>=4.1",
     "pytest-mock>=3.11",
+    "playwright>=1.55",
     "ruff>=0.5",
+    "pyyaml>=6.0", # structural GitHub workflow boundary verification
     "aiohttp>=3.9", # execution/daemons/apis test collection (see apis-gateway extra)
     # execution/scripts/transcribe_audio.py imports openai + dotenv unconditionally
     # at module load, so both are needed to collect test_transcribe_audio.py

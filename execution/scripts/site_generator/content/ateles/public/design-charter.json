@@ -1,0 +1,13 @@
+{
+  "_source": {"path": "docs/foundation/charter.md"},
+  "layout": "flow",
+  "eyebrow": "The product promise",
+  "headline": "An organization that can act without losing accountability.",
+  "lede": "Ateles is designed so humans and agents can initiate, execute, review, and approve work together.",
+  "items": [
+    {"label": "01", "title": "Name the roles", "body": "Every participant has a responsibility and a relationship to the people and work around it."},
+    {"label": "02", "title": "Carry the reason", "body": "Work arrives with the goal and priorities that explain why it matters."},
+    {"label": "03", "title": "Bound the action", "body": "Safe work advances; consequential work stops with the person entitled to decide."},
+    {"label": "04", "title": "Keep accountability", "body": "The result remains attributable to the role that acted and the person it acted for."}
+  ]
+}

@@ -992,8 +992,16 @@ numbers are separate and only two of these are opened as decisions below.
   agent everywhere, which is what `workflows.md` keying the roster per scope exists to permit varying.
   The migration derives the map it finds either way; what the design owes is a statement of which shape
   the roster has once a second scope exists, and that is not settled here.
-- **G21 — the roster has no row in `data_model.md`.** It is one of the governance types and the
-  resolver every `owner_role` depends on, and its fields and edges are stated nowhere.
+- **G21 — the roster has no row in `data_model.md`. CLOSED** by the governance-declaration pass: the
+  `swarm_roster` row states its `declaration_scope` key and its `roles` map, and makes the map's values
+  `REFERS_TO` edges to the `agent` rather than name strings, so a renamed agent cannot leave a role
+  resolving to nothing. What the row deliberately does not settle is G20's cardinality question — whether
+  an instance runs one declaration scope or several — which the row keys for and does not answer. The
+  source type is a **keep** with a mapping: the instance's roster carries `roster_key`, `swarm_domain`,
+  and `issuer`, which are the declaration scope and the AAuth coordinates under other names, and it holds
+  `roles` as a role → **agent-name string** map rather than as edges, which is the G32 shape below applied
+  to this type. `artifact_header_format` and `review_tag_format` on the source are presentation and have
+  no design field; they ride in the interpretation as declared-but-unmodelled.
 - **G22 — incremental migration versus one engine.** The design says migration is incremental and that
   two blind engines are the defect; an incremental engine cutover is two blind engines. This document
   resolves it as incremental over tasks and atomic over engines; the design should say so.
@@ -1047,6 +1055,38 @@ numbers are separate and only two of these are opened as decisions below.
   predicate is an `applies_when` on an optional review step of its declaration whose verdict carries that
   role's findings on the record (`workflows.md#planning`;
   `planning_model.md#maintenance-is-work-the-planning-workflow`).
+- **G32 — `agent_policy`'s design row and the source type disagree on four fields, and three of the four
+  are not tolerant-reader cases.** The type is a **keep** and its row is now stated
+  (`data_model.md#concepts`), which makes the disagreements mappable rather than latent. They are listed
+  here because `data_model.md#record-conventions`' tolerant-reader rule covers *one concept written under several
+  field names* and three of these are not that:
+  **(a) the agent-scoping field.** The design scopes a rule to an agent by `agent_sub` and by nothing
+  else. On the source the field exists, is declared, and is populated in **no** row, while rules meant for
+  one agent carry that agent's `sub` in `domain` — so the two fields carry two concepts (`whom it binds`,
+  `what it is about`) and one of them is being used for both. A tolerant reader here would make the
+  conflation permanent, so the mapping is a **backfill**: `agent_sub` is written from `domain` where
+  `domain` holds an agent identifier, and `domain` is corrected to the rule's actual subject, before any
+  reader filters on either. Until that lands, every reader filtering on `agent_sub` — `agent_loader.py`
+  and `generalizer.py` both do — matches nothing, which is a fail-*open* on rule delivery: the agent runs
+  with none of its rules rather than refusing to run.
+  **(b) `rule_kind`'s vocabulary and its default.** The design closes it to `mandatory` and `advisory`
+  with absence reading `mandatory`. The source carries six values (`mandatory`, `recommended`,
+  `operating_discipline`, `allow`, `issue_spec_contribution`, and a sixth) and three rows with none, and
+  has no default at all. The mapping is per value and is a **governance write, not a derivation**: which
+  of the two a `recommended` or `operating_discipline` rule becomes decides whether it binds, which
+  `conformance_suite.md` WM-22/WM-24 reserve to the gate and ateles#1115 asks the operator to rule. No
+  bulk coercion: a rule silently promoted to `mandatory` is as wrong as one silently demoted.
+  **(c) a rule bound to a condition.** The design's `effective_until` takes a date and the row states the
+  gap rather than closing it. The source's answer is to write the condition into `scope` as prose — live
+  on at least one rule, whose `scope` reads "… until the full console provides the same projection" —
+  which both defeats the closed `scope` vocabulary and puts a rule's expiry somewhere no filter reads.
+  The mapping cannot be made until the design rules between the two candidates the row names, so these
+  rows carry their condition as declared-but-unmodelled and are **not** coerced into a date.
+  **(d) `description` versus `rule`.** The source makes `description` required and `rule` optional, and
+  nine rows carry only a `description` — an abstract of a rule whose normative body was never ingested.
+  The design's row makes `rule` the field a reader applies. This one **is** a tolerant-reader case in
+  form (two spellings of the rule's text) and is not one in substance for those nine rows, because there
+  is no text to read tolerantly: they need their bodies ingested, not their field names widened.
 
 ## The decisions this document opened, and how each was ruled
 

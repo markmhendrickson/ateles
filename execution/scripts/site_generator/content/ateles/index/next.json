@@ -1,0 +1,10 @@
+{
+  "layout": "comparison_teaser",
+  "eyebrow": "Not another orchestration framework",
+  "headline": "Coordination is not the same as legitimate action.",
+  "lede": "Frameworks can spawn agents, route work, and persist execution state. Ateles keeps the organization around that work: roles, priorities, authority, handoffs, and accountability.",
+  "items": [
+    {"title": "Read the design", "body": "See how roles, priorities, handoffs, checkpoints, and accountability fit together.", "href": "/design/", "link_label": "Open the design"},
+    {"title": "Compare the boundary", "body": "See what a standing agent organization adds beyond routing one run.", "href": "/compare/", "link_label": "Open comparison"}
+  ]
+}

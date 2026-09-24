@@ -1,0 +1,16 @@
+{
+  "_source": {
+    "path": "docs/positioning/neotoma/icp-durable-candidate-b.md",
+    "entity_id": "ent_825474455c25f9ea0783ebc6"
+  },
+  "layout": "proof_cards",
+  "eyebrow": "Evaluate the fit",
+  "headline": "Continuity matters when a wrong fact changes the work.",
+  "lede": "The useful boundary is not how much an agent can remember. It is whether the work needs a current, attributable, correctable record.",
+  "items": [
+    {"label": "Trigger", "title": "A correction failed to travel", "body": "You fixed a value in one place and later discovered another agent still used the old one."},
+    {"label": "Trigger", "title": "You cannot explain an answer", "body": "The result matters, but nobody can show which source established it or when it changed."},
+    {"label": "Fit", "title": "You will run local infrastructure", "body": "You are comfortable installing and connecting a maintained tool, but do not want to build a state system from scratch."},
+    {"label": "Not a fit", "title": "Convenient recall is enough", "body": "The work has no shared state, no correction history, and no consequence when sources diverge."}
+  ]
+}

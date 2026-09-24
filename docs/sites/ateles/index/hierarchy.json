@@ -1,0 +1,8 @@
+{
+  "layout": "hierarchy",
+  "eyebrow": "Priorities travel with the task",
+  "headline": "Every action can read the reason above it.",
+  "lede": "The swarm should not allocate attention from whichever session is loudest. Each task carries a clear line back to the mission and priorities that explain why it matters.",
+  "levels": ["Mission", "Strategy", "Project", "Plan", "Task"],
+  "proof_note": "If that line is missing, the organization surfaces the gap instead of inventing a reason."
+}

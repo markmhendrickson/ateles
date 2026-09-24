@@ -1,0 +1,13 @@
+{
+  "layout": "capabilities",
+  "eyebrow": "Robust organizational design",
+  "headline": "Delegate outcomes, not every next step.",
+  "lede": "The product is not a smarter router. It is a structure for who may act, what context travels with the work, how work is claimed, and where responsibility stops.",
+  "items": [
+    {"label": "Research", "title": "Roles exist individually and relationally", "body": "Each role is defined by its responsibility and by the people, work, and other roles around it.", "terms": "Named responsibility · declared relationships"},
+    {"label": "Bounded authority", "title": "Authority is explicit", "body": "Each role knows what it may do, for whom, and under which conditions. Consequential actions stop for review.", "terms": "Clear scope · review when needed"},
+    {"label": "Coordinated handoff", "title": "Work carries high-level context", "body": "A role can pick up a task with its purpose and priorities intact instead of waiting for the operator to narrate every next move.", "terms": "Shared goal · accountable handoff"},
+    {"label": "Operator attention", "title": "Intervention is the exception", "body": "Safe work advances unattended. The operator sees the decisions only they can make, with enough context to decide.", "terms": "Advance safely · escalate clearly"}
+  ],
+  "status_note": "The public reference runs today for one operator. Shared ownership and delegated approval across several people remain design direction, not a claim about the current checkout."
+}

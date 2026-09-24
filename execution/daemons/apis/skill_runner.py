@@ -106,34 +106,42 @@ ATELES_REPO = Path(
 _DROPPED_ALLOWLIST_RULE_RE = re.compile(r'Ignoring\s+--allowedTools rule "([^"]*)"')
 
 # ── Gate-writeback tool grant (ateles#795) ────────────────────────────────────
-# The Neotoma tools a gate-owning review lens needs to record its OWN verdict.
+# The Neotoma tools a gate-owning review lens is pre-approved for READ-ONLY
+# access to, so it can look up and read back the parent issue's `gate_status`
+# for its own situational awareness.
 #
-# A panelist seated because it owns a pending pre-impl gate is instructed (the
-# GATE WRITEBACK block in swarm_dispatch._panelist_prompt) to `correct()`
-# `gate_status.<lens>` on the parent issue entity and then read it back. On PR
-# #791 that write was DENIED — and not by Neotoma: the `agent_grant` admitting
-# `issue` on retrieve+correct has been live and `active` since ateles#769, and
-# the instance policy is permissive. It was denied by the LOCAL harness. A
+# HISTORY, and why `correct` is NO LONGER in this tuple. A panelist seated
+# because it owns a pending pre-impl gate used to be instructed to `correct()`
+# `gate_status.<lens>` on the parent issue entity itself, pre-approved via this
+# same allowlist. On PR #791 that write was DENIED by the LOCAL harness (a
 # headless `claude --print` child runs in `default` permission mode, where an
-# MCP write tool it was not explicitly granted raises an approval prompt that a
-# non-interactive child cannot answer. The lens signed off in prose while
-# `gate_status.ux` stayed `pending`, and gate inheritance — a hard stop that
-# outranks APIS_AUTONOMY_AUTO_MERGE — withheld the merge forever.
+# MCP write tool it was not explicitly granted raises an approval prompt a
+# non-interactive child cannot answer), so this tuple originally added
+# `mcp__mcpsrv_neotoma__correct` to pre-approve exactly that write.
 #
-# The remedy is to name these three tools on `--allowed-tools` so the writeback
-# is pre-approved at tool granularity. Deliberately NOT the remedy:
-# `--permission-mode bypassPermissions` or `--dangerously-skip-permissions`,
-# either of which lifts every gate on the child (shell, network, the entire MCP
-# surface) to fix one internal governance write. Least privilege is the point.
+# The operator's amended ADR on ateles#795 moved the system-of-record write
+# off this path entirely: `gate_waive.IssueGateStore.sign_off`, called by the
+# DISPATCHER after a clean lens verdict, signs the write with the LENS's own
+# AAuth keypair — never this MCP session's shared daemon bearer. Leaving
+# `mcp__mcpsrv_neotoma__correct` pre-approved here left an unattributed sibling
+# path wide open: every lens session presents the SAME shared bearer over MCP
+# (see `neotoma_token_for_agent`'s Tier-2 fallback), so a pre-approved
+# `correct()` on `gate_status` from ANY seated lens could clear a gate with no
+# lens AAuth signature at all — and `sign_off`'s own idempotent no-op on an
+# already-cleared gate (see `gate_waive.sign_off`) would then read that
+# shared-bearer write back as a verified success. Removing `correct` from this
+# allowlist closes that sink: an agent MCP `correct()` of `gate_status` is no
+# longer pre-approved at the tool-permission layer, so it falls back to the
+# same `default`-mode approval prompt a non-interactive child cannot answer —
+# best-effort at most, never a clearance path (Falco's security review on PR
+# #1181, ateles#795 amended ADR).
 #
-# The two retrieve tools are here because the recipe is correct-then-READ-BACK:
-# a `correct()` the lens cannot verify is exactly the silent failure ateles#762
-# cause #2 named, and a blind write would trade one invisible failure for
-# another.
+# The two retrieve tools remain pre-approved: they are read-only situational
+# awareness (what does `gate_status` currently say), not a system-of-record
+# mutation, so pre-approving them carries none of the attribution risk above.
 GATE_WRITEBACK_TOOLS: tuple[str, ...] = (
     "mcp__mcpsrv_neotoma__retrieve_entity_by_identifier",
     "mcp__mcpsrv_neotoma__retrieve_entity_snapshot",
-    "mcp__mcpsrv_neotoma__correct",
 )
 
 
@@ -149,6 +157,33 @@ def gate_writeback_allowlist(tools: list[str]) -> list[str]:
         if tool not in merged:
             merged.append(tool)
     return merged
+
+
+# ── Deny the sibling attribution-bypass sink (Falco's REQUEST_CHANGES, PR #1181) ──
+# `GATE_WRITEBACK_TOOLS` is additive — it never carried `correct`, but an
+# ADDITIVE allowlist cannot un-grant a tool the agent already has through the
+# `mcp__mcpsrv_neotoma__*` wildcard (every claude dispatch gets this wildcard;
+# see the `--mcp-config` block below) or through `tools == ["*"]` (every tool,
+# unconditionally). Removing `correct` from `GATE_WRITEBACK_TOOLS` was
+# necessary but not sufficient: the wildcard/`*` path still pre-approves
+# `mcp__mcpsrv_neotoma__correct` for a gate-owning lens exactly as before,
+# which is the identical shared-bearer attribution-bypass sink `sign_off` was
+# built to close (Falco's finding `ent_f276d2310e1705a7bbbe1fd0`, reconfirmed
+# at commit `104867d`).
+#
+# This is the actual close: for a run that OWNS a pending pre-impl gate
+# (`owns_pending_gate=True` — every run whose clean verdict `sign_off` records,
+# i.e. the PR panel and the Phase-1 issue-spec pm turn), `correct` is placed on
+# the CLI's DENY list, which takes precedence over any allow entry including a
+# wildcard. This is a subtractive control, not an additive grant, so it cannot
+# be defeated by the same class of gap that made the additive fix incomplete.
+#
+# Since the dispatcher security run at e874537f (BLOCKING
+# `incomplete_class_sweep`), the deny also covers EVERY seated reviewer
+# (`run_skill(seated_reviewer=True)`), not only a run that owns a pending gate:
+# an advisory seat, or a gate owner re-seated after its gate cleared, held the
+# same wildcard over the same shared bearer.
+GATE_OWNER_DENIED_TOOLS: tuple[str, ...] = ("mcp__mcpsrv_neotoma__correct",)
 
 
 # ── Per-agent Neotoma credential (ateles#795) ─────────────────────────────────
@@ -184,6 +219,13 @@ def gate_writeback_allowlist(tools: list[str]) -> list[str]:
 # case the caller refuses instead (`gate_writeback_identity_error`), per
 # CLAUDE.md "fail closed on the field that carries the safety meaning".
 NEOTOMA_IDENTITY_UNAVAILABLE = "per-agent Neotoma identity unavailable"
+
+# ateles#795, Falco's REQUEST_CHANGES on PR #1181: the public-safe error-class
+# prefix for a gate-owning run refused because its provider cannot deny a
+# single MCP tool (see the `owns_pending_gate and provider != "claude"` check
+# in `_run_skill_once`). Mirrors `NEOTOMA_IDENTITY_UNAVAILABLE`'s shape so
+# `swarm_dispatch.review_failure_class` can match on it the same way.
+GATE_OWNER_TOOL_DENY_UNAVAILABLE = "gate-owner tool-deny unavailable on provider"
 
 
 def neotoma_token_env_name(role: str) -> str:
@@ -307,9 +349,12 @@ def _load_agent_def(role: str) -> AgentDefinition:
 # escalated to the operator instead of clearing the panel.
 #
 # `SIGNED_OFF` is NOT a synonym for `APPROVE`. It certifies a narrower, prior
-# claim: that a gate-owning lens's `correct()` write to `gate_status` landed,
-# confirmed by an immediate read-back (see the GATE WRITEBACK instruction in
-# swarm_dispatch._panelist_prompt). `APPROVE` certifies a judgement about the
+# claim: that a gate-owning lens's `gate_status` write landed, confirmed by an
+# immediate read-back — as of ateles#795's amended ADR that write is the
+# DISPATCHER's own lens-AAuth-signed `gate_waive.IssueGateStore.sign_off`
+# (called from `swarm_dispatch._run_pr_review_panel` and
+# `_run_issue_spec_pipeline`), never the lens's own in-session `correct()`.
+# `APPROVE` certifies a judgement about the
 # PR as a whole. Collapsing the two would let a durable-write confirmation
 # stand in for a merge authorisation it never made — so `SIGNED_OFF` maps to
 # the inert GitHub `COMMENT` event, never `APPROVE` (see
@@ -327,6 +372,15 @@ REVIEW_VERDICT_TOKENS: tuple[str, ...] = (
     "COMMENT",
     "BLOCKED",
     "SIGNED_OFF",
+)
+
+# The one sentence every gate-verdict prompt uses to state where the
+# dispatcher reads a verdict (`swarm_dispatch.lens_own_verdict`: a fixed
+# position, independent security run at 8f51ffc2 on PR #1181). The contract
+# below and `swarm_dispatch.gate_verdict_instruction` both render it from
+# here, so the prompts cannot state two different rules.
+GATE_VERDICT_POSITION_RULE = (
+    "the FIRST line of your reply must be your header; the second line your verdict"
 )
 
 
@@ -385,6 +439,15 @@ em-dash, same "Ateles swarm," prefix. Do not add repository/issue suffixes or re
 
 Per ateles#109: when posting under your own dedicated provisioned account (avatar is \
 attribution), the header MAY be omitted. When included, it MUST be the exact form above.
+
+**Gate verdicts are read from your header only.** When you own a gate, the dispatcher \
+reads your verdict from a fixed position in the reply you return: \
+{gate_verdict_position_rule}. That holds on every account, including a dedicated one; \
+at most one `<!-- review:<lens> commit=<sha> -->` marker line may come before the \
+header, and everything else goes after the verdict line. A first line that is not your \
+header, a second line that is not your verdict, a second header, or a second verdict \
+line anywhere leaves the gate pending. Never reproduce an earlier comment's header \
+or verdict line, quoted or not.
 
 ### Verdict line — exact, verbatim form
 
@@ -448,7 +511,8 @@ the same issue or PR. Use `gh api -X PATCH repos/<owner>/<repo>/issues/comments/
 ### PR review head and supersession
 
 Every PR verdict is scoped to the exact artifact it reviewed. Put the full current
-40-hex head SHA in an HTML marker at the start of the comment:
+40-hex head SHA in ONE HTML marker line at the start of the comment, above the header:
+the first form for a lens review, the second for a Vanellus aggregation, never both.
 
 ```
 <!-- review:<lens> commit=<full40hex> -->
@@ -494,7 +558,7 @@ summary, not a narrative.\
 # cannot occur elsewhere in the text has no such failure mode.
 SWARM_GITHUB_CONTRACT = SWARM_GITHUB_CONTRACT.replace(
     "{verdict_vocabulary_block}", _VERDICT_VOCABULARY_BLOCK
-)
+).replace("{gate_verdict_position_rule}", GATE_VERDICT_POSITION_RULE)
 
 # ── Prior-art contract (check existing context before building) ───────────────
 # Injected into every dispatched agent's system prompt by build_system_prompt,
@@ -654,6 +718,18 @@ def _write_harness_event(
     base_url = _require_neotoma_base_url()
     token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     if not token:
+        # Best-effort diagnostic write: log loudly and skip rather than raise.
+        # Every caller of this function already wraps it in
+        # `try/except Exception: log.debug(...)`, so a raise here would only
+        # get demoted to a debug line indistinguishable from a transient
+        # network blip — losing the signal instead of surfacing it. Logging
+        # at WARNING here, before returning, is what actually makes an empty
+        # token visible: the audit trail has a hole, but dispatch (the thing
+        # this event is only OBSERVING) is not the thing failing.
+        log.warning(
+            "[apis] NEOTOMA_BEARER_TOKEN is not set; skipping harness_event "
+            f"write (event_type={event_type}, task_entity_id={task_entity_id})"
+        )
         return
 
     event_at = datetime.now(timezone.utc).isoformat()
@@ -1344,29 +1420,69 @@ async def _run_skill_once(
         log.error(f"[apis] {skill} dispatch skipped — {msg}")
         return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
-    # ateles#795 — a gate owner that cannot be ATTRIBUTED must not run silently.
-    # Running it anyway burns a full review whose verdict Neotoma will refuse,
-    # and leaves `gate_status.<lens>` at `pending` — the state that is
-    # indistinguishable from a review that never ran, which is the whole defect.
-    # Refusing BEFORE the subprocess turns that invisible loss into a named,
-    # loud failure the panel surfaces on the PR. Only gate owners are refused;
-    # an advisory lens still runs on the shared bearer exactly as before.
-    if owns_pending_gate:
-        _, _own_identity = neotoma_token_for_agent(_role)
-        identity_error = gate_writeback_identity_error(
-            _role, is_own_identity=_own_identity
+    # ── Fail closed on providers that cannot deny a specific MCP tool ──────────
+    # Falco's REQUEST_CHANGES on PR #1181: the `claude` adapter can put
+    # `correct` on a CLI deny list (`GATE_OWNER_DENIED_TOOLS`, applied below),
+    # which takes precedence over the `mcp__mcpsrv_neotoma__*` wildcard every
+    # dispatch grants. Neither other adapter has an equivalent mechanism in
+    # this codebase today:
+    #   - `codex exec` here is launched with `--sandbox workspace-write` and
+    #     no `--mcp-config` / tool-allowlist flag at all (see
+    #     `_provider_command`) — there is no per-tool grant to narrow.
+    #   - `cursor-agent --print` is launched with `--force --approve-mcps`
+    #     (see `_provider_command`), which auto-approves EVERY MCP tool call
+    #     with no per-tool exception.
+    # A gate-owning run (`owns_pending_gate=True` — every run whose clean
+    # verdict `sign_off` records) must never reach either adapter unrestricted:
+    # that would silently reopen the exact sink this PR closes for `claude`,
+    # on a path nobody is failing loudly on. Refuse the launch instead, with a
+    # legible reason surfaced through the same `SkillResult.ok=False` +
+    # `error` shape every other launch failure already uses — `swarm_dispatch`
+    # already maps that shape to a public failure-class string in
+    # `review_failure_class` / `_surface_failed_sign_offs`, so this reuses the
+    # existing surfacing rather than inventing a new one.
+    if owns_pending_gate and provider != "claude":
+        msg = (
+            f"{GATE_OWNER_TOOL_DENY_UNAVAILABLE}: provider {provider!r} has no "
+            "mechanism in this codebase to deny a single MCP tool "
+            f"({GATE_OWNER_DENIED_TOOLS[0]}) while still granting the rest of "
+            "the agent's Neotoma access — refusing to launch a seated "
+            "reviewer or gate-owning lens on it rather than running "
+            "unrestricted (ateles#795, "
+            "Falco's security review on PR #1181)."
         )
-        if identity_error:
-            log.error(f"[apis] {skill} dispatch refused — {identity_error}")
-            return SkillResult(
-                skill,
-                False,
-                None,
-                "",
-                "",
-                error=identity_error,
-                provider=provider,
-            )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+
+    # ateles#795 amended ADR — this preflight refusal is RELAXED, not removed.
+    #
+    # It used to hard-block a gate owner from launching at all when it had no
+    # per-agent Neotoma bearer (`<ROLE>_NEOTOMA_TOKEN`): the lens's own MCP
+    # `correct()` was the only planned writeback path, and a write Neotoma
+    # would refuse for lack of attribution was worse than never running.
+    #
+    # The operator's amended decision moves the SYSTEM-OF-RECORD write off the
+    # lens's MCP session entirely: `swarm_dispatch` now calls
+    # `IssueGateStore.sign_off()` (`gate_waive.py`) after a clean verdict,
+    # which signs the write with the LENS's own AAuth keypair via
+    # `neotoma_signed.signed_request` — not the lens's MCP bearer, and not the
+    # daemon's shared bearer either. No prompt instructs a gate-owning lens
+    # to `correct()` `gate_status` itself any more — the panel's
+    # `_panelist_prompt` GATE WRITEBACK block and the additive-spec
+    # pipeline's `pm_gate_block` / `_pavo_prompt` were all rewritten to state
+    # a verdict via comment only (Falco's security review, PR #1181's
+    # follow-up round) — so a lens's own MCP `correct()` of `gate_status` is
+    # unsolicited at best, not even "advisory", and the absence of a
+    # per-agent MCP bearer is no longer a reason to refuse the launch — refusing here
+    # would leave pm/arch/ux permanently unable to run, which is the second
+    # failure this amendment exists to fix (the operator's decision comment
+    # names this explicitly: provisioning `<ROLE>_NEOTOMA_TOKEN` "routes
+    # around the design rather than implementing it").
+    #
+    # `gate_writeback_identity_error` / `neotoma_token_for_agent` are kept
+    # (still exercised by their own unit tests) for any OTHER caller that
+    # still needs to refuse a write attempted as the wrong principal — this
+    # call site just no longer treats their answer as a launch gate.
 
     try:
         skill_md = skill_path.read_text(encoding="utf-8")
@@ -1484,21 +1600,50 @@ async def _run_skill_once(
         ).rstrip("/")
         # ateles#795: prefer the ROLE's own Neotoma principal. Falls back to the
         # shared daemon bearer, so every agent without its own credential behaves
-        # exactly as before; a gate owner that needs attribution has already been
-        # refused upstream by the `owns_pending_gate` preflight.
+        # exactly as before. A gate owner is NOT refused here for lacking one
+        # (amended ADR): the system-of-record write is now the dispatcher's
+        # `IssueGateStore.sign_off`, signed with the lens's own AAuth key,
+        # independent of this MCP session's bearer. The prompt no longer
+        # instructs a gate-owning lens to `correct()` `gate_status` itself (the
+        # GATE WRITEBACK block was removed from `_panelist_prompt`), and
+        # `mcp__mcpsrv_neotoma__correct` is no longer pre-approved for this
+        # session either (see `GATE_WRITEBACK_TOOLS`) — an unsolicited `correct`
+        # attempt on `gate_status` would fall back to an unanswerable
+        # `default`-mode approval prompt, never a clearance path.
         _neotoma_token, _ = neotoma_token_for_agent(_role)
+        if not _neotoma_token:
+            # Unlike the harness_event writer above, this is not a
+            # best-effort diagnostic — it constructs the MCP config the
+            # spawned child actually connects with. Neotoma's /mcp endpoint
+            # requires auth (verified live: an unauthenticated POST to
+            # /mcp returns HTTP 401 with "Unauthorized: Authentication
+            # required"), so a missing token here is not a degraded-but-
+            # usable config — it is a config that guarantees the child's
+            # own MCP handshake fails, far from this call site and with no
+            # indication the cause was an empty env var in the parent.
+            # Raise here, matching _require_neotoma_base_url's convention,
+            # so the failure is attributed to its actual cause. This applies
+            # regardless of which tier (role-owned or shared daemon bearer)
+            # neotoma_token_for_agent() resolved from — both can be empty.
+            raise RuntimeError(
+                "NEOTOMA_BEARER_TOKEN is not set; refusing to construct an "
+                "--mcp-config for the dispatched child. Neotoma's /mcp "
+                "endpoint requires authentication, so a config built "
+                "without a bearer token would only fail later, inside the "
+                "child's own MCP handshake, with no trace back to this "
+                "cause. Under launchd the plist supplies this; for an "
+                "ad-hoc run, export it or source ~/.config/neotoma/.env "
+                "first."
+            )
         _mcp_cfg: dict = {
             "mcpServers": {
                 "mcpsrv_neotoma": {
                     "type": "http",
                     "url": f"{_neotoma_base}/mcp",
+                    "headers": {"Authorization": f"Bearer {_neotoma_token}"},
                 }
             }
         }
-        if _neotoma_token:
-            _mcp_cfg["mcpServers"]["mcpsrv_neotoma"]["headers"] = {
-                "Authorization": f"Bearer {_neotoma_token}"
-            }
 
         # Write the MCP config to a mode-0600 temp file to avoid argv exposure.
         try:
@@ -1521,6 +1666,17 @@ async def _run_skill_once(
             _mcp_tmp_path = None
 
     tools = agent_def.tools  # property: list[str]; ['*'] means all
+    # ateles#795, Falco's REQUEST_CHANGES on PR #1181: for a gate-owning run,
+    # `correct` goes on the CLI's DENY list, never relying on the additive
+    # allowlist alone. `--disallowed-tools` takes precedence over
+    # `--allowed-tools` (verified against this installed CLI's `--help`,
+    # which documents both flags; Claude Code's allow/deny precedence is
+    # deny-wins, matching every other permission layer in the product — see
+    # the PR comment for the reviewer-run provider table), so this closes the
+    # wildcard/`*` gap the additive `GATE_WRITEBACK_TOOLS` fix left open: a
+    # gate owner's session can no longer clear `gate_status` over the shared
+    # bearer no matter what its allowlist otherwise grants.
+    disallowed_list = list(GATE_OWNER_DENIED_TOOLS) if owns_pending_gate else []
     if provider == "claude" and tools != ["*"]:
         # --allowed-tools is confirmed present in `claude --print --help`
         # (alias: --allowedTools). Accepts comma- or space-separated tool names.
@@ -1531,11 +1687,15 @@ async def _run_skill_once(
         allowed_list = list(tools)
         if "mcp__mcpsrv_neotoma__*" not in allowed_list:
             allowed_list.append("mcp__mcpsrv_neotoma__*")
-        # ateles#795: name the gate-writeback tools explicitly even though the
-        # `mcp__mcpsrv_neotoma__*` wildcard above nominally covers them. The
-        # wildcard is what a restricted agent already had on PR #791 when its
-        # `correct()` was still denied, so it is not sufficient evidence that
-        # the writeback is pre-approved. Exact tool names are.
+        # ateles#795: name the two read-only gate tools explicitly even though
+        # the `mcp__mcpsrv_neotoma__*` wildcard above nominally covers them —
+        # exact tool names are the durable statement of intent, not reliance on
+        # a wildcard that could later narrow. `correct` is deliberately absent
+        # (see `GATE_WRITEBACK_TOOLS`'s docstring): the dispatcher's signed
+        # `sign_off` is the system-of-record write now, and this session's own
+        # `correct()` of `gate_status` must NOT be pre-approved — and, for a
+        # gate-owning run, is additionally on the deny list below regardless
+        # of the wildcard.
         allowed_list = gate_writeback_allowlist(allowed_list)
         allowed = ",".join(allowed_list)
         cmd += ["--allowed-tools", allowed]
@@ -1552,10 +1712,16 @@ async def _run_skill_once(
         # cannot answer a prompt. So the most-trusted agents were the ones
         # whose gate writeback was surest to be denied (ateles#795).
         #
-        # Granting the three gate-writeback tools by name is the smallest fix
-        # that makes the verdict recordable. It does NOT narrow the agent: the
-        # `*` wildcard is preserved as the first entry, so every other tool the
-        # agent had remains available exactly as before.
+        # Granting the two read-only gate tools by name is a courtesy grant for
+        # situational awareness, not a writeback fix — `correct` on
+        # `gate_status` is deliberately NOT pre-approved (see
+        # `GATE_WRITEBACK_TOOLS`'s docstring: the dispatcher's signed
+        # `sign_off` is the system-of-record write now). This does NOT narrow
+        # the agent: the `*` wildcard is preserved as the first entry, so every
+        # other tool the agent had remains available exactly as before. For a
+        # gate-owning run, `correct` is additionally denied below — the `*`
+        # wildcard on its own left `correct` reachable, which is exactly the
+        # sink Falco's review confirmed on PR #1181.
         allowed = ",".join(gate_writeback_allowlist(["*"]))
         cmd += ["--allowed-tools", allowed]
         log.info(
@@ -1563,7 +1729,15 @@ async def _run_skill_once(
             f"<{_role}:{'agent_def+' if not degraded else 'degraded-'}{skill}.SKILL.md> "
             f"--allowed-tools {allowed} timeout={timeout}s"
         )
-    else:
+    if provider == "claude" and disallowed_list:
+        cmd += ["--disallowed-tools", ",".join(disallowed_list)]
+        log.info(
+            f"[apis] Spawning via {provider}: <{_role}:{skill}.SKILL.md> "
+            f"--disallowed-tools {','.join(disallowed_list)} "
+            "(seated reviewer or gate-owning run — correct() denied "
+            "regardless of allowlist)"
+        )
+    if provider != "claude":
         log.info(
             f"[apis] Spawning via {provider}: "
             f"<{_role}:{'agent_def+' if not degraded else 'degraded-'}{skill}.SKILL.md> "
@@ -1597,7 +1771,30 @@ async def _run_skill_once(
     # (all SSE task-path and non-GitHub call sites), this block is skipped and
     # the child inherits the daemon's ambient tokens unchanged — exact
     # current behaviour, no regression.
-    if github_token:
+    #
+    # github_token == "" (requested but resolved EMPTY) is a distinct, more
+    # dangerous case and must NOT take the same silent-skip path as None.
+    # `_token_for_agent_on_repo`/`_token_for_repo` return "" (not None) when
+    # every configured PAT env var is unset — and a truthiness check here
+    # (`if github_token:`) previously treated "" identically to "not
+    # requested", so the child silently inherited the daemon's AMBIENT
+    # environment instead. On a host where `gh` has an active keyring
+    # session, that ambient identity is the operator's own personal GitHub
+    # account, not the agent's — this produced a PR opened as
+    # markmhendrickson instead of the intended agent identity, with no error
+    # anywhere in the path. Fail loudly instead of falling back.
+    if github_token is not None:
+        if not github_token:
+            raise RuntimeError(
+                "[apis] github_token was explicitly requested for this dispatch "
+                "but resolved to an EMPTY string (no <AGENT>_AGENT_PAT, "
+                "ATELES_AGENT_PAT, NEOTOMA_AGENT_PAT, or GITHUB_TOKEN configured "
+                "for this agent/repo). Refusing to spawn the child with the "
+                "daemon's ambient GitHub identity — that silent fallback is "
+                "exactly what let a PR land under the operator's own account "
+                "instead of the agent's. Provision the missing PAT before "
+                "retrying; never proceed unauthenticated or on keyring fallback."
+            )
         subprocess_env["GITHUB_TOKEN"] = github_token
         subprocess_env["GH_TOKEN"] = github_token
 
@@ -1911,6 +2108,7 @@ async def run_skill(
     provider: str | None = None,
     preferred_provider: str | None = None,
     owns_pending_gate: bool = False,
+    seated_reviewer: bool = False,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
 
@@ -1923,39 +2121,114 @@ async def run_skill(
     Passing ``provider`` pins the invocation to one adapter, primarily for
     diagnostics and focused tests.
 
-    ``owns_pending_gate`` (ateles#795): the run must be able to record a durable
-    verdict as ITSELF. Without its own Neotoma credential the run is refused
-    rather than started, so a verdict cannot evaporate into a `pending` gate.
+    ``owns_pending_gate`` (ateles#795): True when this run is seated because it
+    OWNS a pending pre-impl gate (pm/arch/ux). Historically this refused the
+    run outright when the role had no per-agent Neotoma credential, because
+    the lens's own in-session `correct()` was the only writeback path and a
+    write Neotoma would refuse for lack of attribution was worse than not
+    running. The amended ADR moves the system-of-record write to the
+    dispatcher (`gate_waive.IssueGateStore.sign_off`, signed with the lens's
+    own AAuth key, independent of this session), so this flag no longer gates
+    the launch — it is threaded through to `_run_skill_once` for any caller
+    that still wants to distinguish a gate-owning run from an advisory one
+    (e.g. logging), and MUST NOT be reintroduced as a hard launch refusal
+    without re-litigating the amended ADR on ateles#795.
+
+    ``seated_reviewer`` (PR #1181, dispatcher security run at e874537f,
+    BLOCKING `incomplete_class_sweep`): True for EVERY lens the dispatcher
+    seats on a PR panel, an issue-spec section, a missing-lens re-run, or a
+    fix-guidance round, whether or not it owns a pending gate. Each such run
+    gets the `mcp__mcpsrv_neotoma__*` wildcard over the shared daemon bearer,
+    so an advisory seat (security, content, ...) or a gate owner re-seated
+    after its gate cleared could otherwise still `correct` the shared
+    `gate_status` map. It carries the same controls as a gate-owning run:
+    `correct` on the CLI deny list, and claude-only routing, since no other
+    adapter here can deny a single MCP tool. No seated lens needs `correct`
+    for anything but gate state: they file findings through `store`.
     """
+    # One control, two reasons to apply it. The internal name stays
+    # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
+    # use it only for the deny and the claude-only routing.
+    deny_correct = owns_pending_gate or seated_reviewer
+
     async def attempt(selected: str) -> SkillResult:
         return await _run_skill_once(
             skill, prompt, provider=selected, role=role,
             task_entity_id=task_entity_id, timeout=timeout, env_extra=env_extra,
             notifier=notifier, github_token=github_token,
             include_github_contract=include_github_contract, cwd=cwd,
-            owns_pending_gate=owns_pending_gate,
+            owns_pending_gate=deny_correct,
         )
 
     return await _run_provider_attempts(
         skill, attempt, binaries=_provider_binaries(), provider=provider,
         role=role, task_entity_id=task_entity_id, notifier=notifier,
-        preferred_provider=preferred_provider,
+        preferred_provider=preferred_provider, owns_pending_gate=deny_correct,
     )
 
 
 async def _run_provider_attempts(
     skill, attempt, *, binaries, provider=None, role=None, task_entity_id="",
     notifier=None, retry_safe=False, preferred_provider=None,
+    owns_pending_gate: bool = False,
 ) -> SkillResult:
     """One selection/cooldown/failover mechanism for every harness entrypoint.
 
     ``retry_safe`` is reserved for tool-free inference: only those calls can
     safely repeat after a timeout/outage without duplicating external effects.
+
+    ``owns_pending_gate`` (ateles#795 / #1181 operational finding): an
+    UNPINNED gate-owning reviewer run (``provider is None``, the normal
+    dispatch path) must land on ``claude`` only — it is the sole provider
+    that can deny `mcp__mcpsrv_neotoma__correct` at the tool-permission layer
+    (see the preflight refusal in `_run_skill_once`). That refusal used to be
+    the ONLY mechanism enforcing this, but it fires from *inside* a
+    per-provider attempt, after `provider_candidates` has already picked
+    cursor or codex first (the common case — see the live dispatch mix in the
+    #1181 finding). `_run_provider_attempts` only fails over on a classified
+    `failure_kind` or a `"{selected} launch failed:"` error, and the in-attempt
+    refusal is neither, so it returned immediately with no failover to claude
+    and most gate-owner runs would stop. Filtering candidates to `claude`
+    BEFORE selection, here, fixes that: claude is simply the only candidate an
+    unpinned gate-owning run ever sees, so normal failover logic (try the next
+    eligible candidate) never needs to special-case this refusal.
+
+    A caller that hard-PINS a specific non-claude ``provider`` (diagnostics,
+    focused tests) is left untouched by this filter — pinning already means
+    "run exactly this adapter or fail," so it still reaches the in-attempt
+    refusal in `_run_skill_once` unchanged, which remains the backstop for
+    every call path (pinned or not).
     """
+    if owns_pending_gate and provider is None:
+        if preferred_provider and preferred_provider != "claude":
+            # A lens preference (e.g. the security lens's second-model
+            # `codex`) cannot be honoured on a run that must deny `correct`:
+            # say so rather than drop it silently.
+            log.info(
+                f"[apis] {skill}: preferred provider {preferred_provider!r} "
+                "not used — this run denies mcp__mcpsrv_neotoma__correct, which "
+                "only the claude adapter can enforce"
+            )
+        binaries = {"claude": binaries.get("claude")}
+        preferred_provider = None
+
     candidates = provider_candidates(binaries, preferred=provider)
     if preferred_provider in candidates and provider is None:
         candidates = [preferred_provider, *[p for p in candidates if p != preferred_provider]]
     if not candidates:
+        if owns_pending_gate and provider is None:
+            reason = provider_exclusion_reason("claude", binaries) or "not eligible"
+            msg = (
+                f"{GATE_OWNER_TOOL_DENY_UNAVAILABLE}: claude is the only "
+                "provider that can deny a single MCP tool for a seated "
+                "reviewer or gate-owning run, and it is currently ineligible "
+                f"({reason}) — refusing "
+                "to launch on cursor/codex unrestricted rather than falling "
+                "over to them (ateles#795, #1181 operational finding). "
+                "Nothing was cooled down."
+            )
+            log.error(f"[apis] {skill} dispatch refused — {msg}")
+            return SkillResult(skill, False, None, "", "", error=msg)
         if provider is not None:
             reason = provider_exclusion_reason(provider, binaries)
             msg = (

@@ -38,8 +38,11 @@ class _Notifier:
     def __init__(self) -> None:
         self.sent: list[str] = []
 
-    def send(self, msg: str, priority=None, handler=None) -> None:  # noqa: ANN001
+    def send(self, msg: str, priority=None, handler=None, **kwargs) -> None:  # noqa: ANN001
         self.sent.append(msg)
+
+    def clear_dedupe(self, key: str) -> None:
+        return None
 
 
 def _dispatcher() -> sd.SwarmDispatcher:
@@ -224,18 +227,32 @@ def _stalled_recovery_dispatcher(monkeypatch, *, vanellus_stdout):
         # The GitHub-facing boundary this test exists to prove gets reached.
         assert reviewed_head == "a" * 40
         posted_reviews.append((f"{trigger.repository}#{trigger.number}", verdict))
-        return "rev-1"
+        return sd.ReviewBindingReceipt(
+            review_id="rev-1",
+            reviewer_login="markmhendrickson-ateles-vanellus",
+            commit_id="a" * 40,
+            state="APPROVED",
+        )
 
     async def fake_persist(self, *a, **k):  # noqa: ANN001
         return None
 
-    async def fake_route(self, trigger, parent, reviews, verdict):  # noqa: ANN001
+    async def fake_route(
+        self,
+        trigger,
+        parent,
+        reviews,
+        verdict,
+        **kwargs,  # noqa: ANN001
+    ):
         return None
 
-    async def fake_gate(self, trigger, parent, panel):  # noqa: ANN001
+    async def fake_gate(self, trigger, parent, panel, **kwargs):  # noqa: ANN001
         return None
 
-    async def fake_post_missing_vanellus(self, trigger, result):  # noqa: ANN001
+    async def fake_post_missing_vanellus(  # noqa: ANN001
+        self, trigger, result, **kwargs
+    ):
         return None
 
     async def fake_head(self, trigger):  # noqa: ANN001

@@ -1,0 +1,15 @@
+{
+  "_source": {
+    "path": "docs/positioning/ateles/icp-design-sourced.md",
+    "entity_id": "ent_b6e066a5d110b8500d3ec8c9"
+  },
+  "layout": "proof_cards",
+  "eyebrow": "Built for an organization, starting with one operator",
+  "headline": "For people delegating outcomes across several agent roles.",
+  "lede": "The reference implementation starts with one operator. The design extends toward several accountable people without replacing the organizational model.",
+  "items": [
+    {"label": "Good fit", "title": "Your agents already have different jobs", "body": "Research, building, review, operations, and communication need distinct responsibilities and handoffs."},
+    {"label": "Good fit", "title": "Authority cannot remain implicit", "body": "Some work should advance alone; consequential actions should stop with the right person and enough context to decide."},
+    {"label": "Not the job", "title": "You only need a per-run workflow", "body": "If one process can route a few model calls and then disappear, a conventional orchestration framework is enough."}
+  ]
+}

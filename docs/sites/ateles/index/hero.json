@@ -1,0 +1,17 @@
+{
+  "layout": "network_hero",
+  "category": "The operating system for agentic organizations",
+  "headline": "The operating system for agentic organizations.",
+  "body": "Give agents distinct roles, bounded authority, and shared direction—so the organization keeps moving without constant supervision.",
+  "primary_cta": {"label": "Read the design", "href": "/design/"},
+  "secondary_cta": {"label": "Compare approaches", "href": "/compare/"},
+  "concept_film_brief": "content/ateles/index/concept-film.json",
+  "footnote": "Open source · single-operator reference implementation today · multi-operator design ahead",
+  "scope": "one swarm · distinct roles · shared mission",
+  "roles": ["Operator", "Research", "Build", "Review", "Operate"],
+  "grants": [
+    {"label": "research and propose", "state": "GRANTED"},
+    {"label": "publish externally", "state": "CHECKPOINT"},
+    {"label": "merge release", "state": "WITHHELD"}
+  ]
+}

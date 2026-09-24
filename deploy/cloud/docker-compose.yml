@@ -30,6 +30,11 @@ services:
     environment:
       APIS_DRY_RUN: "${APIS_DRY_RUN:-1}"        # M0/M3: dry-run until cutover
       APIS_AUTONOMY_AUTO_MERGE: "0"
+      APIS_CHECKPOINT_DENIAL_DIR: "/var/lib/ateles/checkpoint-denials"
+    volumes:
+      - ${ATELES_AGE_KEY:?set ATELES_AGE_KEY to the host age key file}:/secrets/age/keys.txt:ro
+      - ${ATELES_PRIVATE_DIR:?set ATELES_PRIVATE_DIR to the ateles-private clone}:/secrets/ateles-private:ro
+      - apis-checkpoint-denials:/var/lib/ateles/checkpoint-denials
     ports:
       - "8742:8742"                              # GitHub webhook gateway
 
@@ -72,3 +77,6 @@ services:
   # monedula / sylvia / cotinga read Google Calendar via local `gws`; they move
   # to the cloud only after the A-svc (Google service account) step. Until then
   # they stay as launchd agents on the operator's device. See README §Google.
+
+volumes:
+  apis-checkpoint-denials:

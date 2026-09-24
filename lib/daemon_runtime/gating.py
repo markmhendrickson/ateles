@@ -47,8 +47,12 @@ from __future__ import annotations
 
 import logging
 import os
+import hashlib
+import json
+import re
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 
 import httpx
 
@@ -194,6 +198,10 @@ class ExecutionPolicy:
     )
     checkpoint_postures: dict[str, CheckpointPosture] = field(default_factory=dict)
     loaded: bool = False  # False = using fallbacks (Neotoma unreachable)
+    # Canonical content/revision fingerprint of the entity record used to make
+    # the gate decision.  Checkpoint release re-reads the policy and requires
+    # this exact value so a same-id policy edit cannot inherit old authority.
+    authorization_revision: str = ""
 
     def blast_radius_for(self, action_type: str | None) -> BlastRadius:
         """Classify an action type's blast radius under this policy.
@@ -283,6 +291,38 @@ class GateDecision:
         )
 
 
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def entity_record_digest(record: dict) -> str:
+    """Fingerprint a complete Neotoma entity revision deterministically."""
+    return hashlib.sha256(_canonical_json(record).encode()).hexdigest()
+
+
+def execution_policy_revision(policy: ExecutionPolicy) -> str:
+    """Return the loaded entity revision, or a deterministic fallback revision."""
+    if policy.authorization_revision:
+        return policy.authorization_revision
+    content = {
+        "entity_id": policy.entity_id,
+        "title": policy.title,
+        "confidence_threshold": policy.confidence_threshold,
+        "blast_radius_default": policy.blast_radius_default.value,
+        "auto_execute_after_n_successful_recurrences": (
+            policy.auto_execute_after_n_successful_recurrences
+        ),
+        "high_blast_action_types": sorted(policy.high_blast_action_types),
+        "low_blast_action_types": sorted(policy.low_blast_action_types),
+        "checkpoint_postures": {
+            key: value.value
+            for key, value in sorted(policy.checkpoint_postures.items())
+        },
+        "loaded": policy.loaded,
+    }
+    return hashlib.sha256(_canonical_json(content).encode()).hexdigest()
+
+
 def _parse_policy(entity_id: str, data: dict) -> ExecutionPolicy:
     snap = (data.get("snapshot") or {}).get("snapshot") or data.get("snapshot") or data
 
@@ -318,7 +358,9 @@ def _parse_policy(entity_id: str, data: dict) -> ExecutionPolicy:
     except (TypeError, ValueError):
         n_recur = None
 
-    high = _as_set(snap.get("high_blast_action_types")) or frozenset(_FALLBACK_HIGH_BLAST)
+    high = _as_set(snap.get("high_blast_action_types")) or frozenset(
+        _FALLBACK_HIGH_BLAST
+    )
     low = _as_set(snap.get("low_blast_action_types")) or frozenset(_FALLBACK_LOW_BLAST)
     postures = _parse_checkpoint_postures(snap.get("checkpoint_postures"), entity_id)
 
@@ -332,6 +374,7 @@ def _parse_policy(entity_id: str, data: dict) -> ExecutionPolicy:
         low_blast_action_types=low,
         checkpoint_postures=postures,
         loaded=True,
+        authorization_revision=entity_record_digest(data),
     )
 
 
@@ -386,8 +429,37 @@ def _fetch_entity(entity_id: str) -> dict | None:
         resp.raise_for_status()
         return resp.json()
     except Exception as exc:  # noqa: BLE001 — fail closed, never crash dispatch
-        log.warning(f"[gating] could not fetch policy {entity_id}: {exc}")
+        log.warning(f"[gating] could not fetch entity {entity_id}: {exc}")
         return None
+
+
+def _fetch_entity_observations(entity_id: str, *, limit: int = 100) -> list[dict]:
+    if not NEOTOMA_BEARER_TOKEN:
+        return []
+    try:
+        resp = httpx.get(
+            f"{NEOTOMA_BASE_URL}/entities/{entity_id}/observations",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            params={"limit": limit},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        observations = data.get("observations") if isinstance(data, dict) else None
+        return observations if isinstance(observations, list) else []
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[gating] could not fetch observations for %s: %s", entity_id, exc)
+        return []
+
+
+def fetch_entity_user_id(entity_id: str) -> str | None:
+    """Resolve tenant provenance from immutable observation ownership."""
+    user_ids = {
+        str(item.get("user_id")).strip()
+        for item in _fetch_entity_observations(entity_id)
+        if item.get("user_id")
+    }
+    return next(iter(user_ids)) if len(user_ids) == 1 else None
 
 
 def load_policy(policy_id: str | None = None) -> ExecutionPolicy:
@@ -512,8 +584,7 @@ def evaluate_gate(
     # set n=None).
     graduated = (
         policy.auto_execute_after_n_successful_recurrences is not None
-        and successful_recurrences
-        >= policy.auto_execute_after_n_successful_recurrences
+        and successful_recurrences >= policy.auto_execute_after_n_successful_recurrences
         and blast == BlastRadius.LOW  # NEVER and HIGH never graduate
     )
 
@@ -573,6 +644,217 @@ def evaluate_gate(
     )
 
 
+CHECKPOINT_AUTHORIZATION_VERSION = 2
+_TRUSTED_AAUTH_TIERS = frozenset({"software", "operator_attested", "hardware"})
+CHECKPOINT_REQUIRED_APPROVER_SUB = os.environ.get(
+    "APIS_CHECKPOINT_REQUIRED_APPROVER_SUB", "ateles@ateles-swarm"
+).strip()
+CHECKPOINT_REQUIRED_APPROVER_JKT = os.environ.get(
+    "APIS_CHECKPOINT_REQUIRED_APPROVER_JKT", ""
+).strip()
+CHECKPOINT_PRODUCER_JKT = os.environ.get("APIS_CHECKPOINT_PRODUCER_JKT", "").strip()
+
+
+def _checkpoint_producer_http_signer(handler: str):
+    """Load only the checkpoint producer's existing RFC 9421 JWK."""
+    from .aauth_httpsig import load_http_sig_signer
+
+    keys_dir = Path(
+        os.environ.get(
+            "ATELES_PRIVATE_KEYS_DIR",
+            str(Path(__file__).resolve().parents[3] / "ateles-private" / "keys"),
+        )
+    )
+    producer_sub = f"{str(handler).strip().lower()}@ateles-swarm"
+    return load_http_sig_signer(
+        keys_dir / f"{str(handler).strip().lower()}.jwk.json",
+        expected_sub=producer_sub,
+        issuer=os.environ.get(
+            "APIS_CHECKPOINT_PRODUCER_ISS", "https://markmhendrickson.com"
+        ),
+    )
+
+
+def build_checkpoint_authorization_envelope(
+    *,
+    task_record: dict,
+    policy: ExecutionPolicy,
+    decision: GateDecision,
+    action_type: str,
+    user_id: str,
+    required_approver_sub: str = CHECKPOINT_REQUIRED_APPROVER_SUB,
+    required_approver_jkt: str = CHECKPOINT_REQUIRED_APPROVER_JKT,
+    producer_jkt: str | None = None,
+) -> str:
+    """Serialize the exact task and policy revisions shown for approval."""
+    resolved_producer_jkt = (
+        CHECKPOINT_PRODUCER_JKT if producer_jkt is None else str(producer_jkt).strip()
+    )
+    payload = {
+        "version": CHECKPOINT_AUTHORIZATION_VERSION,
+        "producer": "apis@ateles-swarm",
+        "producer_jkt": resolved_producer_jkt,
+        "task_entity_id": str(task_record.get("entity_id") or ""),
+        "task_revision": entity_record_digest(task_record),
+        "task_observation_count": task_record.get("observation_count"),
+        "task_last_observation_at": task_record.get("last_observation_at"),
+        "user_id": str(user_id),
+        "required_approver_sub": str(required_approver_sub).strip(),
+        # A subject name alone is self-asserted by an AAuth agent token. Pin
+        # the RFC 7638 thumbprint as well so a newly generated key cannot claim
+        # the configured resolver's name and manufacture release authority.
+        "required_approver_jkt": str(required_approver_jkt).strip(),
+        "action_type": str(action_type).strip().lower(),
+        "policy_entity_id": policy.entity_id,
+        "policy_revision": execution_policy_revision(policy),
+        "gate_action": decision.action.value,
+        "blast_radius": decision.blast_radius.value,
+    }
+    return _canonical_json(payload)
+
+
+def read_authenticated_checkpoint_authorization(
+    checkpoint_id: str, checkpoint_record: dict
+) -> dict | None:
+    """Read an authorization envelope only from its AAuth-backed observation.
+
+    The current snapshot fields are mutable reducer output.  Trust comes from
+    the immutable creation observation named by per-field provenance, after
+    Neotoma has verified and recorded Apis's AAuth identity.
+    """
+    snapshot = _snapshot_of(checkpoint_record)
+    encoded = snapshot.get("body")
+    provenance = checkpoint_record.get("provenance")
+    if not isinstance(encoded, str) or not isinstance(provenance, dict):
+        return None
+    observation_id = provenance.get("body")
+    if not isinstance(observation_id, str) or not observation_id:
+        return None
+    protected_fields = (
+        "body",
+        "task_entity_id",
+        "policy_entity_id",
+        "blast_radius",
+        "gate_action",
+        "handler",
+    )
+    if any(provenance.get(field) != observation_id for field in protected_fields):
+        return None
+    observation = next(
+        (
+            item
+            for item in _fetch_entity_observations(checkpoint_id)
+            if item.get("id") == observation_id
+        ),
+        None,
+    )
+    if not isinstance(observation, dict):
+        return None
+    fields = observation.get("fields")
+    auth = observation.get("provenance")
+    if not isinstance(fields, dict) or fields.get("body") != encoded:
+        return None
+    if not isinstance(auth, dict):
+        return None
+    expected_producer_jkt = str(CHECKPOINT_PRODUCER_JKT or "").strip()
+    if (
+        not re.fullmatch(r"[A-Za-z0-9_-]{43}", expected_producer_jkt)
+        or auth.get("agent_sub") != "apis@ateles-swarm"
+        or str(auth.get("agent_thumbprint") or "").strip() != expected_producer_jkt
+        or auth.get("attribution_tier") not in _TRUSTED_AAUTH_TIERS
+    ):
+        return None
+    try:
+        payload = json.loads(encoded)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("version") != 2:
+        return None
+    if (
+        payload.get("producer") != "apis@ateles-swarm"
+        or str(payload.get("producer_jkt") or "").strip() != expected_producer_jkt
+    ):
+        return None
+    required_sub = str(payload.get("required_approver_sub") or "").strip()
+    required_jkt = str(payload.get("required_approver_jkt") or "").strip()
+    if (
+        not required_sub
+        or "@" not in required_sub
+        or not re.fullmatch(r"[A-Za-z0-9_-]{43}", required_jkt)
+    ):
+        return None
+    return payload
+
+
+def read_authenticated_checkpoint_resolution(
+    checkpoint_id: str,
+    checkpoint_record: dict,
+    *,
+    required_approver_sub: str,
+    required_approver_jkt: str,
+    expected_user_id: str,
+    expected_resolution: str = "approved",
+) -> dict | None:
+    """Read a resolution only from its authenticated principal observation.
+
+    The checkpoint snapshot's ``status`` is reducer output and therefore says
+    only what value won, not who supplied it.  Release authority comes from the
+    immutable observation named by that field's provenance.  Missing,
+    unreadable, untrusted, cross-tenant, or wrong-principal attribution is not
+    an approval.
+    """
+    required_sub = str(required_approver_sub or "").strip()
+    required_jkt = str(required_approver_jkt or "").strip()
+    tenant_id = str(expected_user_id or "").strip()
+    expected = str(expected_resolution or "").strip().lower()
+    if (
+        not required_sub
+        or not re.fullmatch(r"[A-Za-z0-9_-]{43}", required_jkt)
+        or not tenant_id
+        or expected not in {"approved", "rejected"}
+    ):
+        return None
+    snapshot = _snapshot_of(checkpoint_record)
+    if read_checkpoint_resolution(snapshot) != expected:
+        return None
+    provenance = checkpoint_record.get("provenance")
+    if not isinstance(provenance, dict):
+        return None
+    observation_id = provenance.get("status")
+    if not isinstance(observation_id, str) or not observation_id:
+        return None
+    observation = next(
+        (
+            item
+            for item in _fetch_entity_observations(checkpoint_id)
+            if item.get("id") == observation_id
+        ),
+        None,
+    )
+    if not isinstance(observation, dict):
+        return None
+    fields = observation.get("fields")
+    auth = observation.get("provenance")
+    if not isinstance(fields, dict) or read_checkpoint_resolution(fields) != expected:
+        return None
+    if str(observation.get("user_id") or "").strip() != tenant_id:
+        return None
+    if not isinstance(auth, dict):
+        return None
+    if (
+        str(auth.get("agent_sub") or "").strip() != required_sub
+        or str(auth.get("agent_thumbprint") or "").strip() != required_jkt
+        or auth.get("attribution_tier") not in _TRUSTED_AAUTH_TIERS
+    ):
+        return None
+    return {
+        "principal_sub": required_sub,
+        "observation_id": observation_id,
+        "attribution_tier": auth.get("attribution_tier"),
+        "agent_thumbprint": required_jkt,
+    }
+
+
 def write_checkpoint_brief(
     *,
     task_entity_id: str,
@@ -581,6 +863,11 @@ def write_checkpoint_brief(
     plan_summary: str,
     handler: str,
     alternatives: list[str] | None = None,
+    user_id: str | None = None,
+    action_type: str | None = None,
+    idempotency_context: str | None = None,
+    task_record: dict | None = None,
+    policy: ExecutionPolicy | None = None,
 ) -> str | None:
     """
     Store a blocking checkpoint_brief entity in Neotoma and link it to the task.
@@ -590,6 +877,17 @@ def write_checkpoint_brief(
     """
     if not NEOTOMA_BEARER_TOKEN:
         log.warning("[gating] no bearer token — checkpoint_brief not persisted")
+        return None
+
+    # The fallback policy keeps ordinary classification available; it is not
+    # authoritative enough to mint an approval artifact.  Otherwise a stable
+    # hash of ``loaded=False`` turns Indeterminate into approvable authority.
+    if policy is not None and not policy.loaded:
+        log.error(
+            "[gating] execution policy %s is not loaded — refusing to create "
+            "checkpoint authority",
+            policy.entity_id or "(fallback)",
+        )
         return None
 
     body = {
@@ -622,17 +920,86 @@ def write_checkpoint_brief(
         ],
         "idempotency_key": f"checkpoint-{handler}-{task_entity_id}-plan",
     }
-    try:
-        resp = httpx.post(
-            f"{NEOTOMA_BASE_URL}/store",
-            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            json=body,
-            timeout=15,
+    normalized_action = str(action_type or "").strip().lower()
+    authorization_expected = task_record is not None and policy is not None
+    expected_authorization: dict | None = None
+    if authorization_expected:
+        if (
+            task_record.get("entity_id") != task_entity_id
+            or str(task_record.get("entity_type", "")).strip().lower() != "task"
+            or not user_id
+            or not CHECKPOINT_REQUIRED_APPROVER_SUB
+            or not re.fullmatch(r"[A-Za-z0-9_-]{43}", CHECKPOINT_REQUIRED_APPROVER_JKT)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{43}", CHECKPOINT_PRODUCER_JKT)
+        ):
+            log.warning(
+                "[gating] incomplete task, producer, or resolver provenance for "
+                "checkpoint authority"
+            )
+            return None
+        encoded_authorization = build_checkpoint_authorization_envelope(
+            task_record=task_record,
+            policy=policy,
+            decision=decision,
+            action_type=normalized_action,
+            user_id=user_id,
+            required_approver_sub=CHECKPOINT_REQUIRED_APPROVER_SUB,
+            required_approver_jkt=CHECKPOINT_REQUIRED_APPROVER_JKT,
+            producer_jkt=CHECKPOINT_PRODUCER_JKT,
         )
+        body["entities"][0]["body"] = encoded_authorization
+        expected_authorization = json.loads(encoded_authorization)
+    if idempotency_context:
+        body["idempotency_key"] += f"-{idempotency_context}"
+    try:
+        headers = {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}
+        encoded_request_body: bytes | None = None
+        if authorization_expected:
+            signer = _checkpoint_producer_http_signer(handler)
+            if signer.thumbprint != CHECKPOINT_PRODUCER_JKT:
+                log.error(
+                    "[gating] checkpoint producer JWK does not match the configured "
+                    "RFC 7638 thumbprint — refusing to create authority"
+                )
+                return None
+            encoded_request_body = _canonical_json(body).encode("utf-8")
+            headers.update(
+                signer.sign_headers(
+                    method="POST",
+                    url=f"{NEOTOMA_BASE_URL.rstrip('/')}/store",
+                    body=encoded_request_body,
+                    content_type="application/json",
+                )
+            )
+        store_url = f"{NEOTOMA_BASE_URL.rstrip('/')}/store"
+        if encoded_request_body is None:
+            resp = httpx.post(store_url, headers=headers, json=body, timeout=15)
+        else:
+            resp = httpx.post(
+                store_url,
+                headers=headers,
+                content=encoded_request_body,
+                timeout=15,
+            )
         resp.raise_for_status()
         data = resp.json()
         ents = data.get("entities") or []
-        return ents[0].get("entity_id") if ents else None
+        entity_id = ents[0].get("entity_id") if ents else None
+        if entity_id and authorization_expected:
+            readback = _fetch_entity(entity_id)
+            authorization = (
+                read_authenticated_checkpoint_authorization(entity_id, readback)
+                if isinstance(readback, dict)
+                else None
+            )
+            if authorization != expected_authorization:
+                log.warning(
+                    "[gating] checkpoint %s authenticated authorization did not "
+                    "materialize exactly on read-back",
+                    entity_id,
+                )
+                return None
+        return entity_id
     except Exception as exc:  # noqa: BLE001
         log.warning(f"[gating] failed to persist checkpoint_brief: {exc}")
         return None
@@ -653,6 +1020,33 @@ def write_checkpoint_brief(
 # Statuses that resolve a checkpoint, and how the dispatcher should treat them.
 CHECKPOINT_APPROVED_STATES = frozenset({"approved", "approve", "accepted"})
 CHECKPOINT_REJECTED_STATES = frozenset({"rejected", "reject", "declined", "denied"})
+CHECKPOINT_APPROVED_NO_RELEASE = "approved_no_release"
+CHECKPOINT_REQUIRES_FRESH_APPROVAL = "approved_requires_fresh_approval"
+
+
+def checkpoint_authorization_digest(
+    *,
+    task_entity_id: str,
+    user_id: str,
+    action_type: str,
+    gate_action: str,
+    blast_radius: str,
+    policy_id: str,
+) -> str:
+    """Return the retired v1 sibling-field checksum for legacy detection."""
+    canonical = json.dumps(
+        {
+            "action_type": str(action_type).strip().lower(),
+            "blast_radius": str(blast_radius).strip().lower(),
+            "gate_action": str(gate_action).strip().lower(),
+            "policy_id": str(policy_id).strip(),
+            "task_entity_id": str(task_entity_id).strip(),
+            "user_id": str(user_id).strip(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def _snapshot_of(data: dict) -> dict:
@@ -663,6 +1057,23 @@ def _snapshot_of(data: dict) -> dict:
     if isinstance(data.get("snapshot"), dict):
         return data["snapshot"]
     return data
+
+
+def _snapshot_with_tenant(data: dict) -> dict:
+    """Return a snapshot without dropping tenant provenance on the envelope."""
+    snapshot = dict(_snapshot_of(data))
+    envelope_user_id = data.get("user_id")
+    snapshot_user_id = snapshot.get("user_id")
+    if envelope_user_id and snapshot_user_id and envelope_user_id != snapshot_user_id:
+        # Preserve the conflict as absent authorization rather than choosing
+        # either source. Checkpoint consumers require a truthy matching value.
+        log.warning(
+            "[gating] entity tenant provenance conflicts between envelope and snapshot"
+        )
+        snapshot["user_id"] = None
+    elif envelope_user_id and not snapshot_user_id:
+        snapshot["user_id"] = envelope_user_id
+    return snapshot
 
 
 def read_checkpoint_resolution(snapshot: dict) -> str | None:
@@ -678,15 +1089,48 @@ def read_checkpoint_resolution(snapshot: dict) -> str | None:
     return None
 
 
-def fetch_task_snapshot(task_entity_id: str) -> dict | None:
-    """
-    Fetch the current snapshot of the task a checkpoint_brief refers to, so the
-    dispatcher can re-run it on approval. Returns None if unreachable.
-    """
+def fetch_task_record(task_entity_id: str) -> dict | None:
+    """Fetch the complete typed task record, including revision provenance."""
     data = _fetch_entity(task_entity_id)
     if data is None:
         return None
-    return _snapshot_of(data)
+    entity_type = str(data.get("entity_type") or data.get("type") or "").strip().lower()
+    if entity_type != "task":
+        log.warning(
+            "[gating] entity %s is type %r, not task — refusing checkpoint release",
+            task_entity_id,
+            entity_type or "unknown",
+        )
+        return None
+    return data
+
+
+def fetch_task_snapshot(task_entity_id: str) -> dict | None:
+    """Fetch the current typed task snapshot for dispatch."""
+    data = fetch_task_record(task_entity_id)
+    return _snapshot_with_tenant(data) if data is not None else None
+
+
+def fetch_checkpoint_record(checkpoint_entity_id: str) -> dict | None:
+    """Fetch a complete typed checkpoint record, including provenance."""
+    data = _fetch_entity(checkpoint_entity_id)
+    if data is None:
+        return None
+    entity_type = str(data.get("entity_type") or data.get("type") or "").strip().lower()
+    if entity_type != "checkpoint_" + "brief":
+        log.warning(
+            "[gating] entity %s is type %r, not a checkpoint brief",
+            checkpoint_entity_id,
+            entity_type or "unknown",
+        )
+        return None
+    return data
+
+
+def fetch_checkpoint_snapshot(checkpoint_entity_id: str) -> dict | None:
+    """Fetch a checkpoint snapshot, rejecting ambiguous types."""
+    data = fetch_checkpoint_record(checkpoint_entity_id)
+    return _snapshot_with_tenant(data) if data is not None else None
 
 
 def checkpoint_already_dispatched(snapshot: dict) -> bool:
@@ -701,9 +1145,10 @@ def checkpoint_already_dispatched(snapshot: dict) -> bool:
 
 def stamp_checkpoint_dispatched(checkpoint_entity_id: str, *, handler: str) -> bool:
     """
-    Mark a checkpoint_brief `resolved_dispatched: true` after the dispatcher has
-    acted on its resolution, so SSE replays of the same approved/rejected event
-    are no-ops. Best-effort; logs and returns False on failure.
+    Claim a checkpoint_brief resolution with `resolved_dispatched: true` once
+    the consumer has decided it can act, so SSE replays are no-ops. The caller
+    must not dispatch if this write fails. Best-effort; logs and returns False
+    on failure.
     """
     if not NEOTOMA_BEARER_TOKEN:
         log.warning("[gating] no bearer token — cannot stamp checkpoint dispatched")
@@ -723,12 +1168,138 @@ def stamp_checkpoint_dispatched(checkpoint_entity_id: str, *, handler: str) -> b
             timeout=15,
         )
         resp.raise_for_status()
+        response_body = resp.json()
+        if not isinstance(response_body, dict) or response_body.get("snapshot") is None:
+            # Neotoma's idempotent duplicate path returns snapshot=null. The
+            # field may read true because another consumer won, but this caller
+            # did not acquire the claim and therefore must not dispatch.
+            log.info(
+                "[gating] checkpoint %s stamp was an idempotent replay — claim not acquired",
+                checkpoint_entity_id,
+            )
+            return False
+        # A successful correction response is not proof that the field landed:
+        # Neotoma can accept a write that does not materialize on the entity.
+        # Read the brief itself back before treating the stamp as a replay claim.
+        data = _fetch_entity(checkpoint_entity_id)
+        if data is None:
+            log.warning(
+                "[gating] checkpoint %s stamp could not be read back",
+                checkpoint_entity_id,
+            )
+            return False
+        entity_type = (
+            str(data.get("entity_type") or data.get("type") or "").strip().lower()
+        )
+        snapshot = _snapshot_of(data)
+        if entity_type != "checkpoint_" + "brief" or not checkpoint_already_dispatched(
+            snapshot
+        ):
+            log.warning(
+                "[gating] checkpoint %s stamp was not materialized on read-back",
+                checkpoint_entity_id,
+            )
+            return False
         return True
     except Exception as exc:  # noqa: BLE001
         log.warning(
             f"[gating] failed to stamp checkpoint {checkpoint_entity_id} dispatched: {exc}"
         )
         return False
+
+
+def _transition_checkpoint_status(
+    checkpoint_entity_id: str,
+    *,
+    handler: str,
+    reason: str,
+    status: str,
+    idempotency_label: str,
+) -> bool:
+    """Write and read back a terminal/non-releasable checkpoint status."""
+    if not NEOTOMA_BEARER_TOKEN:
+        log.warning(
+            "[gating] no bearer token — cannot transition checkpoint to %s", status
+        )
+        return False
+    body = {
+        "entity_id": checkpoint_entity_id,
+        "entity_type": "checkpoint_brief",
+        "field": "status",
+        "value": status,
+        "idempotency_key": f"checkpoint-{idempotency_label}-{handler}-{checkpoint_entity_id}",
+    }
+    try:
+        resp = httpx.post(
+            f"{NEOTOMA_BASE_URL}/correct",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            json=body,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = _fetch_entity(checkpoint_entity_id)
+        if data is None:
+            log.warning(
+                "[gating] checkpoint %s transition to %s could not be read back",
+                checkpoint_entity_id,
+                status,
+            )
+            return False
+        entity_type = (
+            str(data.get("entity_type") or data.get("type") or "").strip().lower()
+        )
+        snapshot = _snapshot_of(data)
+        if (
+            entity_type != "checkpoint_" + "brief"
+            or str(snapshot.get("status", "")).strip().lower() != status
+        ):
+            log.warning(
+                "[gating] checkpoint %s transition to %s did not materialize",
+                checkpoint_entity_id,
+                status,
+            )
+            return False
+        log.info(
+            "[gating] checkpoint %s transitioned to %s (%s)",
+            checkpoint_entity_id,
+            status,
+            reason,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "[gating] failed to transition checkpoint %s to %s: %s",
+            checkpoint_entity_id,
+            status,
+            exc,
+        )
+        return False
+
+
+def close_checkpoint_without_release(
+    checkpoint_entity_id: str, *, handler: str, reason: str
+) -> bool:
+    """Durably consume an approval that is not authorized to release work."""
+    return _transition_checkpoint_status(
+        checkpoint_entity_id,
+        handler=handler,
+        reason=reason,
+        status=CHECKPOINT_APPROVED_NO_RELEASE,
+        idempotency_label="no-release",
+    )
+
+
+def require_fresh_checkpoint_approval(
+    checkpoint_entity_id: str, *, handler: str, reason: str
+) -> bool:
+    """Retire stale authority while preserving the task for a new approval."""
+    return _transition_checkpoint_status(
+        checkpoint_entity_id,
+        handler=handler,
+        reason=reason,
+        status=CHECKPOINT_REQUIRES_FRESH_APPROVAL,
+        idempotency_label="fresh-approval",
+    )
 
 
 def mark_task_declined(task_entity_id: str, *, reason: str, handler: str) -> bool:

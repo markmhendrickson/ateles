@@ -1,0 +1,10 @@
+{
+  "layout": "sibling",
+  "eyebrow": "The other half",
+  "headline": "Authority needs a record it can trust.",
+  "lede": "Ateles governs who may act. Neotoma governs what counts as settled state. The two products meet at the boundary between legitimate action and trustworthy knowledge.",
+  "items": [
+    {"title": "Ateles answers who was authorized", "body": "Roles, grants, workflows, checkpoints, and attributed execution make delegation governable."},
+    {"title": "Neotoma answers what was true", "body": "A durable, correctable, attributable record gives those actions a trustworthy state to act against.", "href": "https://neotoma.io", "link_label": "Visit Neotoma"}
+  ]
+}

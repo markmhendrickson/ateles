@@ -1,0 +1,1377 @@
+{
+  "_observation_ids": {
+    "asset_inventory": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
+    "completeness": "63417972-dbc2-ddab-63dd-1a3befdcc8cc",
+    "downstream_contracts": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
+    "name": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
+    "ownership": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
+    "phrases": "05cf0304-9640-6f15-32a0-b7c2aff5a033",
+    "positioning": "9a5bd8d2-1d6a-a389-c527-db3bc197218a",
+    "product": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
+    "production_specs": "50984e28-3dbf-5754-14db-553bd9f76b60",
+    "provenance": "b50ae57a-ef5a-946b-a7ce-4443080fae53",
+    "schema_version": "unknown",
+    "scope": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
+    "slug": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
+    "status": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
+    "terminology": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
+    "updated_at": "48f5b97b-6fe4-5f4d-0a28-a95305fc9c8e",
+    "visibility": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
+    "visual_concepts": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
+    "visual_styles": "ec75f024-ef9b-a5ee-dae7-edf1c63c5a9e",
+    "voice": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d"
+  },
+  "_source": {
+    "entity_id": "ent_bada69d5cbb1f27bf82bb86b",
+    "entity_type": "brand_guideline",
+    "fetched_at": "2026-09-22T16:49:29+00:00",
+    "product": "ateles",
+    "schema_entity_id": "ent_73da44b2d434cbafe5d8ecb9"
+  },
+  "asset_inventory": [
+    {
+      "kind": "symbol",
+      "name": "Public-site swarm mark",
+      "preview": "mark",
+      "public_path": null,
+      "repository_path": "execution/scripts/site_generator/templates/render.py",
+      "source": "ent_9158c8b39e0f437fdb2a86de",
+      "status": "approved",
+      "use": "Navigation and small identity placements"
+    },
+    {
+      "kind": "wordmark",
+      "name": "Lowercase Ateles wordmark",
+      "preview": "none",
+      "public_path": "https://github.com/markmhendrickson/ateles/blob/main/apps/task-dashboard/src/Brand.tsx",
+      "repository_path": "apps/task-dashboard/src/Brand.tsx",
+      "source": "apps/task-dashboard",
+      "status": "approved",
+      "use": "Application lockups and text-led identity"
+    },
+    {
+      "kind": "symbol",
+      "name": "Core-and-satellites application symbol",
+      "preview": "none",
+      "public_path": "https://github.com/markmhendrickson/ateles/blob/main/apps/task-dashboard/src/Brand.tsx",
+      "repository_path": "apps/task-dashboard/src/Brand.tsx",
+      "source": "apps/task-dashboard",
+      "status": "provisional",
+      "use": "Legacy application mark pending alignment with edge-free differentiated swarm semantics"
+    },
+    {
+      "kind": "cinematic",
+      "name": "Connected-node concept film",
+      "preview": "video",
+      "public_path": "/assets/ateles/hero-concept.webm",
+      "repository_path": "execution/scripts/site_generator/assets/ateles/hero-concept.webm",
+      "source": "ent_9444da0c7dea895c182fe098",
+      "status": "provisional",
+      "use": "Exploratory secondary evidence only; permanent paths read as a graph and exclude it from hero duty"
+    },
+    {
+      "kind": "cinematic",
+      "name": "Connected-node MP4 fallback",
+      "preview": "none",
+      "public_path": "/assets/ateles/hero-concept.mp4",
+      "repository_path": "execution/scripts/site_generator/assets/ateles/hero-concept.mp4",
+      "source": "ent_9444da0c7dea895c182fe098",
+      "status": "provisional",
+      "use": "Fallback encode for exploratory film"
+    },
+    {
+      "kind": "poster",
+      "name": "Connected-node poster",
+      "preview": "image",
+      "public_path": "/assets/ateles/hero-concept.avif",
+      "repository_path": "execution/scripts/site_generator/assets/ateles/hero-concept.avif",
+      "source": "ent_9444da0c7dea895c182fe098",
+      "status": "provisional",
+      "use": "Static evidence for exploratory film"
+    },
+    {
+      "kind": "cinematic",
+      "name": "Swarm-first hero film",
+      "preview": "none",
+      "public_path": null,
+      "repository_path": null,
+      "source": "ent_9444da0c7dea895c182fe098",
+      "status": "missing",
+      "use": "Primary hero takeover showing an edge-free swarm becoming an organization"
+    }
+  ],
+  "completeness": {
+    "dimensions": [
+      {
+        "name": "positioning",
+        "status": "provisional"
+      },
+      {
+        "name": "phrases",
+        "status": "provisional"
+      },
+      {
+        "name": "terminology",
+        "status": "approved"
+      },
+      {
+        "name": "voice",
+        "status": "approved"
+      },
+      {
+        "name": "visual_style",
+        "status": "provisional"
+      },
+      {
+        "name": "asset_inventory",
+        "status": "provisional"
+      },
+      {
+        "name": "cinematic_production",
+        "status": "provisional"
+      },
+      {
+        "name": "provenance",
+        "status": "approved"
+      },
+      {
+        "name": "downstream_contracts",
+        "status": "provisional"
+      },
+      {
+        "name": "brand_intent",
+        "status": "provisional"
+      },
+      {
+        "name": "logo_system",
+        "status": "provisional"
+      },
+      {
+        "name": "typography_system",
+        "status": "provisional"
+      },
+      {
+        "name": "research_provenance",
+        "status": "approved"
+      },
+      {
+        "name": "accessibility",
+        "status": "approved"
+      },
+      {
+        "name": "market_reference_ledger",
+        "status": "provisional"
+      },
+      {
+        "name": "differentiation_matrix",
+        "status": "provisional"
+      },
+      {
+        "name": "aesthetic_territory",
+        "status": "provisional"
+      }
+    ],
+    "missing_items": [
+      "Swarm-first cinematic hero and section master set",
+      "Application core-and-satellites mark alignment",
+      "Complete foundation-viewer asset production",
+      "Canonical clear-space and digital/print minimum-size measurements for final Ateles exports",
+      "Approved horizontal, stacked, monochrome, reversed, favicon and co-branding Ateles assets",
+      "Final type weight/style inventory and owner-approved research cadence",
+      "Operator approval or revision of the complete provisional brand system and its original aesthetic territory",
+      "Final contradiction audit against the section copy-to-visual production matrix"
+    ],
+    "overall_status": "provisional"
+  },
+  "downstream_contracts": [
+    {
+      "consumer": "Human repository guide",
+      "contract": "Generated at docs/brand/ateles.md; never hand-edit.",
+      "status": "approved"
+    },
+    {
+      "consumer": "Machine site contract",
+      "contract": "Generated at execution/scripts/site_generator/brand_systems/ateles.json and validated against schema.v1.json.",
+      "status": "approved"
+    },
+    {
+      "consumer": "Design tokens",
+      "contract": "Palette and typography derive from this instance or the same render transaction; product visual design_system remains an upstream source until cutover.",
+      "status": "provisional"
+    },
+    {
+      "consumer": "Product site",
+      "contract": "The /brand/ route renders this machine contract as a read-only viewer and public-safe projection.",
+      "status": "approved"
+    },
+    {
+      "consumer": "Cinematic production",
+      "contract": "Prompts inherit shared/product rules here; shot briefs record only concept-specific deltas.",
+      "status": "approved"
+    },
+    {
+      "consumer": "Application marks",
+      "contract": "UI marks must pass the primary-symbol and anti-pattern contract.",
+      "status": "provisional"
+    }
+  ],
+  "name": "Ateles canonical brand system",
+  "ownership": {
+    "approval_role": "Product owner for category and brand promise; designated design review for visual execution",
+    "maintenance": "Correct the canonical Neotoma brand_guideline, rerun the repository renderer, and commit both human and machine mirrors together.",
+    "owner_role": "Product owner"
+  },
+  "phrases": [
+    {
+      "guidance": "Exact settled outward category and hero headline; brand-system expression remains provisional until final operator approval.",
+      "name": "The operating system for agentic organizations.",
+      "source": "ent_97504a9c5762e37842d07436",
+      "status": "provisional"
+    },
+    {
+      "guidance": "Hero support; use once near the category headline.",
+      "name": "Give agents distinct roles, bounded authority, and shared direction\u2014so the organization keeps moving without constant supervision.",
+      "source": "ent_c1fe64b279327d7882c39571",
+      "status": "provisional"
+    },
+    {
+      "guidance": "Section-level mechanism principle only; do not repeat in the hero.",
+      "name": "Delegate outcomes, not every next step.",
+      "source": "ent_c1fe64b279327d7882c39571",
+      "status": "approved"
+    },
+    {
+      "guidance": "Editorial framing, not category or hero headline.",
+      "name": "Agents are cheap. Organizations are not.",
+      "source": "ent_9444da0c7dea895c182fe098",
+      "status": "provisional"
+    },
+    {
+      "guidance": "Superseded category; must fail public-copy validation.",
+      "name": "The distributed-authority operating layer for governed initiative.",
+      "source": "operator decision",
+      "status": "retired"
+    },
+    {
+      "guidance": "Removed because it repeats the mechanism principle.",
+      "name": "Delegate more than a session can hold.",
+      "source": "operator decision",
+      "status": "retired"
+    }
+  ],
+  "positioning": {
+    "audience": "Operators delegating consequential work to multiple AI agents while retaining explicit authority, priorities, escalation, and accountability.",
+    "category": "The operating system for agentic organizations.",
+    "hero_headline": "The operating system for agentic organizations.",
+    "hero_support": "Give agents distinct roles, bounded authority, and shared direction\u2014so the organization keeps moving without constant supervision.",
+    "intent": {
+      "core_idea": "A swarm becomes an organization without surrendering member identity and judgement.",
+      "emotional_outcome": "Confident delegation without constant supervision.",
+      "forbidden_perceptions": [
+        "Generic orchestration",
+        "Central controller",
+        "Anonymous neural mesh",
+        "Literal hive or insects",
+        "Seal as brand"
+      ],
+      "functional_truth": "Distinct agent roles coordinate through bounded authority, accountable claims, temporary handoffs, escalation and mission-to-task structure.",
+      "intended_perceptions": [
+        "Standing agentic organization",
+        "Distinct responsible roles",
+        "Coordinated autonomy",
+        "Governed accountable motion"
+      ],
+      "proof_cues": [
+        "Distinct roles and shapes",
+        "Temporary signals and handoffs",
+        "Bounded local checkpoint",
+        "Visible purpose, authority and accountability"
+      ],
+      "sibling_distinction": "Ateles governs who can act and how work is coordinated; Neotoma preserves what is true.",
+      "status": "provisional"
+    },
+    "product_promise": "A standing agentic organization that can keep coordinated work moving without constant supervision.",
+    "sibling_role": "Ateles answers who was authorized; Neotoma answers what was true."
+  },
+  "product": "Ateles",
+  "production_specs": {
+    "accessibility": {
+      "contrast": {
+        "requirement": "Meet WCAG contrast for text and meaningful graphics in every approved colorway; media copy needs a tested safe field.",
+        "status": "approved"
+      },
+      "images_of_text": {
+        "requirement": "Use semantic text; only essential logotypes may be images of text and need accessible names.",
+        "status": "approved"
+      },
+      "reduced_motion_static_equivalence": {
+        "requirement": "Honor reduced motion and provide a static state carrying every meaning expressed by motion.",
+        "status": "approved"
+      },
+      "relative_sizing": {
+        "requirement": "Use relative responsive sizing and preserve resize/reflow without two-dimensional page scrolling.",
+        "status": "approved"
+      },
+      "semantic_headings": {
+        "requirement": "Use one H1 and ordered semantic headings; size never substitutes for level.",
+        "status": "approved"
+      }
+    },
+    "cinematic": {
+      "palette_and_material": "Warm paper and ink, rust coordination signals, restrained grant green, tactile ceramic/metal/paper materials.",
+      "prohibitions": [
+        "permanent edges",
+        "central hub",
+        "anonymous neural mesh",
+        "literal insects, monkeys, spiders, robots, hives, or honeycomb",
+        "seal as hero or logo",
+        "generated text or UI"
+      ],
+      "semantics": "A swarm becomes an organization: autonomous differentiated members self-organize around shared purpose, exchange work through temporary handoffs, pause at one bounded checkpoint or escalation, then continue."
+    },
+    "delivery": {
+      "behavior": [
+        "muted",
+        "autoplay",
+        "playsinline",
+        "loop",
+        "preload=metadata",
+        "lazy-load non-hero media"
+      ],
+      "hero": "One silent 8-second 4:3 master, 720p or better, with H.264 and VP9/AV1 web encodes; each hero asset under 1.8 MB.",
+      "responsive": "Provide 16:9 desktop and art-directed 9:16 mobile crops without losing the semantic beat.",
+      "sections": "Five-to-six-second silent 16:9 masters or still-led micro-loops; target under 900 KB per moving web asset and under 150 KB per AVIF poster."
+    },
+    "generation_gate": {
+      "approval_owner": "Product owner",
+      "generation_allowed": false,
+      "predicates": [
+        {
+          "evidence": "A complete product-truth-grounded intent draft exists and awaits operator approval with the whole brand system.",
+          "name": "brand_intent",
+          "status": "blocked"
+        },
+        {
+          "evidence": "Exact outward category was selected by the operator and read back in ent_97504a9c5762e37842d07436.",
+          "name": "category_language",
+          "status": "approved"
+        },
+        {
+          "evidence": "Terminology and voice rules exist, but the regenerated copy system remains part of the pending whole-brand approval.",
+          "name": "phrases_terminology_voice",
+          "status": "blocked"
+        },
+        {
+          "evidence": "Symbol and metaphor are approved; final exported logo variants are not required in-frame, but film-facing logo application rules still await final approval.",
+          "name": "symbol_and_logo_for_film",
+          "status": "provisional"
+        },
+        {
+          "evidence": "Palette, materiality, and type-role draft is complete; final typography inventory and whole-brand approval remain open.",
+          "name": "palette_materiality_typography",
+          "status": "blocked"
+        },
+        {
+          "evidence": "One original motion/cinematography territory is synthesized from current live evidence and awaits operator approval.",
+          "name": "motion_cinematography",
+          "status": "blocked"
+        },
+        {
+          "evidence": "Contrast, semantic text, reduced-motion and static-equivalence rules are approved.",
+          "name": "accessibility_static_equivalence",
+          "status": "approved"
+        },
+        {
+          "evidence": "Current dated market-reference learnings and convergence tests are complete but await operator review.",
+          "name": "market_learning_and_differentiation",
+          "status": "blocked"
+        },
+        {
+          "evidence": "The section-by-section production matrix exists in the cinematic task but remains under operator review.",
+          "name": "section_copy_to_visual_matrix",
+          "status": "blocked"
+        },
+        {
+          "evidence": "A final contradiction audit between the brand guide and page production brief has not yet been recorded as clear.",
+          "name": "brand_brief_consistency",
+          "status": "blocked"
+        }
+      ],
+      "rule": "Do not submit, regenerate, or resume cinematic media production until every predicate is approved and read back from the canonical records. Final logo exports may remain a separate asset task only when no logo appears in-frame.",
+      "status": "blocked",
+      "unresolved": [
+        "Operator approval or revision of the complete provisional brand system",
+        "Film-facing logo application-rule approval",
+        "Final typography weight/style inventory",
+        "Approved section-by-section copy-to-visual matrix",
+        "Recorded contradiction-free audit between the approved brand guide and production brief"
+      ]
+    },
+    "still_and_reduced_motion": {
+      "accessibility": [
+        "No meaning only in motion",
+        "DOM text remains text, never generated into imagery",
+        "Maintain readable copy-safe negative space and AA contrast",
+        "Use descriptive figure labels for non-decorative visuals"
+      ],
+      "requirement": "The poster and reduced-motion state must communicate the complete adjacent claim without relying on movement."
+    }
+  },
+  "provenance": {
+    "boundary": "This entity owns expression. Product capability and roadmap truth remain in product/foundation sources. Repository docs and JSON are generated mirrors; /brand/ is a viewer; concept-film records may only add shot-specific deltas.",
+    "canonical_storage": "Neotoma brand_guideline entity",
+    "differentiation_matrix": {
+      "axes": [
+        {
+          "ateles": "Operating system for agentic organizations",
+          "ateles_brand_rule_class": "distinctive_brand_territory",
+          "axis": "category_language",
+          "convergence_test": "Fail if both collapse into generic agent infrastructure.",
+          "neotoma": "System of record for AI agents",
+          "neotoma_brand_rule_class": "distinctive_brand_territory"
+        },
+        {
+          "ateles": "Edge-free swarm with temporary handoffs",
+          "ateles_brand_rule_class": "distinctive_brand_territory",
+          "axis": "symbol_metaphor",
+          "convergence_test": "Fail if Ateles gains permanent edges or Neotoma loses durable relationships.",
+          "neotoma": "Persistent typed record graph",
+          "neotoma_brand_rule_class": "distinctive_brand_territory"
+        },
+        {
+          "ateles": "Warm paper, rust signals, restrained grant green; ceramic and metal",
+          "ateles_brand_rule_class": "adapted_convention",
+          "axis": "palette_materiality",
+          "convergence_test": "Fail if both become generic dark AI glow or share one accent logic.",
+          "neotoma": "Archival paper, teal continuity, amber correction; vellum, glass and mineral record tiles",
+          "neotoma_brand_rule_class": "distinctive_brand_territory"
+        },
+        {
+          "ateles": "Geometric expressive headings, humanist productive body, operational mono labels",
+          "ateles_brand_rule_class": "adapted_convention",
+          "axis": "typography",
+          "convergence_test": "Fail if type roles or examples become interchangeable.",
+          "neotoma": "Editorial serif headings, neutral productive body, provenance mono labels",
+          "neotoma_brand_rule_class": "adapted_convention"
+        },
+        {
+          "ateles": "Autonomous members align, signal, hand off, pause locally and continue",
+          "ateles_brand_rule_class": "distinctive_brand_territory",
+          "axis": "motion_cinematography",
+          "convergence_test": "Fail if both read as a permanent network or generic node pulses.",
+          "neotoma": "Graph remains registered while create, retrieve and update change state with history intact",
+          "neotoma_brand_rule_class": "distinctive_brand_territory"
+        },
+        {
+          "ateles": "Organizational, decisive, bounded and forward-moving",
+          "ateles_brand_rule_class": "distinctive_brand_territory",
+          "axis": "voice",
+          "convergence_test": "Fail if either adopts generic AI optimism or interchangeable infrastructure prose.",
+          "neotoma": "Precise, calm, durable and epistemically honest",
+          "neotoma_brand_rule_class": "distinctive_brand_territory"
+        },
+        {
+          "ateles": "Roles, authority, claim/lease, escalation and accountable continuation",
+          "ateles_brand_rule_class": "distinctive_brand_territory",
+          "axis": "proof_style",
+          "convergence_test": "Fail if proof becomes feature lists without product-truth mechanisms.",
+          "neotoma": "Typed records, provenance, version history, disagreement and correction",
+          "neotoma_brand_rule_class": "distinctive_brand_territory"
+        }
+      ],
+      "principle": "Adopt principles only; never copy a reference brand's recognizable expression.",
+      "status": "provisional"
+    },
+    "evidence_visibility": "Machine mirrors retain entity and observation IDs. Public brand pages translate provenance into human-readable source labels and never expose internal IDs.",
+    "market_reference_ledger": [
+      {
+        "adopted_rule": "Make durable execution and intervention legible.",
+        "bad_practices_to_avoid": [
+          "Do not make permanent graph topology or routing lines the organization."
+        ],
+        "best_practices_to_adopt": [
+          "Make durable execution and intervention legible."
+        ],
+        "brand_rule_class": "distinctive_brand_territory",
+        "confidence": "high",
+        "derived_learning": "Inference: Runtime persistence and routing are table stakes, but permanent graph topology does not express a standing accountable organization.",
+        "differentiation_implication": "Ateles must show distinct members, bounded authority, accountable claims and temporary handoffs with paths that disappear.",
+        "evidence": {
+          "observed_at": "2026-09-22",
+          "source": "https://www.langchain.com/langgraph"
+        },
+        "observed_fact": "The current official page presents an agent runtime and low-level orchestration framework using a near-black field and permanent flowing-line topology.",
+        "referenced_product": "LangGraph",
+        "rejected_pattern": "Permanent graph topology and routing lines.",
+        "relationship": "competitor",
+        "status": "provisional",
+        "support": "direct",
+        "visibility": "public_safe"
+      },
+      {
+        "adopted_rule": "Use human materiality and decisive cinematic scale.",
+        "bad_practices_to_avoid": [
+          "Do not copy editorial italics, coral gradients, or manager-led crew theater."
+        ],
+        "best_practices_to_adopt": [
+          "Use human materiality and decisive cinematic scale."
+        ],
+        "brand_rule_class": "distinctive_brand_territory",
+        "confidence": "high",
+        "derived_learning": "Inference: Human warmth and cinematic scale help infrastructure feel consequential, but build/runtime and crew framing still risk transient, manager-led execution.",
+        "differentiation_implication": "Show a persistent agentic organization whose members claim and hand off work under bounded authority.",
+        "evidence": {
+          "observed_at": "2026-09-22",
+          "source": "https://www.crewai.com/"
+        },
+        "observed_fact": "The current official site presents an enterprise agent build-and-runtime layer through a large atmospheric coral panel, editorial display type, and embedded product media.",
+        "referenced_product": "CrewAI",
+        "rejected_pattern": "Manager-led crew theater and recognizable coral/editorial expression.",
+        "relationship": "competitor",
+        "status": "provisional",
+        "support": "direct",
+        "visibility": "public_safe"
+      },
+      {
+        "adopted_rule": "Keep actor boundaries and events inspectable.",
+        "bad_practices_to_avoid": [
+          "Avoid chat-team diagrams and event buses as the public identity."
+        ],
+        "best_practices_to_adopt": [
+          "Keep actor boundaries and events inspectable."
+        ],
+        "brand_rule_class": "distinctive_brand_territory",
+        "confidence": "high",
+        "derived_learning": "Inference: Distributed message exchange and team state do not by themselves establish standing roles, authority, accountable claims, or mission continuity.",
+        "differentiation_implication": "Ateles must make legitimate action and durable organizational responsibility visible.",
+        "evidence": {
+          "observed_at": "2026-09-22",
+          "source": "https://microsoft.github.io/autogen/dev/"
+        },
+        "observed_fact": "Current official documentation presents event-driven distributed agents and multi-agent application patterns.",
+        "referenced_product": "AutoGen",
+        "rejected_pattern": "Chat-team diagrams and event-bus identity.",
+        "relationship": "competitor",
+        "status": "provisional",
+        "support": "direct",
+        "visibility": "public_safe"
+      },
+      {
+        "adopted_rule": "Keep durable context available to work.",
+        "bad_practices_to_avoid": [
+          "Avoid project folders or one assistant persona as the organization."
+        ],
+        "best_practices_to_adopt": [
+          "Keep durable context available to work."
+        ],
+        "brand_rule_class": "adapted_convention",
+        "confidence": "high",
+        "derived_learning": "Inference: Context continuity does not by itself establish distinct principals or pull-based claims.",
+        "differentiation_implication": "Make identity, authority and work ownership visible.",
+        "evidence": {
+          "observed_at": "2026-09-21",
+          "source": "docs/positioning/ateles/incumbent-and-competitor-test.md"
+        },
+        "observed_fact": "Provides persistent workspace context and operator-directed sessions.",
+        "referenced_product": "Claude Projects",
+        "rejected_pattern": "Avoid project folders or one assistant persona as the organization.",
+        "relationship": "adjacent_benchmark",
+        "status": "provisional",
+        "support": "synthesized",
+        "visibility": "public_safe"
+      },
+      {
+        "adopted_rule": "Use named roles to clarify specialization.",
+        "bad_practices_to_avoid": [
+          "Avoid parent-and-workers hub-and-spoke imagery."
+        ],
+        "best_practices_to_adopt": [
+          "Use named roles to clarify specialization."
+        ],
+        "brand_rule_class": "distinctive_brand_territory",
+        "confidence": "high",
+        "derived_learning": "Inference: Delegated subagents differ from independently eligible members claiming leased work.",
+        "differentiation_implication": "Show autonomy through fitness, claims, leases and accountable continuation.",
+        "evidence": {
+          "observed_at": "2026-09-21",
+          "source": "https://learn.chatgpt.com/codex/agent-configuration/subagents"
+        },
+        "observed_fact": "A parent selects and spawns configured subagents.",
+        "referenced_product": "ChatGPT Work and Codex subagents",
+        "rejected_pattern": "Avoid parent-and-workers hub-and-spoke imagery.",
+        "relationship": "adjacent_benchmark",
+        "status": "provisional",
+        "support": "direct",
+        "visibility": "public_safe"
+      },
+      {
+        "adopted_rule": "Make attribution clear.",
+        "bad_practices_to_avoid": [
+          "Avoid shared-bearer or anonymous-assistant identity."
+        ],
+        "best_practices_to_adopt": [
+          "Make attribution clear."
+        ],
+        "brand_rule_class": "distinctive_brand_territory",
+        "confidence": "high",
+        "derived_learning": "Inference: Independent principals provide a meaningful authority distinction.",
+        "differentiation_implication": "Identity and bounded authority are visible brand structure.",
+        "evidence": {
+          "observed_at": "2026-09-21",
+          "source": "https://docs.x.ai/grok-bot/security"
+        },
+        "observed_fact": "Bots act as the signed-in member rather than holding independent identity and credentials.",
+        "referenced_product": "Grok Bot",
+        "rejected_pattern": "Avoid shared-bearer or anonymous-assistant identity.",
+        "relationship": "adjacent_benchmark",
+        "status": "provisional",
+        "support": "direct",
+        "visibility": "public_safe"
+      },
+      {
+        "adopted_rule": "Use decisive scale, disciplined negative space, and concrete proof.",
+        "bad_practices_to_avoid": [
+          "Do not copy monochrome UI-first expression or reduce Ateles to a work-tracking screen."
+        ],
+        "best_practices_to_adopt": [
+          "Use decisive scale, disciplined negative space, and concrete proof."
+        ],
+        "brand_rule_class": "adapted_convention",
+        "confidence": "high",
+        "derived_learning": "Inference: Decisive hierarchy, restraint, and direct proof signal modern product confidence without requiring decorative density.",
+        "differentiation_implication": "Ateles should keep cinematic organizational motion primary and use interface proof only where it demonstrates authority and accountability.",
+        "evidence": {
+          "observed_at": "2026-09-22",
+          "source": "https://linear.app/"
+        },
+        "observed_fact": "The current site uses austere dark space, oversized neutral type, sparse chrome, and large real-interface proof to support a system-for-teams-and-agents claim.",
+        "referenced_product": "Linear",
+        "rejected_pattern": "Monochrome UI-first work-tracking identity.",
+        "relationship": "adjacent_benchmark",
+        "status": "provisional",
+        "support": "direct",
+        "visibility": "public_safe"
+      },
+      {
+        "adopted_rule": "Keep the promise simple and support it with recognizable proof.",
+        "bad_practices_to_avoid": [
+          "Do not copy workspace UI or imply that shared pages create an organization."
+        ],
+        "best_practices_to_adopt": [
+          "Keep the promise simple and support it with recognizable proof."
+        ],
+        "brand_rule_class": "adapted_convention",
+        "confidence": "high",
+        "derived_learning": "Inference: A simple promise plus recognizable proof lowers education tax, but workspace imagery does not express delegated authority.",
+        "differentiation_implication": "Ateles must visualize autonomy, role identity, temporary handoffs, and bounded escalation beyond workspace collaboration.",
+        "evidence": {
+          "observed_at": "2026-09-22",
+          "source": "https://www.notion.com/product"
+        },
+        "observed_fact": "The current product page uses oversized straightforward type, a bright white field, one colored action cue, customer proof, and large interface imagery for teams-and-agents work.",
+        "referenced_product": "Notion",
+        "rejected_pattern": "Workspace UI as proof of organization.",
+        "relationship": "complement",
+        "status": "provisional",
+        "support": "direct",
+        "visibility": "public_safe"
+      }
+    ],
+    "regeneration_chain": {
+      "sampling_rationale": "Direct competitors (LangGraph, CrewAI, AutoGen), complements/adjacent systems (Notion), and a contemporary craft benchmark (Linear) were sampled from current official surfaces; permanent-graph and central-controller expressions were treated as explicit anti-exemplars.",
+      "source_artifacts": [
+        "ent_97504a9c5762e37842d07436",
+        "ent_fd64f687e7e1bf5711c6de2b",
+        "ent_f8271efcdb842076a5147929",
+        "ent_2a29bed8dcacd4b1ff20c6f2",
+        "ent_2ef24658c391519b5f01ea14",
+        "ent_9bae18b46d70d678e496ecb6",
+        "ent_810de1deab0bc282128089fd"
+      ],
+      "stages": [
+        {
+          "evidence": "Operator voice memo and settled symbolic, category, copy, and page-production decisions were consumed as sourced inputs.",
+          "name": "operator_inputs_and_settled_decisions",
+          "status": "complete"
+        },
+        {
+          "evidence": "Exact outward category settled by ent_97504a9c5762e37842d07436.",
+          "name": "define_category",
+          "status": "settled"
+        },
+        {
+          "evidence": "Target persona, incumbent, and chronic/acute pain artifacts were re-read and updated without duplication.",
+          "name": "frame_product_argument",
+          "status": "complete"
+        },
+        {
+          "evidence": "Current official claim audit stored in ent_2ef24658c391519b5f01ea14.",
+          "name": "competitive_research",
+          "status": "complete"
+        },
+        {
+          "evidence": "Current official live-page benchmark stored in ent_9bae18b46d70d678e496ecb6.",
+          "name": "aesthetic_ui_benchmark",
+          "status": "complete"
+        },
+        {
+          "evidence": "One recommendation, rejected alternatives, and convergence tests stored in ent_810de1deab0bc282128089fd.",
+          "name": "original_aesthetic_territory",
+          "status": "provisional_review"
+        },
+        {
+          "evidence": "Canonical brand record, repository mirrors, and review pages are regenerated from the full chain.",
+          "name": "brand_system_draft",
+          "status": "provisional_review"
+        },
+        {
+          "evidence": "Required before public-copy application or cinematic production.",
+          "name": "operator_brand_approval",
+          "status": "pending"
+        }
+      ],
+      "status": "awaiting_approval"
+    },
+    "regeneration_gate": {
+      "next_gate": "Operator approves or revises the complete provisional brand system; no public-copy or cinematic application occurs before that ruling.",
+      "reason": "Category and product argument are settled; current competitive and aesthetic evidence plus one original aesthetic territory are complete. The whole regenerated brand system remains provisional until the operator approves or revises it.",
+      "skill_id": "ent_94218851b815696f6cea86dc",
+      "status": "blocked",
+      "task_id": "ent_8c834a37087f9471fd8b0c05",
+      "zero_category_definitions_verified": "2026-09-22"
+    },
+    "research": {
+      "benchmark": {
+        "aesthetic_artifact": "ent_9bae18b46d70d678e496ecb6",
+        "competitive_artifact": "ent_2ef24658c391519b5f01ea14",
+        "sampled_at": "2026-09-22",
+        "sampling_rationale": "Direct competitors (LangGraph, CrewAI, AutoGen), complements/adjacent systems (Notion), and a contemporary craft benchmark (Linear) were sampled from current official surfaces; permanent-graph and central-controller expressions were treated as explicit anti-exemplars.",
+        "status": "provisional",
+        "territory_artifact": "ent_810de1deab0bc282128089fd"
+      },
+      "review_cadence": {
+        "cadence": "Quarterly review proposed; exact cadence awaits owner approval.",
+        "status": "provisional",
+        "triggers": [
+          "category or promise change",
+          "asset or type change",
+          "new production method",
+          "accessibility-standard change"
+        ]
+      },
+      "reviewed_at": "2026-09-22",
+      "sources": [
+        {
+          "checked_at": "2026-09-22",
+          "informs": "clear space, approved variants, misuse and co-branding",
+          "label": "OpenAI Design Guidelines",
+          "rationale": "Adopt the governing principle, never the source brand's recognizable expression.",
+          "status": "approved",
+          "url": "https://openai.com/brand/"
+        },
+        {
+          "checked_at": "2026-09-22",
+          "informs": "exclusion zones, minimum sizes, backgrounds, co-branding and readable line length",
+          "label": "UK Space Agency branding guidelines",
+          "rationale": "Adopt the governing principle, never the source brand's recognizable expression.",
+          "status": "approved",
+          "url": "https://www.gov.uk/government/publications/uk-space-agency-communications-resources/branding-guidelines"
+        },
+        {
+          "checked_at": "2026-09-22",
+          "informs": "tokens as source of truth and accessible logo, typography and motion foundations",
+          "label": "Atlassian design foundations",
+          "rationale": "Adopt the governing principle, never the source brand's recognizable expression.",
+          "status": "approved",
+          "url": "https://atlassian.design/foundations"
+        },
+        {
+          "checked_at": "2026-09-22",
+          "informs": "productive and expressive type roles",
+          "label": "IBM Carbon typography",
+          "rationale": "Adopt the governing principle, never the source brand's recognizable expression.",
+          "status": "approved",
+          "url": "https://carbondesignsystem.com/elements/typography/style-strategies/"
+        },
+        {
+          "checked_at": "2026-09-22",
+          "informs": "purposeful productive and expressive motion",
+          "label": "IBM Carbon motion",
+          "rationale": "Adopt the governing principle, never the source brand's recognizable expression.",
+          "status": "approved",
+          "url": "https://carbondesignsystem.com/elements/motion/overview/"
+        },
+        {
+          "checked_at": "2026-09-22",
+          "informs": "contrast, images of text, relative sizing and reflow",
+          "label": "W3C WCAG 2.1",
+          "rationale": "Adopt the governing principle, never the source brand's recognizable expression.",
+          "status": "approved",
+          "url": "https://www.w3.org/TR/WCAG21/"
+        },
+        {
+          "checked_at": "2026-09-22",
+          "informs": "static alternatives and perceivable content",
+          "label": "W3C accessibility principles",
+          "rationale": "Adopt the governing principle, never the source brand's recognizable expression.",
+          "status": "approved",
+          "url": "https://www.w3.org/WAI/fundamentals/accessibility-principles/"
+        },
+        {
+          "checked_at": "2026-09-22",
+          "informs": "vision, audience, personality, values and a living guide",
+          "label": "Mailchimp brand style guide",
+          "rationale": "Adopt the governing principle, never the source brand's recognizable expression.",
+          "status": "approved",
+          "url": "https://mailchimp.com/resources/tips-to-create-your-brands-style-guide/"
+        },
+        {
+          "checked_at": "2026-09-22",
+          "informs": "stable voice with context-dependent tone",
+          "label": "Mailchimp voice and tone",
+          "rationale": "Adopt the governing principle, never the source brand's recognizable expression.",
+          "status": "approved",
+          "url": "https://styleguide.mailchimp.com/voice-and-tone/"
+        },
+        {
+          "checked_at": "2026-09-22",
+          "informs": "direct-competitor category and orchestration convergence test",
+          "label": "Ateles current competitive claim audit",
+          "rationale": "Observed fact is separated from inference in the canonical research artifact.",
+          "status": "provisional",
+          "url": "https://www.langchain.com/langgraph"
+        },
+        {
+          "checked_at": "2026-09-22",
+          "informs": "hierarchy, negative space, proof discipline, and anti-copy test",
+          "label": "Ateles current aesthetic benchmark",
+          "rationale": "Adopt only principles; the recommended expression is grounded in Ateles product truth.",
+          "status": "provisional",
+          "url": "https://linear.app/"
+        }
+      ]
+    },
+    "sources": [
+      {
+        "entity_id": "ent_f79f82c13b90a9d6439623db",
+        "label": "Ateles product profile",
+        "status": "approved"
+      },
+      {
+        "entity_id": "ent_9158c8b39e0f437fdb2a86de",
+        "label": "Ateles visual identity",
+        "status": "approved"
+      },
+      {
+        "entity_id": "ent_c1fe64b279327d7882c39571",
+        "label": "Ateles homepage specification",
+        "status": "approved"
+      },
+      {
+        "entity_id": "ent_72e01f1008653b601be1a956",
+        "label": "Shared structural design system",
+        "status": "approved"
+      },
+      {
+        "entity_id": "ent_9444da0c7dea895c182fe098",
+        "label": "Cinematic production plan",
+        "status": "provisional"
+      }
+    ]
+  },
+  "schema_version": "1.0",
+  "scope": {
+    "does_not_own": [
+      "Product capabilities or roadmap truth",
+      "Foundation architecture",
+      "Page information architecture and calls to action",
+      "Shot-specific concept-film deltas",
+      "Shared UI component structure"
+    ],
+    "owns": [
+      "Public copy voice and grammar",
+      "Approved phrases and terminology",
+      "Primary and secondary symbols",
+      "Palette and typography",
+      "Material, light, camera, motion, and composition",
+      "Cinematic and still production requirements",
+      "Brand asset acceptance and anti-patterns"
+    ]
+  },
+  "slug": "ateles",
+  "status": "provisional",
+  "terminology": [
+    {
+      "guidance": "Use adjectivally for organizations, operating models, workflows, capabilities, work, or behavior characterized by delegated agency.",
+      "name": "agentic",
+      "source": "operator decision",
+      "status": "approved"
+    },
+    {
+      "guidance": "Use as a noun or concrete technical noun modifier: AI agents, agent roles, agent runtime, agent memory, agent identity, agent operations.",
+      "name": "agent",
+      "source": "operator decision",
+      "status": "approved"
+    },
+    {
+      "guidance": "Ateles-specific collective behavior and primary symbol; not the outward category noun.",
+      "name": "swarm",
+      "source": "ent_f79f82c13b90a9d6439623db",
+      "status": "approved"
+    },
+    {
+      "guidance": "The product promise and outward object; differentiated roles retain responsibility over time.",
+      "name": "organization",
+      "source": "ent_c1fe64b279327d7882c39571",
+      "status": "approved"
+    },
+    {
+      "guidance": "Differentiating structure and mechanism, never an alternate category.",
+      "name": "governance and bounded authority",
+      "source": "ent_f79f82c13b90a9d6439623db",
+      "status": "approved"
+    },
+    {
+      "guidance": "Secondary state marker only for authorization, commitment, approval, or completed checkpoint.",
+      "name": "seal",
+      "source": "ent_9158c8b39e0f437fdb2a86de",
+      "status": "approved"
+    },
+    {
+      "guidance": "Reject as awkward and ambiguous; agent names a concrete actor.",
+      "name": "agentic agents",
+      "source": "operator decision",
+      "status": "retired"
+    }
+  ],
+  "updated_at": "2026-09-22",
+  "visibility": "private_source",
+  "visual_concepts": [
+    {
+      "guidance": "Show members with different shapes/materials and clear responsibilities, not identical dots.",
+      "name": "Autonomous differentiated roles",
+      "source": "ent_9158c8b39e0f437fdb2a86de",
+      "status": "approved"
+    },
+    {
+      "guidance": "Signals and paths exist only during exchange and disappear afterward.",
+      "name": "Temporary coordination and handoff",
+      "source": "ent_9158c8b39e0f437fdb2a86de",
+      "status": "approved"
+    },
+    {
+      "guidance": "A consequential path pauses at a small checkpoint while the rest of the organization remains capable of movement.",
+      "name": "Bounded authority and escalation",
+      "source": "ent_c1fe64b279327d7882c39571",
+      "status": "approved"
+    },
+    {
+      "guidance": "Show purpose narrowing into current work without turning the organization into a permanent graph.",
+      "name": "Mission-to-task priority inheritance",
+      "source": "ent_9444da0c7dea895c182fe098",
+      "status": "approved"
+    },
+    {
+      "guidance": "Required primary film must preserve edge-free swarm semantics.",
+      "name": "Swarm-first cinematic replacement",
+      "source": "ent_9444da0c7dea895c182fe098",
+      "status": "missing"
+    }
+  ],
+  "visual_styles": {
+    "aesthetic_territory": {
+      "camera_motion": "Slow orbital or lateral camera; independent paths align, claim, hand off, pause locally at a checkpoint, release, and resume. The meaning remains legible in the still state.",
+      "convergence_tests": [
+        {
+          "reference": "Neotoma",
+          "test": "Fail if edges persist after handoff, a central graph appears, or provenance/version imagery dominates."
+        },
+        {
+          "reference": "LangGraph and AutoGen",
+          "test": "Fail if topology, routing, chat exchange, or event buses become the organizing visual."
+        },
+        {
+          "reference": "CrewAI",
+          "test": "Fail if the scene reads as a manager assigning a temporary crew."
+        },
+        {
+          "reference": "Linear and Notion",
+          "test": "Adopt restraint and proof discipline only; fail if Ateles becomes monochrome UI-first software."
+        }
+      ],
+      "identity": "Organization is the promise; swarm is the symbol; governance and authority are the structure; the seal is only a secondary authorization or completion marker. Members retain distinct shape, surface, and path. No permanent edges or central hub.",
+      "name": "Coordinated agency in motion",
+      "originality_basis": "Distinctiveness comes from product truth\u2014member identity, bounded authority, accountable work ownership, temporary handoff, escalation, and continuation\u2014not arbitrary novelty.",
+      "palette_material_light": "Warm paper and deep ink; rust for coordination; grant green only at bounded authorization; ceramic, patinated metal, woven paper, shallow atmospheric depth, and warm directional light.",
+      "product_truth": "Ateles turns multiple agent actors into a standing agentic organization through persistent roles, bounded authority, accountable claims and leases, mission-to-task priority, escalation, and continued action.",
+      "rejected_alternatives": [
+        {
+          "name": "Governance seal as primary",
+          "reason": "Too narrow and static; retain only as a secondary state marker."
+        },
+        {
+          "name": "Permanent network graph",
+          "reason": "Collapses Ateles into Neotoma and orchestration topology."
+        },
+        {
+          "name": "Agent command center",
+          "reason": "Implies central control and generic dashboard software."
+        },
+        {
+          "name": "Polished crew theater",
+          "reason": "Risks transient manager-led casting rather than durable roles and accountability."
+        }
+      ],
+      "scope_statement": "Internal creative platform subordinate to the settled category \u201cThe operating system for agentic organizations.\u201d It is not an alternate category noun, public headline, or tagline.",
+      "source_artifact": "ent_810de1deab0bc282128089fd",
+      "status": "provisional",
+      "summary": "An edge-free abstract swarm of differentiated semi-autonomous members organizes around shared purpose through proximity, orientation, temporary signals, and short-lived handoffs.",
+      "typography_layout": "Geometric expressive headings, humanist productive copy, and short public operational labels; cinematic fields dominate with concise text in a protected safe zone."
+    },
+    "anti_patterns": [
+      "Do not use the seal as Ateles's logo, hero object, or primary metaphor. It is only a secondary state marker for a concrete authorization, commitment, approval, or completed checkpoint.",
+      "Do not literalize \u201cswarm\u201d with monkeys, spiders, insects, hives, honeycombs, or mascot clusters. Show a living collective through abstract named roles and relationships.",
+      "Do not render an anonymous neural-network mesh. Every visible node or path must communicate an organizational role, relationship, handoff, priority, or intervention state.",
+      "Never expose internal record IDs, entity types, field or decision keys, code-call names, repository filenames, phase bookkeeping, agent instructions, or bracketed internal scope notation on a public page.",
+      "Do not paste research analysis, source citations, or implementation-review notes into public prose. Preserve evidence in linked source artifacts and translate it into concise reader-facing claims.",
+      "Do not let motion carry organizational meaning that disappears under reduced-motion preferences; the static graph must remain legible and complete.",
+      "Do not spread authorization or withdrawal colors as general accents; reserve them for active versus withdrawn, expired, or paused authority.",
+      "Do not diverge shared structural tokens from Neotoma without a product reason; the products remain siblings through spacing, restraint, and hierarchy.",
+      "Do not reuse the Neotoma app or Inspector palette. Ateles keeps its warm paper and ink system with a rust coordination accent."
+    ],
+    "camera": "Stable three-quarter top-down or low oblique compositions; one measured push or drift; enough depth to read members as an organization rather than points.",
+    "composition": "Visually dominant scenes with intentional copy-safe space. Distinct roles must remain legible at nav/logo scale and expand into a richer living collective in hero media.",
+    "light": "Warm directional studio light with restrained contrast and disciplined negative space.",
+    "logo_system": {
+      "background_rules": {
+        "guidance": "Use calm warm-paper or deep-ink fields; avoid busy imagery.",
+        "status": "provisional"
+      },
+      "clear_space": {
+        "guidance": "Define and test an exclusion zone from final geometry; no product measurement is approved.",
+        "measurement": null,
+        "status": "missing"
+      },
+      "co_branding": {
+        "guidance": "Define peer-brand spacing, hierarchy, dividers and approval before use.",
+        "status": "missing"
+      },
+      "colorway_rules": {
+        "guidance": "Rust may coordinate; grant green is reserved for authorization state.",
+        "status": "provisional"
+      },
+      "export_formats": [],
+      "minimum_size": {
+        "digital": null,
+        "guidance": "Test final exports; no numerical threshold is approved.",
+        "print": null,
+        "status": "missing"
+      },
+      "misuse_rules": [
+        "Do not stretch, rotate, crop, mask, outline, shadow or redraw the mark.",
+        "Do not add permanent edges, a central hub, literal insects, honeycomb or the seal as primary symbol.",
+        "Never approve a variant without a traceable source asset and reviewed export."
+      ],
+      "source_formats": [
+        "inline SVG (provisional)"
+      ],
+      "variants": {
+        "application": {
+          "backgrounds": [],
+          "export_formats": [],
+          "name": "Application mark",
+          "source_asset": null,
+          "source_format": null,
+          "status": "provisional",
+          "use": "Align current application mark with the edge-free swarm."
+        },
+        "favicon": {
+          "backgrounds": [],
+          "export_formats": [],
+          "name": "Favicon",
+          "source_asset": null,
+          "source_format": null,
+          "status": "missing",
+          "use": "Required before this placement is approved."
+        },
+        "horizontal": {
+          "backgrounds": [],
+          "export_formats": [],
+          "name": "Horizontal lockup",
+          "source_asset": null,
+          "source_format": null,
+          "status": "missing",
+          "use": "Required before this placement is approved."
+        },
+        "lockup": {
+          "backgrounds": [],
+          "export_formats": [],
+          "name": "Swarm + wordmark lockup",
+          "source_asset": null,
+          "source_format": null,
+          "status": "provisional",
+          "use": "Navigation identity; spacing measurement remains missing."
+        },
+        "monochrome": {
+          "backgrounds": [],
+          "export_formats": [],
+          "name": "Monochrome variant",
+          "source_asset": null,
+          "source_format": null,
+          "status": "missing",
+          "use": "One-color reproduction."
+        },
+        "primary_mark": {
+          "backgrounds": [
+            "light neutral",
+            "dark neutral"
+          ],
+          "export_formats": [],
+          "name": "Abstract swarm mark",
+          "source_asset": "execution/scripts/site_generator/templates/render.py#_brand_mark",
+          "source_format": "inline SVG",
+          "status": "provisional",
+          "use": "Primary compact identity."
+        },
+        "reversed": {
+          "backgrounds": [],
+          "export_formats": [],
+          "name": "Reversed variant",
+          "source_asset": null,
+          "source_format": null,
+          "status": "missing",
+          "use": "Dark or photographic fields."
+        },
+        "small_scale": {
+          "backgrounds": [],
+          "export_formats": [],
+          "name": "Small-scale variant",
+          "source_asset": null,
+          "source_format": null,
+          "status": "provisional",
+          "use": "Requires tested legibility threshold."
+        },
+        "stacked": {
+          "backgrounds": [],
+          "export_formats": [],
+          "name": "Stacked lockup",
+          "source_asset": null,
+          "source_format": null,
+          "status": "missing",
+          "use": "Required before this placement is approved."
+        },
+        "symbol_only": {
+          "backgrounds": [],
+          "export_formats": [],
+          "name": "Abstract swarm symbol",
+          "source_asset": null,
+          "source_format": null,
+          "status": "provisional",
+          "use": "Compact use after small-scale review."
+        },
+        "wordmark": {
+          "backgrounds": [
+            "light neutral",
+            "dark neutral"
+          ],
+          "export_formats": [],
+          "name": "Ateles wordmark",
+          "source_asset": null,
+          "source_format": null,
+          "status": "provisional",
+          "use": "Named identity."
+        }
+      }
+    },
+    "material": "Tactile ceramic, powder-coated metal, woven paper, subtle ground shadows, and one small glasslike checkpoint token.",
+    "motion": "Members begin independently, align without losing shape, exchange one work object through brief signals, pause only the bounded path at a small checkpoint, then continue; paths disappear after handoff.",
+    "palette": {
+      "dark": {
+        "accent": "#e08a4f",
+        "accent_2": "#eba26e",
+        "accent_wash": "#241a10",
+        "grant": "#8fae7f",
+        "ink": "#f0ebe1",
+        "ink_2": "#cabfae",
+        "ink_3": "#b3a794",
+        "line": "#2b241a",
+        "on_accent": "#14100b",
+        "paper": "#14100b",
+        "paper_2": "#1a1510",
+        "revoked": "#c97b62"
+      },
+      "light": {
+        "accent": "#8a3b1f",
+        "accent_2": "#a8552d",
+        "accent_wash": "#f2e6da",
+        "grant": "#4a6741",
+        "ink": "#1c1710",
+        "ink_2": "#453d30",
+        "ink_3": "#6b6255",
+        "line": "#ddd3bf",
+        "on_accent": "#f7f4ee",
+        "paper": "#f7f4ee",
+        "paper_2": "#efe9dd",
+        "revoked": "#9c4a3a"
+      },
+      "rationale": "Swarm coordination, not wax-seal brand theater: the warm paper and ink base makes the system feel inhabited and legible, while rust traces relationships, handoffs, and directed motion among differentiated roles. Green remains semantic and reserved for active authorization; revoked remains reserved for withdrawn or expired authority. A small seal survives only as a secondary state marker attached to an authorization, commitment, or completed checkpoint\u2014not as the product symbol or ambient palette rationale.",
+      "wcag_aa_verified_2026_09_21": {
+        "accent_on_paper_dark": "7.14:1",
+        "accent_on_paper_light": "7.02:1",
+        "ink_on_paper_dark": "15.94:1",
+        "ink_on_paper_light": "16.22:1",
+        "method": "relative-luminance WCAG contrast formula computed directly; all eight pairs exceed the 4.5:1 AA normal-text threshold",
+        "muted_on_paper_dark": "8.00:1",
+        "muted_on_paper_light": "5.46:1",
+        "on_accent_on_accent_dark_button_text": "7.14:1",
+        "on_accent_on_accent_light_button_text": "7.02:1"
+      }
+    },
+    "symbol": {
+      "guidance": "Distinct semi-autonomous members coordinate through proximity, orientation, motion, short-lived signals, and temporary handoffs. No central hub or permanent edges.",
+      "name": "Abstract swarm",
+      "secondary": "A small seal may mark a concrete authorization or checkpoint.",
+      "status": "approved"
+    },
+    "typography": {
+      "body_font_family": "'Source Sans 3', system-ui, -apple-system, 'Segoe UI', sans-serif (KEPT)",
+      "code_font_family": "'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace (KEPT as family; assigned to public organization labels)",
+      "google_fonts_licence": "All three (Space Grotesk, Source Sans 3, IBM Plex Mono) are free, open-license Google Fonts already loaded via the current font mechanism; no licensing action is needed.",
+      "heading_font_family": "'Space Grotesk', system-ui, sans-serif (KEPT from current live page)",
+      "rationale": "Family kept deliberately: research checked 2026-09-21 (typewolf.com/space-grotesk and madegooddesigns.com/space-grotesk-font) found Space Grotesk broadly signals forward-looking technology rather than authority by itself. The identity therefore comes from the living organization visual, not from inventing a more authoritative typeface. IBM Plex Mono is reserved for short, plain-language role, scope, handoff, priority, and status labels. It must not carry internal bracketed scope formats, IDs, decision keys, code vocabulary, or phase bookkeeping."
+    },
+    "typography_system": {
+      "examples": [
+        "Expressive: The operating system for agentic organizations.",
+        "Technical: role \u00b7 scope \u00b7 handoff"
+      ],
+      "fallbacks": {
+        "expressive": "'Space Grotesk', system-ui, sans-serif (KEPT from current live page)",
+        "productive": "'Source Sans 3', system-ui, -apple-system, 'Segoe UI', sans-serif (KEPT)",
+        "status": "approved",
+        "technical": "'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace (KEPT as family; assigned to public organization labels)"
+      },
+      "forbidden_use": [
+        "No body copy as images.",
+        "No sustained all-caps prose.",
+        "No unlicensed or unrecorded typefaces.",
+        "No internal scope syntax, IDs, decision keys or phases."
+      ],
+      "hierarchy": [
+        {
+          "casing": "sentence case",
+          "family": "expressive",
+          "line_height": "0.98",
+          "measure": "13ch",
+          "size": "clamp(2.8rem, 7vw, 5.8rem)",
+          "source": "current generator",
+          "status": "provisional",
+          "token": "display"
+        },
+        {
+          "casing": "sentence case",
+          "family": "expressive",
+          "line_height": "1.02",
+          "measure": "18ch",
+          "size": "clamp(2rem, 4vw, 3.6rem)",
+          "source": "current generator",
+          "status": "provisional",
+          "token": "section_heading"
+        },
+        {
+          "casing": "sentence case",
+          "family": "productive",
+          "line_height": "1.62",
+          "measure": "target 60\u201370 characters",
+          "size": "16px base",
+          "source": "current generator plus UK Space Agency rationale",
+          "status": "provisional",
+          "token": "body"
+        },
+        {
+          "casing": "uppercase only for brief state labels",
+          "family": "technical",
+          "line_height": "normal",
+          "measure": "short labels only",
+          "size": "0.72rem reference",
+          "source": "current generator",
+          "status": "provisional",
+          "token": "label"
+        }
+      ],
+      "licensing": {
+        "guidance": "All three (Space Grotesk, Source Sans 3, IBM Plex Mono) are free, open-license Google Fonts already loaded via the current font mechanism; no licensing action is needed.",
+        "status": "approved"
+      },
+      "responsive": {
+        "casing": "Sentence case; uppercase only for short tracked labels.",
+        "line_height": "Generous for body; tight display leading only when legible.",
+        "measure": "Target 60\u201370 characters and never exceed 80 without review.",
+        "sizing": "Use rem-based clamp scales and preserve reflow."
+      },
+      "roles": {
+        "expressive": {
+          "name": "Space Grotesk",
+          "status": "approved",
+          "use": "Purpose and organization statements."
+        },
+        "productive": {
+          "name": "Source Sans 3",
+          "status": "approved",
+          "use": "Body, navigation and sustained reading."
+        },
+        "technical": {
+          "name": "IBM Plex Mono",
+          "status": "approved",
+          "use": "Short role, scope, handoff and status labels."
+        }
+      },
+      "status": "provisional",
+      "weights_styles": [
+        {
+          "guidance": "Use loaded approved weights only; final inventory awaits font-file audit.",
+          "role": "expressive",
+          "status": "provisional"
+        },
+        {
+          "guidance": "Use regular, semibold and bold only where loaded.",
+          "role": "productive",
+          "status": "provisional"
+        },
+        {
+          "guidance": "Use medium or semibold roman for short labels.",
+          "role": "technical",
+          "status": "provisional"
+        }
+      ]
+    }
+  },
+  "voice": {
+    "attributes": [
+      "direct",
+      "organizational",
+      "specific",
+      "calm",
+      "accountable",
+      "forward-moving"
+    ],
+    "avoid": [
+      "internal entity and field names",
+      "phase or stage bookkeeping",
+      "implementation-review narration",
+      "source citations embedded in prose",
+      "anonymous collective language that erases roles"
+    ],
+    "grammar": [
+      "Use agentic adjectivally and agent as a noun or concrete technical modifier.",
+      "Use active voice and concrete organizational subjects.",
+      "Do not concatenate swarm, governance, authority, and mechanism words into a compound category alias."
+    ],
+    "rules": [
+      "Lead with organization and delegated outcomes, then explain authority and governance.",
+      "Name roles, responsibilities, scope, handoffs, priorities, checkpoints, and escalation in ordinary language.",
+      "Keep public copy concise; one declarative headline and one compact explanatory passage per major claim.",
+      "Distinguish designed future from running reference explicitly."
+    ]
+  }
+}

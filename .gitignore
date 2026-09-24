@@ -124,3 +124,6 @@ execution/embed-design/
 # a build artifact regenerated from the page inventory + design tokens +
 # repo/positioning source files; never hand-edited, never committed.
 dist/site/
+
+# Local visual-QA captures for generated product sites; regenerated on demand.
+preview-artifacts/

@@ -1,0 +1,7 @@
+{
+  "layout": "cta_banner",
+  "eyebrow": "Install guide",
+  "headline": "Follow the maintained installation instructions.",
+  "body": "The GitHub guide carries the current commands and supported connections.",
+  "primary_cta": {"label": "Open Neotoma on GitHub", "href": "https://github.com/markmhendrickson/neotoma"}
+}

@@ -1,0 +1,18 @@
+{
+  "layout": "record_hero",
+  "category": "The system of record for AI agents",
+  "headline": "The system of record for AI agents.",
+  "body": "Persistent, connected context agents can create, retrieve, and update—with provenance intact.",
+  "primary_cta": {"label": "Install Neotoma", "href": "/install/"},
+  "secondary_cta": {"label": "Evaluate the fit", "href": "/evaluate/"},
+  "concept_film_brief": "content/neotoma/index/concept-film.json",
+  "footnote": "Robust epistemological design for agents · open source · local-first",
+  "proof": {
+    "source": "Customer record",
+    "old": "London",
+    "current": "Madrid",
+    "corrected": "Today",
+    "provenance": "Confirmed by the named source",
+    "read": "Madrid · active now"
+  }
+}

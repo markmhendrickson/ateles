@@ -1,0 +1,7 @@
+{
+  "layout": "cta_banner",
+  "eyebrow": "The deciding test",
+  "headline": "Do you need another answer—or an authoritative record?",
+  "body": "If better retrieval solves the problem, use it. If the work depends on corrections, provenance, conflicting sources, and state that changes over time, test Neotoma on that boundary.",
+  "primary_cta": {"label": "Install Neotoma", "href": "/install/"}
+}

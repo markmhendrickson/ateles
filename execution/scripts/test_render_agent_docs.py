@@ -80,7 +80,7 @@ class TestMirrorsMatchFreshRender:
         """render_agent_docs.py --check reports failures per-file; the 9
         corrected agents' mirrors must NOT be among any reported failures
         (independent of unrelated pre-existing drift elsewhere in the tree)."""
-        base_url, token = render_agent_docs._load_env()
+        base_url, token = render_agent_docs.load_env()
         agents = render_agent_docs.fetch_agents(base_url, token)
         targets = render_agent_docs._targets(agents)
 

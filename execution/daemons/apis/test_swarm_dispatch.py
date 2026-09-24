@@ -8,6 +8,7 @@ Also covers the checkbox definition-of-done changes:
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ from swarm_dispatch import (
     _SWARM_RUN_CMD,
     _VANELLUS_COMMENT_MARKER,
     DispatchConfig,
+    ReviewBindingReceipt,
     SwarmDispatcher,
     _agent_prompt_instruction,
     _is_bot_author,
@@ -82,11 +84,17 @@ class _StubNotifier:
         self.sent = []
         self.priorities = []  # HEAD-side: priority-only assertions
         self.sent_full = []  # main-side: (message, priority) assertions
+        self.kwargs = []
+        self.cleared = []
 
-    def send(self, message, priority=None, handler=None):
+    def send(self, message, priority=None, handler=None, **kwargs):
         self.sent.append(message)
         self.priorities.append(priority)
         self.sent_full.append((message, priority))
+        self.kwargs.append(kwargs)
+
+    def clear_dedupe(self, key):
+        self.cleared.append(key)
 
 
 def _config(**overrides):
@@ -111,6 +119,40 @@ def _config(**overrides):
     )
 
 
+def _expected_pr_review(**overrides):
+    review = {
+        "entity_type": "pr_review",
+        "repository": "owner/repo",
+        "pr_number": 87,
+        "pr_title": "A pull request",
+        "review_lens": "qa",
+        "reviewer_agent": "phoenicurus",
+        "head_sha": "b" * 40,
+        "verdict": "approve",
+        "status": "live",
+        "review_round": 3,
+        "content": "**APPROVE**",
+        "blocking_findings": [],
+        "nonblocking_findings": [
+            {
+                "id": "finding-1",
+                "category": "coverage",
+                "summary": "retain regression coverage",
+                "files": ["execution/daemons/apis/test_swarm_dispatch.py"],
+            }
+        ],
+        "finding_ids": ["finding-1"],
+        "generated_by": "phoenicurus",
+        "generated_at": "2026-09-23T00:00:00+00:00",
+    }
+    review.update(overrides)
+    return review
+
+
+def _snapshot_for_review(review):
+    return {key: value for key, value in review.items() if key != "entity_type"}
+
+
 # ── content_digest ──────────────────────────────────────────────────────────
 
 
@@ -123,6 +165,815 @@ def test_content_digest_changes_when_content_changes():
     a = [{"entity_type": "harness_event", "occurred_at": "2026-06-12T10:00:00Z"}]
     b = [{"entity_type": "harness_event", "occurred_at": "2026-06-12T10:00:01Z"}]
     assert content_digest(a) != content_digest(b)
+
+
+def test_pr_harness_event_also_upserts_canonical_pull_request(monkeypatch):
+    stored = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.append((entities, idempotency_key))
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    trigger = _trigger(
+        body="Closes #1141.",
+        head_ref="fix/checkpoint-release",
+        base_ref="main",
+    )
+    asyncio.run(SwarmDispatcher(_StubNotifier(), _config())._log_harness_event(trigger))
+
+    entities, _ = stored[0]
+    pull_request = next(
+        entity for entity in entities if entity["entity_type"] == "pull_request"
+    )
+    assert pull_request["repository"] == "owner/repo"
+    assert pull_request["number"] == 87
+    assert pull_request["head_sha"] == "a" * 40
+    assert pull_request["parent_issue_number"] == 1141
+
+
+def test_panel_reviews_use_verified_pre_panel_head_not_stale_trigger(monkeypatch):
+    stored = []
+    superseded = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.append((entities, idempotency_key))
+        return {
+            "entities": [
+                {"observation_index": index, "entity_id": f"ent_{index}"}
+                for index, _ in enumerate(entities)
+            ]
+        }
+
+    async def no_priors(self, trigger, lenses, current_sha):
+        return {}
+
+    async def fake_supersede(
+        self, trigger, lenses, current_sha, *, priors=None, new_ids_by_lens=None
+    ):
+        superseded.append((current_sha, new_ids_by_lens))
+        return True
+
+    async def fake_confirm(self, trigger, entities, store_result, reviewed_head):
+        return self._new_pr_review_ids_by_lens(entities, store_result)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_prior_live_reviews", no_priors)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_confirmed_new_pr_review_ids_by_lens", fake_confirm
+    )
+    monkeypatch.setattr(SwarmDispatcher, "_supersede_prior_reviews", fake_supersede)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    reviewed_head = "b" * 40
+    asyncio.run(
+        dispatcher._persist_panel_reviews(
+            _trigger(head_sha="a" * 40),
+            [("security", "**REQUEST_CHANGES**\n[BLOCKING] auth: pin producer")],
+            {"security": "falco"},
+            reviewed_head=reviewed_head,
+        )
+    )
+
+    reviews = stored[0][0]
+    assert reviews[0]["entity_type"] == "pr_review"
+    assert reviews[0]["head_sha"] == reviewed_head
+    assert reviews[0]["review_round"] == 1
+    assert superseded == [(reviewed_head, {"security": "ent_0"})]
+
+
+def test_panel_reviews_seed_round_from_max_of_all_live_priors(monkeypatch):
+    stored = []
+    superseded = []
+    reviewed_head = "b" * 40
+    priors = {
+        "qa": [
+            {
+                "entity_id": "ent_round_7",
+                "snapshot": {"review_lens": "qa", "review_round": 7},
+            },
+            {
+                "entity_id": "ent_round_3",
+                "snapshot": {"review_lens": "qa", "review_round": 3},
+            },
+        ]
+    }
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.append(entities)
+        return {"entities": [{"observation_index": 0, "entity_id": "ent_new"}]}
+
+    async def fake_priors(self, trigger, lenses, current_sha):
+        return priors
+
+    async def fake_confirm(self, trigger, entities, store_result, reviewed_head):
+        return {"qa": "ent_new"}
+
+    async def fake_supersede(
+        self, trigger, lenses, current_sha, *, priors=None, new_ids_by_lens=None
+    ):
+        superseded.append((priors, new_ids_by_lens))
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_prior_live_reviews", fake_priors)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_confirmed_new_pr_review_ids_by_lens", fake_confirm
+    )
+    monkeypatch.setattr(SwarmDispatcher, "_supersede_prior_reviews", fake_supersede)
+
+    asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_panel_reviews(
+            _trigger(),
+            [("qa", "**APPROVE**")],
+            {"qa": "phoenicurus"},
+            reviewed_head=reviewed_head,
+        )
+    )
+
+    assert stored[0][0]["review_round"] == 8
+    assert superseded == [(priors, {"qa": "ent_new"})]
+
+
+def test_security_findings_store_only_declared_fields_and_require_readback(monkeypatch):
+    stored = []
+    reviewed_head = "b" * 40
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+        return {
+            "entities": [
+                {"observation_index": index, "entity_id": f"ent_security_{index}"}
+                for index, _ in enumerate(entities)
+            ]
+        }
+
+    async def fake_post(self, path, payload):
+        canonical = payload["snapshot_filters"]["canonical_name"]["value"]
+        entity = next(row for row in stored if row["canonical_name"] == canonical)
+        return {
+            "entities": [
+                {"entity_id": "ent_security_0", "snapshot": dict(entity)}
+            ]
+        }
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_security_findings(
+            _trigger(),
+            [
+                (
+                    "security",
+                    "**REQUEST_CHANGES**\n"
+                    "[BLOCKING] auth: pin producer JKT\n"
+                    "Evidence in `execution/auth.py`.",
+                )
+            ],
+            reviewed_head,
+        )
+    )
+
+    assert confirmed is True
+    assert len(stored) == 1
+    assert set(stored[0]) == {
+        "entity_type",
+        "canonical_name",
+        "title",
+        "severity",
+        "notes",
+        "status",
+        "class_description",
+        "class_sweep_record",
+        "regression_test_path",
+        "remediation_refs",
+        "source_audit",
+        "verified_at",
+    }
+
+
+def test_security_finding_missing_readback_fails_closed(monkeypatch):
+    async def fake_store(self, entities, idempotency_key):
+        return {"entities": [{"observation_index": 0, "entity_id": "ent_new"}]}
+
+    async def no_readback(self, path, payload):
+        return {"entities": []}
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", no_readback)
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_security_findings(
+            _trigger(),
+            [("security", "[NON-BLOCKING] hardening: tighten timeout")],
+            "b" * 40,
+        )
+    )
+    assert confirmed is False
+
+
+def test_replacement_ids_require_exact_head_live_readback(monkeypatch):
+    reviewed_head = "b" * 40
+    entities = [
+        _expected_pr_review(),
+        _expected_pr_review(
+            review_lens="security",
+            reviewer_agent="falco",
+            generated_by="falco",
+        ),
+    ]
+    store_result = {
+        "entities": [
+            {"observation_index": 0, "entity_id": "ent_qa_new"},
+            {"observation_index": 1, "entity_id": "ent_security_new"},
+        ]
+    }
+
+    async def fake_post(self, path, payload):
+        assert path == "entities/query"
+        return {
+            "entities": [
+                {
+                    "entity_id": "ent_qa_new",
+                    "snapshot": _snapshot_for_review(entities[0]),
+                },
+                {
+                    "entity_id": "ent_security_new",
+                    "snapshot": _snapshot_for_review(
+                        {**entities[1], "head_sha": "c" * 40}
+                    ),
+                },
+            ]
+        }
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._confirmed_new_pr_review_ids_by_lens(
+            _trigger(), entities, store_result, reviewed_head
+        )
+    )
+
+    assert confirmed == {"qa": "ent_qa_new"}
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "repository",
+        "pr_number",
+        "pr_title",
+        "review_lens",
+        "reviewer_agent",
+        "head_sha",
+        "verdict",
+        "status",
+        "review_round",
+        "content",
+        "blocking_findings",
+        "nonblocking_findings",
+        "finding_ids",
+        "generated_by",
+        "generated_at",
+    ],
+)
+def test_replacement_ids_require_every_expected_declared_field(
+    monkeypatch, missing_field
+):
+    reviewed_head = "b" * 40
+    entity = _expected_pr_review()
+    snapshot = _snapshot_for_review(entity)
+    snapshot.pop(missing_field)
+
+    async def fake_post(self, path, payload):
+        assert path == "entities/query"
+        return {"entities": [{"entity_id": "ent_qa_new", "snapshot": snapshot}]}
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    confirmed = asyncio.run(
+        SwarmDispatcher(
+            _StubNotifier(), _config()
+        )._confirmed_new_pr_review_ids_by_lens(
+            _trigger(),
+            [entity],
+            {"entities": [{"observation_index": 0, "entity_id": "ent_qa_new"}]},
+            reviewed_head,
+        )
+    )
+
+    assert confirmed == {}
+
+
+@pytest.mark.parametrize(
+    "schema_loss",
+    [
+        {"unknown_fields_count": 1},
+        {"unknown_fields": ["verdict"]},
+    ],
+)
+def test_panel_review_store_schema_loss_fails_before_supersession(
+    monkeypatch, schema_loss
+):
+    calls = []
+
+    async def fake_store(self, entities, idempotency_key):
+        if entities and entities[0]["entity_type"] == "pr_review":
+            return {
+                "entities": [{"observation_index": 0, "entity_id": "ent_new"}],
+                **schema_loss,
+            }
+        return {}
+
+    async def unexpected_confirm(*args, **kwargs):
+        calls.append("confirm")
+        return {"qa": "ent_new"}
+
+    async def unexpected_supersede(*args, **kwargs):
+        calls.append("supersede")
+        return True
+
+    async def confirmed(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_confirmed_new_pr_review_ids_by_lens", unexpected_confirm
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher, "_supersede_prior_reviews", unexpected_supersede
+    )
+    monkeypatch.setattr(SwarmDispatcher, "_persist_security_findings", confirmed)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_and_confirm_pull_request", confirmed)
+
+    durable = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_panel_reviews(
+            _trigger(),
+            [("qa", "**APPROVE**")],
+            {"qa": "phoenicurus"},
+            reviewed_head="b" * 40,
+        )
+    )
+
+    assert durable is False
+    assert calls == []
+
+
+def test_unverified_supersession_keeps_panel_durability_closed(monkeypatch):
+    async def fake_store(self, entities, idempotency_key):
+        if entities and entities[0]["entity_type"] == "pr_review":
+            return {"entities": [{"observation_index": 0, "entity_id": "ent_new"}]}
+        return {}
+
+    async def fake_priors(self, trigger, lenses, current_sha):
+        return {
+            "qa": [
+                {
+                    "entity_id": "ent_prior",
+                    "snapshot": {"review_lens": "qa", "review_round": 2},
+                }
+            ]
+        }
+
+    async def fake_confirm(self, trigger, entities, store_result, reviewed_head):
+        return {"qa": "ent_new"}
+
+    async def failed_supersession(*args, **kwargs):
+        return False
+
+    async def confirmed(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_prior_live_reviews", fake_priors)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_confirmed_new_pr_review_ids_by_lens", fake_confirm
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher, "_supersede_prior_reviews", failed_supersession
+    )
+    monkeypatch.setattr(SwarmDispatcher, "_persist_security_findings", confirmed)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_and_confirm_pull_request", confirmed)
+
+    durable = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_panel_reviews(
+            _trigger(),
+            [("qa", "**APPROVE**")],
+            {"qa": "phoenicurus"},
+            reviewed_head="b" * 40,
+        )
+    )
+
+    assert durable is False
+
+
+def test_failed_replacement_store_leaves_all_prior_reviews_live(monkeypatch):
+    corrections = []
+    prior = {
+        "entity_id": "ent_prior",
+        "snapshot": {"review_lens": "qa", "review_round": 2},
+    }
+
+    async def failed_store(self, entities, idempotency_key):
+        return None
+
+    async def fake_priors(self, trigger, lenses, current_sha):
+        return {"qa": [prior]}
+
+    async def fake_post(self, path, payload):
+        corrections.append((path, payload))
+        return {}
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", failed_store)
+    monkeypatch.setattr(SwarmDispatcher, "_prior_live_reviews", fake_priors)
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+
+    asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._persist_panel_reviews(
+            _trigger(),
+            [("qa", "**APPROVE**")],
+            {"qa": "phoenicurus"},
+            reviewed_head="b" * 40,
+        )
+    )
+
+    assert corrections == []
+
+
+def test_panelist_prompt_uses_verified_pre_panel_head_not_stale_trigger():
+    stale_head = "a" * 40
+    reviewed_head = "b" * 40
+
+    prompt = SwarmDispatcher._panelist_prompt(
+        _trigger(head_sha=stale_head),
+        _sample_lens(),
+        "",
+        reviewed_head=reviewed_head,
+    )
+
+    assert f"<!-- review:qa commit={reviewed_head} -->" in prompt
+    assert f"<!-- review:qa commit={stale_head} -->" not in prompt
+
+
+def test_vanellus_prompt_uses_verified_pre_panel_head_not_stale_trigger():
+    stale_head = "a" * 40
+    reviewed_head = "b" * 40
+
+    prompt = SwarmDispatcher._vanellus_prompt(
+        _trigger(head_sha=stale_head),
+        parent=80,
+        lenses=["security"],
+        reviewed_head=reviewed_head,
+    )
+
+    assert f"<!-- vanellus-aggregation commit={reviewed_head} -->" in prompt
+    assert f"<!-- vanellus-aggregation commit={stale_head} -->" not in prompt
+
+
+def test_panel_reviews_without_verified_head_fail_closed(monkeypatch, caplog):
+    stored = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    with caplog.at_level("ERROR"):
+        asyncio.run(
+            dispatcher._persist_panel_reviews(
+                _trigger(),
+                [("qa", "**APPROVE**")],
+                {"qa": "phoenicurus"},
+                reviewed_head="",
+            )
+        )
+
+    assert not [row for row in stored if row["entity_type"] == "pr_review"]
+    assert [row["entity_type"] for row in stored] == ["harness_event"]
+    assert "refusing to persist pr_review" in caplog.text
+
+
+def test_reviewed_head_blocker_recovery_ignores_stale_webhook_head(monkeypatch):
+    reviewed_head = "b" * 40
+    stale_head = "a" * 40
+
+    async def fake_comments(self, repository, number, client):
+        return [
+            {
+                "body": (
+                    f"<!-- review:security commit={stale_head} -->\n"
+                    "review:security\n**REQUEST_CHANGES**\n"
+                    "[BLOCKING] stale: wrong head"
+                )
+            },
+            {
+                "body": (
+                    f"<!-- review:security commit={reviewed_head} -->\n"
+                    "review:security\n**REQUEST_CHANGES**\n"
+                    "[BLOCKING] auth: pin producer JKT"
+                )
+            },
+        ]
+
+    monkeypatch.setattr(SwarmDispatcher, "_all_issue_comments", fake_comments)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    recovered = asyncio.run(
+        dispatcher._blocking_findings_from_reviewed_head_comments(
+            _trigger(head_sha=stale_head), reviewed_head
+        )
+    )
+    assert [finding.summary for finding in recovered["security"]] == [
+        "pin producer JKT"
+    ]
+
+
+def test_supersede_prior_review_writes_status_pointer_and_edge(monkeypatch):
+    calls = []
+    current_sha = "b" * 40
+
+    async def fake_post(self, path, payload):
+        calls.append((path, payload))
+        if path == "correct":
+            return {"observation_id": f"obs-{payload['field']}"}
+        if path == "create_relationship":
+            return {"relationship_key": "SUPERSEDES:ent_new:ent_prior"}
+        if path == "get_entity_snapshot":
+            return {
+                "entity_id": "ent_prior",
+                "snapshot": {
+                    "status": "superseded",
+                    "superseded_by": current_sha,
+                },
+            }
+        if path == "relationships/snapshot":
+            return {
+                "snapshot": {
+                    "relationship_type": "SUPERSEDES",
+                    "source_entity_id": "ent_new",
+                    "target_entity_id": "ent_prior",
+                    "is_live": 1,
+                }
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    prior = {
+        "entity_id": "ent_prior",
+        "snapshot": {"review_lens": "qa", "head_sha": "a" * 40},
+    }
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
+            _trigger(),
+            ["qa"],
+            current_sha,
+            priors={"qa": [prior]},
+            new_ids_by_lens={"qa": "ent_new"},
+        )
+    )
+    assert confirmed is True
+    assert [(path, payload.get("field")) for path, payload in calls[:2]] == [
+        ("correct", "status"),
+        ("correct", "superseded_by"),
+    ]
+    assert calls[2] == (
+        "create_relationship",
+        {
+            "source_entity_id": "ent_new",
+            "target_entity_id": "ent_prior",
+            "relationship_type": "SUPERSEDES",
+        },
+    )
+    assert calls[3] == ("get_entity_snapshot", {"entity_id": "ent_prior"})
+    assert calls[4] == (
+        "relationships/snapshot",
+        {
+            "source_entity_id": "ent_new",
+            "target_entity_id": "ent_prior",
+            "relationship_type": "SUPERSEDES",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "failed_operation",
+    ["status_correction", "superseded_by_correction", "edge_creation"],
+)
+def test_supersede_prior_reviews_fails_closed_on_each_write_failure(
+    monkeypatch, failed_operation
+):
+    current_sha = "b" * 40
+
+    async def fake_post(self, path, payload):
+        if path == "correct" and payload["field"] == "status":
+            return (
+                None
+                if failed_operation == "status_correction"
+                else {"observation_id": "status"}
+            )
+        if path == "correct" and payload["field"] == "superseded_by":
+            return (
+                None
+                if failed_operation == "superseded_by_correction"
+                else {"observation_id": "pointer"}
+            )
+        if path == "create_relationship":
+            return (
+                None
+                if failed_operation == "edge_creation"
+                else {"relationship_key": "edge"}
+            )
+        if path == "get_entity_snapshot":
+            return {
+                "snapshot": {
+                    "status": "superseded",
+                    "superseded_by": current_sha,
+                }
+            }
+        if path == "relationships/snapshot":
+            return {
+                "snapshot": {
+                    "relationship_type": "SUPERSEDES",
+                    "source_entity_id": "ent_new",
+                    "target_entity_id": "ent_prior",
+                    "is_live": 1,
+                }
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
+            _trigger(),
+            ["qa"],
+            current_sha,
+            priors={
+                "qa": [
+                    {
+                        "entity_id": "ent_prior",
+                        "snapshot": {"review_lens": "qa"},
+                    }
+                ]
+            },
+            new_ids_by_lens={"qa": "ent_new"},
+        )
+    )
+
+    assert confirmed is False
+
+
+@pytest.mark.parametrize("failed_readback", ["entity", "edge"])
+def test_supersede_prior_reviews_fails_closed_on_readback_failure(
+    monkeypatch, failed_readback
+):
+    current_sha = "b" * 40
+
+    async def fake_post(self, path, payload):
+        if path == "correct":
+            return {"observation_id": payload["field"]}
+        if path == "create_relationship":
+            return {"relationship_key": "edge"}
+        if path == "get_entity_snapshot":
+            if failed_readback == "entity":
+                return {"snapshot": {"status": "live"}}
+            return {
+                "snapshot": {
+                    "status": "superseded",
+                    "superseded_by": current_sha,
+                }
+            }
+        if path == "relationships/snapshot":
+            if failed_readback == "edge":
+                return None
+            return {
+                "snapshot": {
+                    "relationship_type": "SUPERSEDES",
+                    "source_entity_id": "ent_new",
+                    "target_entity_id": "ent_prior",
+                    "is_live": 1,
+                }
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
+            _trigger(),
+            ["qa"],
+            current_sha,
+            priors={
+                "qa": [
+                    {
+                        "entity_id": "ent_prior",
+                        "snapshot": {"review_lens": "qa"},
+                    }
+                ]
+            },
+            new_ids_by_lens={"qa": "ent_new"},
+        )
+    )
+
+    assert confirmed is False
+
+
+def test_supersede_prior_reviews_requires_confirmed_replacement_id(monkeypatch):
+    calls = []
+
+    async def fake_post(self, path, payload):
+        calls.append((path, payload))
+        return {}
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    prior = {
+        "entity_id": "ent_prior",
+        "snapshot": {"review_lens": "qa", "head_sha": "a" * 40},
+    }
+
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
+            _trigger(),
+            ["qa"],
+            "b" * 40,
+            priors={"qa": [prior]},
+            new_ids_by_lens={},
+        )
+    )
+
+    assert confirmed is False
+    assert calls == []
+
+
+def test_supersede_prior_reviews_demotes_every_live_row_for_confirmed_lens(
+    monkeypatch,
+):
+    calls = []
+
+    current_sha = "b" * 40
+
+    async def fake_post(self, path, payload):
+        calls.append((path, payload))
+        if path == "correct":
+            return {"observation_id": payload["field"]}
+        if path == "create_relationship":
+            return {"relationship_key": "edge"}
+        if path == "get_entity_snapshot":
+            return {
+                "snapshot": {
+                    "status": "superseded",
+                    "superseded_by": current_sha,
+                }
+            }
+        if path == "relationships/snapshot":
+            return {
+                "snapshot": {
+                    "relationship_type": "SUPERSEDES",
+                    "source_entity_id": payload["source_entity_id"],
+                    "target_entity_id": payload["target_entity_id"],
+                    "is_live": 1,
+                }
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", fake_post)
+    qa_priors = [
+        {
+            "entity_id": "ent_qa_round_7",
+            "snapshot": {"review_lens": "qa", "review_round": 7},
+        },
+        {
+            "entity_id": "ent_qa_round_3",
+            "snapshot": {"review_lens": "qa", "review_round": 3},
+        },
+    ]
+    security_prior = {
+        "entity_id": "ent_security_round_4",
+        "snapshot": {"review_lens": "security", "review_round": 4},
+    }
+
+    confirmed = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._supersede_prior_reviews(
+            _trigger(),
+            ["qa", "security"],
+            current_sha,
+            priors={"qa": qa_priors, "security": [security_prior]},
+            # A partial replacement response confirms QA only. Security must
+            # remain live until its own replacement is durably read back.
+            new_ids_by_lens={"qa": "ent_qa_new"},
+        )
+    )
+
+    assert confirmed is False
+
+    corrected_ids = [
+        payload["entity_id"] for path, payload in calls if path == "correct"
+    ]
+    assert corrected_ids == [
+        "ent_qa_round_3",
+        "ent_qa_round_3",
+        "ent_qa_round_7",
+        "ent_qa_round_7",
+    ]
+    assert "ent_security_round_4" not in corrected_ids
+    relationship_targets = [
+        payload["target_entity_id"]
+        for path, payload in calls
+        if path == "create_relationship"
+    ]
+    assert relationship_targets == ["ent_qa_round_3", "ent_qa_round_7"]
 
 
 # ── parse_gate_verdict ──────────────────────────────────────────────────────
@@ -416,16 +1267,16 @@ def test_signed_off_head_pinning_fails_closed_on_stale_or_missing_commit():
 
 
 def _pr_dispatcher_with_stubs(
-    monkeypatch, *, vanellus_stdout, calls, auto_merge=False
+    monkeypatch, *, vanellus_stdout, calls, auto_merge=False,
+    binding_receipt=True,
 ):
     """Dispatcher whose _handle_pr reaches the verdict branch, then records
     which downstream path (_route_blocking_findings vs _gate_merge_readiness)
     fired, without doing real work in either.
 
-    `auto_merge` drives the flag that decides whether a merge-ready PR gets a
-    checkpoint at all, so a test can assert routing still happens under the
-    autonomous posture — the case where a missed blocker is silent rather than
-    merely wrong.
+    `auto_merge` drives the post-receipt dispatcher path, so a test can assert
+    routing still happens under the autonomous posture — the case where a
+    missed blocker is silent rather than merely wrong.
     """
 
     async def fake_run_skill(skill, prompt, **kwargs):
@@ -442,13 +1293,14 @@ def _pr_dispatcher_with_stubs(
     async def fake_changed_files(self, trigger):
         return ["src/x.ts"]
 
-    async def fake_route(self, trigger, parent, reviews, verdict):
+    async def fake_route(self, trigger, parent, reviews, verdict, **kwargs):
+        calls.append(("route_head", kwargs.get("reviewed_head")))
         calls.append(("route", verdict))
 
-    async def fake_gate(self, trigger, parent, panel):
+    async def fake_gate(self, trigger, parent, panel, **kwargs):
         calls.append(("gate", None))
 
-    async def fake_post_missing_vanellus(self, trigger, result):
+    async def fake_post_missing_vanellus(self, trigger, result, **kwargs):
         return None
 
     async def fake_emit_review(self, trigger, verdict, body, **kwargs):
@@ -461,9 +1313,19 @@ def _pr_dispatcher_with_stubs(
         # COMMENT here while GitHub received REQUEST_CHANGES — the stub silently
         # hid the very disagreement these tests exist to catch.
         calls.append(("review", verdict_to_review_event(verdict, body=body)))
-        return "rev-1"
+        if not binding_receipt:
+            return None
+        event = verdict_to_review_event(verdict, body=body)
+        state = "APPROVED" if event == "APPROVE" else "CHANGES_REQUESTED"
+        return ReviewBindingReceipt(
+            review_id="101",
+            reviewer_login="markmhendrickson-ateles-vanellus",
+            commit_id="a" * 40,
+            state=state,
+        )
 
     async def fake_persist(self, *a, **k):
+        calls.append(("persist_head", k.get("reviewed_head")))
         return None
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
@@ -497,6 +1359,26 @@ def test_handle_pr_blocking_verdict_routes_findings(monkeypatch):
     assert ("gate", None) not in calls
 
 
+def test_handle_pr_threads_one_live_head_through_persistence_and_recovery(
+    monkeypatch,
+):
+    calls = []
+    live_head = "b" * 40
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch,
+        vanellus_stdout="**REQUEST_CHANGES**\n1 blocking",
+        calls=calls,
+    )
+    monkeypatch.setattr(
+        d, "_pr_head_sha", lambda trigger: _async_return(live_head)
+    )
+    asyncio.run(
+        d._handle_pr(_trigger(body="Closes #80.", head_sha="a" * 40))
+    )
+    assert ("persist_head", live_head) in calls
+    assert ("route_head", live_head) in calls
+
+
 def test_handle_pr_clear_verdict_gates_readiness(monkeypatch):
     calls = []
     d = _pr_dispatcher_with_stubs(
@@ -505,6 +1387,170 @@ def test_handle_pr_clear_verdict_gates_readiness(monkeypatch):
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert ("gate", None) in calls
     assert not any(c[0] == "route" for c in calls)
+
+
+def test_handle_pr_panel_loop_clean_verdict_calls_sign_off(monkeypatch):
+    """Phoenicurus's QA review, PR #1181 (NON-BLOCKING coverage gap): the
+    panel-loop `sign_off` branch in `_handle_pr` — CLEAN verdict for a gate a
+    lens owns -> `IssueGateStore.sign_off` called with `(repo, parent, gate,
+    agent, review_head)` — was covered only at the helper level
+    (`test_gate_sign_off.py`, `test_gate_sign_off_dispatch.py`), never at the
+    call site that wires them into the actual panel loop. This drives one
+    real `_handle_pr` panel iteration end to end via the same
+    `_pr_dispatcher_with_stubs` scaffolding the other `_handle_pr` tests use,
+    with the `arch` lens (always-seated) returning a clean `**SIGNED_OFF**`."""
+    import gate_waive
+
+    calls = []
+    sign_off_calls = []
+
+    async def fake_sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+        sign_off_calls.append((repo, issue_number, gate, lens_agent, head_sha))
+        return gate_waive.SignOffOutcome(
+            ok=True, gate=gate, lens_agent=lens_agent, verified=True
+        )
+
+    monkeypatch.setattr(swarm_dispatch.IssueGateStore, "sign_off", fake_sign_off)
+
+    # Which gates to sign comes from the LIVE record now (PR #1181, qa/legal
+    # gap), not from Lanius's report: the record reads `arch` pending.
+    async def fake_live(self, repository, issue_number):
+        return {"pm": "signed_off", "ux": "signed_off", "arch": "pending"}
+
+    monkeypatch.setattr(SwarmDispatcher, "_live_gate_status", fake_live)
+
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+    review_head = "a" * 40
+
+    async def fake_run_skill_gate_pending(skill, prompt, **kwargs):
+        # Lanius reports `arch` as the still-pending gate, which is what
+        # `owns_pending_gate` (and therefore the sign_off call) is keyed on —
+        # `arch` being `always=True` gets it a panel SEAT regardless, but the
+        # sign_off branch additionally requires `lens.lens in pending_gates`.
+        if skill == "lanius":
+            return SkillResult(
+                skill, True, 0, "GATE_INHERITANCE: clear\nGATE_PENDING: arch", ""
+            )
+        if skill == "vanellus":
+            return SkillResult(skill, True, 0, "**APPROVE**\nlgtm", "")
+        if skill == "waxwing":
+            return SkillResult(
+                skill,
+                True,
+                0,
+                "**🤖 Waxwing — Ateles swarm, arch lens panelist**\n"
+                "**SIGNED_OFF**\nno concerns",
+                "",
+            )
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill_gate_pending)
+
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.", head_sha=review_head)))
+
+    assert sign_off_calls, "sign_off was never called for the arch lens"
+    assert ("owner/repo", 80, "arch", "waxwing", review_head) in sign_off_calls
+
+
+def test_handle_pr_panel_loop_blocking_verdict_does_not_call_sign_off(monkeypatch):
+    """The inverse of the above: a `[BLOCKING]` finding from the gate-owning
+    lens must leave the gate untouched — `sign_off` is not called at all."""
+
+    calls = []
+    sign_off_calls = []
+
+    async def fake_sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+        sign_off_calls.append((repo, issue_number, gate, lens_agent, head_sha))
+        raise AssertionError("sign_off must not be called on a blocking verdict")
+
+    monkeypatch.setattr(swarm_dispatch.IssueGateStore, "sign_off", fake_sign_off)
+
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch,
+        vanellus_stdout="**REQUEST_CHANGES**\n[BLOCKING] arch: bad contract",
+        calls=calls,
+    )
+
+    async def fake_run_skill_blocking(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "vanellus":
+            return SkillResult(
+                skill, True, 0, "**REQUEST_CHANGES**\n[BLOCKING] arch: bad contract", ""
+            )
+        if skill == "waxwing":
+            return SkillResult(
+                skill, True, 0, "**REQUEST_CHANGES**\n[BLOCKING] arch: bad contract", ""
+            )
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill_blocking)
+
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.", head_sha="a" * 40)))
+
+    assert not sign_off_calls, "sign_off must not be called when the lens blocked"
+
+
+def test_handle_pr_clear_verdict_without_verified_approval_holds_readiness(monkeypatch):
+    """A clear model verdict is prose until GitHub readback proves an exact-head
+    APPROVED review by the distinct Vanellus principal."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch,
+        vanellus_stdout="**APPROVE**\nlgtm",
+        calls=calls,
+        binding_receipt=False,
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("review", "APPROVE") in calls
+    assert ("gate", None) not in calls
+
+
+def test_handle_pr_push_after_binding_receipt_holds_readiness(monkeypatch):
+    """The receipt is stale if the PR head moves before readiness is filed."""
+    calls = []
+    live = {"head": "b" * 40}
+    dispatcher = _pr_dispatcher_with_stubs(
+        monkeypatch,
+        vanellus_stdout="**APPROVE**\nlgtm",
+        calls=calls,
+    )
+
+    async def current_head(trigger):
+        return live["head"]
+
+    async def approve_then_push(trigger, verdict, body, **kwargs):
+        reviewed_head = live["head"]
+        live["head"] = "c" * 40
+        return ReviewBindingReceipt(
+            review_id="102",
+            reviewer_login="markmhendrickson-ateles-vanellus",
+            commit_id=reviewed_head,
+            state="APPROVED",
+        )
+
+    monkeypatch.setattr(dispatcher, "_pr_head_sha", current_head)
+    monkeypatch.setattr(dispatcher, "_emit_formal_review", approve_then_push)
+
+    asyncio.run(dispatcher._handle_pr(_trigger(body="Closes #80.")))
+
+    assert ("gate", None) not in calls
+
+
+def test_handle_pr_holds_before_aggregation_when_durable_readback_fails(monkeypatch):
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+
+    async def durability_failed(self, *args, **kwargs):
+        return False
+
+    monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", durability_failed)
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
 
 
 def test_handle_pr_emits_formal_review_on_blocking_path(monkeypatch):
@@ -583,10 +1629,10 @@ def _gate_blocked_dispatcher(monkeypatch, *, calls, auto_rereview):
     async def fake_changed_files(self, trigger):
         return ["src/x.ts"]
 
-    async def fake_route(self, trigger, parent, reviews, verdict):
+    async def fake_route(self, trigger, parent, reviews, verdict, **kwargs):
         calls.append(("route", verdict))
 
-    async def fake_gate(self, trigger, parent, panel):
+    async def fake_gate(self, trigger, parent, panel, **kwargs):
         calls.append(("gate", None))
 
     async def fake_noop(self, *a, **k):
@@ -846,12 +1892,11 @@ def test_route_findings_escalates_at_retry_cap(monkeypatch):
     assert any("auto-fix rounds did not clear" in m for m in notifier.sent)
 
 
-def test_route_findings_exhausted_dedup_suppresses_renotify(monkeypatch):
+def test_route_findings_exhausted_dedup_suppresses_renotify(monkeypatch, tmp_path):
     """A re-review after the cap must not re-page the operator.
 
-    Regression for the duplicate-fire bug (ateles#262 sent four identical
-    auto-fix-exhausted pings): when _claim_escalation reports the condition was
-    already escalated (returns False), the notification is suppressed.
+    Notifier dedupe (ateles#1165) suppresses repeats; _claim_escalation False
+    still allows the first Notifier delivery for that head.
     """
     async def fake_run_skill(skill, prompt, **kwargs):
         return SkillResult(skill, True, 0, "x", "")
@@ -862,18 +1907,42 @@ def test_route_findings_exhausted_dedup_suppresses_renotify(monkeypatch):
     async def fake_claim(self, trigger, kind):
         return False  # already escalated → suppress
 
+    from lib.notify import Notifier
+
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
     monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40)
+    )
 
-    notifier = _StubNotifier()
+    sent = []
+    # Empty silence window: production Madrid 22:00–08:00 holds
+    # OPERATOR_DECISION and fails these effect tests after 22:00 local.
+    # Isolate digest path too — default /tmp digest flushes leftover
+    # held notices into `sent` once silence is empty.
+    notifier = Notifier(
+        rubric={
+            "timezone": "Europe/Madrid",
+            "silence_start": "",
+            "silence_end": "",
+        }
+    )
+    notifier._dedupe_path = tmp_path / "dedupe.json"
+    notifier._digest_path = tmp_path / "digest.json"
+    notifier._deliver = lambda m, **kw: (sent.append(m), True)[1]
     d = SwarmDispatcher(notifier, _config())
     reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
-    asyncio.run(
-        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
-                                   verdict="request_changes")
-    )
-    assert not any("auto-fix rounds did not clear" in m for m in notifier.sent)
+    trig = _trigger()
+    for _ in range(2):
+        asyncio.run(
+            d._route_blocking_findings(
+                trig, parent=80, reviews=reviews, verdict="request_changes",
+                reviewed_head="a" * 40,
+            )
+        )
+    assert len(sent) == 1
+    assert "auto-fix rounds did not clear" in sent[0]
 
 
 def test_route_findings_cicada_auth_failure_pages_infra(monkeypatch):
@@ -933,7 +2002,7 @@ def test_route_findings_no_parseable_blocking_escalates(monkeypatch):
     assert any("process, not content" in m for m in notifier.sent)
 
 
-def test_route_findings_unparseable_dedup_suppresses_renotify(monkeypatch):
+def test_route_findings_unparseable_dedup_suppresses_renotify(monkeypatch, tmp_path):
     """A re-review of the same unparseable verdict must not re-page the operator."""
     async def fake_run_skill(skill, prompt, **kwargs):
         raise AssertionError("should not dispatch when nothing parses")
@@ -941,18 +2010,40 @@ def test_route_findings_unparseable_dedup_suppresses_renotify(monkeypatch):
     async def fake_claim(self, trigger, kind):
         return False  # already escalated → suppress
 
+    from lib.notify import Notifier
+
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
-    notifier = _StubNotifier()
+
+    sent = []
+    notifier = Notifier(
+        rubric={
+            "timezone": "Europe/Madrid",
+            "silence_start": "",
+            "silence_end": "",
+        }
+    )
+    notifier._dedupe_path = tmp_path / "dedupe2.json"
+    notifier._digest_path = tmp_path / "digest2.json"
+    notifier._deliver = lambda m, **kw: (sent.append(m), True)[1]
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_blocking_findings_from_reviewed_head_comments",
+        lambda self, t, h: _async_return({}),
+    )
     d = SwarmDispatcher(notifier, _config())
-    asyncio.run(
-        d._route_blocking_findings(_trigger(), parent=80,
-                                   reviews=[("pm", "cannot proceed")],
-                                   verdict="blocked")
-    )
-    assert not any(
-        "no blocking findings could be parsed" in m for m in notifier.sent
-    )
+    trig = _trigger()
+    for _ in range(2):
+        asyncio.run(
+            d._route_blocking_findings(
+                trig, parent=80,
+                reviews=[("pm", "cannot proceed")],
+                verdict="request_changes",
+                reviewed_head="a" * 40,
+            )
+        )
+    assert len(sent) == 1
+    assert "no blocking findings could be parsed" in sent[0]
 
 
 # ── _gate_merge_readiness (verdict-clear AND CI-green) ───────────────────────
@@ -1001,6 +2092,185 @@ def test_gate_readiness_ci_pending_holds_without_paging(monkeypatch):
     assert routed == []
     # Held as INFO (digest), not an OPERATOR_DECISION merge page.
     assert not any("READY TO MERGE" in m for m in d.notifier.sent)
+
+
+def test_auto_merge_runs_only_with_verified_receipt_and_atomic_head(monkeypatch):
+    merged = []
+    head = "b" * 40
+
+    async def fake_head(self, trigger):
+        return head
+
+    async def fake_ci(self, trigger):
+        return "green"
+
+    async def fake_merge(
+        self,
+        repository,
+        number,
+        method,
+        *,
+        expected_head="",
+        require_default_base=False,
+    ):
+        merged.append(
+            (repository, number, method, expected_head, require_default_base)
+        )
+        return True, "d" * 40
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_merge_pr", fake_merge)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
+    receipt = ReviewBindingReceipt(
+        review_id="103",
+        reviewer_login="markmhendrickson-ateles-vanellus",
+        commit_id=head,
+        state="APPROVED",
+    )
+
+    asyncio.run(
+        dispatcher._gate_merge_readiness(
+            _trigger(head_sha=head),
+            parent=80,
+            panel=[],
+            reviewed_head=head,
+            binding_receipt=receipt,
+        )
+    )
+
+    assert merged == [("owner/repo", 87, "squash", head, True)]
+    assert any("MERGED automatically" in message for message in dispatcher.notifier.sent)
+
+
+@pytest.mark.parametrize("review_id", ["", "0", "-1", "not-an-id"])
+def test_auto_merge_rejects_receipt_without_valid_github_review_id(
+    monkeypatch, review_id
+):
+    merged = []
+    head = "b" * 40
+
+    async def fake_head(self, trigger):
+        return head
+
+    async def fake_merge(self, *args, **kwargs):
+        merged.append((args, kwargs))
+        return True, "d" * 40
+
+    async def fake_ci(self, trigger):
+        return "green"
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_merge_pr", fake_merge)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
+    receipt = ReviewBindingReceipt(
+        review_id=review_id,
+        reviewer_login="markmhendrickson-ateles-vanellus",
+        commit_id=head,
+        state="APPROVED",
+    )
+
+    asyncio.run(
+        dispatcher._gate_merge_readiness(
+            _trigger(head_sha=head),
+            parent=80,
+            panel=[],
+            reviewed_head=head,
+            binding_receipt=receipt,
+        )
+    )
+
+    assert merged == []
+
+
+def test_auto_merge_without_verified_receipt_stays_held(monkeypatch):
+    merged = []
+    head = "b" * 40
+
+    async def fake_head(self, trigger):
+        return head
+
+    async def fake_merge(self, *args, **kwargs):
+        merged.append((args, kwargs))
+        return True, "d" * 40
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+    monkeypatch.setattr(SwarmDispatcher, "_merge_pr", fake_merge)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
+
+    asyncio.run(
+        dispatcher._gate_merge_readiness(
+            _trigger(head_sha=head),
+            parent=80,
+            panel=[],
+            reviewed_head=head,
+            binding_receipt=None,
+        )
+    )
+
+    assert merged == []
+
+
+def test_auto_merge_atomic_base_refusal_is_recorded_without_success_notice(
+    monkeypatch,
+):
+    head = "b" * 40
+    refusals = []
+
+    async def fake_head(self, trigger):
+        return head
+
+    async def fake_ci(self, trigger):
+        return "green"
+
+    async def atomic_base_unavailable(self, *args, **kwargs):
+        return (
+            False,
+            "GitHub merge API cannot atomically bind the PR base; "
+            "auto-merge held",
+        )
+
+    def fake_refusal(self, **kwargs):
+        refusals.append(kwargs)
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_merge_pr", atomic_base_unavailable)
+    monkeypatch.setattr(SwarmDispatcher, "record_merge_refusal", fake_refusal)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
+    receipt = ReviewBindingReceipt(
+        review_id="123",
+        reviewer_login=agent_github_login("vanellus"),
+        commit_id=head,
+        state="APPROVED",
+    )
+
+    asyncio.run(
+        dispatcher._gate_merge_readiness(
+            _trigger(head_sha=head),
+            parent=80,
+            panel=[],
+            reviewed_head=head,
+            binding_receipt=receipt,
+        )
+    )
+
+    assert refusals == [
+        {
+            "repository": "owner/repo",
+            "number": 87,
+            "reason": (
+                "GitHub merge API cannot atomically bind the PR base; "
+                "auto-merge held"
+            ),
+            "auto_merge": True,
+        }
+    ]
+    assert not any(
+        "MERGED automatically" in message
+        for message in dispatcher.notifier.sent
+    )
 
 
 # ── _required_ci_state (CI detection — status API + check-runs precedence) ───
@@ -1214,7 +2484,7 @@ def _wire_ci_status(monkeypatch, *, ci_state, review_clear, pr_head="abc123",
     async def fake_route(self, trigger, parent):
         calls.append(("route", trigger.number))
 
-    async def fake_gate(self, trigger, parent, panel, ci_state=None):
+    async def fake_gate(self, trigger, parent, panel, ci_state=None, **kwargs):
         calls.append(("gate", trigger.number))
 
     monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
@@ -1302,7 +2572,7 @@ def test_ci_status_fetch_pr_failure_notifies_operator(monkeypatch):
     async def fake_route(self, trigger, parent):
         calls.append(("route", trigger.number))
 
-    async def fake_gate(self, trigger, parent, panel, ci_state=None):
+    async def fake_gate(self, trigger, parent, panel, ci_state=None, **kwargs):
         calls.append(("gate", trigger.number))
 
     monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr_fails)
@@ -1344,7 +2614,7 @@ def test_ci_status_green_threads_ci_state_into_gate(monkeypatch):
     async def fake_clear(self, repo, num, head_sha=""):
         return True
 
-    async def fake_gate(self, trigger, parent, panel, ci_state=None):
+    async def fake_gate(self, trigger, parent, panel, ci_state=None, **kwargs):
         seen["ci_state"] = ci_state
 
     monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
@@ -1354,6 +2624,505 @@ def test_ci_status_green_threads_ci_state_into_gate(monkeypatch):
     d = SwarmDispatcher(_StubNotifier(), _config())
     asyncio.run(d._handle_ci_status(_ci_status_trigger()))
     assert seen.get("ci_state") == "green"
+
+
+def test_ci_status_auto_merge_reenters_fresh_exact_head_panel(monkeypatch):
+    head = "c" * 40
+    calls = []
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=calls,
+    )
+    d.config.auto_merge = True
+
+    async def fake_handle_pr(self, trigger):
+        calls.append(("fresh-panel", trigger.head_sha))
+
+    async def reconstruction_must_not_run(self, *args, **kwargs):
+        raise AssertionError("delayed CI must not reconstruct merge authority")
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_binding_approval_receipt_from_github",
+        reconstruction_must_not_run,
+    )
+
+    asyncio.run(
+        d._handle_ci_status(_ci_status_trigger(ci_head_sha=head))
+    )
+
+    assert ("fresh-panel", head) in calls
+    assert not any(call[0] == "gate" for call in calls)
+
+
+def test_ci_status_concurrent_same_head_coalesces_fresh_panel_but_logs_deliveries(
+    monkeypatch,
+):
+    """Two live deliveries may describe one completed PR head.
+
+    Every GitHub delivery must retain its own harness audit row, while only one
+    full panel may create durable reviews, a native approval, and notifications
+    for the shared (repository, PR, live-head) attempt.
+    """
+    head = "c" * 40
+    calls = []
+    delivery_logs = []
+    fetch_count = 0
+    second_fetch_completed = asyncio.Event()
+    release_panel = asyncio.Event()
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=calls,
+    )
+    d.config.auto_merge = True
+
+    async def fake_log_harness_event(self, trigger):
+        delivery_logs.append(trigger.delivery_id)
+
+    async def fake_fetch_pr(self, repo, num):
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 2:
+            second_fetch_completed.set()
+        return {
+            "number": num,
+            "state": "open",
+            "draft": False,
+            "title": "t",
+            "body": "Closes #80",
+            "html_url": "u",
+            "head": {"sha": head, "ref": "feat/x"},
+            "base": {"ref": "main"},
+        }
+
+    async def fake_handle_pr(self, trigger):
+        calls.append(("fresh-panel", trigger.head_sha, trigger.delivery_id))
+        await release_panel.wait()
+
+    monkeypatch.setattr(SwarmDispatcher, "_log_harness_event", fake_log_harness_event)
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+
+    async def run_concurrently():
+        first = asyncio.create_task(
+            d.handle_trigger(_ci_status_trigger(ci_head_sha=head, delivery_id="ci-a"))
+        )
+        while not calls:
+            await asyncio.sleep(0)
+        second = asyncio.create_task(
+            d.handle_trigger(_ci_status_trigger(ci_head_sha=head, delivery_id="ci-b"))
+        )
+        await second_fetch_completed.wait()
+        # Let the second delivery advance past its live-head read. Without a
+        # coalescing claim it enters the full panel before the first is released.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert calls == [("fresh-panel", head, "")]
+        release_panel.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(run_concurrently())
+
+    # handle_trigger audits deliveries before CI-head coalescing. The
+    # synthesized pr_synchronize trigger deliberately keeps delivery_id empty:
+    # panel storage is canonical by PR/head/content, never by whichever
+    # equivalent check-suite delivery won the in-process claim.
+    assert delivery_logs == ["ci-a", "ci-b"]
+    assert calls == [("fresh-panel", head, "")]
+
+
+def test_ci_status_same_conclusion_rechecks_after_leader_finds_aggregate_pending(
+    monkeypatch,
+):
+    """Suite B completion must close a loop suite A found still pending."""
+    head = "b" * 40
+    ci_states = iter(("pending", "green"))
+    first_ci_read = asyncio.Event()
+    release_first_ci_read = asyncio.Event()
+    second_live_head_read = asyncio.Event()
+    panels = []
+    fetch_count = 0
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="pending",
+        review_clear=True,
+        pr_head=head,
+        calls=[],
+    )
+    d.config.auto_merge = True
+
+    async def fake_fetch_pr(self, repo, num):
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 2:
+            second_live_head_read.set()
+        return {
+            "number": num,
+            "state": "open",
+            "draft": False,
+            "title": "t",
+            "body": "Closes #80",
+            "html_url": "u",
+            "head": {"sha": head, "ref": "feat/x"},
+            "base": {"ref": "main"},
+        }
+
+    async def fake_ci(self, trigger):
+        state = next(ci_states)
+        if state == "pending":
+            first_ci_read.set()
+            await release_first_ci_read.wait()
+        return state
+
+    async def fake_handle_pr(self, trigger):
+        panels.append(trigger.head_sha)
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+
+    async def run_concurrently():
+        suite_a = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(
+                    ci_head_sha=head,
+                    ci_conclusion="success",
+                    delivery_id="suite-a",
+                )
+            )
+        )
+        await first_ci_read.wait()
+        suite_b = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(
+                    ci_head_sha=head,
+                    ci_conclusion="success",
+                    delivery_id="suite-b",
+                )
+            )
+        )
+        await second_live_head_read.wait()
+        await asyncio.sleep(0)
+        release_first_ci_read.set()
+        await asyncio.gather(suite_a, suite_b)
+
+    asyncio.run(run_concurrently())
+    assert panels == [head]
+    assert fetch_count == 3
+
+
+def test_ci_status_same_conclusion_retries_after_leader_exception(monkeypatch):
+    """A failed leader cannot make its same-conclusion waiter disappear."""
+    head = "a" * 40
+    first_panel_entered = asyncio.Event()
+    release_failing_panel = asyncio.Event()
+    second_live_head_read = asyncio.Event()
+    panel_calls = 0
+    fetch_count = 0
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=[],
+    )
+    d.config.auto_merge = True
+
+    async def fake_fetch_pr(self, repo, num):
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 2:
+            second_live_head_read.set()
+        return {
+            "number": num,
+            "state": "open",
+            "draft": False,
+            "title": "t",
+            "body": "Closes #80",
+            "html_url": "u",
+            "head": {"sha": head, "ref": "feat/x"},
+            "base": {"ref": "main"},
+        }
+
+    async def fake_handle_pr(self, trigger):
+        nonlocal panel_calls
+        panel_calls += 1
+        if panel_calls == 1:
+            first_panel_entered.set()
+            await release_failing_panel.wait()
+            raise RuntimeError("leader panel failed")
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+
+    async def run_concurrently():
+        leader = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(
+                    ci_head_sha=head,
+                    ci_conclusion="success",
+                    delivery_id="leader",
+                )
+            )
+        )
+        await first_panel_entered.wait()
+        waiter = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(
+                    ci_head_sha=head,
+                    ci_conclusion="success",
+                    delivery_id="waiter",
+                )
+            )
+        )
+        await second_live_head_read.wait()
+        await asyncio.sleep(0)
+        release_failing_panel.set()
+        results = await asyncio.gather(leader, waiter, return_exceptions=True)
+        assert isinstance(results[0], RuntimeError)
+        assert results[1] is None
+
+    asyncio.run(run_concurrently())
+    assert panel_calls == 2
+    assert fetch_count == 3
+
+
+def test_ci_status_same_conclusion_retries_after_leader_cancellation(monkeypatch):
+    head = "9" * 40
+    first_panel_entered = asyncio.Event()
+    second_live_head_read = asyncio.Event()
+    panel_calls = 0
+    fetch_count = 0
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=[],
+    )
+    d.config.auto_merge = True
+
+    async def fake_fetch_pr(self, repo, num):
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 2:
+            second_live_head_read.set()
+        return {
+            "number": num,
+            "state": "open",
+            "draft": False,
+            "title": "t",
+            "body": "Closes #80",
+            "html_url": "u",
+            "head": {"sha": head, "ref": "feat/x"},
+            "base": {"ref": "main"},
+        }
+
+    async def fake_handle_pr(self, trigger):
+        nonlocal panel_calls
+        panel_calls += 1
+        if panel_calls == 1:
+            first_panel_entered.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+
+    async def run_concurrently():
+        leader = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(ci_head_sha=head, delivery_id="leader")
+            )
+        )
+        await first_panel_entered.wait()
+        waiter = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(ci_head_sha=head, delivery_id="waiter")
+            )
+        )
+        await second_live_head_read.wait()
+        await asyncio.sleep(0)
+        leader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+        await waiter
+
+    asyncio.run(run_concurrently())
+    assert panel_calls == 2
+    assert fetch_count == 3
+
+
+def test_ci_status_same_head_runs_again_after_inflight_claim_finishes(monkeypatch):
+    """The claim coalesces overlap; it must not permanently consume a head."""
+    head = "d" * 40
+    calls = []
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=calls,
+    )
+    d.config.auto_merge = True
+
+    async def fake_handle_pr(self, trigger):
+        calls.append(("fresh-panel", trigger.head_sha))
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+
+    async def run_sequentially():
+        await d._handle_ci_status(_ci_status_trigger(ci_head_sha=head))
+        await d._handle_ci_status(_ci_status_trigger(ci_head_sha=head))
+
+    asyncio.run(run_sequentially())
+    assert calls == [("fresh-panel", head), ("fresh-panel", head)]
+
+
+def test_ci_status_different_conclusion_waits_then_rechecks(monkeypatch):
+    """A changed conclusion is serialized, not discarded as a duplicate."""
+    head = "f" * 40
+    events = []
+    ci_states = iter(("green", "failing"))
+    first_panel_entered = asyncio.Event()
+    second_live_head_read = asyncio.Event()
+    release_first_panel = asyncio.Event()
+    fetch_count = 0
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=[],
+    )
+    d.config.auto_merge = True
+
+    async def fake_fetch_pr(self, repo, num):
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 2:
+            second_live_head_read.set()
+        return {
+            "number": num,
+            "state": "open",
+            "draft": False,
+            "title": "t",
+            "body": "Closes #80",
+            "html_url": "u",
+            "head": {"sha": head, "ref": "feat/x"},
+            "base": {"ref": "main"},
+        }
+
+    async def fake_ci(self, trigger):
+        return next(ci_states)
+
+    async def fake_handle_pr(self, trigger):
+        events.append("panel-start")
+        first_panel_entered.set()
+        await release_first_panel.wait()
+        events.append("panel-finish")
+
+    async def fake_route(self, trigger, parent):
+        events.append("route-failure")
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_route_ci_failure", fake_route)
+
+    async def run_concurrently():
+        first = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(ci_head_sha=head, ci_conclusion="success")
+            )
+        )
+        await first_panel_entered.wait()
+        second = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(ci_head_sha=head, ci_conclusion="failure")
+            )
+        )
+        await second_live_head_read.wait()
+        await asyncio.sleep(0)
+        assert events == ["panel-start"]
+        release_first_panel.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(run_concurrently())
+    assert events == ["panel-start", "panel-finish", "route-failure"]
+    # The changed conclusion re-enters through the public handler and therefore
+    # re-reads the live PR/head after waiting for the first claim.
+    assert fetch_count == 3
+
+
+def test_ci_status_claim_is_released_when_claimed_work_raises(monkeypatch):
+    head = "1" * 40
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=[],
+    )
+    d.config.auto_merge = True
+
+    async def failing_panel(self, trigger):
+        raise RuntimeError("panel failed")
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", failing_panel)
+
+    with pytest.raises(RuntimeError, match="panel failed"):
+        asyncio.run(d._handle_ci_status(_ci_status_trigger(ci_head_sha=head)))
+
+    assert d._ci_head_claims == {}
+
+
+def test_ci_status_concurrent_different_prs_do_not_share_claim(monkeypatch):
+    """Coalescing is scoped to repository, PR number, and exact live head."""
+    head = "e" * 40
+    entered = []
+    both_entered = asyncio.Event()
+    release_panels = asyncio.Event()
+    d = _wire_ci_status(
+        monkeypatch,
+        ci_state="green",
+        review_clear=True,
+        pr_head=head,
+        calls=[],
+    )
+    d.config.auto_merge = True
+
+    async def fake_handle_pr(self, trigger):
+        entered.append(trigger.number)
+        if len(entered) == 2:
+            both_entered.set()
+        await release_panels.wait()
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+
+    async def run_concurrently():
+        first = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(number=87, ci_pr_numbers=[87], ci_head_sha=head)
+            )
+        )
+        second = asyncio.create_task(
+            d._handle_ci_status(
+                _ci_status_trigger(number=88, ci_pr_numbers=[88], ci_head_sha=head)
+            )
+        )
+        await asyncio.wait_for(both_entered.wait(), timeout=1)
+        release_panels.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(run_concurrently())
+    assert sorted(entered) == [87, 88]
 
 
 def test_pr_review_is_clear_reads_newest_first(monkeypatch):
@@ -1971,36 +3740,38 @@ def _arch_lens() -> Lens:
 
 
 def test_panelist_prompt_gate_writeback_when_owns_pending_gate():
-    """A pending-gate owner is told to correct gate_status.<gate> → signed_off."""
+    """Was: a pending-gate owner was told to correct gate_status.<gate> itself.
+
+    Falco's security review, PR #1181 (ateles#795 amended ADR): that
+    instruction was removed entirely — it was half of the attribution-bypass
+    sink, since it told a lens seated over the SAME shared daemon bearer as
+    every other session to attempt a write that could land unattributed. The
+    dispatcher's `IssueGateStore.sign_off` (in the panel loop, keyed on the
+    SAME `owns_pending_gate` flag) is the sole system-of-record write now, so
+    the prompt must NOT carry a `correct()`-gate_status instruction even for a
+    pending-gate owner — this assertion is the inverse of what it was before
+    the fix, and the inversion IS the fix.
+    """
     t = _trigger()
     expectation = "- [ ] arch check\n"
     prompt = SwarmDispatcher._panelist_prompt(
         t, _arch_lens(), expectation, parent=80, owns_pending_gate=True
     )
-    assert "GATE WRITEBACK" in prompt
-    assert "gate_status.arch" in prompt
-    assert '"signed_off"' in prompt
-    # Must be conditional on a clean verdict and must preserve the rest of the map.
-    assert "ONLY if" in prompt
-    assert "MERGE the existing map" in prompt
-    assert "gate-signoff-arch-" in prompt  # idempotency key stem
-    # Effect chrome (ateles#769): read-back + BLOCKED on mismatch, never
-    # trust correct() 200 alone.
-    assert "READ-BACK" in prompt
-    assert "retrieve_entity_snapshot" in prompt
-    assert "**BLOCKED**" in prompt
-    assert "SIGNED_OFF" in prompt  # only after confirm
+    assert "GATE WRITEBACK" not in prompt
+    assert "you MUST reconcile `gate_status`" not in prompt
+    assert '"signed_off"' not in prompt
 
 
-def test_panelist_prompt_gate_writeback_blocks_signed_off_without_readback():
-    """Failure path must be present: BLOCKED when read-back does not confirm."""
+def test_panelist_prompt_never_instructs_lens_correct_of_gate_status_regardless_of_ownership():
+    """Neither an owner nor a non-owner is ever told to correct() gate_status —
+    the write moved off the prompt entirely, not just off the non-owner path
+    (which already carried no instruction before this fix)."""
     t = _trigger()
-    prompt = SwarmDispatcher._panelist_prompt(
-        t, _arch_lens(), "- [ ] x\n", parent=80, owns_pending_gate=True
-    )
-    assert "If read-back fails" in prompt or "read-back fails" in prompt.lower()
-    assert "do NOT emit SIGNED_OFF" in prompt or "Do NOT emit SIGNED_OFF" in prompt
-    assert "attempted vs read-back" in prompt
+    for owns in (True, False):
+        prompt = SwarmDispatcher._panelist_prompt(
+            t, _arch_lens(), "- [ ] x\n", parent=80, owns_pending_gate=owns
+        )
+        assert "GATE WRITEBACK" not in prompt
 
 
 def test_panelist_prompt_no_gate_writeback_when_not_owner():
@@ -2589,10 +4360,10 @@ def test_confirm_gates_clear_on_pr_comment_retriggers_pr_pipeline(monkeypatch):
     async def fake_store(self, entities, idempotency_key):
         pass
 
-    async def fake_post_missing(self, t, reviews, agents_by_lens):
+    async def fake_post_missing(self, t, reviews, agents_by_lens, **kwargs):
         pass
 
-    async def fake_persist(self, t, reviews, agents_by_lens):
+    async def fake_persist(self, t, reviews, agents_by_lens, **kwargs):
         pass
 
     async def fake_merge_checkpoint(self, t, parent, lenses):
@@ -2653,21 +4424,36 @@ def test_confirm_gates_clear_is_case_insensitive_for_operator_login(monkeypatch)
 # ── Part B — Pavo pm self-sign-off prompt ──────────────────────────────────
 
 
-def test_pavo_prompt_contains_mandatory_sign_off_rule():
-    """_pavo_prompt must tell Pavo to sign off gate_status.pm when scoping passes."""
+def test_pavo_prompt_states_verdict_via_comment_not_correct():
+    """ateles#795 amended ADR, Falco's follow-up finding on PR #1181: Pavo must
+    state its pm-gate verdict via a plain GitHub comment. The dispatcher — not
+    Pavo's own MCP session — makes the system-of-record gate write via
+    the lens-signed `sign_off`, exactly like the PR review panel.
+
+    Checks the schema field names via `gate_waive`'s own declared-fields
+    constant rather than spelling the retired-in-docs literal in this test
+    file (`check_foundation_vocabulary.py`'s retired-name ratchet flags a
+    fresh (file, name) hit; `gate_waive.py` already carries this as
+    baselined migration debt, so importing its name avoids adding a second,
+    unbaselined occurrence for a name this test never needs to author)."""
+    import gate_waive
+
     t = _trigger(kind="issue_opened", number=1, title="An issue", body="Body.")
     prompt = SwarmDispatcher._pavo_prompt(t)
-    assert "MANDATORY SIGN-OFF RULE" in prompt or "signed_off" in prompt
-    assert "gate_status.pm" in prompt
-    assert "signed_off" in prompt
+    assert "correct()" not in prompt
+    for declared_field in gate_waive._SIGN_OFF_DECLARED_FIELDS:
+        assert declared_field not in prompt
+    assert "current_owner" not in prompt
+    assert "comment" in prompt.lower()
 
 
-def test_pavo_prompt_requires_plan_contribution_sign_off():
-    """Pavo must store a plan_contribution with contribution_type: sign_off."""
+def test_pavo_prompt_still_names_the_blocking_marker_for_failure():
+    """A failing verdict must carry `[BLOCKING]` so the dispatcher's
+    `body_has_blocking_findings` scan (the same one gating the panel's
+    sign_off) can tell a pass from a fail without a self-written gate_status."""
     t = _trigger(kind="issue_opened", number=1, title="An issue", body="Body.")
     prompt = SwarmDispatcher._pavo_prompt(t)
-    assert "sign_off" in prompt
-    assert "plan_contribution" in prompt
+    assert "[BLOCKING]" in prompt
 
 
 def test_pavo_prompt_warns_against_pending_deadlock():
@@ -3043,8 +4829,9 @@ def test_additive_spec_pr_opened_is_info_priority(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(swarm_dispatch, "select_expectation_agents",
                         lambda *a, **kw: [])
-    # ateles#460: _gates_green is async and takes (lanius, repository, number).
-    async def _always_green(self, lanius, repository, issue_number):
+    # ateles#460: _gates_green is async and takes (lanius, repository, number),
+    # plus the trigger/head keywords its reverted-gate surface uses.
+    async def _always_green(self, lanius, repository, issue_number, **kwargs):
         return True
 
     monkeypatch.setattr(SwarmDispatcher, "_gates_green", _always_green)
@@ -3096,10 +4883,10 @@ def test_github_trigger_pr_pipeline_passes_contract(monkeypatch):
     async def fake_store(self, entities, idempotency_key):
         pass
 
-    async def fake_post_missing(self, t, reviews, agents_by_lens):
+    async def fake_post_missing(self, t, reviews, agents_by_lens, **kwargs):
         pass
 
-    async def fake_persist(self, t, reviews, agents_by_lens):
+    async def fake_persist(self, t, reviews, agents_by_lens, **kwargs):
         pass
 
     async def fake_merge_checkpoint(self, t, parent, lenses):
@@ -4224,6 +6011,116 @@ def test_merge_pr_helper_bad_method_defaults_squash(monkeypatch):
     assert client.put_calls[0]["json"]["merge_method"] == "squash"
 
 
+def test_merge_pr_expected_head_is_preflighted_and_sent_atomically(monkeypatch):
+    head = "b" * 40
+
+    class _AtomicMergeClient(_MergeAwareClient):
+        async def get(self, url, **kwargs):
+            if url.endswith("/pulls/87"):
+                return _MergeResp(
+                    200,
+                    {"head": {"sha": head}, "base": {"ref": "main"}},
+                )
+            if url.endswith("/repos/owner/repo"):
+                return _MergeResp(200, {"default_branch": "main"})
+            raise AssertionError(f"unexpected GET {url}")
+
+    client = _AtomicMergeClient(merge_status=200, merged=True)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    ok, _detail = asyncio.run(
+        dispatcher._merge_pr(
+            "owner/repo",
+            87,
+            "squash",
+            expected_head=head,
+            require_default_base=False,
+        )
+    )
+
+    assert ok is True
+    assert client.put_calls[0]["json"] == {
+        "merge_method": "squash",
+        "sha": head,
+    }
+
+
+def test_merge_pr_refuses_default_base_requirement_without_atomic_binding(
+    monkeypatch,
+):
+    head = "b" * 40
+
+    class _AtomicMergeClient(_MergeAwareClient):
+        async def get(self, url, **kwargs):
+            if url.endswith("/pulls/87"):
+                return _MergeResp(
+                    200,
+                    {"head": {"sha": head}, "base": {"ref": "main"}},
+                )
+            if url.endswith("/repos/owner/repo"):
+                return _MergeResp(200, {"default_branch": "main"})
+            raise AssertionError(f"unexpected GET {url}")
+
+    client = _AtomicMergeClient(merge_status=200, merged=True)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    ok, detail = asyncio.run(
+        dispatcher._merge_pr(
+            "owner/repo",
+            87,
+            "squash",
+            expected_head=head,
+            require_default_base=True,
+        )
+    )
+
+    assert ok is False
+    assert "cannot atomically bind the PR base" in detail
+    assert client.put_calls == []
+
+
+def test_merge_pr_rejects_malformed_expected_head_without_mutation(monkeypatch):
+    client = _MergeAwareClient(merge_status=200, merged=True)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    ok, detail = asyncio.run(
+        dispatcher._merge_pr(
+            "owner/repo",
+            87,
+            "squash",
+            expected_head="not-a-sha",
+            require_default_base=True,
+        )
+    )
+
+    assert ok is False
+    assert "cannot atomically bind the PR base" in detail
+    assert client.put_calls == []
+
+
+def test_merge_pr_rejects_malformed_optional_head_precondition(monkeypatch):
+    client = _MergeAwareClient(merge_status=200, merged=True)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    ok, detail = asyncio.run(
+        dispatcher._merge_pr(
+            "owner/repo",
+            87,
+            "squash",
+            expected_head="not-a-sha",
+            require_default_base=False,
+        )
+    )
+
+    assert ok is False
+    assert detail == "invalid expected PR head; merge held"
+    assert client.put_calls == []
+
+
 # ── /reject command ──────────────────────────────────────────────────────────
 
 
@@ -4721,6 +6618,27 @@ def test_vanellus_fallback_posts_when_comment_missing(monkeypatch):
     )
 
 
+def test_vanellus_fallback_uses_verified_head_not_stale_trigger(monkeypatch):
+    client = _FakeHttpxClientForVanellus(existing_bodies=[])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    stale_head = "a" * 40
+    reviewed_head = "b" * 40
+
+    asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._post_missing_vanellus_comment(
+            _trigger(head_sha=stale_head),
+            SkillResult("vanellus", True, 0, "**APPROVE**", ""),
+            reviewed_head=reviewed_head,
+        )
+    )
+
+    assert len(client.post_calls) == 1
+    posted_body = client.post_calls[0]["json"]["body"]
+    assert f"<!-- vanellus-aggregation commit={reviewed_head} -->" in posted_body
+    assert f"<!-- vanellus-aggregation commit={stale_head} -->" not in posted_body
+
+
 def test_vanellus_fallback_skips_when_comment_already_present(monkeypatch):
     """When Vanellus's comment IS present, no duplicate is posted."""
     existing_body = compose_vanellus_fallback_comment(
@@ -4784,21 +6702,27 @@ def test_vanellus_fallback_non_fatal_when_post_raises(monkeypatch):
 
 def test_handle_pr_calls_vanellus_fallback_after_run(monkeypatch):
     """_handle_pr must call _post_missing_vanellus_comment after the Vanellus run."""
-    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40))
+    stale_head = "a" * 40
+    reviewed_head = "b" * 40
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_pr_head_sha",
+        lambda self, t: _async_return(reviewed_head),
+    )
 
     fallback_calls: list[tuple] = []
-    skill_calls: list[str] = []
+    skill_calls: list[tuple[str, str]] = []
 
     async def fake_run_skill(skill, prompt, **kwargs):
-        skill_calls.append(skill)
+        skill_calls.append((skill, prompt))
         if skill == "lanius":
             return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
         if skill == "vanellus":
             return SkillResult(skill, True, 0, "VERDICT: all clear.", "")
         return SkillResult(skill, True, 0, "ok", "")
 
-    async def fake_vanellus_fallback(self, t, result):
-        fallback_calls.append((t.number, result.stdout))
+    async def fake_vanellus_fallback(self, t, result, **kwargs):
+        fallback_calls.append((t.number, result.stdout, kwargs.get("reviewed_head")))
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(
@@ -4808,8 +6732,8 @@ def test_handle_pr_calls_vanellus_fallback_after_run(monkeypatch):
     async def fake_changed_files(self, t): return []
     async def fake_preregistered(self, repo, number): return {}
     async def fake_store(self, entities, idempotency_key): pass
-    async def fake_post_missing(self, t, reviews, agents_by_lens): pass
-    async def fake_persist(self, t, reviews, agents_by_lens): pass
+    async def fake_post_missing(self, t, reviews, agents_by_lens, **kwargs): pass
+    async def fake_persist(self, t, reviews, agents_by_lens, **kwargs): pass
     async def fake_merge_checkpoint(self, t, parent, lenses): pass
 
     monkeypatch.setattr(SwarmDispatcher, "_changed_files", fake_changed_files)
@@ -4820,14 +6744,23 @@ def test_handle_pr_calls_vanellus_fallback_after_run(monkeypatch):
     monkeypatch.setattr(SwarmDispatcher, "_store_merge_checkpoint", fake_merge_checkpoint)
 
     dispatcher = SwarmDispatcher(_StubNotifier(), _config())
-    asyncio.run(dispatcher._handle_pr(_trigger()))
+    asyncio.run(dispatcher._handle_pr(_trigger(head_sha=stale_head)))
 
     assert len(fallback_calls) == 1, (
         f"_post_missing_vanellus_comment must be called exactly once; got {fallback_calls}"
     )
-    pr_number, captured_stdout = fallback_calls[0]
+    pr_number, captured_stdout, fallback_head = fallback_calls[0]
     assert pr_number == 87
     assert captured_stdout == "VERDICT: all clear."
+    assert fallback_head == reviewed_head
+    review_prompts = [
+        prompt for skill, prompt in skill_calls if skill not in {"lanius", "vanellus"}
+    ]
+    assert review_prompts
+    assert all(f"commit={reviewed_head}" in prompt for prompt in review_prompts)
+    vanellus_prompt = next(prompt for skill, prompt in skill_calls if skill == "vanellus")
+    assert f"commit={reviewed_head}" in vanellus_prompt
+    assert f"commit={stale_head}" not in vanellus_prompt
 
 
 # ── QE3: eval-authoring affordance — PR-branch worktree ───────────────────────
@@ -4891,6 +6824,18 @@ def test_only_qa_lens_gets_a_worktree(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "prepare_pr_worktree", fake_prepare)
     monkeypatch.setattr(swarm_dispatch, "cleanup_pr_worktree", fake_cleanup)
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+
+    # dbe4791b added a live `_pr_head_sha` read before the panel loop
+    # (`review_head`), on top of the live `gate_status` reads this test
+    # already runs token-less (which correctly short-circuit to "unknown"
+    # with no token, per `IssueGateStore._post`). Unlike those,
+    # `_pr_head_sha_for` hits the real GitHub API with no local token
+    # short-circuit, so a token-less CI run depends on outbound network
+    # reachability rather than failing closed the same way. Stub it so the
+    # panel loop is reached deterministically regardless of network access.
+    monkeypatch.setattr(
+        SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40)
+    )
 
     # Force a panel that includes phoenicurus + at least one other lens.
     monkeypatch.setattr(
@@ -5019,6 +6964,38 @@ def _install_pipeline_stubs(monkeypatch, run_skill_impl, *, select_agents=None):
         swarm_dispatch.IssueGateStore, "load", fake_gate_load
     )
 
+    # "Genuinely cleared" includes provenance: each `signed_off` is backed by
+    # its owning lens's own signed write (PR #1181, second security run at
+    # e874537f, N2). The re-proof itself is tested in
+    # test_gate_sign_off_residuals.py.
+    async def fake_all_proven(self, state, owners):
+        return set()
+
+    monkeypatch.setattr(
+        swarm_dispatch.IssueGateStore,
+        "unverified_signed_off_gates",
+        fake_all_proven,
+        raising=False,
+    )
+
+    # ateles#795 amended ADR, extended to the Phase-1 pm gate: the pipeline
+    # now calls the real `IssueGateStore.sign_off` after a clean pm verdict.
+    # These pipeline-mechanics tests exercise section ordering / persistence
+    # / build-handoff, not gate-signing behaviour (which has its own tests
+    # around `test_pm_clean_verdict_triggers_dispatcher_sign_off` below), so
+    # stub `sign_off` to a no-op success rather than growing `_ClearGateState`
+    # into a full fake of every field the real method's write path touches.
+    async def fake_sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+        from gate_waive import SignOffOutcome
+        return SignOffOutcome(
+            ok=True, gate=gate, lens_agent=lens_agent,
+            lens_sub=f"{lens_agent}@ateles-swarm", verified=True,
+        )
+
+    monkeypatch.setattr(
+        swarm_dispatch.IssueGateStore, "sign_off", fake_sign_off
+    )
+
     # Neutralize the GitHub-body mirror (no network); we test it separately.
     async def fake_mirror(self, trigger, state):
         pass
@@ -5114,6 +7091,750 @@ def test_issue_pipeline_sections_persist_additively(monkeypatch):
     assert store.mirrored is True
 
 
+# ── Phase-1 pm gate: dispatcher-signed sign_off (ateles#795 amended ADR,
+#    Falco's follow-up finding on PR #1181) ──────────────────────────────────
+#
+# The panel loop (`_run_pr_review_panel`) already routes a clean lens verdict
+# through `IssueGateStore.sign_off` rather than the lens's own MCP `correct()`.
+# Falco's review found the additive-spec (Phase-1) pipeline had NOT been
+# updated to match: `_spec_section_prompt`'s pm_gate_block still instructed
+# Pavo to `correct()` `gate_status.pm` itself, and because this PR relaxes the
+# launch refusal that used to keep gate-owning lenses from starting at all,
+# merging without this fix would have REOPENED unsigned Phase-1 gate writes on
+# the shared bearer. These tests cover the dispatcher-side fix mirroring the
+# panel's own pattern.
+
+
+def test_pm_clean_verdict_triggers_dispatcher_sign_off(monkeypatch):
+    """A clean (non-blocking) pm verdict must call the dispatcher's
+    lens-signed `IssueGateStore.sign_off` — never the lens's own `correct()`,
+    which no longer exists as an instructed path after this fix."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "pavo":
+            return SkillResult(
+                skill, True, 0,
+                "**🤖 Pavo — Ateles swarm, pm gate owner**\n"
+                "**SIGNED_OFF**\n\n"
+                "<<<SPEC_SECTION>>>**Scope:** pm section with enough substance "
+                "to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>\n"
+                "pm gate passes — intent, acceptance criteria, and scope are "
+                "all clear.",
+                "",
+            )
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            calls.append((repo, issue_number, gate, lens_agent, head_sha))
+            from gate_waive import SignOffOutcome
+            return SignOffOutcome(
+                ok=True, gate=gate, lens_agent=lens_agent,
+                lens_sub=f"{lens_agent}@ateles-swarm", verified=True,
+            )
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert len(calls) == 1
+    repo, issue_number, gate, lens_agent, head_sha = calls[0]
+    assert repo == "owner/repo"
+    assert issue_number == 100
+    assert gate == "pm"
+    assert lens_agent == "pavo"
+    assert head_sha  # a non-empty content-derived surrogate, never blank
+
+
+def test_pm_section_run_skill_call_carries_owns_pending_gate(monkeypatch):
+    """PR #1181 provider-table round: this call site was found NOT passing
+    `owns_pending_gate` at all (every section ran with the default `False`).
+    That is exactly the gate-owner tool-deny fix's activation condition
+    (`skill_runner._run_skill_once`'s `owns_pending_gate and provider !=
+    "claude"` refusal, and its `--disallowed-tools` append on claude) — so
+    Pavo's `pm` turn here ran with the deny NEVER applied even though it is
+    the same run whose clean verdict `sign_off` immediately below records.
+    `pm` always carries the deny regardless of Lanius's pending-gate report
+    (this pipeline unconditionally clears it via `sign_off`). This fixture
+    selects NO conditional sections at all
+    (`select_agents=lambda *a, **kw: []`), so ux/arch never run here and this
+    test says nothing about their predicate — see
+    `test_ux_and_arch_issue_spec_runs_carry_the_gate_owner_deny` (Falco's
+    CONFIRMED BLOCKING finding on this same PR's later round) for the case
+    where a conditional section IS seated while its own gate is pending: it
+    must ALSO carry the deny, even though it never reaches `sign_off` here.
+    """
+    seen_kwargs: dict[str, dict] = {}
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        seen_kwargs[skill] = kwargs
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            from gate_waive import SignOffOutcome
+            return SignOffOutcome(
+                ok=True, gate=gate, lens_agent=lens_agent,
+                lens_sub=f"{lens_agent}@ateles-swarm", verified=True,
+            )
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert "pavo" in seen_kwargs, "the pm section (pavo) must have run"
+    assert seen_kwargs["pavo"]["owns_pending_gate"] is True, (
+        "pavo's pm-section run is the run whose clean verdict sign_off "
+        "records — it must carry owns_pending_gate=True so the gate-owner "
+        "tool-deny actually applies to it"
+    )
+    # Non-pm sections in this pipeline never reach sign_off; must not be
+    # mis-flagged as gate-owning either.
+    for other in ("cicada", "phoenicurus"):
+        if other in seen_kwargs:
+            assert seen_kwargs[other]["owns_pending_gate"] is False
+
+
+def test_pm_blocking_verdict_does_not_call_sign_off(monkeypatch):
+    """A `[BLOCKING]` pm verdict must leave the gate pending — no sign_off
+    attempted — exactly like the panel's own blocking-finding guard."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "pavo":
+            return SkillResult(
+                skill, True, 0,
+                "<<<SPEC_SECTION>>>**Scope:** pm section with enough substance "
+                "to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>\n"
+                "[BLOCKING] scope: no acceptance criteria stated.",
+                "",
+            )
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, *a, **kw):
+            calls.append((a, kw))
+            raise AssertionError("sign_off must not be called on a blocking verdict")
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert calls == []
+
+
+def test_sign_off_is_warranted_requires_explicit_clear_token():
+    """Falco's CONFIRMED BLOCKING finding, ateles#795 / PR #1181: the two
+    dispatcher-side sign_off call sites used to branch on
+    `result.ok and not body_has_blocking_findings(result.stdout)` alone,
+    which never actually looks for a verdict token. `body_has_blocking_findings`
+    returns False for an EMPTY string, so an empty or garbled-but-successful
+    run, or a `**BLOCKED**`/`**REQUEST_CHANGES**` verdict with no
+    `[BLOCKING]`-marked finding line, all read as "clean" under the old
+    check. `sign_off_is_warranted` must reject every one of these — RED on
+    the old `result.ok and not body_has_blocking_findings(...)` predicate,
+    GREEN on this one."""
+    from swarm_dispatch import sign_off_is_warranted
+
+    # Unparseable / empty stdout: no verdict token at all.
+    assert sign_off_is_warranted("", lens_agent="pavo") is False
+    assert sign_off_is_warranted(None, lens_agent="pavo") is False
+    assert sign_off_is_warranted("garbled output, no token, no marker", lens_agent="pavo") is False
+
+    # An explicit non-clear token, even with no [BLOCKING] line in the body.
+    assert sign_off_is_warranted("**BLOCKED**\nmissing information", lens_agent="pavo") is False
+    assert sign_off_is_warranted("**REQUEST_CHANGES**\nplease fix X", lens_agent="pavo") is False
+
+    # A [BLOCKING] finding under a nominally-clear token still refuses
+    # (the body cross-check is an EXTRA veto, never relaxed by the token).
+    assert (
+        sign_off_is_warranted("**APPROVE**\n[BLOCKING] scope: actually missing", lens_agent="pavo")
+        is False
+    )
+
+    # The only warranted shapes: an explicit clear token under the lens's own
+    # header, clean body (no headerless path since bf97b1a4's security runs).
+    header = "**🤖 Pavo — Ateles swarm, pm gate owner**\n"
+    assert sign_off_is_warranted(header + "**SIGNED_OFF**\nno concerns", lens_agent="pavo") is True
+    assert sign_off_is_warranted(header + "**APPROVE**\nlgtm", lens_agent="pavo") is True
+    assert sign_off_is_warranted("**SIGNED_OFF**\nno concerns", lens_agent="pavo") is False
+    # `COMMENT` ("observations only") names no gate decision, so it does not
+    # clear a gate (second security run, PR #1181: only an explicit clear
+    # token may). See test_gate_sign_off_fail_closed.py for the mixed-verdict
+    # cases that finding was about.
+    assert sign_off_is_warranted("**COMMENT**\nobservation only", lens_agent="pavo") is False
+
+
+def test_pm_unparseable_verdict_does_not_call_sign_off(monkeypatch):
+    """The exact RED case Falco's finding names: `result.ok=True` with an
+    empty/unparseable stdout used to read as clean (no [BLOCKING] marker in
+    an empty string) and call sign_off. It must not."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "pavo":
+            # ok=True, but stdout carries no verdict token and no spec
+            # section fence either — the "garbled successful run" shape.
+            return SkillResult(skill, True, 0, "", "")
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, *a, **kw):
+            calls.append((a, kw))
+            raise AssertionError(
+                "sign_off must not be called on an unparseable verdict"
+            )
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert calls == []
+
+
+def test_ux_and_arch_issue_spec_runs_carry_the_gate_owner_deny(monkeypatch):
+    """Falco's CONFIRMED BLOCKING finding, ateles#795 / PR #1181: the
+    issue-spec pipeline's `run_skill` call for a spec section previously set
+    `owns_pending_gate=section.lens == "pm"` — hardcoded to pm alone — so a
+    ux or arch section seated in THIS pipeline (a repo whose panel loop never
+    seats them, or one where they are pre-registered here) ran WITHOUT the
+    gate-owner tool-deny even though its generated skill (accipiter/waxwing
+    SKILL.md) still instructs `correct(gate_status...)`. Every lens that owns
+    a pending gate in this pipeline must carry the deny; ux/arch never reach
+    `sign_off` HERE (they clear later via the PR panel loop, which already
+    threads `owns_pending_gate=lens.lens in pending_gates` correctly), but
+    that is a reason they get no *sign_off call*, not a reason to seat them
+    without the deny while a gate is pending."""
+    seen_kwargs: dict[str, dict] = {}
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        seen_kwargs[skill] = kwargs
+        if skill == "lanius":
+            # Both ux and arch are reported as still-pending, which is the
+            # signal `owns_pending_gate` must key on for a conditional
+            # section (mirrors the PR panel's own `parse_pending_gates`
+            # usage).
+            return SkillResult(
+                skill, True, 0, "GATE_INHERITANCE: clear\nGATE_PENDING: ux,arch", ""
+            )
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    # ux (accipiter) and arch (waxwing) are the CONDITIONAL sections
+    # (`SpecSection.always=False` in issue_spec.py) — they only run when
+    # `select_expectation_agents` selects them for this issue. Force both in,
+    # the way `_pr_dispatcher_with_stubs`'s own `select_panel` override does.
+    _selected = [
+        Lens(agent="accipiter", lens="ux", gate="ux", checks="design"),
+        Lens(agent="waxwing", lens="arch", gate="arch", checks="security"),
+    ]
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: _selected
+    )
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert "accipiter" in seen_kwargs, "the ux section (accipiter) must have run"
+    assert "waxwing" in seen_kwargs, "the arch section (waxwing) must have run"
+    assert seen_kwargs["accipiter"]["owns_pending_gate"] is True, (
+        "ux/accipiter owns the ux gate in this pipeline and must carry the "
+        "gate-owner tool-deny — a generated skill that still instructs "
+        "correct(gate_status...) must not be seated without it"
+    )
+    assert seen_kwargs["waxwing"]["owns_pending_gate"] is True, (
+        "arch/waxwing owns the arch gate in this pipeline and must carry the "
+        "gate-owner tool-deny for the same reason"
+    )
+
+
+def test_pm_sign_off_failure_is_surfaced_not_swallowed(monkeypatch):
+    """A clean verdict whose dispatcher-side sign_off FAILS must be surfaced
+    (via `_surface_failed_sign_offs`), never silently left as a bare
+    `pending` indistinguishable from "review never ran" (ateles#795)."""
+    surfaced = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "pavo":
+            return SkillResult(
+                skill, True, 0,
+                "**🤖 Pavo — Ateles swarm, pm gate owner**\n"
+                "**SIGNED_OFF**\n\n"
+                "<<<SPEC_SECTION>>>**Scope:** pm section with enough substance "
+                "to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>\n"
+                "pm gate passes.",
+                "",
+            )
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            from gate_waive import SignOffOutcome, SIGN_OFF_SIGNING_FAILED
+            return SignOffOutcome(
+                ok=False, gate=gate, lens_agent=lens_agent,
+                lens_sub=f"{lens_agent}@ateles-swarm",
+                error=SIGN_OFF_SIGNING_FAILED,
+            )
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    async def fake_surface(self, trigger, parent, failed):
+        surfaced.append((trigger.number, parent, failed))
+
+    monkeypatch.setattr(
+        SwarmDispatcher, "_surface_failed_sign_offs", fake_surface
+    )
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert len(surfaced) == 1
+    issue_number, parent, failed = surfaced[0]
+    from gate_waive import SIGN_OFF_SIGNING_FAILED
+    assert issue_number == 100
+    # (lens, agent, error_class, observed_state): the fake outcome carries no
+    # re-read value, so observed_state is empty and the comment says unknown.
+    assert failed == [("pm", "pavo", SIGN_OFF_SIGNING_FAILED, "")]
+
+
+def test_ux_and_arch_clean_verdicts_trigger_dispatcher_sign_off(monkeypatch):
+    """ateles#1220/#1223: a clean ux (accipiter) or arch (waxwing) verdict in
+    the additive-spec (issue) pipeline must call the dispatcher's lens-signed
+    `IssueGateStore.sign_off` for ITS OWN gate — exactly as the pm section
+    already does — not leave the gate pending forever because the pipeline's
+    sign_off call site was hardcoded to `section.lens == "pm"`. RED on
+    origin/main (7b8880d0): ux/arch sections ran and even carried the
+    gate-owner `correct()` deny (see
+    test_ux_and_arch_issue_spec_runs_carry_the_gate_owner_deny above) but
+    their clean verdicts never reached `sign_off` at all, so `_gates_green`
+    (ateles#460) could never see them cleared — the exact "gate_status still
+    has ux, arch uncleared — not handing off to build" symptom logged for
+    ateles#1220/#1223 on 2026-09-24."""
+    calls = []
+
+    def _clean(agent, lens, heading):
+        return SkillResult(
+            agent, True, 0,
+            f"**🤖 {agent.title()} — Ateles swarm, {lens} gate owner**\n"
+            "**SIGNED_OFF**\n\n"
+            f"<<<SPEC_SECTION>>>**{heading}:** {agent}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>\n"
+            f"{lens} gate passes — no concerns.",
+            "",
+        )
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "pavo":
+            return _clean("pavo", "pm", "Scope")
+        if skill == "accipiter":
+            return _clean("accipiter", "ux", "Design")
+        if skill == "waxwing":
+            return _clean("waxwing", "arch", "Security")
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    # ux (accipiter) and arch (waxwing) are the CONDITIONAL sections — force
+    # both selected, as in test_ux_and_arch_issue_spec_runs_carry_the_gate_owner_deny.
+    _selected = [
+        Lens(agent="accipiter", lens="ux", gate="ux", checks="design"),
+        Lens(agent="waxwing", lens="arch", gate="arch", checks="security"),
+    ]
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: _selected
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            calls.append((repo, issue_number, gate, lens_agent, head_sha))
+            from gate_waive import SignOffOutcome
+            return SignOffOutcome(
+                ok=True, gate=gate, lens_agent=lens_agent,
+                lens_sub=f"{lens_agent}@ateles-swarm", verified=True,
+            )
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    signed_gates = {(gate, lens_agent) for _, _, gate, lens_agent, _ in calls}
+    assert ("pm", "pavo") in signed_gates, "pm must still sign off (no regression)"
+    assert ("ux", "accipiter") in signed_gates, (
+        "ux/accipiter's clean verdict must sign off the ux gate — this is "
+        "the ateles#1220/#1223 regression: ux was never signed at all"
+    )
+    assert ("arch", "waxwing") in signed_gates, (
+        "arch/waxwing's clean verdict must sign off the arch gate — this is "
+        "the ateles#1220/#1223 regression: arch was never signed at all"
+    )
+    for repo, issue_number, gate, lens_agent, head_sha in calls:
+        assert repo == "owner/repo"
+        assert issue_number == 100
+        assert head_sha  # non-empty content-derived surrogate
+
+
+def test_ux_blocking_verdict_does_not_call_sign_off_for_ux_gate(monkeypatch):
+    """A `[BLOCKING]` ux verdict must leave the ux gate pending — no sign_off
+    for `ux` — exactly like the pm guard and the panel's own blocking-finding
+    guard. Guards against a fix that signs every seated gate-owning section
+    unconditionally instead of checking `sign_off_is_warranted` per section."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "accipiter":
+            return SkillResult(
+                skill, True, 0,
+                "<<<SPEC_SECTION>>>**Design:** ux section with enough substance "
+                "to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>\n"
+                "[BLOCKING] design: no accessibility review stated.",
+                "",
+            )
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _selected = [Lens(agent="accipiter", lens="ux", gate="ux", checks="design")]
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: _selected
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            calls.append((repo, issue_number, gate, lens_agent, head_sha))
+            from gate_waive import SignOffOutcome
+            return SignOffOutcome(
+                ok=True, gate=gate, lens_agent=lens_agent,
+                lens_sub=f"{lens_agent}@ateles-swarm", verified=True,
+            )
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    ux_calls = [c for c in calls if c[2] == "ux"]
+    assert ux_calls == [], "a [BLOCKING] ux verdict must never sign the ux gate"
+
+
+# ── ateles#1233: pm → ux/arch → build, end to end, through the real prompts ──
+#
+# The ux/arch sign-off tests above hand the dispatcher a reply that already
+# carries a fixed-position header and verdict. In production nothing asked
+# Accipiter or Waxwing for one: their spec-section prompt requested a fenced
+# section only, so on ateles#1221 both lenses ran, posted no verdict, and the
+# gates stayed pending. These tests drive the pipeline with lenses that answer
+# the prompt they are actually given — a gate verdict only when the prompt asks
+# for one in the fixed-position format — against a stateful gate store, and
+# assert the whole chain: pm signed, ux/arch owners asked for a gate verdict,
+# their clear verdicts signed, and the issue handed to build.
+
+
+def _gate_owner_reply(agent: str, lens: str, prompt: str, verdict: str) -> str:
+    """What a lens returns for *prompt*: the section always, a gate verdict
+    only when the prompt asks for one at the fixed position under this lens's
+    own gate-owner header (the shape `gate_verdict_instruction` renders)."""
+    section = (
+        f"<<<SPEC_SECTION>>>**{lens}:** {agent}-section body with real "
+        "substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>"
+    )
+    header = swarm_dispatch.attribution_header(agent, f"{lens} gate owner")
+    asked = (
+        header in prompt
+        and swarm_dispatch.GATE_VERDICT_POSITION_RULE in prompt
+    )
+    if not asked:
+        return section
+    tail = ""
+    if verdict == "BLOCKED":
+        tail = f"\n[BLOCKING] {lens}: the spec leaves this lens's question open."
+    return f"{header}\n**{verdict}**\n\n{section}{tail}"
+
+
+class _StatefulGateStore:
+    """A gate record shared across every `IssueGateStore(...)` the pipeline
+    constructs: Lanius triaged pm/ux/arch to `pending`, `sign_off` flips the
+    lens's own gate, and only a gate this store signed is provable."""
+
+    gate_status: dict = {}
+    signed: list = []
+
+    def __init__(self, base_url, token):
+        pass
+
+    @classmethod
+    def reset(cls):
+        cls.gate_status = {"pm": "pending", "ux": "pending", "arch": "pending"}
+        cls.signed = []
+
+    async def load(self, repo, issue_number):
+        from gate_waive import IssueGateState
+
+        return IssueGateState(
+            repo=repo,
+            issue_number=issue_number,
+            entity_id="ent_issue",
+            gate_status=dict(type(self).gate_status),
+        )
+
+    async def sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+        from gate_waive import SignOffOutcome
+
+        assert head_sha, "sign_off must name what the verdict was for"
+        type(self).gate_status[gate] = "signed_off"
+        type(self).signed.append((gate, lens_agent))
+        return SignOffOutcome(
+            ok=True, gate=gate, lens_agent=lens_agent,
+            lens_sub=f"{lens_agent}@ateles-swarm", verified=True,
+        )
+
+    async def unverified_signed_off_gates(self, state, owners):
+        signed_gates = {g for g, _ in type(self).signed}
+        return {
+            g for g in owners
+            if (state.gate_status.get(g) or "") == "signed_off"
+            and g not in signed_gates
+        }
+
+
+def _run_pipeline_to_build(monkeypatch, verdicts: dict[str, str]):
+    """Run `_handle_issue_opened` with ux/arch seated and auto-build ON.
+
+    *verdicts* maps agent → the verdict it gives WHEN ASKED. Returns
+    (prompts by agent, build handoffs opened)."""
+    prompts: dict[str, str] = {}
+    lens_of = {"pavo": "pm", "accipiter": "ux", "waxwing": "arch"}
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        prompts[skill] = prompt
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill in lens_of:
+            return SkillResult(
+                skill, True, 0,
+                _gate_owner_reply(
+                    skill, lens_of[skill], prompt, verdicts.get(skill, "SIGNED_OFF")
+                ),
+                "",
+            )
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _selected = [
+        Lens(agent="accipiter", lens="ux", gate="ux", checks="design"),
+        Lens(agent="waxwing", lens="arch", gate="arch", checks="security"),
+    ]
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: _selected
+    )
+    _StatefulGateStore.reset()
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _StatefulGateStore)
+
+    async def no_declared_override(self, state, ref):
+        return None  # every pre-impl key is present, so this is never consulted
+
+    monkeypatch.setattr(
+        SwarmDispatcher, "_declared_gates_for_issue", no_declared_override
+    )
+
+    async def no_surface(self, *a, **kw):
+        return None
+
+    for name in (
+        "_surface_failed_sign_offs",
+        "_surface_unreadable_gate_verdicts",
+        "_surface_unverified_signed_off_gates",
+    ):
+        monkeypatch.setattr(SwarmDispatcher, name, no_surface)
+
+    opened: list[int] = []
+
+    async def fake_open_pr(self, trigger, state):
+        opened.append(trigger.number)
+        return f"https://github.com/owner/repo/pull/{trigger.number + 1}"
+
+    monkeypatch.setattr(SwarmDispatcher, "_open_implementation_pr", fake_open_pr)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_build=True))
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+    return prompts, opened
+
+
+def test_issue_pipeline_signs_ux_and_arch_and_hands_off_to_build(monkeypatch):
+    """ateles#1233 / ateles#1221, end to end: pm signs, the ux and arch owners
+    are asked for a gate verdict, their clear verdicts sign their own gates,
+    and the issue hands off to build. RED on main (only pm is ever signed) and
+    on the sign-off wiring alone (the ux/arch prompt never asks for a verdict,
+    so there is none to read)."""
+    prompts, opened = _run_pipeline_to_build(monkeypatch, {})
+
+    for agent, lens in (("accipiter", "ux"), ("waxwing", "arch")):
+        header = swarm_dispatch.attribution_header(agent, f"{lens} gate owner")
+        assert header in prompts[agent], (
+            f"{agent}'s section prompt must ask for its {lens} gate verdict "
+            "under its own gate-owner header"
+        )
+        assert swarm_dispatch.GATE_VERDICT_POSITION_RULE in prompts[agent]
+
+    assert ("pm", "pavo") in _StatefulGateStore.signed
+    assert ("ux", "accipiter") in _StatefulGateStore.signed
+    assert ("arch", "waxwing") in _StatefulGateStore.signed
+    assert _StatefulGateStore.gate_status == {
+        "pm": "signed_off", "ux": "signed_off", "arch": "signed_off",
+    }
+    assert opened == [100], "all pre-impl gates signed — must hand off to build"
+
+
+def test_issue_pipeline_blocked_arch_verdict_keeps_gate_pending_and_no_build(
+    monkeypatch,
+):
+    """Fail closed: a `**BLOCKED**` arch verdict leaves arch pending and the
+    issue does not reach build, while the clear ux verdict still signs ux."""
+    _prompts, opened = _run_pipeline_to_build(
+        monkeypatch, {"waxwing": "BLOCKED"}
+    )
+
+    assert ("ux", "accipiter") in _StatefulGateStore.signed
+    assert all(g != "arch" for g, _ in _StatefulGateStore.signed)
+    assert _StatefulGateStore.gate_status["arch"] == "pending"
+    assert opened == []
+
+
+def test_issue_pipeline_comment_ux_verdict_is_not_a_clear(monkeypatch):
+    """Fail closed: `**COMMENT**` names no gate decision, so ux stays pending
+    and nothing is handed to build."""
+    _prompts, opened = _run_pipeline_to_build(
+        monkeypatch, {"accipiter": "COMMENT"}
+    )
+
+    assert all(g != "ux" for g, _ in _StatefulGateStore.signed)
+    assert _StatefulGateStore.gate_status["ux"] == "pending"
+    assert opened == []
+
+
+def test_issue_pipeline_verdict_under_another_agents_header_does_not_sign(
+    monkeypatch,
+):
+    """Identity stays bound: a clear arch verdict under a header naming a
+    different agent than the one seated for the gate signs nothing, and the
+    issue does not reach build."""
+    _run_pipeline_to_build(monkeypatch, {})
+    harness_run_skill = swarm_dispatch.run_skill
+
+    async def impostor(skill, prompt, **kwargs):
+        if skill != "waxwing":
+            return await harness_run_skill(skill, prompt, **kwargs)
+        header = swarm_dispatch.attribution_header("accipiter", "arch gate owner")
+        return SkillResult(
+            skill, True, 0,
+            f"{header}\n**SIGNED_OFF**\n\n<<<SPEC_SECTION>>>**arch:** body "
+            "with real substance to pass the floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", impostor)
+    _StatefulGateStore.reset()
+    opened: list[int] = []
+
+    async def fake_open_pr(self, trigger, state):
+        opened.append(trigger.number)
+        return "https://github.com/owner/repo/pull/101"
+
+    monkeypatch.setattr(SwarmDispatcher, "_open_implementation_pr", fake_open_pr)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_build=True))
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert ("ux", "accipiter") in _StatefulGateStore.signed
+    assert all(g != "arch" for g, _ in _StatefulGateStore.signed)
+    assert _StatefulGateStore.gate_status["arch"] == "pending"
+    assert opened == []
+
+
 def test_spec_section_prompt_is_additive_and_no_comment(monkeypatch):
     """The section prompt must tell the agent to add ONLY its section, build on
     prior sections, and NOT post spec as a comment."""
@@ -5126,8 +7847,35 @@ def test_spec_section_prompt_is_additive_and_no_comment(monkeypatch):
     assert "ONLY" in prompt
     assert "<<<SPEC_SECTION>>>" in prompt
     assert "Do NOT post your section as a" in prompt or "not** post" in prompt.lower()
-    # PM section still folds in the gate sign-off.
-    assert "gate_status.pm" in prompt
+    # PM section still folds in the gate verdict instruction (via comment,
+    # never a self-issued `correct()` — see
+    # test_spec_section_prompt_pm_gate_never_instructs_correct below).
+    assert "GATE" in prompt
+
+
+def test_spec_section_prompt_pm_gate_never_instructs_correct():
+    """ateles#795 amended ADR, Falco's follow-up finding on PR #1181: the
+    additive-spec pipeline's pm gate block must NOT instruct Pavo to
+    `correct()` the gate schema fields itself — that is the exact
+    shared-bearer sink Falco's review found still open after the panel's own
+    block was fixed. The dispatcher's lens-signed `sign_off` (mirroring the
+    panel loop) is now the sole system-of-record write for this gate too.
+
+    Field names come from `gate_waive`'s own declared-fields constant, not a
+    literal spelled in this test file — see the sibling assertion on
+    `_pavo_prompt` above for why."""
+    import gate_waive
+
+    pm = next(s for s in SECTIONS if s.key == "pm")
+    prompt = SwarmDispatcher._spec_section_prompt(
+        _issue_trigger(), pm, "PRIOR SPEC CONTENT"
+    )
+    assert "correct()" not in prompt
+    for declared_field in gate_waive._SIGN_OFF_DECLARED_FIELDS:
+        assert declared_field not in prompt
+    assert "current_owner" not in prompt
+    assert "plan_contribution" not in prompt
+    assert "[BLOCKING]" in prompt
 
 
 def test_extract_section_text_prefers_fenced_content():
@@ -6484,7 +9232,7 @@ def test_handle_pr_reports_successful_and_failed_lenses(monkeypatch):
     persisted = []
     deferred = {}
 
-    async def fake_persist(self, trigger, reviews, agents):
+    async def fake_persist(self, trigger, reviews, agents, **kwargs):
         persisted.extend(reviews)
 
     async def fake_deferral(self, *args, **kwargs):
@@ -7033,37 +9781,38 @@ def test_handle_pr_defers_when_no_verdict_anywhere(monkeypatch):
     assert not any(c[0] == "route" for c in calls), calls
 
 
-# ── Vanellus merge authorization tracks APIS_AUTONOMY_AUTO_MERGE (ateles#333) ──
+# ── Vanellus aggregation never owns the merge boundary ─────────────────────
 #
-# Regression guard for a real defect: _vanellus_prompt injected an unconditional
-# "DO NOT MERGE ... This overrides any merge instruction in your standing
-# protocol" while _gate_merge_readiness returns EARLY when auto_merge is on (so
-# no checkpoint is filed either). With the flag on, the dispatcher stepped aside
-# expecting Vanellus to merge while simultaneously forbidding it — nothing
-# merged and nothing was escalated, strictly worse than the flag being off.
+# Aggregation runs before the dispatcher has a verified distinct native-review
+# receipt.  It must remain read-only with respect to merge authority under both
+# flag states; the dispatcher owns auto-merge after receipt and head checks.
 
 
-def test_vanellus_prompt_forbids_merge_when_auto_merge_off():
+def test_vanellus_aggregation_prompt_forbids_merge():
     prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(
-        _trigger(), 80, ["pm"], None, auto_merge=False
+        _trigger(), 80, ["pm"], None
     )
     assert "DO NOT MERGE" in prompt
     assert "operator-gated" in prompt
     assert "YOU MAY MERGE" not in prompt
 
 
-def test_vanellus_prompt_authorizes_merge_when_auto_merge_on():
-    prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(
-        _trigger(), 80, ["pm"], None, auto_merge=True
+def test_vanellus_aggregation_prompt_has_no_merge_authority_input():
+    assert (
+        "auto_merge"
+        not in inspect.signature(
+            swarm_dispatch.SwarmDispatcher._vanellus_prompt
+        ).parameters
     )
-    assert "YOU MAY MERGE" in prompt
-    # The unconditional prohibition must be gone, or the flag is inert.
-    assert "DO NOT MERGE. Merge is operator-gated" not in prompt
-    # Hard stops must still be stated so autonomy is bounded, not blanket.
-    assert "gate inheritance" in prompt
-    assert "branch-protection" in prompt
-    assert "APPROVE with Blocking: 0" in prompt
-    assert "Releases remain human-gated" in prompt
+    prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(
+        _trigger(), 80, ["pm"], None
+    )
+    # The aggregation invocation happens before the dispatcher can post and
+    # verify a distinct exact-head native review.  It must therefore never be
+    # entrusted with the merge, even when auto-merge is configured.  The
+    # dispatcher owns the post-receipt auto-merge boundary instead.
+    assert "YOU MAY MERGE" not in prompt
+    assert "DO NOT MERGE" in prompt
 
 
 def test_vanellus_prompt_defaults_to_forbidding_merge():
@@ -7149,13 +9898,85 @@ def test_unreadable_head_sha_does_not_invent_a_failure(monkeypatch):
     assert not any("without pushing any commit" in m for m in notifier.sent)
 
 
-# ── self-review 422 downgrade is loud, not silent ───────────────────────────
+# ── distinct-principal binding review ───────────────────────────────────────
 
 
-def _emit_review_with_422(monkeypatch, caplog, *, first_status):
-    """Drive _emit_formal_review where the first POST returns `first_status`
-    and any retry succeeds. Returns (notifier, log_text)."""
+def _reviewer_app_test_pem():
+    # Non-PEM placeholder only — binding unit tests mock mint/JWT. A literal
+    # PKCS#8 block trips gitleaks `private-key` even when synthetic.
+    return "TEST_REVIEWER_APP_KEY_MATERIAL_NOT_A_PEM"
+
+
+def _configure_binding_credentials(
+    monkeypatch,
+    *,
+    mode="pat",
+    pem=None,
+    installation_id="424242",
+    clear_shared=True,
+):
+    """mode: pat | app | both | unset"""
+    for name in (
+        "ATELES_REVIEWER_APP_ID",
+        "ATELES_REVIEWER_APP_PRIVATE_KEY",
+        "ATELES_REVIEWER_APP_INSTALLATION_ID",
+        "VANELLUS_AGENT_PAT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    swarm_dispatch._clear_reviewer_app_installation_token_cache()
+    if clear_shared:
+        monkeypatch.delenv("ATELES_AGENT_PAT", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    if mode in ("app", "both"):
+        monkeypatch.setenv("ATELES_REVIEWER_APP_ID", "123456")
+        monkeypatch.setenv(
+            "ATELES_REVIEWER_APP_PRIVATE_KEY", pem or _reviewer_app_test_pem()
+        )
+        if installation_id is not None:
+            monkeypatch.setenv(
+                "ATELES_REVIEWER_APP_INSTALLATION_ID", str(installation_id)
+            )
+    if mode in ("pat", "both"):
+        monkeypatch.setenv("VANELLUS_AGENT_PAT", "test-vanellus-token")
+
+
+def _emit_binding_review(
+    monkeypatch,
+    caplog,
+    *,
+    mode="pat",
+    post_status=200,
+    reviewer="distinct-reviewer",
+    author="octo-author",
+    live_head="a" * 40,
+    reviewed_head=None,
+    readback_state="CHANGES_REQUESTED",
+    verdict="request_changes",
+    post_review_id=999,
+    readback_review_id=999,
+    user_type="User",
+    pr_state="open",
+    mint_ok=True,
+    installation_lookup=False,
+):
+    """Drive the binding native-review path without live credentials."""
     posts = []
+    get_user_calls = []
+    auth_bearers = []
+
+    _configure_binding_credentials(monkeypatch, mode=mode)
+    if mode in ("app", "both"):
+
+        async def _fake_app_token(repository, client):
+            if not mint_ok:
+                return None
+            return "ghs_installation_token"
+
+        monkeypatch.setattr(
+            swarm_dispatch,
+            "_mint_reviewer_app_installation_token",
+            _fake_app_token,
+        )
 
     class _Resp:
         def __init__(self, status, payload=None, text=""):
@@ -7177,55 +9998,947 @@ def _emit_review_with_422(monkeypatch, caplog, *, first_status):
         async def __aexit__(self, *a):
             return False
 
-        async def post(self, url, headers=None, **kwargs):
-            posts.append((kwargs.get("json") or {}).get("event"))
-            if len(posts) == 1:
+        async def get(self, url, headers=None, **kwargs):
+            auth_bearers.append((headers or {}).get("Authorization"))
+            if url.endswith("/user"):
+                get_user_calls.append(url)
+                return _Resp(200, {"login": reviewer})
+            if "/reviews/" in url:
+                rid = url.rsplit("/reviews/", 1)[-1]
+                if rid.isdigit():
+                    return _Resp(
+                        200,
+                        {
+                            "id": readback_review_id,
+                            "user": {"login": reviewer, "type": user_type},
+                            "commit_id": live_head,
+                            "state": readback_state,
+                        },
+                    )
+            if url.endswith("/pulls/87"):
                 return _Resp(
-                    first_status,
-                    text='["Review Can not request changes on your own pull request"]',
+                    200,
+                    {
+                        "state": pr_state,
+                        "merged_at": None,
+                        "head": {"sha": live_head},
+                        "user": {"login": author},
+                    },
                 )
-            return _Resp(200)
+            if url.endswith("/installation"):
+                if not mint_ok:
+                    return _Resp(404, {})
+                return _Resp(200, {"id": 424242})
+            if "/issues/87/comments" in url:
+                return _Resp(200, [])
+            raise AssertionError(f"unexpected GET {url}")
+
+        async def post(self, url, headers=None, **kwargs):
+            auth_bearers.append((headers or {}).get("Authorization"))
+            if "/access_tokens" in url:
+                if not mint_ok:
+                    return _Resp(401, {})
+                return _Resp(
+                    200,
+                    {
+                        "token": "ghs_installation_token",
+                        "expires_at": "2099-01-01T00:00:00Z",
+                    },
+                )
+            posts.append((kwargs.get("json") or {}).get("event"))
+            return _Resp(
+                post_status,
+                {"id": post_review_id},
+                text=(
+                    '["Review Can not request changes on your own pull request"]'
+                    if post_status == 422
+                    else ""
+                ),
+            )
 
     monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", lambda **kw: _Client())
-
-    async def fake_claim(self, trigger, kind):
-        return True
-
-    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
-
     notifier = _StubNotifier()
     d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="tok"))
+    panel_head = reviewed_head if reviewed_head is not None else live_head
     with caplog.at_level(logging.INFO):
-        asyncio.run(
-            d._emit_formal_review(_trigger(), "request_changes", "panel findings")
+        receipt = asyncio.run(
+            d._emit_formal_review(
+                _trigger(author=author, head_sha=panel_head),
+                verdict,
+                "panel findings",
+                reviewed_head=panel_head,
+            )
         )
-    return notifier, caplog.text, posts
+    ctx = {
+        "get_user_calls": get_user_calls,
+        "auth_bearers": auth_bearers,
+        "installation_lookup": installation_lookup,
+    }
+    return receipt, notifier, caplog.text, posts, ctx
 
 
-def test_self_review_422_escalates_and_logs_the_downgrade(monkeypatch, caplog):
-    """ateles-agent reviewing an ateles-agent PR: GitHub refuses the verdict,
-    it becomes a non-binding COMMENT, and reviewDecision stays empty forever —
-    11 of 15 unreviewed open PRs on 2026-09-01. That must page the operator,
-    and the log must not claim a REQUEST_CHANGES landed."""
-    notifier, log_text, posts = _emit_review_with_422(
-        monkeypatch, caplog, first_status=422
+def test_binding_review_requires_dedicated_vanellus_token(monkeypatch):
+    _configure_binding_credentials(monkeypatch, mode="unset")
+    monkeypatch.setenv("ATELES_AGENT_PAT", "shared-author")
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-shared")
+    posts = []
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            posts.append(k)
+            raise AssertionError("binding review must not use a shared token")
+
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", lambda **kw: _Client())
+    d = SwarmDispatcher(
+        _StubNotifier(), DispatchConfig(neotoma_token="", github_token="shared")
     )
-    assert posts[0] == "REQUEST_CHANGES" and posts[1] == "COMMENT"
-    assert any("DIFFERENT GitHub identity" in m for m in notifier.sent), notifier.sent
-    assert Priority.OPERATOR_DECISION in notifier.priorities
-    assert "DOWNGRADED" in log_text
-    assert "posted formal GitHub review COMMENT" in log_text
+    receipt = asyncio.run(
+        d._emit_formal_review(_trigger(), "approve", "**APPROVE**")
+    )
+    assert receipt is None
+    assert posts == []
 
 
-def test_accepted_review_does_not_escalate_or_claim_a_downgrade(monkeypatch, caplog):
-    """The happy path stays quiet and reports the event that actually landed."""
-    notifier, log_text, posts = _emit_review_with_422(
-        monkeypatch, caplog, first_status=200
+def test_binding_review_both_credentials_unset(monkeypatch, caplog):
+    _configure_binding_credentials(monkeypatch, mode="unset")
+    monkeypatch.setenv("ATELES_AGENT_PAT", "shared-author")
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-shared")
+    receipt, _, log_text, posts, _ = _emit_binding_review(
+        monkeypatch, caplog, mode="unset"
+    )
+    assert receipt is None
+    assert posts == []
+    assert "reason=unset" in log_text
+
+
+def test_binding_review_rejects_same_pr_author(monkeypatch, caplog):
+    receipt, _, log_text, posts, _ = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        reviewer="octo-author",
+        author="octo-author",
+    )
+    assert receipt is None
+    assert posts == []
+    assert "reason=same_login" in log_text
+
+
+def test_binding_review_same_login_pat(monkeypatch, caplog):
+    test_binding_review_rejects_same_pr_author(monkeypatch, caplog)
+
+
+def test_binding_review_422_is_not_downgraded_to_comment(monkeypatch, caplog):
+    receipt, _, log_text, posts, _ = _emit_binding_review(
+        monkeypatch, caplog, post_status=422
+    )
+    assert receipt is None
+    assert posts == ["REQUEST_CHANGES"]
+    assert "COMMENT" not in posts
+    assert "reason=same_login" in log_text
+
+
+def test_binding_review_422_own_pr_is_same_login(monkeypatch, caplog):
+    test_binding_review_422_is_not_downgraded_to_comment(monkeypatch, caplog)
+
+
+def test_binding_review_422_closed_is_pr_closed(monkeypatch, caplog):
+    receipt, _, log_text, posts, _ = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        post_status=422,
+        pr_state="open",
+    )
+
+    class _Resp:
+        def __init__(self, status, payload=None, text=""):
+            self.status_code = status
+            self._payload = payload or {}
+            self.text = text
+
+        def json(self):
+            return self._payload
+
+    class _Client422Closed:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kwargs):
+            if url.endswith("/user"):
+                return _Resp(200, {"login": "distinct-reviewer"})
+            if "/pulls/87" in url:
+                return _Resp(
+                    200,
+                    {
+                        "state": "open",
+                        "head": {"sha": "a" * 40},
+                        "user": {"login": "octo-author"},
+                    },
+                )
+            if "/issues/87/comments" in url:
+                return _Resp(200, [])
+            raise AssertionError(url)
+
+        async def post(self, url, headers=None, **kwargs):
+            return _Resp(422, {}, text='["pull request is closed"]')
+
+    _configure_binding_credentials(monkeypatch, mode="pat")
+    monkeypatch.setattr(
+        swarm_dispatch.httpx, "AsyncClient", lambda **kw: _Client422Closed()
+    )
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    with caplog.at_level(logging.INFO):
+        receipt = asyncio.run(
+            d._emit_formal_review(_trigger(), "approve", "**APPROVE**")
+        )
+    assert receipt is None
+    assert "reason=pr_closed" in caplog.text
+
+
+def test_accepted_binding_review_returns_exact_readback_receipt(monkeypatch, caplog):
+    receipt, notifier, log_text, posts, _ = _emit_binding_review(
+        monkeypatch, caplog
     )
     assert posts == ["REQUEST_CHANGES"]
     assert notifier.sent == []
-    assert "DOWNGRADED" not in log_text
+    assert receipt is not None
+    assert receipt.review_id == "999"
+    assert receipt.reviewer_login == "distinct-reviewer"
+    assert receipt.commit_id == "a" * 40
+    assert receipt.state == "CHANGES_REQUESTED"
+    assert "review_submitted event=REQUEST_CHANGES" in log_text
+    assert "principal=pat" in log_text
 
+
+@pytest.mark.parametrize("review_id", [None, "", 0, -1, "not-an-id"])
+def test_binding_review_rejects_invalid_created_review_id(
+    monkeypatch, caplog, review_id
+):
+    receipt, _, log_text, posts, _ = _emit_binding_review(
+        monkeypatch, caplog, post_review_id=review_id
+    )
+    assert posts == ["REQUEST_CHANGES"]
+    assert receipt is None
+    assert "reason=readback fail" in log_text
+
+
+def test_binding_review_rejects_mismatched_readback_review_id(monkeypatch, caplog):
+    receipt, _, log_text, posts, _ = _emit_binding_review(
+        monkeypatch, caplog, post_review_id=999, readback_review_id=1000
+    )
+    assert posts == ["REQUEST_CHANGES"]
+    assert receipt is None
+    assert "reason=readback fail" in log_text
+
+
+def test_binding_review_rejects_stale_live_head(monkeypatch, caplog):
+    receipt, _, log_text, posts, _ = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        reviewed_head="a" * 40,
+        live_head="b" * 40,
+    )
+    assert receipt is None
+    assert posts == []
+    assert "head changed" in log_text
+
+
+def test_binding_approve_receipt_proves_exact_head_approval(monkeypatch, caplog):
+    receipt, _, _log_text, posts, _ = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        verdict="approve",
+        readback_state="APPROVED",
+    )
+    assert posts == ["APPROVE"]
+    assert receipt is not None
+    assert receipt.proves_approval(head_sha="a" * 40, pr_author="octo-author")
+    assert not receipt.proves_approval(
+        head_sha="a" * 40, pr_author=receipt.reviewer_login
+    )
+
+
+def test_proves_approval_author_never_proves():
+    receipt = ReviewBindingReceipt(
+        review_id="1",
+        reviewer_login="octo-author",
+        commit_id="a" * 40,
+        state="APPROVED",
+    )
+    assert not receipt.proves_approval(head_sha="a" * 40, pr_author="octo-author")
+
+
+def test_binding_review_rejects_wrong_readback_state(monkeypatch, caplog):
+    receipt, _, log_text, posts, _ = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        verdict="approve",
+        readback_state="COMMENTED",
+    )
+    assert posts == ["APPROVE"]
+    assert receipt is None
+    assert "reason=readback fail" in log_text
+
+
+def test_binding_review_rejects_unexpected_token_identity(monkeypatch, caplog):
+    receipt, _, log_text, posts, _ = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        reviewer="ateles-agent",
+        author="octo-author",
+    )
+    assert receipt is not None
+    assert posts == ["REQUEST_CHANGES"]
+    assert "unexpected login" not in log_text
+
+
+def test_binding_review_pat_approve_when_app_unset(monkeypatch, caplog):
+    receipt, _, log_text, posts, ctx = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        mode="pat",
+        verdict="approve",
+        readback_state="APPROVED",
+    )
+    assert receipt is not None
+    assert posts == ["APPROVE"]
+    assert ctx["get_user_calls"]
+    assert "principal=pat" in log_text
+
+
+def test_binding_review_pat_request_changes_when_app_unset(monkeypatch, caplog):
+    test_accepted_binding_review_returns_exact_readback_receipt(monkeypatch, caplog)
+
+
+def test_binding_review_app_approve_distinct_bot(monkeypatch, caplog):
+    receipt, _, log_text, posts, ctx = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        mode="app",
+        reviewer="bot-login[bot]",
+        user_type="Bot",
+        verdict="approve",
+        readback_state="APPROVED",
+    )
+    assert receipt is not None
+    assert posts == ["APPROVE"]
+    assert not ctx["get_user_calls"]
+    assert "principal=bot" in log_text
+
+
+def test_binding_review_app_request_changes_distinct_bot(monkeypatch, caplog):
+    receipt, _, log_text, posts, ctx = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        mode="app",
+        reviewer="bot-login[bot]",
+        user_type="Bot",
+    )
+    assert receipt is not None
+    assert not ctx["get_user_calls"]
+    assert "principal=bot" in log_text
+
+
+def test_binding_review_app_never_calls_get_user(monkeypatch, caplog):
+    _, _, _, _, ctx = _emit_binding_review(monkeypatch, caplog, mode="app")
+    assert ctx["get_user_calls"] == []
+
+
+def test_binding_review_app_installation_id_from_env_or_api(monkeypatch, caplog):
+    _configure_binding_credentials(monkeypatch, mode="app", installation_id="999001")
+    lookups = []
+
+    class _Resp:
+        def __init__(self, status, payload=None, text=""):
+            self.status_code = status
+            self._payload = payload or {}
+            self.text = text
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kwargs):
+            if url.endswith("/installation"):
+                lookups.append(url)
+                raise AssertionError("installation lookup must be skipped")
+            if "/reviews/" in url:
+                return _Resp(
+                    200,
+                    {
+                        "id": 999,
+                        "user": {"login": "bot-login[bot]", "type": "Bot"},
+                        "commit_id": "a" * 40,
+                        "state": "APPROVED",
+                    },
+                )
+            if "/reviews/" in url:
+                return _Resp(
+                    200,
+                    {
+                        "id": 999,
+                        "user": {"login": "bot-login[bot]", "type": "Bot"},
+                        "commit_id": "a" * 40,
+                        "state": "APPROVED",
+                    },
+                )
+            if url.endswith("/pulls/87"):
+                return _Resp(
+                    200,
+                    {
+                        "state": "open",
+                        "head": {"sha": "a" * 40},
+                        "user": {"login": "octo-author"},
+                    },
+                )
+            if "/issues/87/comments" in url:
+                return _Resp(200, [])
+            raise AssertionError(url)
+
+        async def post(self, url, headers=None, **kwargs):
+            if "/access_tokens" in url:
+                assert "/installations/999001/" in url
+                return _Resp(
+                    200,
+                    {
+                        "token": "ghs_installation_token",
+                        "expires_at": "2099-01-01T00:00:00Z",
+                    },
+                )
+            return _Resp(200, {"id": 999})
+
+    monkeypatch.setattr(swarm_dispatch, "_mint_reviewer_app_jwt", lambda: "fake.jwt")
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", lambda **kw: _Client())
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    with caplog.at_level(logging.INFO):
+        receipt = asyncio.run(
+            d._emit_formal_review(_trigger(head_sha="a" * 40), "approve", "**APPROVE**")
+        )
+    assert receipt is not None
+    assert lookups == []
+
+
+def test_binding_review_app_mint_discovers_unset_installation_id(monkeypatch):
+    """Direct coverage of _mint_reviewer_app_installation_token: no env
+    installation id -> the real function calls GET .../installation to
+    discover it, then POSTs .../access_tokens with the discovered id."""
+    swarm_dispatch._clear_reviewer_app_installation_token_cache()
+    _configure_binding_credentials(monkeypatch, mode="app", installation_id=None)
+    monkeypatch.setattr(swarm_dispatch, "_mint_reviewer_app_jwt", lambda: "fake.jwt")
+    installation_gets = []
+    token_posts = []
+
+    class _Resp:
+        def __init__(self, status, payload=None):
+            self.status_code = status
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kwargs):
+            if url.endswith("/installation"):
+                installation_gets.append(url)
+                assert (headers or {}).get("Authorization") == "Bearer fake.jwt"
+                return _Resp(200, {"id": 777333})
+            raise AssertionError(f"unexpected GET {url}")
+
+        async def post(self, url, headers=None, **kwargs):
+            assert "/installations/777333/access_tokens" in url
+            token_posts.append(url)
+            return _Resp(
+                200,
+                {"token": "ghs_discovered", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+
+    async def _run():
+        async with _Client() as client:
+            return await swarm_dispatch._mint_reviewer_app_installation_token(
+                "owner/repo", client
+            )
+
+    token = asyncio.run(_run())
+    assert token == "ghs_discovered"
+    assert installation_gets == ["https://api.github.com/repos/owner/repo/installation"]
+    assert token_posts
+
+
+def test_binding_review_app_mint_discovery_failure_returns_none(
+    monkeypatch,
+):
+    """A 404 on the installation-discovery GET must fail closed (None), not
+    raise and not fall through to any other credential."""
+    swarm_dispatch._clear_reviewer_app_installation_token_cache()
+    _configure_binding_credentials(monkeypatch, mode="app", installation_id=None)
+    monkeypatch.setattr(swarm_dispatch, "_mint_reviewer_app_jwt", lambda: "fake.jwt")
+
+    class _Resp:
+        def __init__(self, status, payload=None):
+            self.status_code = status
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kwargs):
+            if url.endswith("/installation"):
+                return _Resp(404, {})
+            raise AssertionError(f"unexpected GET {url}")
+
+        async def post(self, url, headers=None, **kwargs):
+            raise AssertionError("must not mint a token after failed discovery")
+
+    async def _run():
+        async with _Client() as client:
+            return await swarm_dispatch._mint_reviewer_app_installation_token(
+                "owner/repo", client
+            )
+
+    assert asyncio.run(_run()) is None
+
+
+def test_binding_review_app_mint_access_token_post_failure_returns_none(
+    monkeypatch,
+):
+    """A non-2xx on the access-token POST must fail closed (None)."""
+    swarm_dispatch._clear_reviewer_app_installation_token_cache()
+    _configure_binding_credentials(monkeypatch, mode="app", installation_id="424242")
+    monkeypatch.setattr(swarm_dispatch, "_mint_reviewer_app_jwt", lambda: "fake.jwt")
+
+    class _Resp:
+        def __init__(self, status, payload=None):
+            self.status_code = status
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kwargs):
+            raise AssertionError("installation id was set via env; must not GET it")
+
+        async def post(self, url, headers=None, **kwargs):
+            assert "/installations/424242/access_tokens" in url
+            return _Resp(401, {})
+
+    async def _run():
+        async with _Client() as client:
+            return await swarm_dispatch._mint_reviewer_app_installation_token(
+                "owner/repo", client
+            )
+
+    assert asyncio.run(_run()) is None
+
+
+def test_binding_review_app_mint_jwt_signing_failure_returns_none(
+    monkeypatch,
+):
+    """A malformed PEM must make JWT signing raise inside the mint function,
+    and the mint function must swallow it and fail closed rather than
+    propagate or fall through to a network call."""
+    swarm_dispatch._clear_reviewer_app_installation_token_cache()
+    _configure_binding_credentials(
+        monkeypatch, mode="app", pem="not-a-real-pem", installation_id="424242"
+    )
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kwargs):
+            raise AssertionError("must not reach network after signing failure")
+
+        async def post(self, url, headers=None, **kwargs):
+            raise AssertionError("must not reach network after signing failure")
+
+    async def _run():
+        async with _Client() as client:
+            return await swarm_dispatch._mint_reviewer_app_installation_token(
+                "owner/repo", client
+            )
+
+    assert asyncio.run(_run()) is None
+
+
+def test_binding_review_app_mint_cache_reused_within_ttl(monkeypatch):
+    """A second mint call before the cached token's near-expiry window must
+    reuse the cache and issue no new network calls at all."""
+    swarm_dispatch._clear_reviewer_app_installation_token_cache()
+    _configure_binding_credentials(monkeypatch, mode="app", installation_id="424242")
+    monkeypatch.setattr(swarm_dispatch, "_mint_reviewer_app_jwt", lambda: "fake.jwt")
+    calls = {"get": 0, "post": 0}
+
+    class _Resp:
+        def __init__(self, status, payload=None):
+            self.status_code = status
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kwargs):
+            calls["get"] += 1
+            raise AssertionError("installation id from env; must not GET it")
+
+        async def post(self, url, headers=None, **kwargs):
+            calls["post"] += 1
+            return _Resp(
+                200,
+                {"token": "ghs_first", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+
+    async def _run():
+        async with _Client() as client:
+            first = await swarm_dispatch._mint_reviewer_app_installation_token(
+                "owner/repo", client
+            )
+            second = await swarm_dispatch._mint_reviewer_app_installation_token(
+                "owner/repo", client
+            )
+            return first, second
+
+    first, second = asyncio.run(_run())
+    assert first == "ghs_first"
+    assert second == "ghs_first"
+    assert calls["post"] == 1
+    assert calls["get"] == 0
+
+
+def test_binding_review_app_mint_remints_after_near_expiry(monkeypatch):
+    """A cached token within 1 minute of expires_at must be treated as
+    unusable and re-minted, not returned stale."""
+    from datetime import timedelta
+
+    swarm_dispatch._clear_reviewer_app_installation_token_cache()
+    _configure_binding_credentials(monkeypatch, mode="app", installation_id="424242")
+    monkeypatch.setattr(swarm_dispatch, "_mint_reviewer_app_jwt", lambda: "fake.jwt")
+    almost_expired = datetime.now(timezone.utc) + timedelta(seconds=30)
+    swarm_dispatch._REVIEWER_APP_INSTALLATION_TOKEN_CACHE = (
+        "ghs_stale",
+        almost_expired,
+    )
+    calls = {"post": 0}
+
+    class _Resp:
+        def __init__(self, status, payload=None):
+            self.status_code = status
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kwargs):
+            raise AssertionError("installation id from env; must not GET it")
+
+        async def post(self, url, headers=None, **kwargs):
+            calls["post"] += 1
+            return _Resp(
+                200,
+                {"token": "ghs_reminted", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+
+    async def _run():
+        async with _Client() as client:
+            return await swarm_dispatch._mint_reviewer_app_installation_token(
+                "owner/repo", client
+            )
+
+    token = asyncio.run(_run())
+    assert token == "ghs_reminted"
+    assert calls["post"] == 1
+    swarm_dispatch._clear_reviewer_app_installation_token_cache()
+
+
+def test_binding_review_app_preferred_over_pat(monkeypatch, caplog):
+    _, _, _, _, ctx = _emit_binding_review(
+        monkeypatch,
+        caplog,
+        mode="both",
+        reviewer="bot-login[bot]",
+        user_type="Bot",
+        verdict="approve",
+        readback_state="APPROVED",
+    )
+    assert ctx["get_user_calls"] == []
+    assert any(
+        b and "ghs_installation_token" in b for b in ctx["auth_bearers"]
+    )
+
+
+def test_binding_review_app_mint_failed(monkeypatch, caplog):
+    receipt, _, log_text, posts, _ = _emit_binding_review(
+        monkeypatch, caplog, mode="app", mint_ok=False
+    )
+    assert receipt is None
+    assert posts == []
+    assert "reason=app_mint_failed" in log_text
+
+
+def test_binding_review_readback_gates_receipt(monkeypatch, caplog):
+    test_binding_review_rejects_wrong_readback_state(monkeypatch, caplog)
+
+
+def test_formal_review_comment_keeps_repo_token(monkeypatch, caplog):
+    monkeypatch.setenv("ATELES_AGENT_PAT", "shared-author-token")
+    monkeypatch.delenv("VANELLUS_AGENT_PAT", raising=False)
+    monkeypatch.delenv("ATELES_REVIEWER_APP_ID", raising=False)
+    auth = []
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"id": 1}
+
+        def raise_for_status(self):
+            return None
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, **kwargs):
+            auth.append((headers or {}).get("Authorization"))
+            return _Resp()
+
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", lambda **kw: _Client())
+    d = SwarmDispatcher(_StubNotifier(), _config(github_token="cfg-token"))
+    with caplog.at_level(logging.INFO):
+        asyncio.run(d._emit_formal_review(_trigger(), "comment", "**COMMENT**"))
+    assert auth == ["Bearer shared-author-token"]
+    assert "reason=unset" not in caplog.text
+
+
+def test_binding_review_author_token_or_comment_stays_review_required():
+    comment_event = swarm_dispatch.verdict_to_review_event("comment", body="**COMMENT**")
+    approve_event = swarm_dispatch.verdict_to_review_event("approve", body="**APPROVE**")
+    assert comment_event == "COMMENT"
+    assert approve_event == "APPROVE"
+
+
+def test_binding_review_no_double_escalation_on_clear_panel(monkeypatch):
+    claims = []
+
+    async def fake_claim(self, trigger, kind, *, detail=None):
+        claims.append(kind)
+        return True
+
+    async def fake_already(self, trigger):
+        return any(k.startswith("binding-review-") for k in claims)
+
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_binding_review_escalation_already_claimed", fake_already
+    )
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    trigger = _trigger()
+    asyncio.run(
+        d._abort_binding_review(
+            trigger,
+            "unset",
+            fields="credential=ATELES_REVIEWER_APP_ID|VANELLUS_AGENT_PAT",
+            hint="set secrets",
+        )
+    )
+    if not asyncio.run(d._binding_review_escalation_already_claimed(trigger)):
+        asyncio.run(d._claim_escalation(trigger, "binding-review-unverified"))
+    assert claims == ["binding-review-unset"]
+    assert "binding-review-unverified" not in claims
+
+
+def test_vanellus_review_docs_match_binding_lines():
+    text = open(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "..",
+            "docs",
+            "agents",
+            "vanellus.md",
+        ),
+        encoding="utf-8",
+    ).read()
+    assert "## Binding review" in text
+    assert "#binding-review" in text
+    assert "reason=unset" in text
+    assert "principal=bot" in text
+    assert "principal=pat" in text
+    assert "cosmetic-pending" not in text
+
+
+def test_ci_receipt_reconstruction_requires_latest_exact_head_approval(monkeypatch):
+    head = "b" * 40
+    reviewer = "markmhendrickson-ateles-vanellus"
+
+    class _ReviewClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, **kwargs):
+            return _MergeResp(
+                200,
+                [
+                    {
+                        "id": 1,
+                        "user": {"login": reviewer},
+                        "commit_id": head,
+                        "state": "APPROVED",
+                        "submitted_at": "2026-09-23T00:00:00Z",
+                    },
+                    {
+                        "id": 2,
+                        "user": {"login": reviewer},
+                        "commit_id": head,
+                        "state": "CHANGES_REQUESTED",
+                        "submitted_at": "2026-09-23T00:01:00Z",
+                    },
+                ],
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: _ReviewClient())
+    receipt = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._binding_approval_receipt_from_github(
+            "owner/repo", 87, head, pr_author="someone"
+        )
+    )
+    assert receipt is None
+
+
+def test_binding_approval_receipt_from_github_prefers_bot(monkeypatch):
+    head = "c" * 40
+
+    class _ReviewClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, **kwargs):
+            return _MergeResp(
+                200,
+                [
+                    {
+                        "id": 1,
+                        "user": {"login": "human-reviewer", "type": "User"},
+                        "commit_id": head,
+                        "state": "APPROVED",
+                        "submitted_at": "2026-09-23T00:00:00Z",
+                    },
+                    {
+                        "id": 2,
+                        "user": {"login": "bot-login[bot]", "type": "Bot"},
+                        "commit_id": head,
+                        "state": "APPROVED",
+                        "submitted_at": "2026-09-23T00:00:01Z",
+                    },
+                ],
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: _ReviewClient())
+    receipt = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._binding_approval_receipt_from_github(
+            "owner/repo", 87, head, pr_author="octo-author"
+        )
+    )
+    assert receipt is not None
+    assert receipt.reviewer_login == "bot-login[bot]"
+    assert receipt.principal == "bot"
+
+
+@pytest.mark.parametrize("review_id", [None, "", 0, -1, "not-an-id", True])
+def test_ci_receipt_reconstruction_rejects_missing_or_invalid_review_id(
+    monkeypatch, review_id
+):
+    head = "b" * 40
+    reviewer = "distinct-reviewer"
+
+    class _ReviewClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, **kwargs):
+            return _MergeResp(
+                200,
+                [
+                    {
+                        "id": review_id,
+                        "user": {"login": reviewer},
+                        "commit_id": head,
+                        "state": "APPROVED",
+                        "submitted_at": "2026-09-23T00:00:00Z",
+                    }
+                ],
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: _ReviewClient())
+    receipt = asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._binding_approval_receipt_from_github(
+            "owner/repo", 87, head, pr_author="someone"
+        )
+    )
+    assert receipt is None
 
 # ── parent-issue link resolution (ateles#434 / #613 / #300) ─────────────────
 #
@@ -7742,3 +11455,470 @@ class TestGateIdentityFailureClass:
             "accipiter", False, 1, "", "boom", error="boom", provider="claude"
         )
         assert swarm_dispatch.review_failure_class(other) == "execution failure"
+
+
+# ── PR #1181 provider-table round: a fail-closed provider refusal for a ──────
+# gate-owning lens must be its own legible class, not a bare "execution
+# failure" (which would read identically to an unrelated crash) or a
+# "credential failure" (which would send the operator chasing a token that
+# was never the problem).
+class TestGateOwnerToolDenyFailureClass:
+    def test_provider_refusal_is_its_own_class(self) -> None:
+        refused = SkillResult(
+            "waxwing",
+            False,
+            None,
+            "",
+            "",
+            error=(
+                f"{swarm_dispatch.GATE_OWNER_TOOL_DENY_UNAVAILABLE}: provider "
+                "'codex' has no mechanism ..."
+            ),
+            provider="codex",
+        )
+        assert (
+            swarm_dispatch.review_failure_class(refused)
+            == "gate-owner tool-deny unavailable on provider"
+        )
+
+    def test_ordinary_failure_still_classes_as_execution_failure(self) -> None:
+        other = SkillResult(
+            "waxwing", False, 1, "", "boom", error="boom", provider="codex"
+        )
+        assert swarm_dispatch.review_failure_class(other) == "execution failure"
+
+
+# ── PR #1181 ux review [BLOCKING]: a gate-owning lens refused AT LAUNCH must
+# carry the same Design **BLOCKED** contract (reason/gate/attempted/observed/
+# next_action) as a failed sign_off, not the generic "Review incomplete"
+# prose `_handle_panel_session_limit` posts for every other incomplete-panel
+# cause. Covers both launch-refusal classes named in `review_failure_class`:
+# `gate identity unavailable` and `gate-owner tool-deny unavailable on
+# provider`.
+#
+# WHAT THIS LOOKED LIKE RED, before the fix: `_surface_gate_launch_refusals`
+# did not exist, `GATE_LAUNCH_REFUSAL_CLASSES` did not exist, and a
+# gate-owning lens refused at launch reached the PR only through
+# `_handle_panel_session_limit`'s generic comment — no `**BLOCKED**` token,
+# no per-lens reason/gate/attempted/observed fields, no next_action.
+class TestGateLaunchRefusalSurface:
+    def test_surface_posts_blocked_template_for_identity_unavailable(self, monkeypatch):
+        comment_bodies: list[str] = []
+
+        class _CapturingClient:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get(self, url, **kwargs):
+                return _FakeListResp([])
+            async def post(self, url, **kwargs):
+                comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+                return _FakeResp(201)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+        monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+        notifier = _StubNotifier()
+        d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="x"))
+        trig = _trigger(number=1181, repository="owner/repo")
+        asyncio.run(
+            d._surface_gate_launch_refusals(
+                trig, 795,
+                [("ux", "accipiter", "gate identity unavailable")],
+            )
+        )
+
+        assert len(comment_bodies) == 1
+        body = comment_bodies[0]
+        assert swarm_dispatch.GATE_LAUNCH_REFUSED_MARKER in body
+        assert "**BLOCKED**" in body
+        assert "reason: `gate identity unavailable`" in body
+        assert "gate: `ux` (lens: `accipiter`)" in body
+        assert "attempted: `review`" in body
+        assert "observed: `gate identity unavailable`" in body
+        assert "next_action:" in body
+        assert "Provision the lens's own Neotoma identity" in body
+        # Non-blocking finding: the comment must state retry-or-stuck, not
+        # leave the reader to infer it.
+        assert "does NOT retry this on its own" in body
+        assert "not** a verdict" in body or "not a verdict" in body.lower()
+        assert notifier.priorities == [swarm_dispatch.Priority.BLOCKER]
+
+    def test_surface_posts_blocked_template_for_tool_deny_unavailable(self, monkeypatch):
+        comment_bodies: list[str] = []
+
+        class _CapturingClient:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get(self, url, **kwargs):
+                return _FakeListResp([])
+            async def post(self, url, **kwargs):
+                comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+                return _FakeResp(201)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+        monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+        notifier = _StubNotifier()
+        d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="x"))
+        trig = _trigger(number=1181, repository="owner/repo")
+        asyncio.run(
+            d._surface_gate_launch_refusals(
+                trig, 795,
+                [
+                    (
+                        "arch",
+                        "waxwing",
+                        "gate-owner tool-deny unavailable on provider",
+                    )
+                ],
+            )
+        )
+
+        assert len(comment_bodies) == 1
+        body = comment_bodies[0]
+        assert "reason: `gate-owner tool-deny unavailable on provider`" in body
+        assert "gate: `arch` (lens: `waxwing`)" in body
+        assert "next_action:" in body
+        assert "claude" in body
+        # This class DOES self-retry — the class-specific next_action differs
+        # from the identity-unavailable case above.
+        assert "retries automatically" in body
+        assert "Provision the lens's own Neotoma identity" not in body
+
+    def test_surface_is_idempotent_on_marker(self, monkeypatch):
+        posted = []
+
+        class _CapturingClient:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get(self, url, **kwargs):
+                return _FakeListResp(
+                    [{"body": swarm_dispatch.GATE_LAUNCH_REFUSED_MARKER}]
+                )
+            async def post(self, url, **kwargs):
+                posted.append(1)
+                return _FakeResp(201)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+        monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+        d = SwarmDispatcher(_StubNotifier(), DispatchConfig(neotoma_token="", github_token="x"))
+        trig = _trigger(number=1181, repository="owner/repo")
+        asyncio.run(
+            d._surface_gate_launch_refusals(
+                trig, 795,
+                [("ux", "accipiter", "gate identity unavailable")],
+            )
+        )
+        assert posted == []  # already surfaced — no duplicate comment
+
+    def test_handle_pr_routes_gate_owning_launch_refusal_to_blocked_surface(
+        self, monkeypatch
+    ):
+        """A gate-owning lens refused at launch is pulled out of the generic
+        `failed_lenses` bucket and routed to `_surface_gate_launch_refusals`
+        instead of `_handle_panel_session_limit`."""
+        calls = []
+        d = _pr_dispatcher_with_stubs(
+            monkeypatch, vanellus_stdout="**APPROVE**", calls=calls
+        )
+        monkeypatch.setattr(
+            swarm_dispatch,
+            "select_panel",
+            lambda **kwargs: [
+                Lens(agent="accipiter", lens="ux", gate="ux", checks="design"),
+            ],
+        )
+
+        async def fake_run_skill(skill, prompt, **kwargs):
+            if skill == "lanius":
+                return SkillResult(
+                    skill, True, 0,
+                    "GATE_INHERITANCE: clear\nGATE_PENDING: ux", "",
+                )
+            if skill == "accipiter":
+                return SkillResult(
+                    skill, False, None, "", "",
+                    error=(
+                        f"{swarm_dispatch.NEOTOMA_IDENTITY_UNAVAILABLE}: "
+                        "'accipiter' owns a pre-impl gate ..."
+                    ),
+                )
+            raise AssertionError(f"unexpected skill: {skill}")
+
+        session_limit_calls = []
+        launch_refusal_calls = []
+
+        async def fake_session_limit(self, *args, **kwargs):
+            session_limit_calls.append((args, kwargs))
+
+        async def fake_launch_refusal(self, trigger, parent, refused):
+            launch_refusal_calls.append((trigger.number, parent, refused))
+
+        monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+        monkeypatch.setattr(
+            SwarmDispatcher, "_handle_panel_session_limit", fake_session_limit
+        )
+        monkeypatch.setattr(
+            SwarmDispatcher, "_surface_gate_launch_refusals", fake_launch_refusal
+        )
+
+        asyncio.run(d._handle_pr(_trigger(body="Closes #795.")))
+
+        assert session_limit_calls == []
+        assert len(launch_refusal_calls) == 1
+        issue_number, parent, refused = launch_refusal_calls[0]
+        assert refused == [
+            ("ux", "accipiter", "gate identity unavailable")
+        ]
+        # Panel incomplete → must not fall through to merge-authorization.
+        assert not any(kind in {"route", "gate"} for kind, _ in calls)
+
+    def test_advisory_lens_launch_refusal_still_uses_generic_path(self, monkeypatch):
+        """The SAME failure class on a lens that does NOT own the pending gate
+        has no gate riding on it — stays on the existing generic
+        `_handle_panel_session_limit` path, unchanged."""
+        calls = []
+        d = _pr_dispatcher_with_stubs(
+            monkeypatch, vanellus_stdout="**APPROVE**", calls=calls
+        )
+        monkeypatch.setattr(
+            swarm_dispatch,
+            "select_panel",
+            lambda **kwargs: [
+                Lens(agent="falco", lens="security", gate=None, checks="security"),
+            ],
+        )
+
+        async def fake_run_skill(skill, prompt, **kwargs):
+            if skill == "lanius":
+                return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+            if skill == "falco":
+                return SkillResult(
+                    skill, False, None, "", "",
+                    error=(
+                        f"{swarm_dispatch.GATE_OWNER_TOOL_DENY_UNAVAILABLE}: "
+                        "provider 'codex' has no mechanism ..."
+                    ),
+                )
+            raise AssertionError(f"unexpected skill: {skill}")
+
+        session_limit_calls = []
+        launch_refusal_calls = []
+
+        async def fake_session_limit(self, *args, **kwargs):
+            session_limit_calls.append(kwargs)
+
+        async def fake_launch_refusal(self, trigger, parent, refused):
+            launch_refusal_calls.append(refused)
+
+        monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+        monkeypatch.setattr(
+            SwarmDispatcher, "_handle_panel_session_limit", fake_session_limit
+        )
+        monkeypatch.setattr(
+            SwarmDispatcher, "_surface_gate_launch_refusals", fake_launch_refusal
+        )
+
+        asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+        assert launch_refusal_calls == []
+        assert len(session_limit_calls) == 1
+        assert session_limit_calls[0]["failed_lenses"] == (
+            ("security", "gate-owner tool-deny unavailable on provider"),
+        )
+
+
+# ── Regression: other incomplete-panel causes keep their EXISTING message ──
+# unchanged (usage limit / provider exhaustion / head-changed / stale). Only
+# the two named launch-refusal classes on a GATE-OWNING lens move to the new
+# surface.
+class TestOtherIncompletePanelCausesUnchanged:
+    def test_session_limit_still_uses_generic_deferral_message(self, monkeypatch):
+        comment_bodies: list[str] = []
+
+        class _CapturingClient:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def get(self, url, **kwargs):
+                return _FakeListResp([])
+            async def post(self, url, **kwargs):
+                comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+                return _FakeResp(201)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+        monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+        notifier = _StubNotifier()
+        d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="x"))
+        asyncio.run(
+            d._handle_panel_session_limit(
+                _trigger(number=264, repository="owner/repo"),
+                None,
+                "vanellus",
+                "You've hit your session limit · resets 7:30pm", "",
+            )
+        )
+        assert len(comment_bodies) == 1
+        body = comment_bodies[0]
+        assert "Review incomplete" in body
+        assert swarm_dispatch.GATE_LAUNCH_REFUSED_MARKER not in body
+        assert "**BLOCKED**" not in body
+
+    def test_head_changed_still_uses_generic_message(self, monkeypatch):
+        comment_bodies: list[str] = []
+
+        class _CapturingClient:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def get(self, url, **kwargs):
+                return _FakeListResp([])
+            async def post(self, url, **kwargs):
+                comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+                return _FakeResp(201)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+        monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+        notifier = _StubNotifier()
+        d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="x"))
+        asyncio.run(
+            d._handle_panel_session_limit(
+                _trigger(number=264, repository="owner/repo"),
+                None, "vanellus", "", "",
+                reason="PR head changed during review or could not be verified",
+            )
+        )
+        assert len(comment_bodies) == 1
+        body = comment_bodies[0]
+        assert "Review incomplete" in body
+        assert swarm_dispatch.GATE_LAUNCH_REFUSED_MARKER not in body
+        assert "**BLOCKED**" not in body
+
+# ── A failed sign_off is never a cleared gate (PR #1181, second security
+# run BLOCKING B2) ─────────────────────────────────────────────────────────
+# The gate-level half (a fake store whose writes land) lives in
+# test_gate_sign_off_fail_closed.py; these are the two callers.
+
+
+import gate_waive as _gw  # noqa: E402
+
+
+class TestCallersTreatAFailedSignOffAsNotCleared:
+    def test_panel_keeps_a_failed_gate_pending_even_when_the_reread_shows_it_cleared(
+        self, monkeypatch
+    ):
+        calls: list = []
+        captured: dict = {}
+        surfaced: list = []
+
+        async def fake_sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            return _gw.SignOffOutcome(
+                ok=False,
+                gate=gate,
+                lens_agent=lens_agent,
+                error=_gw.SIGN_OFF_VERIFY_FAILED,
+            )
+
+        class _Cleared:
+            found = True
+            gate_status = {"pm": "signed_off", "ux": "signed_off", "arch": "signed_off"}
+            gate_status_unreadable = False
+
+        async def fake_load(self, repo, issue_number):
+            return _Cleared()
+
+        # The pre-panel live read, which decides what to sign, shows `arch`
+        # pending; the re-read after the failed sign_off shows it cleared.
+        async def fake_live(self, repository, issue_number):
+            return {"pm": "signed_off", "ux": "signed_off", "arch": "pending"}
+
+        monkeypatch.setattr(swarm_dispatch.IssueGateStore, "sign_off", fake_sign_off)
+        monkeypatch.setattr(swarm_dispatch.IssueGateStore, "load", fake_load)
+        monkeypatch.setattr(SwarmDispatcher, "_live_gate_status", fake_live)
+        d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls)
+
+        async def fake_run_skill(skill, prompt, **kwargs):
+            if skill == "lanius":
+                return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear\nGATE_PENDING: arch", "")
+            if skill == "waxwing":
+                return SkillResult(
+                    skill, True, 0,
+                    "**🤖 Waxwing — Ateles swarm, arch lens panelist**\n"
+                    "**SIGNED_OFF**\nno concerns",
+                    "",
+                )
+            return SkillResult(skill, True, 0, "**APPROVE**\nlgtm", "")
+
+        original_prompt = SwarmDispatcher._vanellus_prompt
+
+        def spy_prompt(trigger, parent, lenses, reviews=None, pending_gates=None, reviewed_head=None):
+            captured["pending_gates"] = set(pending_gates or ())
+            return original_prompt(
+                trigger, parent, lenses, reviews,
+                pending_gates=pending_gates, reviewed_head=reviewed_head,
+            )
+
+        async def fake_surface(self, trigger, parent, failed):
+            surfaced.extend(failed)
+
+        monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+        monkeypatch.setattr(SwarmDispatcher, "_vanellus_prompt", staticmethod(spy_prompt))
+        monkeypatch.setattr(SwarmDispatcher, "_surface_failed_sign_offs", fake_surface)
+
+        asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+        assert surfaced, "the failed sign_off must be surfaced"
+        assert "arch" in captured.get("pending_gates", set()), (
+            "a failed sign_off must stay pending for merge authorization even "
+            "though the re-read shows the gate cleared"
+        )
+
+    def test_issue_pipeline_does_not_build_on_a_failed_pm_sign_off(self, monkeypatch):
+        build_calls: list = []
+
+        async def fake_run_skill(skill, prompt, **kwargs):
+            if skill == "cicada" and "DO NOT MERGE" in prompt:
+                build_calls.append(skill)
+            if skill == "lanius":
+                return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+            if skill == "pavo":
+                return SkillResult(
+                    skill, True, 0,
+                    "**🤖 Pavo — Ateles swarm, pm gate owner**\n**SIGNED_OFF**\n\n"
+                    "<<<SPEC_SECTION>>>**Scope:** pm section with enough substance "
+                    "to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+                    "",
+                )
+            return SkillResult(skill, True, 0, "text", "")
+
+        _install_pipeline_stubs(monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: [])
+
+        async def failing_sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            return _gw.SignOffOutcome(
+                ok=False, gate=gate, lens_agent=lens_agent,
+                error=_gw.SIGN_OFF_VERIFY_FAILED,
+            )
+
+        async def fake_surface(self, trigger, parent, failed):
+            return None
+
+        async def fake_open_pr(self, trigger, state):
+            build_calls.append("opened")
+            return "https://example.invalid/pr/1"
+
+        monkeypatch.setattr(swarm_dispatch.IssueGateStore, "sign_off", failing_sign_off)
+        monkeypatch.setattr(SwarmDispatcher, "_surface_failed_sign_offs", fake_surface)
+        monkeypatch.setattr(SwarmDispatcher, "_open_implementation_pr", fake_open_pr)
+
+        notifier = _StubNotifier()
+        d = SwarmDispatcher(notifier, _config(auto_build=True))
+        asyncio.run(d._handle_issue_opened(_issue_trigger()))
+
+        assert build_calls == [], "a failed pm sign_off must not count as a cleared gate"
+        assert any("gates not green" in m for m in notifier.sent)
