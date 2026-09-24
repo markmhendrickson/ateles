@@ -20,11 +20,16 @@ from execution.daemons.apis.test_swarm_dispatch import (
     _trigger,
 )
 
-# Daytime in Europe/Madrid → outside the 22:00–08:00 silence window.
+# No configured window at all → _in_silence_window() always returns False
+# (empty strings fail the int() parse in Notifier._in_silence_window, which
+# is caught and treated as "not silent"). "22:00"-"08:00" is a real nightly
+# window, not a never-silent one — that previous form made every one of
+# these tests flaky between 22:00 and 08:00 Europe/Madrid, since the send it
+# asserts on gets queued to the held-notice digest instead of delivered.
 _NEVER_SILENT = {
     "timezone": "Europe/Madrid",
-    "silence_start": "22:00",
-    "silence_end": "08:00",
+    "silence_start": "",
+    "silence_end": "",
 }
 
 
@@ -38,6 +43,7 @@ def _notifier(tmp_path, sent, *, deliver_kw=None):
 
     n = Notifier(rubric=_NEVER_SILENT)
     n._dedupe_path = tmp_path / "dedupe.json"
+    n._digest_path = tmp_path / "digest.json"
     n._deliver = _deliver
     return n
 
