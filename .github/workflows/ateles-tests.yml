@@ -63,6 +63,23 @@ jobs:
       # agent that does not exist, for seven weeks, with every test green.
       - name: Check agent roster (no retired agent names)
         run: python3 scripts/linters/check_agent_roster.py
+      # ateles#1098 (pm/qa lens, round 1): check_agent_mirror_pii.py is wired
+      # as a blocking step in scripts/lint.sh, but no workflow invoked the
+      # real scanner against actual repo content before this — CI ran only
+      # its unit tests (see the step below), so the "binding, not `|| true`"
+      # claim in this linter's own docstring was not itself backed by CI.
+      # Same defect class as check_agent_roster.py's history (ateles#320).
+      # NOT yet blocking: a live run against this checkout's HEAD (2026-09-24)
+      # surfaces the pre-existing loop-start/SKILL.md finding filed separately
+      # as ateles#1099, out of this PR's scope — making this step blocking
+      # today would fail every PR in CI over an unrelated, already-tracked
+      # issue. Flip to blocking (remove continue-on-error) once #1099 lands.
+      - name: Check agent mirrors for operator payload (informational until #1099 lands)
+        continue-on-error: true
+        env:
+          NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}
+          NEOTOMA_BASE_URL: ${{ vars.NEOTOMA_BASE_URL || 'https://neotoma.markmhendrickson.com' }}
+        run: python3 scripts/linters/check_agent_mirror_pii.py
 
       - name: Run ateles package tests
         run: uv run --extra dev python -m pytest ateles/ .claude/hooks/ -q
@@ -127,6 +144,15 @@ jobs:
       # roster-in-lint.sh-only, anthus (#584/#596), execution/scripts (#524/#527).
       - name: Run CLAUDE.md verification-discipline effect tests
         run: uv run --extra dev python -m pytest scripts/linters/test_claude_verification_discipline.py -q
+      # ateles#1098 (pm/qa lens, round 1): scripts/linters/test_*.py is a path
+      # trigger above but the only file this job ever executed was
+      # test_claude_verification_discipline.py — test_check_neotoma_rest_paths.py
+      # and test_validate_tool_allowlist.py were (and remain) committed but
+      # collected by no lane, the same defect class as #584/#524/#727. Fixing
+      # those two pre-existing gaps is out of scope for #1098; this step
+      # collects the new file added here so it does not silently join them.
+      - name: Run agent-mirror PII gate tests
+        run: uv run --extra dev python -m pytest scripts/linters/test_check_agent_mirror_pii.py -q
 
   mcp-server-tests:
     runs-on: ubuntu-latest

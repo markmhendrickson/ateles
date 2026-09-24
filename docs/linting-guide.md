@@ -103,6 +103,15 @@ python scripts/linters/check_documentation.py path/to/file.md
 - Config: `scripts/linters/check_protected_paths.sh`
 - Auto-fixes: No (prevents commit)
 
+**Agent Mirror PII Checker** - Blocks operator payload in public agent-prompt mirrors
+- Detects: a Bitcoin address (structural, no network) plus a live `contact`/`payment_profile` value (name, phone, email, IBAN, BTC address) read from Neotoma at lint time
+- Scope: `.claude/skills/**/SKILL.md`, `docs/agents/*.md` — the generated PUBLIC mirrors of agent prompts
+- **Gitleaks allowlist gap:** `.gitleaks.toml` deliberately allowlists the entire `.claude/` tree ("env var names in skill docs, not secrets"), which is exactly where these mirrors live, and has no rule for a Bitcoin address at all — so reading only the Gitleaks entry above does not mean an agent-prompt mirror is clean. This linter is the control for that boundary (agent_policy `ent_c3c5e4a9350250cbf69e08bf`, `ent_f2e21d651669c24183b2b4eb`).
+- Fails closed: exits non-zero (not skip) when Neotoma is unreachable, since this is a content gate on files about to be published — use `--allow-unverified` only on a deliberately offline host, which still runs the structural check.
+- Suppression: `<!-- agent-mirror-pii-ok: <reason> -->` on the offending line, for a worked example or other non-operator content.
+- Config: `scripts/linters/check_agent_mirror_pii.py`
+- Auto-fixes: No (prevents commit)
+
 ### File Naming
 
 **File Naming Checker** - Enforces naming conventions
@@ -232,6 +241,22 @@ Protected paths:
 **Solution:** Add required sections:
 - `docs/` files: Purpose, Scope
 - `strategy/` files: Purpose
+
+### "check_agent_mirror_pii: FAILED" / operator payload in a mirror file
+
+**Problem:** A `.claude/skills/**/SKILL.md` or `docs/agents/*.md` file contains a Bitcoin address, or a live `contact`/`payment_profile` value (name, phone, email, IBAN), about to be committed to the public repo.
+
+**Solution:** Move the specific value into the Neotoma `contact`/`payment_profile` entity it belongs on (or confirm it already lives there), and have the prompt resolve it from that context entity at runtime instead of inlining it:
+```
+# ❌ Wrong — inlined in the mirror
+resolve the payment via bc1q... to Jane Vendor
+
+# ✅ Correct — generic instruction, resolved at runtime
+resolve the payment amount and address from the matching payment_profile entity
+```
+Do NOT reach for `.gitleaks.toml` here — it deliberately allowlists `.claude/` and has no Bitcoin-address rule, so it will not catch this class of finding either way.
+
+**Exception:** A worked example or other non-operator content that legitimately matches may be suppressed with `<!-- agent-mirror-pii-ok: <reason> -->` on the offending line — use sparingly; the correct fix for a real finding is the split above.
 
 ## Disabling Hooks (Not Recommended)
 
