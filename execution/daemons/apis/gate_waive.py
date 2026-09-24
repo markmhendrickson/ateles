@@ -189,6 +189,67 @@ def owner_history_is_unreadable(raw: object) -> bool:
     return True
 
 
+def uncleared_gates(
+    gate_status: dict[str, str],
+    gates: tuple[str, ...] | list[str],
+    declared_gates: frozenset[str] | set[str] | None = None,
+) -> list[str]:
+    """THE gate-clearance predicate. Every caller in the swarm derives from it.
+
+    Returns the subset of *gates*, in order, that are NOT cleared — where
+    "cleared" means the stored state is in `CLEARED_GATE_STATES`, or the gate
+    is one this issue's workflow does not declare at all.
+
+    WHY THIS FUNCTION EXISTS (ateles#1213)
+    --------------------------------------
+    Two predicates over one vocabulary drifted. `gates_needing_waive` here read
+    an absent gate as ``""``; `swarm_dispatch._gates_green` read the same
+    absence as ``"pending"``. Both then refused to clear it — so an absent gate
+    blocked build handoff FOREVER, because nothing can sign a gate that does
+    not exist. 18 distinct ateles issues logged "not handing off to build" on
+    2026-09-23 for exactly this reason.
+
+    The lazy repair — treat every absence as cleared — converts a stuck
+    pipeline into an UNGUARDED one: a gate that genuinely applies and is merely
+    unwritten would then wave build through unreviewed. So absence is resolved
+    against the issue's OWN workflow, which is the authority on which gates
+    apply:
+
+      * *declared_gates* is None  → the workflow could not be read. Absence is
+        UNKNOWN, and unknown takes the restrictive branch: the gate BLOCKS.
+        (`docs/foundation/principles.md#5`.)
+      * gate not in *declared_gates* → this workflow never runs that gate. It
+        can never be signed, so holding it pending is not caution, it is a
+        deadlock. It CLEARS.
+      * gate in *declared_gates*, key absent → the gate applies and nobody has
+        written it yet. It BLOCKS, exactly as before.
+
+    The live evidence for the third rule being distinct from the second:
+    ateles#1209 (`workflow_type: bug`) binds
+    `workflow_definition_id: ent_1b6d0acbdc436d3f0dad5a0d`, the
+    ``ateles|bug`` workflow, whose declared gates are exactly
+    ``pm, impl, pr_review, qa, release`` — key-for-key what its `gate_status`
+    holds. The missing `ux`/`arch` keys are that workflow's own declaration,
+    not an omission.
+
+    Note the ABSENT value is compared as ``""``, never ``"pending"``. Inventing
+    a blocking sentinel for a key that is not there is what made the two
+    predicates disagree in the first place: it erases the difference between
+    "written as pending" and "never written", which is the exact distinction
+    this function is here to preserve.
+    """
+    out: list[str] = []
+    for gate in gates:
+        raw = gate_status.get(gate)
+        if raw is None and declared_gates is not None and gate not in declared_gates:
+            # The workflow does not run this gate. Nothing can ever sign it.
+            continue
+        if (raw or "").strip().lower() in CLEARED_GATE_STATES:
+            continue
+        out.append(gate)
+    return out
+
+
 def gates_needing_waive(
     gate_status: dict[str, str], pre_impl_gates: tuple[str, ...]
 ) -> list[str]:
@@ -200,13 +261,11 @@ def gates_needing_waive(
     while ``ux`` stayed ``pending``; that cannot happen here because the sweep
     is a total function over *pre_impl_gates*, not an agent's iteration.
     """
-    out: list[str] = []
-    for gate in pre_impl_gates:
-        state = (gate_status.get(gate) or "").strip().lower()
-        if state in CLEARED_GATE_STATES:
-            continue
-        out.append(gate)
-    return out
+    # Delegates to `uncleared_gates` with NO declared-gate set: a waive sweep
+    # is deliberately total over *pre_impl_gates*, so an absent gate is a
+    # legitimate waive target rather than something to skip. Sharing the
+    # predicate is what stops the two from drifting again (ateles#1213).
+    return uncleared_gates(gate_status, pre_impl_gates, declared_gates=None)
 
 
 def apply_waives(
@@ -707,6 +766,14 @@ class IssueGateState:
     # reports it as unreadable state rather than a missing entity
     # (independent security run at b76b1376 on PR #1181, NON-BLOCKING).
     row_unreadable: bool = False
+    # The issue's OWN workflow binding, read straight off the snapshot. This
+    # is the authority on WHICH gates apply to this issue, and so on whether an
+    # absent gate key means "does not apply" (clears) or "applies, unwritten"
+    # (blocks) — see `uncleared_gates` (ateles#1213). Empty when the snapshot
+    # carries neither, which callers must treat as UNKNOWN (absence blocks),
+    # never as "no gates apply".
+    workflow_type: str = ""
+    workflow_definition_id: str = ""
     # Per-field REDUCER provenance ({field_name: observation_id}), read
     # straight off the snapshot the same way `agent_loader.py`'s
     # `_parse`/`lib.daemon_runtime.gating.read_authenticated_checkpoint_*`
@@ -1003,6 +1070,10 @@ class IssueGateStore:
             state.gate_status_unreadable = gate_status_is_unreadable(raw_gates)
             state.owner_history_unreadable = owner_history_is_unreadable(raw_history)
             state.current_owner = str(snap.get("current_owner") or "")
+            state.workflow_type = str(snap.get("workflow_type") or "")
+            state.workflow_definition_id = str(
+                snap.get("workflow_definition_id") or ""
+            )
             # The reducer's per-field provenance rides on the query row's
             # ENVELOPE (`entity["provenance"]`), beside `snapshot`, not inside
             # it: read live from prod `/entities/query` on 2026-09-23 for

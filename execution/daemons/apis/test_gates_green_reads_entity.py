@@ -136,7 +136,16 @@ async def test_not_applicable_counts_as_cleared(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_missing_gate_key_is_treated_as_pending(monkeypatch):
-    """An absent key is not evidence of clearance."""
+    """An absent key is not evidence of clearance — WITH NO WORKFLOW READ.
+
+    Narrowed by ateles#1213, which is why the stub here carries no workflow
+    binding. An absent key means "unknown" until the issue's own workflow says
+    whether that gate applies; unknown holds
+    (`gates_and_workflows.md#an-unreadable-workflow-is-unknown-and-unknown-holds`),
+    so this still blocks. The case where the workflow DOES resolve and does not
+    declare the gate — which must clear, and which this assertion used to
+    forbid — is `test_absent_gate_is_not_pending.py`.
+    """
     d = _dispatcher()
     _stub_gate_status(monkeypatch, {"pm": "signed_off"})  # ux/arch absent
 
