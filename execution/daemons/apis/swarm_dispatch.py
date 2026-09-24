@@ -58,6 +58,7 @@ import httpx
 
 from gate_waive import (
     CLEARED_GATE_STATES,
+    uncleared_gates,
     GATE_SIGNING_CUTOFF_ENV,
     SIGN_OFF_ATTRIBUTION_FAILED,
     SIGN_OFF_OTHER_AUTHORITY,
@@ -1617,6 +1618,50 @@ def workflow_owner_drift(
             if owner and owner not in known_agents:
                 drift.append((str(name), str(gate.get("gate_name") or "?"), owner))
     return drift
+
+
+def declared_gate_names(workflow_snapshot: dict) -> frozenset[str] | None:
+    """The gate names a `workflow_definition` snapshot declares, or None.
+
+    ateles#1213. This is the AUTHORITY on which gates apply to an issue, and so
+    on whether an absent `gate_status` key means "this workflow never runs that
+    gate" (clears) or "the gate applies and nobody wrote it yet" (blocks).
+
+    Returns None — meaning UNKNOWN, on which every caller must fail closed —
+    rather than an empty set, whenever the snapshot cannot be read as a gate
+    declaration: no `gates` key, a `gates` value that is not a list (after the
+    JSON-string decode below), or a list that yields no usable gate name.
+    Collapsing those to `frozenset()` would read as "this workflow declares NO
+    gates", which clears EVERY gate and waves an unreviewed issue through to
+    build — the precise inversion this function exists to prevent.
+
+    `gates` round-trips as a JSON-encoded STRING on most live rows (schema
+    inference typed the field as a string) and as a real list on others; both
+    shapes are live in prod today, so both are decoded. Same gotcha as
+    `parse_gate_status` in `gate_waive.py`.
+
+    CLAUDE.md records that these entities have been wrong before (ateles#719:
+    8 workflows carried gate sequences the dispatcher ignored, and disagreed
+    with the hardcoded tuples). That is why this reads ONLY the gate NAMES —
+    the set of gates that exist for this workflow — and never the owner, phase,
+    or `required` flag. A stale owner name cannot mislead this function, and
+    the roster drift it would cause is already caught by
+    `workflow_owner_drift`.
+    """
+    raw = workflow_snapshot.get("gates")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(raw, list):
+        return None
+    names = {
+        str(gate.get("gate_name")).strip()
+        for gate in raw
+        if isinstance(gate, dict) and gate.get("gate_name")
+    }
+    return frozenset(names) or None
 
 
 def agent_github_login(agent: str) -> str:
@@ -5085,12 +5130,17 @@ class SwarmDispatcher:
             )
             return False
 
-        unsigned = [
-            gate
-            for gate in PRE_IMPL_GATES
-            if (state.gate_status.get(gate) or "pending").strip().lower()
-            not in CLEARED_GATE_STATES
-        ]
+        # An ABSENT gate key is resolved against the issue's own workflow
+        # rather than read as `pending` (ateles#1213). `.get(gate) or "pending"`
+        # invented a blocking state for a key that was never written, so a
+        # `workflow_type: bug` issue — whose workflow declares no `ux`/`arch`
+        # at all — could never hand off: nothing can sign a gate that does not
+        # exist. `declared` is None when the workflow cannot be read, and
+        # `uncleared_gates` then keeps every absence blocking.
+        declared = await self._declared_gates_for_issue(state, ref)
+        unsigned = uncleared_gates(
+            state.gate_status, PRE_IMPL_GATES, declared_gates=declared
+        )
         if unsigned:
             # Lanius said nothing and the record disagrees. That divergence is
             # the bug's signature, so name it rather than failing quietly.
@@ -5126,6 +5176,85 @@ class SwarmDispatcher:
                 )
             return False
         return True
+
+    async def _declared_gates_for_issue(
+        self, state: "IssueGateState", ref: str
+    ) -> frozenset[str] | None:
+        """Which gates this issue's workflow declares, or None when unknown.
+
+        ateles#1213. Resolved from the issue entity's OWN binding, in order:
+        `workflow_definition_id` (an exact entity id Lanius stamped at triage),
+        then `workflow_type` + `repo` (`workflow_definition:<project>|<type>`).
+        Returns None when neither resolves or the read fails, and every caller
+        must then treat an absent gate key as BLOCKING — unknown is not clear.
+
+        Deliberately does NOT fall back to "no workflow ⇒ no gates". An
+        unreadable workflow that returned `frozenset()` would clear every
+        pre-impl gate at once, which is strictly worse than the stall this
+        change fixes.
+        """
+        # Read through `getattr`: this must degrade to UNKNOWN (which blocks)
+        # for any state object that predates the workflow fields, never raise
+        # and take the whole gate check down with it.
+        wf_id = str(getattr(state, "workflow_definition_id", "") or "")
+        wf_type = str(getattr(state, "workflow_type", "") or "")
+        if not (wf_id or wf_type):
+            return None
+        try:
+            store = IssueSpecStore(
+                self.config.neotoma_base_url, self.config.neotoma_token
+            )
+            rows: list[dict] = []
+            if wf_id:
+                data = await store._post(
+                    "entities/query",
+                    {
+                        "entity_type": "workflow_definition",
+                        "limit": 200,
+                        "include_snapshots": True,
+                    },
+                )
+                if data:
+                    rows = [
+                        row
+                        for row in (data.get("entities") or [])
+                        if str(row.get("entity_id") or "") == wf_id
+                    ]
+            if not rows and wf_type:
+                project = str(getattr(state, "repo", "") or "").split("/")[-1]
+                want = f"workflow_definition:{project}|{wf_type}"
+                data = await store._post(
+                    "entities/query",
+                    {
+                        "entity_type": "workflow_definition",
+                        "limit": 200,
+                        "include_snapshots": True,
+                    },
+                )
+                if data:
+                    rows = [
+                        row
+                        for row in (data.get("entities") or [])
+                        if str(row.get("canonical_name") or "") == want
+                    ]
+            if not rows:
+                log.warning(
+                    f"[{DAEMON_NAME}] {ref}: no workflow_definition resolved "
+                    f"(id={wf_id or '-'}, type={wf_type or '-'}) — an "
+                    "absent gate key "
+                    "stays BLOCKING"
+                )
+                return None
+            snap = rows[0].get("snapshot")
+            if not isinstance(snap, dict):
+                return None
+            return declared_gate_names(snap)
+        except Exception as exc:  # noqa: BLE001 — unknown, never "clear"
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: workflow_definition read failed "
+                f"({type(exc).__name__}) — an absent gate key stays BLOCKING"
+            )
+            return None
 
     @staticmethod
     def _extract_section_text(stdout: str, section: SpecSection) -> str:
