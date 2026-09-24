@@ -53,54 +53,57 @@ The repo currently maintains **two parallel keypair formats** for two contexts:
 
 Unifying these formats and publishing all public keys to the same JWKS is on the to-do list below.
 
-### A third context neither flavor reaches: the dispatched child's MCP session
+### The dispatched child's MCP session does NOT carry gate attribution — the dispatcher signs on the lens's behalf instead
 
-A **dispatched agent** (a review lens, or any role Apis spawns via `skill_runner`) does not use either
-flavor above for its Neotoma writes. It reaches Neotoma over **HTTP MCP**, and an MCP session
-authenticates **once**, with a static `Authorization` header — there is no per-request signature for a
-signer to supply. So neither keypair format governs what principal that child writes as.
+A **dispatched agent** (a review lens, or any role Apis spawns via `skill_runner`) reaches Neotoma over
+**HTTP MCP**, and an MCP session authenticates **once**, with a static `Authorization` header — there is no
+per-request signature for a signer to supply from inside that session. So neither keypair format above
+governs what principal a dispatched child's OWN MCP writes land under, and no signing proxy sits in front of
+that session. This was true before [ateles#795](https://github.com/markmhendrickson/ateles/issues/795) and
+remains true after it: [ateles#1181](https://github.com/markmhendrickson/ateles/pull/1181) does not add a
+per-request signer to the dispatched child's transport.
 
-`skill_runner` does inject `NEOTOMA_AAUTH_PRIVATE_JWK_PATH` / `_SUB` / `_ISS` when the role's JWK exists,
-but those vars are read only by code that shells out to the TypeScript client signer
-(`lib/daemon_runtime/neotoma_signed.py`). **A present JWK is not evidence that a dispatched agent's MCP
-writes are attributed to its role.** Reading it that way is what let one shared bearer pass for a per-lens
-identity while [ateles#795](https://github.com/markmhendrickson/ateles/issues/795) stayed open: a review
-lens signed off, Neotoma matched the `agent_grant` on the *daemon's* principal rather than the lens's,
-refused the write, and `gate_status.<lens>` stayed `pending` — indistinguishable from a review that never
-ran.
+Instead, **#1181 removes the lens's own gate write entirely** and moves it to a party that CAN sign: the
+Apis dispatcher process itself, acting on the lens's behalf.
 
-`skill_runner` resolves a per-role env var for this static header:
+- A seated review lens (or the `pm` gate in the Phase-1 additive-spec pipeline) states its verdict as a
+  plain reply — a fixed-position `**SIGNED_OFF**`/`**APPROVE**` header, or a `[BLOCKING]` finding — and
+  never calls `correct()` on `gate_status` itself. `mcp__mcpsrv_neotoma__correct` is removed from the
+  seated lens's tool allowlist (`GATE_OWNER_DENIED_TOOLS`, enforced via `--disallowed-tools`), so an
+  unsolicited attempt is not a pre-approved clearance path.
+- After the dispatcher parses a CLEAN verdict, `execution/daemons/apis/swarm_dispatch.py` calls
+  `execution/daemons/apis/gate_waive.py`'s `IssueGateStore.sign_off(repo, issue_number, gate, lens_agent,
+  head_sha)`. `sign_off` re-reads `gate_status` fresh, then writes `gate_status.<gate> = "signed_off"`
+  through `lib/daemon_runtime/neotoma_signed.py`'s `signed_request(..., sub=lens_agent)` — passing the
+  **lens's own `sub`** explicitly (never the dispatcher's ambient identity, never the shared bearer) — and
+  reads the write back to confirm it landed as claimed. `signed_request` resolves the lens's signing key
+  via `agent_identity(lens_agent, sub=...)`, which loads `ateles-private/keys/<lens_agent>.jwk.json` — the
+  SAME path `aauth_provision_identity.py` (below) provisions. `sign_off` never falls back to the shared
+  bearer on any failure (a missing key, a signing error, a non-2xx response): it returns
+  `SignOffOutcome(ok=False, ...)` and the gate stays `pending` — the same fail-closed *outcome*
+  `gate_writeback_identity_error` used to enforce, now produced at write time instead of launch time.
+  `skill_runner.run_skill`'s launch-time call to that check is removed as part of #1181 — a gate-owning
+  lens is no longer refused at DISPATCH for lacking `<ROLE>_NEOTOMA_TOKEN`, because the lens no longer
+  writes the gate itself, so a missing token there no longer implies a doomed write. The functions
+  `gate_writeback_identity_error` and `neotoma_token_for_agent` themselves are NOT deleted — they stay
+  on `main`, deliberately, as reusable primitives for any other caller that needs to refuse a write
+  attempted as the wrong principal (see the comment at `skill_runner.py`'s launch-preflight call site
+  and `swarm_dispatch.review_failure_class`, both explicit that this is kept-not-dead code); they are
+  simply no longer wired into the review-panel launch path.
 
-| Tier | Source | Principal |
-|---|---|---|
-| 1 | `<ROLE>_NEOTOMA_TOKEN` (e.g. `ACCIPITER_NEOTOMA_TOKEN`) | intended: the agent's own |
-| 2 | `NEOTOMA_BEARER_TOKEN` | the shared daemon bearer |
+So `<ROLE>_NEOTOMA_TOKEN` and the dispatched child's `--mcp-config` `Authorization` header remain what they
+always were — a bearer credential Neotoma resolves to a human `user_id`, never to an agent `sub`, per
+`src/services/mcp_auth.ts` on the Neotoma side — and they are now **entirely uninvolved** in gate
+attribution. The credential that matters for a gate write is the `ateles-private/keys/<role>.jwk.json`
+keypair this doc's provisioning script mints, consumed by the DISPATCHER's `sign_off` call, not by anything
+the dispatched child itself presents over its own MCP session.
 
-This mirrors `_token_for_agent_on_repo`'s tiering for GitHub, deliberately: the two credential systems
-should degrade the same way. Tier 2 is a real fallback for an **advisory** agent, whose product (a PR
-comment) survives an unattributed run. `skill_runner.run_skill(..., owns_pending_gate=True)` refuses to
-dispatch a gate-owning role that has no Tier 1 credential, rather than let it proceed on Tier 2 alone.
-
-**`<ROLE>_NEOTOMA_TOKEN` does not, on its own, give a dispatched agent Neotoma's `agent_grant`-admitted
-identity.** Reading Neotoma's server source (`src/services/aauth_admission.ts`,
-`src/services/protected_entity_types.ts`, `src/services/mcp_auth.ts` on Neotoma `origin/main`) shows why:
-`agent_grant` admission is matched only against a *verified AAuth request signature* (`sub`/`iss`/
-`thumbprint` from RFC 9421 `Signature`/`Signature-Input`/`Signature-Key` headers) — never against a bearer
-string. Every bearer/OAuth token Neotoma accepts resolves, via `mcp_oauth_connections`, to a human
-`user_id`, not to an agent `sub`. A static `Authorization: Bearer <token>` header — which is all a
-`--mcp-config` entry can express, since it does not change per request — therefore cannot carry AAuth
-admission no matter what string it holds; Neotoma's own docs state this directly (`docs/subsystems/aauth.md`
-on the Neotoma side: "Bearer tokens, OAuth, and MCP `connection_id` continue to resolve the human `user_id`.
-AAuth never bypasses user-scope resolution.").
-
-Carrying an agent's own AAuth signature into this transport requires a **per-request signing proxy** in
-front of the dispatched child's MCP connection — analogous to Neotoma's own `neotoma mcp proxy --aauth`
-stdio shim — since a signature must be recomputed per request (it covers method, path, and body digest).
-No such proxy is wired into `skill_runner`'s `--mcp-config` construction today; this is tracked separately
-(see the swarm-architecture plan) rather than fixed here. Until it exists, `<ROLE>_NEOTOMA_TOKEN` provisions
-and verifies an agent's own signing key (via `aauth_provision_identity.py`, below) but that key is not yet
-consulted by the dispatched-child transport, so treat any assumption that setting the env var alone
-attributes a gate write to the role as unverified.
+**Residual, tracked separately, not fixed by #1181 or this doc:** `sign_off`'s signed write still competes
+with the underlying admission condition it works around — any process holding the shared bearer plus
+`correct` admission on `issue` could still write `gate_status` unattributed if instructed to. #1181's fix
+closes every currently-instructed path to that write, but does not add server-side enforcement that only an
+AAuth-signed, authorized principal may write `gate_status.<gate>`. That is filed as
+`markmhendrickson/neotoma#2485`.
 
 ### Per-agent status (ground truth, May 2026)
 
@@ -171,9 +174,13 @@ neotoma request --operation createAgentGrant --body '{
 }'
 ```
 
-This keypair alone does not yet change what principal a dispatched agent's gate-verdict write lands
-under — see "A third context neither flavor reaches" above for why, and treat this as identity
-provisioning in advance of the transport wiring that would consume it.
+This keypair is what `execution/daemons/apis/gate_waive.py`'s `IssueGateStore.sign_off` loads (via
+`lib/daemon_runtime/neotoma_signed.py`'s `agent_identity(lens_agent, sub=...)`) to sign a gate verdict as
+this role — see "The dispatched child's MCP session does NOT carry gate attribution" above for the full
+mechanism. Provisioning the keypair is necessary but not sufficient: `sign_off` also needs the resolved
+`sub` to be admitted server-side (an `agent_grant` matching `<role>@ateles-swarm`, or the role's `sub`
+present in `NEOTOMA_STRICT_AAUTH_SUBS` if that's how the target instance is configured) for the signed
+write to land as anything other than an unadmitted signature.
 
 ### Proxy layer (Cursor IDE → Neotoma)
 

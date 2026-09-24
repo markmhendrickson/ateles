@@ -146,7 +146,7 @@ def provision(
     "path"}``. Never returns or prints the private key material.
     """
     role = role.strip().lower()
-    if not role or "/" in role or ".." in role:
+    if not role or "/" in role or "\\" in role or ".." in role or "\x00" in role:
         raise ValueError(f"invalid role name: {role!r}")
 
     directory = keys_dir or _default_keys_dir()

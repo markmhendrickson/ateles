@@ -233,102 +233,42 @@ def neotoma_token_env_name(role: str) -> str:
     return f"{role.upper().replace('-', '_')}_NEOTOMA_TOKEN"
 
 
-def _role_has_provisioned_aauth_key(role: str) -> bool:
-    """Whether *role* has a real AAuth private JWK at the path this codebase's
-    provisioning tooling writes to (`aauth_provision_identity.py`, and the
-    same convention read by `aauth_signer.py` / `neotoma_signed.py` /
-    `gating.py`).
-
-    Tier 1 of `neotoma_token_for_agent` used to trust ANY non-empty
-    `<ROLE>_NEOTOMA_TOKEN` as proof of the role's own identity — a stale,
-    placeholder, or typo'd value passed identically to a real credential.
-    This gives that check something to correlate against: a role that has
-    actually been provisioned has a keyfile on disk, one that has not does
-    not. It does not by itself prove the token is genuine (`docs/aauth.md`
-    is explicit that `<ROLE>_NEOTOMA_TOKEN` is a separate, narrower
-    mechanism from the AAuth-signed write path #1181 is landing), but it
-    closes the specific fail-open this preflight had: an unprovisioned role
-    can no longer satisfy Tier 1 with an arbitrary string.
-    """
-    # Matches the resolution the NEOTOMA_AAUTH_PRIVATE_JWK_PATH injection block
-    # below already uses (no invented fallback default here — an unset
-    # ATELES_PRIVATE_KEYS_DIR means "cannot tell", which must read as
-    # unprovisioned, not as some other path guessed at import time).
-    keys_dir = os.environ.get("ATELES_PRIVATE_KEYS_DIR", "")
-    if not keys_dir:
-        return False
-    # os.path.exists, not Path.exists — the latter is patched wholesale in
-    # several tests to stub the unrelated SKILL.md-file lookup, which would
-    # make this check pass unconditionally and silently reopen the fail-open.
-    return os.path.exists(os.path.join(keys_dir, f"{role.lower()}.jwk.json"))
-
-
 def neotoma_token_for_agent(role: str) -> tuple[str, bool]:
     """Resolve (token, is_own_identity) for *role*'s Neotoma calls.
 
-    Tier 1 — `<ROLE>_NEOTOMA_TOKEN`: the agent's own principal, PROVIDED that
-             *role* also has a provisioned AAuth key on disk
-             (`_role_has_provisioned_aauth_key`). `is_own_identity` is True
-             only here. The token itself is still returned whenever the env
-             var is non-empty, regardless of the key check — the MCP header
-             this feeds (`--mcp-config`) is strictly better off presenting a
-             role's real, working token than silently discarding it and
-             falling back to the shared bearer, which would be a correctness
-             regression on top of the fix this scopes. Only `is_own_identity`
-             — the field the gate-writeback preflight trusts for attribution
-             — is gated on the key check.
+    Tier 1 — `<ROLE>_NEOTOMA_TOKEN`: the agent's own principal. `is_own_identity`
+             is True only here.
     Tier 2 — `NEOTOMA_BEARER_TOKEN`: the shared daemon bearer, preserving exact
              current behaviour for every agent that has no credential of its own.
 
     Returning the tier alongside the token is the point: a caller that needs the
     write ATTRIBUTED (a gate writeback) must be able to tell the two apart, and a
-    bare token string cannot say which principal it speaks for. Requiring the
-    keyfile alongside the env var means presence-of-string alone can no longer
-    claim an ATTRIBUTED identity nothing provisioned — but does not stop the
-    token from being used at all where attribution isn't the caller's concern.
+    bare token string cannot say which principal it speaks for.
     """
     own = os.environ.get(neotoma_token_env_name(role), "").strip()
     if own:
-        return own, _role_has_provisioned_aauth_key(role)
+        return own, True
     return os.environ.get("NEOTOMA_BEARER_TOKEN", ""), False
 
 
 def gate_writeback_identity_error(role: str, *, is_own_identity: bool) -> str | None:
     """Why *role* cannot record its own gate verdict, or None when it can.
 
-    No subprocess and no network call, so the preflight is testable without
-    either — it does read `ATELES_PRIVATE_KEYS_DIR` and stat one local file
-    (`_role_has_provisioned_aauth_key`), so it is not pure in the strict
-    sense. Only a gate OWNER calls this; an advisory lens runs on the shared
-    bearer exactly as before.
+    Pure, so the preflight is testable without a subprocess. Only a gate OWNER
+    calls this; an advisory lens runs on the shared bearer exactly as before.
     """
     if is_own_identity:
         return None
-    token_set = bool(os.environ.get(neotoma_token_env_name(role), "").strip())
-    key_provisioned = _role_has_provisioned_aauth_key(role)
-    if token_set and not key_provisioned:
-        cause = (
-            f"{neotoma_token_env_name(role)} is set, but '{role}' has no "
-            "provisioned AAuth key on disk (run "
-            f"`execution/scripts/aauth_provision_identity.py --role {role}`), "
-            "so the token cannot be correlated to a real, currently-usable "
-            "credential for this role."
-        )
-    else:
-        cause = f"no {neotoma_token_env_name(role)} is set"
     return (
         f"{NEOTOMA_IDENTITY_UNAVAILABLE}: '{role}' owns a pre-impl gate and must "
-        f"`correct()` the parent issue entity to record its verdict, but {cause}, "
-        "so it would present the shared daemon bearer instead of its own "
-        "principal. That write would still be ACCEPTED by Neotoma today — "
-        "`issue` is not a protected entity_type, so `agent_grant` admission is "
-        "not required for it — but it would land attributed to the "
-        "shared/operator principal rather than to "
-        f"'{role}@ateles-swarm', which is indistinguishable in the record from a "
-        "review that never ran under its own identity (ateles#795). Refusing "
-        "here keeps that attribution failure from landing silently. Provision "
-        f"{neotoma_token_env_name(role)} — see docs/aauth.md for what that "
-        "currently does and does not achieve."
+        f"`correct()` the parent issue entity to record its verdict, but no "
+        f"{neotoma_token_env_name(role)} is set, so it would present the shared "
+        "daemon bearer instead of its own principal. Neotoma matches the "
+        f"agent_grant on the caller's principal, so the write would be refused "
+        "and the gate would stay `pending` — indistinguishable from a review "
+        f"that never ran (ateles#795). Provision {neotoma_token_env_name(role)} "
+        f"for '{role}@ateles-swarm' and file an agent_grant carrying retrieve + "
+        "correct on `issue`."
     )
 
 
