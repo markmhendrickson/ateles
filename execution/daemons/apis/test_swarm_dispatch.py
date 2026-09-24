@@ -7587,6 +7587,243 @@ def test_ux_blocking_verdict_does_not_call_sign_off_for_ux_gate(monkeypatch):
     assert ux_calls == [], "a [BLOCKING] ux verdict must never sign the ux gate"
 
 
+# ── ateles#1233: pm → ux/arch → build, end to end, through the real prompts ──
+#
+# The ux/arch sign-off tests above hand the dispatcher a reply that already
+# carries a fixed-position header and verdict. In production nothing asked
+# Accipiter or Waxwing for one: their spec-section prompt requested a fenced
+# section only, so on ateles#1221 both lenses ran, posted no verdict, and the
+# gates stayed pending. These tests drive the pipeline with lenses that answer
+# the prompt they are actually given — a gate verdict only when the prompt asks
+# for one in the fixed-position format — against a stateful gate store, and
+# assert the whole chain: pm signed, ux/arch owners asked for a gate verdict,
+# their clear verdicts signed, and the issue handed to build.
+
+
+def _gate_owner_reply(agent: str, lens: str, prompt: str, verdict: str) -> str:
+    """What a lens returns for *prompt*: the section always, a gate verdict
+    only when the prompt asks for one at the fixed position under this lens's
+    own gate-owner header (the shape `gate_verdict_instruction` renders)."""
+    section = (
+        f"<<<SPEC_SECTION>>>**{lens}:** {agent}-section body with real "
+        "substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>"
+    )
+    header = swarm_dispatch.attribution_header(agent, f"{lens} gate owner")
+    asked = (
+        header in prompt
+        and swarm_dispatch.GATE_VERDICT_POSITION_RULE in prompt
+    )
+    if not asked:
+        return section
+    tail = ""
+    if verdict == "BLOCKED":
+        tail = f"\n[BLOCKING] {lens}: the spec leaves this lens's question open."
+    return f"{header}\n**{verdict}**\n\n{section}{tail}"
+
+
+class _StatefulGateStore:
+    """A gate record shared across every `IssueGateStore(...)` the pipeline
+    constructs: Lanius triaged pm/ux/arch to `pending`, `sign_off` flips the
+    lens's own gate, and only a gate this store signed is provable."""
+
+    gate_status: dict = {}
+    signed: list = []
+
+    def __init__(self, base_url, token):
+        pass
+
+    @classmethod
+    def reset(cls):
+        cls.gate_status = {"pm": "pending", "ux": "pending", "arch": "pending"}
+        cls.signed = []
+
+    async def load(self, repo, issue_number):
+        from gate_waive import IssueGateState
+
+        return IssueGateState(
+            repo=repo,
+            issue_number=issue_number,
+            entity_id="ent_issue",
+            gate_status=dict(type(self).gate_status),
+        )
+
+    async def sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+        from gate_waive import SignOffOutcome
+
+        assert head_sha, "sign_off must name what the verdict was for"
+        type(self).gate_status[gate] = "signed_off"
+        type(self).signed.append((gate, lens_agent))
+        return SignOffOutcome(
+            ok=True, gate=gate, lens_agent=lens_agent,
+            lens_sub=f"{lens_agent}@ateles-swarm", verified=True,
+        )
+
+    async def unverified_signed_off_gates(self, state, owners):
+        signed_gates = {g for g, _ in type(self).signed}
+        return {
+            g for g in owners
+            if (state.gate_status.get(g) or "") == "signed_off"
+            and g not in signed_gates
+        }
+
+
+def _run_pipeline_to_build(monkeypatch, verdicts: dict[str, str]):
+    """Run `_handle_issue_opened` with ux/arch seated and auto-build ON.
+
+    *verdicts* maps agent → the verdict it gives WHEN ASKED. Returns
+    (prompts by agent, build handoffs opened)."""
+    prompts: dict[str, str] = {}
+    lens_of = {"pavo": "pm", "accipiter": "ux", "waxwing": "arch"}
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        prompts[skill] = prompt
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill in lens_of:
+            return SkillResult(
+                skill, True, 0,
+                _gate_owner_reply(
+                    skill, lens_of[skill], prompt, verdicts.get(skill, "SIGNED_OFF")
+                ),
+                "",
+            )
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _selected = [
+        Lens(agent="accipiter", lens="ux", gate="ux", checks="design"),
+        Lens(agent="waxwing", lens="arch", gate="arch", checks="security"),
+    ]
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: _selected
+    )
+    _StatefulGateStore.reset()
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _StatefulGateStore)
+
+    async def no_declared_override(self, state, ref):
+        return None  # every pre-impl key is present, so this is never consulted
+
+    monkeypatch.setattr(
+        SwarmDispatcher, "_declared_gates_for_issue", no_declared_override
+    )
+
+    async def no_surface(self, *a, **kw):
+        return None
+
+    for name in (
+        "_surface_failed_sign_offs",
+        "_surface_unreadable_gate_verdicts",
+        "_surface_unverified_signed_off_gates",
+    ):
+        monkeypatch.setattr(SwarmDispatcher, name, no_surface)
+
+    opened: list[int] = []
+
+    async def fake_open_pr(self, trigger, state):
+        opened.append(trigger.number)
+        return f"https://github.com/owner/repo/pull/{trigger.number + 1}"
+
+    monkeypatch.setattr(SwarmDispatcher, "_open_implementation_pr", fake_open_pr)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_build=True))
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+    return prompts, opened
+
+
+def test_issue_pipeline_signs_ux_and_arch_and_hands_off_to_build(monkeypatch):
+    """ateles#1233 / ateles#1221, end to end: pm signs, the ux and arch owners
+    are asked for a gate verdict, their clear verdicts sign their own gates,
+    and the issue hands off to build. RED on main (only pm is ever signed) and
+    on the sign-off wiring alone (the ux/arch prompt never asks for a verdict,
+    so there is none to read)."""
+    prompts, opened = _run_pipeline_to_build(monkeypatch, {})
+
+    for agent, lens in (("accipiter", "ux"), ("waxwing", "arch")):
+        header = swarm_dispatch.attribution_header(agent, f"{lens} gate owner")
+        assert header in prompts[agent], (
+            f"{agent}'s section prompt must ask for its {lens} gate verdict "
+            "under its own gate-owner header"
+        )
+        assert swarm_dispatch.GATE_VERDICT_POSITION_RULE in prompts[agent]
+
+    assert ("pm", "pavo") in _StatefulGateStore.signed
+    assert ("ux", "accipiter") in _StatefulGateStore.signed
+    assert ("arch", "waxwing") in _StatefulGateStore.signed
+    assert _StatefulGateStore.gate_status == {
+        "pm": "signed_off", "ux": "signed_off", "arch": "signed_off",
+    }
+    assert opened == [100], "all pre-impl gates signed — must hand off to build"
+
+
+def test_issue_pipeline_blocked_arch_verdict_keeps_gate_pending_and_no_build(
+    monkeypatch,
+):
+    """Fail closed: a `**BLOCKED**` arch verdict leaves arch pending and the
+    issue does not reach build, while the clear ux verdict still signs ux."""
+    _prompts, opened = _run_pipeline_to_build(
+        monkeypatch, {"waxwing": "BLOCKED"}
+    )
+
+    assert ("ux", "accipiter") in _StatefulGateStore.signed
+    assert all(g != "arch" for g, _ in _StatefulGateStore.signed)
+    assert _StatefulGateStore.gate_status["arch"] == "pending"
+    assert opened == []
+
+
+def test_issue_pipeline_comment_ux_verdict_is_not_a_clear(monkeypatch):
+    """Fail closed: `**COMMENT**` names no gate decision, so ux stays pending
+    and nothing is handed to build."""
+    _prompts, opened = _run_pipeline_to_build(
+        monkeypatch, {"accipiter": "COMMENT"}
+    )
+
+    assert all(g != "ux" for g, _ in _StatefulGateStore.signed)
+    assert _StatefulGateStore.gate_status["ux"] == "pending"
+    assert opened == []
+
+
+def test_issue_pipeline_verdict_under_another_agents_header_does_not_sign(
+    monkeypatch,
+):
+    """Identity stays bound: a clear arch verdict under a header naming a
+    different agent than the one seated for the gate signs nothing, and the
+    issue does not reach build."""
+    _run_pipeline_to_build(monkeypatch, {})
+    harness_run_skill = swarm_dispatch.run_skill
+
+    async def impostor(skill, prompt, **kwargs):
+        if skill != "waxwing":
+            return await harness_run_skill(skill, prompt, **kwargs)
+        header = swarm_dispatch.attribution_header("accipiter", "arch gate owner")
+        return SkillResult(
+            skill, True, 0,
+            f"{header}\n**SIGNED_OFF**\n\n<<<SPEC_SECTION>>>**arch:** body "
+            "with real substance to pass the floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", impostor)
+    _StatefulGateStore.reset()
+    opened: list[int] = []
+
+    async def fake_open_pr(self, trigger, state):
+        opened.append(trigger.number)
+        return "https://github.com/owner/repo/pull/101"
+
+    monkeypatch.setattr(SwarmDispatcher, "_open_implementation_pr", fake_open_pr)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_build=True))
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert ("ux", "accipiter") in _StatefulGateStore.signed
+    assert all(g != "arch" for g, _ in _StatefulGateStore.signed)
+    assert _StatefulGateStore.gate_status["arch"] == "pending"
+    assert opened == []
+
+
 def test_spec_section_prompt_is_additive_and_no_comment(monkeypatch):
     """The section prompt must tell the agent to add ONLY its section, build on
     prior sections, and NOT post spec as a comment."""

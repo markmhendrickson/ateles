@@ -9911,6 +9911,41 @@ class SwarmDispatcher:
                 "do not leave it blocked without saying why.\n\n"
                 + gate_verdict_instruction(section.agent, "pm gate owner")
             )
+        elif section.lens in PRE_IMPL_GATES:
+            # ateles#1233: ux (Accipiter) and arch (Waxwing) own pre-impl
+            # gates too, and `_run_issue_spec_pipeline` signs their gate from
+            # their reply exactly as it signs pm's. But `lens_own_verdict`
+            # reads a verdict ONLY from the reply's first two lines, and until
+            # this block the ux/arch prompt never asked for one: it asked for
+            # a fenced spec section and nothing else. Their generated skills
+            # still say to `correct(gate_status...)` themselves, which the
+            # gate-owner deny now refuses, so the lens had no way left to
+            # record a verdict at all. On ateles#1221 both ran, wrote their
+            # sections, posted no verdict, and ux/arch stayed pending.
+            pm_gate_block = (
+                f"\n\nGATE: you own the `{section.lens}` pre-implementation "
+                "gate for this issue, and it is decided from YOUR reply. State "
+                "your verdict in ONE GitHub comment on the issue, in the "
+                "contract's format (attribution header, then the verdict "
+                "line), and repeat that header and verdict line at the very "
+                "START of your reply here, BEFORE the `<<<SPEC_SECTION>>>` "
+                f"fence: {GATE_VERDICT_POSITION_RULE}. The dispatcher — never "
+                "this session — records the system-of-record gate clearance, "
+                "signed with your own AAuth identity, after reading your "
+                "verdict. You have no durable write to make here; do not "
+                "call `correct` on `gate_status` or `current_owner`.\n"
+                f"- When the issue PASSES your `{section.lens}` review, the "
+                "verdict line is `**SIGNED_OFF**`, with NO `[BLOCKING]` marker "
+                "anywhere in the reply.\n"
+                "- Only when it GENUINELY FAILS, the verdict line is "
+                f"`**BLOCKED**`, with a `[BLOCKING] {section.lens}: <what is "
+                "missing>` line saying exactly what must change. A pending "
+                f"`{section.lens}` gate keeps this issue from reaching build, "
+                "so do not leave it blocked without saying why.\n\n"
+                + gate_verdict_instruction(
+                    section.agent, f"{section.lens} gate owner"
+                )
+            )
 
         # Foundation binding (docs/foundation/conformance.md): the pm gate
         # states the design basis from the kernel; the arch gate checks it.
