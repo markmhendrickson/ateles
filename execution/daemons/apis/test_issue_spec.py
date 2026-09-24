@@ -2,6 +2,13 @@
 
 Covers the pure helpers (assemble_spec_markdown, splice_managed_block) and the
 IssueSpecStore create/correct additive-merge behaviour with a stubbed Neotoma.
+
+The read-path fix (targeted snapshot_filters query + fail-closed-on-ambiguous
+match) is carried from PR #497 into entity_lookup.py / entity_lookup.resolve_entity
+and is tested in test_issue_spec_entity_lookup.py, not here. This file covers
+what remains specific to issue_spec.py: the additive create/correct contract,
+and this PR's OWN addition beyond #492/#497's scope — the create branch's
+idempotency-key fix and the _post() error-body capture.
 """
 
 import asyncio
@@ -19,6 +26,7 @@ from issue_spec import (
     spec_key,
     splice_managed_block,
     _extract_entity_id,
+    _redact,
 )
 
 
@@ -197,11 +205,25 @@ class _StubStore(IssueSpecStore):
                 if rec["entity_id"] == payload["entity_id"]:
                     rec["snapshot"][payload["field"]] = payload["value"]
             return {}
-        if path in ("entities/query", "retrieve_entities"):
+        if path == "entities/query":
+            # entity_lookup.resolve_entity's targeted query carries
+            # snapshot_filters; honor it so load() finds the right row
+            # (mirrors real Neotoma's eq-filter semantics).
+            filters = payload.get("snapshot_filters")
+            items = self._server.values()
+            if filters:
+                items = [
+                    r
+                    for r in items
+                    if all(
+                        str(r["snapshot"].get(field)) == str(spec["value"])
+                        for field, spec in filters.items()
+                    )
+                ]
             return {
                 "entities": [
                     {"entity_id": r["entity_id"], "snapshot": r["snapshot"]}
-                    for r in self._server.values()
+                    for r in items
                 ]
             }
         return {}
@@ -279,62 +301,57 @@ def test_section_fields_match_sections():
     assert SECTION_FIELDS == tuple(s.field for s in SECTIONS)
 
 
-# ── ateles#499: load() must query TARGETED, and a stale idempotency key ─────
-# ── must not 400 forever once an entity it missed already exists ────────────
+# ── This PR's own addition: idempotency-key fix + error-body capture ───────
 #
-# Reproduces the real prod failure (474 store-failed 400s since 2026-08-09,
-# e.g. markmhendrickson/ateles#403 and #1189): load() queried ONE UNFILTERED
-# page (`limit: 200`, no snapshot_filters, no cursor walk) of the WHOLE
-# issue_spec corpus. With 900+ entities in prod, an issue whose entity sorted
-# past page 1 was invisible to load(), so upsert_section took the CREATE
-# branch for an issue that already HAD an entity. Neotoma's identity resolver
-# recognizes the repo+issue_number collision, but the create branch's
-# idempotency key (`issue-spec-create-{key}`, a bare per-issue CONSTANT) had
-# already been consumed by that issue's real first create with DIFFERENT
-# content, so every subsequent mis-detected retry got a permanent, actionable
-# ERR_IDEMPOTENCY_MISMATCH 400 — reproduced live against prod Neotoma with
-# `commit: false` during diagnosis (see the PR description).
+# The READ-path fix (targeted snapshot_filters query, fail-closed on an
+# ambiguous match) is carried from PR #497 into entity_lookup.py and tested
+# in test_issue_spec_entity_lookup.py — not duplicated here.
 #
-# The fix replaces the unfiltered scan with a TARGETED entities/query using
-# snapshot_filters on {repo, issue_number} — the entity's own identity rule
-# (confirmed live: composite:repo+issue_number) — as the DEFAULT path, not a
-# scan. Hosted Neotoma is capacity-constrained (a bulk read already crashed
-# it once, neotoma#2483, 2026-09-23), so a full-corpus scan is kept ONLY as a
-# bounded fallback for when the targeted query itself errors, never
-# triggered merely by finding zero matches.
+# What remains PR-specific: the real prod failure reproduced live against
+# prod Neotoma (commit:false dry-runs; see the PR description) was that
+# IssueSpecStore.load() read one UNFILTERED page (limit: 200, no
+# snapshot_filters, no cursor walk) of the WHOLE issue_spec corpus. With
+# 900+ entities in prod, an issue whose entity sorted past page 1 was
+# invisible to load(), so upsert_section took the CREATE branch for an issue
+# that already HAD an entity. Neotoma's identity resolver recognizes the
+# repo+issue_number collision, but the create branch's idempotency key
+# (`issue-spec-create-{key}`, a bare per-issue CONSTANT) had already been
+# consumed by that issue's real first create with DIFFERENT content, so
+# every subsequent mis-detected retry got a permanent, actionable
+# ERR_IDEMPOTENCY_MISMATCH 400 — 474 occurrences since 2026-08-09.
+#
+# #492/#498 (via #497's entity_lookup.resolve_entity, now adopted in
+# issue_spec.py) fixes the READ side. #492 is explicitly read-only in scope
+# (its own Security/Arch section: "No idempotency_key requirement applies to
+# the lookup path itself") — it does NOT touch the create branch's
+# idempotency key, so the 474 400s are NOT fixed by #492/#497 alone. The fix
+# below is this PR's own, separate addition.
 
 
 class _PaginatingStubStore(IssueSpecStore):
-    """Simulates a Neotoma corpus, honoring ``snapshot_filters`` on
-    entities/query the way prod does, with a large enough corpus that an
-    UNFILTERED query needs cursor pagination to reach a later row.
-
-    ``page_size`` bounds an unfiltered (fallback-scan) page; a cursor threads
-    through until the corpus is exhausted. ``fail_targeted_queries`` makes any
-    call carrying ``snapshot_filters`` return an error (None), so tests can
-    exercise load()'s bounded-fallback path deliberately.
+    """Stub Neotoma honoring entity_lookup.resolve_entity's real request
+    shapes: a targeted snapshot_filters query, then — only if that
+    errors — a recency-sorted scan (sort_by/offset, no snapshot_filters).
+    Also honors idempotency-key collisions on store, matching real Neotoma's
+    behaviour (verified live against prod during diagnosis: same key +
+    different content -> 400 ERR_IDEMPOTENCY_MISMATCH; a fresh key ->
+    identity-based merge, never a duplicate entity).
     """
 
-    def __init__(self, page_size=2, extra_entities=0, fail_targeted_queries=False):
+    def __init__(self, extra_entities=0):
         super().__init__(base_url="http://x", token="tok")
         self.calls = []
         self._server = {}
         self._next_id = 1
-        self.page_size = page_size
-        self.fail_targeted_queries = fail_targeted_queries
-        # Pad the corpus with unrelated entities BEFORE the real one, so an
-        # UNFILTERED, non-paginating scan misses it (mirrors prod: 900+
-        # issue_spec rows, sorted by entity_id, with any one issue's row
-        # potentially anywhere). The targeted query never needs to see these.
+        # Padding rows are irrelevant to a TARGETED query (it filters
+        # server-side) but exist so a regression to an unfiltered scan would
+        # be caught by a test asserting the query is actually filtered.
         for i in range(extra_entities):
             eid = f"ent_padding_{i:04d}"
             self._server[("padding/repo", i)] = {
                 "entity_id": eid,
                 "snapshot": {"repo": "padding/repo", "issue_number": i},
             }
-        # Idempotency-key ledger: key -> content signature of the payload that
-        # consumed it, so a mismatched replay can be detected like the real
-        # Neotoma /store endpoint does.
         self._idempotency: dict[str, str] = {}
 
     def _content_signature(self, payload: dict) -> str:
@@ -395,20 +412,17 @@ class _PaginatingStubStore(IssueSpecStore):
             self.last_error = None
             filters = payload.get("snapshot_filters")
             if filters:
-                if self.fail_targeted_queries:
-                    self.last_error_code = "ERR_UPSTREAM_TIMEOUT"
-                    self.last_error_status = 502
-                    self.last_error = "simulated targeted-query failure"
-                    return None
-                # Real Neotoma's snapshot_filters: eq match on each named
-                # field, exactly the identity fields (repo, issue_number).
-                want_repo = filters.get("repo", {}).get("value")
-                want_issue = filters.get("issue_number", {}).get("value")
+                # entity_lookup's targeted combos use whichever field-name
+                # pair the caller supplied; match generically on ALL filters
+                # present in this call (mirrors real snapshot_filters AND
+                # semantics).
                 matches = [
                     r
                     for r in self._server.values()
-                    if r["snapshot"].get("repo") == want_repo
-                    and str(r["snapshot"].get("issue_number")) == str(want_issue)
+                    if all(
+                        str(r["snapshot"].get(field)) == str(spec["value"])
+                        for field, spec in filters.items()
+                    )
                 ]
                 return {
                     "entities": [
@@ -416,145 +430,19 @@ class _PaginatingStubStore(IssueSpecStore):
                         for r in matches
                     ]
                 }
-            # Unfiltered (full-scan fallback) path: paginate.
-            cursor = payload.get("cursor")
+            # entity_lookup's recency-scan fallback: no snapshot_filters,
+            # sort_by/offset instead of the old cursor pagination.
             all_items = list(self._server.values())
-            start = int(cursor) if cursor else 0
-            page = all_items[start : start + self.page_size]
-            next_start = start + self.page_size
-            resp = {
+            offset = payload.get("offset", 0)
+            limit = payload.get("limit", 100)
+            page = all_items[offset : offset + limit]
+            return {
                 "entities": [
                     {"entity_id": r["entity_id"], "snapshot": r["snapshot"]}
                     for r in page
                 ]
             }
-            if next_start < len(all_items):
-                resp["next_cursor"] = str(next_start)
-            return resp
         return {}
-
-
-def test_load_uses_a_targeted_query_not_a_full_corpus_scan():
-    """RED on the pre-fix load(): it read one UNFILTERED page of the whole
-    corpus (limit: 200, no snapshot_filters). Hosted Neotoma is capacity-
-    constrained (a bulk read already crashed it once, neotoma#2483) — the
-    fix must query the ONE entity load() actually wants via
-    snapshot_filters={repo, issue_number}, never scan the corpus by default.
-
-    5 padding rows (entities load() has no reason to ever see) would force
-    3+ pages under the OLD unfiltered pagination; a targeted query finds the
-    real entity in exactly one call, filtered, regardless of corpus size.
-    """
-    store = _PaginatingStubStore(page_size=2, extra_entities=5)
-    state = asyncio.run(
-        store.upsert_section(
-            SpecState(repo="owner/repo", issue_number=1189, title="T"),
-            _section("pm"),
-            "PM scope",
-        )
-    )
-    assert state.entity_id, "entity should have been created"
-
-    reloaded = asyncio.run(store.load("owner/repo", 1189, "T"))
-    assert reloaded.entity_id == state.entity_id, (
-        "load() must find the entity via a targeted query regardless of how "
-        "many unrelated rows exist in the corpus"
-    )
-    assert reloaded.sections.get("pm_section") == "PM scope"
-
-    query_calls = [c for c in store.calls if c[0] == "entities/query"]
-    # Exactly ONE entities/query call for the load() above (the create
-    # itself makes no query call) — this is the "small reads" contract: a
-    # targeted lookup costs one request no matter the corpus size, where the
-    # pre-fix pagination cost N requests proportional to corpus size.
-    assert len(query_calls) == 1, (
-        "load() must resolve in ONE targeted entities/query call, not a "
-        f"multi-page scan; got {len(query_calls)} call(s)"
-    )
-    only_call = query_calls[0][1]
-    assert only_call.get("snapshot_filters") == {
-        "repo": {"op": "eq", "value": "owner/repo"},
-        "issue_number": {"op": "eq", "value": 1189},
-    }, (
-        "load()'s entities/query call must carry snapshot_filters on repo + "
-        f"issue_number, not scan unfiltered; got {only_call}"
-    )
-    # And it must never have paged through the corpus with cursor — the
-    # padding rows exist specifically to catch a regression to the old
-    # unfiltered-scan behaviour.
-    assert not any("cursor" in c[1] for c in query_calls)
-
-
-def test_load_falls_back_to_bounded_scan_only_when_the_targeted_query_errors():
-    """The full-corpus scan is a FALLBACK for a targeted-query ERROR only —
-    never the default path, and never triggered merely by zero matches (a
-    genuinely new issue has zero matches on the targeted query too).
-    """
-    # Case 1: targeted query errors -> falls back and still finds the entity.
-    store = _PaginatingStubStore(
-        page_size=2, extra_entities=5, fail_targeted_queries=True
-    )
-    # Pre-seed the "existing entity" directly in the stub's server, bypassing
-    # upsert_section (which would itself hit the failing targeted query).
-    store._server[("owner/repo", 1189)] = {
-        "entity_id": "ent_preexisting",
-        "snapshot": {
-            "repo": "owner/repo",
-            "issue_number": 1189,
-            "pm_section": "PM scope",
-        },
-    }
-    reloaded = asyncio.run(store.load("owner/repo", 1189, "T"))
-    assert reloaded.entity_id == "ent_preexisting", (
-        "when the targeted query errors, load() must fall back to the "
-        "bounded full-corpus scan rather than giving up"
-    )
-    query_calls = [c for c in store.calls if c[0] == "entities/query"]
-    # The failed targeted attempt, THEN at least one unfiltered fallback page.
-    assert query_calls[0][1].get("snapshot_filters"), (
-        "the targeted query must still be tried FIRST, even though it will "
-        "fail in this test"
-    )
-    assert any(not c[1].get("snapshot_filters") for c in query_calls[1:]), (
-        "a fallback scan must have run after the targeted query errored"
-    )
-
-    # Case 2: targeted query SUCCEEDS with zero matches (a genuinely new
-    # issue) -> must NOT fall back to a full scan at all.
-    store2 = _PaginatingStubStore(page_size=2, extra_entities=5)
-    reloaded2 = asyncio.run(store2.load("owner/repo", 99999, "T"))
-    assert reloaded2.entity_id == ""
-    query_calls2 = [c for c in store2.calls if c[0] == "entities/query"]
-    assert len(query_calls2) == 1, (
-        "zero matches on the targeted query is a normal outcome (a new "
-        "issue) and must NOT trigger a full-corpus fallback scan; got "
-        f"{len(query_calls2)} entities/query call(s)"
-    )
-
-
-def test_load_fails_closed_on_an_ambiguous_multi_match():
-    """More than one match for repo+issue_number violates the entity's own
-    identity rule (composite:repo+issue_number, confirmed live against prod)
-    — load() must refuse to guess which row is authoritative rather than
-    silently picking one and risking a correction against the wrong entity.
-    """
-    store = _PaginatingStubStore()
-    store._server[("owner/repo", 1189)] = {
-        "entity_id": "ent_a",
-        "snapshot": {"repo": "owner/repo", "issue_number": 1189},
-    }
-    # Same (repo, issue_number) tuple can't literally be a second dict key,
-    # so simulate the ambiguous-server-response shape directly.
-    store._server[("owner/repo", 1189, "dup")] = {
-        "entity_id": "ent_b",
-        "snapshot": {"repo": "owner/repo", "issue_number": 1189},
-    }
-
-    state = asyncio.run(store.load("owner/repo", 1189, "T"))
-    assert state.entity_id == "", (
-        "an ambiguous (>1 match) targeted query result must fail CLOSED — "
-        "no entity_id picked — rather than guessing"
-    )
 
 
 def test_missed_entity_does_not_400_forever_on_stale_idempotency_key():
@@ -568,12 +456,12 @@ def test_missed_entity_does_not_400_forever_on_stale_idempotency_key():
     section text). Pre-fix: the create branch always sent
     `issue-spec-create-{key}` with no variance, so C1 != C2 under the same
     key -> permanent ERR_IDEMPOTENCY_MISMATCH, and pre-fix's reload fallback
-    used the SAME unfiltered, un-paginated load() that missed the entity in
-    the first place, so it never recovered — the eng section is silently
-    lost forever. Post-fix, the reload uses the TARGETED query, which finds
-    the entity regardless of corpus size.
+    used the SAME defective load() that missed the entity in the first place,
+    so it never recovered — the eng section is silently lost forever.
+    Post-fix, the reload uses entity_lookup.resolve_entity's targeted query,
+    which finds the entity regardless of corpus size.
     """
-    store = _PaginatingStubStore(page_size=500, extra_entities=0)
+    store = _PaginatingStubStore(extra_entities=0)
     state = asyncio.run(
         store.upsert_section(
             SpecState(repo="owner/repo", issue_number=1189, title="T"),
@@ -585,8 +473,8 @@ def test_missed_entity_does_not_400_forever_on_stale_idempotency_key():
     assert real_entity_id
 
     # Simulate a subsequent dispatch whose load() missed the already-created
-    # entity (the ateles#499 scenario) by starting a FRESH SpecState with no
-    # entity_id, as load() would hand back on a miss.
+    # entity by starting a FRESH SpecState with no entity_id, as load() would
+    # hand back on a miss.
     fresh_state = SpecState(repo="owner/repo", issue_number=1189, title="T")
     fresh_state = asyncio.run(
         store.upsert_section(fresh_state, _section("eng"), "ENG plan")
@@ -596,7 +484,7 @@ def test_missed_entity_does_not_400_forever_on_stale_idempotency_key():
         "after a create collides on a stale idempotency key, upsert_section "
         "must recover the EXISTING entity_id (via a targeted reload) rather "
         "than permanently losing the section — this is the exact shape of "
-        "the 474 store-failed 400s in ateles#499"
+        "the 474 store-failed 400s this PR fixes"
     )
     # The pm section written by the first call must survive untouched — the
     # recovery path must never overwrite a sibling section.
@@ -608,8 +496,7 @@ def test_missed_entity_does_not_400_forever_on_stale_idempotency_key():
 def test_post_captures_status_and_error_code_on_http_error(monkeypatch):
     """RED on pre-fix _post: the response body (status + error_code) that
     Neotoma sends on a 400 was discarded — only the bare exception string
-    ("400 Bad Request") reached the log, per ateles#499's own description
-    ("store failures logged without a reason").
+    ("400 Bad Request") reached the log.
     """
     import httpx as httpx_mod
 
@@ -650,3 +537,64 @@ def test_post_captures_status_and_error_code_on_http_error(monkeypatch):
         "the bare '400 Bad Request' exception string"
     )
     assert store.last_error and "boom" in store.last_error
+
+
+# ── _redact() — belt-and-braces Authorization-stripping (QA gap) ────────────
+
+
+def test_redact_strips_header_form_bearer_token():
+    """Header-shaped 'Authorization: Bearer <token>' must be redacted.
+
+    RED without the fix: an earlier revision of _redact's regex anchored on
+    a literal colon only (no `[:=]` alternation), which fails to match a
+    body echoing the header in query-string/JSON-assignment form
+    (`authorization=Bearer ...`) — proven by temporarily narrowing the
+    pattern to `:` only, see the sibling assertion below.
+    """
+    out = _redact("Authorization: Bearer sk-abc123XYZsecret")
+    assert "sk-abc123XYZsecret" not in out
+    assert "<redacted>" in out
+    assert out == "Authorization: <redacted>"
+
+
+def test_redact_strips_json_assignment_form_bearer_token():
+    """A JSON-string-embedded 'authorization': 'Bearer ...' must also redact
+    (the `[:=]` alternation + optional quote handling is what this proves)."""
+    body = '{"authorization": "Bearer sk-realtoken999", "message": "boom"}'
+    out = _redact(body)
+    assert "sk-realtoken999" not in out
+    assert "<redacted>" in out
+    assert '"message": "boom"' in out, "unrelated fields must survive untouched"
+
+
+def test_redact_case_insensitive_and_leaves_non_auth_text_alone():
+    out = _redact("AUTHORIZATION: BEARER sk-xyz")
+    assert "sk-xyz" not in out.lower() or "<redacted>" in out
+    # Ordinary error text must pass through completely unchanged.
+    plain = '{"error_code": "ERR_IDEMPOTENCY_MISMATCH", "message": "boom"}'
+    assert _redact(plain) == plain
+
+
+def test_redact_regex_is_exercised_not_vacuous():
+    """Proves the test above can actually fail: a regex requiring a literal
+    colon (rejecting the `=` form real error bodies could carry, e.g. a
+    query-string echo) misses the assignment-form case.
+
+    This mirrors the "colon-only" regex verified RED here, then confirms the
+    real _redact (which alternates `[:=]`) is not that narrower pattern.
+    """
+    import re
+
+    colon_only = re.compile(
+        r'(?i)(authorization["\']?\s*:\s*["\']?)bearer\s+\S+'
+    )
+    assignment_form = 'authorization=Bearer sk-shouldberedacted'
+    # RED: the narrower colon-only pattern does NOT catch the `=` form.
+    assert colon_only.sub(r"\1<redacted>", assignment_form) == assignment_form, (
+        "sanity check: a colon-only regex must NOT catch the assignment "
+        "form — if this assertion itself fails, the sanity check is broken"
+    )
+    # GREEN: the real _redact DOES catch it (uses [:=] alternation).
+    out = _redact(assignment_form)
+    assert "sk-shouldberedacted" not in out
+    assert "<redacted>" in out

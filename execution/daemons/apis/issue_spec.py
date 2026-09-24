@@ -42,6 +42,8 @@ from datetime import datetime, timezone
 
 import httpx
 
+from entity_lookup import resolve_entity
+
 log = logging.getLogger("apis.issue_spec")
 
 # Idempotency-mismatch is Neotoma's signal that a payload was already stored
@@ -52,12 +54,6 @@ log = logging.getLogger("apis.issue_spec")
 # agent's section field, since the create-branch payload only carries the ONE
 # section this call is writing).
 ERR_IDEMPOTENCY_MISMATCH = "ERR_IDEMPOTENCY_MISMATCH"
-
-# Cap on entities/query pages load() will walk looking for a match. Bounds a
-# pathological cursor loop (a server bug returning a cursor forever) while
-# comfortably covering real corpus sizes: 922 issue_spec entities today at
-# 500/page is 2 pages, so 40 pages is far beyond any real backlog.
-MAX_LOAD_PAGES = 40
 
 
 # ── Managed-marker constants ─────────────────────────────────────────────────
@@ -271,14 +267,19 @@ class SpecState:
             self.sequence_state = []
 
 
-def _state_from_entity(entity: dict, state: SpecState, title: str) -> SpecState:
-    """Populate ``state`` from one entities/query result row's snapshot.
+def _state_from_hit(
+    entity: dict, snap: dict, state: SpecState, title: str
+) -> SpecState:
+    """Populate ``state`` from an ``entity_lookup.resolve_entity`` hit.
 
-    Pure/no I/O — shared by load()'s targeted query and its bounded
-    full-scan fallback, so the two paths parse a matched row identically.
+    ``entity`` is the raw result row; ``snap`` is its ALREADY-UNWRAPPED
+    snapshot field map (``entity_lookup.unwrap_snapshot`` has already
+    tolerated the one-level-nested shape some prod responses use). Pure/no
+    I/O.
     """
-    snap = entity.get("snapshot") or {}
-    state.entity_id = entity.get("entity_id", "")
+    state.entity_id = str(
+        entity.get("entity_id") or entity.get("id") or snap.get("entity_id") or ""
+    )
     state.title = snap.get("title", title) or title
     state.sections = {
         field: snap[field] for field in SECTION_FIELDS if snap.get(field)
@@ -322,7 +323,7 @@ class IssueSpecStore:
         failure REASONS (e.g. an idempotency-key collision vs. a transient
         502) can — a bare "failed: <exception str>" log line was silently
         losing the response body, which is the one place Neotoma states WHY a
-        400 happened (ateles#499).
+        400 happened (this PR's own addition; see PR body).
         """
         self.last_error = None
         self.last_error_code = None
@@ -368,123 +369,75 @@ class IssueSpecStore:
             log.error("[apis.issue_spec] %s failed: %s", path, exc)
             return None
 
+    @staticmethod
+    def _matches(snap: dict, repo: str, issue_number: int) -> bool:
+        """True when *snap* is the issue_spec for ``repo#issue_number``.
+
+        Tolerates the duplicated field spellings seen in prod, matching the
+        equivalent predicate in gate_waive.py: ``repo``/``repository`` and
+        ``issue_number``/``github_number``. Carried from PR #497
+        (ateles#492) unchanged.
+        """
+        snap_repo = snap.get("repo") or snap.get("repository") or ""
+        if str(snap_repo) != str(repo):
+            return False
+        for key in ("issue_number", "github_number"):
+            value = snap.get(key)
+            if value is not None and str(value) == str(issue_number):
+                return True
+        return False
+
     async def load(self, repo: str, issue_number: int, title: str) -> SpecState:
         """Retrieve the current spec for ``repo#number`` (or an empty state).
 
-        Matches on the ``repo`` + ``issue_number`` fields of the ``issue_spec``
-        snapshot.  A missing token, missing entity, or fetch error all degrade
-        to a fresh empty ``SpecState`` so the caller can still create it.
+        Identity resolution is delegated to
+        :func:`entity_lookup.resolve_entity` (targeted ``snapshot_filters``
+        query, client-side re-verification, then a bounded recency-sorted
+        scan fallback) — carried from PR #497 (ateles#492) rather than
+        hand-rolled here, per `docs/foundation/principles.md#6` ("extend the
+        mechanism that already generalizes; do not build a parallel one").
+        #497 built this exact mechanism for the twin defect in
+        `IssueGateStore.load()` and named `issue_spec.py`'s copy of the same
+        bug as in-scope; a second, divergent implementation in this file
+        would have shipped two different fixes for one defect in the same
+        function.
 
-        Queries with a TARGETED ``snapshot_filters`` match on repo+issue_number
-        — never the full corpus — because hosted Neotoma is capacity-
-        constrained and a bulk read has already crashed it once (neotoma#2483,
-        2026-09-23); the standing guidance is small reads at concurrency <= 2.
-        A full-corpus paginated scan is kept ONLY as a bounded fallback for
-        when the targeted query itself errors (never as the default path, and
-        never triggered merely by finding zero matches — a genuinely new
-        issue has zero matches on every path and that must not trigger a
-        900-entity scan).
+        A missing token, missing entity, or fetch error all degrade to a
+        fresh empty ``SpecState`` so the caller can still create it. An
+        AMBIGUOUS targeted-query result (more than one re-verified match,
+        which the repo+issue_number identity rule says should never happen)
+        fails CLOSED inside ``entity_lookup`` itself — see that module's
+        "Ambiguous match" section — rather than here, so both callers of
+        ``resolve_entity`` share the same fail-closed behavior.
 
-        Before this method used ``snapshot_filters`` at all, it read one
-        un-paginated page (``limit: 200``, no cursor) of the WHOLE corpus.
-        With 900+ issue_spec entities in prod, any entity sorting past that
-        page was invisible, so upsert_section took the CREATE branch for an
-        issue that already had an entity, replaying a content-bound,
+        Before this used ``resolve_entity`` at all, it read one un-paginated
+        page (``limit: 200``, no cursor, no filter) of the WHOLE corpus. With
+        900+ issue_spec entities in prod, any entity sorting past that page
+        was invisible, so upsert_section took the CREATE branch for an issue
+        that already had an entity, replaying a content-bound,
         per-issue-constant idempotency key its real first create had already
-        consumed — a permanent 400 ERR_IDEMPOTENCY_MISMATCH for that issue
-        (ateles#499; first observed 2026-08-09, e.g. markmhendrickson/ateles#403
-        and #1189). The targeted query fixes the same defect without ever
-        reading more than a handful of rows.
+        consumed — a permanent 400 ERR_IDEMPOTENCY_MISMATCH for that issue.
+        The read-path defect is ateles#492/#498 (fixed by adopting
+        `resolve_entity`); the idempotency-key fix below is this PR's own
+        addition beyond what #492 scopes — see PR body.
         """
         state = SpecState(repo=repo, issue_number=issue_number, title=title)
-        # NOTE: the prod Neotoma REST surface exposes the read as POST
-        # /entities/query, NOT /retrieve_entities (which 404s). The 404 was
-        # silently degrading every load to an empty state, forcing a create on
-        # each section and (because the tail of the pipeline runs after load)
-        # could abort the completion/auto-build handoff. /entities/query
-        # returns the same {entities:[{snapshot:{...}}]} shape this parser
-        # expects.
-        data = await self._post(
-            "entities/query",
-            {
-                "entity_type": self.ENTITY_TYPE,
-                # Small limit on purpose: repo+issue_number is the entity's
-                # own identity rule (composite:repo+issue_number, confirmed
-                # live against prod), so more than one match is a server-side
-                # anomaly, not an expected shape to page through.
-                "limit": 5,
-                "include_snapshots": True,
-                "snapshot_filters": {
-                    "repo": {"op": "eq", "value": repo},
-                    "issue_number": {"op": "eq", "value": issue_number},
-                },
-            },
+        hit = await resolve_entity(
+            self._post,
+            self.ENTITY_TYPE,
+            lambda snap: self._matches(snap, repo, issue_number),
+            [
+                {repo_field: repo, num_field: issue_number}
+                for repo_field in ("repo", "repository")
+                for num_field in ("issue_number", "github_number")
+            ],
+            spec_key(repo, issue_number),
+            ("issue_number", "github_number"),
         )
-        if data is not None:
-            entities = data.get("entities", [])
-            if len(entities) > 1:
-                # Ambiguous: the identity rule says this cannot happen for a
-                # well-formed corpus. Fail CLOSED rather than guessing which
-                # row is authoritative — silently picking one risks correcting
-                # the WRONG entity's fields.
-                log.error(
-                    "[apis.issue_spec] entities/query returned %s matches for "
-                    "%s (expected 0 or 1 under the repo+issue_number identity "
-                    "rule) — refusing to guess; treating as unresolved",
-                    len(entities), spec_key(repo, issue_number),
-                )
-                return state
-            if entities:
-                return _state_from_entity(entities[0], state, title)
-            # Zero matches via the targeted query is a normal, expected
-            # outcome (a genuinely new issue) — NOT a reason to fall back to
-            # the full-corpus scan.
+        if hit is None:
             return state
-
-        # The targeted query itself errored (self._post returned None) —
-        # bounded pagination fallback, never the default path. Logged so a
-        # fallback scan is visible rather than indistinguishable from the
-        # fast path.
-        log.warning(
-            "[apis.issue_spec] targeted entities/query failed for %s (%s) — "
-            "falling back to a bounded full-corpus scan",
-            spec_key(repo, issue_number), self.last_error_code or self.last_error,
-        )
-        return await self._load_via_full_scan(repo, issue_number, title)
-
-    async def _load_via_full_scan(
-        self, repo: str, issue_number: int, title: str
-    ) -> SpecState:
-        """Bounded full-corpus pagination — FALLBACK ONLY, never the default.
-
-        Walks entities/query via next_cursor up to MAX_LOAD_PAGES pages. Used
-        only when the targeted snapshot_filters query in load() errors; see
-        that method's docstring for why the targeted query is the default.
-        """
-        state = SpecState(repo=repo, issue_number=issue_number, title=title)
-        cursor: str | None = None
-        for _page in range(MAX_LOAD_PAGES):
-            body: dict = {
-                "entity_type": self.ENTITY_TYPE,
-                "limit": 500,
-                "include_snapshots": True,
-            }
-            if cursor:
-                body["cursor"] = cursor
-            data = await self._post("entities/query", body)
-            if not data:
-                return state
-            for entity in data.get("entities", []):
-                snap = entity.get("snapshot") or {}
-                if (
-                    snap.get("repo") == repo
-                    and str(snap.get("issue_number")) == str(issue_number)
-                ):
-                    return _state_from_entity(entity, state, title)
-            cursor = data.get("next_cursor")
-            if not cursor:
-                break
-        return state
+        entity, snap = hit
+        return _state_from_hit(entity, snap, state, title)
 
     async def upsert_section(
         self, state: SpecState, section: SpecSection, text: str
@@ -530,8 +483,9 @@ class IssueSpecStore:
             # key means every retry after the entity already exists reuses a
             # key Neotoma already bound to different content, and it correctly
             # 400s ERR_IDEMPOTENCY_MISMATCH forever rather than silently
-            # accepting a second, different payload under the same key
-            # (ateles#499). Uniqueness here does not risk a duplicate entity:
+            # accepting a second, different payload under the same key. This
+            # is a separate defect from #492/#498's read-path fix above — see
+            # PR body. Uniqueness here does not risk a duplicate entity:
             # identity is resolved server-side by the repo+issue_number
             # composite rule, not by the idempotency key.
             result = await self._post(
@@ -580,7 +534,7 @@ class IssueSpecStore:
             # caller holds, which does not survive the process). Surface it
             # — once per issue, re-asserted if it keeps failing — rather than
             # letting the bare ERROR line above be the only trace, which is
-            # exactly how ateles#499's 474 failures went unnoticed for six
+            # exactly how this defect's 474 failures went unnoticed for six
             # weeks.
             reason = self.last_error_code or self.last_error_status or "unknown"
             # Reuse unroutable_ledger's existing disk-backed dedup+reassert
