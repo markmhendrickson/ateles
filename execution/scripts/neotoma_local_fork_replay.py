@@ -144,6 +144,20 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
+
+# lib/daemon_runtime/neotoma_signed.py is the prior art for per-agent AAuth
+# signing (ateles#795 / PR #1181): it shells out to neotoma's proven
+# cliSignedFetch so a write is attributed to a named agent sub instead of the
+# shared bearer identity. Imported defensively -- a checkout that lacks
+# lib/daemon_runtime (or node, or the neotoma-rc-src signer) must not crash
+# this script at import time; --sign-as fails closed later, at the point a
+# write actually needs a signature (see resolve_signing_identity).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "lib" / "daemon_runtime"))
+try:
+    import neotoma_signed as _neotoma_signed  # type: ignore
+except Exception:  # pragma: no cover -- exercised only on a broken checkout
+    _neotoma_signed = None
 
 USER_AGENT = "ateles-migrate/1.0"
 
@@ -893,9 +907,15 @@ def extend_hosted_schema(
     schema_info: dict,
     base_url: str,
     token: str,
+    sign_as: str | None = None,
 ) -> tuple[bool, dict]:
     """Apply fields_to_add to hosted -- register_schema for a no-schema type,
     update_schema_incremental for an existing one. Returns (ok, response).
+
+    A WRITE call: when `sign_as` is given (the --apply path), this is signed
+    as that AAuth sub via signed_write rather than sent with the bearer
+    token -- operator ruling 2026-09-24 (ateles#1223), never a silent
+    fallback to the shared bearer identity for a write.
 
     Callers MUST re-fetch the schema and verify the new fields are present
     (see verify_schema_extension_applied) before relying on them for a
@@ -906,15 +926,15 @@ def extend_hosted_schema(
     necessarily happened").
     """
     if schema_info.get("has_schema"):
+        path = "/update_schema_incremental"
         payload = build_update_schema_incremental_payload(entity_type, fields_to_add)
-        status, resp = http_request(
-            "POST", base_url, "/update_schema_incremental", token, payload
-        )
     else:
+        path = "/register_schema"
         payload = build_register_schema_payload(entity_type, fields_to_add)
-        status, resp = http_request(
-            "POST", base_url, "/register_schema", token, payload
-        )
+    if sign_as:
+        status, resp = signed_write("POST", base_url, path, sign_as, payload)
+    else:
+        status, resp = http_request("POST", base_url, path, token, payload)
     ok = status in (200, 201) and isinstance(resp, dict) and not resp.get("error")
     return ok, resp
 
@@ -1445,7 +1465,7 @@ def run_reconciliation(
             payload = build_store_payload_for_reconcile(
                 entity_id, entity_type, fields_to_write, idem_key
             )
-            status, resp = http_request("POST", base_url, "/store", token, payload)
+            status, resp = signed_write("POST", base_url, "/store", args.sign_as, payload)
             ok = status in (200, 201)
             print(
                 f"{'APPLIED' if ok else 'ERROR'}: entity={entity_id} type={entity_type} "
@@ -2585,8 +2605,8 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
                 "idempotency_key": idem_key,
                 "observation_source": "import",
             }
-            status, resp = http_request(
-                "POST", base_url, "/store", token, store_payload
+            status, resp = signed_write(
+                "POST", base_url, "/store", args.sign_as, store_payload
             )
             request_count += 1
             ok = status in (200, 201)
@@ -2699,6 +2719,76 @@ CODE_DEFERRED = "DEFERRED"
 # threshold, kept as a distinct code so it is never confused with a hosted
 # health failure.
 CODE_SANITY_THRESHOLD = "E_SANITY_THRESHOLD"
+
+# Operator ruling 2026-09-24 (ateles#1223): every hosted WRITE this script
+# performs in --apply mode must be signed as this agent sub, never the shared
+# NEOTOMA_BEARER_TOKEN identity -- see resolve_signing_identity below and
+# lib/daemon_runtime/neotoma_signed.py (prior art: PR #1181 / ateles#795).
+DEFAULT_SIGN_AS_SUB = "ateles@ateles-swarm"
+
+CODE_SIGNING_UNAVAILABLE = "E_SIGNING_UNAVAILABLE"
+
+
+def resolve_signing_identity(sign_as: str) -> dict:
+    """Resolve the AAuth signing identity for `sign_as` (an agent name, i.e.
+    the part of the sub before '@', e.g. 'ateles' for 'ateles@ateles-swarm').
+
+    Returns {"agent_name": ..., "sub": ..., "kid": ...} on success. Raises
+    RuntimeError with a clear, actionable message on any failure -- missing
+    lib/daemon_runtime import, no JWK key on disk, or via_cli disabled -- so
+    callers can fail closed (E_SIGNING_UNAVAILABLE) rather than silently
+    falling back to the bearer token for a write. This function NEVER reads,
+    prints, or logs key material -- it only checks that a key file exists
+    and asks neotoma_signed to resolve the identity dict it already exposes.
+    """
+    if _neotoma_signed is None:
+        raise RuntimeError(
+            "lib/daemon_runtime/neotoma_signed.py could not be imported -- "
+            "signing is unavailable in this checkout"
+        )
+    agent_name = sign_as.split("@", 1)[0]
+    ident = _neotoma_signed.agent_identity(agent_name)
+    if ident is None:
+        raise RuntimeError(
+            f"no AAuth JWK key found for agent {agent_name!r} under "
+            f"{_neotoma_signed.AAUTH_KEYS_DIR} (expected {agent_name}.jwk.json) -- "
+            "signing is unavailable for this identity"
+        )
+    return {"agent_name": agent_name, "sub": ident["sub"], "kid": ident["kid"]}
+
+
+def signed_write(
+    method: str,
+    base_url: str,
+    path: str,
+    sign_as: str,
+    body: dict | None = None,
+    timeout: int = HTTP_CLIENT_TIMEOUT_SECONDS,
+) -> tuple[int, dict]:
+    """Perform a hosted WRITE signed as `sign_as` (never the shared bearer).
+
+    Thin wrapper around neotoma_signed.signed_request that enables the
+    NEOTOMA_AAUTH_VIA_CLI feature flag for the duration of the call (the
+    underlying module defaults it off) and normalizes failures into the same
+    RuntimeError contract as resolve_signing_identity, so main() can catch
+    one exception type and fail the run with E_SIGNING_UNAVAILABLE / stop on
+    any write error, matching this script's existing "stop on any write
+    error" behavior for the bearer path.
+    """
+    if _neotoma_signed is None:
+        raise RuntimeError("neotoma_signed is unavailable -- cannot sign this write")
+    agent_name = sign_as.split("@", 1)[0]
+    prior = os.environ.get("NEOTOMA_AAUTH_VIA_CLI")
+    os.environ["NEOTOMA_AAUTH_VIA_CLI"] = "1"
+    try:
+        return _neotoma_signed.signed_request(
+            method, f"{base_url}{path}", body=body, agent_name=agent_name, timeout=timeout
+        )
+    finally:
+        if prior is None:
+            os.environ.pop("NEOTOMA_AAUTH_VIA_CLI", None)
+        else:
+            os.environ["NEOTOMA_AAUTH_VIA_CLI"] = prior
 
 
 def emit_error(
@@ -2816,6 +2906,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "--log",
             default="neotoma_local_fork_replay.jsonl",
             help="Path to append the JSONL action log to (default: ./neotoma_local_fork_replay.jsonl).",
+        )
+        sp.add_argument(
+            "--sign-as",
+            dest="sign_as",
+            default=DEFAULT_SIGN_AS_SUB,
+            help=(
+                "AAuth sub every hosted WRITE this run performs is signed as "
+                f"(default: {DEFAULT_SIGN_AS_SUB}, per the operator ruling "
+                "2026-09-24 that this migration's writes are attributed to "
+                "the ateles swarm identity, never the shared bearer token). "
+                "In --apply mode, if this identity cannot be resolved to a "
+                "local AAuth JWK key, the run refuses before any write "
+                "(E_SIGNING_UNAVAILABLE) rather than falling back to the "
+                "bearer token. Dry-run reads (existence probes, schema "
+                "fetches) still use the bearer token regardless of this "
+                "flag -- only writes are signed."
+            ),
         )
 
     replay_sp = subparsers.add_parser(
@@ -3025,6 +3132,30 @@ def main() -> None:
                 f"{build_apply_hint(args.mode, argv)}",
             )
 
+        # Operator ruling 2026-09-24 (ateles#1223): every hosted write this
+        # migration performs must be signed as args.sign_as, never the shared
+        # bearer token. Checked BEFORE any HTTP call (matching the
+        # confirm-apply double-guard's own placement above) -- an --apply run
+        # with no usable signing identity refuses outright rather than
+        # silently writing under the bearer's shared attribution.
+        try:
+            resolve_signing_identity(args.sign_as)
+        except RuntimeError as exc:
+            emit_error(
+                CODE_SIGNING_UNAVAILABLE,
+                f"--apply requires a usable AAuth signing identity for "
+                f"--sign-as={args.sign_as}, but none is available: {exc}",
+                writes_occurred=False,
+                log_path=getattr(args, "log", None),
+                next_action=(
+                    "mint/verify the AAuth JWK key for this agent sub "
+                    "(see docs/aauth.md) and confirm an active agent_grant "
+                    "exists for it on hosted, then re-run with --apply. "
+                    "This script never falls back to NEOTOMA_BEARER_TOKEN "
+                    "for a write."
+                ),
+            )
+
     if getattr(args, "mode", None) == "replay" and args.extend_schemas is None:
         args.extend_schemas = bool(args.apply)
 
@@ -3159,7 +3290,8 @@ def main() -> None:
                 )
                 continue
             ok, resp = extend_hosted_schema(
-                entity_type, fields_to_add, schema_info, base_url, token
+                entity_type, fields_to_add, schema_info, base_url, token,
+                sign_as=args.sign_as,
             )
             if not ok:
                 print(
@@ -3480,10 +3612,10 @@ def main() -> None:
 
             print(f"APPLYING: {prefix}")
             if kind == "observation":
-                status, resp = http_request("POST", base_url, "/store", token, payload)
+                status, resp = signed_write("POST", base_url, "/store", args.sign_as, payload)
             elif kind == "relationship":
-                status, resp = http_request(
-                    "POST", base_url, "/create_relationship", token, payload
+                status, resp = signed_write(
+                    "POST", base_url, "/create_relationship", args.sign_as, payload
                 )
             elif kind == "source":
                 print(

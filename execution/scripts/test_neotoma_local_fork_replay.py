@@ -483,6 +483,136 @@ def test_apply_with_wrong_confirm_value_still_refuses():
     assert "NEOTOMA_REPLAY_CONFIRM_APPLY=yes" in result.stderr
 
 
+def test_apply_refuses_without_a_signing_identity():
+    """ateles#1223: --apply must fail closed (E_SIGNING_UNAVAILABLE) before
+    any hosted call when the --sign-as identity has no AAuth JWK key on
+    disk, rather than silently falling back to the bearer token for a
+    write. ATELES_AAUTH_KEYS_DIR points at an empty dir so this is
+    deterministic regardless of what keys the running machine happens to
+    have under ~/repos/ateles-private/keys."""
+    import os as _os
+
+    env = dict(_os.environ)
+    env["NEOTOMA_REPLAY_CONFIRM_APPLY"] = "yes"
+    env["ATELES_AAUTH_KEYS_DIR"] = "/tmp/neotoma-local-fork-replay-test-no-such-keys-dir"
+    result = _run_cli(
+        ["replay", "--db", "/tmp/does-not-exist.db", "--cutover", "2026-01-01T00:00:00Z", "--apply"],
+        env=env,
+    )
+    assert result.returncode == 1
+    assert "code=E_SIGNING_UNAVAILABLE" in result.stderr
+    assert "ateles@ateles-swarm" in result.stderr
+    assert "NEOTOMA_BEARER_TOKEN" in result.stderr  # "never falls back" language present
+
+
+def test_apply_refuses_for_an_explicit_sign_as_with_no_key_either():
+    """Same guard, but exercised via an explicit --sign-as rather than the
+    default, confirming the flag is actually read (not just the default
+    constant)."""
+    import os as _os
+
+    env = dict(_os.environ)
+    env["NEOTOMA_REPLAY_CONFIRM_APPLY"] = "yes"
+    result = _run_cli(
+        [
+            "replay", "--db", "/tmp/does-not-exist.db",
+            "--cutover", "2026-01-01T00:00:00Z", "--apply",
+            "--sign-as", "nosuchagent@ateles-swarm",
+        ],
+        env=env,
+    )
+    assert result.returncode == 1
+    assert "code=E_SIGNING_UNAVAILABLE" in result.stderr
+    assert "nosuchagent@ateles-swarm" in result.stderr
+
+
+def test_dry_run_does_not_require_a_signing_identity():
+    """Dry-run must NOT be gated on signing availability -- only --apply is.
+    Confirms the signing check is skipped entirely in dry-run (the run
+    proceeds to its normal dry-run NO_CHANGES path rather than refusing)."""
+    import os as _os
+
+    env = dict(_os.environ)
+    env["ATELES_AAUTH_KEYS_DIR"] = "/tmp/neotoma-local-fork-replay-test-no-such-keys-dir"
+    result = _run_cli(
+        ["replay", "--db", "/tmp/does-not-exist.db", "--cutover", "2026-01-01T00:00:00Z"],
+        env=env,
+    )
+    assert "code=E_SIGNING_UNAVAILABLE" not in result.stderr
+
+
+def test_signed_write_shells_out_via_neotoma_signed_with_no_bearer_header(monkeypatch, tmp_path):
+    """Requests carry signatures, and never a bearer header, on the write
+    path (ateles#1223). signed_write must route through
+    neotoma_signed.signed_request rather than constructing an
+    Authorization: Bearer header itself -- asserted here by monkeypatching
+    neotoma_signed.signed_request and inspecting exactly what it was called
+    with (method/url/body/agent_name), with NO token/bearer argument
+    anywhere in that call's signature or kwargs."""
+    import inspect
+    import neotoma_local_fork_replay as _mod
+
+    calls = []
+
+    def fake_signed_request(method, url, body=None, agent_name="", timeout=20):
+        calls.append(
+            {"method": method, "url": url, "body": body, "agent_name": agent_name}
+        )
+        return 200, {"success": True}
+
+    # Confirm the real signed_request signature has no bearer/token
+    # parameter at all -- the write path has no way to smuggle one in.
+    real_sig = inspect.signature(_mod._neotoma_signed.signed_request)
+    assert "token" not in real_sig.parameters
+    assert "bearer" not in real_sig.parameters
+    assert "authorization" not in {p.lower() for p in real_sig.parameters}
+
+    monkeypatch.setattr(_mod._neotoma_signed, "signed_request", fake_signed_request)
+
+    status, resp = _mod.signed_write(
+        "POST", "https://hosted.example.invalid", "/store",
+        "ateles@ateles-swarm", {"entities": [{"entity_type": "task"}]},
+    )
+
+    assert status == 200
+    assert resp == {"success": True}
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["method"] == "POST"
+    assert call["url"] == "https://hosted.example.invalid/store"
+    assert call["agent_name"] == "ateles"
+    assert call["body"] == {"entities": [{"entity_type": "task"}]}
+    # No bearer/Authorization header was ever constructed by signed_write
+    # itself -- it delegates entirely to neotoma_signed, which signs with
+    # the agent's own key rather than a shared token.
+    assert "token" not in call
+    assert "Authorization" not in call
+    assert "bearer" not in json.dumps(call).lower()
+
+
+def test_signed_write_enables_via_cli_flag_only_for_the_call_duration(monkeypatch):
+    """signed_write flips NEOTOMA_AAUTH_VIA_CLI on for the duration of the
+    call and restores whatever value (or absence) preceded it -- so it
+    can't leave the flag globally enabled for unrelated code running later
+    in the same process."""
+    import os as _os
+    import neotoma_local_fork_replay as _mod
+
+    _os.environ.pop("NEOTOMA_AAUTH_VIA_CLI", None)
+    seen_during_call = {}
+
+    def fake_signed_request(method, url, body=None, agent_name="", timeout=20):
+        seen_during_call["value"] = _os.environ.get("NEOTOMA_AAUTH_VIA_CLI")
+        return 200, {}
+
+    monkeypatch.setattr(_mod._neotoma_signed, "signed_request", fake_signed_request)
+
+    _mod.signed_write("POST", "https://hosted.example.invalid", "/store", "ateles@ateles-swarm", {})
+
+    assert seen_during_call["value"] == "1"
+    assert "NEOTOMA_AAUTH_VIA_CLI" not in _os.environ
+
+
 def test_apply_with_deprecated_migrate_confirm_apply_still_works_with_warning():
     """MIGRATE_CONFIRM_APPLY is kept as a deprecated fallback (only honored
     when NEOTOMA_REPLAY_CONFIRM_APPLY is absent) -- confirms it still passes
@@ -495,16 +625,25 @@ def test_apply_with_deprecated_migrate_confirm_apply_still_works_with_warning():
     env["MIGRATE_CONFIRM_APPLY"] = "yes"
     env["NEOTOMA_BASE_URL"] = "https://example.invalid"
     env["NEOTOMA_BEARER_TOKEN"] = "test-token"
+    # Deterministic regardless of what AAuth keys the running machine has:
+    # point at an empty keys dir so this exercises "passes confirm gate,
+    # then fails on the next guard (signing)" rather than depending on a
+    # real ateles.jwk.json being present.
+    env["ATELES_AAUTH_KEYS_DIR"] = "/tmp/neotoma-local-fork-replay-test-no-such-keys-dir"
     result = _run_cli(
         ["replay", "--db", "/tmp/does-not-exist-for-deprecated-alias-test.db",
          "--cutover", "2026-01-01T00:00:00Z", "--apply"],
         env=env,
     )
     # Passes the confirm gate (no E_CONFIRMATION_REQUIRED) and prints the
-    # deprecation warning; it then fails downstream opening the nonexistent
-    # DB, which is expected and out of scope for this assertion.
+    # deprecation warning; it then fails on the next guard down the chain
+    # (signing identity unavailable, since ATELES_AAUTH_KEYS_DIR above is
+    # empty) rather than the confirm gate -- confirming MIGRATE_CONFIRM_APPLY
+    # genuinely unblocked --apply rather than the run never reaching that
+    # far at all.
     assert "code=E_CONFIRMATION_REQUIRED" not in result.stderr
     assert "MIGRATE_CONFIRM_APPLY is deprecated" in result.stderr
+    assert "code=E_SIGNING_UNAVAILABLE" in result.stderr
 
 
 def test_zero_references_to_deprecated_confirm_var_remain_as_the_primary_name():
@@ -2390,7 +2529,14 @@ def _fake_hosted_gate_restore_router(monkeypatch, *, store_status=200):
     GET /entities/<id> -> confirmed 404 (no hosted issue yet, so every
     candidate plans as a 'create'), GET /health -> 200 ok, POST /store ->
     store_status. Returns the list of POST /store bodies sent, so callers
-    can assert on idempotency keys / no-writes-in-dry-run / log contents."""
+    can assert on idempotency keys / no-writes-in-dry-run / log contents.
+
+    POST /store is a WRITE (ateles#1223): the real code path now sends it
+    via signed_write, not http_request, so both are faked here -- the fake
+    http_request covers the read-only probes/health as before, and
+    signed_write is monkeypatched separately to route into the same
+    store_calls list rather than shelling out to a real AAuth signer.
+    """
     import neotoma_local_fork_replay as _mod
 
     store_calls: list[dict] = []
@@ -2411,7 +2557,15 @@ def _fake_hosted_gate_restore_router(monkeypatch, *, store_status=200):
             return store_status, {"success": True}
         raise AssertionError(f"unexpected call: {method} {path}")
 
+    def fake_signed_write(method, base_url, path, sign_as, body=None, **kwargs):
+        assert sign_as, "signed_write called with no signing identity"
+        if path == "/store":
+            store_calls.append(body)
+            return store_status, {"success": True}
+        raise AssertionError(f"unexpected signed write: {method} {path}")
+
     monkeypatch.setattr(_mod, "http_request", fake_http_request)
+    monkeypatch.setattr(_mod, "signed_write", fake_signed_write)
     return store_calls
 
 
@@ -2556,7 +2710,12 @@ def _fake_hosted_reconcile_router(monkeypatch, *, store_status=200, hosted_field
     apply-time hash re-check -- defaults to a `body` value whose hash
     matches the "stale hosted text" fixture the tests below use as
     hosted_value_hash, so the drift check finds no drift), POST /store ->
-    store_status. Returns the list of POST /store bodies sent."""
+    store_status. Returns the list of POST /store bodies sent.
+
+    POST /store is a WRITE (ateles#1223): the real code path now sends it
+    via signed_write, not http_request -- both are faked here, matching
+    _fake_hosted_gate_restore_router's approach.
+    """
     import neotoma_local_fork_replay as _mod
 
     if hosted_fields is None:
@@ -2573,7 +2732,15 @@ def _fake_hosted_reconcile_router(monkeypatch, *, store_status=200, hosted_field
             return store_status, {"success": True}
         raise AssertionError(f"unexpected call: {method} {path}")
 
+    def fake_signed_write(method, base_url, path, sign_as, body=None, **kwargs):
+        assert sign_as, "signed_write called with no signing identity"
+        if path == "/store":
+            store_calls.append(body)
+            return store_status, {"success": True}
+        raise AssertionError(f"unexpected signed write: {method} {path}")
+
     monkeypatch.setattr(_mod, "http_request", fake_http_request)
+    monkeypatch.setattr(_mod, "signed_write", fake_signed_write)
     return store_calls
 
 
