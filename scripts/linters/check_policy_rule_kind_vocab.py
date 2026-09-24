@@ -47,7 +47,12 @@ HOW THE SNAPSHOT IS WRITE-PROTECTED:
   no baked-in default — CLAUDE.md's config-sourcing rule). It screens every
   string field for operator-PII shapes (BTC address, IBAN, phone, currency
   figure) before committing, and REFUSES the write rather than warning, naming
-  the offending entity_id — see `_screen_row_for_operator_pii`.
+  the offending entity_id — see `_screen_row_for_operator_pii`. "Every string
+  field" means every field in the narrowed row `fetch_live` builds
+  (`entity_id`, `rule_kind`, `scope`, `status`), not every field on the live
+  Neotoma entity — the narrowing-before-screening is deliberate (see
+  `title`/`canonical_name` below), so do not widen `row` back out to "fix"
+  this into screening fields that are dropped before the screen ever runs.
 
   `title`/`canonical_name` is NEVER stored, deliberately, not merely
   truncated. A free-text title can name a real third party with no shape a

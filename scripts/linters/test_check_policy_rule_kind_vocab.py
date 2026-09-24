@@ -9,8 +9,11 @@ to `return False` (or deleting the call in `find_violations`) makes both fail â€
 that is the regression they guard, not just "throws on bad input".
 """
 
+import json
 import sys
+import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -124,3 +127,165 @@ def test_missing_snapshot_exits_2(tmp_path):
         assert False, "expected SystemExit"
     except SystemExit as exc:
         assert exc.code == 2
+
+
+# --- _screen_row_for_operator_pii: one positive case per pattern, a clean-row
+# negative, and a case proving entity_id is deliberately exempt (qa lens,
+# PR #1246 round 1: zero of the 12 pre-existing tests touched this screen).
+
+
+def test_pii_screen_refuses_bitcoin_address():
+    row = {"entity_id": "e1", "scope": "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"}
+    try:
+        guard._screen_row_for_operator_pii(row)
+        assert False, "expected OperatorPIIRefusal"
+    except guard.OperatorPIIRefusal as exc:
+        assert "bitcoin address" in str(exc)
+        assert "e1" in str(exc)
+
+
+def test_pii_screen_refuses_iban():
+    # ES00 0000 ... is a placeholder shape (.gitleaks.toml allowlists all-zero
+    # IBANs as documentation placeholders); it still matches the guard's own
+    # IBAN pattern, which only checks shape, not check-digit validity.
+    row = {"entity_id": "e1", "scope": "note: pay to ES00 0000 0000 0000 0000 00"}
+    try:
+        guard._screen_row_for_operator_pii(row)
+        assert False, "expected OperatorPIIRefusal"
+    except guard.OperatorPIIRefusal as exc:
+        assert "IBAN" in str(exc)
+
+
+def test_pii_screen_refuses_phone_number():
+    # +1 555... is the standard fictional-number exchange (.gitleaks.toml
+    # allowlists it as a placeholder); it still matches the guard's own phone
+    # pattern, which only checks shape.
+    row = {"entity_id": "e1", "scope": "call +1 555 0132 to confirm"}
+    try:
+        guard._screen_row_for_operator_pii(row)
+        assert False, "expected OperatorPIIRefusal"
+    except guard.OperatorPIIRefusal as exc:
+        assert "phone number" in str(exc)
+
+
+def test_pii_screen_refuses_currency_figure():
+    row = {"entity_id": "e1", "scope": "budget cap $4,500 for this quarter"}
+    try:
+        guard._screen_row_for_operator_pii(row)
+        assert False, "expected OperatorPIIRefusal"
+    except guard.OperatorPIIRefusal as exc:
+        assert "currency figure" in str(exc)
+
+
+def test_pii_screen_passes_clean_row():
+    row = {
+        "entity_id": "ent_abc123",
+        "rule_kind": "mandatory",
+        "scope": "global",
+        "status": "active",
+    }
+    # Must not raise.
+    guard._screen_row_for_operator_pii(row)
+
+
+def test_pii_screen_exempts_entity_id_field():
+    # entity_id is Neotoma's own identifier, not operator PII â€” deliberately
+    # excluded from the screen so a currency- or phone-shaped entity_id (none
+    # currently exist, but the field is opaque) never blocks a legitimate
+    # write. Every OTHER field with the same shape still refuses.
+    row = {"entity_id": "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"}
+    # Must not raise: entity_id is exempt.
+    guard._screen_row_for_operator_pii(row)
+
+
+# --- fetch_live: proves the PII screen is wired into the write path, not
+# just a standalone function (qa lens: "most missing" finding).
+
+
+def test_fetch_live_screens_before_returning():
+    payload = {
+        "entities": [
+            {
+                "entity_id": "e1",
+                "snapshot": {
+                    "rule_kind": "mandatory",
+                    "scope": "call +1 555 0132 to confirm",
+                    "status": "active",
+                },
+            }
+        ]
+    }
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return json.dumps(payload).encode()
+
+    with (
+        patch.object(urllib.request, "urlopen", return_value=_FakeResponse()),
+        patch.dict(
+            "os.environ",
+            {
+                "NEOTOMA_BEARER_TOKEN": "test-token",
+                "NEOTOMA_BASE_URL": "https://neotoma.example",
+            },
+        ),
+    ):
+        try:
+            guard.fetch_live()
+            assert False, "expected OperatorPIIRefusal"
+        except guard.OperatorPIIRefusal as exc:
+            assert "phone number" in str(exc)
+            assert "e1" in str(exc)
+
+
+def test_fetch_live_returns_narrowed_clean_rows():
+    payload = {
+        "entities": [
+            {
+                "entity_id": "e1",
+                "snapshot": {
+                    "rule_kind": "mandatory",
+                    "scope": "global",
+                    "status": "active",
+                    "title": "internal-only free text, never returned",
+                },
+            }
+        ]
+    }
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return json.dumps(payload).encode()
+
+    with (
+        patch.object(urllib.request, "urlopen", return_value=_FakeResponse()),
+        patch.dict(
+            "os.environ",
+            {
+                "NEOTOMA_BEARER_TOKEN": "test-token",
+                "NEOTOMA_BASE_URL": "https://neotoma.example",
+            },
+        ),
+    ):
+        rows = guard.fetch_live()
+
+    assert rows == [
+        {
+            "entity_id": "e1",
+            "rule_kind": "mandatory",
+            "scope": "global",
+            "status": "active",
+        }
+    ]
