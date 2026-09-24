@@ -85,9 +85,10 @@ class _Record:
         tier: str = "software",
         thumbprint: str = LENS_TP,
         tier_by_sub: dict[str, str] | None = None,
+        owner_history: list[dict] | None = None,
     ) -> None:
         self.gate_status = dict(gate_status)
-        self.owner_history: list[dict] = []
+        self.owner_history: list[dict] = list(owner_history or [])
         self.current_owner = ""
         self.provenance: dict[str, str] = {}
         self.observations: list[dict] = []
@@ -302,6 +303,58 @@ class TestFailedSignOffNeverLeavesTheGateCleared:
         restore_value, restore_sub = rec.gate_writes()[-1]
         assert parse_gate_status(restore_value)["ux"] == "pending"
         assert restore_sub == "accipiter@ateles-swarm"
+
+    def test_failed_sign_off_note_does_not_resend_existing_history(self, monkeypatch):
+        """ateles#617 regression: `_record_failed_sign_off` (gate_waive.py)
+        must send ONLY its new `sign_off_failed` entry, never
+        `existing + [new]` — same discipline as the `signed_off` write itself
+        (see `TestOwnerHistorySendsOnlyNewEntry` in test_gate_sign_off.py).
+        Reached via the same attribution-failure path as
+        `test_attribution_failure_restores_the_gate` above: the
+        `owner_history` write (this call's `signed_off` entry) LANDS, then
+        the `gate_status` write's attribution fails, so
+        `_settle_failed_sign_off` runs with `history_written=True` and
+        `_record_failed_sign_off` appends a `sign_off_failed` entry onto the
+        re-read state. `_Record.apply`'s `owner_history` branch appends
+        whatever is sent onto its OWN stored list (mirroring the real
+        server's reducer), so seeding a non-empty history here is what makes
+        `[new]` and `existing + [new]` produce different, distinguishable
+        results — with an empty seed (the class's other tests) they are the
+        same list and the bug is invisible."""
+        existing_history = [
+            {"gate": "pm", "action": "signed_off", "actor": "pavo"},
+            {"gate": "ux", "action": "signed_off", "actor": "accipiter"},
+        ]
+        rec = _Record(
+            {"ux": "pending"},
+            attributed_sub="apis@ateles-swarm",
+            owner_history=existing_history,
+        )
+        store = _wire(monkeypatch, rec)
+
+        outcome = _run(store.sign_off("o/r", 795, "ux", "accipiter", HEAD))
+
+        assert not outcome.ok
+        assert rec.gate_status["ux"] == "pending"
+        # Two single-entry writes land on this path — this call's own
+        # `signed_off` entry (written before `gate_status`, per the
+        # write-order contract), then the `sign_off_failed` note appended
+        # after the attribution failure. Each write's payload must carry
+        # ONLY its own new entry: `existing + 2`, never `existing + existing
+        # + 2` or any other re-send of the prior array.
+        assert len(rec.owner_history) == len(existing_history) + 2, (
+            "owner_history must end with exactly the two new entries this "
+            f"call appends onto the existing {len(existing_history)}, never "
+            f"the existing array re-sent alongside them (got "
+            f"{len(rec.owner_history)} total)"
+        )
+        for entry in existing_history:
+            assert entry in rec.owner_history
+        signed_off_entry, failed_entry = rec.owner_history[-2:]
+        assert signed_off_entry["action"] == "signed_off"
+        assert signed_off_entry["gate"] == "ux"
+        assert failed_entry["action"] == "sign_off_failed"
+        assert failed_entry["gate"] == "ux"
 
     def test_unconfirmed_restore_is_its_own_failure_class(self, monkeypatch):
         """The restore write itself is refused, so the gate still reads
