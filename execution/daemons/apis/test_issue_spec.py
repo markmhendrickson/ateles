@@ -493,6 +493,78 @@ def test_missed_entity_does_not_400_forever_on_stale_idempotency_key():
     assert server_snap.get("eng_section") == "ENG plan"
 
 
+def test_double_failure_logs_the_loss_explicitly(caplog):
+    """When BOTH the create collides (ERR_IDEMPOTENCY_MISMATCH) AND the
+    reload fallback also fails to recover an entity_id, the section write is
+    genuinely lost for this run. This must produce one explicit ERROR log
+    line naming the section and the issue — the only trace left, since
+    nothing downstream consumes any other signal for this branch (see PR
+    body: the previous unroutable_ledger call here was removed because
+    nothing drains it).
+
+    RED without the log call: deleting the `log.error(...)` line in this
+    branch (verified locally by temporarily removing it) makes this test
+    fail — there is no other observable effect of this branch to assert on,
+    which is exactly why QA's original finding ("no test for this branch")
+    could not be answered by testing the ledger call: there was nothing true
+    to test until this log line became the branch's only real effect.
+    """
+    import logging
+
+    class _DoubleFailureStore(IssueSpecStore):
+        """First create attempt succeeds (plants pm). Second call always
+        400s with ERR_IDEMPOTENCY_MISMATCH on create AND always fails the
+        reload (entities/query returns None), so the double-failure branch
+        is reached deterministically."""
+
+        def __init__(self):
+            super().__init__(base_url="http://x", token="tok")
+            self._pm_planted = False
+
+        async def _post(self, path, payload):
+            if path == "store":
+                # Every create attempt "collides" — simulates an entity that
+                # already exists under a key this store already consumed.
+                self.last_error_code = "ERR_IDEMPOTENCY_MISMATCH"
+                self.last_error_status = 400
+                self.last_error = "idempotency_key already used"
+                return None
+            if path == "entities/query":
+                # The reload fallback ALSO fails outright (e.g. Neotoma is
+                # unreachable) — the double-failure case.
+                self.last_error_code = "ERR_UPSTREAM_TIMEOUT"
+                self.last_error_status = 502
+                self.last_error = "simulated reload failure"
+                return None
+            return {}
+
+    store = _DoubleFailureStore()
+    with caplog.at_level(logging.ERROR, logger="apis.issue_spec"):
+        state = asyncio.run(
+            store.upsert_section(
+                SpecState(repo="owner/repo", issue_number=1189, title="T"),
+                _section("eng"),
+                "ENG plan",
+            )
+        )
+
+    assert state.entity_id == "", "no entity_id can be recovered in this branch"
+    error_messages = [
+        r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR
+    ]
+    matching = [
+        m
+        for m in error_messages
+        if "eng" in m and "owner/repo#1189" in m and "LOST this run" in m
+    ]
+    assert matching, (
+        "the double-failure branch (create collides AND reload also fails) "
+        "must log exactly one ERROR line naming the section key ('eng'), "
+        "the issue ('owner/repo#1189'), and that the write was lost — got: "
+        f"{error_messages!r}"
+    )
+
+
 def test_post_captures_status_and_error_code_on_http_error(monkeypatch):
     """RED on pre-fix _post: the response body (status + error_code) that
     Neotoma sends on a 400 was discarded — only the bare exception string

@@ -531,28 +531,28 @@ class IssueSpecStore:
 
             # Reload also failed to recover an id: this section's write is
             # LOST for this run (kept only in the in-memory `state` the
-            # caller holds, which does not survive the process). Surface it
-            # — once per issue, re-asserted if it keeps failing — rather than
-            # letting the bare ERROR line above be the only trace, which is
-            # exactly how this defect's 474 failures went unnoticed for six
-            # weeks.
+            # caller holds, which does not survive the process). A previous
+            # revision of this branch also called
+            # unroutable_ledger.shared_ledger().note_undefined_role(...) here,
+            # intending to reuse that mechanism's dedup+reassert persistence.
+            # Removed: note_undefined_role's only real effect is its boolean
+            # return value, which the ONE existing caller (skill_runner.py)
+            # uses to decide whether to notify an operator. This call site
+            # discarded that return value, and nothing anywhere drains or
+            # reports the `_roles` dict the call writes to — not apis.py, not
+            # any daemon loop. So the call persisted a disk entry nothing
+            # ever reads, which is a control that does not bind
+            # (docs/foundation/principles.md#1), while implying — via its own
+            # log text — a downstream escalation that never happened. A
+            # single explicit log line, naming the issue and section, is what
+            # actually fires every time; nothing here is currently wired to
+            # notify an operator, and that gap is real, not the log line's to
+            # paper over.
             reason = self.last_error_code or self.last_error_status or "unknown"
-            # Reuse unroutable_ledger's existing disk-backed dedup+reassert
-            # primitive rather than building a parallel one (CLAUDE.md:
-            # "extend the mechanism that already generalizes"). It already
-            # dedups an arbitrary string key with a reassert window and
-            # survives a daemon restart — note_undefined_role's shape (dedup
-            # on a bare key, no fingerprint) is exactly what a failing
-            # spec_key needs, and its persistence is exercised by
-            # test_unroutable_ledger.py already.
-            from unroutable_ledger import shared_ledger
-
-            shared_ledger().note_undefined_role(f"issue_spec_store:{key}")
             log.error(
                 "[apis.issue_spec] %s section for %s LOST this run — create "
                 "failed (%s) and the reload fallback could not recover an "
-                "entity_id either; escalated once via the unroutable ledger "
-                "(re-asserted if it keeps failing)",
+                "entity_id either; this write did not persist to Neotoma",
                 section.key, key, reason,
             )
             return state
