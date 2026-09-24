@@ -385,6 +385,252 @@ class TestAFormatOnlyRejectionIsVisible:
         assert self._issue_run(monkeypatch, stdout) == []
 
 
+# ── 2b. A leading harness acknowledgment does not hide a real header ────────
+#
+# ateles#1247. PR #1149's `ux` (Accipiter) and `pm` (Pavo) rounds each posted
+# a byte-exact, contract-shaped comment (marker → header → verdict, no
+# leading blank) — confirmed via `gh pr view 1149 --repo markmhendrickson/
+# ateles --json comments`. Apis still rejected both with
+# `gate_verdict_unreadable_format`, `observed: first line is not the lens
+# header`. That message was literally true of what the dispatcher actually
+# parsed: the persisted `pr_review.content` for both rounds (Neotoma
+# `ent_7640dba44b1b85f92be15de2` / `ent_d535f3202fad94b4b9fd698f`) shows the
+# harness's own final reply — the exact `stdout` `gate_verdict_format_rejected`
+# / `describe_gate_verdict_position` receive — opened with an extra
+# acknowledgment line the posted comment never carried (`Posted: https://
+# github.com/…#issuecomment-…`, `Posted. Reply below, reproducing the exact
+# same content as returned per the gate-verdict contract.`) ahead of the
+# marker+header+verdict the lens actually composed. Neither of the issue's
+# two named candidates (a stale/cached comment read, or a marker-skip
+# off-by-one) is what happened — the parser's line-0 check was correct
+# against the text it was given; it was given the wrong artifact's leading
+# line. `_skip_leading_ack_line` looks one line further ONLY when the
+# candidate line reads as a `Posted…` acknowledgment (not a marker, not a
+# header) AND the next non-blank line is itself a marker or a valid header —
+# so a reply that is genuinely headerless still falls through to the
+# existing rejection unchanged (asserted below alongside the fix).
+
+
+class TestALeadingPostedAckLineDoesNotHideTheHeader:
+    # Byte-for-byte `result.stdout` the dispatcher parsed on PR #1149 (the
+    # harness's own final reply, captured verbatim in the persisted
+    # `pr_review.content` for `ent_7640dba44b1b85f92be15de2`; trimmed to the
+    # position-relevant prefix — the parser never reads past the verdict
+    # line plus the "no second header/verdict" scan, and a full multi-KB
+    # review body adds nothing this test needs to assert).
+    UX_STDOUT_1149 = (
+        "Posted: https://github.com/markmhendrickson/ateles/pull/1149"
+        "#issuecomment-5821092658\n\n"
+        "<!-- review:ux commit=6d4f69db7929c118b7f964235689d93e4202886c -->\n"
+        "**🤖 Accipiter — Ateles swarm, ux lens panelist**\n"
+        "**APPROVE**\n\n"
+        "Reviewed diff-only (no PR checkout available); no code was "
+        "executed, so findings below are held to the stated evidence bar.\n"
+    )
+    # Same shape, `pm`/Pavo round (`ent_d535f3202fad94b4b9fd698f`) — a
+    # differently-worded acknowledgment line, confirming the fix keys on the
+    # `Posted` prefix pattern rather than one exact sentence.
+    PM_STDOUT_1149 = (
+        "Posted. Reply below, reproducing the exact same content as "
+        "returned per the gate-verdict contract.\n\n"
+        "<!-- review:pm commit=6d4f69db7929c118b7f964235689d93e4202886c -->\n"
+        "**🤖 Pavo — Ateles swarm, pm lens panelist**\n"
+        "**APPROVE**\n\n"
+        "### Scope match against the pm-signed acceptance criteria "
+        "(issue #1150)\n"
+    )
+
+    def test_red_before_green_reproduces_the_exact_reported_false_positive(self):
+        """Pinned to the literal reported bytes: `describe_gate_verdict_
+        position` must NEVER again read `first line is not the lens header`
+        for a reply whose real header sits one acknowledgment line down —
+        that exact string against that exact shape is the false positive
+        ateles#1247 reports. This assertion is red against pre-fix
+        `swarm_dispatch.py` (confirmed: reverting `_skip_leading_ack_line`
+        and its two call sites reproduces `observed ==
+        "first line is not the lens header"` for both fixtures below)."""
+        observed_ux = swarm_dispatch.describe_gate_verdict_position(
+            self.UX_STDOUT_1149, lens_agent="accipiter"
+        )
+        observed_pm = swarm_dispatch.describe_gate_verdict_position(
+            self.PM_STDOUT_1149, lens_agent="pavo"
+        )
+        assert observed_ux != "first line is not the lens header", observed_ux
+        assert observed_pm != "first line is not the lens header", observed_pm
+
+    def test_the_ux_round_now_reads_as_an_explicit_clear(self):
+        assert (
+            swarm_dispatch.lens_own_verdict(self.UX_STDOUT_1149, lens_agent="accipiter")
+            == "approve"
+        )
+        assert swarm_dispatch.gate_verdict_format_rejected(
+            self.UX_STDOUT_1149, lens_agent="accipiter"
+        ) is False
+        assert swarm_dispatch.sign_off_is_warranted(
+            self.UX_STDOUT_1149, lens_agent="accipiter"
+        ) is True
+
+    def test_the_pm_round_now_reads_as_an_explicit_clear(self):
+        assert (
+            swarm_dispatch.lens_own_verdict(self.PM_STDOUT_1149, lens_agent="pavo")
+            == "approve"
+        )
+        assert swarm_dispatch.gate_verdict_format_rejected(
+            self.PM_STDOUT_1149, lens_agent="pavo"
+        ) is False
+        assert swarm_dispatch.sign_off_is_warranted(
+            self.PM_STDOUT_1149, lens_agent="pavo"
+        ) is True
+
+    def test_shared_parser_one_fixture_pair_covers_every_gate(self):
+        """`lens_own_verdict` / `gate_verdict_format_rejected` /
+        `describe_gate_verdict_position` are the ONE parsing path both PR-panel
+        call sites (`_handle_pr`) and the additive issue-spec call site use for
+        every gate (`pm`, `ux`, `arch`, `qa`, `legal`, …) — there is no
+        per-gate branch in any of the three functions this fix touches, so the
+        `ux`/`pm` fixtures above are representative of the whole class and no
+        `arch`/`qa`/`legal`-specific fixture is needed."""
+        assert swarm_dispatch.lens_own_verdict.__module__ == "swarm_dispatch"
+        # Same function, different lens_agent: arch would clear identically
+        # were an arch-owning lens's reply shaped this way. Uses the same
+        # bounded ack shape the fix actually recognises (a GitHub PR-comment
+        # URL) — an arbitrary "Posted: <url>" is deliberately NOT enough,
+        # see `test_an_arbitrary_posted_prefixed_url_is_not_an_ack_line`.
+        arch_header = swarm_dispatch.attribution_header("waxwing", "arch reviewer")
+        stdout = (
+            "Posted: https://github.com/markmhendrickson/ateles/pull/9"
+            f"#issuecomment-1\n\n{arch_header}\n**SIGNED_OFF**\n\nok"
+        )
+        assert (
+            swarm_dispatch.lens_own_verdict(stdout, lens_agent="waxwing") == "signed_off"
+        )
+
+    # ── no-regression: every existing true-positive rejection is unchanged ──
+
+    def test_a_headerless_reply_still_rejects_even_with_a_posted_prefix(self):
+        """The fix is NOT a blanket "skip the first line" — a `Posted…`
+        prefix followed by prose that is still not a header must keep
+        rejecting with the same message as today, or a lens whose reply is
+        genuinely malformed would silently start clearing."""
+        stdout = "Posted somewhere.\nSome prose that is not a header\n**SIGNED_OFF**"
+        assert (
+            swarm_dispatch.describe_gate_verdict_position(stdout, lens_agent="accipiter")
+            == "first line is not the lens header"
+        )
+        assert swarm_dispatch.gate_verdict_format_rejected(
+            stdout, lens_agent="accipiter"
+        ) is True
+
+    def test_a_plain_headerless_reply_is_unaffected(self):
+        assert (
+            swarm_dispatch.describe_gate_verdict_position(
+                "**SIGNED_OFF**\n\nok", lens_agent="accipiter"
+            )
+            == "first line is not the lens header"
+        )
+
+    def test_a_lenses_own_prose_that_happens_to_start_with_posted_still_rejects(self):
+        """CONFIRMED by two independent reviews during this PR's own build:
+        an EARLIER, looser version of the ack pattern (`^Posted\\b` as a bare
+        prefix on the candidate line) treated ANY reply whose own first line
+        of prose happened to start with the word "Posted" as a harness
+        artifact to skip past — so a lens's genuinely malformed reply
+        (real header two lines down purely by coincidence, e.g. because it
+        echoes an unrelated marker+header from quoted material) silently
+        cleared instead of failing closed. `_POSTED_ACK_LINE_RE` now matches
+        only the two acknowledgment shapes actually observed on PR #1149,
+        anchored at BOTH ends (`\\Z`) — a real GitHub PR-comment URL or the
+        exact fixed "Reply below…" sentence, never a bare word-prefix on
+        arbitrary content. This reply is deliberately NOT either of those
+        shapes even though it starts with "Posted" and is followed by a
+        well-formed header: it is one continuous sentence of the lens's own
+        analysis, which is exactly what must keep rejecting."""
+        stdout = (
+            "Posted-mortem analysis follows below for the maintainers to "
+            "review at their convenience.\n\n"
+            f"{_header('ux')}\n**APPROVE**\n\nLGTM\n"
+        )
+        assert (
+            swarm_dispatch.describe_gate_verdict_position(stdout, lens_agent="accipiter")
+            == "first line is not the lens header"
+        )
+        assert swarm_dispatch.lens_own_verdict(stdout, lens_agent="accipiter") is None
+        assert swarm_dispatch.sign_off_is_warranted(stdout, lens_agent="accipiter") is False
+
+    def test_an_arbitrary_posted_prefixed_url_is_not_an_ack_line(self):
+        """A `Posted: <url>` line whose URL is NOT a GitHub PR-comment URL
+        (`.../issuecomment-<digits>`) is not recognised as the harness
+        artifact — bounding the fix to the shape actually observed rather
+        than any URL, per the same fail-closed reasoning as the case
+        above."""
+        stdout = "Posted: https://example.invalid/not-a-github-comment\n\nSome prose that is not a header\n**SIGNED_OFF**"
+        assert (
+            swarm_dispatch.describe_gate_verdict_position(stdout, lens_agent="accipiter")
+            == "first line is not the lens header"
+        )
+
+    def test_marker_only_no_header_edge_case_still_rejects(self):
+        """A comment whose first line IS a valid marker but whose second line
+        is NOT a valid header must still reject — the case a naive
+        "unconditionally skip line 0" fix would silently break by shifting
+        the off-by-one rather than fixing it."""
+        marker = _marker("ux")
+        stdout = f"{marker}\nnot a header line at all\n**SIGNED_OFF**"
+        assert (
+            swarm_dispatch.describe_gate_verdict_position(stdout, lens_agent="accipiter")
+            == "first line is not the lens header"
+        )
+
+    def test_double_marker_edge_case_still_rejects(self):
+        """Two marker-shaped lines before the header still fail — the "at
+        most one marker line" constraint is untouched by this fix."""
+        marker = _marker("ux")
+        stdout = f"{marker}\n{marker}\n{_header('ux')}\n**SIGNED_OFF**"
+        assert (
+            swarm_dispatch.describe_gate_verdict_position(stdout, lens_agent="accipiter")
+            == "first line is not the lens header"
+        )
+
+    def test_leading_blank_line_behaviour_is_unchanged(self):
+        """A blank line ahead of the header (documented contract: reject) is
+        neither newly permitted nor newly rejected by this fix — same
+        result before and after, since `_skip_leading_ack_line` only ever
+        acts on a `Posted…`-shaped candidate line, never a blank one."""
+        stdout = f"\n{_header('ux')}\n**SIGNED_OFF**\n\nok"
+        before = swarm_dispatch.lens_own_verdict(stdout, lens_agent="accipiter")
+        assert before == "signed_off"
+
+    def test_a_posted_prefixed_stale_or_off_position_blocking_verdict_still_blocks(self):
+        """A `Posted…`-prefixed reply that DOES carry a real header must
+        still fail closed on a genuine blocking verdict — the skip only
+        relocates where the header is read from, never what counts as
+        clear."""
+        stdout = (
+            "Posted: https://github.com/markmhendrickson/ateles/pull/9"
+            f"#issuecomment-1\n\n{_header('ux')}\n**REQUEST_CHANGES**\n\n"
+            "[BLOCKING] scope: missing"
+        )
+        assert swarm_dispatch.sign_off_is_warranted(stdout, lens_agent="accipiter") is False
+        assert swarm_dispatch.gate_verdict_format_rejected(
+            stdout, lens_agent="accipiter"
+        ) is False
+
+    def test_observed_field_contract_the_exact_string_is_never_produced_for_this_shape(self):
+        """UX/Eng contract: never emit the literal `first line is not the
+        lens header` string when line 0 is a `Posted…` acknowledgment and the
+        following line is a valid marker+header — direct string-absence
+        assertion on the two PR #1149 fixtures, closing the loop on the
+        reported false positive rather than a generic "parses OK" check."""
+        for stdout, lens in (
+            (self.UX_STDOUT_1149, "accipiter"),
+            (self.PM_STDOUT_1149, "pavo"),
+        ):
+            observed = swarm_dispatch.describe_gate_verdict_position(
+                stdout, lens_agent=lens
+            )
+            assert "first line is not the lens header" not in observed
+
+
 # ── 3. A malformed row fails closed ─────────────────────────────────────────
 
 
