@@ -3367,7 +3367,11 @@ class TestGateOwnerIdentity:
             "NEOTOMA_AGENT_NEOTOMA_TOKEN"
         )
 
-    def test_own_token_preferred_and_reported_as_own(self, monkeypatch) -> None:
+    def test_own_token_preferred_and_reported_as_own(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        (tmp_path / "accipiter.jwk.json").write_text("{}")
+        monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", str(tmp_path))
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
         monkeypatch.setenv("ACCIPITER_NEOTOMA_TOKEN", "accipiter-own-token")
         token, is_own = skill_runner.neotoma_token_for_agent("accipiter")
@@ -3382,6 +3386,47 @@ class TestGateOwnerIdentity:
         # The load-bearing half: the caller must be able to TELL. A bare token
         # string cannot say which principal it speaks for, which is exactly how
         # the shared bearer passed for the lens's own identity for months.
+        assert is_own is False
+
+    def test_unprovisioned_placeholder_token_does_not_claim_own_identity(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """RED before the fix: any non-empty <ROLE>_NEOTOMA_TOKEN was trusted as
+        the role's own ATTRIBUTED identity with no correlation to a real
+        credential — a stale, placeholder, or typo'd value passed identically
+        to a genuine one (security finding on PR #1193). A role with no
+        provisioned AAuth key on disk must not be reported as its own
+        identity, even though the token itself is still used (falling back to
+        the shared bearer here would be a correctness regression for the
+        ordinary, non-gate-owning case — see
+        test_own_token_used_for_mcp_header_even_when_key_unprovisioned).
+        """
+        monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", str(tmp_path))
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+        monkeypatch.setenv("ACCIPITER_NEOTOMA_TOKEN", "some-placeholder-value")
+        # Deliberately no accipiter.jwk.json written to tmp_path.
+        token, is_own = skill_runner.neotoma_token_for_agent("accipiter")
+        assert token == "some-placeholder-value"
+        assert is_own is False
+
+    def test_own_token_used_for_mcp_header_even_when_key_unprovisioned(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A role's own token must still be used for ordinary Neotoma calls
+        (the --mcp-config Authorization header) even before its AAuth key is
+        provisioned — only the ATTRIBUTION guarantee (`is_own_identity`, which
+        the gate-writeback preflight relies on) is gated on the key. Silently
+        discarding a real, working token here would regress every ordinary
+        write for a role mid-provisioning onto the shared/operator principal,
+        which is a correctness bug distinct from the attribution gap this
+        module fixes.
+        """
+        monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", str(tmp_path))
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+        monkeypatch.setenv("ACCIPITER_NEOTOMA_TOKEN", "accipiter-own-token")
+        # Deliberately no accipiter.jwk.json written to tmp_path.
+        token, is_own = skill_runner.neotoma_token_for_agent("accipiter")
+        assert token == "accipiter-own-token"
         assert is_own is False
 
     def test_gate_writeback_identity_error_fails_closed(self) -> None:
@@ -3400,6 +3445,29 @@ class TestGateOwnerIdentity:
         # the operator is not left to work out what to provision.
         assert "ACCIPITER_NEOTOMA_TOKEN" in err
         assert "issue" in err
+
+    def test_gate_writeback_identity_error_names_missing_key_when_token_set(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """When the env var IS set but no AAuth key is provisioned, the refusal
+        message must name that specific cause (not just "no token set") so the
+        operator runs the right remediation — provisioning a key, not re-setting
+        a token that is already present.
+        """
+        monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", str(tmp_path))
+        monkeypatch.setenv("ACCIPITER_NEOTOMA_TOKEN", "some-placeholder-value")
+        err = skill_runner.gate_writeback_identity_error(
+            "accipiter", is_own_identity=False
+        )
+        assert err is not None
+        assert "no provisioned AAuth key" in err
+        assert "aauth_provision_identity.py --role accipiter" in err
+
+    def test_role_has_provisioned_aauth_key(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", str(tmp_path))
+        assert skill_runner._role_has_provisioned_aauth_key("accipiter") is False
+        (tmp_path / "accipiter.jwk.json").write_text("{}")
+        assert skill_runner._role_has_provisioned_aauth_key("accipiter") is True
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -3535,6 +3603,76 @@ class TestGateOwnerIdentity:
         assert launched, (
             "The review must actually run: refusing to launch is exactly the "
             "regression this amendment closes."
+        )
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_gate_owner_with_unprovisioned_placeholder_token_is_still_refused(
+        self, MockLoader, mock_write_harness, monkeypatch, tmp_path
+    ) -> None:
+        """Effect test for the security finding on PR #1193: a gate owner with
+        an arbitrary non-empty <ROLE>_NEOTOMA_TOKEN — a stale, placeholder, or
+        typo'd value with no provisioned AAuth key behind it — must be refused
+        exactly like a gate owner with no token at all. RED before the fix:
+        `neotoma_token_for_agent` trusted presence-of-string alone, so this
+        role's review would have RUN and its verdict landed misattributed to
+        the shared/operator principal.
+        """
+        fake_def = _make_def(
+            prompt_markdown="Role: Accipiter.",
+            aauth_sub="accipiter@ateles-swarm",
+            name="accipiter",
+        )
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", str(tmp_path))
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+        monkeypatch.setenv("ACCIPITER_NEOTOMA_TOKEN", "some-placeholder-value")
+        # Deliberately no accipiter.jwk.json written to tmp_path.
+
+        launched = []
+
+        async def fake_exec(*cmd, **kwargs):
+            launched.append(cmd)
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"**SIGNED_OFF**", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "accipiter",
+                    "review prompt",
+                    role="accipiter",
+                    provider="claude",
+                    task_entity_id="ent_abc",
+                    owns_pending_gate=True,
+                )
+            )
+
+        assert not result.ok, (
+            "A gate owner presenting an unprovisioned placeholder token must "
+            "be refused exactly like one with no token — presence of a "
+            "non-empty string must never substitute for a real credential."
+        )
+        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
+        assert "no provisioned AAuth key" in (result.error or "")
+        assert launched == [], (
+            "The refusal must precede the subprocess — running the review burns "
+            "a full session whose verdict Neotoma will discard, and here it "
+            "would additionally land misattributed to the shared principal."
         )
 
     @patch("skill_runner._write_harness_event")
