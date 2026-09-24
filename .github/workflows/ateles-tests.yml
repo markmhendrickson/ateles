@@ -42,6 +42,7 @@ on:
       - "scripts/linters/test_claude_verification_discipline.py"
       - "scripts/linters/test_*.py"
       - "docs/agents/**"
+      - ".github/workflows/canonical-rule-inventory.yml"
       - ".github/workflows/ateles-tests.yml"
   workflow_dispatch:
 

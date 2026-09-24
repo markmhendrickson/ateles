@@ -93,6 +93,54 @@ class NeotomaSignedTest(unittest.TestCase):
             ns.signed_request("GET", "http://x", agent_name="ghost")
         self.assertIn("no AAuth key", str(cm.exception))
 
+    # ── ateles#795 constraint 2: explicit subject, never ambient ──────────────
+
+    def test_agent_identity_explicit_sub_ignores_ambient_env(self):
+        """An explicit `sub` wins even when NEOTOMA_AAUTH_SUB names someone else.
+
+        Reproduces the daemon-process hazard named in ateles#795: a process
+        (e.g. Apis) that already carries its OWN NEOTOMA_AAUTH_SUB must still
+        be able to sign as a DIFFERENT principal (a reviewing lens) without
+        that ambient value leaking into the signature.
+        """
+        self._write_key("pavo", kid="pavo-kid")
+        os.environ["NEOTOMA_AAUTH_SUB"] = "apis@ateles-swarm"
+        ident = ns.agent_identity("pavo", sub="pavo@ateles-swarm")
+        self.assertEqual(ident["sub"], "pavo@ateles-swarm")
+        self.assertNotEqual(ident["sub"], os.environ["NEOTOMA_AAUTH_SUB"])
+
+    def test_agent_identity_no_explicit_sub_keeps_ambient_ladder(self):
+        """Omitting `sub` preserves EXACT existing behavior for agent_loader.py."""
+        self._write_key("apus", kid="apus-kid")
+        os.environ["NEOTOMA_AAUTH_SUB"] = "custom@x"
+        self.assertEqual(ns.agent_identity("apus")["sub"], "custom@x")
+        os.environ.pop("NEOTOMA_AAUTH_SUB", None)
+        self.assertEqual(ns.agent_identity("apus")["sub"], "apus@ateles-swarm")
+
+    def test_signed_request_explicit_sub_reaches_the_subprocess_env(self):
+        """`sign_off`'s explicit subject must reach NEOTOMA_AAUTH_SUB in the
+        subprocess env — not the daemon process's own ambient value."""
+        self._write_key("waxwing", kid="waxwing-kid")
+        os.environ["NEOTOMA_AAUTH_SUB"] = "apis@ateles-swarm"
+        helper_out = json.dumps({"status": 200, "ok": True, "body": "{}"})
+
+        seen_env = {}
+
+        def fake_run(cmd, **kw):
+            seen_env.update(kw["env"])
+            return subprocess.CompletedProcess(cmd, 0, stdout=helper_out, stderr="")
+
+        with mock.patch.object(ns.subprocess, "run", side_effect=fake_run):
+            ns.signed_request(
+                "POST",
+                "http://x/correct",
+                {"f": 1},
+                agent_name="waxwing",
+                sub="waxwing@ateles-swarm",
+            )
+        self.assertEqual(seen_env["NEOTOMA_AAUTH_SUB"], "waxwing@ateles-swarm")
+        self.assertNotEqual(seen_env["NEOTOMA_AAUTH_SUB"], "apis@ateles-swarm")
+
 
 if __name__ == "__main__":
     unittest.main()

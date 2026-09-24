@@ -59,6 +59,144 @@ def test_non_blocking_marker_is_not_a_blocker():
     )
 
 
+def test_fullwidth_encoding_of_blocking_still_detected():
+    """Falco's security review, PR #1181 (NON-BLOCKING PLAUSIBLE-miss finding):
+    a fullwidth Unicode rendering of `[BLOCKING]` must still be detected, or a
+    lens verdict written in that form would read as CLEAN and reach
+    `sign_off` on a finding the dispatcher never saw as blocking. NFKC
+    normalization folds the fullwidth brackets/letters to their ASCII form."""
+    fullwidth = "［ＢＬＯＣＫＩＮＧ］"
+    assert fullwidth != "[BLOCKING]"  # sanity: genuinely a different string
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{fullwidth} scope: nope")
+
+
+def test_zero_width_joiner_split_encoding_still_detected():
+    """The splice-insertion form: a zero-width character spliced between the
+    ASCII letters of `[BLOCKING]` so a literal substring match misses it."""
+    spliced = "[BLO​CKING]"
+    assert spliced != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{spliced} scope: nope")
+
+
+def test_zero_width_joiner_split_non_blocking_still_not_flagged():
+    """The normalization widens detection of [BLOCKING]; it must not also
+    widen [NON-BLOCKING] into a false block by stripping the very characters
+    that (accidentally) helped it read as NON- in some encoding. The negative
+    lookbehind on `NON-` must still apply to the NORMALIZED text."""
+    spliced = "[NON​-BLOCKING] naming: nit"
+    assert not body_has_blocking_findings(f"**COMMENT**\n\n{spliced}")
+
+
+# ── PR #1181 provider-table round: harden past NFKC + zero-width alone ───────
+# (Falco's second-pass finding: Cyrillic/spaced/soft-hyphen/combining forms of
+# [BLOCKING] still missed the guard).
+
+
+def test_cyrillic_i_confusable_still_detected():
+    """Falco's own named example: Ukrainian/Belarusian `І` (U+0406) reads as
+    Latin `I` to a human but is a distinct code point NFKC does not fold."""
+    cyrillic_i = "[BLOCKІNG]"
+    assert cyrillic_i != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{cyrillic_i} scope: nope")
+
+
+def test_cyrillic_ve_confusable_still_detected():
+    """Cyrillic `В` (U+0412) is visually identical to Latin `B`."""
+    cyrillic_ve = "[ВLOCKING]"
+    assert cyrillic_ve != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{cyrillic_ve} scope: nope")
+
+
+def test_greek_iota_confusable_still_detected():
+    """Greek Iota (U+0399) is visually identical to Latin `I`."""
+    greek_iota = "[BLOCKΙNG]"
+    assert greek_iota != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{greek_iota} scope: nope")
+
+
+def test_soft_hyphen_still_detected():
+    """The soft hyphen (U+00AD, category Cf) spliced into the token — the same
+    splice-insertion shape as the zero-width forms above, but a code point
+    the original fix's explicit four-character set did not name."""
+    soft_hyphen = "[BLOCKING­]"
+    assert soft_hyphen != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{soft_hyphen} scope: nope")
+
+
+def test_combining_mark_spliced_into_token_still_detected():
+    """A combining acute accent (U+0301, category Mn) stacked onto a letter —
+    changes the code-point sequence without changing what a human reads."""
+    combining = "[B́LOCKING]"
+    assert combining != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{combining} scope: nope")
+
+
+def test_precomposed_accented_letter_confusable_still_detected():
+    """ateles#795 comment 5796296178 (Falco): the previous revision ran NFKC
+    BEFORE stripping combining marks, so `I` + combining acute (U+0301) — the
+    same splice `test_combining_mark_spliced_into_token_still_detected` covers
+    for `B` — composed into the PRECOMPOSED `Í` (U+00CD) first. `Í` has no
+    confusables-table entry, so the marker read as clean. Fixed by decomposing
+    (NFKD) before stripping marks, then recomposing (NFKC) after. Covers `Í`
+    (acute), `Ì` (grave), and a mark stacked on every letter of BLOCKING."""
+    precomposed_i_acute = "[BLOCKÍNG]"
+    assert precomposed_i_acute != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{precomposed_i_acute} scope: nope")
+
+    precomposed_i_grave = "[BLOCKÌNG]"
+    assert precomposed_i_grave != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{precomposed_i_grave} scope: nope")
+
+    mark_before_base = "[B́LOCKING]"  # combining acute BEFORE the base letter
+    assert mark_before_base != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{mark_before_base} scope: nope")
+
+    every_letter_marked = "[" + "".join(ch + "́" for ch in "BLOCKING") + "]"
+    assert every_letter_marked != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{every_letter_marked} scope: nope")
+
+
+def test_precomposed_accented_letter_non_blocking_still_not_flagged():
+    """Mirrors `test_zero_width_joiner_split_non_blocking_still_not_flagged`
+    for the precomposed-accent form: the decompose/strip/recompose ordering
+    fix must not turn a genuine [NON-BLOCKING] into a false block."""
+    precomposed = "[NON-BLOCKÍNG] naming: nit"
+    assert not body_has_blocking_findings(f"**COMMENT**\n\n{precomposed}")
+
+    precomposed_grave = "[NON-BLOCKÌNG] naming: nit"
+    assert not body_has_blocking_findings(f"**COMMENT**\n\n{precomposed_grave}")
+
+
+def test_spaced_letters_still_detected():
+    """Falco's finding: 'spaced letters, if spaced is reasonable' — a lens
+    could write the token with a space between every letter."""
+    spaced = "[ B L O C K I N G ]"
+    assert spaced != "[BLOCKING]"  # sanity
+    assert body_has_blocking_findings(f"**COMMENT**\n\n{spaced} scope: nope")
+
+
+def test_spaced_non_blocking_still_not_flagged():
+    """The spaced-letters widening must not turn a spaced-out NON-BLOCKING
+    into a false block — mirrors `test_zero_width_joiner_split_non_blocking_
+    still_not_flagged` for the new spacing pass."""
+    spaced = "[ N O N - B L O C K I N G ] naming: nit"
+    assert not body_has_blocking_findings(f"**COMMENT**\n\n{spaced}")
+
+
+def test_confusables_table_is_narrow_and_covers_named_letters():
+    """The confusables table is deliberately scoped to the letters in
+    BLOCKING, not a general Unicode-TR39 confusables table."""
+    from swarm_dispatch import _CONFUSABLE_TO_ASCII
+
+    assert _CONFUSABLE_TO_ASCII, "table must not be empty for the fix to apply"
+    for src, dst in _CONFUSABLE_TO_ASCII.items():
+        assert dst.upper() in "BLOCKING", (
+            f"{src!r} -> {dst!r} maps to a letter outside BLOCKING — the "
+            "table must stay scoped to the marker it defends"
+        )
+        assert src != dst, "no-op identity entries add nothing and confuse intent"
+
+
 def test_comment_token_with_blocking_body_escalates_to_request_changes():
     """ateles#595, the exact ateles#558 shape: the legal lens posted **COMMENT**
     with a [BLOCKING] credential-scope finding. Submitted as --comment, it never

@@ -151,8 +151,11 @@ class _Notifier:
     def __init__(self) -> None:
         self.sent: list[str] = []
 
-    def send(self, msg: str, priority=None, handler=None) -> None:  # noqa: ANN001
+    def send(self, msg: str, priority=None, handler=None, **kwargs) -> None:  # noqa: ANN001
         self.sent.append(msg)
+
+    def clear_dedupe(self, key: str) -> None:
+        return None
 
 
 def _dispatcher() -> sd.SwarmDispatcher:
@@ -167,9 +170,23 @@ def _pr(number: int = 2153) -> dict:
         "draft": False,
         "user": {"login": "someone"},
         "html_url": f"https://github.com/o/r/pull/{number}",
-        "head": {"ref": "feature"},
+        "head": {"ref": "feature", "sha": "a" * 40},
         "base": {"ref": "main"},
     }
+
+
+@pytest.mark.asyncio
+async def test_redispatch_refuses_an_unresolved_head_before_running_lens(
+    monkeypatch,
+):
+    async def must_not_run(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("lens must not run without an exact head")
+
+    monkeypatch.setattr(sd, "run_skill", must_not_run)
+    pr = _pr()
+    pr["head"].pop("sha")
+    with pytest.raises(RuntimeError, match="verified full PR head SHA"):
+        await _dispatcher()._redispatch_missing_lens("o/r", pr, "security")
 
 
 @pytest.mark.asyncio
@@ -335,13 +352,15 @@ async def test_a_redispatched_verdict_is_persisted_and_posted(monkeypatch):
     async def fake_run_skill(agent, *a, **k):  # noqa: ANN001
         return _Ok()
 
-    async def fake_persist(trigger, reviews, agents):  # noqa: ANN001
+    async def fake_persist(trigger, reviews, agents, **kwargs):  # noqa: ANN001
         order.append("persist")
         assert reviews == [("security", "**APPROVE**")]
         assert agents == {"security": "falco"}
+        assert kwargs["reviewed_head"] == "a" * 40
 
-    async def fake_post(trigger, reviews, agents):  # noqa: ANN001
+    async def fake_post(trigger, reviews, agents, **kwargs):  # noqa: ANN001
         order.append("post")
+        assert kwargs["reviewed_head"] == "a" * 40
 
     monkeypatch.setattr(sd, "run_skill", fake_run_skill)
     monkeypatch.setattr(d, "_persist_panel_reviews", fake_persist)
