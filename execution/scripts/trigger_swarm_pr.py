@@ -54,8 +54,16 @@ def _ensure_secrets_env() -> None:
         "GITHUB_TOKEN",
         "ATELES_AGENT_PAT",
         "NEOTOMA_AGENT_PAT",
+        "VANELLUS_AGENT_PAT",
     )
-    if all(os.environ.get(v) for v in ("NEOTOMA_BEARER_TOKEN", "GITHUB_TOKEN")):
+    if all(
+        os.environ.get(v)
+        for v in (
+            "NEOTOMA_BEARER_TOKEN",
+            "GITHUB_TOKEN",
+            "VANELLUS_AGENT_PAT",
+        )
+    ):
         return  # daemon / already-materialized shell: nothing to do
     try:
         import secrets_lib

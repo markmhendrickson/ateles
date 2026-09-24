@@ -61,17 +61,65 @@ except Exception:  # lib unavailable or Neotoma unreachable at import time
     _notifier = None
 
 
-def _notify(message: str, priority: str = "info") -> None:
-    """Send via lib/notify if available; silently skip if not."""
+def _notify(
+    message: str,
+    priority: str = "info",
+    dedupe_key: str | None = None,
+    email_eligible: bool = True,
+) -> None:
+    """Send via lib/notify if available; silently skip if not.
+
+    ``dedupe_key``, when given, is forwarded to Notifier.send() so a
+    repeating, still-open condition notifies once instead of on every tick
+    (ateles#1127). See ``_clear_notify_dedupe`` to release a key once the
+    condition resolves.
+
+    ``email_eligible=False`` keeps the alert on Telegram/Apprise but out of
+    the operator's inbox, for a notification he cannot act on from the
+    message body alone (ateles#1127) — the underlying condition still has a
+    durable Neotoma record via the escalation entity this daemon files
+    separately.
+    """
     if _notifier is None:
         return
     try:
         from lib.notify import Priority
 
         p = getattr(Priority, priority.upper(), Priority.INFO)
-        _notifier.send(message, priority=p, handler="monedula")
+        _notifier.send(
+            message,
+            priority=p,
+            handler="monedula",
+            dedupe_key=dedupe_key,
+            email_eligible=email_eligible,
+        )
     except Exception:
         pass
+
+
+def _clear_notify_dedupe(dedupe_key: str) -> None:
+    """Release a dedupe key once its condition has resolved. Never raises."""
+    if _notifier is None:
+        return
+    try:
+        _notifier.clear_dedupe(dedupe_key)
+    except Exception:
+        pass
+
+
+# Stable dedupe key for the consent-channel-timeout alert (ateles#1127). Must
+# NOT vary per tick — no timestamp, no streak count, no pending-handler list —
+# or it defeats the dedupe the same way a changing message would. Scoped to
+# "monedula" + the condition name; the streak/handlers/detail still appear in
+# the message body and in the escalation entity, just not in the key.
+_CONSENT_CHANNEL_DEDUPE_KEY = "monedula:consent_channel_failed"
+
+# Same shape, different condition: a calendar-fetch outage also re-evaluates
+# on every ~15-minute tick with no dedupe today. Not observed to have fired
+# in the 2026-09-13..09-20 email audit, but the retry loop is identical in
+# structure to the consent-channel case, so it gets the same key discipline
+# rather than being left to reproduce the failure later (ateles#1127).
+_CALENDAR_FETCH_DEDUPE_KEY = "monedula:calendar_fetch_failed"
 
 
 # Activity-log channel (CyphorhinusBot observation feed).
@@ -1049,6 +1097,7 @@ def main() -> bool:
                 f"monedula: calendar fetch failed for {yesterday_str} — "
                 "recurring payment detection is DOWN; will retry next tick",
                 priority="blocker",
+                dedupe_key=_CALENDAR_FETCH_DEDUPE_KEY,
             )
             # Do NOT return: a calendar outage says nothing about whether an
             # invoice is due. Recurring payments are skipped this tick (no
@@ -1056,8 +1105,12 @@ def main() -> bool:
             events = []
         else:
             # Calendar fetch succeeded — claim the day so concurrent launchd
-            # re-launches (and later ticks) skip the calendar leg.
+            # re-launches (and later ticks) skip the calendar leg. The outage
+            # (if any) is over too: release the dedupe key so a FUTURE
+            # failure reports again instead of staying silently suppressed by
+            # a stale key (ateles#1127).
             _mark_ran_today()
+            _clear_notify_dedupe(_CALENDAR_FETCH_DEDUPE_KEY)
 
     # Find triggered handlers from calendar
     triggered: list[tuple] = []  # [(handler, [match, ...]), ...]
@@ -1128,14 +1181,18 @@ def main() -> bool:
             f"payments pending ({handler_names}) — {streak} consecutive "
             "failure(s). Payments BLOCKED, not declined. See escalation.",
             priority="blocker",
+            dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
+            # Not actionable from the email body alone: there is nothing to
+            # decide or reply to here, only a pointer to "see escalation"
+            # elsewhere. Stays on Telegram (and the escalation entity already
+            # written above is the durable, consultable record) but does not
+            # become an inbox item (ateles#1127).
+            email_eligible=False,
         )
-        try:
-            telegram_send(
-                "🔴 Monedula: consent channel failed — payments blocked, "
-                "not declined. Escalated."
-            )
-        except Exception:
-            pass
+        # Do NOT also call telegram_send here. `_notify(..., email_eligible=False)`
+        # already routes BLOCKER to Telegram via Apprise; a parallel telegram_send
+        # double-fires on the first tick and bypasses the dedupe journal on every
+        # later tick while the condition stays open (ateles#1128 / Falco).
         # A channel failure is a run that could not even ask, distinct from
         # both "nothing to do" and a stranding — but it must exit non-zero
         # for the same reason strandings do: silent 0 is how this stayed
@@ -1148,6 +1205,10 @@ def main() -> bool:
     # dead-gate streak: it proves the operator could see and respond to the
     # prompt, which is the property the streak exists to detect the absence of.
     _reset_gate_failure_streak()
+    # The channel is demonstrably working again — release the dedupe key so a
+    # FUTURE timeout (a genuine recurrence, not a continuation of this one)
+    # notifies instead of staying silently suppressed forever (ateles#1127).
+    _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
     reply = poll_result.text
     approved = _parse_reply(reply, handler_names)
 

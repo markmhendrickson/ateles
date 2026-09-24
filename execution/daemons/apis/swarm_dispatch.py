@@ -334,6 +334,12 @@ def content_digest(entities: list[dict]) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:12]
 
 
+def finding_id(lens: str, head_sha: str, summary: str) -> str:
+    """Return a stable content-derived identifier for one review finding."""
+    digest = content_digest([lens, head_sha[:12], summary])[:8]
+    return f"{lens}-{digest}"
+
+
 # Phrases that mark a line as the agent narrating ABOUT its section rather than
 # being the section content. Matched case-insensitively at line start.
 _NARRATION_PREFIXES: tuple[str, ...] = (
@@ -1415,6 +1421,17 @@ def _normalise_full_sha(value: str) -> str:
     return sha if _FULL_SHA_RE.fullmatch(sha) else ""
 
 
+def _normalise_github_review_id(value: object) -> str:
+    """Return a positive GitHub review id, or ``""`` when it is not valid."""
+    if isinstance(value, bool):
+        return ""
+    try:
+        review_id = int(str(value).strip())
+    except (TypeError, ValueError):
+        return ""
+    return str(review_id) if review_id > 0 else ""
+
+
 def compose_lens_review_marker(lens: str, commit_sha: str) -> str:
     """Head-scoped lens marker, or a detectable legacy line if head is unknown."""
     sha = _normalise_full_sha(commit_sha)
@@ -1829,6 +1846,35 @@ def _token_for_repo(repo: str) -> str:
     )
 
 
+@dataclass(frozen=True)
+class ReviewBindingReceipt:
+    """Read-back proof that a binding GitHub review landed as intended."""
+
+    review_id: str
+    reviewer_login: str
+    commit_id: str
+    state: str
+
+    def proves_approval(self, *, head_sha: str) -> bool:
+        return (
+            bool(_normalise_github_review_id(self.review_id))
+            and self.reviewer_login.casefold()
+            == agent_github_login("vanellus").casefold()
+            and self.commit_id == _normalise_full_sha(head_sha)
+            and self.state == "APPROVED"
+        )
+
+
+@dataclass
+class _CIHeadClaim:
+    """One in-process delayed-CI leader and the outcome its waiters need."""
+
+    completed: asyncio.Event
+    conclusion: str
+    delivery_id: str
+    handled: bool = False
+
+
 @dataclass
 class DispatchConfig:
     neotoma_base_url: str = os.environ.get(
@@ -1838,7 +1884,7 @@ class DispatchConfig:
     github_token: str = os.environ.get("GITHUB_TOKEN", "") or os.environ.get(
         "ATELES_AGENT_PAT", ""
     )
-    panel_max: int = int(os.environ.get("APIS_PANEL_MAX", "4"))
+    panel_max: int = int(os.environ.get("APIS_PANEL_MAX", "6"))
     auto_merge: bool = os.environ.get("APIS_AUTONOMY_AUTO_MERGE", "0") == "1"
     dry_run: bool = os.environ.get("APIS_DRY_RUN", "0") == "1"
     # Auto-build handoff (rollout safety): when ON, a fully-assembled spec whose
@@ -1938,6 +1984,20 @@ class SwarmDispatcher:
         # that later rots to DIRTY pages again — that transition changes what
         # the operator can actually do about it.
         self._approved_escalated: dict[str, bool] = {}
+        # A check_suite completion can be delivered more than once, and one PR
+        # head can have multiple suites complete together.  The delayed-CI
+        # auto-merge path deliberately re-enters the full review panel, so two
+        # overlapping deliveries would otherwise create two native reviews,
+        # two notification streams, and competing durable supersession writes.
+        #
+        # The claim is per dispatcher process and exists only while work is in
+        # flight.  Later delivery after completion is allowed to re-evaluate
+        # the same head; this is coalescing, not permanent event consumption.
+        # A waiter may suppress its equivalent delivery only when the leader
+        # completed a conclusive handling path. Pending/unknown state and an
+        # exception or cancellation leave ``handled`` false so the waiter
+        # re-enters and re-fetches the live head and aggregate required-CI state.
+        self._ci_head_claims: dict[tuple[str, int, str], _CIHeadClaim] = {}
 
     async def handle_trigger(self, trigger: SwarmTrigger) -> None:
         """Entry point handed to the webhook gateway. Never raises."""
@@ -2353,7 +2413,8 @@ class SwarmDispatcher:
             except Exception as exc:
                 log.warning(
                     f"[{DAEMON_NAME}] stale-marker sweep: could not scan "
-                    f"{repository} ({exc}) — skipping"
+                    f"{repository} ({exc}) — skipping {repository} — "
+                    "will retry next boot"
                 )
                 continue
         return cleared
@@ -2974,6 +3035,12 @@ class SwarmDispatcher:
             base_ref=(pr.get("base") or {}).get("ref", ""),
             head_sha=(pr.get("head") or {}).get("sha", ""),
         )
+        reviewed_head = _normalise_full_sha(trigger.head_sha or "")
+        if not reviewed_head:
+            raise RuntimeError(
+                f"refusing to re-dispatch lens '{lens_name}' without a "
+                "verified full PR head SHA"
+            )
 
         # The qa lens authors and runs an eval, so it needs a writable checkout;
         # every other lens is diff-only. Same treatment as the panel loop.
@@ -3019,8 +3086,18 @@ class SwarmDispatcher:
         # failure this sweep exists to fix.
         captured = [(lens.lens, result.stdout)]
         agents_by_lens = {lens.lens: lens.agent}
-        await self._persist_panel_reviews(trigger, captured, agents_by_lens)
-        await self._post_missing_panel_comments(trigger, captured, agents_by_lens)
+        await self._persist_panel_reviews(
+            trigger,
+            captured,
+            agents_by_lens,
+            reviewed_head=reviewed_head,
+        )
+        await self._post_missing_panel_comments(
+            trigger,
+            captured,
+            agents_by_lens,
+            reviewed_head=reviewed_head,
+        )
 
     async def resume_missing_lens_reviews(self, repositories: list[str]) -> dict:
         """Re-dispatch a lens that never answered on an otherwise-clear panel.
@@ -3669,30 +3746,35 @@ class SwarmDispatcher:
         gates_green = await self._gates_green(
             lanius, trigger.repository, trigger.number
         )
+        spec_ready_key = f"spec-ready:{ref}"
+        spec_action = (
+            f"Open {trigger.html_url} — set ATELES_SWARM_AUTO_BUILD=1 and ensure "
+            "pre-implementation gates are signed off (_gates_green), or approve "
+            "the build manually once gates are green."
+        )
         if self.config.auto_build and gates_green:
             pr_url = await self._open_implementation_pr(trigger, state)
-            self.notifier.send(
-                f"Issue {ref}: additive spec assembled ("
-                f"{', '.join(completed) or 'none'}); "
-                + (
+            if pr_url:
+                self.notifier.clear_dedupe(spec_ready_key)
+                self.notifier.send(
+                    f"Issue {ref}: additive spec assembled ("
+                    f"{', '.join(completed) or 'none'}); "
                     f"auto-build ON — implementation PR opened ({pr_url}); the "
-                    "PR gate pipeline now owns it (merge stays operator-gated)."
-                    if pr_url
-                    else "auto-build ON, but the Cicada build handoff opened NO "
-                    "PR (spec may be incomplete or the build produced nothing). "
-                    "Spec is ready; open the build manually or re-run once the "
-                    "spec is implementable."
-                ),
-                # A successfully-opened PR is FYI — the PR gate pipeline owns it
-                # and will stop at the operator's merge approval, so this needs
-                # no immediate action and belongs in the digest. The NO-PR branch
-                # is a real failure the operator must act on, so it stays an
-                # immediate operator decision.
-                priority=(
-                    Priority.INFO if pr_url else Priority.OPERATOR_DECISION
-                ),
-                handler=DAEMON_NAME,
-            )
+                    "PR gate pipeline now owns it (merge stays operator-gated).",
+                    priority=Priority.INFO,
+                    handler=DAEMON_NAME,
+                )
+            else:
+                self.notifier.send(
+                    f"Issue {ref}: additive spec assembled ("
+                    f"{', '.join(completed) or 'none'}); "
+                    "auto-build ON, but the Cicada build handoff opened NO PR "
+                    "(spec may be incomplete or the build produced nothing). "
+                    f"{spec_action}",
+                    priority=Priority.OPERATOR_DECISION,
+                    handler=DAEMON_NAME,
+                    dedupe_key=spec_ready_key,
+                )
         else:
             reason = (
                 "auto-build OFF"
@@ -3704,9 +3786,10 @@ class SwarmDispatcher:
                 f"({', '.join(completed) or 'none'}); Lanius"
                 f"{'✓' if lanius.ok else '✗'}. "
                 f"Spec is ready and awaiting `build` approval ({reason}). "
-                "No PR opened; nothing auto-merged.",
+                f"{spec_action} No PR opened; nothing auto-merged.",
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
+                dedupe_key=spec_ready_key,
             )
 
     async def _refresh_pending_gates(
@@ -4045,7 +4128,13 @@ class SwarmDispatcher:
         return int(m.group(1)) if m else None
 
     async def _merge_pr(
-        self, repo: str, pr_number: int, method: str = "squash"
+        self,
+        repo: str,
+        pr_number: int,
+        method: str = "squash",
+        *,
+        expected_head: str = "",
+        require_default_base: bool = False,
     ) -> tuple[bool, str]:
         """Merge a PR via the GitHub REST API. Returns (merged, detail).
 
@@ -4058,12 +4147,71 @@ class SwarmDispatcher:
         """
         method = method if method in ("squash", "merge", "rebase") else "squash"
         api = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/merge"
+        expected = _normalise_full_sha(expected_head)
+        if require_default_base and not expected:
+            return (
+                False,
+                "GitHub merge API cannot atomically bind the PR base; "
+                "auto-merge held",
+            )
+        if expected_head and not expected:
+            return False, "invalid expected PR head; merge held"
         try:
             async with httpx.AsyncClient(timeout=60) as client:
+                headers = self._github_headers(repo)
+                if expected:
+                    pr_response = await client.get(
+                        f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
+                        headers=headers,
+                    )
+                    pr_response.raise_for_status()
+                    pr = pr_response.json() or {}
+                    live_head = _normalise_full_sha(
+                        str((pr.get("head") or {}).get("sha") or "")
+                    )
+                    if live_head != expected:
+                        return (
+                            False,
+                            "reviewed head changed before merge: "
+                            f"{expected[:12]} -> {live_head[:12] or 'unreadable'}",
+                        )
+                    if require_default_base:
+                        repo_response = await client.get(
+                            f"https://api.github.com/repos/{repo}", headers=headers
+                        )
+                        repo_response.raise_for_status()
+                        default_branch = str(
+                            (repo_response.json() or {}).get("default_branch") or ""
+                        )
+                        base_branch = str((pr.get("base") or {}).get("ref") or "")
+                        if not default_branch or base_branch != default_branch:
+                            return (
+                                False,
+                                "auto-merge requires the live PR base to equal "
+                                f"the repository default branch ({base_branch!r} "
+                                f"!= {default_branch!r})",
+                            )
+                        # GitHub's PR merge API accepts an expected head SHA,
+                        # but no expected base ref/OID. A concurrent PR-base
+                        # retarget can therefore land between these diagnostic
+                        # reads and the merge PUT without changing the head.
+                        # Autonomous merge must remain closed until the
+                        # mutation itself can bind both sides.
+                        return (
+                            False,
+                            "GitHub merge API cannot atomically bind the PR "
+                            "base; auto-merge held",
+                        )
+
+                payload = {"merge_method": method}
+                if expected:
+                    # GitHub rejects the merge atomically if the head moves
+                    # after the preflight GET and before this PUT.
+                    payload["sha"] = expected
                 resp = await client.put(
                     api,
-                    headers=self._github_headers(repo),
-                    json={"merge_method": method},
+                    headers=headers,
+                    json=payload,
                 )
         except Exception as exc:  # noqa: BLE001 — never raise into the caller
             return False, f"merge request error: {exc}"
@@ -4248,7 +4396,17 @@ class SwarmDispatcher:
                 "merge stays gated)"
             )
 
-        review_head = await self._pr_head_sha(trigger)
+        review_head = _normalise_full_sha((await self._pr_head_sha(trigger)) or "")
+        if not review_head:
+            await self._handle_panel_session_limit(
+                trigger,
+                parent,
+                "panel",
+                "",
+                "",
+                reason="PR head could not be verified before review",
+            )
+            return
 
         # 2. Assemble the review panel (neotoma#1640): pre-registered agents
         #    from the parent issue ∪ diff-surface matches ∪ downstream lenses.
@@ -4289,6 +4447,7 @@ class SwarmDispatcher:
                         has_worktree=bool(qa_worktree),
                         owns_pending_gate=lens.lens in pending_gates,
                         changed_files=changed_files,
+                        reviewed_head=review_head,
                     ),
                     github_token=_token_for_agent_on_repo(
                         lens.agent, trigger.repository
@@ -4330,11 +4489,20 @@ class SwarmDispatcher:
         #     comment the panelist could not post itself (PR-87 self-dogfood
         #     findings: stdout was the only copy, and Vanellus aggregates
         #     from the PR comments).
+        durable_review_state: bool | None = None
         if reviews:
             agents_by_lens = {p.lens: p.agent for p in panel}
-            await self._persist_panel_reviews(trigger, reviews, agents_by_lens)
+            durable_review_state = await self._persist_panel_reviews(
+                trigger,
+                reviews,
+                agents_by_lens,
+                reviewed_head=review_head,
+            )
             await self._post_missing_panel_comments(
-                trigger, reviews, agents_by_lens
+                trigger,
+                reviews,
+                agents_by_lens,
+                reviewed_head=review_head,
             )
 
         if failed_lenses:
@@ -4358,22 +4526,59 @@ class SwarmDispatcher:
             )
             return
 
+        if durable_review_state is False:
+            await self._handle_panel_session_limit(
+                trigger,
+                parent,
+                "panel",
+                "",
+                "",
+                reason="durable exact-head review read-back failed",
+            )
+            return
+
         # 3. Learning pass (ateles#82): systemic findings → operator-gated
         #    proposed_skill_update entities.
         proposals = propose_skill_updates(reviews, pr_ref=ref)
         if proposals:
-            await self._store_entities(
+            digest = content_digest(proposals)
+            store_result = await self._store_entities(
                 proposals,
                 idempotency_key=(
-                    f"learning-{ref}-{trigger.delivery_id}-"
-                    f"{content_digest(proposals)}"
+                    f"learning-{ref}-{trigger.delivery_id}-{digest}"
                 ),
             )
+            first = proposals[0]
+            finding_label = first.get("finding_category") or first.get("title", "")
+            proposed_rule = first.get("proposed_rule") or first.get("title", "")
+            stored_ids: list[str] = []
+            if store_result:
+                for ent in store_result.get("entities", []):
+                    eid = ent.get("entity_id")
+                    if eid:
+                        stored_ids.append(eid)
+            approve_bits: list[str] = []
+            if trigger.html_url:
+                approve_bits.append(f"PR: {trigger.html_url}")
+            if stored_ids:
+                approve_bits.append(
+                    "proposed_skill_update entity id(s): "
+                    + ", ".join(stored_ids)
+                )
+            approve_bits.append(
+                "Approve the proposed_skill_update record(s) in Neotoma when ready."
+            )
+            email_eligible = bool(trigger.html_url or stored_ids)
             self.notifier.send(
                 f"{len(proposals)} systemic review finding(s) on {ref} — "
-                f"proposed skill update(s) await operator approval",
+                f"proposed skill update(s) await operator approval.\n"
+                f"Finding: {finding_label}\n"
+                f"Proposed rule: {proposed_rule}\n"
+                + "\n".join(approve_bits),
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
+                dedupe_key=f"skill-updates:{ref}:{digest}",
+                email_eligible=email_eligible,
             )
 
         # 3b. ateles#795: re-read gate_status from the record before the merge
@@ -4386,7 +4591,9 @@ class SwarmDispatcher:
         # 4. Vanellus aggregates panel verdicts. Merge is operator-gated
         #    unless APIS_AUTONOMY_AUTO_MERGE=1 (ateles#80 guardrail).
         aggregation_started_at = datetime.now(timezone.utc)
-        aggregation_head = await self._pr_head_sha(trigger)
+        aggregation_head = _normalise_full_sha(
+            (await self._pr_head_sha(trigger)) or ""
+        )
         if not review_head or aggregation_head != review_head:
             await self._handle_panel_session_limit(
                 trigger, parent, "panel", "", "",
@@ -4400,12 +4607,8 @@ class SwarmDispatcher:
                 parent,
                 [p.lens for p in panel],
                 reviews,
-                auto_merge=self.config.auto_merge,
-                # ateles#594 gap 3: the autonomy clause must be derived from
-                # gate state too, not the flag alone. Lanius's fail-open-for-
-                # review path (above) is correct, but that fail-open must not
-                # propagate into merge AUTHORIZATION language.
                 pending_gates=pending_gates,
+                reviewed_head=review_head,
             ),
             github_token=_token_for_agent_on_repo("vanellus", trigger.repository),
             include_github_contract=True,
@@ -4449,7 +4652,9 @@ class SwarmDispatcher:
         # 4b. Dispatcher fallback: if Vanellus's own gh comment did not land
         #     on the PR, post the captured stdout ourselves (mirrors
         #     _post_missing_panel_comments for the aggregation step).
-        await self._post_missing_vanellus_comment(trigger, vanellus_result)
+        await self._post_missing_vanellus_comment(
+            trigger, vanellus_result, reviewed_head=review_head
+        )
 
         # 5. Act on the verdict — this is the loop closure. Previously the
         #    dispatcher filed a merge checkpoint here UNCONDITIONALLY, ignoring
@@ -4486,7 +4691,7 @@ class SwarmDispatcher:
         #     review state as an APPROVE that proceeds. Best-effort: a failure
         #     here must not change the routing decision below, which remains
         #     driven by the parsed verdict.
-        await self._emit_formal_review(
+        binding_receipt = await self._emit_formal_review(
             trigger, verdict, vanellus_result.stdout, reviewed_head=aggregation_head
         )
 
@@ -4512,15 +4717,79 @@ class SwarmDispatcher:
         #     a `[BLOCKING]` finding block the PR on GitHub while the dispatcher
         #     told the operator it was merge-ready.
         if review_blocks_merge(verdict, vanellus_result.stdout):
-            await self._route_blocking_findings(trigger, parent, reviews, verdict)
+            await self._route_blocking_findings(
+                trigger,
+                parent,
+                reviews,
+                verdict,
+                reviewed_head=review_head,
+            )
             return
 
-        await self._gate_merge_readiness(trigger, parent, panel)
+        # A clear model verdict is not a merge-readiness control until GitHub
+        # confirms that the distinct Vanellus principal posted an APPROVED
+        # review against the exact head the panel judged.  A missing token,
+        # same-principal identity, rejected POST, stale head, or mismatched
+        # readback all hold here.  Routing blockers remains independent above.
+        proves_approval = getattr(binding_receipt, "proves_approval", None)
+        if not (
+            callable(proves_approval)
+            and proves_approval(head_sha=aggregation_head)
+        ):
+            log.error(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: clear "
+                "panel verdict lacks a verified exact-head APPROVED receipt "
+                "from the distinct Vanellus principal — merge readiness held"
+            )
+            await self._claim_escalation(trigger, "binding-review-unverified")
+            self.notifier.send(
+                f"PR {trigger.repository}#{trigger.number}: standing "
+                "self-review defect (ateles#1139 — reviewer token must differ "
+                "from PR author): GitHub did not confirm an exact-head APPROVED "
+                "review from the dedicated Vanellus identity. "
+                "https://github.com/markmhendrickson/ateles/issues/1139 — "
+                "merge readiness is held closed.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+                dedupe_key="self-review-refused",
+            )
+            return
+
+        self.notifier.clear_dedupe("self-review-refused")
+
+        # Close the receipt-to-readiness race.  The formal-review path checked
+        # the live head before posting, but a push can land after that GET and
+        # after GitHub returns the review readback.  Re-read immediately before
+        # readiness and invalidate the now-stale receipt on any mismatch.
+        readiness_head = _normalise_full_sha(
+            (await self._pr_head_sha(trigger)) or ""
+        )
+        if readiness_head != aggregation_head:
+            await self._handle_panel_session_limit(
+                trigger,
+                parent,
+                "panel",
+                "",
+                "",
+                reason=(
+                    "PR head changed after binding review or could not be "
+                    "verified before merge readiness"
+                ),
+            )
+            return
+
+        await self._gate_merge_readiness(
+            trigger,
+            parent,
+            panel,
+            reviewed_head=aggregation_head,
+            binding_receipt=binding_receipt,
+        )
 
     async def _emit_formal_review(
         self, t: SwarmTrigger, verdict: str | None, body: str,
         *, reviewed_head: str | None = None,
-    ) -> str | None:
+    ) -> ReviewBindingReceipt | None:
         """Post the aggregated panel verdict as a native GitHub Review.
 
         This is ateles#241: the swarm's verdicts previously existed only as prose
@@ -4532,27 +4801,22 @@ class SwarmDispatcher:
         routinely fail their own `gh` calls, and of the lens agents only Vanellus
         and Waxwing even hold `gh pr review` grants.
 
-        Best-effort — returns the review id on success, else None. NEVER raises:
-        the routing decision in `_handle_pr` is driven by the parsed verdict, and
-        a GitHub hiccup must not change which branch runs.
+        Binding events (APPROVE / REQUEST_CHANGES) require the dedicated
+        ``VANELLUS_AGENT_PAT``.  The dispatcher verifies that token's login,
+        verifies it differs from the immutable PR author, verifies the live PR
+        head still equals the panel-reviewed head, posts that exact commit_id,
+        then reads the created review back and checks reviewer, commit, and
+        state.  Only that readback produces a :class:`ReviewBindingReceipt`.
 
-        Two failures are expected and handled quietly rather than as errors:
-        - 422 "Can not approve your own pull request" — the swarm authored the PR
-          and is reviewing under the same identity. Falls back to COMMENT so the
-          verdict still lands. Resolves once per-agent accounts (#109) ship.
-        - 422 on a closed/merged PR — a race between the panel and a merge.
+        Best-effort for routing — returns None on any failure and never raises.
+        A blocking verdict still routes findings, but a clear verdict cannot
+        enter merge-readiness without a verified APPROVED receipt.
         """
         # ateles#595: the body, not the self-reported token, is the authority on
         # whether this review blocks. A `**COMMENT**` above a `[BLOCKING]`
         # finding must reach reviewDecision as REQUEST_CHANGES.
         event = verdict_to_review_event(verdict, body=body)
         ref = f"{t.repository}#{t.number}"
-
-        if not _token_for_repo(t.repository) and not self.config.github_token:
-            log.warning(
-                f"[{DAEMON_NAME}] no GitHub token — formal review skipped for {ref}"
-            )
-            return None
 
         url = f"https://api.github.com/repos/{t.repository}/pulls/{t.number}/reviews"
         # GitHub rejects a bodyless REQUEST_CHANGES/COMMENT (only APPROVE may be
@@ -4576,61 +4840,148 @@ class SwarmDispatcher:
             return None
         payload = {"event": event, "body": text[:65000], "commit_id": head_sha}
 
-        async def _post(p: dict) -> httpx.Response:
-            async with httpx.AsyncClient(timeout=30) as client:
-                return await client.post(
-                    url, json=p, headers=self._github_headers(t.repository)
+        binding_event = event in {
+            _REVIEW_EVENT_APPROVE,
+            _REVIEW_EVENT_REQUEST_CHANGES,
+        }
+        if binding_event:
+            token = os.environ.get("VANELLUS_AGENT_PAT", "")
+            if not token:
+                log.error(
+                    f"[{DAEMON_NAME}] VANELLUS_AGENT_PAT unset — binding "
+                    f"formal review {event} skipped for {ref}; shared-token "
+                    "fallback is forbidden"
                 )
-
-        try:
-            resp = await _post(payload)
-            downgraded = False
-            if resp.status_code == 422 and event != _REVIEW_EVENT_COMMENT:
-                # Self-review or otherwise-unacceptable event: degrade to COMMENT
-                # so the verdict is still recorded, and say so plainly.
-                detail = (resp.text or "")[:200]
-                downgraded = True
+                return None
+        else:
+            token = _token_for_repo(t.repository) or self.config.github_token
+            if not token:
                 log.warning(
-                    f"[{DAEMON_NAME}] formal review {event} rejected on {ref} "
-                    f"(422) — retrying as COMMENT: {detail}"
+                    f"[{DAEMON_NAME}] no GitHub token — formal review skipped "
+                    f"for {ref}"
                 )
-                resp = await _post({**payload, "event": _REVIEW_EVENT_COMMENT})
-                # A COMMENT does NOT set reviewDecision, so the PR reads as
-                # "never reviewed" forever and no gate can ever be satisfied.
-                # GitHub refuses REQUEST_CHANGES/APPROVE on your own PR, so when
-                # the authoring token and the reviewing token are the same
-                # identity every verdict silently becomes non-binding. Measured
-                # 2026-09-01: 11 of 15 unreviewed open ateles PRs are
-                # ateles-agent reviewing ateles-agent, and 28 such downgrades
-                # appear in apis.log. Only a distinct reviewer identity fixes
-                # this, so page the operator instead of burying it in a WARNING.
-                if await self._claim_escalation(t, "self-review-422"):
-                    self.notifier.send(
-                        f"PR {ref}: GitHub refused the `{event}` review "
-                        f"({detail[:120]}), so it was recorded as a non-binding "
-                        "COMMENT and the PR still reads as never-reviewed. The "
-                        "review gate cannot be satisfied until the reviewing "
-                        "token is a DIFFERENT GitHub identity from the PR "
-                        "author. Merge held.",
-                        priority=Priority.OPERATOR_DECISION,
-                        handler=DAEMON_NAME,
+                return None
+
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                if binding_event:
+                    identity_resp = await client.get(
+                        "https://api.github.com/user", headers=headers
                     )
-            resp.raise_for_status()
-            review_id = resp.json().get("id")
-            # Report what actually landed, not what was attempted — the old log
-            # said "posted formal GitHub review REQUEST_CHANGES" even when the
-            # request had been downgraded to an inert COMMENT.
-            landed = _REVIEW_EVENT_COMMENT if downgraded else event
-            log.info(
-                f"[{DAEMON_NAME}] posted formal GitHub review {landed} on {ref} "
-                f"(id={review_id}, verdict={verdict}"
-                f"{', DOWNGRADED from ' + event + ' — non-binding' if downgraded else ''})"
-            )
-            return str(review_id) if review_id is not None else None
+                    identity_resp.raise_for_status()
+                    reviewer_login = str(
+                        (identity_resp.json() or {}).get("login") or ""
+                    )
+                    expected_login = agent_github_login("vanellus")
+                    if reviewer_login.casefold() != expected_login.casefold():
+                        raise RuntimeError(
+                            "VANELLUS_AGENT_PAT resolved to unexpected login "
+                            f"{reviewer_login!r}; expected {expected_login!r}"
+                        )
+
+                    pr_resp = await client.get(
+                        f"https://api.github.com/repos/{t.repository}/pulls/"
+                        f"{t.number}",
+                        headers=headers,
+                    )
+                    pr_resp.raise_for_status()
+                    pr = pr_resp.json() or {}
+                    live_head = _normalise_full_sha(
+                        str((pr.get("head") or {}).get("sha") or "")
+                    )
+                    pr_author = str((pr.get("user") or {}).get("login") or "")
+                    if live_head != head_sha:
+                        raise RuntimeError(
+                            f"PR head changed from reviewed {head_sha[:12]} to "
+                            f"{live_head[:12] or 'unreadable'}"
+                        )
+                    if not pr_author:
+                        raise RuntimeError("PR author could not be read")
+                    if reviewer_login.casefold() == pr_author.casefold():
+                        raise RuntimeError(
+                            f"reviewer {reviewer_login!r} is the PR author; "
+                            "binding self-review refused"
+                        )
+
+                resp = await client.post(url, json=payload, headers=headers)
+                if resp.status_code >= 400:
+                    detail = (resp.text or "")[:240]
+                    raise RuntimeError(f"HTTP {resp.status_code}: {detail}")
+                review_id = _normalise_github_review_id(
+                    (resp.json() or {}).get("id")
+                )
+                if not binding_event:
+                    log.info(
+                        f"[{DAEMON_NAME}] posted formal GitHub review {event} "
+                        f"on {ref} (id={review_id}, verdict={verdict})"
+                    )
+                    return None
+                if not review_id:
+                    raise RuntimeError(
+                        "GitHub review response carried an invalid review id"
+                    )
+
+                readback_resp = await client.get(
+                    f"{url}/{review_id}", headers=headers
+                )
+                readback_resp.raise_for_status()
+                readback = readback_resp.json() or {}
+                actual_review_id = _normalise_github_review_id(
+                    readback.get("id")
+                )
+                actual_login = str(
+                    (readback.get("user") or {}).get("login") or ""
+                )
+                actual_commit = _normalise_full_sha(
+                    str(readback.get("commit_id") or "")
+                )
+                actual_state = str(readback.get("state") or "").upper()
+                expected_state = (
+                    "APPROVED"
+                    if event == _REVIEW_EVENT_APPROVE
+                    else "CHANGES_REQUESTED"
+                )
+                if actual_review_id != review_id:
+                    raise RuntimeError(
+                        "review readback id mismatch: "
+                        f"{actual_review_id!r} != {review_id!r}"
+                    )
+                if actual_login.casefold() != reviewer_login.casefold():
+                    raise RuntimeError(
+                        "review readback principal mismatch: "
+                        f"{actual_login!r} != {reviewer_login!r}"
+                    )
+                if actual_commit != head_sha:
+                    raise RuntimeError(
+                        "review readback commit mismatch: "
+                        f"{actual_commit!r} != {head_sha!r}"
+                    )
+                if actual_state != expected_state:
+                    raise RuntimeError(
+                        "review readback state mismatch: "
+                        f"{actual_state!r} != {expected_state!r}"
+                    )
+                receipt = ReviewBindingReceipt(
+                    review_id=actual_review_id,
+                    reviewer_login=actual_login,
+                    commit_id=actual_commit,
+                    state=actual_state,
+                )
+                log.info(
+                    f"[{DAEMON_NAME}] verified binding GitHub review {event} "
+                    f"on {ref} (id={review_id}, reviewer={actual_login}, "
+                    f"commit={actual_commit[:12]}, state={actual_state})"
+                )
+                return receipt
         except Exception as exc:
-            # Never fail the handler on a review-post problem.
+            # Never change blocker routing because GitHub posting failed. The
+            # clear path independently requires the receipt and therefore holds.
             log.warning(
-                f"[{DAEMON_NAME}] formal review post failed on {ref} "
+                f"[{DAEMON_NAME}] binding formal review post failed on {ref} "
                 f"({event}): {exc}"
             )
             return None
@@ -4815,12 +5166,52 @@ class SwarmDispatcher:
             )
             return True
 
+    async def _blocking_findings_from_reviewed_head_comments(
+        self,
+        trigger: SwarmTrigger,
+        reviewed_head: str,
+    ) -> dict[str, list[ReviewFinding]]:
+        """Recover structured blockers only from the head the panel reviewed."""
+        head = _normalise_full_sha(reviewed_head)
+        if not head:
+            log.error(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                "refusing blocker recovery without a verified reviewed head"
+            )
+            return {}
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._all_issue_comments(
+                    trigger.repository, trigger.number, client
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] reviewed-head comment scan failed for "
+                f"{trigger.repository}#{trigger.number}: {exc}"
+            )
+            return {}
+
+        by_lens: dict[str, list[ReviewFinding]] = {}
+        for comment in comments:
+            body = comment.get("body") or ""
+            for lens in {item.lens for item in LENSES}:
+                if not lens_comment_satisfies_presence(
+                    body, lens, head_sha=head
+                ):
+                    continue
+                for finding in parse_findings(body, lens=lens):
+                    if finding.blocking:
+                        by_lens.setdefault(lens, []).append(finding)
+        return by_lens
+
     async def _route_blocking_findings(
         self,
         trigger: SwarmTrigger,
         parent: int | None,
         reviews: list[tuple[str, str]],
         verdict: str | None,
+        *,
+        reviewed_head: str = "",
     ) -> None:
         """Route panel blocking findings back for an automatic fix (bounded).
 
@@ -4840,20 +5231,27 @@ class SwarmDispatcher:
                 if f.blocking:
                     by_lens.setdefault(lens, []).append(f)
 
+        if not by_lens:
+            by_lens = await self._blocking_findings_from_reviewed_head_comments(
+                trigger, reviewed_head
+            )
+
         if not by_lens and verdict == "blocked":
             # BLOCKED without content findings means a process precondition was
             # unmet. It is actionable context, not a malformed verdict and not
             # code for Cicada to change.
-            if await self._claim_escalation(trigger, "process-blocked"):
-                detail = next((text.strip() for _, text in reviews if text.strip()), "")
-                self.notifier.send(
-                    f"ℹ️ Vanellus reports BLOCKED (process, not content): no "
-                    f"blocking findings, but a process gate is unmet. "
-                    f"{detail[:300]}. No code changes required — see PR "
-                    f"body/thread. PR {ref} remains held.",
-                    priority=Priority.OPERATOR_DECISION,
-                    handler=DAEMON_NAME,
-                )
+            await self._claim_escalation(trigger, "process-blocked")
+            detail = next((text.strip() for _, text in reviews if text.strip()), "")
+            head_key = _normalise_full_sha(reviewed_head) or reviewed_head
+            self.notifier.send(
+                f"ℹ️ Vanellus reports BLOCKED (process, not content): no "
+                f"blocking findings, but a process gate is unmet. "
+                f"{detail[:300]}. No code changes required — see PR "
+                f"body/thread. PR {ref} ({trigger.html_url}) remains held.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+                dedupe_key=f"process-blocked:{ref}:{head_key}",
+            )
             return
 
         if not by_lens:
@@ -4865,14 +5263,17 @@ class SwarmDispatcher:
             # human reads the review. Without this the body-derived blocker would
             # simply land in a different silence than the one it came from.
             # Only notify once per PR: a re-review must not re-ping the operator.
-            if await self._claim_escalation(trigger, "unparseable-verdict"):
-                self.notifier.send(
-                    f"PR {ref}: review verdict `{verdict or 'unparseable'}` did "
-                    "not clear the merge path but no blocking findings could be "
-                    "parsed from the lens reviews — needs your read. Merge held.",
-                    priority=Priority.OPERATOR_DECISION,
-                    handler=DAEMON_NAME,
-                )
+            await self._claim_escalation(trigger, "unparseable-verdict")
+            head_key = _normalise_full_sha(reviewed_head) or reviewed_head
+            self.notifier.send(
+                f"PR {ref}: review verdict `{verdict or 'unparseable'}` did "
+                "not clear the merge path but no blocking findings could be "
+                f"parsed from the lens reviews — needs your read. "
+                f"{trigger.html_url} Merge held.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+                dedupe_key=f"unparseable-verdict:{ref}:{head_key}",
+            )
             return
 
         prior_rounds = await self._fix_round_count(trigger)
@@ -4881,14 +5282,18 @@ class SwarmDispatcher:
             # Once-per-PR: the exhausted-rounds condition is re-evaluated on
             # every subsequent push, so guard the operator ping behind the
             # escalation marker to avoid identical repeats (ateles#262 ×4).
-            if await self._claim_escalation(trigger, "auto-fix-exhausted"):
-                self.notifier.send(
-                    f"PR {ref}: {self.config.max_fix_rounds} auto-fix rounds did "
-                    f"not clear review (still blocking on: {lenses}). Escalating "
-                    "— needs your attention. Merge held.",
-                    priority=Priority.OPERATOR_DECISION,
-                    handler=DAEMON_NAME,
-                )
+            await self._claim_escalation(trigger, "auto-fix-exhausted")
+            head = _normalise_full_sha(
+                (await self._pr_head_sha(trigger)) or reviewed_head or ""
+            ) or reviewed_head
+            self.notifier.send(
+                f"PR {ref}: {self.config.max_fix_rounds} auto-fix rounds did "
+                f"not clear review (still blocking on: {lenses}). Escalating "
+                f"— needs your attention. {trigger.html_url} Merge held.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+                dedupe_key=f"fix-exhausted:{ref}:{head}",
+            )
             return
 
         this_round = prior_rounds + 1
@@ -5033,22 +5438,48 @@ class SwarmDispatcher:
         parent: int | None,
         panel: list[Lens],
         ci_state: str | None = None,
+        *,
+        reviewed_head: str = "",
+        binding_receipt: ReviewBindingReceipt | None = None,
     ) -> None:
-        """File the merge checkpoint + notify ONLY when review is clear AND CI green.
+        """Advance only after exact-head review proof and green CI.
 
-        Previously this fired unconditionally after review. Now the operator's
-        merge-ready email is a truthful signal: it means the PR is actually
-        ready. When CI is not green, hold quietly (digest note) rather than
-        paging the operator prematurely. A completed check re-invokes this via
-        the ci_status path; a re-push re-runs the whole panel.
+        In operator-gated mode this files the checkpoint and truthful merge-ready
+        notification. In auto-merge mode it additionally requires a verified
+        distinct native-review receipt, rechecks the live head, and delegates
+        the final merge to GitHub with that head as an atomic precondition.
+        When CI is not green, hold quietly rather than paging prematurely.
 
         `ci_state` may be passed by a caller that already computed it (the
         ci_status path) to avoid a redundant _required_ci_state fetch (3 GitHub
         API round-trips); when None we compute it here as before.
         """
         ref = f"{trigger.repository}#{trigger.number}"
+        expected_head = _normalise_full_sha(reviewed_head)
+        if expected_head:
+            live_head = _normalise_full_sha(
+                (await self._pr_head_sha(trigger)) or ""
+            )
+            if live_head != expected_head:
+                log.error(
+                    f"[{DAEMON_NAME}] {ref}: reviewed head "
+                    f"{expected_head[:12]} no longer matches live head "
+                    f"{live_head[:12] or 'unreadable'} — readiness held"
+                )
+                return
+
         if self.config.auto_merge:
-            return  # auto-merge path: Vanellus handles merge, no checkpoint.
+            proves_approval = getattr(binding_receipt, "proves_approval", None)
+            if not (
+                expected_head
+                and callable(proves_approval)
+                and proves_approval(head_sha=expected_head)
+            ):
+                log.error(
+                    f"[{DAEMON_NAME}] {ref}: auto-merge held without a verified "
+                    "distinct exact-head APPROVED receipt"
+                )
+                return
 
         ci = ci_state if ci_state is not None else await self._required_ci_state(trigger)
         if ci == "failing":
@@ -5069,6 +5500,38 @@ class SwarmDispatcher:
             )
             return
 
+        ci_exhaust_head = expected_head or _normalise_full_sha(
+            (await self._pr_head_sha(trigger)) or ""
+        )
+        if ci_exhaust_head:
+            self.notifier.clear_dedupe(
+                f"ci-exhausted:{trigger.repository}#{trigger.number}:{ci_exhaust_head}"
+            )
+
+        if self.config.auto_merge:
+            merged, detail = await self._merge_pr(
+                trigger.repository,
+                trigger.number,
+                "squash",
+                expected_head=expected_head,
+                require_default_base=True,
+            )
+            if merged:
+                self.notifier.send(
+                    f"PR {ref} MERGED automatically after verified distinct "
+                    f"exact-head approval and green CI ({detail[:12]}).",
+                    priority=Priority.INFO,
+                    handler=DAEMON_NAME,
+                )
+            else:
+                self.record_merge_refusal(
+                    repository=trigger.repository,
+                    number=trigger.number,
+                    reason=detail,
+                    auto_merge=True,
+                )
+            return
+
         await self._store_merge_checkpoint(trigger, parent, [p.lens for p in panel])
         # Approval channels (approval loop): the operator can (a) reply APPROVE to
         # this email, (b) click Approve on the PR in GitHub, or (c) comment
@@ -5083,6 +5546,69 @@ class SwarmDispatcher:
             priority=Priority.OPERATOR_DECISION,
             handler=DAEMON_NAME,
         )
+
+    async def _fetch_head_ci_snapshot(
+        self, trigger: SwarmTrigger
+    ) -> tuple[str, str, list[dict]]:
+        """Return PR head SHA, combined commit status state, and raw check-runs."""
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = self._github_headers(trigger.repository)
+            pr = await client.get(
+                f"https://api.github.com/repos/{trigger.repository}/pulls/"
+                f"{trigger.number}",
+                headers=headers,
+            )
+            pr.raise_for_status()
+            head_sha = pr.json().get("head", {}).get("sha", "")
+            if not head_sha:
+                return "", "unknown", []
+
+            status = await client.get(
+                f"https://api.github.com/repos/{trigger.repository}/commits/"
+                f"{head_sha}/status",
+                headers=headers,
+            )
+            status.raise_for_status()
+            state = status.json().get("state", "")
+
+            checks = await client.get(
+                f"https://api.github.com/repos/{trigger.repository}/commits/"
+                f"{head_sha}/check-runs",
+                headers={**headers, "Accept": "application/vnd.github+json"},
+            )
+            checks.raise_for_status()
+            runs = checks.json().get("check_runs", [])
+            return head_sha, state, runs
+
+    async def _failing_check_runs(
+        self, trigger: SwarmTrigger
+    ) -> list[dict[str, str]]:
+        """Failing check-runs for the PR head — name and html_url only."""
+        try:
+            _head, _state, runs = await self._fetch_head_ci_snapshot(trigger)
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                f"could not fetch check-runs for CI notify: {exc}"
+            )
+            return []
+        failing_conclusions = (
+            "failure",
+            "timed_out",
+            "cancelled",
+            "action_required",
+        )
+        out: list[dict[str, str]] = []
+        for run in runs:
+            if run.get("conclusion") not in failing_conclusions:
+                continue
+            out.append(
+                {
+                    "name": (run.get("name") or "").strip(),
+                    "html_url": (run.get("html_url") or "").strip(),
+                }
+            )
+        return out
 
     async def _required_ci_state(self, trigger: SwarmTrigger) -> str:
         """Return "green" | "failing" | "pending" | "unknown" for the PR head.
@@ -5102,52 +5628,25 @@ class SwarmDispatcher:
         """
 
         async def _fetch_state() -> str:
-            async with httpx.AsyncClient(timeout=30) as client:
-                headers = self._github_headers(trigger.repository)
-                pr = await client.get(
-                    f"https://api.github.com/repos/{trigger.repository}/pulls/"
-                    f"{trigger.number}",
-                    headers=headers,
-                )
-                pr.raise_for_status()
-                head_sha = pr.json().get("head", {}).get("sha", "")
-                if not head_sha:
-                    return "unknown"
+            head_sha, state, runs = await self._fetch_head_ci_snapshot(trigger)
+            if not head_sha:
+                return "unknown"
+            run_conclusions = [r.get("conclusion") for r in runs]
+            run_statuses = [r.get("status") for r in runs]
 
-                # Combined legacy commit status (Loxia, external CIs).
-                status = await client.get(
-                    f"https://api.github.com/repos/{trigger.repository}/commits/"
-                    f"{head_sha}/status",
-                    headers=headers,
-                )
-                status.raise_for_status()
-                state = status.json().get("state", "")  # success|failure|pending|""
+            failing_run = any(
+                c in ("failure", "timed_out", "cancelled", "action_required")
+                for c in run_conclusions
+            )
+            pending_run = any(s != "completed" for s in run_statuses)
 
-                # GitHub Actions check-runs (not covered by the status API).
-                checks = await client.get(
-                    f"https://api.github.com/repos/{trigger.repository}/commits/"
-                    f"{head_sha}/check-runs",
-                    headers={**headers, "Accept": "application/vnd.github+json"},
-                )
-                checks.raise_for_status()
-                runs = checks.json().get("check_runs", [])
-                run_conclusions = [r.get("conclusion") for r in runs]
-                run_statuses = [r.get("status") for r in runs]
-
-                failing_run = any(
-                    c in ("failure", "timed_out", "cancelled", "action_required")
-                    for c in run_conclusions
-                )
-                pending_run = any(s != "completed" for s in run_statuses)
-
-                if state == "failure" or failing_run:
-                    return "failing"
-                if state == "pending" or pending_run:
-                    return "pending"
-                if state in ("success", "") and not runs and not failing_run:
-                    # No checks configured at all — treat as green (nothing to fail).
-                    return "green"
+            if state == "failure" or failing_run:
+                return "failing"
+            if state == "pending" or pending_run:
+                return "pending"
+            if state in ("success", "") and not runs and not failing_run:
                 return "green"
+            return "green"
 
         ref = f"{trigger.repository}#{trigger.number}"
         # load_policy() does a blocking httpx.get(); run it off the event loop
@@ -5222,12 +5721,39 @@ class SwarmDispatcher:
         ref = f"{trigger.repository}#{trigger.number}"
         prior_rounds = await self._fix_round_count(trigger)
         if prior_rounds >= self.config.max_fix_rounds:
-            self.notifier.send(
+            head = _normalise_full_sha((await self._pr_head_sha(trigger)) or "")
+            dedupe_key = (
+                f"ci-exhausted:{trigger.repository}#{trigger.number}:{head}"
+                if head
+                else None
+            )
+            failing = await self._failing_check_runs(trigger)
+            check_lines = [
+                f"- {c['name']}: {c['html_url']}"
+                for c in failing
+                if c.get("name") and c.get("html_url")
+            ]
+            action = (
+                "Open the failing check URL(s) above, re-push a fix, or raise "
+                f"APIS_MAX_FIX_ROUNDS (currently {self.config.max_fix_rounds})."
+            )
+            email_eligible = bool(check_lines)
+            body = (
                 f"PR {ref}: required CI is failing after "
                 f"{self.config.max_fix_rounds} auto-fix rounds. Escalating — "
-                "needs your attention. Merge held.",
+                "needs your attention. Merge held.\n"
+            )
+            if check_lines:
+                body += "Failing checks:\n" + "\n".join(check_lines) + "\n"
+            body += action
+            if trigger.html_url:
+                body += f"\nPR: {trigger.html_url}"
+            self.notifier.send(
+                body,
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
+                dedupe_key=dedupe_key,
+                email_eligible=email_eligible,
             )
             return
         this_round = prior_rounds + 1
@@ -5648,9 +6174,11 @@ class SwarmDispatcher:
 
           - required CI failed → route back to Cicada for a fix (bounded, shared
             with the push path via _route_ci_failure);
-          - required CI green AND the panel verdict is already clear → run the
-            readiness gate so the operator gets the (now-truthful) merge-ready
-            signal.
+          - required CI green AND the panel verdict is already clear → in
+            operator-gated mode, run readiness so the operator gets the
+            (now-truthful) merge-ready signal; in auto-merge mode, re-run the
+            exact-head panel so canonical durability is freshly proved with
+            its expected lens set before readiness is reachable.
 
         Guards: resolve the PR from the check_suite's associated PRs; SKIP if the
         suite's head_sha is not the PR's CURRENT head (a stale check for a
@@ -5741,7 +6269,65 @@ class SwarmDispatcher:
             )
             return
 
+        # The dictionary check-and-insert below contains no await, so it is an
+        # atomic in-process claim on this event loop.  A plain asyncio.Lock
+        # would only serialize duplicate deliveries; the waiter would still
+        # launch a second full panel after the leader released it.  Waiting on
+        # the leader's completion event and returning is what actually
+        # coalesces equivalent overlapping deliveries.
+        claim_key = (trigger.repository.casefold(), pr_number, current_head)
+        existing_claim = self._ci_head_claims.get(claim_key)
+        if existing_claim is not None:
+            log.info(
+                f"[{DAEMON_NAME}] {ref}@{current_head[:9]}: CI delivery "
+                f"{trigger.delivery_id or '<none>'!r} coalesced behind "
+                f"{existing_claim.delivery_id or '<none>'!r}"
+            )
+            await existing_claim.completed.wait()
+            if (
+                trigger.ci_conclusion == existing_claim.conclusion
+                and existing_claim.handled
+            ):
+                return
+            # A materially different conclusion is never a duplicate. Neither
+            # is the same conclusion after a leader found aggregate CI still
+            # pending/unknown or unwound through exception/cancellation.
+            # Re-enter so the waiter re-fetches the PR/head and aggregate state.
+            return await self._handle_ci_status(trigger)
+
+        claim = _CIHeadClaim(
+            completed=asyncio.Event(),
+            conclusion=trigger.ci_conclusion,
+            delivery_id=trigger.delivery_id,
+        )
+        self._ci_head_claims[claim_key] = claim
+        try:
+            claim.handled = await self._handle_ci_status_for_current_head(
+                trigger, pr, current_head
+            )
+        finally:
+            claim.completed.set()
+            # Delete only our own claim. This is defensive against future code
+            # that may replace a claim while a cancelled leader unwinds.
+            if self._ci_head_claims.get(claim_key) is claim:
+                self._ci_head_claims.pop(claim_key, None)
+
+    async def _handle_ci_status_for_current_head(
+        self,
+        trigger: SwarmTrigger,
+        pr: dict,
+        current_head: str,
+    ) -> bool:
+        """Process one claimed delayed-CI attempt for an exact live PR head."""
+        pr_number = pr.get("number", 0) or trigger.number
+        ref = f"{trigger.repository}#{pr_number}"
+
         # Build a PR-shaped trigger the readiness/route helpers expect.
+        # Its delivery_id intentionally remains empty. handle_trigger already
+        # persisted one harness_event for every GitHub delivery before claims
+        # are coalesced; downstream panel state is canonically keyed by PR,
+        # exact head, lens and content, not by whichever equivalent delivery
+        # happened to win this in-process claim.
         pr_trigger = self._pr_trigger_from_api(trigger.repository, pr)
         parent = self._parent_issue_number(pr_trigger.body, trigger.repository)
 
@@ -5751,9 +6337,21 @@ class SwarmDispatcher:
         if ci == "failing":
             log.info(f"[{DAEMON_NAME}] {ref}: CI completed failing — routing to fix")
             await self._route_ci_failure(pr_trigger, parent)
-            return
+            return True
         if ci != "green":
-            return  # pending/unknown — a later check_suite:completed will re-fire
+            # Pending/unknown is not handled: an overlapping same-conclusion
+            # completion may be the suite that makes the aggregate conclusive.
+            return False
+
+        # Condition resolved for this head: allow a later same-head CI
+        # exhaustion to re-notify (ateles#1165). Clear even when review is
+        # not yet clear — that early-return below would otherwise leave the
+        # key stuck until a new head.
+        green_head = _normalise_full_sha(current_head) or current_head
+        if green_head:
+            self.notifier.clear_dedupe(
+                f"ci-exhausted:{trigger.repository}#{pr_number}:{green_head}"
+            )
 
         # CI green: only advance the merge-ready signal if review is ALREADY
         # clear. An unreviewed PR going green is the panel path's job, not ours.
@@ -5764,10 +6362,91 @@ class SwarmDispatcher:
                 f"[{DAEMON_NAME}] {ref}: CI green but no clear panel verdict yet "
                 "— leaving to the review path"
             )
-            return
+            return True
+        if self.config.auto_merge:
+            # A delayed CI event no longer has the expected panel manifest in
+            # memory. The canonical rows identify what exists, but they do not
+            # persist the expected lens set, so a query cannot distinguish a
+            # legitimate reduced panel from a silently omitted review. Re-run
+            # the exact-head PR path instead: it selects the expected panel,
+            # writes and reads back pull_request, pr_review, and
+            # security_finding state, and only then reaches readiness with the
+            # fresh binding receipt it created. Never reconstruct GitHub
+            # approval and merge directly from this delayed callback.
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: CI green + review clear — re-running "
+                "the exact-head panel to re-prove canonical durability"
+            )
+            await self._handle_pr(pr_trigger)
+            return True
         log.info(f"[{DAEMON_NAME}] {ref}: CI green + review clear — gating readiness")
         # Pass the CI state we already computed so the gate does not re-fetch it.
-        await self._gate_merge_readiness(pr_trigger, parent, panel=[], ci_state=ci)
+        await self._gate_merge_readiness(
+            pr_trigger,
+            parent,
+            panel=[],
+            ci_state=ci,
+            reviewed_head=current_head,
+            binding_receipt=None,
+        )
+        return True
+
+    async def _binding_approval_receipt_from_github(
+        self,
+        repository: str,
+        pr_number: int,
+        head_sha: str,
+        *,
+        pr_author: str = "",
+    ) -> ReviewBindingReceipt | None:
+        """Reconstruct a durable distinct-reviewer receipt for CI loop closure."""
+        expected_head = _normalise_full_sha(head_sha)
+        expected_login = agent_github_login("vanellus")
+        if (
+            not expected_head
+            or not expected_login
+            or not pr_author
+            or expected_login.casefold() == pr_author.casefold()
+        ):
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                reviews = await self._all_pr_reviews(
+                    repository, pr_number, client
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {repository}#{pr_number}: native review "
+                f"readback failed ({exc}) — auto-merge held"
+            )
+            return None
+
+        matching = [
+            review
+            for review in reviews
+            if str((review.get("user") or {}).get("login") or "").casefold()
+            == expected_login.casefold()
+            and _normalise_full_sha(str(review.get("commit_id") or ""))
+            == expected_head
+            and _normalise_github_review_id(review.get("id"))
+        ]
+        if not matching:
+            return None
+        latest = max(
+            matching,
+            key=lambda review: (
+                str(review.get("submitted_at") or ""),
+                int(_normalise_github_review_id(review.get("id"))),
+            ),
+        )
+        if str(latest.get("state") or "").upper() != "APPROVED":
+            return None
+        return ReviewBindingReceipt(
+            review_id=_normalise_github_review_id(latest.get("id")),
+            reviewer_login=expected_login,
+            commit_id=expected_head,
+            state="APPROVED",
+        )
 
     async def _resolve_review_verdict(
         self, t: SwarmTrigger, stdout: str, *,
@@ -7816,6 +8495,7 @@ class SwarmDispatcher:
         has_worktree: bool = False,
         owns_pending_gate: bool = False,
         changed_files: list[str] | None = None,
+        reviewed_head: str | None = None,
     ) -> str:
         """Build a lens panelist's prompt.
 
@@ -7966,8 +8646,11 @@ class SwarmDispatcher:
                         t.body, where="the PR body"
                     )
         _panelist_role = f"{lens.lens} lens panelist"
-        lens_marker = compose_lens_review_marker(lens.lens, t.head_sha)
-        if not t.head_sha:
+        marker_head = _normalise_full_sha(
+            reviewed_head if reviewed_head is not None else t.head_sha
+        )
+        lens_marker = compose_lens_review_marker(lens.lens, marker_head)
+        if not marker_head:
             lens_marker = f"<!-- review:{lens.lens} commit=<full40hex> -->"
         if is_provisioned(lens.agent):
             comment_identity_block = (
@@ -8026,8 +8709,8 @@ class SwarmDispatcher:
         parent: int | None,
         lenses: list[str],
         reviews: list[tuple[str, str]] | None = None,
-        auto_merge: bool = False,
         pending_gates: set[str] | None = None,
+        reviewed_head: str | None = None,
     ) -> str:
         # The captured lens reviews are embedded INLINE below so the aggregator
         # never has to re-fetch them via `gh`. Vanellus runs diff-only
@@ -8041,8 +8724,11 @@ class SwarmDispatcher:
             )
         else:
             panel_block = "(no panel lens reviews captured — GHA baseline only)"
-        marker = compose_aggregation_marker(t.head_sha)
-        if not t.head_sha:
+        marker_head = _normalise_full_sha(
+            reviewed_head if reviewed_head is not None else t.head_sha
+        )
+        marker = compose_aggregation_marker(marker_head)
+        if not marker_head:
             marker = "<!-- vanellus-aggregation commit=<full40hex> -->"
         return (
             "Invoke the vanellus agent per your appended system prompt.\n\n"
@@ -8076,7 +8762,11 @@ class SwarmDispatcher:
             "dispatcher parses it and posts the comment for you if your gh "
             "call fails).\n\n"
             + merge_authorization_clause(
-                auto_merge=auto_merge, pending_gates=pending_gates
+                # A Vanellus aggregation prompt is necessarily pre-receipt:
+                # the dispatcher emits the native review only after this skill
+                # returns.  Keep merge forbidden here under every flag state;
+                # post-receipt auto-merge is dispatcher-owned.
+                auto_merge=False, pending_gates=pending_gates
             )
         )
 
@@ -8200,10 +8890,12 @@ class SwarmDispatcher:
 
     # ── Neotoma helpers ──────────────────────────────────────────────────────
 
-    async def _store_entities(self, entities: list[dict], idempotency_key: str) -> None:
+    async def _store_entities(
+        self, entities: list[dict], idempotency_key: str
+    ) -> dict | None:
         if not self.config.neotoma_token:
             log.warning(f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN unset — store skipped")
-            return
+            return None
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
@@ -8214,8 +8906,10 @@ class SwarmDispatcher:
                     },
                 )
                 resp.raise_for_status()
+                return resp.json() if resp.content else {}
         except Exception as exc:
             log.error(f"[{DAEMON_NAME}] Neotoma store failed ({idempotency_key}): {exc}")
+            return None
 
     async def _log_harness_event(self, t: SwarmTrigger) -> None:
         entities = [
@@ -8229,6 +8923,28 @@ class SwarmDispatcher:
                 "occurred_at": datetime.now(timezone.utc).isoformat(),
             }
         ]
+        if t.is_pr:
+            parent_number = self._parent_issue_number(t.body, t.repository)
+            pull_request: dict = {
+                "entity_type": "pull_request",
+                "repository": t.repository,
+                "number": t.number,
+                "provider": "github",
+                "url": t.html_url,
+                "title": t.title,
+                "state": "open",
+                "status": "open",
+                "head_ref": t.head_ref,
+                "base_ref": t.base_ref,
+                "author_login": t.author,
+            }
+            head_sha = _normalise_full_sha(t.head_sha or "")
+            if head_sha:
+                pull_request["head_sha"] = head_sha
+            if parent_number:
+                pull_request["closes_issue_number"] = parent_number
+                pull_request["parent_issue_number"] = parent_number
+            entities.append(pull_request)
         await self._store_entities(
             entities,
             idempotency_key=(
@@ -8242,11 +8958,135 @@ class SwarmDispatcher:
         t: SwarmTrigger,
         reviews: list[tuple[str, str]],
         agents_by_lens: dict[str, str] | None = None,
-    ) -> None:
-        """Store each captured panel review as a harness_event so the review
-        text survives even when the panelist could not post its PR comment."""
+        *,
+        reviewed_head: str = "",
+    ) -> bool:
+        """Persist exact-head ``pr_review`` records plus dispatch audit rows.
+
+        The caller supplies the pre-panel live head. This method never derives
+        identity from the webhook payload or performs a later live-head read:
+        either would let a delayed webhook or mid-panel push attach the review
+        to a commit the panel did not inspect.
+        """
         agents_by_lens = agents_by_lens or {}
-        entities = [
+        sha = _normalise_full_sha(reviewed_head)
+        now = datetime.now(timezone.utc).isoformat()
+
+        durability_confirmed = False
+        if sha:
+            priors = await self._prior_live_reviews(
+                t, [lens for lens, _ in reviews], sha
+            )
+            entities: list[dict] = []
+            for lens, text in reviews:
+                findings = parse_findings(text, lens=lens)
+                blocking = [finding for finding in findings if finding.blocking]
+                non_blocking = [
+                    finding for finding in findings if not finding.blocking
+                ]
+
+                def shape(finding: ReviewFinding) -> dict:
+                    key = f"{finding.category}: {finding.summary}"
+                    return {
+                        "id": finding_id(lens, sha, key),
+                        "category": finding.category,
+                        "summary": finding.summary,
+                        "files": finding.files,
+                    }
+
+                prior_round = max(
+                    (self._prior_review_sort_key(prior)[0] for prior in priors.get(lens, [])),
+                    default=0,
+                )
+                shaped_blocking = [shape(finding) for finding in blocking]
+                shaped_non_blocking = [
+                    shape(finding) for finding in non_blocking
+                ]
+                entities.append(
+                    {
+                        "entity_type": "pr_review",
+                        "repository": t.repository,
+                        "pr_number": t.number,
+                        "pr_title": t.title,
+                        "review_lens": lens,
+                        "reviewer_agent": agents_by_lens.get(lens, ""),
+                        "head_sha": sha,
+                        "verdict": parse_review_verdict(text) or "unparseable",
+                        "status": "live",
+                        "review_round": prior_round + 1,
+                        "content": text,
+                        "blocking_findings": shaped_blocking,
+                        "nonblocking_findings": shaped_non_blocking,
+                        "finding_ids": [
+                            item["id"]
+                            for item in (*shaped_blocking, *shaped_non_blocking)
+                        ],
+                        "generated_by": agents_by_lens.get(lens, DAEMON_NAME),
+                        "generated_at": now,
+                    }
+                )
+
+            digest_basis = [
+                {key: value for key, value in entity.items() if key != "generated_at"}
+                for entity in entities
+            ]
+            store_result = await self._store_entities(
+                entities,
+                idempotency_key=(
+                    f"pr-review-{t.repository}-{t.number}-{sha[:12]}-"
+                    f"{content_digest(digest_basis)}"
+                ),
+            )
+            expected_lenses = {entity["review_lens"] for entity in entities}
+            review_store_confirmed = bool(store_result) and not (
+                self._store_result_has_unknown_fields(store_result)
+            )
+            if review_store_confirmed:
+                confirmed_ids = await self._confirmed_new_pr_review_ids_by_lens(
+                    t, entities, store_result, sha
+                )
+            else:
+                confirmed_ids = {}
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: pr_review "
+                    "store failed or reported undeclared fields; prior reviews "
+                    "remain live"
+                )
+            reviews_confirmed = set(confirmed_ids) == expected_lenses
+            supersession_confirmed = False
+            if reviews_confirmed:
+                supersession_confirmed = await self._supersede_prior_reviews(
+                    t,
+                    [entity["review_lens"] for entity in entities],
+                    sha,
+                    priors=priors,
+                    new_ids_by_lens=confirmed_ids,
+                )
+            security_confirmed = await self._persist_security_findings(
+                t, reviews, sha, verified_at=now
+            )
+            pull_request_confirmed = await self._persist_and_confirm_pull_request(
+                t, sha
+            )
+            durability_confirmed = (
+                reviews_confirmed
+                and supersession_confirmed
+                and security_confirmed
+                and pull_request_confirmed
+            )
+            if not durability_confirmed:
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: durable "
+                    "exact-head panel state incomplete; merge readiness must "
+                    "remain closed"
+                )
+        elif reviews:
+            log.error(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: refusing to "
+                "persist pr_review rows without a verified pre-panel head"
+            )
+
+        audit = [
             {
                 "entity_type": "harness_event",
                 "event_type": "github.panel_review",
@@ -8257,23 +9097,528 @@ class SwarmDispatcher:
                 "delivery_id": t.delivery_id,
                 "lens": lens,
                 "content": text,
-                "occurred_at": datetime.now(timezone.utc).isoformat(),
+                "occurred_at": now,
             }
             for lens, text in reviews
         ]
         await self._store_entities(
-            entities,
+            audit,
             idempotency_key=(
                 f"panel-reviews-{t.repository}-{t.number}-"
-                f"{t.delivery_id}-{content_digest(entities)}"
+                f"{t.delivery_id}-{content_digest(audit)}"
             ),
         )
+        return durability_confirmed
+
+    @staticmethod
+    def _store_result_has_unknown_fields(store_result: dict | None) -> bool:
+        """True when a Neotoma store response reports schema loss."""
+
+        def walk(value: object) -> bool:
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key == "unknown_fields_count":
+                        try:
+                            if int(item or 0) > 0:
+                                return True
+                        except (TypeError, ValueError):
+                            return True
+                    if key == "unknown_fields" and item:
+                        return True
+                    if walk(item):
+                        return True
+            elif isinstance(value, list):
+                return any(walk(item) for item in value)
+            return False
+
+        return walk(store_result or {})
+
+    async def _persist_security_findings(
+        self,
+        t: SwarmTrigger,
+        reviews: list[tuple[str, str]],
+        reviewed_head: str,
+        *,
+        verified_at: str | None = None,
+    ) -> bool:
+        """Persist and read back every structured Falco finding.
+
+        ``security_finding`` has a deliberately narrow schema.  Repository,
+        PR, lens and exact-head anchoring therefore live in the canonical name
+        and ``source_audit`` rather than undeclared convenience fields that
+        Neotoma would silently route to raw fragments.
+        """
+        sha = _normalise_full_sha(reviewed_head)
+        if not sha:
+            return False
+        now = verified_at or datetime.now(timezone.utc).isoformat()
+        entities: list[dict] = []
+        for lens, text in reviews:
+            if lens != "security":
+                continue
+            for finding in parse_findings(text, lens=lens):
+                key = f"{finding.category}: {finding.summary}"
+                identifier = finding_id(lens, sha, key)
+                canonical = (
+                    f"security_finding:{t.repository}|{t.number}|{sha}|"
+                    f"{identifier}"
+                )
+                entities.append(
+                    {
+                        "entity_type": "security_finding",
+                        "canonical_name": canonical,
+                        "title": finding.summary,
+                        "severity": (
+                            "blocking" if finding.blocking else "non_blocking"
+                        ),
+                        "notes": finding.detail[:4000],
+                        "status": "live",
+                        "class_description": finding.category,
+                        "class_sweep_record": "apis security review panel",
+                        "regression_test_path": "",
+                        "remediation_refs": ", ".join(finding.files),
+                        "source_audit": (
+                            f"{t.repository}#{t.number}|security|{sha}|"
+                            f"{identifier}"
+                        ),
+                        "verified_at": now,
+                    }
+                )
+        if not entities:
+            return True
+
+        digest_basis = [
+            {key: value for key, value in entity.items() if key != "verified_at"}
+            for entity in entities
+        ]
+        store_result = await self._store_entities(
+            entities,
+            idempotency_key=(
+                f"security-findings-{t.repository}-{t.number}-{sha[:12]}-"
+                f"{content_digest(digest_basis)}"
+            ),
+        )
+        if not store_result or self._store_result_has_unknown_fields(store_result):
+            log.error(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: security_finding "
+                "store failed or reported unknown fields"
+            )
+            return False
+
+        for entity in entities:
+            data = await self._neotoma_post(
+                "entities/query",
+                {
+                    "entity_type": "security_finding",
+                    "snapshot_filters": {
+                        "canonical_name": {
+                            "op": "eq",
+                            "value": entity["canonical_name"],
+                        }
+                    },
+                    "limit": 5,
+                    "include_snapshots": True,
+                },
+            )
+            expected = {
+                key: value for key, value in entity.items() if key != "entity_type"
+            }
+            matches = [
+                row
+                for row in (data or {}).get("entities", [])
+                if all((row.get("snapshot") or {}).get(key) == value
+                       for key, value in expected.items())
+            ]
+            if not matches:
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: exact-head "
+                    f"security_finding read-back missing for "
+                    f"{entity['canonical_name']}"
+                )
+                return False
+        return True
+
+    async def _persist_and_confirm_pull_request(
+        self, t: SwarmTrigger, reviewed_head: str
+    ) -> bool:
+        """Refresh the canonical PR row at the verified head and read it back."""
+        sha = _normalise_full_sha(reviewed_head)
+        if not sha:
+            return False
+        entity = {
+            "entity_type": "pull_request",
+            "repository": t.repository,
+            "number": t.number,
+            "provider": "github",
+            "url": t.html_url,
+            "title": t.title,
+            "state": "open",
+            "status": "open",
+            "head_ref": t.head_ref,
+            "base_ref": t.base_ref,
+            "author_login": t.author,
+            "head_sha": sha,
+        }
+        store_result = await self._store_entities(
+            [entity],
+            idempotency_key=(
+                f"pull-request-{t.repository}-{t.number}-{sha[:12]}-"
+                f"{content_digest([entity])}"
+            ),
+        )
+        if not store_result or self._store_result_has_unknown_fields(store_result):
+            return False
+        data = await self._neotoma_post(
+            "entities/query",
+            {
+                "entity_type": "pull_request",
+                "snapshot_filters": {
+                    "repository": {"op": "eq", "value": t.repository},
+                    "number": {"op": "eq", "value": t.number},
+                },
+                "limit": 5,
+                "include_snapshots": True,
+            },
+        )
+        return any(
+            (row.get("snapshot") or {}).get("repository") == t.repository
+            and str((row.get("snapshot") or {}).get("number")) == str(t.number)
+            and _normalise_full_sha(
+                str((row.get("snapshot") or {}).get("head_sha") or "")
+            ) == sha
+            for row in (data or {}).get("entities", [])
+        )
+
+    async def _neotoma_post(self, path: str, payload: dict) -> dict | None:
+        """POST to Neotoma and return the decoded response when available."""
+        if not self.config.neotoma_token:
+            log.warning(
+                f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN unset — {path} skipped"
+            )
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    f"{self.config.neotoma_base_url}/{path}",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {self.config.neotoma_token}"},
+                )
+                response.raise_for_status()
+                return response.json() if response.content else {}
+        except Exception as exc:
+            log.warning(f"[{DAEMON_NAME}] Neotoma {path} failed: {exc}")
+            return None
+
+    async def _matching_prior_reviews(
+        self,
+        t: SwarmTrigger,
+        lenses: list[str],
+        current_sha: str,
+    ) -> list[dict]:
+        """Return prior live reviews for this PR and lens set at other heads."""
+        data = await self._neotoma_post(
+            "entities/query",
+            {
+                "entity_type": "pr_review",
+                "snapshot_filters": {
+                    "repository": {"op": "eq", "value": t.repository},
+                    "pr_number": {"op": "eq", "value": t.number},
+                },
+                "limit": 200,
+                "include_snapshots": True,
+            },
+        )
+        if not data:
+            return []
+        matches: list[dict] = []
+        for entity in data.get("entities", []):
+            snapshot = entity.get("snapshot") or {}
+            if (
+                snapshot.get("repository") != t.repository
+                or str(snapshot.get("pr_number")) != str(t.number)
+                or snapshot.get("review_lens") not in lenses
+                or snapshot.get("head_sha") == current_sha
+                or snapshot.get("status") == "superseded"
+            ):
+                continue
+            if entity.get("entity_id"):
+                matches.append(entity)
+        return matches
+
+    async def _prior_live_reviews(
+        self,
+        t: SwarmTrigger,
+        lenses: list[str],
+        current_sha: str,
+    ) -> dict[str, list[dict]]:
+        """Map each lens to every prior live review, deterministically ordered.
+
+        Multiple live rows are a repair condition, not a reason to discard all
+        but whichever row the query happened to return last.  Keeping the full
+        set lets review rounds seed from the maximum and lets a successful
+        replacement demote every stale live row.
+        """
+        by_lens: dict[str, list[dict]] = {}
+        for entity in await self._matching_prior_reviews(t, lenses, current_sha):
+            lens = (entity.get("snapshot") or {}).get("review_lens")
+            if lens:
+                by_lens.setdefault(lens, []).append(entity)
+        for entities in by_lens.values():
+            entities.sort(key=self._prior_review_sort_key)
+        return by_lens
+
+    @staticmethod
+    def _prior_review_sort_key(entity: dict) -> tuple[int, str, str]:
+        snapshot = entity.get("snapshot") or {}
+        try:
+            review_round = int(snapshot.get("review_round") or 0)
+        except (TypeError, ValueError):
+            review_round = 0
+        return (
+            review_round,
+            str(snapshot.get("generated_at") or ""),
+            str(entity.get("entity_id") or entity.get("id") or ""),
+        )
+
+    @staticmethod
+    def _new_pr_review_ids_by_lens(
+        entities: list[dict], store_result: dict | None
+    ) -> dict[str, str]:
+        """Map each review lens to the entity id returned by ``/store``."""
+        if not store_result:
+            return {}
+        by_index = {
+            result.get("observation_index"): result.get("entity_id")
+            for result in store_result.get("entities", [])
+            if result.get("entity_id")
+        }
+        return {
+            entity["review_lens"]: by_index[index]
+            for index, entity in enumerate(entities)
+            if index in by_index
+        }
+
+    async def _confirmed_new_pr_review_ids_by_lens(
+        self,
+        t: SwarmTrigger,
+        entities: list[dict],
+        store_result: dict | None,
+        reviewed_head: str,
+    ) -> dict[str, str]:
+        """Return replacement IDs only after exact-head durable read-back.
+
+        A successful HTTP response is not evidence that Neotoma stored the
+        declared fields.  Superseding the prior live review is destructive to
+        the gate, so each lens remains untouched unless the entity ID returned
+        by ``/store`` can be read back with every declared value supplied to
+        ``/store``.
+        """
+        if not store_result or self._store_result_has_unknown_fields(store_result):
+            log.error(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: pr_review store "
+                "failed or reported undeclared fields; prior reviews remain live"
+            )
+            return {}
+
+        stored_ids = self._new_pr_review_ids_by_lens(entities, store_result)
+        if not stored_ids:
+            log.error(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: pr_review store "
+                "returned no replacement entity ids; prior reviews remain live"
+            )
+            return {}
+
+        data = await self._neotoma_post(
+            "entities/query",
+            {
+                "entity_type": "pr_review",
+                "snapshot_filters": {
+                    "repository": {"op": "eq", "value": t.repository},
+                    "pr_number": {"op": "eq", "value": t.number},
+                },
+                "limit": 200,
+                "include_snapshots": True,
+            },
+        )
+        if not data:
+            log.error(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: pr_review "
+                "read-back failed; prior reviews remain live"
+            )
+            return {}
+
+        expected_head = _normalise_full_sha(reviewed_head)
+        confirmed: dict[str, str] = {}
+        expected_by_id = {
+            entity_id: entity
+            for entity in entities
+            if (entity_id := stored_ids.get(str(entity.get("review_lens") or "")))
+        }
+        for row in data.get("entities", []):
+            entity_id = str(row.get("entity_id") or row.get("id") or "")
+            expected = expected_by_id.get(entity_id)
+            if not expected:
+                continue
+            if (
+                _normalise_full_sha(str(expected.get("head_sha") or ""))
+                != expected_head
+            ):
+                continue
+            snapshot = row.get("snapshot") or {}
+            expected_snapshot = {
+                key: value for key, value in expected.items() if key != "entity_type"
+            }
+            if all(
+                key in snapshot and snapshot[key] == value
+                for key, value in expected_snapshot.items()
+            ):
+                confirmed[str(expected["review_lens"])] = entity_id
+
+        missing = sorted(set(stored_ids) - set(confirmed))
+        if missing:
+            log.error(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: pr_review "
+                f"read-back did not confirm replacement lens(es) {missing}; "
+                "their prior reviews remain live"
+            )
+        return confirmed
+
+    async def _supersede_prior_reviews(
+        self,
+        t: SwarmTrigger,
+        lenses: list[str],
+        current_sha: str,
+        *,
+        priors: dict[str, list[dict]] | None = None,
+        new_ids_by_lens: dict[str, str] | None = None,
+    ) -> bool:
+        """Demote prior rows only when every write is durably read back."""
+        if priors is not None:
+            prior_entities = [
+                entity
+                for lens in sorted(priors)
+                for entity in sorted(
+                    priors[lens], key=self._prior_review_sort_key
+                )
+            ]
+        else:
+            prior_entities = sorted(
+                await self._matching_prior_reviews(t, lenses, current_sha),
+                key=lambda entity: (
+                    str((entity.get("snapshot") or {}).get("review_lens") or ""),
+                    self._prior_review_sort_key(entity),
+                ),
+            )
+        new_ids_by_lens = new_ids_by_lens or {}
+        for entity in prior_entities:
+            snapshot = entity.get("snapshot") or {}
+            entity_id = entity.get("entity_id", "")
+            lens = snapshot.get("review_lens")
+            new_id = new_ids_by_lens.get(lens)
+            if not entity_id or not new_id:
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: cannot "
+                    f"supersede prior review {entity_id or '<missing id>'} "
+                    f"for lens {lens or '<missing lens>'}; replacement is not "
+                    "durably identified"
+                )
+                return False
+            status_result = await self._neotoma_post(
+                "correct",
+                {
+                    "entity_id": entity_id,
+                    "entity_type": "pr_review",
+                    "field": "status",
+                    "value": "superseded",
+                    "idempotency_key": (
+                        f"pr-review-supersede-{entity_id}-{current_sha[:12]}"
+                    ),
+                },
+            )
+            if not status_result:
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: failed to "
+                    f"mark prior review {entity_id} superseded"
+                )
+                return False
+            pointer_result = await self._neotoma_post(
+                "correct",
+                {
+                    "entity_id": entity_id,
+                    "entity_type": "pr_review",
+                    "field": "superseded_by",
+                    "value": current_sha,
+                    "idempotency_key": (
+                        f"pr-review-superseded-by-{entity_id}-{current_sha[:12]}"
+                    ),
+                },
+            )
+            if not pointer_result:
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: failed to "
+                    f"record replacement head on prior review {entity_id}"
+                )
+                return False
+            edge_result = await self._neotoma_post(
+                "create_relationship",
+                {
+                    "source_entity_id": new_id,
+                    "target_entity_id": entity_id,
+                    "relationship_type": "SUPERSEDES",
+                },
+            )
+            if not edge_result:
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: failed to "
+                    f"link replacement review {new_id} to {entity_id}"
+                )
+                return False
+
+            entity_readback = await self._neotoma_post(
+                "get_entity_snapshot", {"entity_id": entity_id}
+            )
+            readback_snapshot = (entity_readback or {}).get("snapshot") or {}
+            if (
+                readback_snapshot.get("status") != "superseded"
+                or readback_snapshot.get("superseded_by") != current_sha
+            ):
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: prior review "
+                    f"{entity_id} supersession corrections were not read back"
+                )
+                return False
+
+            edge_readback = await self._neotoma_post(
+                "relationships/snapshot",
+                {
+                    "source_entity_id": new_id,
+                    "target_entity_id": entity_id,
+                    "relationship_type": "SUPERSEDES",
+                },
+            )
+            edge_snapshot = (edge_readback or {}).get("snapshot") or {}
+            if not (
+                edge_snapshot.get("relationship_type") == "SUPERSEDES"
+                and edge_snapshot.get("source_entity_id") == new_id
+                and edge_snapshot.get("target_entity_id") == entity_id
+                # SQLite-backed Neotoma serializes this boolean as integer 1.
+                and edge_snapshot.get("is_live") == 1
+            ):
+                log.error(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: SUPERSEDES "
+                    f"edge {new_id} -> {entity_id} was not read back live"
+                )
+                return False
+
+        return True
 
     async def _post_missing_panel_comments(
         self,
         t: SwarmTrigger,
         reviews: list[tuple[str, str]],
         agents_by_lens: dict[str, str] | None = None,
+        *,
+        reviewed_head: str = "",
     ) -> None:
         """Backfill `review:<lens>` PR comments the panelists failed to post.
 
@@ -8301,9 +9646,13 @@ class SwarmDispatcher:
                 bodies = [c.get("body", "") for c in resp.json()]
                 captured = dict(reviews)
                 agents = agents_by_lens or {}
-                head_sha = _normalise_full_sha(t.head_sha)
+                head_sha = _normalise_full_sha(reviewed_head)
                 if not head_sha:
-                    head_sha = _normalise_full_sha((await self._pr_head_sha(t)) or "")
+                    head_sha = _normalise_full_sha(t.head_sha)
+                if not head_sha:
+                    head_sha = _normalise_full_sha(
+                        (await self._pr_head_sha(t)) or ""
+                    )
                 if not head_sha:
                     log.warning(
                         f"[{DAEMON_NAME}] current head unavailable — fallback "
@@ -8645,6 +9994,8 @@ class SwarmDispatcher:
         self,
         t: SwarmTrigger,
         result: SkillResult,
+        *,
+        reviewed_head: str | None = None,
     ) -> None:
         """Post Vanellus's aggregated verdict as a PR comment when its own gh
         call failed to land it (mirrors _post_missing_panel_comments for the
@@ -8686,8 +10037,10 @@ class SwarmDispatcher:
                 )
                 resp.raise_for_status()
                 bodies = [c.get("body", "") for c in resp.json()]
-                head_sha = _normalise_full_sha(t.head_sha)
-                if not head_sha:
+                head_sha = _normalise_full_sha(
+                    reviewed_head if reviewed_head is not None else t.head_sha
+                )
+                if not head_sha and reviewed_head is None:
                     head_sha = _normalise_full_sha((await self._pr_head_sha(t)) or "")
                 if not head_sha:
                     log.warning(

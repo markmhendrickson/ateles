@@ -257,3 +257,112 @@ def test_no_matching_definition_is_also_a_stub(monkeypatch):
     d = al.AgentLoader("apis").load()
     assert d.is_stub is True
     assert "no agent_definition" in d.load_error
+
+
+class TestPolicyScoping:
+    """ateles#1118 — `agent_sub` was populated 0 of 25 rows, so every agent
+    loaded ZERO policies. The filter required `agent_sub` equality
+    unconditionally, which also meant the 12 `scope: global` rows reached NO
+    agent rather than every agent — the opposite of what global means.
+
+    The fixture is the PRODUCTION shape: empty `agent_sub`, `scope: global`.
+    A test whose fixture already sets `agent_sub` passes against the defect.
+    """
+
+    def test_global_scope_with_no_agent_sub_reaches_every_agent(self):
+        snap = {"scope": "global", "rule": "always read a write back"}
+        assert al.policy_binds_agent(snap, "corvus@ateles-swarm")
+        assert al.policy_binds_agent(snap, "pavo@ateles-swarm")
+
+    def test_swarm_scope_reaches_every_agent(self):
+        snap = {"scope": "swarm"}
+        assert al.policy_binds_agent(snap, "anyone@ateles-swarm")
+
+    def test_agent_scope_binds_only_its_own_agent(self):
+        snap = {"scope": "agent", "agent_sub": "corvus@ateles-swarm"}
+        assert al.policy_binds_agent(snap, "corvus@ateles-swarm")
+        assert not al.policy_binds_agent(snap, "pavo@ateles-swarm")
+
+    def test_agent_scope_with_empty_agent_sub_binds_nobody(self):
+        # The design refuses this row at the write; a reader that meets one
+        # anyway must not broadcast it.
+        assert not al.policy_binds_agent({"scope": "agent"}, "corvus@ateles-swarm")
+
+    def test_unrecognised_scope_fails_closed(self):
+        # principles.md#5 — `scope` carries the REACH of a rule, so an
+        # unreadable value takes the narrowest reading, never the widest.
+        assert not al.policy_binds_agent({"scope": "everyone"}, "corvus@ateles-swarm")
+        assert not al.policy_binds_agent({}, "corvus@ateles-swarm")
+
+    def test_scope_match_is_case_insensitive(self):
+        assert al.policy_binds_agent({"scope": "GLOBAL"}, "corvus@ateles-swarm")
+
+    def test_exact_agent_sub_binds_even_with_no_scope(self):
+        # Tolerant on the row the old filter DID accept: no regression for
+        # rows that already worked.
+        snap = {"agent_sub": "corvus@ateles-swarm"}
+        assert al.policy_binds_agent(snap, "corvus@ateles-swarm")
+
+
+class TestRenderedPromptCarriesTheRule:
+    """The acceptance test ateles#1118 names: assert the RULE TEXT is in the
+    string `render_policy_prompt()` returns, from the PRODUCTION fixture.
+
+    A query returning 200, or a list assertion against a fixture that already
+    sets `agent_sub`, does not satisfy this — both pass against the defect.
+    """
+
+    @staticmethod
+    def _loader_with(monkeypatch, rows):
+        monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: False)
+        monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+        monkeypatch.setattr(
+            al.httpx, "post", lambda url, **kw: _Resp({"entities": rows})
+        )
+        return al.AgentLoader("corvus")
+
+    def test_global_policy_reaches_the_rendered_prompt(self, monkeypatch):
+        # RED ON MAIN: `agent_sub` is empty — the production shape — so the
+        # old unconditional equality filter dropped it and the prompt was "".
+        rows = [
+            {
+                "snapshot": {
+                    "scope": "global",
+                    "status": "active",
+                    "rule_kind": "mandatory",
+                    "rule": "Read a write back before reporting success.",
+                }
+            }
+        ]
+        prompt = self._loader_with(monkeypatch, rows).render_policy_prompt()
+        assert "Read a write back before reporting success." in prompt
+
+    def test_another_agents_policy_stays_out_of_the_prompt(self, monkeypatch):
+        rows = [
+            {
+                "snapshot": {
+                    "scope": "agent",
+                    "agent_sub": "pavo@ateles-swarm",
+                    "status": "active",
+                    "rule": "Pavo-only rule.",
+                }
+            }
+        ]
+        assert self._loader_with(monkeypatch, rows).render_policy_prompt() == ""
+
+    def test_empty_scoping_field_on_every_row_is_logged_loudly(
+        self, monkeypatch, caplog
+    ):
+        # The zero-agents clause: rows came back and the filter matched none
+        # BECAUSE the field is empty. That must not look like "no policies".
+        rows = [
+            {"snapshot": {"status": "active", "rule": "r1"}},
+            {"snapshot": {"status": "active", "rule": "r2"}},
+        ]
+        loader = self._loader_with(monkeypatch, rows)
+        with caplog.at_level("ERROR"):
+            out = loader.load_active_policies()
+        assert out == []
+        assert any(
+            "unpopulated on EVERY one" in r.message for r in caplog.records
+        ), [r.message for r in caplog.records]

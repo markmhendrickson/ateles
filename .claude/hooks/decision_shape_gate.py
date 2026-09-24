@@ -171,9 +171,78 @@ def last_assistant_text(transcript_path: str | None) -> str:
     return last
 
 
+# Contexts that QUOTE prose rather than assert it. ateles#1105: both observed
+# false positives fired on text DOCUMENTING the rule being enforced — an
+# evidence table quoting what the gate had blocked, and an issue body quoting
+# the standing rule. Stripping these before matching is the analogue of
+# `gmail_send_gate.py`'s text-bearing-leader exemption: the same principle
+# (a mention is not an invocation) applied to prose instead of commands.
+#
+# Order matters. Fenced blocks are removed FIRST so a pipe character inside a
+# fence cannot be mistaken for a table row.
+FENCED_ANY_RE = re.compile(r"```.*?```", re.S)
+INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$", re.M)
+# A phrase in quotation marks is being NAMED, not asserted — the commonest way
+# to write a rule down ("do not end with \"Want me to\""). Bounded to one line
+# and to a short span so an unterminated quote cannot swallow the turn's real
+# ending: a permission question is short, and a span this size cannot hide a
+# whole closing paragraph. Straight and curly pairs both, since prose uses both.
+QUOTED_PHRASE_RE = re.compile(r"[\"\u201c][^\"\u201c\u201d\n]{1,120}[\"\u201d]")
+BLOCKQUOTE_RE = re.compile(r"^\s*>.*$", re.M)
+
+
+def strip_quoted(text: str) -> str:
+    """Remove contexts that quote prose rather than assert it.
+
+    Replaces each with a newline rather than deleting it, so sentence
+    boundaries around the removed span are preserved — `sentence_around`
+    scopes the consent exemption and must not have two sentences fused into
+    one by the strip.
+    """
+    for pattern in (
+        FENCED_ANY_RE,
+        TABLE_ROW_RE,
+        BLOCKQUOTE_RE,
+        INLINE_CODE_RE,
+        QUOTED_PHRASE_RE,
+    ):
+        text = pattern.sub("\n", text)
+    return text
+
+
+# How much of the message counts as "the closing section". The docstring has
+# always stated the check as "the turn ENDS with a permission question", but
+# this returned the last 2500 characters, so a phrase quoted 2000 characters
+# back matched as though the turn ended with it (ateles#1105).
+#
+# The final BLOCK is the honest reading: everything after the last blank line,
+# which is the paragraph, bullet or table the turn actually ends on. The 2500
+# character bound is kept as a backstop for a turn written as one long block,
+# since a message with no blank line at all would otherwise be scanned whole.
+CLOSING_BLOCK_MAX = 2500
+
+# How many trailing blocks count as "the closing section". ONE was too narrow
+# (Loxia, PR #1175): a genuine permission question followed by a footer
+# paragraph or a bullet list escaped entirely — and a closing decisions
+# section followed by bullets is the house style, so that false NEGATIVE was
+# more likely than the false positive being fixed. Three blocks covers a
+# question plus a short footer while staying far short of the old
+# whole-2500-character window that matched quotations paragraphs back.
+CLOSING_BLOCKS = 3
+
+
 def closing_section(text: str) -> str:
-    """The tail of the message, where decisions are carried. Bounded."""
-    return text[-2500:] if len(text) > 2500 else text
+    """The tail of the message, where decisions are carried. Bounded.
+
+    Quoted contexts are stripped first, then the final block is taken. A
+    turn whose last block is entirely quotation therefore falls back to the
+    preceding prose block, which is the text the turn genuinely ends on.
+    """
+    stripped = strip_quoted(text).rstrip()
+    blocks = [b for b in re.split(r"\n\s*\n", stripped) if b.strip()]
+    tail = "\n\n".join(blocks[-CLOSING_BLOCKS:]) if blocks else ""
+    return tail[-CLOSING_BLOCK_MAX:] if len(tail) > CLOSING_BLOCK_MAX else tail
 
 
 def findings(text: str) -> list[str]:
