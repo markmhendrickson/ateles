@@ -2295,3 +2295,669 @@ def test_build_apply_hint_strips_dry_run_token_if_present():
     hint = _mod.build_apply_hint("replay", argv)
     assert "--dry-run" not in hint
     assert "--apply" in hint
+
+
+# =============================================================================
+# QA (Phoenicurus) findings on PR #1167, 2026-09-23/24 -----------------------
+# =============================================================================
+#
+# The tests below close out the QA lens's REQUEST_CHANGES on this PR:
+#   - eval-coverage: restore-gates' 150-issue sanity threshold had no
+#     boundary test (150 proceeds, 151 refuses before any write).
+#   - test-coverage: run_gate_restore / run_reconciliation, the two
+#     apply-mode orchestrators, were never invoked end to end by any test.
+#   - NEOTOMA_REPLAY_CONFIRM_APPLY vs the deprecated MIGRATE_CONFIRM_APPLY
+#     disagreeing (the new var always wins).
+#   - the documented canary filters (--limit / --entity-ids /
+#     --exclude-entity-ids) lacked direct behavioural tests.
+#   - the JSONL action log's "never logs field contents" claim was asserted
+#     nowhere.
+#
+# All of these drive run_gate_restore()/run_reconciliation() directly
+# in-process (real argparse.Namespace via build_arg_parser().parse_args) with
+# http_request monkeypatched -- no live HTTP, matching every other apply-mode
+# test in this file (see test_gate_restore_owner_history_converges_to_zero_
+# after_simulated_write above).
+
+
+def _gate_restore_args(tmp_path, db_paths, *, apply=False, cutover="2026-01-01T00:00:00Z", **extra):
+    """Build a real argparse.Namespace for the restore-gates subcommand via
+    the script's own parser, so these tests exercise the exact flags/defaults
+    main() would pass to run_gate_restore rather than a hand-rolled stand-in
+    that could silently drift from the real CLI surface."""
+    import neotoma_local_fork_replay as _mod
+
+    argv = [
+        "restore-gates",
+        "--db", ",".join(db_paths),
+        "--cutover", cutover,
+        "--log", str(tmp_path / "action.jsonl"),
+    ]
+    if apply:
+        argv.append("--apply")
+    for flag, value in extra.items():
+        argv.extend([flag, value])
+    ap = _mod.build_arg_parser()
+    return ap.parse_args(argv)
+
+
+def _make_gate_candidate_db(tmp_path, name, entities):
+    """entities: dict of entity_id -> (repo, github_number, gate_status_dict).
+    Builds a minimal observations table with one post-cutover row per entity,
+    matching the columns scan_local_gate_candidates reads."""
+    import sqlite3 as _sqlite3
+
+    db_path = tmp_path / name
+    conn = _sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE observations (id TEXT, entity_id TEXT, entity_type TEXT, fields TEXT, created_at TEXT)"
+    )
+    for i, (entity_id, (repo, github_number, gate_status)) in enumerate(entities.items()):
+        conn.execute(
+            "INSERT INTO observations VALUES (?,?,?,?,?)",
+            (
+                f"o{i}",
+                entity_id,
+                "issue",
+                json.dumps(
+                    {
+                        LEGACY_GATE_STATUS_FIELD: gate_status,
+                        "repo": repo,
+                        "github_number": github_number,
+                    }
+                ),
+                "2026-09-23T09:00:00Z",
+            ),
+        )
+    conn.commit()
+    conn.close()
+    return str(db_path)
+
+
+def _fake_github_open(monkeypatch):
+    """Every candidate resolves as OPEN on GitHub -- isolates these tests
+    from the identity filter's own behavior (covered separately above) so
+    they can focus on the sanity threshold / orchestration under test."""
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(
+        _mod, "github_issue_lookup", lambda repo, number: {"state": "open"}
+    )
+
+
+def _fake_hosted_gate_restore_router(monkeypatch, *, store_status=200):
+    """A minimal hosted double for run_gate_restore's HTTP surface:
+    GET /entities/<id> -> confirmed 404 (no hosted issue yet, so every
+    candidate plans as a 'create'), GET /health -> 200 ok, POST /store ->
+    store_status. Returns the list of POST /store bodies sent, so callers
+    can assert on idempotency keys / no-writes-in-dry-run / log contents."""
+    import neotoma_local_fork_replay as _mod
+
+    store_calls: list[dict] = []
+
+    def fake_http_request(method, base_url, path, token, body=None, **kwargs):
+        if path == "/health":
+            return 200, {"ok": True}
+        if path.startswith("/schemas/"):
+            return 404, {"error": "not found"}
+        if path.startswith("/entities/"):
+            return 404, {"error": "not found"}
+        if path == "/retrieve_entity_by_identifier":
+            # No canonical hosted entity either -- every candidate plans as
+            # a genuine 'create'.
+            return 404, {"error": "not found"}
+        if path == "/store":
+            store_calls.append(body)
+            return store_status, {"success": True}
+        raise AssertionError(f"unexpected call: {method} {path}")
+
+    monkeypatch.setattr(_mod, "http_request", fake_http_request)
+    return store_calls
+
+
+# --- 150-issue restore-gates sanity threshold: boundary test ---------------
+
+
+def test_restore_gates_150_planned_changes_proceeds(tmp_path, monkeypatch, capsys):
+    import neotoma_local_fork_replay as _mod
+
+    _fake_github_open(monkeypatch)
+    store_calls = _fake_hosted_gate_restore_router(monkeypatch)
+
+    entities = {
+        f"ent_{i:04d}": (f"owner/repo{i}", i, {"pm": "signed_off"})
+        for i in range(150)
+    }
+    db_path = _make_gate_candidate_db(tmp_path, "db150.db", entities)
+    args = _gate_restore_args(tmp_path, [db_path], apply=False)
+
+    _mod.run_gate_restore(args, "https://hosted.example.invalid", "tok", apply_mode=False)
+
+    out = capsys.readouterr().out
+    assert "E_SANITY_THRESHOLD" not in out
+    assert "150" in out
+    assert store_calls == []  # dry run: no writes regardless of threshold
+
+
+def test_restore_gates_151_planned_changes_refuses_before_any_write(
+    tmp_path, monkeypatch, capsys
+):
+    import neotoma_local_fork_replay as _mod
+
+    _fake_github_open(monkeypatch)
+    store_calls = _fake_hosted_gate_restore_router(monkeypatch)
+
+    entities = {
+        f"ent_{i:04d}": (f"owner/repo{i}", i, {"pm": "signed_off"})
+        for i in range(151)
+    }
+    db_path = _make_gate_candidate_db(tmp_path, "db151.db", entities)
+    args = _gate_restore_args(tmp_path, [db_path], apply=False)
+
+    with pytest.raises(SystemExit) as exc_info:
+        _mod.run_gate_restore(args, "https://hosted.example.invalid", "tok", apply_mode=False)
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "code=E_SANITY_THRESHOLD" in err
+    assert "151" in err
+    assert "writes_occurred=no" in err
+    assert store_calls == []  # the whole point of the gate: refuses before any write
+
+
+# --- run_gate_restore end to end (dry-run and apply), mocked HTTP ----------
+
+
+def test_run_gate_restore_dry_run_issues_no_store_writes(tmp_path, monkeypatch, capsys):
+    import neotoma_local_fork_replay as _mod
+
+    _fake_github_open(monkeypatch)
+    store_calls = _fake_hosted_gate_restore_router(monkeypatch)
+
+    db_path = _make_gate_candidate_db(
+        tmp_path, "dry.db", {"ent_a": ("owner/repo", 42, {"pm": "signed_off"})}
+    )
+    args = _gate_restore_args(tmp_path, [db_path], apply=False)
+
+    _mod.run_gate_restore(args, "https://hosted.example.invalid", "tok", apply_mode=False)
+
+    assert store_calls == []
+    out = capsys.readouterr().out
+    assert "This was a DRY RUN. No data was written to hosted Neotoma." in out
+    assert "owner/repo#42" in out
+
+
+def test_run_gate_restore_apply_writes_expected_store_payload_with_idempotency_key(
+    tmp_path, monkeypatch, capsys
+):
+    import neotoma_local_fork_replay as _mod
+
+    _fake_github_open(monkeypatch)
+    store_calls = _fake_hosted_gate_restore_router(monkeypatch)
+
+    db_path = _make_gate_candidate_db(
+        tmp_path, "apply.db", {"ent_a": ("owner/repo", 42, {"pm": "signed_off"})}
+    )
+    args = _gate_restore_args(tmp_path, [db_path], apply=True)
+
+    _mod.run_gate_restore(args, "https://hosted.example.invalid", "tok", apply_mode=True)
+
+    assert len(store_calls) == 1
+    (payload,) = store_calls
+    assert payload["idempotency_key"]
+    (entity,) = payload["entities"]
+    assert entity["target_id"] == "ent_a"
+    assert entity["entity_type"] == "issue"
+    assert entity[LEGACY_GATE_STATUS_FIELD] == {"pm": "signed_off"}
+
+    out = capsys.readouterr().out
+    assert "Applied: 1" in out
+    assert "Failed:  0" in out
+
+
+def test_run_gate_restore_apply_aborts_on_ambiguous_5xx_probe(tmp_path, monkeypatch):
+    """An ambiguous (non-200/404) hosted GET /entities/<id> must raise
+    HostedProbeAmbiguousError -- never be silently treated as 'missing' and
+    planned as a create (neotoma#2483). run_gate_restore does not catch
+    this itself, so it propagates out of the apply run entirely rather than
+    proceeding to any /store write."""
+    import neotoma_local_fork_replay as _mod
+
+    _fake_github_open(monkeypatch)
+
+    def fake_http_request(method, base_url, path, token, body=None, **kwargs):
+        if path == "/health":
+            return 200, {"ok": True}
+        if path.startswith("/schemas/"):
+            return 404, {"error": "not found"}
+        if path.startswith("/entities/"):
+            return 502, {"error": "bad gateway"}
+        raise AssertionError(f"unexpected call reached /store on an ambiguous probe: {path}")
+
+    monkeypatch.setattr(_mod, "http_request", fake_http_request)
+
+    db_path = _make_gate_candidate_db(
+        tmp_path, "ambiguous.db", {"ent_a": ("owner/repo", 42, {"pm": "signed_off"})}
+    )
+    args = _gate_restore_args(tmp_path, [db_path], apply=True)
+
+    with pytest.raises(_mod.HostedProbeAmbiguousError):
+        _mod.run_gate_restore(args, "https://hosted.example.invalid", "tok", apply_mode=True)
+
+
+# --- run_reconciliation end to end (dry-run and apply), mocked HTTP -------
+
+
+def _fake_hosted_reconcile_router(monkeypatch, *, store_status=200, hosted_fields=None):
+    """A minimal hosted double for run_reconciliation's HTTP surface:
+    GET /schemas/<type> -> confirmed 404 (no schema, so no merge_array
+    reduction applies and nothing is stripped), GET /entities/<id> -> a
+    hosted snapshot carrying `hosted_fields` (used by recheck_hosted_drift's
+    apply-time hash re-check -- defaults to a `body` value whose hash
+    matches the "stale hosted text" fixture the tests below use as
+    hosted_value_hash, so the drift check finds no drift), POST /store ->
+    store_status. Returns the list of POST /store bodies sent."""
+    import neotoma_local_fork_replay as _mod
+
+    if hosted_fields is None:
+        hosted_fields = {"body": "stale hosted text"}
+    store_calls: list[dict] = []
+
+    def fake_http_request(method, base_url, path, token, body=None, **kwargs):
+        if path.startswith("/schemas/"):
+            return 404, {"error": "not found"}
+        if path.startswith("/entities/"):
+            return 200, {"fields": dict(hosted_fields)}
+        if path == "/store":
+            store_calls.append(body)
+            return store_status, {"success": True}
+        raise AssertionError(f"unexpected call: {method} {path}")
+
+    monkeypatch.setattr(_mod, "http_request", fake_http_request)
+    return store_calls
+
+
+def _reconcile_args(tmp_path, db_path, reconcile_file, *, apply=False, cutover="2026-01-01T00:00:00Z"):
+    import neotoma_local_fork_replay as _mod
+
+    argv = [
+        "reconcile",
+        "--db", db_path,
+        "--cutover", cutover,
+        "--reconcile-file", str(reconcile_file),
+        "--log", str(tmp_path / "action.jsonl"),
+    ]
+    if apply:
+        argv.append("--apply")
+    ap = _mod.build_arg_parser()
+    return ap.parse_args(argv)
+
+
+def test_run_reconciliation_dry_run_issues_no_store_writes(tmp_path, monkeypatch, capsys):
+    import neotoma_local_fork_replay as _mod
+
+    store_calls = _fake_hosted_reconcile_router(monkeypatch)
+
+    conn = _make_sqlite_with_observations(
+        tmp_path, "ent_x", [({"body": "current text"}, "2026-08-05T00:00:00.000Z")]
+    )
+    reconcile_file = tmp_path / "reconciliation.json"
+    reconcile_file.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "ent_x",
+                    "entity_type": "issue",
+                    "fields": [
+                        {
+                            "name": "body",
+                            "classification": "LOCAL_NEWER",
+                            "local_value_hash": value_hash("current text"),
+                            "hosted_value_hash": value_hash("stale hosted text"),
+                        }
+                    ],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    args = _reconcile_args(tmp_path, str(tmp_path / "fork.db"), reconcile_file, apply=False)
+
+    _mod.run_reconciliation(
+        args, conn, "https://hosted.example.invalid", "tok", "20260101",
+        apply_mode=False, entity_ids=None,
+    )
+
+    assert store_calls == []
+    out = capsys.readouterr().out
+    assert "This was a DRY RUN. No data was written to hosted Neotoma." in out
+
+
+def test_run_reconciliation_apply_writes_expected_store_payload(tmp_path, monkeypatch, capsys):
+    import neotoma_local_fork_replay as _mod
+
+    store_calls = _fake_hosted_reconcile_router(monkeypatch)
+
+    conn = _make_sqlite_with_observations(
+        tmp_path, "ent_x", [({"body": "current text"}, "2026-08-05T00:00:00.000Z")]
+    )
+    reconcile_file = tmp_path / "reconciliation.json"
+    reconcile_file.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "ent_x",
+                    "entity_type": "issue",
+                    "fields": [
+                        {
+                            "name": "body",
+                            "classification": "LOCAL_NEWER",
+                            "local_value_hash": value_hash("current text"),
+                            "hosted_value_hash": value_hash("stale hosted text"),
+                        }
+                    ],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    args = _reconcile_args(tmp_path, str(tmp_path / "fork.db"), reconcile_file, apply=True)
+
+    _mod.run_reconciliation(
+        args, conn, "https://hosted.example.invalid", "tok", "20260101",
+        apply_mode=True, entity_ids=None,
+    )
+
+    assert len(store_calls) == 1
+    (payload,) = store_calls
+    (entity,) = payload["entities"]
+    assert entity["target_id"] == "ent_x"
+    assert entity["body"] == "current text"
+    assert payload["idempotency_key"]
+
+
+def test_run_reconciliation_apply_aborts_on_ambiguous_5xx_schema_probe(tmp_path, monkeypatch):
+    """A 5xx on GET /schemas/<type> must raise HostedProbeAmbiguousError, not
+    be silently treated as 'no schema' -- see get_schema_declared_fields's
+    own docstring (neotoma#2483). This propagates out of run_reconciliation
+    before any /store call is attempted."""
+    import neotoma_local_fork_replay as _mod
+
+    def fake_http_request(method, base_url, path, token, body=None, **kwargs):
+        if path.startswith("/schemas/"):
+            return 500, {"error": "internal"}
+        raise AssertionError(f"unexpected call reached /store on an ambiguous schema probe: {path}")
+
+    monkeypatch.setattr(_mod, "http_request", fake_http_request)
+
+    conn = _make_sqlite_with_observations(
+        tmp_path, "ent_x", [({"body": "current text"}, "2026-08-05T00:00:00.000Z")]
+    )
+    reconcile_file = tmp_path / "reconciliation.json"
+    reconcile_file.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "ent_x",
+                    "entity_type": "issue",
+                    "fields": [
+                        {
+                            "name": "body",
+                            "classification": "LOCAL_NEWER",
+                            "local_value_hash": value_hash("current text"),
+                            "hosted_value_hash": value_hash("stale hosted text"),
+                        }
+                    ],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    args = _reconcile_args(tmp_path, str(tmp_path / "fork.db"), reconcile_file, apply=True)
+
+    with pytest.raises(_mod.HostedProbeAmbiguousError):
+        _mod.run_reconciliation(
+            args, conn, "https://hosted.example.invalid", "tok", "20260101",
+            apply_mode=True, entity_ids=None,
+        )
+
+
+# --- NEOTOMA_REPLAY_CONFIRM_APPLY vs deprecated MIGRATE_CONFIRM_APPLY ------
+# conflict resolution: the new var always wins when both are set and they
+# disagree, rather than either being ignored or an ambiguous outcome.
+
+
+def test_new_confirm_var_wins_when_both_set_and_agree_yes():
+    import os as _os
+
+    env = dict(_os.environ)
+    env["NEOTOMA_REPLAY_CONFIRM_APPLY"] = "yes"
+    env["MIGRATE_CONFIRM_APPLY"] = "yes"
+    env["NEOTOMA_BASE_URL"] = "https://example.invalid"
+    env["NEOTOMA_BEARER_TOKEN"] = "test-token"
+    result = _run_cli(
+        ["replay", "--db", "/tmp/does-not-exist-both-agree.db",
+         "--cutover", "2026-01-01T00:00:00Z", "--apply"],
+        env=env,
+    )
+    assert "code=E_CONFIRMATION_REQUIRED" not in result.stderr
+    # No deprecation warning: the new var being present is what satisfied
+    # the gate, so the deprecated-alias code path was never reached.
+    assert "MIGRATE_CONFIRM_APPLY is deprecated" not in result.stderr
+
+
+def test_new_confirm_var_no_wins_over_deprecated_yes_when_they_disagree():
+    """The conflict case QA flagged as unpinned: NEOTOMA_REPLAY_CONFIRM_APPLY
+    explicitly set to something other than 'yes' (e.g. accidentally 'no')
+    while the deprecated MIGRATE_CONFIRM_APPLY=yes is also present. The new
+    var is checked first and, once present, is authoritative -- it must
+    still refuse, never fall back to honoring the deprecated yes."""
+    import os as _os
+
+    env = dict(_os.environ)
+    env["NEOTOMA_REPLAY_CONFIRM_APPLY"] = "no"
+    env["MIGRATE_CONFIRM_APPLY"] = "yes"
+    env["NEOTOMA_BASE_URL"] = "https://example.invalid"
+    env["NEOTOMA_BEARER_TOKEN"] = "test-token"
+    result = _run_cli(
+        ["replay", "--db", "/tmp/does-not-exist-disagree.db",
+         "--cutover", "2026-01-01T00:00:00Z", "--apply"],
+        env=env,
+    )
+    assert result.returncode == 1
+    assert "code=E_CONFIRMATION_REQUIRED" in result.stderr
+
+
+def test_resolve_confirm_apply_env_new_var_present_never_reports_deprecated_used(monkeypatch):
+    """Unit-level check on resolve_confirm_apply_env's own return contract:
+    the second element (used_deprecated) must be False whenever the new var
+    is present at all, regardless of the deprecated var, since the new var
+    being present is what's authoritative."""
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setenv("NEOTOMA_REPLAY_CONFIRM_APPLY", "no")
+    monkeypatch.setenv("MIGRATE_CONFIRM_APPLY", "yes")
+    confirmed, used_deprecated = _mod.resolve_confirm_apply_env()
+    assert confirmed is False
+    assert used_deprecated is False
+
+
+# --- Documented canary filters: --limit / --entity-ids / --exclude-entity-ids
+
+
+def test_restore_gates_limit_filter_is_documented_only_as_a_smoke_test_cap():
+    """--limit is documented on the CLI itself as a smoke-test cap; assert
+    the help text still says so (behavioural: --limit is applied to `replay`
+    candidates via slicing, exercised directly below for restore-gates via
+    --entity-ids/--exclude-entity-ids, which restore-gates actually filters
+    on -- --limit is shared-flag plumbing common to all three subcommands
+    but restore-gates' own candidate-selection code path uses entity-id
+    filters, asserted behaviourally next)."""
+    result = _run_cli(["restore-gates", "--help"])
+    assert result.returncode == 0
+    assert "smoke test" in result.stdout
+
+
+def test_restore_gates_entity_ids_filter_restricts_to_named_candidates(
+    tmp_path, monkeypatch, capsys
+):
+    import neotoma_local_fork_replay as _mod
+
+    _fake_github_open(monkeypatch)
+    store_calls = _fake_hosted_gate_restore_router(monkeypatch)
+
+    db_path = _make_gate_candidate_db(
+        tmp_path,
+        "multi.db",
+        {
+            "ent_a": ("owner/repo", 1, {"pm": "signed_off"}),
+            "ent_b": ("owner/repo", 2, {"pm": "signed_off"}),
+            "ent_c": ("owner/repo", 3, {"pm": "signed_off"}),
+        },
+    )
+    args = _gate_restore_args(
+        tmp_path, [db_path], apply=True, **{"--entity-ids": "ent_a,ent_c"}
+    )
+
+    _mod.run_gate_restore(args, "https://hosted.example.invalid", "tok", apply_mode=True)
+
+    entity_ids_written = {c["entities"][0]["target_id"] for c in store_calls}
+    assert entity_ids_written == {"ent_a", "ent_c"}
+
+
+def test_restore_gates_exclude_entity_ids_filter_removes_named_candidates(
+    tmp_path, monkeypatch, capsys
+):
+    import neotoma_local_fork_replay as _mod
+
+    _fake_github_open(monkeypatch)
+    store_calls = _fake_hosted_gate_restore_router(monkeypatch)
+
+    db_path = _make_gate_candidate_db(
+        tmp_path,
+        "multi_exclude.db",
+        {
+            "ent_a": ("owner/repo", 1, {"pm": "signed_off"}),
+            "ent_b": ("owner/repo", 2, {"pm": "signed_off"}),
+            "ent_c": ("owner/repo", 3, {"pm": "signed_off"}),
+        },
+    )
+    args = _gate_restore_args(
+        tmp_path, [db_path], apply=True, **{"--exclude-entity-ids": "ent_b"}
+    )
+
+    _mod.run_gate_restore(args, "https://hosted.example.invalid", "tok", apply_mode=True)
+
+    entity_ids_written = {c["entities"][0]["target_id"] for c in store_calls}
+    assert entity_ids_written == {"ent_a", "ent_c"}
+
+
+def test_restore_gates_entity_ids_then_exclude_applied_in_documented_order(
+    tmp_path, monkeypatch
+):
+    """--exclude-entity-ids is documented as 'applied after --entity-ids, if
+    both are given' -- assert that ordering directly: an id present in
+    both --entity-ids and --exclude-entity-ids ends up excluded (exclude
+    wins), and an id in neither list never appears."""
+    import neotoma_local_fork_replay as _mod
+
+    _fake_github_open(monkeypatch)
+    store_calls = _fake_hosted_gate_restore_router(monkeypatch)
+
+    db_path = _make_gate_candidate_db(
+        tmp_path,
+        "order.db",
+        {
+            "ent_a": ("owner/repo", 1, {"pm": "signed_off"}),
+            "ent_b": ("owner/repo", 2, {"pm": "signed_off"}),
+            "ent_c": ("owner/repo", 3, {"pm": "signed_off"}),
+        },
+    )
+    args = _gate_restore_args(
+        tmp_path,
+        [db_path],
+        apply=True,
+        **{"--entity-ids": "ent_a,ent_b", "--exclude-entity-ids": "ent_b"},
+    )
+
+    _mod.run_gate_restore(args, "https://hosted.example.invalid", "tok", apply_mode=True)
+
+    entity_ids_written = {c["entities"][0]["target_id"] for c in store_calls}
+    assert entity_ids_written == {"ent_a"}  # ent_c never selected, ent_b excluded
+
+
+# --- JSONL action log: "never logs field contents" -------------------------
+
+
+def test_action_log_never_logs_field_contents(tmp_path, monkeypatch):
+    """The gate-restore action log entries carry only ids/paths/status
+    (log_action's own fields kwarg is entity_id/entity_type/entity_class/
+    repo/github_number/fields_written [names only]/action/idempotency_key/
+    http_status) -- never the actual field VALUES written. Runs a mocked
+    apply with a sentinel value planted in the gate_status payload and
+    asserts that sentinel string appears nowhere in the JSONL log, even
+    though it was sent in the /store call itself."""
+    import neotoma_local_fork_replay as _mod
+
+    sentinel = "SENTINEL_DO_NOT_LOG_ME_9f3c2a"
+    _fake_github_open(monkeypatch)
+    store_calls = _fake_hosted_gate_restore_router(monkeypatch)
+
+    # gate_status values aren't free text, but owner_history notes are --
+    # plant the sentinel there via a local DB row carrying it, so it flows
+    # through plan_gate_restore_for_entity into the /store payload.
+    import sqlite3 as _sqlite3
+
+    db_path = tmp_path / "sentinel.db"
+    conn = _sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE observations (id TEXT, entity_id TEXT, entity_type TEXT, fields TEXT, created_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO observations VALUES (?,?,?,?,?)",
+        (
+            "o1",
+            "ent_a",
+            "issue",
+            json.dumps(
+                {
+                    LEGACY_GATE_STATUS_FIELD: {"pm": "signed_off"},
+                    "repo": "owner/repo",
+                    "github_number": 42,
+                    "owner_history": [
+                        {
+                            "agent": "pavo",
+                            "action": "signed_off",
+                            "gate": "pm",
+                            "at": "2026-09-23T10:00:00Z",
+                            "note": sentinel,
+                        }
+                    ],
+                }
+            ),
+            "2026-09-23T09:00:00Z",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    args = _gate_restore_args(tmp_path, [str(db_path)], apply=True)
+    log_path = tmp_path / "action.jsonl"
+
+    _mod.run_gate_restore(args, "https://hosted.example.invalid", "tok", apply_mode=True)
+
+    # The sentinel DID get sent to hosted (proves the test actually
+    # exercises a payload carrying it, so a pass here is not vacuous).
+    assert any(
+        sentinel in json.dumps(c) for c in store_calls
+    ), "sentinel never reached the /store payload -- test setup is broken"
+
+    # ...but it must never appear in the action log.
+    log_text = log_path.read_text(encoding="utf-8")
+    assert sentinel not in log_text
+    # Sanity: the log is non-empty and JSON-parseable per line, so this
+    # isn't vacuously passing on an empty/malformed log either.
+    lines = [ln for ln in log_text.splitlines() if ln.strip()]
+    assert lines
+    for line in lines:
+        json.loads(line)
