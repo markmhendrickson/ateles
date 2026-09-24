@@ -130,7 +130,14 @@ class _Record:
             self.gate_status = parse_gate_status(value)
             self.gate_writes_landed += 1
         elif field_name == "owner_history":
-            self.owner_history = list(value)
+            # ateles#617: Neotoma's real `owner_history` reducer APPENDS
+            # whatever is sent, server-side — it never replaces the stored
+            # array. The fix in gate_waive.py now sends only each
+            # transition's new entries, so this fake must append them to
+            # mirror the real server rather than replacing the list (which
+            # would silently hide a regression back to sending the full,
+            # already-merged array).
+            self.owner_history = list(self.owner_history) + list(value)
         else:
             self.current_owner = str(value)
         observation_id = f"obs-{len(self.writes)}"
