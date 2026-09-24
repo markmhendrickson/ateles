@@ -4912,6 +4912,7 @@ class SwarmDispatcher:
                 "gates as not green"
             )
             gates_green = False
+        # dedupe scope: per-issue/PR ref (`ref` here is the triggering issue).
         spec_ready_key = f"spec-ready:{ref}"
         spec_action = (
             f"Open {trigger.html_url} — set ATELES_SWARM_AUTO_BUILD=1 and ensure "
@@ -4921,6 +4922,7 @@ class SwarmDispatcher:
         if self.config.auto_build and gates_green:
             pr_url = await self._open_implementation_pr(trigger, state)
             if pr_url:
+                # clear scope matches send scope: spec_ready_key is per-issue/PR ref.
                 self.notifier.clear_dedupe(spec_ready_key)
                 self.notifier.send(
                     f"Issue {ref}: additive spec assembled ("
@@ -4939,7 +4941,7 @@ class SwarmDispatcher:
                     f"{spec_action}",
                     priority=Priority.OPERATOR_DECISION,
                     handler=DAEMON_NAME,
-                    dedupe_key=spec_ready_key,
+                    dedupe_key=spec_ready_key,  # scope: per-issue/PR ref
                 )
         else:
             reason = (
@@ -4955,7 +4957,7 @@ class SwarmDispatcher:
                 f"{spec_action} No PR opened; nothing auto-merged.",
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
-                dedupe_key=spec_ready_key,
+                dedupe_key=spec_ready_key,  # scope: per-issue/PR ref
             )
 
     async def _live_gate_status(
@@ -6184,6 +6186,8 @@ class SwarmDispatcher:
                 + "\n".join(approve_bits),
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
+                # dedupe scope: per-PR + content digest (a NEW proposal on the
+                # same PR is a distinct key; an identical repeat is suppressed).
                 dedupe_key=f"skill-updates:{ref}:{digest}",
                 email_eligible=email_eligible,
             )
@@ -6378,6 +6382,12 @@ class SwarmDispatcher:
                 await self._claim_escalation(
                     trigger, "binding-review-unverified"
                 )
+                # dedupe scope: per-PR (ateles#1216 — was global
+                # "self-review-refused", which let PR A holding this
+                # condition open silence it on every other PR. No head
+                # suffix: the condition is a standing per-PR identity/#1139
+                # hold, not head-scoped like ci-exhausted / fix-exhausted /
+                # unparseable-verdict / process-blocked below.
                 self.notifier.send(
                     f"PR {trigger.repository}#{trigger.number}: standing "
                     "self-review defect (ateles#1139 — reviewer token must "
@@ -6388,11 +6398,11 @@ class SwarmDispatcher:
                     "— merge readiness is held closed.",
                     priority=Priority.OPERATOR_DECISION,
                     handler=DAEMON_NAME,
-                    dedupe_key="self-review-refused",
+                    dedupe_key=f"self-review-refused:{ref}",  # scope: per-PR
                 )
             return
 
-        self.notifier.clear_dedupe("self-review-refused")
+        self.notifier.clear_dedupe(f"self-review-refused:{ref}")  # scope: per-PR
 
         # Close the receipt-to-readiness race.  The formal-review path checked
         # the live head before posting, but a push can land after that GET and
@@ -7139,6 +7149,8 @@ class SwarmDispatcher:
                 f"body/thread. PR {ref} ({trigger.html_url}) remains held.",
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
+                # dedupe scope: per-head (a new push, i.e. new head, re-opens
+                # the notice even if the process-blocked condition persists).
                 dedupe_key=f"process-blocked:{ref}:{head_key}",
             )
             return
@@ -7161,6 +7173,7 @@ class SwarmDispatcher:
                 f"{trigger.html_url} Merge held.",
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
+                # dedupe scope: per-head (a new push re-opens the notice).
                 dedupe_key=f"unparseable-verdict:{ref}:{head_key}",
             )
             return
@@ -7181,6 +7194,8 @@ class SwarmDispatcher:
                 f"— needs your attention. {trigger.html_url} Merge held.",
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
+                # dedupe scope: per-head (a new push re-opens the notice even
+                # if the fix-round count re-exhausts on the new head).
                 dedupe_key=f"fix-exhausted:{ref}:{head}",
             )
             return
@@ -7410,6 +7425,7 @@ class SwarmDispatcher:
             (await self._pr_head_sha(trigger)) or ""
         )
         if ci_exhaust_head:
+            # dedupe scope: per-head, matching the ci-exhausted send below.
             self.notifier.clear_dedupe(
                 f"ci-exhausted:{trigger.repository}#{trigger.number}:{ci_exhaust_head}"
             )
@@ -7628,6 +7644,10 @@ class SwarmDispatcher:
         prior_rounds = await self._fix_round_count(trigger)
         if prior_rounds >= self.config.max_fix_rounds:
             head = _normalise_full_sha((await self._pr_head_sha(trigger)) or "")
+            # dedupe scope: per-head. Fails closed (dedupe_key=None → send()
+            # never suppresses) rather than falling back to a global/per-PR
+            # key when head is unknown — collapsing scope here would silently
+            # reintroduce the ateles#1216 defect for this call site.
             dedupe_key = (
                 f"ci-exhausted:{trigger.repository}#{trigger.number}:{head}"
                 if head
@@ -7658,7 +7678,7 @@ class SwarmDispatcher:
                 body,
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
-                dedupe_key=dedupe_key,
+                dedupe_key=dedupe_key,  # scope: per-head (built above; may be None)
                 email_eligible=email_eligible,
             )
             return
@@ -8253,9 +8273,11 @@ class SwarmDispatcher:
         # exhaustion to re-notify (ateles#1165). Clear even when review is
         # not yet clear — that early-return below would otherwise leave the
         # key stuck until a new head.
+        # dedupe scope: per-head, matching the ci-exhausted send in
+        # _route_ci_failure.
         green_head = _normalise_full_sha(current_head) or current_head
         if green_head:
-            self.notifier.clear_dedupe(
+            self.notifier.clear_dedupe(  # scope: per-head
                 f"ci-exhausted:{trigger.repository}#{pr_number}:{green_head}"
             )
 
