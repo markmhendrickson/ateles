@@ -1389,6 +1389,110 @@ def test_handle_pr_clear_verdict_gates_readiness(monkeypatch):
     assert not any(c[0] == "route" for c in calls)
 
 
+def test_handle_pr_panel_loop_clean_verdict_calls_sign_off(monkeypatch):
+    """Phoenicurus's QA review, PR #1181 (NON-BLOCKING coverage gap): the
+    panel-loop `sign_off` branch in `_handle_pr` — CLEAN verdict for a gate a
+    lens owns -> `IssueGateStore.sign_off` called with `(repo, parent, gate,
+    agent, review_head)` — was covered only at the helper level
+    (`test_gate_sign_off.py`, `test_gate_sign_off_dispatch.py`), never at the
+    call site that wires them into the actual panel loop. This drives one
+    real `_handle_pr` panel iteration end to end via the same
+    `_pr_dispatcher_with_stubs` scaffolding the other `_handle_pr` tests use,
+    with the `arch` lens (always-seated) returning a clean `**SIGNED_OFF**`."""
+    import gate_waive
+
+    calls = []
+    sign_off_calls = []
+
+    async def fake_sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+        sign_off_calls.append((repo, issue_number, gate, lens_agent, head_sha))
+        return gate_waive.SignOffOutcome(
+            ok=True, gate=gate, lens_agent=lens_agent, verified=True
+        )
+
+    monkeypatch.setattr(swarm_dispatch.IssueGateStore, "sign_off", fake_sign_off)
+
+    # Which gates to sign comes from the LIVE record now (PR #1181, qa/legal
+    # gap), not from Lanius's report: the record reads `arch` pending.
+    async def fake_live(self, repository, issue_number):
+        return {"pm": "signed_off", "ux": "signed_off", "arch": "pending"}
+
+    monkeypatch.setattr(SwarmDispatcher, "_live_gate_status", fake_live)
+
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+    review_head = "a" * 40
+
+    async def fake_run_skill_gate_pending(skill, prompt, **kwargs):
+        # Lanius reports `arch` as the still-pending gate, which is what
+        # `owns_pending_gate` (and therefore the sign_off call) is keyed on —
+        # `arch` being `always=True` gets it a panel SEAT regardless, but the
+        # sign_off branch additionally requires `lens.lens in pending_gates`.
+        if skill == "lanius":
+            return SkillResult(
+                skill, True, 0, "GATE_INHERITANCE: clear\nGATE_PENDING: arch", ""
+            )
+        if skill == "vanellus":
+            return SkillResult(skill, True, 0, "**APPROVE**\nlgtm", "")
+        if skill == "waxwing":
+            return SkillResult(
+                skill,
+                True,
+                0,
+                "**🤖 Waxwing — Ateles swarm, arch lens panelist**\n"
+                "**SIGNED_OFF**\nno concerns",
+                "",
+            )
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill_gate_pending)
+
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.", head_sha=review_head)))
+
+    assert sign_off_calls, "sign_off was never called for the arch lens"
+    assert ("owner/repo", 80, "arch", "waxwing", review_head) in sign_off_calls
+
+
+def test_handle_pr_panel_loop_blocking_verdict_does_not_call_sign_off(monkeypatch):
+    """The inverse of the above: a `[BLOCKING]` finding from the gate-owning
+    lens must leave the gate untouched — `sign_off` is not called at all."""
+
+    calls = []
+    sign_off_calls = []
+
+    async def fake_sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+        sign_off_calls.append((repo, issue_number, gate, lens_agent, head_sha))
+        raise AssertionError("sign_off must not be called on a blocking verdict")
+
+    monkeypatch.setattr(swarm_dispatch.IssueGateStore, "sign_off", fake_sign_off)
+
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch,
+        vanellus_stdout="**REQUEST_CHANGES**\n[BLOCKING] arch: bad contract",
+        calls=calls,
+    )
+
+    async def fake_run_skill_blocking(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "vanellus":
+            return SkillResult(
+                skill, True, 0, "**REQUEST_CHANGES**\n[BLOCKING] arch: bad contract", ""
+            )
+        if skill == "waxwing":
+            return SkillResult(
+                skill, True, 0, "**REQUEST_CHANGES**\n[BLOCKING] arch: bad contract", ""
+            )
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill_blocking)
+
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.", head_sha="a" * 40)))
+
+    assert not sign_off_calls, "sign_off must not be called when the lens blocked"
+
+
 def test_handle_pr_clear_verdict_without_verified_approval_holds_readiness(monkeypatch):
     """A clear model verdict is prose until GitHub readback proves an exact-head
     APPROVED review by the distinct Vanellus principal."""
@@ -3625,36 +3729,38 @@ def _arch_lens() -> Lens:
 
 
 def test_panelist_prompt_gate_writeback_when_owns_pending_gate():
-    """A pending-gate owner is told to correct gate_status.<gate> → signed_off."""
+    """Was: a pending-gate owner was told to correct gate_status.<gate> itself.
+
+    Falco's security review, PR #1181 (ateles#795 amended ADR): that
+    instruction was removed entirely — it was half of the attribution-bypass
+    sink, since it told a lens seated over the SAME shared daemon bearer as
+    every other session to attempt a write that could land unattributed. The
+    dispatcher's `IssueGateStore.sign_off` (in the panel loop, keyed on the
+    SAME `owns_pending_gate` flag) is the sole system-of-record write now, so
+    the prompt must NOT carry a `correct()`-gate_status instruction even for a
+    pending-gate owner — this assertion is the inverse of what it was before
+    the fix, and the inversion IS the fix.
+    """
     t = _trigger()
     expectation = "- [ ] arch check\n"
     prompt = SwarmDispatcher._panelist_prompt(
         t, _arch_lens(), expectation, parent=80, owns_pending_gate=True
     )
-    assert "GATE WRITEBACK" in prompt
-    assert "gate_status.arch" in prompt
-    assert '"signed_off"' in prompt
-    # Must be conditional on a clean verdict and must preserve the rest of the map.
-    assert "ONLY if" in prompt
-    assert "MERGE the existing map" in prompt
-    assert "gate-signoff-arch-" in prompt  # idempotency key stem
-    # Effect chrome (ateles#769): read-back + BLOCKED on mismatch, never
-    # trust correct() 200 alone.
-    assert "READ-BACK" in prompt
-    assert "retrieve_entity_snapshot" in prompt
-    assert "**BLOCKED**" in prompt
-    assert "SIGNED_OFF" in prompt  # only after confirm
+    assert "GATE WRITEBACK" not in prompt
+    assert "you MUST reconcile `gate_status`" not in prompt
+    assert '"signed_off"' not in prompt
 
 
-def test_panelist_prompt_gate_writeback_blocks_signed_off_without_readback():
-    """Failure path must be present: BLOCKED when read-back does not confirm."""
+def test_panelist_prompt_never_instructs_lens_correct_of_gate_status_regardless_of_ownership():
+    """Neither an owner nor a non-owner is ever told to correct() gate_status —
+    the write moved off the prompt entirely, not just off the non-owner path
+    (which already carried no instruction before this fix)."""
     t = _trigger()
-    prompt = SwarmDispatcher._panelist_prompt(
-        t, _arch_lens(), "- [ ] x\n", parent=80, owns_pending_gate=True
-    )
-    assert "If read-back fails" in prompt or "read-back fails" in prompt.lower()
-    assert "do NOT emit SIGNED_OFF" in prompt or "Do NOT emit SIGNED_OFF" in prompt
-    assert "attempted vs read-back" in prompt
+    for owns in (True, False):
+        prompt = SwarmDispatcher._panelist_prompt(
+            t, _arch_lens(), "- [ ] x\n", parent=80, owns_pending_gate=owns
+        )
+        assert "GATE WRITEBACK" not in prompt
 
 
 def test_panelist_prompt_no_gate_writeback_when_not_owner():
@@ -4307,21 +4413,36 @@ def test_confirm_gates_clear_is_case_insensitive_for_operator_login(monkeypatch)
 # ── Part B — Pavo pm self-sign-off prompt ──────────────────────────────────
 
 
-def test_pavo_prompt_contains_mandatory_sign_off_rule():
-    """_pavo_prompt must tell Pavo to sign off gate_status.pm when scoping passes."""
+def test_pavo_prompt_states_verdict_via_comment_not_correct():
+    """ateles#795 amended ADR, Falco's follow-up finding on PR #1181: Pavo must
+    state its pm-gate verdict via a plain GitHub comment. The dispatcher — not
+    Pavo's own MCP session — makes the system-of-record gate write via
+    the lens-signed `sign_off`, exactly like the PR review panel.
+
+    Checks the schema field names via `gate_waive`'s own declared-fields
+    constant rather than spelling the retired-in-docs literal in this test
+    file (`check_foundation_vocabulary.py`'s retired-name ratchet flags a
+    fresh (file, name) hit; `gate_waive.py` already carries this as
+    baselined migration debt, so importing its name avoids adding a second,
+    unbaselined occurrence for a name this test never needs to author)."""
+    import gate_waive
+
     t = _trigger(kind="issue_opened", number=1, title="An issue", body="Body.")
     prompt = SwarmDispatcher._pavo_prompt(t)
-    assert "MANDATORY SIGN-OFF RULE" in prompt or "signed_off" in prompt
-    assert "gate_status.pm" in prompt
-    assert "signed_off" in prompt
+    assert "correct()" not in prompt
+    for declared_field in gate_waive._SIGN_OFF_DECLARED_FIELDS:
+        assert declared_field not in prompt
+    assert "current_owner" not in prompt
+    assert "comment" in prompt.lower()
 
 
-def test_pavo_prompt_requires_plan_contribution_sign_off():
-    """Pavo must store a plan_contribution with contribution_type: sign_off."""
+def test_pavo_prompt_still_names_the_blocking_marker_for_failure():
+    """A failing verdict must carry `[BLOCKING]` so the dispatcher's
+    `body_has_blocking_findings` scan (the same one gating the panel's
+    sign_off) can tell a pass from a fail without a self-written gate_status."""
     t = _trigger(kind="issue_opened", number=1, title="An issue", body="Body.")
     prompt = SwarmDispatcher._pavo_prompt(t)
-    assert "sign_off" in prompt
-    assert "plan_contribution" in prompt
+    assert "[BLOCKING]" in prompt
 
 
 def test_pavo_prompt_warns_against_pending_deadlock():
@@ -4697,8 +4818,9 @@ def test_additive_spec_pr_opened_is_info_priority(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(swarm_dispatch, "select_expectation_agents",
                         lambda *a, **kw: [])
-    # ateles#460: _gates_green is async and takes (lanius, repository, number).
-    async def _always_green(self, lanius, repository, issue_number):
+    # ateles#460: _gates_green is async and takes (lanius, repository, number),
+    # plus the trigger/head keywords its reverted-gate surface uses.
+    async def _always_green(self, lanius, repository, issue_number, **kwargs):
         return True
 
     monkeypatch.setattr(SwarmDispatcher, "_gates_green", _always_green)
@@ -6692,6 +6814,18 @@ def test_only_qa_lens_gets_a_worktree(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "cleanup_pr_worktree", fake_cleanup)
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
 
+    # dbe4791b added a live `_pr_head_sha` read before the panel loop
+    # (`review_head`), on top of the live `gate_status` reads this test
+    # already runs token-less (which correctly short-circuit to "unknown"
+    # with no token, per `IssueGateStore._post`). Unlike those,
+    # `_pr_head_sha_for` hits the real GitHub API with no local token
+    # short-circuit, so a token-less CI run depends on outbound network
+    # reachability rather than failing closed the same way. Stub it so the
+    # panel loop is reached deterministically regardless of network access.
+    monkeypatch.setattr(
+        SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40)
+    )
+
     # Force a panel that includes phoenicurus + at least one other lens.
     monkeypatch.setattr(
         swarm_dispatch,
@@ -6819,6 +6953,38 @@ def _install_pipeline_stubs(monkeypatch, run_skill_impl, *, select_agents=None):
         swarm_dispatch.IssueGateStore, "load", fake_gate_load
     )
 
+    # "Genuinely cleared" includes provenance: each `signed_off` is backed by
+    # its owning lens's own signed write (PR #1181, second security run at
+    # e874537f, N2). The re-proof itself is tested in
+    # test_gate_sign_off_residuals.py.
+    async def fake_all_proven(self, state, owners):
+        return set()
+
+    monkeypatch.setattr(
+        swarm_dispatch.IssueGateStore,
+        "unverified_signed_off_gates",
+        fake_all_proven,
+        raising=False,
+    )
+
+    # ateles#795 amended ADR, extended to the Phase-1 pm gate: the pipeline
+    # now calls the real `IssueGateStore.sign_off` after a clean pm verdict.
+    # These pipeline-mechanics tests exercise section ordering / persistence
+    # / build-handoff, not gate-signing behaviour (which has its own tests
+    # around `test_pm_clean_verdict_triggers_dispatcher_sign_off` below), so
+    # stub `sign_off` to a no-op success rather than growing `_ClearGateState`
+    # into a full fake of every field the real method's write path touches.
+    async def fake_sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+        from gate_waive import SignOffOutcome
+        return SignOffOutcome(
+            ok=True, gate=gate, lens_agent=lens_agent,
+            lens_sub=f"{lens_agent}@ateles-swarm", verified=True,
+        )
+
+    monkeypatch.setattr(
+        swarm_dispatch.IssueGateStore, "sign_off", fake_sign_off
+    )
+
     # Neutralize the GitHub-body mirror (no network); we test it separately.
     async def fake_mirror(self, trigger, state):
         pass
@@ -6914,6 +7080,381 @@ def test_issue_pipeline_sections_persist_additively(monkeypatch):
     assert store.mirrored is True
 
 
+# ── Phase-1 pm gate: dispatcher-signed sign_off (ateles#795 amended ADR,
+#    Falco's follow-up finding on PR #1181) ──────────────────────────────────
+#
+# The panel loop (`_run_pr_review_panel`) already routes a clean lens verdict
+# through `IssueGateStore.sign_off` rather than the lens's own MCP `correct()`.
+# Falco's review found the additive-spec (Phase-1) pipeline had NOT been
+# updated to match: `_spec_section_prompt`'s pm_gate_block still instructed
+# Pavo to `correct()` `gate_status.pm` itself, and because this PR relaxes the
+# launch refusal that used to keep gate-owning lenses from starting at all,
+# merging without this fix would have REOPENED unsigned Phase-1 gate writes on
+# the shared bearer. These tests cover the dispatcher-side fix mirroring the
+# panel's own pattern.
+
+
+def test_pm_clean_verdict_triggers_dispatcher_sign_off(monkeypatch):
+    """A clean (non-blocking) pm verdict must call the dispatcher's
+    lens-signed `IssueGateStore.sign_off` — never the lens's own `correct()`,
+    which no longer exists as an instructed path after this fix."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "pavo":
+            return SkillResult(
+                skill, True, 0,
+                "**🤖 Pavo — Ateles swarm, pm gate owner**\n"
+                "**SIGNED_OFF**\n\n"
+                "<<<SPEC_SECTION>>>**Scope:** pm section with enough substance "
+                "to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>\n"
+                "pm gate passes — intent, acceptance criteria, and scope are "
+                "all clear.",
+                "",
+            )
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            calls.append((repo, issue_number, gate, lens_agent, head_sha))
+            from gate_waive import SignOffOutcome
+            return SignOffOutcome(
+                ok=True, gate=gate, lens_agent=lens_agent,
+                lens_sub=f"{lens_agent}@ateles-swarm", verified=True,
+            )
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert len(calls) == 1
+    repo, issue_number, gate, lens_agent, head_sha = calls[0]
+    assert repo == "owner/repo"
+    assert issue_number == 100
+    assert gate == "pm"
+    assert lens_agent == "pavo"
+    assert head_sha  # a non-empty content-derived surrogate, never blank
+
+
+def test_pm_section_run_skill_call_carries_owns_pending_gate(monkeypatch):
+    """PR #1181 provider-table round: this call site was found NOT passing
+    `owns_pending_gate` at all (every section ran with the default `False`).
+    That is exactly the gate-owner tool-deny fix's activation condition
+    (`skill_runner._run_skill_once`'s `owns_pending_gate and provider !=
+    "claude"` refusal, and its `--disallowed-tools` append on claude) — so
+    Pavo's `pm` turn here ran with the deny NEVER applied even though it is
+    the same run whose clean verdict `sign_off` immediately below records.
+    `pm` always carries the deny regardless of Lanius's pending-gate report
+    (this pipeline unconditionally clears it via `sign_off`). This fixture
+    selects NO conditional sections at all
+    (`select_agents=lambda *a, **kw: []`), so ux/arch never run here and this
+    test says nothing about their predicate — see
+    `test_ux_and_arch_issue_spec_runs_carry_the_gate_owner_deny` (Falco's
+    CONFIRMED BLOCKING finding on this same PR's later round) for the case
+    where a conditional section IS seated while its own gate is pending: it
+    must ALSO carry the deny, even though it never reaches `sign_off` here.
+    """
+    seen_kwargs: dict[str, dict] = {}
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        seen_kwargs[skill] = kwargs
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            from gate_waive import SignOffOutcome
+            return SignOffOutcome(
+                ok=True, gate=gate, lens_agent=lens_agent,
+                lens_sub=f"{lens_agent}@ateles-swarm", verified=True,
+            )
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert "pavo" in seen_kwargs, "the pm section (pavo) must have run"
+    assert seen_kwargs["pavo"]["owns_pending_gate"] is True, (
+        "pavo's pm-section run is the run whose clean verdict sign_off "
+        "records — it must carry owns_pending_gate=True so the gate-owner "
+        "tool-deny actually applies to it"
+    )
+    # Non-pm sections in this pipeline never reach sign_off; must not be
+    # mis-flagged as gate-owning either.
+    for other in ("cicada", "phoenicurus"):
+        if other in seen_kwargs:
+            assert seen_kwargs[other]["owns_pending_gate"] is False
+
+
+def test_pm_blocking_verdict_does_not_call_sign_off(monkeypatch):
+    """A `[BLOCKING]` pm verdict must leave the gate pending — no sign_off
+    attempted — exactly like the panel's own blocking-finding guard."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "pavo":
+            return SkillResult(
+                skill, True, 0,
+                "<<<SPEC_SECTION>>>**Scope:** pm section with enough substance "
+                "to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>\n"
+                "[BLOCKING] scope: no acceptance criteria stated.",
+                "",
+            )
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, *a, **kw):
+            calls.append((a, kw))
+            raise AssertionError("sign_off must not be called on a blocking verdict")
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert calls == []
+
+
+def test_sign_off_is_warranted_requires_explicit_clear_token():
+    """Falco's CONFIRMED BLOCKING finding, ateles#795 / PR #1181: the two
+    dispatcher-side sign_off call sites used to branch on
+    `result.ok and not body_has_blocking_findings(result.stdout)` alone,
+    which never actually looks for a verdict token. `body_has_blocking_findings`
+    returns False for an EMPTY string, so an empty or garbled-but-successful
+    run, or a `**BLOCKED**`/`**REQUEST_CHANGES**` verdict with no
+    `[BLOCKING]`-marked finding line, all read as "clean" under the old
+    check. `sign_off_is_warranted` must reject every one of these — RED on
+    the old `result.ok and not body_has_blocking_findings(...)` predicate,
+    GREEN on this one."""
+    from swarm_dispatch import sign_off_is_warranted
+
+    # Unparseable / empty stdout: no verdict token at all.
+    assert sign_off_is_warranted("", lens_agent="pavo") is False
+    assert sign_off_is_warranted(None, lens_agent="pavo") is False
+    assert sign_off_is_warranted("garbled output, no token, no marker", lens_agent="pavo") is False
+
+    # An explicit non-clear token, even with no [BLOCKING] line in the body.
+    assert sign_off_is_warranted("**BLOCKED**\nmissing information", lens_agent="pavo") is False
+    assert sign_off_is_warranted("**REQUEST_CHANGES**\nplease fix X", lens_agent="pavo") is False
+
+    # A [BLOCKING] finding under a nominally-clear token still refuses
+    # (the body cross-check is an EXTRA veto, never relaxed by the token).
+    assert (
+        sign_off_is_warranted("**APPROVE**\n[BLOCKING] scope: actually missing", lens_agent="pavo")
+        is False
+    )
+
+    # The only warranted shapes: an explicit clear token under the lens's own
+    # header, clean body (no headerless path since bf97b1a4's security runs).
+    header = "**🤖 Pavo — Ateles swarm, pm gate owner**\n"
+    assert sign_off_is_warranted(header + "**SIGNED_OFF**\nno concerns", lens_agent="pavo") is True
+    assert sign_off_is_warranted(header + "**APPROVE**\nlgtm", lens_agent="pavo") is True
+    assert sign_off_is_warranted("**SIGNED_OFF**\nno concerns", lens_agent="pavo") is False
+    # `COMMENT` ("observations only") names no gate decision, so it does not
+    # clear a gate (second security run, PR #1181: only an explicit clear
+    # token may). See test_gate_sign_off_fail_closed.py for the mixed-verdict
+    # cases that finding was about.
+    assert sign_off_is_warranted("**COMMENT**\nobservation only", lens_agent="pavo") is False
+
+
+def test_pm_unparseable_verdict_does_not_call_sign_off(monkeypatch):
+    """The exact RED case Falco's finding names: `result.ok=True` with an
+    empty/unparseable stdout used to read as clean (no [BLOCKING] marker in
+    an empty string) and call sign_off. It must not."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "pavo":
+            # ok=True, but stdout carries no verdict token and no spec
+            # section fence either — the "garbled successful run" shape.
+            return SkillResult(skill, True, 0, "", "")
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, *a, **kw):
+            calls.append((a, kw))
+            raise AssertionError(
+                "sign_off must not be called on an unparseable verdict"
+            )
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert calls == []
+
+
+def test_ux_and_arch_issue_spec_runs_carry_the_gate_owner_deny(monkeypatch):
+    """Falco's CONFIRMED BLOCKING finding, ateles#795 / PR #1181: the
+    issue-spec pipeline's `run_skill` call for a spec section previously set
+    `owns_pending_gate=section.lens == "pm"` — hardcoded to pm alone — so a
+    ux or arch section seated in THIS pipeline (a repo whose panel loop never
+    seats them, or one where they are pre-registered here) ran WITHOUT the
+    gate-owner tool-deny even though its generated skill (accipiter/waxwing
+    SKILL.md) still instructs `correct(gate_status...)`. Every lens that owns
+    a pending gate in this pipeline must carry the deny; ux/arch never reach
+    `sign_off` HERE (they clear later via the PR panel loop, which already
+    threads `owns_pending_gate=lens.lens in pending_gates` correctly), but
+    that is a reason they get no *sign_off call*, not a reason to seat them
+    without the deny while a gate is pending."""
+    seen_kwargs: dict[str, dict] = {}
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        seen_kwargs[skill] = kwargs
+        if skill == "lanius":
+            # Both ux and arch are reported as still-pending, which is the
+            # signal `owns_pending_gate` must key on for a conditional
+            # section (mirrors the PR panel's own `parse_pending_gates`
+            # usage).
+            return SkillResult(
+                skill, True, 0, "GATE_INHERITANCE: clear\nGATE_PENDING: ux,arch", ""
+            )
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    # ux (accipiter) and arch (waxwing) are the CONDITIONAL sections
+    # (`SpecSection.always=False` in issue_spec.py) — they only run when
+    # `select_expectation_agents` selects them for this issue. Force both in,
+    # the way `_pr_dispatcher_with_stubs`'s own `select_panel` override does.
+    _selected = [
+        Lens(agent="accipiter", lens="ux", gate="ux", checks="design"),
+        Lens(agent="waxwing", lens="arch", gate="arch", checks="security"),
+    ]
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: _selected
+    )
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert "accipiter" in seen_kwargs, "the ux section (accipiter) must have run"
+    assert "waxwing" in seen_kwargs, "the arch section (waxwing) must have run"
+    assert seen_kwargs["accipiter"]["owns_pending_gate"] is True, (
+        "ux/accipiter owns the ux gate in this pipeline and must carry the "
+        "gate-owner tool-deny — a generated skill that still instructs "
+        "correct(gate_status...) must not be seated without it"
+    )
+    assert seen_kwargs["waxwing"]["owns_pending_gate"] is True, (
+        "arch/waxwing owns the arch gate in this pipeline and must carry the "
+        "gate-owner tool-deny for the same reason"
+    )
+
+
+def test_pm_sign_off_failure_is_surfaced_not_swallowed(monkeypatch):
+    """A clean verdict whose dispatcher-side sign_off FAILS must be surfaced
+    (via `_surface_failed_sign_offs`), never silently left as a bare
+    `pending` indistinguishable from "review never ran" (ateles#795)."""
+    surfaced = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "pavo":
+            return SkillResult(
+                skill, True, 0,
+                "**🤖 Pavo — Ateles swarm, pm gate owner**\n"
+                "**SIGNED_OFF**\n\n"
+                "<<<SPEC_SECTION>>>**Scope:** pm section with enough substance "
+                "to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>\n"
+                "pm gate passes.",
+                "",
+            )
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            from gate_waive import SignOffOutcome, SIGN_OFF_SIGNING_FAILED
+            return SignOffOutcome(
+                ok=False, gate=gate, lens_agent=lens_agent,
+                lens_sub=f"{lens_agent}@ateles-swarm",
+                error=SIGN_OFF_SIGNING_FAILED,
+            )
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    async def fake_surface(self, trigger, parent, failed):
+        surfaced.append((trigger.number, parent, failed))
+
+    monkeypatch.setattr(
+        SwarmDispatcher, "_surface_failed_sign_offs", fake_surface
+    )
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert len(surfaced) == 1
+    issue_number, parent, failed = surfaced[0]
+    from gate_waive import SIGN_OFF_SIGNING_FAILED
+    assert issue_number == 100
+    # (lens, agent, error_class, observed_state): the fake outcome carries no
+    # re-read value, so observed_state is empty and the comment says unknown.
+    assert failed == [("pm", "pavo", SIGN_OFF_SIGNING_FAILED, "")]
+
+
 def test_spec_section_prompt_is_additive_and_no_comment(monkeypatch):
     """The section prompt must tell the agent to add ONLY its section, build on
     prior sections, and NOT post spec as a comment."""
@@ -6926,8 +7467,35 @@ def test_spec_section_prompt_is_additive_and_no_comment(monkeypatch):
     assert "ONLY" in prompt
     assert "<<<SPEC_SECTION>>>" in prompt
     assert "Do NOT post your section as a" in prompt or "not** post" in prompt.lower()
-    # PM section still folds in the gate sign-off.
-    assert "gate_status.pm" in prompt
+    # PM section still folds in the gate verdict instruction (via comment,
+    # never a self-issued `correct()` — see
+    # test_spec_section_prompt_pm_gate_never_instructs_correct below).
+    assert "GATE" in prompt
+
+
+def test_spec_section_prompt_pm_gate_never_instructs_correct():
+    """ateles#795 amended ADR, Falco's follow-up finding on PR #1181: the
+    additive-spec pipeline's pm gate block must NOT instruct Pavo to
+    `correct()` the gate schema fields itself — that is the exact
+    shared-bearer sink Falco's review found still open after the panel's own
+    block was fixed. The dispatcher's lens-signed `sign_off` (mirroring the
+    panel loop) is now the sole system-of-record write for this gate too.
+
+    Field names come from `gate_waive`'s own declared-fields constant, not a
+    literal spelled in this test file — see the sibling assertion on
+    `_pavo_prompt` above for why."""
+    import gate_waive
+
+    pm = next(s for s in SECTIONS if s.key == "pm")
+    prompt = SwarmDispatcher._spec_section_prompt(
+        _issue_trigger(), pm, "PRIOR SPEC CONTENT"
+    )
+    assert "correct()" not in prompt
+    for declared_field in gate_waive._SIGN_OFF_DECLARED_FIELDS:
+        assert declared_field not in prompt
+    assert "current_owner" not in prompt
+    assert "plan_contribution" not in prompt
+    assert "[BLOCKING]" in prompt
 
 
 def test_extract_section_text_prefers_fenced_content():
@@ -9751,3 +10319,470 @@ class TestGateIdentityFailureClass:
             "accipiter", False, 1, "", "boom", error="boom", provider="claude"
         )
         assert swarm_dispatch.review_failure_class(other) == "execution failure"
+
+
+# ── PR #1181 provider-table round: a fail-closed provider refusal for a ──────
+# gate-owning lens must be its own legible class, not a bare "execution
+# failure" (which would read identically to an unrelated crash) or a
+# "credential failure" (which would send the operator chasing a token that
+# was never the problem).
+class TestGateOwnerToolDenyFailureClass:
+    def test_provider_refusal_is_its_own_class(self) -> None:
+        refused = SkillResult(
+            "waxwing",
+            False,
+            None,
+            "",
+            "",
+            error=(
+                f"{swarm_dispatch.GATE_OWNER_TOOL_DENY_UNAVAILABLE}: provider "
+                "'codex' has no mechanism ..."
+            ),
+            provider="codex",
+        )
+        assert (
+            swarm_dispatch.review_failure_class(refused)
+            == "gate-owner tool-deny unavailable on provider"
+        )
+
+    def test_ordinary_failure_still_classes_as_execution_failure(self) -> None:
+        other = SkillResult(
+            "waxwing", False, 1, "", "boom", error="boom", provider="codex"
+        )
+        assert swarm_dispatch.review_failure_class(other) == "execution failure"
+
+
+# ── PR #1181 ux review [BLOCKING]: a gate-owning lens refused AT LAUNCH must
+# carry the same Design **BLOCKED** contract (reason/gate/attempted/observed/
+# next_action) as a failed sign_off, not the generic "Review incomplete"
+# prose `_handle_panel_session_limit` posts for every other incomplete-panel
+# cause. Covers both launch-refusal classes named in `review_failure_class`:
+# `gate identity unavailable` and `gate-owner tool-deny unavailable on
+# provider`.
+#
+# WHAT THIS LOOKED LIKE RED, before the fix: `_surface_gate_launch_refusals`
+# did not exist, `GATE_LAUNCH_REFUSAL_CLASSES` did not exist, and a
+# gate-owning lens refused at launch reached the PR only through
+# `_handle_panel_session_limit`'s generic comment — no `**BLOCKED**` token,
+# no per-lens reason/gate/attempted/observed fields, no next_action.
+class TestGateLaunchRefusalSurface:
+    def test_surface_posts_blocked_template_for_identity_unavailable(self, monkeypatch):
+        comment_bodies: list[str] = []
+
+        class _CapturingClient:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get(self, url, **kwargs):
+                return _FakeListResp([])
+            async def post(self, url, **kwargs):
+                comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+                return _FakeResp(201)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+        monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+        notifier = _StubNotifier()
+        d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="x"))
+        trig = _trigger(number=1181, repository="owner/repo")
+        asyncio.run(
+            d._surface_gate_launch_refusals(
+                trig, 795,
+                [("ux", "accipiter", "gate identity unavailable")],
+            )
+        )
+
+        assert len(comment_bodies) == 1
+        body = comment_bodies[0]
+        assert swarm_dispatch.GATE_LAUNCH_REFUSED_MARKER in body
+        assert "**BLOCKED**" in body
+        assert "reason: `gate identity unavailable`" in body
+        assert "gate: `ux` (lens: `accipiter`)" in body
+        assert "attempted: `review`" in body
+        assert "observed: `gate identity unavailable`" in body
+        assert "next_action:" in body
+        assert "Provision the lens's own Neotoma identity" in body
+        # Non-blocking finding: the comment must state retry-or-stuck, not
+        # leave the reader to infer it.
+        assert "does NOT retry this on its own" in body
+        assert "not** a verdict" in body or "not a verdict" in body.lower()
+        assert notifier.priorities == [swarm_dispatch.Priority.BLOCKER]
+
+    def test_surface_posts_blocked_template_for_tool_deny_unavailable(self, monkeypatch):
+        comment_bodies: list[str] = []
+
+        class _CapturingClient:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get(self, url, **kwargs):
+                return _FakeListResp([])
+            async def post(self, url, **kwargs):
+                comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+                return _FakeResp(201)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+        monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+        notifier = _StubNotifier()
+        d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="x"))
+        trig = _trigger(number=1181, repository="owner/repo")
+        asyncio.run(
+            d._surface_gate_launch_refusals(
+                trig, 795,
+                [
+                    (
+                        "arch",
+                        "waxwing",
+                        "gate-owner tool-deny unavailable on provider",
+                    )
+                ],
+            )
+        )
+
+        assert len(comment_bodies) == 1
+        body = comment_bodies[0]
+        assert "reason: `gate-owner tool-deny unavailable on provider`" in body
+        assert "gate: `arch` (lens: `waxwing`)" in body
+        assert "next_action:" in body
+        assert "claude" in body
+        # This class DOES self-retry — the class-specific next_action differs
+        # from the identity-unavailable case above.
+        assert "retries automatically" in body
+        assert "Provision the lens's own Neotoma identity" not in body
+
+    def test_surface_is_idempotent_on_marker(self, monkeypatch):
+        posted = []
+
+        class _CapturingClient:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get(self, url, **kwargs):
+                return _FakeListResp(
+                    [{"body": swarm_dispatch.GATE_LAUNCH_REFUSED_MARKER}]
+                )
+            async def post(self, url, **kwargs):
+                posted.append(1)
+                return _FakeResp(201)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+        monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+        d = SwarmDispatcher(_StubNotifier(), DispatchConfig(neotoma_token="", github_token="x"))
+        trig = _trigger(number=1181, repository="owner/repo")
+        asyncio.run(
+            d._surface_gate_launch_refusals(
+                trig, 795,
+                [("ux", "accipiter", "gate identity unavailable")],
+            )
+        )
+        assert posted == []  # already surfaced — no duplicate comment
+
+    def test_handle_pr_routes_gate_owning_launch_refusal_to_blocked_surface(
+        self, monkeypatch
+    ):
+        """A gate-owning lens refused at launch is pulled out of the generic
+        `failed_lenses` bucket and routed to `_surface_gate_launch_refusals`
+        instead of `_handle_panel_session_limit`."""
+        calls = []
+        d = _pr_dispatcher_with_stubs(
+            monkeypatch, vanellus_stdout="**APPROVE**", calls=calls
+        )
+        monkeypatch.setattr(
+            swarm_dispatch,
+            "select_panel",
+            lambda **kwargs: [
+                Lens(agent="accipiter", lens="ux", gate="ux", checks="design"),
+            ],
+        )
+
+        async def fake_run_skill(skill, prompt, **kwargs):
+            if skill == "lanius":
+                return SkillResult(
+                    skill, True, 0,
+                    "GATE_INHERITANCE: clear\nGATE_PENDING: ux", "",
+                )
+            if skill == "accipiter":
+                return SkillResult(
+                    skill, False, None, "", "",
+                    error=(
+                        f"{swarm_dispatch.NEOTOMA_IDENTITY_UNAVAILABLE}: "
+                        "'accipiter' owns a pre-impl gate ..."
+                    ),
+                )
+            raise AssertionError(f"unexpected skill: {skill}")
+
+        session_limit_calls = []
+        launch_refusal_calls = []
+
+        async def fake_session_limit(self, *args, **kwargs):
+            session_limit_calls.append((args, kwargs))
+
+        async def fake_launch_refusal(self, trigger, parent, refused):
+            launch_refusal_calls.append((trigger.number, parent, refused))
+
+        monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+        monkeypatch.setattr(
+            SwarmDispatcher, "_handle_panel_session_limit", fake_session_limit
+        )
+        monkeypatch.setattr(
+            SwarmDispatcher, "_surface_gate_launch_refusals", fake_launch_refusal
+        )
+
+        asyncio.run(d._handle_pr(_trigger(body="Closes #795.")))
+
+        assert session_limit_calls == []
+        assert len(launch_refusal_calls) == 1
+        issue_number, parent, refused = launch_refusal_calls[0]
+        assert refused == [
+            ("ux", "accipiter", "gate identity unavailable")
+        ]
+        # Panel incomplete → must not fall through to merge-authorization.
+        assert not any(kind in {"route", "gate"} for kind, _ in calls)
+
+    def test_advisory_lens_launch_refusal_still_uses_generic_path(self, monkeypatch):
+        """The SAME failure class on a lens that does NOT own the pending gate
+        has no gate riding on it — stays on the existing generic
+        `_handle_panel_session_limit` path, unchanged."""
+        calls = []
+        d = _pr_dispatcher_with_stubs(
+            monkeypatch, vanellus_stdout="**APPROVE**", calls=calls
+        )
+        monkeypatch.setattr(
+            swarm_dispatch,
+            "select_panel",
+            lambda **kwargs: [
+                Lens(agent="falco", lens="security", gate=None, checks="security"),
+            ],
+        )
+
+        async def fake_run_skill(skill, prompt, **kwargs):
+            if skill == "lanius":
+                return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+            if skill == "falco":
+                return SkillResult(
+                    skill, False, None, "", "",
+                    error=(
+                        f"{swarm_dispatch.GATE_OWNER_TOOL_DENY_UNAVAILABLE}: "
+                        "provider 'codex' has no mechanism ..."
+                    ),
+                )
+            raise AssertionError(f"unexpected skill: {skill}")
+
+        session_limit_calls = []
+        launch_refusal_calls = []
+
+        async def fake_session_limit(self, *args, **kwargs):
+            session_limit_calls.append(kwargs)
+
+        async def fake_launch_refusal(self, trigger, parent, refused):
+            launch_refusal_calls.append(refused)
+
+        monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+        monkeypatch.setattr(
+            SwarmDispatcher, "_handle_panel_session_limit", fake_session_limit
+        )
+        monkeypatch.setattr(
+            SwarmDispatcher, "_surface_gate_launch_refusals", fake_launch_refusal
+        )
+
+        asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+        assert launch_refusal_calls == []
+        assert len(session_limit_calls) == 1
+        assert session_limit_calls[0]["failed_lenses"] == (
+            ("security", "gate-owner tool-deny unavailable on provider"),
+        )
+
+
+# ── Regression: other incomplete-panel causes keep their EXISTING message ──
+# unchanged (usage limit / provider exhaustion / head-changed / stale). Only
+# the two named launch-refusal classes on a GATE-OWNING lens move to the new
+# surface.
+class TestOtherIncompletePanelCausesUnchanged:
+    def test_session_limit_still_uses_generic_deferral_message(self, monkeypatch):
+        comment_bodies: list[str] = []
+
+        class _CapturingClient:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def get(self, url, **kwargs):
+                return _FakeListResp([])
+            async def post(self, url, **kwargs):
+                comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+                return _FakeResp(201)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+        monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+        notifier = _StubNotifier()
+        d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="x"))
+        asyncio.run(
+            d._handle_panel_session_limit(
+                _trigger(number=264, repository="owner/repo"),
+                None,
+                "vanellus",
+                "You've hit your session limit · resets 7:30pm", "",
+            )
+        )
+        assert len(comment_bodies) == 1
+        body = comment_bodies[0]
+        assert "Review incomplete" in body
+        assert swarm_dispatch.GATE_LAUNCH_REFUSED_MARKER not in body
+        assert "**BLOCKED**" not in body
+
+    def test_head_changed_still_uses_generic_message(self, monkeypatch):
+        comment_bodies: list[str] = []
+
+        class _CapturingClient:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def get(self, url, **kwargs):
+                return _FakeListResp([])
+            async def post(self, url, **kwargs):
+                comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+                return _FakeResp(201)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+        monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+        notifier = _StubNotifier()
+        d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="x"))
+        asyncio.run(
+            d._handle_panel_session_limit(
+                _trigger(number=264, repository="owner/repo"),
+                None, "vanellus", "", "",
+                reason="PR head changed during review or could not be verified",
+            )
+        )
+        assert len(comment_bodies) == 1
+        body = comment_bodies[0]
+        assert "Review incomplete" in body
+        assert swarm_dispatch.GATE_LAUNCH_REFUSED_MARKER not in body
+        assert "**BLOCKED**" not in body
+
+# ── A failed sign_off is never a cleared gate (PR #1181, second security
+# run BLOCKING B2) ─────────────────────────────────────────────────────────
+# The gate-level half (a fake store whose writes land) lives in
+# test_gate_sign_off_fail_closed.py; these are the two callers.
+
+
+import gate_waive as _gw  # noqa: E402
+
+
+class TestCallersTreatAFailedSignOffAsNotCleared:
+    def test_panel_keeps_a_failed_gate_pending_even_when_the_reread_shows_it_cleared(
+        self, monkeypatch
+    ):
+        calls: list = []
+        captured: dict = {}
+        surfaced: list = []
+
+        async def fake_sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            return _gw.SignOffOutcome(
+                ok=False,
+                gate=gate,
+                lens_agent=lens_agent,
+                error=_gw.SIGN_OFF_VERIFY_FAILED,
+            )
+
+        class _Cleared:
+            found = True
+            gate_status = {"pm": "signed_off", "ux": "signed_off", "arch": "signed_off"}
+            gate_status_unreadable = False
+
+        async def fake_load(self, repo, issue_number):
+            return _Cleared()
+
+        # The pre-panel live read, which decides what to sign, shows `arch`
+        # pending; the re-read after the failed sign_off shows it cleared.
+        async def fake_live(self, repository, issue_number):
+            return {"pm": "signed_off", "ux": "signed_off", "arch": "pending"}
+
+        monkeypatch.setattr(swarm_dispatch.IssueGateStore, "sign_off", fake_sign_off)
+        monkeypatch.setattr(swarm_dispatch.IssueGateStore, "load", fake_load)
+        monkeypatch.setattr(SwarmDispatcher, "_live_gate_status", fake_live)
+        d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls)
+
+        async def fake_run_skill(skill, prompt, **kwargs):
+            if skill == "lanius":
+                return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear\nGATE_PENDING: arch", "")
+            if skill == "waxwing":
+                return SkillResult(
+                    skill, True, 0,
+                    "**🤖 Waxwing — Ateles swarm, arch lens panelist**\n"
+                    "**SIGNED_OFF**\nno concerns",
+                    "",
+                )
+            return SkillResult(skill, True, 0, "**APPROVE**\nlgtm", "")
+
+        original_prompt = SwarmDispatcher._vanellus_prompt
+
+        def spy_prompt(trigger, parent, lenses, reviews=None, pending_gates=None, reviewed_head=None):
+            captured["pending_gates"] = set(pending_gates or ())
+            return original_prompt(
+                trigger, parent, lenses, reviews,
+                pending_gates=pending_gates, reviewed_head=reviewed_head,
+            )
+
+        async def fake_surface(self, trigger, parent, failed):
+            surfaced.extend(failed)
+
+        monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+        monkeypatch.setattr(SwarmDispatcher, "_vanellus_prompt", staticmethod(spy_prompt))
+        monkeypatch.setattr(SwarmDispatcher, "_surface_failed_sign_offs", fake_surface)
+
+        asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+        assert surfaced, "the failed sign_off must be surfaced"
+        assert "arch" in captured.get("pending_gates", set()), (
+            "a failed sign_off must stay pending for merge authorization even "
+            "though the re-read shows the gate cleared"
+        )
+
+    def test_issue_pipeline_does_not_build_on_a_failed_pm_sign_off(self, monkeypatch):
+        build_calls: list = []
+
+        async def fake_run_skill(skill, prompt, **kwargs):
+            if skill == "cicada" and "DO NOT MERGE" in prompt:
+                build_calls.append(skill)
+            if skill == "lanius":
+                return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+            if skill == "pavo":
+                return SkillResult(
+                    skill, True, 0,
+                    "**🤖 Pavo — Ateles swarm, pm gate owner**\n**SIGNED_OFF**\n\n"
+                    "<<<SPEC_SECTION>>>**Scope:** pm section with enough substance "
+                    "to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+                    "",
+                )
+            return SkillResult(skill, True, 0, "text", "")
+
+        _install_pipeline_stubs(monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: [])
+
+        async def failing_sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            return _gw.SignOffOutcome(
+                ok=False, gate=gate, lens_agent=lens_agent,
+                error=_gw.SIGN_OFF_VERIFY_FAILED,
+            )
+
+        async def fake_surface(self, trigger, parent, failed):
+            return None
+
+        async def fake_open_pr(self, trigger, state):
+            build_calls.append("opened")
+            return "https://example.invalid/pr/1"
+
+        monkeypatch.setattr(swarm_dispatch.IssueGateStore, "sign_off", failing_sign_off)
+        monkeypatch.setattr(SwarmDispatcher, "_surface_failed_sign_offs", fake_surface)
+        monkeypatch.setattr(SwarmDispatcher, "_open_implementation_pr", fake_open_pr)
+
+        notifier = _StubNotifier()
+        d = SwarmDispatcher(notifier, _config(auto_build=True))
+        asyncio.run(d._handle_issue_opened(_issue_trigger()))
+
+        assert build_calls == [], "a failed pm sign_off must not count as a cleared gate"
+        assert any("gates not green" in m for m in notifier.sent)

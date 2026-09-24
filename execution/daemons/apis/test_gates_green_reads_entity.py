@@ -75,7 +75,16 @@ def _stub_gate_status(monkeypatch, gate_status: dict | None, found: bool = True)
     async def fake_load(self, repo, issue_number):  # noqa: ANN001
         return _State()
 
+    # Every `signed_off` here is backed by its owner's own signed write; the
+    # provenance re-proof (PR #1181, N2) is tested in
+    # test_gate_sign_off_residuals.py.
+    async def fake_all_proven(self, state, owners):  # noqa: ANN001
+        return set()
+
     monkeypatch.setattr(sd.IssueGateStore, "load", fake_load)
+    monkeypatch.setattr(
+        sd.IssueGateStore, "unverified_signed_off_gates", fake_all_proven, raising=False
+    )
 
 
 @pytest.mark.asyncio

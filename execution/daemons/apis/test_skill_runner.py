@@ -3470,10 +3470,21 @@ class TestGateOwnerIdentity:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_gate_owner_without_own_identity_is_refused(
+    def test_gate_owner_without_own_mcp_identity_still_launches(
         self, MockLoader, mock_write_harness, monkeypatch
     ) -> None:
-        """RED before the fix: the review RAN and its verdict went nowhere."""
+        """Amended ADR (ateles#795 operator decision comment): a gate owner
+        with no per-agent MCP bearer must still be allowed to launch.
+
+        This test used to assert the OPPOSITE — a hard preflight refusal —
+        back when the lens's own in-session `correct()` was the only planned
+        writeback path. The operator's amendment moves the system-of-record
+        write to the dispatcher (`gate_waive.IssueGateStore.sign_off`, signed
+        with the lens's OWN AAuth keypair, independent of this MCP session),
+        so the lens no longer needs a Neotoma identity of its own just to be
+        allowed to review. Refusing here would leave pm/arch/ux permanently
+        unable to run — the second failure mode this amendment exists to fix.
+        """
         fake_def = _make_def(
             prompt_markdown="Role: Accipiter.",
             aauth_sub="accipiter@ateles-swarm",
@@ -3516,14 +3527,14 @@ class TestGateOwnerIdentity:
                 )
             )
 
-        assert not result.ok, (
-            "A gate owner that cannot write its own verdict must FAIL LOUDLY, "
-            "not run and leave the gate reading `pending`."
+        assert result.ok, (
+            "A gate owner with no per-agent MCP bearer must still be allowed "
+            "to launch — the dispatcher's signed sign_off() is now the "
+            "system-of-record write, independent of this session's identity."
         )
-        assert skill_runner.NEOTOMA_IDENTITY_UNAVAILABLE in (result.error or "")
-        assert launched == [], (
-            "The refusal must precede the subprocess — running the review burns "
-            "a full session whose verdict Neotoma will discard."
+        assert launched, (
+            "The review must actually run: refusing to launch is exactly the "
+            "regression this amendment closes."
         )
 
     @patch("skill_runner._write_harness_event")
@@ -3580,3 +3591,468 @@ class TestGateOwnerIdentity:
             "An advisory lens must keep running on the shared bearer — its "
             "product (a PR comment) does not need attribution to survive."
         )
+
+
+# ── Falco's REQUEST_CHANGES on PR #1181: deny `correct` for a gate-owning ───
+# reviewer run, across every dispatch provider ──────────────────────────────
+
+
+class TestGateOwnerToolDenyAcrossProviders:
+    """A gate-owning lens must never reach `mcp__mcpsrv_neotoma__correct`,
+    on ANY provider — the additive `GATE_WRITEBACK_TOOLS` fix removed
+    `correct` from the grant, but could not un-grant it from underneath the
+    `mcp__mcpsrv_neotoma__*` wildcard (every claude dispatch) or `tools ==
+    ['*']` (every tool). This class covers the claude deny-list path (both
+    allowlist shapes) and fail-closed refusal on codex/cursor, which have no
+    per-tool deny mechanism in this codebase.
+    """
+
+    def setup_method(self) -> None:
+        skill_runner._agent_def_cache.clear()
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    # ── claude: --disallowed-tools present, both allowlist shapes ──────────
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_claude_restricted_allowlist_still_denies_correct(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """RED before the fix: a restricted agent (`tools != ['*']`) got the
+        gate-writeback READ tools by name via the additive
+        `GATE_WRITEBACK_TOOLS` grant, but its own `mcp__mcpsrv_neotoma__*`
+        wildcard (added unconditionally below) still pre-approved `correct`
+        with no counterweight — reverting the `--disallowed-tools` append
+        below reproduces exactly that: `correct` present nowhere in
+        `--allowed-tools` yet still reachable because nothing denies it.
+        """
+        fake_def = _make_def(
+            prompt_markdown="Role: Waxwing.",
+            tool_allowlist="Read,Grep",
+            aauth_sub="waxwing@ateles-swarm",
+            name="waxwing",
+        )
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+
+        captured_cmd: list = []
+
+        async def fake_exec(*cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"**SIGNED_OFF**", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "waxwing",
+                    "review prompt",
+                    role="waxwing",
+                    provider="claude",
+                    task_entity_id="ent_abc",
+                    owns_pending_gate=True,
+                )
+            )
+
+        assert result.ok
+        assert "--disallowed-tools" in captured_cmd, (
+            "a gate-owning run on the restricted-allowlist path must carry "
+            "an explicit deny list — an additive allowlist fix alone cannot "
+            "revoke what the mcp__mcpsrv_neotoma__* wildcard already grants"
+        )
+        deny_value = captured_cmd[captured_cmd.index("--disallowed-tools") + 1]
+        assert "mcp__mcpsrv_neotoma__correct" in deny_value.split(",")
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_claude_unrestricted_star_allowlist_still_denies_correct(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """RED before the fix: `tools == ['*']` grants EVERY tool including
+        `mcp__mcpsrv_neotoma__correct` — the courtesy read-tool grant added
+        no deny, so `*` alone left `correct` reachable exactly as before
+        `GATE_WRITEBACK_TOOLS` existed.
+        """
+        fake_def = _make_def(
+            prompt_markdown="Role: Pavo.",
+            tool_allowlist="*",
+            aauth_sub="pavo@ateles-swarm",
+            name="pavo",
+        )
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+
+        captured_cmd: list = []
+
+        async def fake_exec(*cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"**SIGNED_OFF**", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "pavo",
+                    "review prompt",
+                    role="pavo",
+                    provider="claude",
+                    task_entity_id="ent_abc",
+                    owns_pending_gate=True,
+                )
+            )
+
+        assert result.ok
+        assert "--allowed-tools" in captured_cmd
+        allowed_value = captured_cmd[captured_cmd.index("--allowed-tools") + 1]
+        assert allowed_value.split(",")[0] == "*", (
+            "the * wildcard must be preserved — the fix is a deny list, "
+            "never a narrowing of the agent's own grant"
+        )
+        assert "--disallowed-tools" in captured_cmd, (
+            "the * wildcard alone leaves correct() reachable; a gate-owning "
+            "run must carry an explicit deny regardless of allowlist shape"
+        )
+        deny_value = captured_cmd[captured_cmd.index("--disallowed-tools") + 1]
+        assert "mcp__mcpsrv_neotoma__correct" in deny_value.split(",")
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_advisory_lens_gets_no_disallowed_tools_flag(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """Non-regression: a run with neither control set (owns_pending_gate
+        and seated_reviewer both False) gets no `--disallowed-tools` flag.
+        The dispatcher seats every lens with `seated_reviewer=True` (PR #1181,
+        e874537f round), so a SEATED advisory lens does carry the deny — see
+        test_gate_sign_off_residuals.py."""
+        fake_def = _make_def(
+            prompt_markdown="Role: Falco.",
+            tool_allowlist="*",
+            aauth_sub="falco@ateles-swarm",
+            name="falco",
+        )
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+
+        captured_cmd: list = []
+
+        async def fake_exec(*cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"**COMMENT**", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "falco",
+                    "review prompt",
+                    role="falco",
+                    provider="claude",
+                    task_entity_id="ent_abc",
+                    owns_pending_gate=False,
+                )
+            )
+
+        assert result.ok
+        assert "--disallowed-tools" not in captured_cmd
+
+    # ── codex / cursor: fail closed, never launch unrestricted ─────────────
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_codex_refuses_a_gate_owning_launch(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """RED before the fix: codex has no `--mcp-config` / tool-allowlist
+        flag at all in `_provider_command` (`--sandbox workspace-write` only),
+        so a gate-owning lens routed to it would launch with `correct`
+        reachable through the ambient ombudsman config — exactly the sink
+        this PR closes for claude. It must refuse instead.
+        """
+        fake_def = _make_def(
+            prompt_markdown="Role: Waxwing.",
+            tool_allowlist="*",
+            aauth_sub="waxwing@ateles-swarm",
+            name="waxwing",
+        )
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+
+        launched = []
+
+        async def fake_exec(*cmd, **kwargs):
+            launched.append(cmd)
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"**SIGNED_OFF**", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "waxwing",
+                    "review prompt",
+                    role="waxwing",
+                    provider="codex",
+                    task_entity_id="ent_abc",
+                    owns_pending_gate=True,
+                )
+            )
+
+        assert not result.ok, (
+            "codex cannot deny a single MCP tool in this codebase — a "
+            "gate-owning run must refuse rather than launch unrestricted"
+        )
+        assert not launched, "the child must never actually start"
+        assert skill_runner.GATE_OWNER_TOOL_DENY_UNAVAILABLE in result.error
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_cursor_refuses_a_gate_owning_launch(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """RED before the fix: cursor-agent is launched with `--force
+        --approve-mcps` (`_provider_command`), which auto-approves EVERY MCP
+        tool call with no per-tool exception — a gate-owning lens routed to
+        it would run with `correct` unconditionally approved. Must refuse.
+        """
+        fake_def = _make_def(
+            prompt_markdown="Role: Accipiter.",
+            tool_allowlist="*",
+            aauth_sub="accipiter@ateles-swarm",
+            name="accipiter",
+        )
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+
+        launched = []
+
+        async def fake_exec(*cmd, **kwargs):
+            launched.append(cmd)
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"**SIGNED_OFF**", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.CURSOR_BIN", "/usr/bin/cursor-agent"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "accipiter",
+                    "review prompt",
+                    role="accipiter",
+                    provider="cursor",
+                    task_entity_id="ent_abc",
+                    owns_pending_gate=True,
+                )
+            )
+
+        assert not result.ok, (
+            "cursor-agent's --approve-mcps has no per-tool exception — a "
+            "gate-owning run must refuse rather than launch unrestricted"
+        )
+        assert not launched, "the child must never actually start"
+        assert skill_runner.GATE_OWNER_TOOL_DENY_UNAVAILABLE in result.error
+
+    def test_gate_owner_denied_tools_is_narrow(self) -> None:
+        """The deny list is exactly the one sink Falco's finding named — not
+        a broader lockdown that could mask a future missing grant."""
+        assert set(skill_runner.GATE_OWNER_DENIED_TOOLS) == {
+            "mcp__mcpsrv_neotoma__correct"
+        }
+
+
+# ── #1181 operational finding: gate-owner refusal must fail over, not stop ────
+#
+# The in-attempt refusal above (`_run_skill_once` returning `SkillResult(ok=
+# False, error=f"{GATE_OWNER_TOOL_DENY_UNAVAILABLE}: ...")`) is correct in
+# isolation, but `_run_provider_attempts` only advances to the next candidate
+# on a classified `failure_kind` or a `"{selected} launch failed:"` error —
+# this refusal is neither, so when `provider_candidates` picked cursor or
+# codex first (the common case per the live dispatch mix in the finding), the
+# loop returned the refusal immediately with no attempt on claude. The fix
+# filters candidates to `claude` BEFORE selection whenever `owns_pending_gate`
+# is set, so ordinary failover logic naturally lands on claude without ever
+# reaching the in-attempt refusal on a live run.
+class TestGateOwnerFailoverToClaude:
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_gate_owning_run_launches_on_claude_despite_candidate_order(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """RED before the fix: with [cursor, codex, claude] all eligible,
+        `provider_candidates` picks cursor first (smooth weighted round-robin
+        with equal headroom follows configured order). The old code attempted
+        cursor, got the in-attempt refusal, and returned it unchanged — never
+        trying claude. The fix must land on claude."""
+        harness_router.reset_state()
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex,claude")
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+        monkeypatch.delenv("APIS_HARNESS_HEADROOM", raising=False)
+
+        attempted: list[str] = []
+
+        async def attempt(selected: str) -> skill_runner.SkillResult:
+            attempted.append(selected)
+            if selected != "claude":
+                # Exactly the shape of the real in-attempt refusal: ok=False,
+                # an error that is neither a classified failure_kind nor a
+                # "launch failed:"-prefixed string.
+                return skill_runner.SkillResult(
+                    "waxwing", False, None, "", "",
+                    error=(
+                        f"{skill_runner.GATE_OWNER_TOOL_DENY_UNAVAILABLE}: "
+                        f"provider {selected!r} has no mechanism..."
+                    ),
+                    provider=selected,
+                )
+            return skill_runner.SkillResult(
+                "waxwing", True, 0, "**SIGNED_OFF**", "", provider=selected,
+            )
+
+        result = self._run(
+            skill_runner._run_provider_attempts(
+                "waxwing",
+                attempt,
+                binaries={"cursor": "c", "codex": "d", "claude": "e"},
+                owns_pending_gate=True,
+            )
+        )
+
+        assert result.ok
+        assert result.provider == "claude"
+        assert attempted == ["claude"], (
+            "cursor/codex must never even be attempted — the constraint is "
+            "applied at candidate selection, not discovered via a failed "
+            "attempt"
+        )
+        assert harness_router.cooling_providers() == set(), (
+            "the in-attempt refusal is not a launch failure and must not "
+            "cool down cursor or codex for every other role"
+        )
+
+    def test_gate_owning_run_fails_closed_when_claude_ineligible(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """The same run with only [cursor, codex] eligible (no claude binary
+        at all) must fail closed with a legible reason and cool nothing —
+        never fall over to cursor/codex unrestricted."""
+        harness_router.reset_state()
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex")
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+        monkeypatch.delenv("APIS_HARNESS_HEADROOM", raising=False)
+
+        async def should_not_run(selected: str) -> skill_runner.SkillResult:
+            raise AssertionError(f"ineligible provider was attempted: {selected}")
+
+        result = self._run(
+            skill_runner._run_provider_attempts(
+                "waxwing",
+                should_not_run,
+                binaries={"cursor": "c", "codex": "d"},
+                owns_pending_gate=True,
+            )
+        )
+
+        assert not result.ok
+        assert skill_runner.GATE_OWNER_TOOL_DENY_UNAVAILABLE in result.error
+        assert result.attempted_providers == ()
+        assert harness_router.cooling_providers() == set(), (
+            "failing closed on an unavailable claude must not cool down any "
+            "provider — cursor and codex are simply not offered, not failing"
+        )
+
+    def test_non_gate_owning_run_keeps_unchanged_candidate_order(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Non-regression: an advisory run (owns_pending_gate=False, the
+        default) with [cursor, codex, claude] all eligible still launches on
+        cursor — the first candidate in configured order — exactly as before
+        this fix."""
+        harness_router.reset_state()
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex,claude")
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+        monkeypatch.delenv("APIS_HARNESS_HEADROOM", raising=False)
+
+        attempted: list[str] = []
+
+        async def attempt(selected: str) -> skill_runner.SkillResult:
+            attempted.append(selected)
+            return skill_runner.SkillResult(
+                "falco", True, 0, "**COMMENT**", "", provider=selected,
+            )
+
+        result = self._run(
+            skill_runner._run_provider_attempts(
+                "falco",
+                attempt,
+                binaries={"cursor": "c", "codex": "d", "claude": "e"},
+            )
+        )
+
+        assert result.ok
+        assert result.provider == "cursor"
+        assert attempted == ["cursor"]
