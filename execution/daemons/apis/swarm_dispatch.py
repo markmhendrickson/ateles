@@ -46,6 +46,7 @@ import hashlib
 import json
 import logging
 import os
+import pathlib
 import re
 import shutil
 import sys
@@ -2739,8 +2740,37 @@ def _token_for_repo(repo: str) -> str:
 
 
 def _reviewer_app_private_key_pem() -> str:
+    """Return the reviewer App's private key PEM, inline or from a file.
+
+    A GitHub App key is a multi-line PEM, which is awkward to carry in a
+    dotenv value — so an operator naturally stores the file and points at it.
+    Reading only the inline variable made that configuration indistinguishable
+    from no configuration at all: `_binding_review_credential_mode()` returned
+    `unset`, every binding review was skipped as a forbidden shared-token
+    fallback, and merge readiness was held closed across the whole repository
+    (15 PRs over 22 hours) with the key sitting readable on disk. The inline
+    variable still wins when both are set, so existing deployments are
+    unaffected.
+    """
     raw = (os.environ.get("ATELES_REVIEWER_APP_PRIVATE_KEY") or "").strip()
-    return raw.replace("\\n", "\n")
+    if raw:
+        return raw.replace("\\n", "\n")
+
+    path = (os.environ.get("ATELES_REVIEWER_APP_PRIVATE_KEY_PATH") or "").strip()
+    if not path:
+        return ""
+    try:
+        return pathlib.Path(path).expanduser().read_text().strip()
+    except OSError as exc:
+        # An unreadable key is a misconfiguration the operator must see: it
+        # otherwise degrades to the same silent `unset` this branch exists to
+        # fix. Returning "" keeps the caller's fail-closed behaviour.
+        log.error(
+            f"[{DAEMON_NAME}] ATELES_REVIEWER_APP_PRIVATE_KEY_PATH is set but "
+            f"could not be read ({exc.__class__.__name__}); binding reviews "
+            "will be skipped until it is readable"
+        )
+        return ""
 
 
 def _binding_review_credential_mode() -> str:
