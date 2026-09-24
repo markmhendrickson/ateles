@@ -271,6 +271,27 @@ class SpecState:
             self.sequence_state = []
 
 
+def _state_from_entity(entity: dict, state: SpecState, title: str) -> SpecState:
+    """Populate ``state`` from one entities/query result row's snapshot.
+
+    Pure/no I/O — shared by load()'s targeted query and its bounded
+    full-scan fallback, so the two paths parse a matched row identically.
+    """
+    snap = entity.get("snapshot") or {}
+    state.entity_id = entity.get("entity_id", "")
+    state.title = snap.get("title", title) or title
+    state.sections = {
+        field: snap[field] for field in SECTION_FIELDS if snap.get(field)
+    }
+    seq = snap.get("sequence_state")
+    if isinstance(seq, list):
+        state.sequence_state = [str(x) for x in seq]
+    elif isinstance(seq, str) and seq:
+        # Tolerate a comma-joined string form from schema inference.
+        state.sequence_state = [p.strip() for p in seq.split(",") if p.strip()]
+    return state
+
+
 class IssueSpecStore:
     """Retrieve / create / update the additive ``issue_spec`` entity.
 
@@ -354,17 +375,26 @@ class IssueSpecStore:
         snapshot.  A missing token, missing entity, or fetch error all degrade
         to a fresh empty ``SpecState`` so the caller can still create it.
 
-        PAGINATES through the full corpus (``cursor``) rather than reading one
-        page: with 900+ issue_spec entities in prod, a single un-paginated
-        page (previously a bare ``limit: 200``) silently missed any entity
-        sorting past it, reporting "no entity" for one that already exists.
-        upsert_section then took the CREATE branch with a content-bound,
-        per-issue-constant idempotency key that the entity's real first create
-        had already consumed — so Neotoma correctly refused the mismatched
-        replay with 400 ERR_IDEMPOTENCY_MISMATCH, forever, for that issue
+        Queries with a TARGETED ``snapshot_filters`` match on repo+issue_number
+        — never the full corpus — because hosted Neotoma is capacity-
+        constrained and a bulk read has already crashed it once (neotoma#2483,
+        2026-09-23); the standing guidance is small reads at concurrency <= 2.
+        A full-corpus paginated scan is kept ONLY as a bounded fallback for
+        when the targeted query itself errors (never as the default path, and
+        never triggered merely by finding zero matches — a genuinely new
+        issue has zero matches on every path and that must not trigger a
+        900-entity scan).
+
+        Before this method used ``snapshot_filters`` at all, it read one
+        un-paginated page (``limit: 200``, no cursor) of the WHOLE corpus.
+        With 900+ issue_spec entities in prod, any entity sorting past that
+        page was invisible, so upsert_section took the CREATE branch for an
+        issue that already had an entity, replaying a content-bound,
+        per-issue-constant idempotency key its real first create had already
+        consumed — a permanent 400 ERR_IDEMPOTENCY_MISMATCH for that issue
         (ateles#499; first observed 2026-08-09, e.g. markmhendrickson/ateles#403
-        and #1189). Paginating here is what makes the create branch's own
-        reload-on-failure fallback (below) actually able to find the entity.
+        and #1189). The targeted query fixes the same defect without ever
+        reading more than a handful of rows.
         """
         state = SpecState(repo=repo, issue_number=issue_number, title=title)
         # NOTE: the prod Neotoma REST surface exposes the read as POST
@@ -374,6 +404,64 @@ class IssueSpecStore:
         # could abort the completion/auto-build handoff. /entities/query
         # returns the same {entities:[{snapshot:{...}}]} shape this parser
         # expects.
+        data = await self._post(
+            "entities/query",
+            {
+                "entity_type": self.ENTITY_TYPE,
+                # Small limit on purpose: repo+issue_number is the entity's
+                # own identity rule (composite:repo+issue_number, confirmed
+                # live against prod), so more than one match is a server-side
+                # anomaly, not an expected shape to page through.
+                "limit": 5,
+                "include_snapshots": True,
+                "snapshot_filters": {
+                    "repo": {"op": "eq", "value": repo},
+                    "issue_number": {"op": "eq", "value": issue_number},
+                },
+            },
+        )
+        if data is not None:
+            entities = data.get("entities", [])
+            if len(entities) > 1:
+                # Ambiguous: the identity rule says this cannot happen for a
+                # well-formed corpus. Fail CLOSED rather than guessing which
+                # row is authoritative — silently picking one risks correcting
+                # the WRONG entity's fields.
+                log.error(
+                    "[apis.issue_spec] entities/query returned %s matches for "
+                    "%s (expected 0 or 1 under the repo+issue_number identity "
+                    "rule) — refusing to guess; treating as unresolved",
+                    len(entities), spec_key(repo, issue_number),
+                )
+                return state
+            if entities:
+                return _state_from_entity(entities[0], state, title)
+            # Zero matches via the targeted query is a normal, expected
+            # outcome (a genuinely new issue) — NOT a reason to fall back to
+            # the full-corpus scan.
+            return state
+
+        # The targeted query itself errored (self._post returned None) —
+        # bounded pagination fallback, never the default path. Logged so a
+        # fallback scan is visible rather than indistinguishable from the
+        # fast path.
+        log.warning(
+            "[apis.issue_spec] targeted entities/query failed for %s (%s) — "
+            "falling back to a bounded full-corpus scan",
+            spec_key(repo, issue_number), self.last_error_code or self.last_error,
+        )
+        return await self._load_via_full_scan(repo, issue_number, title)
+
+    async def _load_via_full_scan(
+        self, repo: str, issue_number: int, title: str
+    ) -> SpecState:
+        """Bounded full-corpus pagination — FALLBACK ONLY, never the default.
+
+        Walks entities/query via next_cursor up to MAX_LOAD_PAGES pages. Used
+        only when the targeted snapshot_filters query in load() errors; see
+        that method's docstring for why the targeted query is the default.
+        """
+        state = SpecState(repo=repo, issue_number=issue_number, title=title)
         cursor: str | None = None
         for _page in range(MAX_LOAD_PAGES):
             body: dict = {
@@ -392,23 +480,7 @@ class IssueSpecStore:
                     snap.get("repo") == repo
                     and str(snap.get("issue_number")) == str(issue_number)
                 ):
-                    state.entity_id = entity.get("entity_id", "")
-                    state.title = snap.get("title", title) or title
-                    state.sections = {
-                        field: snap[field]
-                        for field in SECTION_FIELDS
-                        if snap.get(field)
-                    }
-                    seq = snap.get("sequence_state")
-                    if isinstance(seq, list):
-                        state.sequence_state = [str(x) for x in seq]
-                    elif isinstance(seq, str) and seq:
-                        # Tolerate a comma-joined string form from schema
-                        # inference.
-                        state.sequence_state = [
-                            p.strip() for p in seq.split(",") if p.strip()
-                        ]
-                    return state
+                    return _state_from_entity(entity, state, title)
             cursor = data.get("next_cursor")
             if not cursor:
                 break

@@ -279,41 +279,53 @@ def test_section_fields_match_sections():
     assert SECTION_FIELDS == tuple(s.field for s in SECTIONS)
 
 
-# ── ateles#499: load() must paginate, and a stale idempotency key must not ──
-# ── 400 forever once an entity it missed already exists ─────────────────────
+# ── ateles#499: load() must query TARGETED, and a stale idempotency key ─────
+# ── must not 400 forever once an entity it missed already exists ────────────
 #
 # Reproduces the real prod failure (474 store-failed 400s since 2026-08-09,
-# e.g. markmhendrickson/ateles#403 and #1189): load() queried ONE page
-# (`limit: 200`, no cursor walk) of entities/query. With 900+ issue_spec
-# entities in prod, an issue whose entity sorted past page 1 was invisible to
-# load(), so upsert_section took the CREATE branch for an issue that already
-# HAD an entity. Neotoma's identity resolver recognizes the repo+issue_number
-# collision, but the create branch's idempotency key
-# (`issue-spec-create-{key}`, a bare per-issue CONSTANT) had already been
-# consumed by that issue's real first create with DIFFERENT content, so every
-# subsequent mis-detected retry got a permanent, actionable
+# e.g. markmhendrickson/ateles#403 and #1189): load() queried ONE UNFILTERED
+# page (`limit: 200`, no snapshot_filters, no cursor walk) of the WHOLE
+# issue_spec corpus. With 900+ entities in prod, an issue whose entity sorted
+# past page 1 was invisible to load(), so upsert_section took the CREATE
+# branch for an issue that already HAD an entity. Neotoma's identity resolver
+# recognizes the repo+issue_number collision, but the create branch's
+# idempotency key (`issue-spec-create-{key}`, a bare per-issue CONSTANT) had
+# already been consumed by that issue's real first create with DIFFERENT
+# content, so every subsequent mis-detected retry got a permanent, actionable
 # ERR_IDEMPOTENCY_MISMATCH 400 — reproduced live against prod Neotoma with
 # `commit: false` during diagnosis (see the PR description).
+#
+# The fix replaces the unfiltered scan with a TARGETED entities/query using
+# snapshot_filters on {repo, issue_number} — the entity's own identity rule
+# (confirmed live: composite:repo+issue_number) — as the DEFAULT path, not a
+# scan. Hosted Neotoma is capacity-constrained (a bulk read already crashed
+# it once, neotoma#2483, 2026-09-23), so a full-corpus scan is kept ONLY as a
+# bounded fallback for when the targeted query itself errors, never
+# triggered merely by finding zero matches.
 
 
 class _PaginatingStubStore(IssueSpecStore):
-    """Simulates a Neotoma corpus large enough to need cursor pagination.
+    """Simulates a Neotoma corpus, honoring ``snapshot_filters`` on
+    entities/query the way prod does, with a large enough corpus that an
+    UNFILTERED query needs cursor pagination to reach a later row.
 
-    ``page_size`` entities are returned per entities/query call; a cursor
-    threads through until the corpus is exhausted. This is the shape that
-    caught the real bug: the pre-fix load() read exactly one page and never
-    followed the cursor.
+    ``page_size`` bounds an unfiltered (fallback-scan) page; a cursor threads
+    through until the corpus is exhausted. ``fail_targeted_queries`` makes any
+    call carrying ``snapshot_filters`` return an error (None), so tests can
+    exercise load()'s bounded-fallback path deliberately.
     """
 
-    def __init__(self, page_size=2, extra_entities=0):
+    def __init__(self, page_size=2, extra_entities=0, fail_targeted_queries=False):
         super().__init__(base_url="http://x", token="tok")
         self.calls = []
         self._server = {}
         self._next_id = 1
         self.page_size = page_size
-        # Pad the corpus with unrelated entities BEFORE the real one, so a
-        # non-paginating load() misses it (mirrors prod: 900+ issue_spec rows,
-        # sorted by entity_id, with any one issue's row potentially anywhere).
+        self.fail_targeted_queries = fail_targeted_queries
+        # Pad the corpus with unrelated entities BEFORE the real one, so an
+        # UNFILTERED, non-paginating scan misses it (mirrors prod: 900+
+        # issue_spec rows, sorted by entity_id, with any one issue's row
+        # potentially anywhere). The targeted query never needs to see these.
         for i in range(extra_entities):
             eid = f"ent_padding_{i:04d}"
             self._server[("padding/repo", i)] = {
@@ -378,6 +390,33 @@ class _PaginatingStubStore(IssueSpecStore):
             self.last_error = None
             return {}
         if path == "entities/query":
+            self.last_error_code = None
+            self.last_error_status = None
+            self.last_error = None
+            filters = payload.get("snapshot_filters")
+            if filters:
+                if self.fail_targeted_queries:
+                    self.last_error_code = "ERR_UPSTREAM_TIMEOUT"
+                    self.last_error_status = 502
+                    self.last_error = "simulated targeted-query failure"
+                    return None
+                # Real Neotoma's snapshot_filters: eq match on each named
+                # field, exactly the identity fields (repo, issue_number).
+                want_repo = filters.get("repo", {}).get("value")
+                want_issue = filters.get("issue_number", {}).get("value")
+                matches = [
+                    r
+                    for r in self._server.values()
+                    if r["snapshot"].get("repo") == want_repo
+                    and str(r["snapshot"].get("issue_number")) == str(want_issue)
+                ]
+                return {
+                    "entities": [
+                        {"entity_id": r["entity_id"], "snapshot": r["snapshot"]}
+                        for r in matches
+                    ]
+                }
+            # Unfiltered (full-scan fallback) path: paginate.
             cursor = payload.get("cursor")
             all_items = list(self._server.values())
             start = int(cursor) if cursor else 0
@@ -391,19 +430,20 @@ class _PaginatingStubStore(IssueSpecStore):
             }
             if next_start < len(all_items):
                 resp["next_cursor"] = str(next_start)
-            self.last_error_code = None
-            self.last_error_status = None
-            self.last_error = None
             return resp
         return {}
 
 
-def test_load_paginates_past_the_first_page_to_find_a_later_entity():
-    """RED on the pre-fix load(): a match sorting past page 1 must still be found.
+def test_load_uses_a_targeted_query_not_a_full_corpus_scan():
+    """RED on the pre-fix load(): it read one UNFILTERED page of the whole
+    corpus (limit: 200, no snapshot_filters). Hosted Neotoma is capacity-
+    constrained (a bulk read already crashed it once, neotoma#2483) — the
+    fix must query the ONE entity load() actually wants via
+    snapshot_filters={repo, issue_number}, never scan the corpus by default.
 
-    5 padding rows + page_size=2 forces 3+ pages before the real entity is
-    reached. The pre-fix load() called entities/query exactly once and never
-    followed `next_cursor`, so it returned an empty SpecState here.
+    5 padding rows (entities load() has no reason to ever see) would force
+    3+ pages under the OLD unfiltered pagination; a targeted query finds the
+    real entity in exactly one call, filtered, regardless of corpus size.
     """
     store = _PaginatingStubStore(page_size=2, extra_entities=5)
     state = asyncio.run(
@@ -417,20 +457,103 @@ def test_load_paginates_past_the_first_page_to_find_a_later_entity():
 
     reloaded = asyncio.run(store.load("owner/repo", 1189, "T"))
     assert reloaded.entity_id == state.entity_id, (
-        "load() must paginate through entities/query (following next_cursor) "
-        "to find an entity that sorts past the first page — a single-page "
-        "read is exactly the ateles#499 defect"
+        "load() must find the entity via a targeted query regardless of how "
+        "many unrelated rows exist in the corpus"
     )
     assert reloaded.sections.get("pm_section") == "PM scope"
 
-    # The paginating stub must actually have been asked for more than one
-    # page — otherwise this test would pass vacuously without exercising the
-    # fix at all (a test that cannot fail on the thing it watches is
-    # decoration).
     query_calls = [c for c in store.calls if c[0] == "entities/query"]
-    assert len(query_calls) >= 3, (
-        "expected load() to walk multiple pages via cursor; got "
-        f"{len(query_calls)} entities/query call(s)"
+    # Exactly ONE entities/query call for the load() above (the create
+    # itself makes no query call) — this is the "small reads" contract: a
+    # targeted lookup costs one request no matter the corpus size, where the
+    # pre-fix pagination cost N requests proportional to corpus size.
+    assert len(query_calls) == 1, (
+        "load() must resolve in ONE targeted entities/query call, not a "
+        f"multi-page scan; got {len(query_calls)} call(s)"
+    )
+    only_call = query_calls[0][1]
+    assert only_call.get("snapshot_filters") == {
+        "repo": {"op": "eq", "value": "owner/repo"},
+        "issue_number": {"op": "eq", "value": 1189},
+    }, (
+        "load()'s entities/query call must carry snapshot_filters on repo + "
+        f"issue_number, not scan unfiltered; got {only_call}"
+    )
+    # And it must never have paged through the corpus with cursor — the
+    # padding rows exist specifically to catch a regression to the old
+    # unfiltered-scan behaviour.
+    assert not any("cursor" in c[1] for c in query_calls)
+
+
+def test_load_falls_back_to_bounded_scan_only_when_the_targeted_query_errors():
+    """The full-corpus scan is a FALLBACK for a targeted-query ERROR only —
+    never the default path, and never triggered merely by zero matches (a
+    genuinely new issue has zero matches on the targeted query too).
+    """
+    # Case 1: targeted query errors -> falls back and still finds the entity.
+    store = _PaginatingStubStore(
+        page_size=2, extra_entities=5, fail_targeted_queries=True
+    )
+    # Pre-seed the "existing entity" directly in the stub's server, bypassing
+    # upsert_section (which would itself hit the failing targeted query).
+    store._server[("owner/repo", 1189)] = {
+        "entity_id": "ent_preexisting",
+        "snapshot": {
+            "repo": "owner/repo",
+            "issue_number": 1189,
+            "pm_section": "PM scope",
+        },
+    }
+    reloaded = asyncio.run(store.load("owner/repo", 1189, "T"))
+    assert reloaded.entity_id == "ent_preexisting", (
+        "when the targeted query errors, load() must fall back to the "
+        "bounded full-corpus scan rather than giving up"
+    )
+    query_calls = [c for c in store.calls if c[0] == "entities/query"]
+    # The failed targeted attempt, THEN at least one unfiltered fallback page.
+    assert query_calls[0][1].get("snapshot_filters"), (
+        "the targeted query must still be tried FIRST, even though it will "
+        "fail in this test"
+    )
+    assert any(not c[1].get("snapshot_filters") for c in query_calls[1:]), (
+        "a fallback scan must have run after the targeted query errored"
+    )
+
+    # Case 2: targeted query SUCCEEDS with zero matches (a genuinely new
+    # issue) -> must NOT fall back to a full scan at all.
+    store2 = _PaginatingStubStore(page_size=2, extra_entities=5)
+    reloaded2 = asyncio.run(store2.load("owner/repo", 99999, "T"))
+    assert reloaded2.entity_id == ""
+    query_calls2 = [c for c in store2.calls if c[0] == "entities/query"]
+    assert len(query_calls2) == 1, (
+        "zero matches on the targeted query is a normal outcome (a new "
+        "issue) and must NOT trigger a full-corpus fallback scan; got "
+        f"{len(query_calls2)} entities/query call(s)"
+    )
+
+
+def test_load_fails_closed_on_an_ambiguous_multi_match():
+    """More than one match for repo+issue_number violates the entity's own
+    identity rule (composite:repo+issue_number, confirmed live against prod)
+    — load() must refuse to guess which row is authoritative rather than
+    silently picking one and risking a correction against the wrong entity.
+    """
+    store = _PaginatingStubStore()
+    store._server[("owner/repo", 1189)] = {
+        "entity_id": "ent_a",
+        "snapshot": {"repo": "owner/repo", "issue_number": 1189},
+    }
+    # Same (repo, issue_number) tuple can't literally be a second dict key,
+    # so simulate the ambiguous-server-response shape directly.
+    store._server[("owner/repo", 1189, "dup")] = {
+        "entity_id": "ent_b",
+        "snapshot": {"repo": "owner/repo", "issue_number": 1189},
+    }
+
+    state = asyncio.run(store.load("owner/repo", 1189, "T"))
+    assert state.entity_id == "", (
+        "an ambiguous (>1 match) targeted query result must fail CLOSED — "
+        "no entity_id picked — rather than guessing"
     )
 
 
@@ -440,16 +563,15 @@ def test_missed_entity_does_not_400_forever_on_stale_idempotency_key():
 
     Simulates the real failure sequence: pm section creates the entity
     (consuming idempotency key K with content C1); a later run's load() fails
-    to see it (here: because the corpus paginated past it and the stub's
-    server dict was queried with a stale/short page — modeled directly by
-    forcing entity_id back to "" to simulate a load() miss) and eng's
-    upsert_section takes the CREATE branch again, reusing THE SAME
-    per-issue-constant key with DIFFERENT content (C2, the eng section text).
-    Pre-fix: the create branch always sent `issue-spec-create-{key}` with no
-    variance, so C1 != C2 under the same key -> permanent
-    ERR_IDEMPOTENCY_MISMATCH, and pre-fix's reload fallback used the SAME
-    un-paginated load() that missed the entity in the first place, so it never
-    recovered — the eng section is silently lost forever.
+    to see it and eng's upsert_section takes the CREATE branch again, reusing
+    THE SAME per-issue-constant key with DIFFERENT content (C2, the eng
+    section text). Pre-fix: the create branch always sent
+    `issue-spec-create-{key}` with no variance, so C1 != C2 under the same
+    key -> permanent ERR_IDEMPOTENCY_MISMATCH, and pre-fix's reload fallback
+    used the SAME unfiltered, un-paginated load() that missed the entity in
+    the first place, so it never recovered — the eng section is silently
+    lost forever. Post-fix, the reload uses the TARGETED query, which finds
+    the entity regardless of corpus size.
     """
     store = _PaginatingStubStore(page_size=500, extra_entities=0)
     state = asyncio.run(
@@ -472,7 +594,7 @@ def test_missed_entity_does_not_400_forever_on_stale_idempotency_key():
 
     assert fresh_state.entity_id == real_entity_id, (
         "after a create collides on a stale idempotency key, upsert_section "
-        "must recover the EXISTING entity_id (via a paginated reload) rather "
+        "must recover the EXISTING entity_id (via a targeted reload) rather "
         "than permanently losing the section — this is the exact shape of "
         "the 474 store-failed 400s in ateles#499"
     )
