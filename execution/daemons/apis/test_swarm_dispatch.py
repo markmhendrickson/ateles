@@ -7455,6 +7455,138 @@ def test_pm_sign_off_failure_is_surfaced_not_swallowed(monkeypatch):
     assert failed == [("pm", "pavo", SIGN_OFF_SIGNING_FAILED, "")]
 
 
+def test_ux_and_arch_clean_verdicts_trigger_dispatcher_sign_off(monkeypatch):
+    """ateles#1220/#1223: a clean ux (accipiter) or arch (waxwing) verdict in
+    the additive-spec (issue) pipeline must call the dispatcher's lens-signed
+    `IssueGateStore.sign_off` for ITS OWN gate — exactly as the pm section
+    already does — not leave the gate pending forever because the pipeline's
+    sign_off call site was hardcoded to `section.lens == "pm"`. RED on
+    origin/main (7b8880d0): ux/arch sections ran and even carried the
+    gate-owner `correct()` deny (see
+    test_ux_and_arch_issue_spec_runs_carry_the_gate_owner_deny above) but
+    their clean verdicts never reached `sign_off` at all, so `_gates_green`
+    (ateles#460) could never see them cleared — the exact "gate_status still
+    has ux, arch uncleared — not handing off to build" symptom logged for
+    ateles#1220/#1223 on 2026-09-24."""
+    calls = []
+
+    def _clean(agent, lens, heading):
+        return SkillResult(
+            agent, True, 0,
+            f"**🤖 {agent.title()} — Ateles swarm, {lens} gate owner**\n"
+            "**SIGNED_OFF**\n\n"
+            f"<<<SPEC_SECTION>>>**{heading}:** {agent}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>\n"
+            f"{lens} gate passes — no concerns.",
+            "",
+        )
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "pavo":
+            return _clean("pavo", "pm", "Scope")
+        if skill == "accipiter":
+            return _clean("accipiter", "ux", "Design")
+        if skill == "waxwing":
+            return _clean("waxwing", "arch", "Security")
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    # ux (accipiter) and arch (waxwing) are the CONDITIONAL sections — force
+    # both selected, as in test_ux_and_arch_issue_spec_runs_carry_the_gate_owner_deny.
+    _selected = [
+        Lens(agent="accipiter", lens="ux", gate="ux", checks="design"),
+        Lens(agent="waxwing", lens="arch", gate="arch", checks="security"),
+    ]
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: _selected
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            calls.append((repo, issue_number, gate, lens_agent, head_sha))
+            from gate_waive import SignOffOutcome
+            return SignOffOutcome(
+                ok=True, gate=gate, lens_agent=lens_agent,
+                lens_sub=f"{lens_agent}@ateles-swarm", verified=True,
+            )
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    signed_gates = {(gate, lens_agent) for _, _, gate, lens_agent, _ in calls}
+    assert ("pm", "pavo") in signed_gates, "pm must still sign off (no regression)"
+    assert ("ux", "accipiter") in signed_gates, (
+        "ux/accipiter's clean verdict must sign off the ux gate — this is "
+        "the ateles#1220/#1223 regression: ux was never signed at all"
+    )
+    assert ("arch", "waxwing") in signed_gates, (
+        "arch/waxwing's clean verdict must sign off the arch gate — this is "
+        "the ateles#1220/#1223 regression: arch was never signed at all"
+    )
+    for repo, issue_number, gate, lens_agent, head_sha in calls:
+        assert repo == "owner/repo"
+        assert issue_number == 100
+        assert head_sha  # non-empty content-derived surrogate
+
+
+def test_ux_blocking_verdict_does_not_call_sign_off_for_ux_gate(monkeypatch):
+    """A `[BLOCKING]` ux verdict must leave the ux gate pending — no sign_off
+    for `ux` — exactly like the pm guard and the panel's own blocking-finding
+    guard. Guards against a fix that signs every seated gate-owning section
+    unconditionally instead of checking `sign_off_is_warranted` per section."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "accipiter":
+            return SkillResult(
+                skill, True, 0,
+                "<<<SPEC_SECTION>>>**Design:** ux section with enough substance "
+                "to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>\n"
+                "[BLOCKING] design: no accessibility review stated.",
+                "",
+            )
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    _selected = [Lens(agent="accipiter", lens="ux", gate="ux", checks="design")]
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: _selected
+    )
+
+    class _FakeGateStore:
+        def __init__(self, base_url, token):
+            pass
+
+        async def sign_off(self, repo, issue_number, gate, lens_agent, head_sha):
+            calls.append((repo, issue_number, gate, lens_agent, head_sha))
+            from gate_waive import SignOffOutcome
+            return SignOffOutcome(
+                ok=True, gate=gate, lens_agent=lens_agent,
+                lens_sub=f"{lens_agent}@ateles-swarm", verified=True,
+            )
+
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", _FakeGateStore)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    ux_calls = [c for c in calls if c[2] == "ux"]
+    assert ux_calls == [], "a [BLOCKING] ux verdict must never sign the ux gate"
+
+
 def test_spec_section_prompt_is_additive_and_no_comment(monkeypatch):
     """The section prompt must tell the agent to add ONLY its section, build on
     prior sections, and NOT post spec as a comment."""
