@@ -818,6 +818,29 @@ class TestVocabularyLint:
         assert [h.ban.term for h in advisory] == ["ticket"]
         assert mod.main(["--root", str(tmp_path), "--quiet-advisory"]) == 1
 
+    def test_rule_inventory_md_never_word_is_skipped(self, tmp_path: Path) -> None:
+        """rule_inventory.md quotes other stores' own vocabulary verbatim — a retired name it surfaces
+        is the inventory's finding, not its defect — so SKIPPED_FILES exempts it from the Never/Not-for
+        scan the same way status.md is exempted.
+        """
+        mod = self._lint()
+        fdir = tmp_path / "docs" / "foundation"
+        fdir.mkdir(parents=True)
+        (fdir / "vocabulary.md").write_text(
+            "# V\n\n### task\n**Definition:** x.\n**Never:** \"work item\", /\\bdispatch\\w*/.\n"
+            "**Not for:** \"ticket\" for a task.\n"
+        )
+        (fdir / "work_model.md").write_text(
+            "# W\n\nA work item is dispatched here. A ticket too.\nThe reaper is retired.\n"
+        )
+        (fdir / "rule_inventory.md").write_text("# RI\n\nwork item work item dispatch\n")
+        never, not_for = mod.parse_bans((fdir / "vocabulary.md").read_text())
+        never_hits, advisory = mod.scan(tmp_path, never, not_for)
+        assert sorted(h.ban.term for h in never_hits) == ["/\\bdispatch\\w*/", "work item"]
+        assert all(h.file.endswith("work_model.md") for h in never_hits)  # rule_inventory.md skipped
+        assert [h.ban.term for h in advisory] == ["ticket"]
+        assert mod.main(["--root", str(tmp_path), "--quiet-advisory"]) == 1
+
 
 class TestGitHubKeyedReadings:
     """github.md is keyed to the GitHub gateway, harness, and Vanellus paths.
@@ -1293,6 +1316,16 @@ class TestCitationCheck:
         root = self._corpus(tmp_path, status="# S\n\n## State\n\nFixed on `main` in a1b2c3d, see #801.\n")
         assert mod.check(root) == []
 
+    def test_rule_inventory_md_may_carry_a_commit_hash(self, tmp_path: Path) -> None:
+        """rule_inventory.md quotes other stores' issue numbers as provenance, not design prose citing a fix
+        as landed; it is exempted from both clauses on the same ground as status.md and skill_inventory.md.
+        """
+        mod = self._citations()
+        root = self._corpus(
+            tmp_path, rule_inventory="# Rule inventory\n\n## Findings\n\nFixed on `main` in a1b2c3d, see #801.\n"
+        )
+        assert mod.check(root) == []
+
     def test_a_planted_issue_number_in_the_body_is_reported(self, tmp_path: Path) -> None:
         mod = self._citations()
         root = self._corpus(tmp_path, a="# A\n\n## The rule\n\nStill broken; see #801 on main.\n")
@@ -1371,3 +1404,91 @@ class TestCitationCheck:
         (tmp_path / "docs" / "foundation").mkdir(parents=True)
         with pytest.raises(mod.MissingCorpus):
             mod.check(tmp_path)
+
+
+class TestFrontMatterCheck:
+    """check_foundation_front_matter.py enforces decision 74: no revision chain in front matter,
+    and a >=3-rule section opens with its own index list. Registered in
+    conformance.md#mechanical-checks-on-this-directory but, before this test class, run by no
+    test — the "reports without binding" defect the foundation names for exactly this failure
+    mode. This exercises the ``EXEMPT`` set directly: ``rule_inventory.md`` is a generated
+    measurement, regenerated rather than amended, and this proves the checker actually treats it
+    that way rather than merely documenting that it should.
+    """
+
+    def _front_matter(self):
+        import importlib.util
+
+        script = _REPO_ROOT / "execution" / "scripts" / "check_foundation_front_matter.py"
+        spec = importlib.util.spec_from_file_location("check_foundation_front_matter", script)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    @staticmethod
+    def _corpus(tmp_path: Path, **files: str) -> Path:
+        """``check()`` globs ``*.md`` directly off ``root`` (unlike the citations checker, which
+        expects a ``docs/foundation/`` subdirectory) — so the fixture files land at the top level.
+        """
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        for name, body in files.items():
+            (tmp_path / f"{name}.md").write_text(body, encoding="utf-8")
+        return tmp_path
+
+    def test_real_documents_carry_no_front_matter_violation(self) -> None:
+        mod = self._front_matter()
+        problems = mod.check(_REPO_ROOT / "docs" / "foundation")
+        assert problems == [], problems
+        assert mod.main(["--root", str(_REPO_ROOT / "docs" / "foundation")]) == 0
+
+    def test_a_planted_revision_chain_is_reported(self, tmp_path: Path) -> None:
+        """Revert-the-fix check: a ``Revised by …`` clause outside the front matter's pointer fails."""
+        mod = self._front_matter()
+        root = self._corpus(
+            tmp_path,
+            a="# A\n\nRevised by someone 2026-01-01.\n\n## The rule\n\nBody text.\n",
+        )
+        problems = mod.check(root)
+        assert len(problems) == 1, problems
+        assert "front-matter-chain" in problems[0]
+
+    def test_rule_inventory_md_may_carry_a_revision_chain(self, tmp_path: Path) -> None:
+        """rule_inventory.md is regenerated by its instrument, never amended, so a front-matter
+        clause or a missing revisions.md pointer in it is not decision 74's target and must not fire.
+        """
+        mod = self._front_matter()
+        root = self._corpus(
+            tmp_path,
+            rule_inventory="# Rule inventory\n\nRevised by render_rule_inventory.py 2026-01-01.\n\n"
+            "## Findings\n\nBody text with no revisions.md pointer.\n",
+        )
+        assert mod.check(root) == []
+
+    def test_rule_inventory_md_may_omit_the_index_for_three_rules(self, tmp_path: Path) -> None:
+        """The missing-index rule is also EXEMPT-gated: three bold-lead rules with no leading index
+        list would fire missing-index on any non-exempt document, but not on rule_inventory.md.
+        """
+        mod = self._front_matter()
+        body = (
+            "# Rule inventory\n\nrevisions.md#rule_inventory\n\n"
+            "## Findings\n\n"
+            "**A missing pointer must always fail this check.** Detail.\n\n"
+            "**A revision chain never belongs in front matter here.** Detail.\n\n"
+            "**The index list always opens a three-rule section.** Detail.\n"
+        )
+        root = self._corpus(tmp_path, rule_inventory=body)
+        assert mod.check(root) == []
+        # Same body under a non-exempt name must fail — proves the assertion above is EXEMPT
+        # membership doing the work, not some other property of the fixture text.
+        root2 = self._corpus(tmp_path / "control", other=body)
+        problems = mod.check(root2)
+        assert any("missing-index" in p for p in problems), problems
+
+    def test_missing_pointer_is_reported_for_a_non_exempt_document(self, tmp_path: Path) -> None:
+        mod = self._front_matter()
+        root = self._corpus(tmp_path, a="# A\n\n## The rule\n\nNo pointer, no chain.\n")
+        problems = mod.check(root)
+        assert len(problems) == 1, problems
+        assert "missing-pointer" in problems[0]
