@@ -86,7 +86,12 @@ VOCABULARY = "vocabulary.md"
 # a foreign vocabulary the ban was written to police. A Never ban is about this corpus's own design
 # prose; the fix for a banned word living in a quoted skill description is renaming that skill, not
 # editing a generated measurement of it.
-SKIPPED_FILES = {"status.md", "decision_state.md", "skill_inventory.md"}
+# `rule_inventory.md` is the same class again: its own header states "foundation companion;
+# generated, never authored", and its entire purpose is to enumerate every place a rule (including
+# banned terms like "dispatch" and "lens") is stated across the corpus, so its prose necessarily
+# quotes the words the ban polices. The fix for a banned word appearing in this inventory is fixing
+# the source location it reports, not editing the generated report of it.
+SKIPPED_FILES = {"status.md", "decision_state.md", "skill_inventory.md", "rule_inventory.md"}
 
 # --- Undefined-term candidates: the checker gap this section closes -------------------------------------
 #

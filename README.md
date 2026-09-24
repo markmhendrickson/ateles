@@ -11,12 +11,13 @@ life end to end, with the governance substrate (identity, capability, gating, au
 against the vision.
 
 Ateles is a design and a working example of it. The design is
-[`docs/foundation/`](docs/foundation/): twenty-five documents — twenty-two stating how work is created,
+[`docs/foundation/`](docs/foundation/): twenty-six documents — twenty-two stating how work is created,
 taken, executed, and approved, and what the swarm does when it cannot reach its own record, plus
-[Revisions](docs/foundation/revisions.md), [Decision state](docs/foundation/decision_state.md), and
-[Skill inventory](docs/foundation/skill_inventory.md), which state no rule and hold, respectively, the
-amendment history, the register projected onto ruled/merged/implemented, and every skill measured by
-name and content hash.
+[Revisions](docs/foundation/revisions.md), [Decision state](docs/foundation/decision_state.md),
+[Skill inventory](docs/foundation/skill_inventory.md), and
+[Rule inventory](docs/foundation/rule_inventory.md), which state no rule and hold, respectively, the
+amendment history, the register projected onto ruled/merged/implemented, every skill measured by name
+and content hash, and every rule measured by where it is stated.
 The example is what
 runs against that design — background daemons and skills that already automate code review, releases,
 issue triage, email, calendar, recurring payments (fiat + Bitcoin), meeting capture and recap, health
@@ -713,7 +714,8 @@ Full documentation lives in `docs/` — index at [docs/README.md](docs/README.md
 [Revisions](docs/foundation/revisions.md) ·
 [Decision state](docs/foundation/decision_state.md) ·
 [Status](docs/foundation/status.md) ·
-[Skill inventory](docs/foundation/skill_inventory.md)
+[Skill inventory](docs/foundation/skill_inventory.md) ·
+[Rule inventory](docs/foundation/rule_inventory.md)
 
 **Orientation:** [Who it's for (ICP)](docs/icp.md) · [Architecture](docs/architecture.md) ·
 [Taxonomy](docs/taxonomy.md) · [Phases](docs/phases.md) ·

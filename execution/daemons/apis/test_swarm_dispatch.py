@@ -61,6 +61,16 @@ from swarm_dispatch import (
     vanellus_comment_missing,
 )
 
+# Empty silence bounds → ValueError in _in_silence_window → never silent.
+# (A 22:00-08:00 window falsely claimed "night" and failed every CI run
+# during Madrid night — same pattern as lib/notify/test_notifier.NO_SILENCE
+# and test_notify_dedupe_call_sites._NEVER_SILENT.)
+_NEVER_SILENT = {
+    "timezone": "Europe/Madrid",
+    "silence_start": "",
+    "silence_end": "",
+}
+
 
 def _trigger(**overrides):
     base = dict(
@@ -1917,14 +1927,9 @@ def test_route_findings_exhausted_dedup_suppresses_renotify(monkeypatch, tmp_pat
     )
 
     sent = []
-    notifier = Notifier(
-        rubric={
-            "timezone": "Europe/Madrid",
-            "silence_start": "22:00",
-            "silence_end": "08:00",
-        }
-    )
+    notifier = Notifier(rubric=_NEVER_SILENT)
     notifier._dedupe_path = tmp_path / "dedupe.json"
+    notifier._digest_path = tmp_path / "digest.json"
     notifier._deliver = lambda m, **kw: (sent.append(m), True)[1]
     d = SwarmDispatcher(notifier, _config())
     reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
@@ -2011,14 +2016,9 @@ def test_route_findings_unparseable_dedup_suppresses_renotify(monkeypatch, tmp_p
     monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
 
     sent = []
-    notifier = Notifier(
-        rubric={
-            "timezone": "Europe/Madrid",
-            "silence_start": "22:00",
-            "silence_end": "08:00",
-        }
-    )
+    notifier = Notifier(rubric=_NEVER_SILENT)
     notifier._dedupe_path = tmp_path / "dedupe2.json"
+    notifier._digest_path = tmp_path / "digest2.json"
     notifier._deliver = lambda m, **kw: (sent.append(m), True)[1]
     d = SwarmDispatcher(notifier, _config())
     trig = _trigger()
@@ -6813,6 +6813,12 @@ def test_only_qa_lens_gets_a_worktree(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "prepare_pr_worktree", fake_prepare)
     monkeypatch.setattr(swarm_dispatch, "cleanup_pr_worktree", fake_cleanup)
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    # Without this, _handle_pr's real GitHub call to verify the PR head SHA
+    # hits the live API and can 403 on rate limits (as it did in CI), which
+    # makes _handle_pr bail out before the panel loop ever runs.
+    monkeypatch.setattr(
+        SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40)
+    )
 
     # dbe4791b added a live `_pr_head_sha` read before the panel loop
     # (`review_head`), on top of the live `gate_status` reads this test

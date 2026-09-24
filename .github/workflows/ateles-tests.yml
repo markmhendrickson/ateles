@@ -25,6 +25,7 @@ on:
       - "execution/daemons/turdus/**"
       - "execution/mcp/**"
       - "lib/daemon_runtime/**"
+      - "lib/adapters/**"
       - "lib/approval/**"
       - "lib/transcript_clarity.py"
       - "lib/test_transcript_clarity.py"
@@ -112,6 +113,8 @@ jobs:
       # for the same attributability reason.
       - name: Run turdus daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/turdus/ -q
+      - name: Run shared adapter runtime tests
+        run: uv run --extra dev python -m pytest lib/adapters/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
       - name: Run transcript clarity lib tests

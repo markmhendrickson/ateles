@@ -11,10 +11,15 @@ from lib.daemon_runtime import NeotomaEvent
 from lib.notify import Notifier, Priority
 from execution.daemons.anthus import anthus
 
+# Empty silence bounds -> ValueError in _in_silence_window -> never silent.
+# A 22:00-08:00 window falsely claimed "night" and failed every CI run during
+# Madrid night hours — same pattern already fixed in
+# lib/notify/test_notifier.NO_SILENCE and
+# execution/daemons/apis/test_notify_dedupe_call_sites._NEVER_SILENT.
 _NEVER_SILENT = {
     "timezone": "Europe/Madrid",
-    "silence_start": "22:00",
-    "silence_end": "08:00",
+    "silence_start": "",
+    "silence_end": "",
 }
 
 
