@@ -611,7 +611,9 @@ each one has caught a wasted run in this swarm.
 two lines: what you searched, and whether anything already covers this. If the
 checks turned up prior art, say what it is and how it changed your approach.
 If they turned up nothing, say that — a stated negative result is what makes
-this contract auditable.
+this contract auditable. One exception to "at the top": when your reply carries
+a gate verdict, your header and verdict lines stay its first lines (after the
+review marker), and this report goes directly after the verdict line.
 
 **When the brief's premise is wrong, say so and stop.** If the thing already
 exists, or the issue describes a problem already fixed, that finding IS the
