@@ -11,10 +11,12 @@ from lib.daemon_runtime import NeotomaEvent
 from lib.notify import Notifier, Priority
 from execution.daemons.anthus import anthus
 
+# Empty silence window — CI after 22:00 Europe/Madrid must not hold
+# OPERATOR_DECISION sends (same footgun as apis notify-dedupe tests).
 _NEVER_SILENT = {
     "timezone": "Europe/Madrid",
-    "silence_start": "22:00",
-    "silence_end": "08:00",
+    "silence_start": "",
+    "silence_end": "",
 }
 
 
@@ -37,6 +39,7 @@ def _install_notifier(tmp_path, sent, deliver_kw=None):
 
     n = Notifier(rubric=_NEVER_SILENT)
     n._dedupe_path = tmp_path / "dedupe.json"
+    n._digest_path = tmp_path / "digest.json"
     n._deliver = _deliver
     anthus._notifier = n
     return deliver_kw
