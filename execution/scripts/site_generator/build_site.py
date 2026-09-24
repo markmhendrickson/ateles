@@ -556,6 +556,24 @@ def build_page(
     return html, blockers
 
 
+def _render_robots_txt(inventory: dict) -> str:
+    """Disallow crawling of pages the inventory marks hidden from nav.
+
+    Nav-hidden pages (e.g. an internal review route) stay reachable by direct
+    URL but should not be indexed or surfaced in search — this keeps the
+    disallow list driven by the same inventory flag that hides the nav link,
+    rather than a second hardcoded list of paths.
+    """
+    disallowed = sorted(
+        page["path"]
+        for page in inventory["pages"]
+        if page.get("nav_visibility") == "hidden"
+    )
+    lines = ["User-agent: *"]
+    lines.extend(f"Disallow: {path}" for path in disallowed)
+    return "\n".join(lines) + "\n"
+
+
 def render_site(product: str) -> tuple[dict[Path, str | bytes], list[str]]:
     """Resolve every page into an in-memory output tree.
 
@@ -568,8 +586,11 @@ def render_site(product: str) -> tuple[dict[Path, str | bytes], list[str]]:
 
     all_blockers: list[str] = []
     rendered: dict[Path, str | bytes] = {}
+    nav_pages = [
+        page for page in inventory["pages"] if page.get("nav_visibility") != "hidden"
+    ]
     for page in inventory["pages"]:
-        html, blockers = build_page(product, page, inventory["pages"], tokens)
+        html, blockers = build_page(product, page, nav_pages, tokens)
         all_blockers.extend(blockers)
 
         slug = page["slug"]
@@ -581,6 +602,7 @@ def render_site(product: str) -> tuple[dict[Path, str | bytes], list[str]]:
     brand_assets, brand_asset_blockers = _collect_brand_assets(product)
     rendered.update(brand_assets)
     all_blockers.extend(brand_asset_blockers)
+    rendered[Path("robots.txt")] = _render_robots_txt(inventory)
     all_blockers.extend(_validate_site(product, inventory, rendered))
     return rendered, all_blockers
 

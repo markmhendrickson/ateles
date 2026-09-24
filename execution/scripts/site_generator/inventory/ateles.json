@@ -106,6 +106,7 @@
       "slug": "brand",
       "path": "/brand/",
       "nav_label": "Brand",
+      "nav_visibility": "hidden",
       "title": "Ateles brand system — expression, assets, and production",
       "meta_description": "The approved and provisional copy, visual, cinematic, and asset system for Ateles.",
       "template": "brand_system_viewer",
