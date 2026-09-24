@@ -44,6 +44,10 @@ on:
       - "execution/scripts/test_foundation_mechanical_checks_ci.py"
       - "docs/foundation/decision_state.md"
       - "execution/daemons/apis/test_foundation*.py"
+      - "execution/conformance/**"
+      - "execution/scripts/check_adapter_admission.py"
+      - "execution/scripts/test_check_adapter_admission.py"
+      - "lib/adapters/**"
       - ".github/workflows/foundation-checks.yml"
     # Synchronize only re-runs when a matching path is in the push delta;
     # empty commits skip this filter (ateles#802 — head 392aee1a missed the lane).
@@ -200,6 +204,19 @@ jobs:
           f=execution/scripts/check_foundation_decision_101.py
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           python3 "$f"
+
+      # Adapter admission (AD-21..AD-34, ateles#1191). Informational only for now, same posture
+      # as the agent-doc-mirror step in scripts/lint.sh: its precondition, the lib.adapters sixth
+      # reference adapter (ateles#1190), is not merged, so RUNTIME_MISSING is the correct and
+      # expected report today — never a soft skip-green within the fixture's own output, but not
+      # yet wired to block every unrelated PR on a dependency this issue does not own landing
+      # first. Flip `|| true` to a hard failure once #1190 merges.
+      - name: Adapter admission — AD-21..AD-34 conformance fixture (informational until #1190 lands)
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_adapter_admission.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f" || true
 
   foundation-tests:
     name: foundation binding tests

@@ -1147,6 +1147,9 @@ A variant that turns more than one row red is a finding about the rows (two obse
 variant that turns none red is a finding about the obligation (no failing artefact) — and the admission
 section's claim that every obligation has one is thereby itself under test.
 
+This fixture is executed by `execution/conformance/adapter_admission/` (`execution/scripts/check_adapter_admission.py`,
+wired into the foundation-checks lane); see its README for the invoke command and expected output (ateles#1191).
+
 ## The simplification pass, verified against the matrix
 
 The simplification pass (revision 29) removed eight things and proposed four, and marked every removal

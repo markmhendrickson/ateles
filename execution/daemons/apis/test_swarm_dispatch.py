@@ -1920,11 +1920,13 @@ def test_route_findings_exhausted_dedup_suppresses_renotify(monkeypatch, tmp_pat
     notifier = Notifier(
         rubric={
             "timezone": "Europe/Madrid",
-            "silence_start": "22:00",
-            "silence_end": "08:00",
+            # Empty bounds: never silent (see test_notify_dedupe_call_sites._NEVER_SILENT).
+            "silence_start": "",
+            "silence_end": "",
         }
     )
     notifier._dedupe_path = tmp_path / "dedupe.json"
+    notifier._digest_path = tmp_path / "digest.json"
     notifier._deliver = lambda m, **kw: (sent.append(m), True)[1]
     d = SwarmDispatcher(notifier, _config())
     reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
@@ -2014,11 +2016,13 @@ def test_route_findings_unparseable_dedup_suppresses_renotify(monkeypatch, tmp_p
     notifier = Notifier(
         rubric={
             "timezone": "Europe/Madrid",
-            "silence_start": "22:00",
-            "silence_end": "08:00",
+            # Empty bounds: never silent (see test_notify_dedupe_call_sites._NEVER_SILENT).
+            "silence_start": "",
+            "silence_end": "",
         }
     )
     notifier._dedupe_path = tmp_path / "dedupe2.json"
+    notifier._digest_path = tmp_path / "digest2.json"
     notifier._deliver = lambda m, **kw: (sent.append(m), True)[1]
     d = SwarmDispatcher(notifier, _config())
     trig = _trigger()
