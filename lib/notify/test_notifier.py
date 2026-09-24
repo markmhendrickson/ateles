@@ -573,6 +573,49 @@ def test_clear_dedupe_on_a_key_never_seen_does_not_raise(tmp_path):
     n.clear_dedupe("never-sent-key")  # must not raise
 
 
+# ── is_dedupe_duplicate — public query for a caller with a side effect ──────
+#
+# A caller that must gate something ELSE (e.g. a durable GitHub comment)
+# on the same dedupe decision as send() cannot use send()'s own return value
+# for that: False means either "suppressed as a duplicate" or "legitimately
+# held" (silence window, digest queue), and those are different states.
+# is_dedupe_duplicate() answers the narrower question directly.
+
+
+def test_is_dedupe_duplicate_false_before_any_send(tmp_path):
+    n = Notifier(rubric=NO_SILENCE)
+    n._dedupe_path = tmp_path / "dedupe.json"
+    assert n.is_dedupe_duplicate("never-sent-key") is False
+
+
+def test_is_dedupe_duplicate_true_after_a_send_marks_the_key(tmp_path):
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    key = "panel-incomplete:owner/repo#1:" + "a" * 40 + ":pm:gate identity unavailable"
+    assert n.is_dedupe_duplicate(key) is False
+    n.send("panel incomplete", Priority.BLOCKER, handler="apis", dedupe_key=key)
+    assert n.is_dedupe_duplicate(key) is True
+
+
+def test_is_dedupe_duplicate_false_again_after_clear(tmp_path):
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    key = "panel-incomplete:owner/repo#1:" + "a" * 40 + ":pm:gate identity unavailable"
+    n.send("panel incomplete", Priority.BLOCKER, handler="apis", dedupe_key=key)
+    assert n.is_dedupe_duplicate(key) is True
+    n.clear_dedupe(key)
+    assert n.is_dedupe_duplicate(key) is False
+
+
+def test_is_dedupe_duplicate_unreadable_journal_fails_open_to_false(tmp_path):
+    n = Notifier(rubric=NO_SILENCE)
+    n._dedupe_path = tmp_path / "dedupe.json"
+    n._dedupe_path.write_text("not json")
+    # Fails open toward NOT-duplicate (i.e. toward sending/posting), matching
+    # send()'s own treatment of an unreadable journal as empty.
+    assert n.is_dedupe_duplicate("some-key") is False
+
+
 # ── email_eligible gate — actionability, not severity (ateles#1127) ─────────
 #
 # The consent-channel-timeout body says "See escalation" — there is nothing

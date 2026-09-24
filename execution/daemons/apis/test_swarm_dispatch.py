@@ -96,6 +96,13 @@ class _StubNotifier:
     def clear_dedupe(self, key):
         self.cleared.append(key)
 
+    def is_dedupe_duplicate(self, key):
+        # This stub never persists a dedupe journal, so no key it has ever
+        # seen through send() is treated as a duplicate — every _handle_pr
+        # test that does not exercise the real Notifier journal keeps
+        # sending/posting exactly as before this method was added.
+        return False
+
 
 def _config(**overrides):
     # No tokens: Neotoma stores and GitHub fallbacks short-circuit with a log.

@@ -6121,6 +6121,7 @@ class SwarmDispatcher:
                 ),
                 completed_lenses=tuple(lens for lens, _ in reviews),
                 failed_lenses=tuple(failed_lenses),
+                head=review_head,
             )
             return
 
@@ -6141,6 +6142,7 @@ class SwarmDispatcher:
                 "",
                 "",
                 reason="durable exact-head review read-back failed",
+                head=review_head,
             )
             return
 
@@ -6223,6 +6225,7 @@ class SwarmDispatcher:
             await self._handle_panel_session_limit(
                 trigger, parent, "panel", "", "",
                 reason="PR head changed during review or could not be verified",
+                head=aggregation_head or review_head,
             )
             return
         vanellus_result = await run_skill(
@@ -6250,6 +6253,7 @@ class SwarmDispatcher:
             await self._handle_panel_session_limit(
                 trigger, parent, "vanellus",
                 vanellus_result.stdout, vanellus_result.stderr,
+                head=aggregation_head,
             )
             return
         # 4a. Credential-expiry guard: if the aggregation's claude call failed
@@ -6271,6 +6275,7 @@ class SwarmDispatcher:
             await self._handle_panel_session_limit(
                 trigger, parent, "vanellus", "", vanellus_result.error,
                 reason=reason,
+                head=aggregation_head,
             )
             return
 
@@ -6302,6 +6307,7 @@ class SwarmDispatcher:
             await self._handle_panel_session_limit(
                 trigger, parent, "vanellus", "", "",
                 reason="no verified current-head verdict",
+                head=aggregation_head,
             )
             return
         if used_comment_fallback:
@@ -6412,6 +6418,7 @@ class SwarmDispatcher:
                     "PR head changed after binding review or could not be "
                     "verified before merge readiness"
                 ),
+                head=readiness_head or aggregation_head,
             )
             return
 
@@ -12305,6 +12312,7 @@ class SwarmDispatcher:
         reason: str = "usage limit",
         completed_lenses: tuple[str, ...] = (),
         failed_lenses: tuple[tuple[str, str], ...] = (),
+        head: str = "",
     ) -> None:
         """Surface an incomplete review without fabricating a verdict.
 
@@ -12313,6 +12321,11 @@ class SwarmDispatcher:
         failures require attention and must not borrow that self-clearing copy.
         Successful and failed lens names remain visible on partial panels.
         Best-effort; never raises.
+
+        ``head``, when the caller has it (``review_head`` / ``aggregation_head``
+        / ``readiness_head`` computed earlier in ``_handle_pr``), scopes the
+        non-auto-resume dedupe key below to the head under review — falls back
+        to ``t.head_sha`` when the caller has not yet resolved a head.
         """
         auto_resume = reason in {"usage limit", "provider capacity exhausted"}
         iso = ""
@@ -12342,6 +12355,51 @@ class SwarmDispatcher:
             if failed_lenses
             else ""
         )
+
+        # dedupe scope: per-PR + head + the exact set of missing lenses (each
+        # paired with its own failure reason). Only the non-auto-resume branch
+        # gets a key. auto_resume (usage limit / provider capacity) already
+        # self-clears via the GitHub marker delete-and-repost above and is
+        # Priority.INFO, which the notifier never marks (INFO is never
+        # delivered — see Notifier._send_locked), so composing a key there
+        # would be inert for send() and would still need to gate the comment
+        # post separately; out of scope here since every dispatcher trigger
+        # against a recovering capacity window is already a legitimate "still
+        # waiting, new reset time" update, not a repeat of an unchanged
+        # condition.
+        #
+        # This blanket key also, as a side effect, suppresses the repeat on
+        # the "PR head changed during review or could not be verified" call
+        # sites — ateles#1219's symptom, on a different PR (#1212/#1217/#1218)
+        # than this fix's target (#1085). #1219's own spec asks for more than
+        # dedupe there (split the two causes; never notify at all for the
+        # routine "head changed" sub-case) — this fix does not implement that
+        # split and #1219 should stay open for it. It only guarantees #1219's
+        # repeat is no worse than deduped, not that the call site meets
+        # #1219's acceptance criteria.
+        #
+        # head is included (not just ref) to match the sibling ci-exhausted /
+        # process-blocked / fix-exhausted / unparseable-verdict keys in this
+        # file: a new push is a new condition and must re-notify even if the
+        # panel fails the same way again. The missing-lens set (not just its
+        # length) is included so a DIFFERENT failure — a severity upgrade from
+        # "gate identity unavailable" to e.g. "execution failure", or arch
+        # newly joining pm/ux as missing — is a distinct key and is never
+        # suppressed on the strength of an unrelated lens's identical repeat
+        # (ateles#1216's severity-upgrade rule, applied to this call site).
+        ref = f"{t.repository}#{t.number}"
+        resolved_head = head or (t.head_sha or "")
+        dedupe_key: str | None = None
+        if not auto_resume:
+            missing = ",".join(
+                f"{lens}:{failure}" for lens, failure in sorted(failed_lenses)
+            )
+            dedupe_key = f"panel-incomplete:{ref}:{resolved_head}:{missing}"
+
+        already_reported = bool(
+            dedupe_key and self.notifier.is_dedupe_duplicate(dedupe_key)
+        )
+
         try:
             if auto_resume:
                 message = (
@@ -12359,9 +12417,23 @@ class SwarmDispatcher:
                 message + completed_note + failed_note,
                 priority=priority,
                 handler=DAEMON_NAME,
+                dedupe_key=dedupe_key,  # scope: per-PR + head + missing-lens set
             )
         except Exception as exc:
             log.error(f"[{DAEMON_NAME}] review-incomplete notice failed: {exc}", exc_info=True)
+
+        if already_reported:
+            # The GitHub comment carries the SAME condition as the send()
+            # above and must be gated identically — otherwise the notifier
+            # side is deduped while the PR thread still grows one identical
+            # comment per trigger (the observed defect: 23 byte-identical
+            # comments over 6 days on #1085). Checked before send() marked
+            # the key, so this reads the state as of entry to this call.
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: suppressing repeat review-incomplete "
+                f"comment for open condition {dedupe_key!r}"
+            )
+            return
 
         repo_token = _token_for_repo(t.repository)
         if not repo_token:
