@@ -311,9 +311,9 @@ A surface is `swept` only when **all** hold:
 4. **Denominator re-checked after the last read.** Corpora grow mid-run.
 
 **Test:** the manifest records `total_matched`, `total_read`, and
-`excluded_by_filter` for every surface. `sweep_manifest.py --check` fails when any
-`swept` surface has `total_read < total_matched` or a null denominator. Run it
-before step 3 and paste the output.
+`excluded_by_filter` for every surface. `sweep_manifest.py check --path M` fails
+when any `swept` surface has `total_read < total_matched` or a null
+denominator. Run it before step 3 and paste the output.
 
 ### 2.3 Sparse and negative findings must name the surfaces
 
@@ -326,8 +326,8 @@ Every negative or sparse finding in the output renders as:
 > full range), Slack (24 conversations, full range), Drive (41 documents).
 > Not searched: the client CRM (no operator access).
 
-Never as "she did not send updates." `scripts/sweep_manifest.py --cite <surfaces>`
-emits this block.
+Never as "she did not send updates." `scripts/sweep_manifest.py cite --path M
+--surfaces <surfaces>` emits this block.
 
 **Test:** every negative finding in the page carries a surface citation. Grep the
 finished body for negative-claim patterns without an adjacent `Searched:` block.
