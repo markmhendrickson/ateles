@@ -74,10 +74,14 @@ SCOPE: .claude/skills/**/SKILL.md, docs/agents/*.md — the generated PUBLIC
 mirrors of agent prompts. Different scope from check_agent_roster.py (runtime
 routing code) and check_hardcoded_config.py (daemon code).
 
-SUPPRESSION: append `<!-- agent-mirror-pii-ok: <reason> -->` to a line that
-legitimately contains a matched string with no operator-specific meaning (a
-worked example, a public documentation address). Use sparingly — the correct
-fix for a real finding is removing the specific from Neotoma
+SUPPRESSION: append `<!-- agent-mirror-payload-ok: <reason> -->` to a line
+that legitimately contains a matched string with no operator-specific
+meaning (a worked example, a public documentation address). The reason is
+REQUIRED and must be non-empty — a bare marker with no reason, or an empty
+reason, does not suppress. `contact_field` and `payment_profile_field` hits
+are NEVER suppressible by this marker; only a structural `crypto_address`
+hit may be suppressed, and only with a documented reason. Use sparingly —
+the correct fix for a real finding is removing the specific from Neotoma
 `agent_definition.prompt_markdown` and pointing the prompt at a context
 entity instead (agent_policy ent_f2e21d651669c24183b2b4eb).
 
@@ -86,6 +90,8 @@ Usage:
   # no args -> scans the default mirror scope
   python3 scripts/linters/check_agent_mirror_pii.py --allow-unverified
   # skip (not fail) the semantic check when Neotoma is unreachable
+  python3 scripts/linters/check_agent_mirror_pii.py --help
+  # usage, exit 0
 """
 
 from __future__ import annotations
@@ -98,7 +104,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "execution" / "scripts"))
 import render_agent_docs  # noqa: E402  — reuse its Neotoma env/fetch, not a copy
 
-SUPPRESS = "agent-mirror-pii-ok"
+SUPPRESS = "agent-mirror-payload-ok"
+# Reason required and non-empty: `<!-- agent-mirror-payload-ok: <reason> -->`.
+# A bare token or an empty reason must NOT suppress (ateles#1100 pm finding 3).
+_SUPPRESS_RE = re.compile(r"<!--\s*" + re.escape(SUPPRESS) + r"\s*:\s*(\S.*?)\s*-->")
 
 DEFAULT_GLOBS = (
     ".claude/skills/**/SKILL.md",
@@ -132,6 +141,33 @@ SENSITIVE_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {
 }
 
 
+def _usage() -> str:
+    globs = "\n".join(f"  {g}" for g in DEFAULT_GLOBS)
+    return (
+        "usage: check_agent_mirror_pii.py [file1 file2 ...] "
+        "[--allow-unverified] [--help|-h]\n\n"
+        "Scans public agent-prompt mirrors for operator/third-party payload.\n"
+        "With no file arguments, scans the default scope:\n"
+        f"{globs}\n\n"
+        "Outcomes:\n"
+        "  FAILED — content      a crypto address or a live contact/"
+        "payment_profile value was found\n"
+        "  FAILED — unverified   the semantic (Neotoma) source could not be "
+        "read, and no content hit was found either\n"
+        "  OK                    no content hit; semantic source read or "
+        "explicitly skipped\n"
+        "  A content hit found alongside an unread semantic source prints "
+        "FAILED — unverified\n"
+        "  first, then FAILED — content, in the same run.\n\n"
+        "Options:\n"
+        "  --allow-unverified    skip (not fail) the semantic check when "
+        "Neotoma is unreachable;\n"
+        "                        the structural crypto-address check still "
+        "always runs\n"
+        "  --help, -h            show this usage and exit 0\n"
+    )
+
+
 def _iter_scope_files(args: list[str]) -> list[Path]:
     if args:
         return [Path(a) for a in args]
@@ -141,8 +177,19 @@ def _iter_scope_files(args: list[str]) -> list[Path]:
     return files
 
 
+def _suppression_reason(line: str) -> str | None:
+    """Return the (non-empty, stripped) suppression reason on this line, or
+    None if unsuppressed. A bare marker or an empty reason is None — it does
+    NOT suppress (ateles#1100 pm finding 3: 'require non-empty reason')."""
+    m = _SUPPRESS_RE.search(line)
+    if not m:
+        return None
+    reason = m.group(1).strip()
+    return reason or None
+
+
 def _is_suppressed(line: str) -> bool:
-    return SUPPRESS in line
+    return _suppression_reason(line) is not None
 
 
 def _check_structural(path: Path, text: str) -> list[str]:
@@ -151,10 +198,14 @@ def _check_structural(path: Path, text: str) -> list[str]:
         if _is_suppressed(line):
             continue
         for m in BTC_ADDRESS_RE.finditer(line):
+            # NO VALUE, NO PREFIX: a CI log on this public repo is itself a
+            # public surface (ateles#1100 pm finding 1). Never echo any part
+            # of the matched literal — cite path/line/category only.
             findings.append(
-                f"{path}:{lineno}: BTC address literal ({m.group(0)[:10]}…) — "
-                f"move the address into a `payment_profile`/`contact` entity "
-                f"and have the prompt resolve it at runtime "
+                f"{path}:{lineno}: crypto_address — a Bitcoin address "
+                f"literal was found — move the address into a "
+                f"`payment_profile`/`contact` entity and have the prompt "
+                f"resolve it at runtime "
                 f"(agent_policy ent_f2e21d651669c24183b2b4eb)"
             )
     return findings
@@ -234,9 +285,10 @@ def _check_semantic(
     findings = []
     lines = text.splitlines()
     for value, provenance in sensitive_values:
+        entity_type, field, eid = provenance.split(":", 2)
+        category = f"{entity_type}_field"
         is_structural = any(
-            provenance.split(":")[1] == suffix
-            or provenance.split(":")[1].endswith(f"_{suffix}")
+            field == suffix or field.endswith(f"_{suffix}")
             for suffix in _STRUCTURAL_FIELD_SUFFIXES
         )
         if is_structural:
@@ -250,30 +302,49 @@ def _check_semantic(
             # embedded inside a longer identifier or word.
             pattern = re.compile(r"\b" + re.escape(value.lower()) + r"\b")
         for lineno, line in enumerate(lines, start=1):
-            if _is_suppressed(line):
-                continue
+            # contact_field / payment_profile_field hits are NEVER
+            # suppressible — only a structural crypto_address hit may carry
+            # the suppression marker (ateles#1100 pm finding 3).
             if pattern.search(line.lower()):
+                # NO VALUE, NO PREFIX in the finding line — field name and
+                # entity id only (ateles#1100 pm finding 1).
                 findings.append(
-                    f"{path}:{lineno}: operator-specific value from "
-                    f"{provenance} appears verbatim — move the specific into "
-                    f"the context entity and have the prompt resolve it at "
-                    f"runtime (agent_policy ent_f2e21d651669c24183b2b4eb), "
-                    f"never inline it in a public mirror"
+                    f"{path}:{lineno}: {category} [{field} {eid}] — "
+                    f"an operator-specific value appears verbatim — move "
+                    f"the specific into the context entity and have the "
+                    f"prompt resolve it at runtime "
+                    f"(agent_policy ent_f2e21d651669c24183b2b4eb), never "
+                    f"inline it in a public mirror; not suppressible"
                 )
     return findings
 
 
 def main() -> int:
     args = sys.argv[1:]
-    allow_unverified = "--allow-unverified" in args
-    args = [a for a in args if a != "--allow-unverified"]
 
-    files = _iter_scope_files(args)
-    if not files:
-        print("check_agent_mirror_pii: no files in scope, nothing to check")
+    if "--help" in args or "-h" in args:
+        print(_usage())
         return 0
 
-    all_findings: list[str] = []
+    allow_unverified = "--allow-unverified" in args
+    positional = [a for a in args if a != "--allow-unverified"]
+
+    unknown = [a for a in positional if a.startswith("-")]
+    if unknown:
+        print(_usage(), file=sys.stderr)
+        print(
+            f"check_agent_mirror_pii: unknown flag(s): {' '.join(unknown)}",
+            file=sys.stderr,
+        )
+        return 2
+
+    files = _iter_scope_files(positional)
+    if not files:
+        globs = ", ".join(DEFAULT_GLOBS)
+        print(f"check_agent_mirror_pii: OK — 0 files matched scope ({globs})")
+        return 0
+
+    content_findings: list[str] = []
     texts: dict[Path, str] = {}
     for path in files:
         if not path.is_file():
@@ -281,46 +352,74 @@ def main() -> int:
         try:
             text = path.read_text(encoding="utf-8")
         except Exception as exc:
-            all_findings.append(
-                f"{path}: could not read file ({exc}) — treating as failing"
+            content_findings.append(
+                f"{path}: unreadable_file — could not read file "
+                f"({type(exc).__name__}) — treating as failing"
             )
             continue
         texts[path] = text
-        all_findings.extend(_check_structural(path, text))
+        content_findings.extend(_check_structural(path, text))
 
     sensitive_values = _fetch_sensitive_values()
-    if sensitive_values is None:
-        if allow_unverified:
-            print(
-                "check_agent_mirror_pii: Neotoma unreachable — semantic check "
-                "SKIPPED (--allow-unverified). Structural (BTC address) check "
-                "still ran."
-            )
-        else:
-            all_findings.append(
-                "semantic PII check UNVERIFIED: could not reach Neotoma "
+    unverified = sensitive_values is None
+    if unverified:
+        if not allow_unverified:
+            content_findings.append(
+                "semantic_source_unverified — could not reach Neotoma "
                 "(NEOTOMA_BASE_URL/NEOTOMA_BEARER_TOKEN) to load known "
-                "operator-specific values. Failing closed — a rule with no "
-                "enforcement is not the same as a rule that passed "
-                "(docs/foundation/principles.md#1). Re-run with "
-                "--allow-unverified only on a deliberately offline host."
+                "operator-specific values. This is NOT a content hit: the "
+                "structural (crypto address) check above still ran with no "
+                "network. Failing closed — a rule with no enforcement is "
+                "not the same as a rule that passed "
+                "(docs/foundation/principles.md#1). --allow-unverified "
+                "does not skip the structural check; use it only on a "
+                "deliberately offline host."
             )
     else:
         for path, text in texts.items():
-            all_findings.extend(_check_semantic(path, text, sensitive_values))
+            content_findings.extend(_check_semantic(path, text, sensitive_values))
 
-    if all_findings:
-        print("check_agent_mirror_pii: FAILED")
-        for finding in all_findings:
+    # Three distinct outcome headers, never one undifferentiated FAILED
+    # (ateles#1100 pm finding 2). When both an unverified source AND a
+    # content hit are present, print FAILED — unverified first, then the
+    # content lines, per the issue's Design/UX flow spec.
+    has_unverified = unverified and not allow_unverified
+    has_content = any(
+        not f.startswith("semantic_source_unverified") for f in content_findings
+    )
+
+    unverified_findings = [
+        f for f in content_findings if f.startswith("semantic_source_unverified")
+    ]
+    real_content_findings = [
+        f for f in content_findings if not f.startswith("semantic_source_unverified")
+    ]
+
+    if has_unverified and not has_content:
+        print("check_agent_mirror_pii: FAILED — unverified")
+        for finding in unverified_findings:
             print(f"  {finding}")
         return 1
 
-    verified = (
-        "semantic check verified live"
+    if has_content:
+        if has_unverified:
+            print("check_agent_mirror_pii: FAILED — unverified")
+            for finding in unverified_findings:
+                print(f"  {finding}")
+        print("check_agent_mirror_pii: FAILED — content")
+        for finding in real_content_findings:
+            print(f"  {finding}")
+        return 1
+
+    values_note = (
+        "semantic check verified live "
+        f"({len(sensitive_values)} contact/payment_profile value(s) loaded)"
         if sensitive_values is not None
-        else "semantic check skipped"
+        else "semantic check skipped (--allow-unverified)"
     )
-    print(f"check_agent_mirror_pii: OK — {len(texts)} file(s) scanned, {verified}")
+    if sensitive_values is not None and len(sensitive_values) == 0:
+        values_note = "0 contact/payment_profile values loaded — structural check only"
+    print(f"check_agent_mirror_pii: OK — {len(texts)} file(s) scanned, {values_note}")
     return 0
 
 

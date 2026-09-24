@@ -108,7 +108,9 @@ python scripts/linters/check_documentation.py path/to/file.md
 - Scope: `.claude/skills/**/SKILL.md`, `docs/agents/*.md` — the generated PUBLIC mirrors of agent prompts
 - **Gitleaks allowlist gap:** `.gitleaks.toml` deliberately allowlists the entire `.claude/` tree ("env var names in skill docs, not secrets"), which is exactly where these mirrors live, and has no rule for a Bitcoin address at all — so reading only the Gitleaks entry above does not mean an agent-prompt mirror is clean. This linter is the control for that boundary (agent_policy `ent_c3c5e4a9350250cbf69e08bf`, `ent_f2e21d651669c24183b2b4eb`).
 - Fails closed: exits non-zero (not skip) when Neotoma is unreachable, since this is a content gate on files about to be published — use `--allow-unverified` only on a deliberately offline host, which still runs the structural check.
-- Suppression: `<!-- agent-mirror-pii-ok: <reason> -->` on the offending line, for a worked example or other non-operator content.
+- Outcome headers: `FAILED — content` (a payload literal was found), `FAILED — unverified` (the semantic source could not be read), `OK` (clean).
+- Suppression: `<!-- agent-mirror-payload-ok: <reason> -->` on the offending line, reason required and non-empty. Suppresses a structural `crypto_address` hit only — `contact_field`/`payment_profile_field` hits are never suppressible.
+- `--help`/`-h`: usage, exit 0. Any other unrecognized flag: usage to stderr, non-zero exit.
 - Config: `scripts/linters/check_agent_mirror_pii.py`
 - Auto-fixes: No (prevents commit)
 
@@ -256,7 +258,7 @@ resolve the payment amount and address from the matching payment_profile entity
 ```
 Do NOT reach for `.gitleaks.toml` here — it deliberately allowlists `.claude/` and has no Bitcoin-address rule, so it will not catch this class of finding either way.
 
-**Exception:** A worked example or other non-operator content that legitimately matches may be suppressed with `<!-- agent-mirror-pii-ok: <reason> -->` on the offending line — use sparingly; the correct fix for a real finding is the split above.
+**Exception:** A worked example or other non-operator content that legitimately matches a `crypto_address` structural pattern may be suppressed with `<!-- agent-mirror-payload-ok: <reason> -->` on the offending line, with a non-empty reason — use sparingly; the correct fix for a real finding is the split above. A `contact_field` or `payment_profile_field` hit cannot be suppressed this way; the specific must be moved to the context entity.
 
 ## Disabling Hooks (Not Recommended)
 

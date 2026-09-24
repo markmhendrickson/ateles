@@ -30,7 +30,9 @@ def test_btc_address_structural_hit_is_flagged(tmp_path) -> None:
     text = f"resolve the payment via {SYNTHETIC_BTC} for this vendor\n"
     findings = lint._check_structural(tmp_path / "SKILL.md", text)
     assert len(findings) == 1
-    assert "BTC address literal" in findings[0]
+    assert "crypto_address" in findings[0]
+    assert SYNTHETIC_BTC not in findings[0]
+    assert SYNTHETIC_BTC[:10] not in findings[0]
 
 
 def test_generic_instruction_with_no_literal_passes(tmp_path) -> None:
@@ -100,7 +102,7 @@ def test_allow_unverified_flag_explicitly_skips(monkeypatch, tmp_path, capsys) -
     rc = lint.main()
     out = capsys.readouterr().out
     assert rc == 0
-    assert "SKIPPED (--allow-unverified)" in out
+    assert "skipped (--allow-unverified)" in out
 
 
 def test_neotoma_unreachable_without_allow_unverified_exits_nonzero(
@@ -121,11 +123,97 @@ def test_suppression_marker_honored(tmp_path) -> None:
     assert findings == []
 
 
-def test_suppression_marker_honored_for_semantic_hit(tmp_path) -> None:
+def test_semantic_hit_is_not_suppressible(tmp_path) -> None:
+    """contact_field and payment_profile_field hits are NEVER suppressible —
+    only a structural crypto_address hit may carry the suppression marker
+    (ateles#1100 pm finding 3)."""
     text = f"pay {SYNTHETIC_SHORT_NAME} <!-- {lint.SUPPRESS}: worked example -->\n"
     findings = lint._check_semantic(
         tmp_path / "SKILL.md",
         text,
         [(SYNTHETIC_SHORT_NAME, f"contact:name:{SYNTHETIC_ENTITY}")],
     )
+    assert len(findings) == 1
+    assert "contact_field" in findings[0]
+    assert "not suppressible" in findings[0]
+
+
+def test_bare_suppression_marker_does_not_suppress(tmp_path) -> None:
+    """A bare marker with no `: <reason>` at all must not suppress
+    (ateles#1100 pm finding 3: reason is required)."""
+    text = f"{SYNTHETIC_BTC} <!-- {lint.SUPPRESS} -->\n"
+    findings = lint._check_structural(tmp_path / "SKILL.md", text)
+    assert len(findings) == 1
+
+
+def test_empty_reason_suppression_does_not_suppress(tmp_path) -> None:
+    """`<!-- agent-mirror-payload-ok: -->` with an empty reason must not
+    suppress (ateles#1100 pm finding 3)."""
+    text = f"{SYNTHETIC_BTC} <!-- {lint.SUPPRESS}: -->\n"
+    findings = lint._check_structural(tmp_path / "SKILL.md", text)
+    assert len(findings) == 1
+
+
+def test_suppression_with_nonempty_reason_still_suppresses_structural(tmp_path) -> None:
+    text = f"{SYNTHETIC_BTC} <!-- {lint.SUPPRESS}: documented worked example -->\n"
+    findings = lint._check_structural(tmp_path / "SKILL.md", text)
     assert findings == []
+
+
+def test_content_hit_uses_failed_content_header(monkeypatch, tmp_path) -> None:
+    """A crypto-address content hit prints the differentiated FAILED —
+    content header, not one undifferentiated FAILED (ateles#1100 pm
+    finding 2)."""
+    hit_file = tmp_path / "SKILL.md"
+    hit_file.write_text(f"resolve via {SYNTHETIC_BTC}\n")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("NEOTOMA_BEARER_TOKEN", raising=False)
+    monkeypatch.delenv("NEOTOMA_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["check_agent_mirror_pii.py", str(hit_file), "--allow-unverified"],
+    )
+    assert lint.main() == 1
+
+
+def test_unverified_header_differs_from_content_header(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    clean_file = tmp_path / "SKILL.md"
+    clean_file.write_text("resolve the amount from the matching payment_profile\n")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("NEOTOMA_BEARER_TOKEN", raising=False)
+    monkeypatch.delenv("NEOTOMA_BASE_URL", raising=False)
+    monkeypatch.setattr(sys, "argv", ["check_agent_mirror_pii.py", str(clean_file)])
+    rc = lint.main()
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "FAILED — unverified" in out
+    assert "FAILED — content" not in out
+
+
+def test_help_flag_prints_usage_and_exits_zero(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["check_agent_mirror_pii.py", "--help"])
+    rc = lint.main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "usage:" in out
+    assert "--allow-unverified" in out
+
+
+def test_short_help_flag_prints_usage_and_exits_zero(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["check_agent_mirror_pii.py", "-h"])
+    rc = lint.main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "usage:" in out
+
+
+def test_unknown_flag_exits_nonzero_with_usage_on_stderr(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["check_agent_mirror_pii.py", "--not-a-real-flag"])
+    rc = lint.main()
+    captured = capsys.readouterr()
+    assert rc != 0
+    assert "usage:" in captured.err
+    assert "unknown flag" in captured.err.lower()
