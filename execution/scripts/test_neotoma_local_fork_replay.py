@@ -2524,7 +2524,28 @@ def _fake_github_open(monkeypatch):
     )
 
 
-def _fake_hosted_gate_restore_router(monkeypatch, *, store_status=200):
+def _permissive_grant_entity(sub="ateles@ateles-swarm"):
+    """A hosted agent_grant list entry covering everything (op="*"-style via
+    explicit "*" entity_types on every op this script's writes use), for
+    fake routers that don't care about the pre-flight grant-coverage check
+    itself (see test_preflight_grant_check_* below for the ones that do)."""
+    return {
+        "entity_id": "ent_test_grant",
+        "entity_type": "agent_grant",
+        "snapshot": {
+            "match_sub": sub,
+            "status": "active",
+            "capabilities": [
+                {"op": "store_structured", "entity_types": ["*"]},
+                {"op": "create_relationship", "entity_types": ["*"]},
+                {"op": "retrieve", "entity_types": ["*"]},
+                {"op": "correct", "entity_types": ["*"]},
+            ],
+        },
+    }
+
+
+def _fake_hosted_gate_restore_router(monkeypatch, *, store_status=200, grant_entities=None):
     """A minimal hosted double for run_gate_restore's HTTP surface:
     GET /entities/<id> -> confirmed 404 (no hosted issue yet, so every
     candidate plans as a 'create'), GET /health -> 200 ok, POST /store ->
@@ -2536,14 +2557,23 @@ def _fake_hosted_gate_restore_router(monkeypatch, *, store_status=200):
     http_request covers the read-only probes/health as before, and
     signed_write is monkeypatched separately to route into the same
     store_calls list rather than shelling out to a real AAuth signer.
+
+    GET /entities?entity_type=agent_grant is the pre-flight grant-coverage
+    check's read (ateles#1223 follow-up) -- defaults to a permissive grant
+    so existing apply-mode tests aren't newly gated by it; pass
+    grant_entities to exercise the gap-detection path itself.
     """
     import neotoma_local_fork_replay as _mod
 
+    if grant_entities is None:
+        grant_entities = [_permissive_grant_entity()]
     store_calls: list[dict] = []
 
     def fake_http_request(method, base_url, path, token, body=None, **kwargs):
         if path == "/health":
             return 200, {"ok": True}
+        if path.startswith("/entities?entity_type=agent_grant"):
+            return 200, {"entities": grant_entities}
         if path.startswith("/schemas/"):
             return 404, {"error": "not found"}
         if path.startswith("/entities/"):
@@ -2669,6 +2699,89 @@ def test_run_gate_restore_apply_writes_expected_store_payload_with_idempotency_k
     assert "Failed:  0" in out
 
 
+def test_run_gate_restore_apply_refuses_before_any_write_when_grant_lacks_issue(
+    tmp_path, monkeypatch, capsys
+):
+    """ateles#1223 follow-up: the pre-flight grant-coverage check must abort
+    BEFORE any /store write when the signing identity's agent_grant does not
+    cover (store_structured, issue) -- restore-gates only ever writes
+    `issue` entities, so a grant missing that type must refuse the whole
+    run rather than fail partway through a batch."""
+    import neotoma_local_fork_replay as _mod
+
+    _fake_github_open(monkeypatch)
+    grant_missing_issue = {
+        "entity_id": "ent_test_grant",
+        "entity_type": "agent_grant",
+        "snapshot": {
+            "match_sub": "ateles@ateles-swarm",
+            "status": "active",
+            "capabilities": [
+                {"op": "store_structured", "entity_types": ["task", "note"]},
+            ],
+        },
+    }
+    store_calls = _fake_hosted_gate_restore_router(
+        monkeypatch, grant_entities=[grant_missing_issue]
+    )
+
+    db_path = _make_gate_candidate_db(
+        tmp_path, "apply.db", {"ent_a": ("owner/repo", 42, {"pm": "signed_off"})}
+    )
+    args = _gate_restore_args(tmp_path, [db_path], apply=True)
+
+    with pytest.raises(SystemExit) as exc_info:
+        _mod.run_gate_restore(args, "https://hosted.example.invalid", "tok", apply_mode=True)
+    assert exc_info.value.code == 1
+
+    assert store_calls == []  # no write reached hosted
+    err = capsys.readouterr().err
+    assert "code=E_SIGNING_UNAVAILABLE" in err
+    assert "store_structured:issue" in err
+
+
+def test_find_grant_gaps_treats_store_and_store_structured_as_the_same_family():
+    """Mirrors hosted's grantOpMatchesRequested (agent_capabilities.ts): a
+    grant entry for op="store" also covers a requested "store_structured",
+    and vice versa -- these are the same family on hosted's admission
+    path, so the pre-flight check must not report a false gap for it."""
+    import neotoma_local_fork_replay as _mod
+
+    caps = [{"op": "store", "entity_types": ["issue"]}]
+    gaps = _mod.find_grant_gaps(caps, {("store_structured", "issue")})
+    assert gaps == []
+
+    caps2 = [{"op": "store_structured", "entity_types": ["issue"]}]
+    gaps2 = _mod.find_grant_gaps(caps2, {("store", "issue")})
+    assert gaps2 == []
+
+
+def test_find_grant_gaps_reports_every_missing_pair_and_respects_wildcards():
+    import neotoma_local_fork_replay as _mod
+
+    caps = [
+        {"op": "store_structured", "entity_types": ["task"]},
+        {"op": "retrieve", "entity_types": ["*"]},
+    ]
+    needed = {
+        ("store_structured", "task"),  # covered
+        ("store_structured", "issue"),  # gap
+        ("retrieve", "anything"),  # covered by "*"
+        ("create_relationship", "task"),  # gap -- no create_relationship entry at all
+    }
+    gaps = _mod.find_grant_gaps(caps, needed)
+    assert set(gaps) == {("store_structured", "issue"), ("create_relationship", "task")}
+
+
+def test_find_grant_gaps_none_capabilities_means_every_pair_is_a_gap():
+    """No active grant found for the sub at all -- every needed pair is
+    reported, never silently treated as covered."""
+    import neotoma_local_fork_replay as _mod
+
+    gaps = _mod.find_grant_gaps(None, {("store_structured", "issue"), ("retrieve", "task")})
+    assert set(gaps) == {("store_structured", "issue"), ("retrieve", "task")}
+
+
 def test_run_gate_restore_apply_aborts_on_ambiguous_5xx_probe(tmp_path, monkeypatch):
     """An ambiguous (non-200/404) hosted GET /entities/<id> must raise
     HostedProbeAmbiguousError -- never be silently treated as 'missing' and
@@ -2702,7 +2815,7 @@ def test_run_gate_restore_apply_aborts_on_ambiguous_5xx_probe(tmp_path, monkeypa
 # --- run_reconciliation end to end (dry-run and apply), mocked HTTP -------
 
 
-def _fake_hosted_reconcile_router(monkeypatch, *, store_status=200, hosted_fields=None):
+def _fake_hosted_reconcile_router(monkeypatch, *, store_status=200, hosted_fields=None, grant_entities=None):
     """A minimal hosted double for run_reconciliation's HTTP surface:
     GET /schemas/<type> -> confirmed 404 (no schema, so no merge_array
     reduction applies and nothing is stripped), GET /entities/<id> -> a
@@ -2714,15 +2827,21 @@ def _fake_hosted_reconcile_router(monkeypatch, *, store_status=200, hosted_field
 
     POST /store is a WRITE (ateles#1223): the real code path now sends it
     via signed_write, not http_request -- both are faked here, matching
-    _fake_hosted_gate_restore_router's approach.
+    _fake_hosted_gate_restore_router's approach. GET
+    /entities?entity_type=agent_grant is the pre-flight grant-coverage
+    check's read -- defaults to a permissive grant.
     """
     import neotoma_local_fork_replay as _mod
 
     if hosted_fields is None:
         hosted_fields = {"body": "stale hosted text"}
+    if grant_entities is None:
+        grant_entities = [_permissive_grant_entity()]
     store_calls: list[dict] = []
 
     def fake_http_request(method, base_url, path, token, body=None, **kwargs):
+        if path.startswith("/entities?entity_type=agent_grant"):
+            return 200, {"entities": grant_entities}
         if path.startswith("/schemas/"):
             return 404, {"error": "not found"}
         if path.startswith("/entities/"):

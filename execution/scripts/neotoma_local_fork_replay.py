@@ -1395,6 +1395,15 @@ def run_reconciliation(
         )
 
     log_path = args.log
+
+    if apply_mode and planned:
+        # Pre-flight (ateles#1223 follow-up): reconcile writes /store for
+        # every distinct entity_type in the filtered plan.
+        needed_ops = {("store_structured", entity_type) for (_id, entity_type, *_rest) in planned}
+        preflight_check_grant_covers_plan(
+            base_url, token, args.sign_as, needed_ops, log_path=log_path
+        )
+
     applied_entities = 0
     applied_fields = 0
     apply_time_drift_fields = 0
@@ -2450,6 +2459,14 @@ def run_gate_restore(args, base_url: str, token: str, apply_mode: bool) -> None:
             "before re-running, and consider --limit or --entity-ids to narrow the run",
         )
 
+    if apply_mode and total_changes > 0:
+        # Pre-flight (ateles#1223 follow-up): restore-gates only ever writes
+        # `issue` entities via /store -- a single-pair check, but run through
+        # the shared helper so every mode fails closed the same way.
+        preflight_check_grant_covers_plan(
+            base_url, token, args.sign_as, {("store_structured", "issue")}, log_path=args.log
+        )
+
     if not apply_mode:
         print()
         run_counts = {
@@ -2755,6 +2772,126 @@ def resolve_signing_identity(sign_as: str) -> dict:
             "signing is unavailable for this identity"
         )
     return {"agent_name": agent_name, "sub": ident["sub"], "kid": ident["kid"]}
+
+
+def fetch_agent_grant_capabilities(
+    base_url: str, token: str, sub: str
+) -> list[dict] | None:
+    """Read the hosted agent_grant for `sub` via the bearer token (a READ --
+    checking the grant does not need to be signed) and return its
+    capabilities list, or None if no active grant matches this sub.
+
+    Uses GET /entities?entity_type=agent_grant, the same list route the
+    prerequisite check used interactively, then filters client-side on
+    match_sub -- there is no server-side filter-by-snapshot-field on this
+    public route. Fails closed by raising on any non-2xx/malformed response
+    rather than returning an empty grant that would read as "covers
+    nothing" (which is the RIGHT failure mode for the pre-flight check
+    below, but should be visibly a fetch failure, not silently "0 grants").
+    """
+    status, body = http_request(
+        "GET", base_url, "/entities?entity_type=agent_grant&limit=200", token, retries=2,
+        retry_backoff_seconds=2.0,
+    )
+    if status != 200 or not isinstance(body, dict):
+        raise RuntimeError(
+            f"could not fetch agent_grant list from hosted to run the pre-flight "
+            f"capability check (status={status})"
+        )
+    for entity in body.get("entities", []):
+        snap = entity.get("snapshot") or {}
+        if snap.get("match_sub") == sub and snap.get("status") == "active":
+            caps = snap.get("capabilities")
+            return caps if isinstance(caps, list) else []
+    return None
+
+
+# Mirrors neotoma's server-side grantOpMatchesRequested (agent_capabilities.ts):
+# a grant entry for "store" also covers a requested "store_structured" and
+# vice versa -- the two names are the same family on hosted's admission path.
+_STORE_OP_FAMILY = {"store", "store_structured"}
+
+
+def _grant_op_matches(grant_op: str, requested_op: str) -> bool:
+    if grant_op == requested_op:
+        return True
+    return grant_op in _STORE_OP_FAMILY and requested_op in _STORE_OP_FAMILY
+
+
+def find_grant_gaps(
+    capabilities: list[dict] | None, needed: set[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """Return the sorted list of (op, entity_type) pairs in `needed` that
+    `capabilities` does NOT cover, mirroring hosted's entryCovers logic
+    (op-family match, "*" entity_types wildcard). `capabilities=None` means
+    no active grant was found for the sub at all -- every pair is a gap.
+    """
+    if capabilities is None:
+        return sorted(needed)
+    gaps = []
+    for op, entity_type in needed:
+        covered = False
+        for cap in capabilities:
+            if not _grant_op_matches(cap.get("op", ""), op):
+                continue
+            types = cap.get("entity_types") or []
+            if "*" in types or entity_type in types:
+                covered = True
+                break
+        if not covered:
+            gaps.append((op, entity_type))
+    return sorted(gaps)
+
+
+def preflight_check_grant_covers_plan(
+    base_url: str,
+    token: str,
+    sign_as: str,
+    needed: set[tuple[str, str]],
+    *,
+    log_path: str | None,
+) -> None:
+    """Abort the run (emit_error, exit 1) before any write if the signing
+    identity's hosted agent_grant does not cover every (op, entity_type)
+    this run's plan needs. Operator ruling 2026-09-24 (ateles#1223 follow-up):
+    an --apply run must fail closed on a grant gap BEFORE any write, rather
+    than getting partway through a batch and refusing mid-run on whichever
+    entity_type happens to come first.
+    """
+    if not needed:
+        return
+    try:
+        capabilities = fetch_agent_grant_capabilities(base_url, token, sign_as)
+    except RuntimeError as exc:
+        emit_error(
+            CODE_SIGNING_UNAVAILABLE,
+            f"pre-flight grant-coverage check could not run: {exc}",
+            writes_occurred=False,
+            log_path=log_path,
+            next_action="confirm hosted is reachable and the bearer token is "
+            "valid, then re-run",
+        )
+        return
+    gaps = find_grant_gaps(capabilities, needed)
+    if not gaps:
+        return
+    gap_summary = ", ".join(f"{op}:{et}" for op, et in gaps[:20])
+    if len(gaps) > 20:
+        gap_summary += f", ... ({len(gaps) - 20} more)"
+    emit_error(
+        CODE_SIGNING_UNAVAILABLE,
+        f"agent_grant for --sign-as={sign_as} does not cover {len(gaps)} "
+        f"(op, entity_type) pair(s) this run's plan needs: {gap_summary}",
+        writes_occurred=False,
+        log_path=log_path,
+        next_action=(
+            f"extend the agent_grant for {sign_as} (match_sub) with the "
+            "missing capabilities -- re-read the grant, MERGE (never "
+            "overwrite) the full capabilities array, write it back, and "
+            "read it back to confirm -- then re-run with --apply. This "
+            "script refuses to start a write batch it cannot finish."
+        ),
+    )
 
 
 def signed_write(
@@ -3191,6 +3328,39 @@ def main() -> None:
     )
     if args.limit:
         obs, rels, srcs = obs[: args.limit], rels[: args.limit], srcs[: args.limit]
+
+    if apply_mode:
+        # Pre-flight (ateles#1223 follow-up): compute every (op, entity_type)
+        # this run's ACTUAL filtered plan needs -- store_structured for each
+        # observation's entity_type, create_relationship for each
+        # relationship's endpoint entity_types (resolved from this same
+        # local fork's observations table, entity_id -> entity_type) -- and
+        # abort before any write if the signing identity's grant does not
+        # cover all of them. Computed from the filtered obs/rels (after
+        # --limit/--entity-ids), matching what this run will actually try
+        # to write, not the whole local DB.
+        needed_ops: set[tuple[str, str]] = {("store_structured", row[2]) for row in obs}
+        endpoint_type_by_id = {row[1]: row[2] for row in obs}
+        cur_for_rel_types = conn.cursor()
+        rel_entity_ids = {eid for row in rels for eid in (row[3], row[4])}
+        unresolved_rel_ids = rel_entity_ids - set(endpoint_type_by_id)
+        if unresolved_rel_ids:
+            cur_for_rel_types.execute(
+                "SELECT DISTINCT entity_id, entity_type FROM observations "
+                "WHERE entity_id IN ({})".format(
+                    ",".join("?" for _ in unresolved_rel_ids)
+                ),
+                tuple(unresolved_rel_ids),
+            )
+            endpoint_type_by_id.update(dict(cur_for_rel_types.fetchall()))
+        for row in rels:
+            for eid in (row[3], row[4]):
+                et = endpoint_type_by_id.get(eid)
+                if et:
+                    needed_ops.add(("create_relationship", et))
+        preflight_check_grant_covers_plan(
+            base_url, token, args.sign_as, needed_ops, log_path=args.log
+        )
 
     print_run_banner(
         mode="replay",
