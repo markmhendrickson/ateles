@@ -1077,6 +1077,9 @@ def gate_verdict_format_rejected(stdout: str | None, *, lens_agent: str) -> bool
 
 
 _PLAIN_REVIEW_LINE_RE = re.compile(r"^review:[a-z0-9_-]+$", re.I)
+# A link to a posted GitHub comment. Descriptive only: it picks which fixed
+# phrase `describe_gate_verdict_position` returns and never decides a gate.
+_COMMENT_LINK_RE = re.compile(r"#issuecomment-\d+|/issues/comments/\d+", re.I)
 
 
 def describe_gate_verdict_position(stdout: str | None, *, lens_agent: str) -> str:
@@ -1110,6 +1113,16 @@ def describe_gate_verdict_position(stdout: str | None, *, lens_agent: str) -> st
         return "a plain `review:` line comes before the lens header"
     header = _OWN_HEADER_RE.match(first)
     if not header:
+        if _COMMENT_LINK_RE.search(text) and not any(
+            _OWN_HEADER_RE.match(_normalize_for_blocking_scan(line).strip())
+            for line, _ in lines
+        ):
+            # PR #1173 arch reply (ateles#1181): a summary ending in a link to
+            # the posted comment, with no header anywhere.
+            return (
+                "the reply is a note or summary pointing at the posted "
+                "comment, not the review itself"
+            )
         return "first line is not the lens header"
     if header.group("name").strip().lower() != (lens_agent or "").strip().lower():
         return "first line is another agent's header"
@@ -1898,6 +1911,42 @@ def gate_verdict_instruction(agent: str, role: str) -> str:
         "A reply whose first line is not your header, whose second line is "
         "not your verdict, or that carries a second header or verdict line is "
         "read as NOT passing, and the gate stays pending."
+    )
+
+
+# ateles#1181 (PR #1173 arch review, 2026-09-24): every panelist reply
+# recovered from that day's lens transcripts (28 of 28 completed runs) failed
+# the fixed-position read, though the comments the same lenses posted were well
+# formed. The replies opened with a posting note (`Comment posted: <url>`,
+# `Posted. Here is my reply:`), a note about Neotoma writes, or were a short
+# summary pointing at the comment in place of the review (Waxwing's arch reply,
+# 660 characters, against a 4,257 character comment). The dispatcher reads the
+# reply, never the comment, so no gate-owning lens could clear its gate. These
+# two strings name that failure to the lens; they do not change what the
+# dispatcher accepts.
+REPLY_IS_THE_REVIEW_RULE = (
+    "Your final reply here is read by the dispatcher, not by a person, and it "
+    "is the only place your gate verdict is read from: never from the comment "
+    "you posted. Do not open the reply with anything before those lines: not "
+    "a note that the comment was posted, not the comment's URL, not a summary, "
+    "not a note about what you stored. Do not return a summary or a link to "
+    "the comment in place of the review. Any of these leaves the gate "
+    "pending, exactly as if you had not reviewed."
+)
+
+
+def final_reply_reminder(start_lines: str) -> str:
+    """The last block of a gate-owning panelist's prompt: the reply's shape.
+
+    *start_lines* are the lines the comment-identity block already asks the
+    comment and the reply to open with, restated inline (not fenced, so the
+    prompt still carries exactly one start-of-reply template).
+    """
+    shown = " / ".join(f"`{line}`" for line in start_lines.splitlines() if line)
+    return (
+        "FINAL REPLY FORMAT (read this last): after posting the comment, "
+        f"return the whole review, opening with these lines in order: {shown}. "
+        + REPLY_IS_THE_REVIEW_RULE
     )
 
 
@@ -4583,9 +4632,6 @@ class SwarmDispatcher:
         completed: list[str] = []
         # (lens, agent, error_class, observed_state) per failed sign_off.
         failed_sign_offs: list[tuple[str, str, str, str]] = []
-        # (gate, agent, header, observed) when the pm reply is refused only
-        # for its format (PR #1181 ux review at b76b1376).
-        unreadable_verdicts: list[tuple[str, str, str, str]] = []
         for section in sections:
             spec_so_far = assemble_spec_markdown(state.sections or {})
             result = await run_skill(
@@ -4678,15 +4724,29 @@ class SwarmDispatcher:
                     if gate_verdict_format_rejected(
                         result.stdout, lens_agent=section.agent
                     ):
-                        unreadable_verdicts.append(
-                            (
-                                "pm",
-                                section.agent,
-                                attribution_header(section.agent, "pm gate owner"),
-                                describe_gate_verdict_position(
-                                    result.stdout, lens_agent=section.agent
-                                ),
-                            )
+                        # Surfaced now, before the later sections run, so a
+                        # restart mid-pipeline cannot lose it (ateles#1181).
+                        # Keyed on the same content-derived "head" the pm
+                        # sign_off names.
+                        await self._surface_unreadable_gate_verdicts(
+                            trigger,
+                            None,
+                            [
+                                (
+                                    "pm",
+                                    section.agent,
+                                    attribution_header(
+                                        section.agent, "pm gate owner"
+                                    ),
+                                    describe_gate_verdict_position(
+                                        result.stdout, lens_agent=section.agent
+                                    ),
+                                )
+                            ],
+                            content_digest(
+                                [trigger.repository, trigger.number,
+                                 trigger.title, trigger.body]
+                            ),
                         )
                 else:
                     gate_store = IssueGateStore(
@@ -4736,17 +4796,6 @@ class SwarmDispatcher:
             await self._surface_failed_sign_offs(
                 trigger, None, failed_sign_offs
             )
-        if unreadable_verdicts:
-            # Keyed on the same content-derived "head" the pm sign_off names.
-            await self._surface_unreadable_gate_verdicts(
-                trigger,
-                None,
-                unreadable_verdicts,
-                content_digest(
-                    [trigger.repository, trigger.number, trigger.title, trigger.body]
-                ),
-            )
-
         await spec_store.mark_mirrored(state)
 
         # 3. Auto-build handoff (rollout-flagged). When ON and gates are green,
@@ -5677,9 +5726,6 @@ class SwarmDispatcher:
         # template via `_surface_gate_launch_refusals` rather than the generic
         # incomplete-panel notice.
         gate_launch_refusals: list[tuple[str, str, str]] = []
-        # (gate, agent, header, observed) for each gate-owning lens whose reply
-        # was refused only for its format (PR #1181 ux review at b76b1376).
-        unreadable_verdicts: list[tuple[str, str, str, str]] = []
         for lens in panel:
             # Whether this seat's clean verdict is signed for its gate, decided
             # from the LIVE record (and the pre-panel re-proof), never from
@@ -5765,17 +5811,29 @@ class SwarmDispatcher:
                         if gate_verdict_format_rejected(
                             result.stdout, lens_agent=lens.agent
                         ):
-                            unreadable_verdicts.append(
-                                (
-                                    lens.gate,
-                                    lens.agent,
-                                    attribution_header(
-                                        lens.agent, f"{lens.lens} lens panelist"
-                                    ),
-                                    describe_gate_verdict_position(
-                                        result.stdout, lens_agent=lens.agent
-                                    ),
-                                )
+                            # Surfaced NOW, not after the rest of the panel
+                            # (ateles#1181, PR #1173): the notice used to wait
+                            # for every later lens to finish, and a daemon
+                            # restart mid-panel lost it, leaving only this log
+                            # line. Deduplicated per gate per head, so a
+                            # re-run cannot double-post.
+                            await self._surface_unreadable_gate_verdicts(
+                                trigger,
+                                parent,
+                                [
+                                    (
+                                        lens.gate,
+                                        lens.agent,
+                                        attribution_header(
+                                            lens.agent,
+                                            f"{lens.lens} lens panelist",
+                                        ),
+                                        describe_gate_verdict_position(
+                                            result.stdout, lens_agent=lens.agent
+                                        ),
+                                    )
+                                ],
+                                review_head,
                             )
                     else:
                         store = IssueGateStore(
@@ -5856,13 +5914,9 @@ class SwarmDispatcher:
             await self._surface_gate_launch_refusals(
                 trigger, parent, gate_launch_refusals
             )
-        # 2a-quinquies. Surface any gate verdict refused only for its format
-        # (PR #1181 ux review at b76b1376) — the lens blocked nothing, and its
-        # verdict is not where the dispatcher reads it.
-        if unreadable_verdicts:
-            await self._surface_unreadable_gate_verdicts(
-                trigger, parent, unreadable_verdicts, review_head
-            )
+        # 2a-quinquies. A gate verdict refused only for its format (PR #1181
+        # ux review at b76b1376) is surfaced inside the loop above, as soon as
+        # that lens's reply is judged (ateles#1181, PR #1173).
 
         # 2b. Persist the captured reviews and backfill any review:<lens>
         #     comment the panelist could not post itself (PR-87 self-dogfood
@@ -10118,7 +10172,8 @@ class SwarmDispatcher:
             "Write the rest of your review after the verdict line, and repeat "
             "the whole comment in your reply here, starting with those same "
             "lines (the dispatcher parses the reply and posts the comment for "
-            "you if your gh call fails)."
+            "you if your gh call fails). "
+            + REPLY_IS_THE_REVIEW_RULE
         )
         return (
             f"Invoke the {lens.agent} agent per your appended system prompt.\n\n"
@@ -10145,6 +10200,16 @@ class SwarmDispatcher:
             f"{checkoff_block}"
             f"{gate_writeback_block}"
             f"{foundation_block}"
+            + (
+                # Last, after the inlined foundation reading list, so the
+                # reply shape is the final thing a gate-owning lens reads
+                # before it writes (ateles#1181, PR #1173 arch review: every
+                # panelist reply that day opened with a posting note or was a
+                # summary, so no gate-owning lens could clear).
+                "\n\n" + final_reply_reminder(_start_lines)
+                if gate_writeback_block
+                else ""
+            )
         )
 
     @staticmethod
