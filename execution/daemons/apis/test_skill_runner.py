@@ -640,6 +640,11 @@ class TestRoleSigningEnvInjection:
         if provider == "codex":
             assert not result.ok, "Codex must refuse dispatch without its intended role signer"
             assert "role signer unavailable" in result.error
+            assert "Codex dispatch refused" in result.error
+            cause = result.error.rsplit("missing ", 1)[-1]
+            assert cause == missing, (
+                f"error should name only the '{missing}' cause: {result.error!r}"
+            )
             launch.assert_not_called()
         else:
             assert result.ok
@@ -2504,6 +2509,37 @@ class TestCrossHarnessRouting:
         assert "--approve-for-me" not in cmd
         assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
         assert "--ignore-user-config" in cmd
+
+    def test_codex_neotoma_auto_approval_flags_empty_allowlist_preapproves_only_identity(
+        self,
+    ) -> None:
+        """An empty Neotoma tool allowlist must preapprove exactly
+        `get_session_identity` and nothing else — the fail-closed default a
+        dispatched role gets when it declares no explicit Neotoma capability.
+
+        Calls `codex_neotoma_auto_approval_flags` directly (not through
+        `_provider_command`) to keep the assertion tight to the function
+        under test.
+        """
+        flags = skill_runner.codex_neotoma_auto_approval_flags([])
+
+        config_values = [
+            flags[i + 1] for i, value in enumerate(flags[:-1]) if value == "-c"
+        ]
+        assert config_values[0].startswith("mcp_servers.neotoma.command=")
+        assert (
+            "--aauth" in config_values[1]
+            and "--fail-closed" in config_values[1]
+        )
+        assert config_values[2] == (
+            'mcp_servers.neotoma.enabled_tools=["get_session_identity"]'
+        )
+        assert config_values[3].startswith("mcp_servers.neotoma.env_vars=")
+
+        approval_values = [v for v in config_values if "approval_mode=" in v]
+        assert approval_values == [
+            'mcp_servers.neotoma.tools.get_session_identity.approval_mode="approve"'
+        ]
 
     def test_cursor_adapter_uses_headless_agent(self) -> None:
         cmd, stdin = skill_runner._provider_command(

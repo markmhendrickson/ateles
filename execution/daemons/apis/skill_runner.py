@@ -1717,21 +1717,35 @@ async def _run_skill_once(
     # the child's Neotoma MCP identity, via the signed AAuth proxy configured
     # by `codex_neotoma_auto_approval_flags` — a different transport, with a
     # per-request signer rather than a static header.
-    if not degraded and agent_def.aauth_sub:
-        keys_dir = os.environ.get("ATELES_PRIVATE_KEYS_DIR", "")
-        if keys_dir:
-            jwk_path = os.path.join(keys_dir, f"{_role}.jwk.json")
-            if os.path.exists(jwk_path):
-                subprocess_env["NEOTOMA_AAUTH_PRIVATE_JWK_PATH"] = jwk_path
-                subprocess_env["NEOTOMA_AAUTH_SUB"] = agent_def.aauth_sub
-                subprocess_env["NEOTOMA_AAUTH_ISS"] = os.environ.get(
-                    "NEOTOMA_AAUTH_ISS", "https://markmhendrickson.com"
-                )
-                role_signer_available = True
+    # Cause label for the four preconditions below, in the order checked —
+    # kept in sync with the `missing` parametrize ids in
+    # test_unavailable_role_signer_cannot_inherit_another_principal.
+    role_signer_missing_cause = "definition"
+    if not degraded:
+        if not agent_def.aauth_sub:
+            role_signer_missing_cause = "subject"
+        else:
+            keys_dir = os.environ.get("ATELES_PRIVATE_KEYS_DIR", "")
+            if not keys_dir:
+                role_signer_missing_cause = "keys_dir"
+            else:
+                jwk_path = os.path.join(keys_dir, f"{_role}.jwk.json")
+                if os.path.exists(jwk_path):
+                    subprocess_env["NEOTOMA_AAUTH_PRIVATE_JWK_PATH"] = jwk_path
+                    subprocess_env["NEOTOMA_AAUTH_SUB"] = agent_def.aauth_sub
+                    subprocess_env["NEOTOMA_AAUTH_ISS"] = os.environ.get(
+                        "NEOTOMA_AAUTH_ISS", "https://markmhendrickson.com"
+                    )
+                    role_signer_available = True
+                else:
+                    role_signer_missing_cause = "key"
 
     if provider == "codex":
         if not role_signer_available:
-            msg = f"Neotoma role signer unavailable for {_role}; Codex dispatch refused"
+            msg = (
+                f"Neotoma role signer unavailable for {_role}; Codex dispatch "
+                f"refused: missing {role_signer_missing_cause}"
+            )
             log.error("[apis] %s", msg)
             return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
         # Codex's ambient Neotoma MCP entry is operator-scoped.  A dispatched
