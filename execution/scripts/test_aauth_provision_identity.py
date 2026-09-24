@@ -76,6 +76,20 @@ class TestProvisionFunction:
         with pytest.raises(ValueError):
             provision("../../etc/passwd", keys_dir=keys_dir)
 
+    def test_rejects_backslash_in_role(self, keys_dir: Path) -> None:
+        """`\\` is a path separator on Windows and can smuggle a component
+        past the POSIX-only `/` and `..` checks."""
+        with pytest.raises(ValueError):
+            provision("..\\..\\etc\\passwd", keys_dir=keys_dir)
+        with pytest.raises(ValueError):
+            provision("accipiter\\evil", keys_dir=keys_dir)
+
+    def test_rejects_nul_byte_in_role(self, keys_dir: Path) -> None:
+        """A NUL byte can truncate a path at the C-library level, letting
+        the rest of the string (e.g. an extension) be silently discarded."""
+        with pytest.raises(ValueError):
+            provision("accipiter\x00.txt", keys_dir=keys_dir)
+
     def test_role_is_lowercased_and_sub_derived(self, keys_dir: Path) -> None:
         result = provision("Accipiter", keys_dir=keys_dir)
         assert result["sub"] == "accipiter@ateles-swarm"
