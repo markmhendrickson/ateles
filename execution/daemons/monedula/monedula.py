@@ -14,6 +14,7 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -936,6 +937,30 @@ def _consent_failure_notify_body(
     )
 
 
+_UNKNOWN_OUTCOME_DEDUPE_PREFIX = "monedula:payment_outcome_unknown"
+
+
+def _notify_unknown_outcome(labels: list[str], yesterday_str: str) -> None:
+    """Escalate payments whose transfer was attempted but whose outcome was
+    never recorded (docs/foundation/payments.md, the unknown case).
+
+    Held, never retried automatically: the operator reads the rail and
+    decides. Deduped per set of held items so a standing hold alerts once.
+    """
+    held = sorted(set(labels))
+    digest = hashlib.sha256("|".join(held).encode()).hexdigest()[:12]
+    _notify(
+        f"monedula: payment outcome UNKNOWN for {yesterday_str}: {', '.join(held)}. "
+        "A transfer was attempted and its result was never recorded, so it may "
+        "or may not have been paid. Held — Monedula will NOT retry it. "
+        "Check the payment rail for this payment before doing anything; do not "
+        "pay it manually until the rail shows it did not land.",
+        priority="blocker",
+        dedupe_key=f"{_UNKNOWN_OUTCOME_DEDUPE_PREFIX}:{digest}",
+        email_eligible=True,
+    )
+
+
 def _pending_summaries(triggered: list) -> list[str]:
     out: list[str] = []
     for handler, _matches in triggered:
@@ -1323,11 +1348,12 @@ def main() -> bool:
         _mark_ran_today()
 
     if channel == "email":
+        import payment_journal
         from consent_email import (
             clear_consent_state,
-            load_executed_tokens,
+            journal_path,
             match_key,
-            record_executed_tokens,
+            obligation_key,
             request_and_collect,
         )
 
@@ -1359,6 +1385,10 @@ def main() -> bool:
                 "consent_reply_read_failed": (
                     "replies could not be checked; check gws/mailbox; no payment executed"
                 ),
+                "payment_journal_unreadable": (
+                    "the payment journal could not be read or written; no payment "
+                    "executed; inspect it before anything is paid"
+                ),
             }.get(reason, "arm ATELES_NOTIFY_EMAIL/OPERATOR_EMAIL or reply to consent thread")
             _notify(
                 _consent_failure_notify_body(
@@ -1373,23 +1403,75 @@ def main() -> bool:
             # Leave day unclaimed so the next tick retries send/read.
             return False
 
-        already_executed = load_executed_tokens()
+        # Durable, obligation-keyed ordering (docs/foundation/payments.md):
+        # record intent → execute → record outcome. Intent without an outcome
+        # is UNKNOWN: held and escalated, never retried automatically.
+        jpath = journal_path()
+
+        def _journal_failure(detail: str) -> bool:
+            log.error(f"payment_journal_unreadable — payments held: {detail}")
+            _notify(
+                "monedula: payment journal could not be read or written "
+                "(payment_journal_unreadable). No further payment will execute "
+                "until it is readable. Inspect the journal before anything is paid.",
+                priority="blocker",
+                dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
+                email_eligible=True,
+            )
+            return False
+
         all_results = []
         newly_executed: set[str] = set()
+        settled: set[str] = set()  # obligation already has a recorded outcome
+        unknown: list[str] = []  # intent recorded, outcome never recorded
+        terms_changed: set[str] = set()
         for item in consent.pending_items:
             key = match_key(item)
             label = f"{item.handler_name}:{item.match_id or 'solo'}"
+            try:
+                journal = payment_journal.load(jpath)
+            except payment_journal.JournalError as exc:
+                return _journal_failure(str(exc))
+            state = payment_journal.obligation_state(journal, item.obligation)
+            if state == payment_journal.STATE_DONE:
+                log.info(f"Already paid {label} — at-most-once skip.")
+                settled.add(key)
+                continue
+            if state == payment_journal.STATE_INTENT:
+                log.error(
+                    f"payment_outcome_unknown {label} — a transfer was attempted "
+                    "and its outcome was never recorded; holding, not retrying."
+                )
+                unknown.append(label)
+                continue
             if key not in consent.approved:
                 if key in consent.skipped:
                     log.info(f"Skipping {label} (operator SKIP).")
                 else:
                     log.info(f"Holding {label} (awaiting_approval).")
                 continue
-            if key in already_executed:
-                log.info(f"Already executed {label} — at-most-once skip.")
+            if payment_journal.token_consumed(journal, key):
+                log.error(f"Approval for {label} already consumed — holding.")
+                unknown.append(label)
                 continue
             handler = item.handler
             match = item.match
+            # Execute-time term check: the obligation the live handler would
+            # pay must be exactly the one the operator approved.
+            current = obligation_key(handler, item.payment_date, item.match_id)
+            if current != item.obligation:
+                log.warning(
+                    f"consent_terms_changed {label} — approval does not cover the "
+                    "current payee/amount; holding and re-requesting."
+                )
+                terms_changed.add(key)
+                continue
+            try:
+                payment_journal.record_intent(
+                    jpath, item.obligation, key, generation=item.generation
+                )
+            except payment_journal.JournalError as exc:
+                return _journal_failure(str(exc))
             log.info(f"Executing {label} payment...")
             _job = (
                 _activity.started(f"executing {handler.name} payment")
@@ -1398,40 +1480,64 @@ def main() -> bool:
             )
             try:
                 result = handler.execute(match)
-                all_results.append((handler, result))
-                newly_executed.add(key)
-                log.info(f"{label} result: {result}")
-                if _job:
-                    _job.finished(f"{handler.name} payment executed")
             except Exception as _exc:
+                # The rail may or may not have moved money. The intent stays
+                # without an outcome, which the next tick holds as unknown.
                 if _job:
                     _job.failed(
                         f"{handler.name} payment error: {type(_exc).__name__}"
                     )
+                unknown.append(label)
+                _notify_unknown_outcome(unknown, yesterday_str)
                 raise
+            status = (
+                str(result.get("status") or "unreported")
+                if isinstance(result, dict)
+                else "unreported"
+            )
+            try:
+                payment_journal.record_outcome(jpath, item.obligation, status)
+            except payment_journal.JournalError as exc:
+                unknown.append(label)
+                _notify_unknown_outcome(unknown, yesterday_str)
+                return _journal_failure(str(exc))
+            all_results.append((handler, result))
+            newly_executed.add(key)
+            log.info(f"{label} result: {result}")
+            if _job:
+                _job.finished(f"{handler.name} payment executed")
 
         if newly_executed:
-            record_executed_tokens(newly_executed)
             _reset_gate_failure_streak()
             _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
 
-        still_open = bool(consent.awaiting) or bool(consent.blocked)
+        if unknown:
+            _notify_unknown_outcome(unknown, yesterday_str)
+
+        if terms_changed:
+            # Drop the outstanding request so the next tick re-asks on the
+            # current terms under a fresh generation.
+            clear_consent_state()
+
+        terminal = settled | newly_executed | consent.skipped
+        still_open = any(match_key(i) not in terminal for i in consent.pending_items)
         if still_open:
             log.info(
                 f"Email consent: awaiting={sorted(consent.awaiting)} "
                 f"skipped={sorted(consent.skipped)} "
                 f"approved={sorted(consent.approved)} "
+                f"unknown_outcome={len(unknown)} "
                 f"executed_this_tick={len(newly_executed)} "
                 f"— calendar leg stays unclaimed for later ticks."
             )
-            return not strandings
+            return not strandings and not unknown
 
         # Every match is terminal (approved or skipped). Claim the day and
         # clear the fingerprint so a future pending set can re-email.
         _mark_ran_today()
         clear_consent_state()
         _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
-        if not consent.approved and not newly_executed and not already_executed:
+        if not consent.approved and not newly_executed and not settled:
             log.info(
                 f"Email consent: all skipped "
                 f"(skipped={sorted(consent.skipped)}) — no execute."

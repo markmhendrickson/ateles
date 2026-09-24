@@ -87,6 +87,9 @@ execution/daemons/**/.monedula_last_run
 execution/daemons/**/.monedula_tg_offset
 execution/daemons/**/.monedula_strandings.json
 execution/daemons/**/.monedula_gate_health
+execution/daemons/**/.monedula_consent_email.json
+execution/daemons/**/.monedula_consent_correction.json
+execution/daemons/**/.monedula_payment_journal.json
 
 # Private docs submodule (not part of public repo)
 docs/private/

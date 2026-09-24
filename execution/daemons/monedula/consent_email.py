@@ -5,7 +5,17 @@ bind), and fail-closed approve semantics. Does NOT invent a second Gmail send
 path — every outbound/inbound call goes through ``lib.approval.email_channel``.
 
 State file (``.monedula_consent_email.json`` beside strandings state) stores
-only ``{fingerprint, sent_at}`` — no addresses, bodies, or financial IDs.
+only ``{fingerprint, generation, sent_at}`` — no addresses, bodies, or
+financial IDs. It is cleared when a pending set ends; it is NOT where payment
+execution is recorded. That lives in the durable, never-cleared
+``payment_journal`` (obligation-keyed intent/outcome + consumed tokens).
+
+Consent binding (``docs/foundation/payments.md#a-payments-approver-is-shown-exactly-what-the-verifier-signed``):
+each approval token is derived from the obligation key — handler, period /
+instance, payee, amount, currency — plus the request generation issued by the
+journal. An approval therefore matches only the exact terms it was shown, and
+only the current request; changed terms or a superseded request produce new
+tokens, so an old reply cannot authorize anything and a fresh request is sent.
 """
 
 from __future__ import annotations
@@ -26,10 +36,26 @@ from lib.approval.email_channel import (
 )
 from lib.approval.tokens import parse_verdict, subject_marker, token_for
 
+import payment_journal
+
 log = logging.getLogger(__name__)
 
 STATE_FILE = Path(__file__).parent / ".monedula_consent_email.json"
 CORRECTION_DEDUPE_FILE = Path(__file__).parent / ".monedula_consent_correction.json"
+
+# Every Monedula profile settles in EUR (``amount_eur``; the Wise leg quotes
+# EUR→EUR). Bound explicitly so a future non-EUR profile changes the key.
+CURRENCY = "EUR"
+
+# The first generation a fresh journal issues. Only a default for callers that
+# build items to inspect tokens; ``request_and_collect`` always passes the
+# generation it actually issued.
+FIRST_GENERATION = 1
+
+
+def journal_path(state_path: Path | None = None) -> Path:
+    """The durable payment journal lives beside the consent state."""
+    return (state_path or STATE_FILE).parent / payment_journal.JOURNAL_NAME
 
 HandlerState = Literal[
     "awaiting_approval", "approved", "skipped", "blocked"
@@ -47,6 +73,10 @@ class PendingItem:
     match_id: str = ""
     match: Any = None
     handler: Any = None
+    # Hash of (handler, period/instance, payee, amount, currency) — the dedup
+    # key payments.md requires. Never contains raw payee/account data.
+    obligation: str = ""
+    generation: int = 0
 
 
 @dataclass
@@ -67,6 +97,7 @@ class ConsentEmailResult:
     send_count: int = 0
     channel_ok: bool = True
     pending_items: list[PendingItem] = field(default_factory=list)
+    generation: int = 0
 
 
 def match_key(item: PendingItem) -> str:
@@ -82,50 +113,13 @@ def _load_mark(path: Path) -> dict:
         return {}
 
 
-def _save_mark(
-    path: Path,
-    fingerprint: str,
-    sent_at: float,
-    *,
-    executed: list[str] | None = None,
-) -> None:
+def _save_mark(path: Path, fingerprint: str, sent_at: float, *, generation: int) -> None:
     payload: dict[str, Any] = {
         "fingerprint": fingerprint,
+        "generation": int(generation),
         "sent_at": sent_at,
     }
-    if executed is not None:
-        payload["executed"] = sorted(set(executed))
-    else:
-        prior = _load_mark(path)
-        prior_exec = prior.get("executed")
-        if isinstance(prior_exec, list) and prior.get("fingerprint") == fingerprint:
-            payload["executed"] = sorted({str(x) for x in prior_exec})
     path.write_text(json.dumps(payload, indent=2, sort_keys=True))
-
-
-def load_executed_tokens(path: Path | None = None) -> set[str]:
-    """Tokens already paid for the current pending-set fingerprint."""
-    mark = _load_mark(path or STATE_FILE)
-    raw = mark.get("executed")
-    if not isinstance(raw, list):
-        return set()
-    return {str(x) for x in raw}
-
-
-def record_executed_tokens(
-    tokens: set[str],
-    *,
-    state_path: Path | None = None,
-) -> None:
-    """Append successfully executed match tokens onto the consent mark."""
-    path = state_path or STATE_FILE
-    mark = _load_mark(path)
-    fp = str(mark.get("fingerprint") or "")
-    if not fp:
-        return
-    prior = load_executed_tokens(path)
-    sent_at = float(mark.get("sent_at") or time.time())
-    _save_mark(path, fp, sent_at, executed=sorted(prior | tokens))
 
 
 def _clear_mark(path: Path) -> None:
@@ -142,12 +136,63 @@ def clear_consent_state(state_path: Path | None = None) -> None:
 
 
 def pending_fingerprint(items: list[PendingItem]) -> str:
-    """Stable hash of the ordered pending set — changes only when the set does."""
-    parts = sorted(
-        f"{i.handler_name}|{i.amount_eur}|{i.label}|{i.payment_date}|{i.match_id}"
-        for i in items
-    )
+    """Stable hash of the pending set's terms — changes when any item's
+    handler, period, payee, amount, currency or label does. Independent of the
+    request generation, so an unchanged set is not re-sent."""
+    parts = sorted(f"{i.obligation}|{i.label}" for i in items)
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+
+
+def payee_identity(handler: Any) -> str:
+    """The payee this handler would pay, as a string for hashing only.
+
+    Uses the handler's own ``payee_identity()`` (which resolves the payee the
+    same way ``execute`` does) when present; otherwise every payee-bearing
+    profile field. An unresolvable payee binds as ``unresolved`` — if it later
+    resolves to anything, the terms differ and consent must be re-requested.
+    Never logged or persisted raw; only its hash leaves this function's caller.
+    """
+    fn = getattr(handler, "payee_identity", None)
+    if callable(fn):
+        try:
+            value = fn()
+        except Exception:
+            value = None
+        return f"resolved|{value}" if value else "unresolved"
+    profile = getattr(handler, "profile", None)
+    fields = (
+        "payment_type",
+        "btc_address",
+        "wise_iban",
+        "wise_recipient_name",
+        "contact_id",
+        "contact_category",
+        "contact_platform",
+    )
+    return "profile|" + "|".join(str(getattr(profile, f, "") or "") for f in fields)
+
+
+def obligation_key(
+    handler: Any,
+    payment_date: str,
+    match_id: str,
+) -> str:
+    """Dedup key for one obligation: handler, period/instance, payee, amount,
+    currency (``docs/foundation/payments.md#the-dedup-key-and-what-it-is-keyed-on``).
+    Recomputed from the live handler, so it also serves as the execute-time
+    check that the terms consented to are still the terms that would be paid."""
+    _label, amount, _is_cal = _profile_fields(handler)
+    basis = "|".join(
+        [
+            str(handler.name),
+            str(payment_date),
+            str(match_id),
+            payee_identity(handler),
+            str(amount),
+            CURRENCY,
+        ]
+    )
+    return hashlib.sha256(basis.encode()).hexdigest()[:32]
 
 
 def _profile_fields(handler: Any) -> tuple[str, int, bool]:
@@ -162,7 +207,10 @@ def _profile_fields(handler: Any) -> tuple[str, int, bool]:
 def build_pending_items(
     triggered: list[tuple[Any, list]],
     yesterday_str: str,
+    generation: int = FIRST_GENERATION,
 ) -> list[PendingItem]:
+    """One item per match. Each token binds the obligation's exact terms and
+    the request generation, so it approves nothing else."""
     items: list[PendingItem] = []
     for handler, matches in triggered:
         label, amount, is_calendar = _profile_fields(handler)
@@ -177,7 +225,11 @@ def build_pending_items(
                     or idx
                 )
             session = yesterday_str if not match_id else f"{yesterday_str}:{match_id}"
-            token = token_for(handler.name, session=session)
+            obligation = obligation_key(handler, yesterday_str, match_id)
+            token = token_for(
+                handler.name,
+                session=f"{session}|{obligation}|g{int(generation)}",
+            )
             items.append(
                 PendingItem(
                     handler_name=handler.name,
@@ -189,6 +241,8 @@ def build_pending_items(
                     match_id=match_id,
                     match=match,
                     handler=handler,
+                    obligation=obligation,
+                    generation=int(generation),
                 )
             )
     return items
@@ -198,6 +252,8 @@ def build_request_body(
     items: list[PendingItem],
     *,
     superseded: bool,
+    settled: set[str] | None = None,
+    unknown: set[str] | None = None,
 ) -> tuple[str, str]:
     """Plain-text subject + body per Design copy. Never instructs PAID."""
     first_marker = subject_marker(items[0].token) if items else ""
@@ -211,11 +267,18 @@ def build_request_body(
         lines.append("")
     lines.append("Pending payment(s) — reply to approve or skip. No payment moves until you reply.")
     lines.append("")
+    settled = settled or set()
+    unknown = unknown or set()
     for item in items:
         marker = subject_marker(item.token)
+        note = ""
+        if item.obligation in settled:
+            note = " | already paid — no reply needed"
+        elif item.obligation in unknown:
+            note = " | outcome unknown — held for review, will not be retried"
         lines.append(
             f"- {item.handler_name} | {item.payment_date} | {item.label} | "
-            f"EUR {item.amount_eur} | {marker}"
+            f"{CURRENCY} {item.amount_eur} | {marker}{note}"
         )
     lines.append("")
     multi = len(items) > 1
@@ -397,32 +460,97 @@ def request_and_collect(
             clear_failure_dedupe()
         return result
 
-    items = build_pending_items(triggered, yesterday_str)
-    result.pending_items = items
-    fp = pending_fingerprint(items)
+    jpath = journal_path(path)
+
+    def _block_all(items_: list[PendingItem], reason: str) -> ConsentEmailResult:
+        for item in items_:
+            key = match_key(item)
+            result.states[key] = "blocked"
+            result.blocked.add(key)
+        result.reason_code = reason
+        result.channel_ok = False
+        return result
+
+    # Terms (and therefore the fingerprint) do not depend on the generation.
+    probe = build_pending_items(triggered, yesterday_str)
+    fp = pending_fingerprint(probe)
     mark = _load_mark(path)
     prior_fp = str(mark.get("fingerprint") or "")
-    already_sent = prior_fp == fp and bool(prior_fp)
+
+    # The journal is the durable record of what was paid and the source of
+    # request generations. Unreadable → hold everything (principles.md#5).
+    try:
+        journal = payment_journal.load(jpath)
+        if not jpath.exists() and prior_fp:
+            # A consent request is outstanding but the record of payments
+            # made against it is gone: nothing can prove what already paid.
+            raise payment_journal.JournalError(
+                "payment journal missing while a consent request is outstanding"
+            )
+    except payment_journal.JournalError as exc:
+        log.error(f"payment_journal_unreadable — payments held: {exc}")
+        result.pending_items = probe
+        return _block_all(probe, "payment_journal_unreadable")
+
+    try:
+        mark_gen = int(mark.get("generation") or 0)
+    except (TypeError, ValueError):
+        mark_gen = 0
+    # Reuse the outstanding request only if it is for these exact terms AND
+    # is the latest generation the journal issued. Anything else (terms
+    # changed, request superseded, mark lost or damaged) re-requests under a
+    # fresh generation, which no earlier reply can match.
+    already_sent = (
+        bool(prior_fp)
+        and prior_fp == fp
+        and mark_gen > 0
+        and mark_gen == int(journal["generation"])
+    )
+
+    settled = {
+        i.obligation
+        for i in probe
+        if payment_journal.obligation_state(journal, i.obligation)
+        == payment_journal.STATE_DONE
+    }
+    unknown = {
+        i.obligation
+        for i in probe
+        if payment_journal.obligation_state(journal, i.obligation)
+        == payment_journal.STATE_INTENT
+    }
 
     if already_sent:
+        generation = mark_gen
+        items = build_pending_items(triggered, yesterday_str, generation)
+        result.pending_items = items
+        result.generation = generation
         log.info("consent_request_suppressed reason=unchanged_pending_set")
     else:
-        if prior_fp and prior_fp != fp:
+        if prior_fp:
             _clear_mark(path)
-        subject, body = build_request_body(items, superseded=bool(prior_fp and prior_fp != fp))
+        try:
+            generation = payment_journal.next_generation(jpath)
+        except payment_journal.JournalError as exc:
+            log.error(f"payment_journal_unwritable — payments held: {exc}")
+            result.pending_items = probe
+            return _block_all(probe, "payment_journal_unreadable")
+        items = build_pending_items(triggered, yesterday_str, generation)
+        result.pending_items = items
+        result.generation = generation
+        subject, body = build_request_body(
+            items,
+            superseded=bool(prior_fp),
+            settled=settled,
+            unknown=unknown,
+        )
         ok = send_request(subject, body)
         result.send_count = 1
         if not ok:
             log.error("consent_request_send_failed — payments remain blocked; retry next tick")
-            for item in items:
-                key = match_key(item)
-                result.states[key] = "blocked"
-                result.blocked.add(key)
-            result.reason_code = "consent_request_send_failed"
-            result.channel_ok = False
-            return result
+            return _block_all(items, "consent_request_send_failed")
         # Ordering invariant: persist mark ONLY after send_request returns True.
-        _save_mark(path, fp, time.time(), executed=[])
+        _save_mark(path, fp, time.time(), generation=generation)
 
     tokens = [i.token for i in items]
     sender_rejected = {"n": 0}
@@ -500,6 +628,6 @@ def _maybe_send_correction(
         body,
     )
     if sent:
-        _save_mark(dedupe_path, fp, time.time())
+        _save_mark(dedupe_path, fp, time.time(), generation=0)
         log.info("consent_reply_unrecognized — correction sent (deduped)")
     # Silence if send fails; items stay held.

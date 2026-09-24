@@ -90,7 +90,10 @@ payment executes; one deduped in-thread correction explains the accepted form.
 
 Non-operator senders (`attacker@evil.example`) are ignored; payments stay held.
 Stale-session tokens and ambiguous replies never execute payment.
-Earlier requests for a different pending set are **superseded**.
+Each marker is bound to the item's exact terms (payee, amount, currency,
+session) and to the current request: if any term changes, or the request is
+superseded, earlier approvals no longer match anything and a fresh request is
+sent. Earlier requests for a different pending set are **superseded**.
 
 Pending-set dedupe: one consent email per fingerprint; unchanged set logs
 `consent_request_suppressed reason=unchanged_pending_set` and still sweeps replies.
@@ -119,6 +122,8 @@ chmod +x install.sh
 | `consent_reply_read_failed` | Replies could not be checked; no payment executed; check `gws`/mailbox |
 | `consent_reply_sender_rejected` | Non-operator From:; payments held; do not expect a reply to the rejected sender |
 | `consent_reply_unrecognized` | Authenticated but unparseable line; hold item; correction mail explains form |
+| `payment_journal_unreadable` | The payment journal could not be read or written; every payment held; inspect `.monedula_payment_journal.json` before anything is paid |
+| `payment_outcome_unknown` | A transfer was attempted and its outcome never recorded (crash or rail error mid-transfer). Held and never retried automatically; check the rail, then resolve by hand |
 | `payment_profiles_stranded` | Fix the named payment_profile config; Notifier key `monedula:stranded:<fp>` |
 
 Consent-channel-failure alert key: `monedula:consent_channel_failed`
@@ -147,5 +152,16 @@ Logs never expose addresses, account identifiers, message bodies, or secrets.
 
 ## Idempotency
 
-Local consent mark: `.monedula_consent_email.json` — fingerprint + `sent_at` only.
+Local consent mark: `.monedula_consent_email.json` — fingerprint, request
+generation and `sent_at` only; cleared when a pending set ends.
+
+Payment journal: `.monedula_payment_journal.json` — durable and never cleared
+by the consent flow. Keyed on a hash of the obligation (handler, session,
+payee, amount, currency). Order per payment: record intent (fsynced) → execute
+→ record outcome. An obligation with a recorded outcome is never paid again;
+one with intent but no outcome is `payment_outcome_unknown` — held and
+escalated, never retried. The journal also issues the monotonically
+increasing request generation. Do not delete it: an unreadable journal holds
+every payment, and a missing one while a consent request is outstanding is
+treated the same way.
 Stranded Notifier dedupe: `monedula:stranded:<sorted keys fp>`.

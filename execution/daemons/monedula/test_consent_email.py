@@ -18,6 +18,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 import consent_email  # noqa: E402
+import payment_journal  # noqa: E402
 import monedula  # noqa: E402
 from lib.approval.email_channel import ReadRepliesOutcome
 from lib.approval.tokens import subject_marker, token_for
@@ -180,7 +181,7 @@ def test_pending_set_sends_exactly_one_send_request(monkeypatch, tmp_path):
     )
     assert len(sends) == 1
     _subj, body = sends[0]
-    tok = token_for("therapy", session=yesterday)
+    tok = _key_for(h, {}, yesterday)
     assert subject_marker(tok) in body
     assert "therapy" in body
     assert result.states[tok] == "awaiting_approval"
@@ -194,7 +195,7 @@ def test_fingerprint_persisted_only_after_send_true(monkeypatch, tmp_path):
         [(h, [{}])], "2026-09-22", state_path=state
     )
     assert not state.exists()
-    tok = token_for("therapy", session="2026-09-22")
+    tok = _key_for(h, {}, "2026-09-22")
     assert result.states[tok] == "blocked"
     assert result.channel_ok is False
 
@@ -296,7 +297,7 @@ def test_statusful_ok_empty_is_awaiting_approval_not_skipped(monkeypatch, tmp_pa
     result = consent_email.request_and_collect(
         [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json"
     )
-    tok = token_for("therapy", session="2026-09-22")
+    tok = _key_for(h, {}, "2026-09-22")
     assert result.states[tok] == "awaiting_approval"
     assert result.reason_code != "consent_reply_read_failed"
 
@@ -314,7 +315,7 @@ def test_transport_error_is_consent_reply_read_failed_no_execute(monkeypatch, tm
     result = consent_email.request_and_collect(
         [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json"
     )
-    tok = token_for("therapy", session="2026-09-22")
+    tok = _key_for(h, {}, "2026-09-22")
     assert result.reason_code == "consent_reply_read_failed"
     assert result.states[tok] == "blocked"
 
@@ -333,7 +334,7 @@ def test_non_operator_reply_ignored_payments_held(monkeypatch, tmp_path, caplog)
         result = consent_email.request_and_collect(
             [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json"
         )
-    tok = token_for("therapy", session="2026-09-22")
+    tok = _key_for(h, {}, "2026-09-22")
     assert result.states[tok] == "awaiting_approval"
     assert any("consent_reply_sender_rejected" in r.message for r in caplog.records)
     joined = " ".join(r.message for r in caplog.records)
@@ -461,8 +462,8 @@ def test_multi_item_unbound_bare_verb_is_unrecognized(monkeypatch, tmp_path):
 
 def test_stale_session_token_does_not_approve(monkeypatch, tmp_path):
     h = _Handler("therapy", label="Studio Example", amount=60)
-    stale = token_for("therapy", session="2026-01-01")
-    live = token_for("therapy", session="2026-09-22")
+    stale = _key_for(h, {}, "2026-01-01")
+    live = _key_for(h, {}, "2026-09-22")
     monkeypatch.setattr(consent_email, "send_request", lambda *a, **k: True)
     monkeypatch.setattr(
         consent_email,
@@ -630,7 +631,7 @@ def test_email_consent_approved_on_later_tick_executes_once(monkeypatch, tmp_pat
     h = _Handler("therapy", label="Studio Example", amount=60, calendar=True)
     match = {"trigger": "calendar", "handler": "therapy"}
     # Single match → session is date only (no event_id suffix).
-    tok = token_for("therapy", session=yesterday_str)
+    tok = _key_for(h, match, yesterday_str)
     h._match_fn = lambda events: [match] if events else []
 
     monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", "email")
@@ -777,3 +778,264 @@ def test_real_read_partial_failure_holds_every_payment(monkeypatch, tmp_path):
     assert result.states[key] == "blocked"
     assert result.approved == set()
     assert result.channel_ok is False
+
+
+# ── Payment safety: term-bound consent, durable replay guard, unknown outcome ─
+#
+# PR #1202 review blockers (security: consent_terms_unbound, payment_replay;
+# qa: crash-window double payment). Each drives ``monedula.main()`` across
+# ticks and asserts the external-effect call count, the only thing that
+# matters for a payment.
+
+
+class _ProcessDeath(BaseException):
+    """Stands in for the process being killed mid-tick (not an Exception)."""
+
+
+def _email_env(monkeypatch):
+    monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", "email")
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+    monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
+
+
+def _quiet_main(monkeypatch, notify_calls=None):
+    sink = notify_calls if notify_calls is not None else []
+    monkeypatch.setattr(
+        monedula,
+        "_notify",
+        lambda msg, priority="info", **k: sink.append((msg, priority, k)),
+    )
+    monkeypatch.setattr(monedula, "_emit_consent_escalation", lambda *a, **k: True)
+    monkeypatch.setattr(monedula, "_post_escalation_entity", lambda *a, **k: True)
+    monkeypatch.setattr(monedula, "_clear_notify_dedupe", lambda *a, **k: None)
+    return sink
+
+
+def _approve_all_read(seen: list):
+    """Operator who approves every marker they are asked about, every tick.
+
+    Replies accumulate in the inbox (as they do in Gmail), so each sweep sees
+    every approval ever sent — the replay condition.
+    """
+    inbox: list[str] = []
+
+    def fake_read(tokens, on_sender_rejected=None, **k):
+        seen.append(list(tokens))
+        for tok in tokens:
+            text = f"RE: x\nATTENDED {subject_marker(tok)}"
+            if text not in inbox:
+                inbox.append(text)
+        return ReadRepliesOutcome(kind="ok", texts=list(inbox))
+
+    return fake_read
+
+
+@pytest.mark.parametrize("change", ["amount", "payee"])
+def test_approval_reused_after_terms_change_does_not_pay(monkeypatch, tmp_path, change):
+    """An approval given for one amount/payee never pays a different one."""
+    h = _Handler("therapy", label="Studio Example", amount=60, calendar=True)
+    h.profile.wise_iban = "PAYEE-ORIGINAL"
+    match = {"trigger": "calendar", "handler": "therapy"}
+    h._match_fn = lambda events: [match]
+    _email_env(monkeypatch)
+    _install(monkeypatch, [h], tmp_path)
+    _quiet_main(monkeypatch)
+
+    sends: list = []
+    asked: list = []
+    replies: list[str] = []
+
+    def fake_send(subject, body, to=None):
+        sends.append((subject, body))
+        return True
+
+    def fake_read(tokens, on_sender_rejected=None, **k):
+        asked.append(list(tokens))
+        return ReadRepliesOutcome(kind="ok", texts=list(replies))
+
+    monkeypatch.setattr(consent_email, "send_request", fake_send)
+    monkeypatch.setattr(consent_email, "read_replies_with_status", fake_read)
+
+    # Tick 1 — request sent for EUR 60 to the original payee; no reply yet.
+    monedula.main()
+    assert h.execute_calls == []
+    original_token = asked[-1][0]
+
+    # Terms change before the operator's reply arrives.
+    if change == "amount":
+        h.profile.amount_eur = 70
+    else:
+        h.profile.wise_iban = "PAYEE-CHANGED"
+
+    # The operator approves the ORIGINAL request (the one they were shown).
+    replies.append(f"RE: {subject_marker(original_token)}\nATTENDED")
+
+    # Tick 2 — the old approval must not authorize the new terms.
+    monedula.main()
+    assert h.execute_calls == []
+    # Changed terms are a new decision: a fresh request goes out, carrying a
+    # new marker (the stale approval also draws a "no payment was made"
+    # correction, which is not a request).
+    requests = [s for s in sends if "correction" not in s[0]]
+    assert len(requests) == 2
+    assert subject_marker(original_token) not in requests[1][1]
+    assert asked[-1][0] != original_token
+
+
+def test_consumed_approval_replayed_after_pending_set_change_does_not_pay(
+    monkeypatch, tmp_path
+):
+    """A paid obligation is never paid again, whatever the pending set does."""
+    a = _Handler("therapy", label="Studio Example", amount=60, calendar=True)
+    b = _Handler("yoga", label="Yoga Studio", amount=40, calendar=True)
+    ma = {"trigger": "calendar", "handler": "therapy"}
+    mb = {"trigger": "calendar", "handler": "yoga"}
+    a._match_fn = lambda events: [ma]
+    b._match_fn = lambda events: [mb]
+    handlers = [a]
+    _email_env(monkeypatch)
+    _install(monkeypatch, handlers, tmp_path)
+    _quiet_main(monkeypatch)
+    monkeypatch.setattr(consent_email, "send_request", lambda *a_, **k: True)
+    seen: list = []
+    monkeypatch.setattr(
+        consent_email, "read_replies_with_status", _approve_all_read(seen)
+    )
+
+    # Tick 1 — A approved and paid.
+    monedula.main()
+    assert a.execute_calls == [ma]
+
+    # The pending set changes (B appears) while A's approval is still in the
+    # inbox and the operator approves everything they are asked again.
+    handlers.append(b)
+    monedula.main()
+    monedula.main()
+
+    assert a.execute_calls == [ma]  # never twice
+    assert b.execute_calls == [mb]
+
+
+def test_crash_after_execute_before_outcome_recorded_does_not_repay(
+    monkeypatch, tmp_path
+):
+    """Process death right after the transfer: restart holds as unknown."""
+    h = _Handler("therapy", label="Studio Example", amount=60, calendar=True)
+    match = {"trigger": "calendar", "handler": "therapy"}
+    h._match_fn = lambda events: [match]
+    _email_env(monkeypatch)
+    _install(monkeypatch, [h], tmp_path)
+    notify_calls = _quiet_main(monkeypatch)
+    monkeypatch.setattr(consent_email, "send_request", lambda *a_, **k: True)
+    seen: list = []
+    monkeypatch.setattr(
+        consent_email, "read_replies_with_status", _approve_all_read(seen)
+    )
+
+    real_execute = h.execute
+    die = {"armed": True}
+
+    def execute_then_die(m):
+        out = real_execute(m)  # the external effect happens
+        if die["armed"]:
+            die["armed"] = False
+            raise _ProcessDeath()  # killed before anything is recorded
+        return out
+
+    monkeypatch.setattr(h, "execute", execute_then_die)
+
+    with pytest.raises(_ProcessDeath):
+        monedula.main()
+    assert len(h.execute_calls) == 1
+
+    # Restart: same approval still in the inbox.
+    ok = monedula.main()
+    assert len(h.execute_calls) == 1  # not paid again
+    assert ok is False  # an unknown outcome is surfaced, not a clean run
+    unknown = [c for c in notify_calls if "unknown" in c[0].lower()]
+    assert unknown, notify_calls
+    assert unknown[0][1] == "blocker"
+
+    # And it stays held on later ticks — never retried automatically.
+    monedula.main()
+    assert len(h.execute_calls) == 1
+
+
+def test_email_consent_partial_execute_crash_does_not_repay_completed_match(
+    monkeypatch, tmp_path
+):
+    """Match 1 pays, match 2 raises: re-run pays neither again."""
+    h = _Handler("yoga", label="Yoga Studio", amount=60, calendar=True)
+    m1 = {"event_id": "sess-1"}
+    m2 = {"event_id": "sess-2"}
+    h._match_fn = lambda events: [m1, m2]
+    _email_env(monkeypatch)
+    _install(monkeypatch, [h], tmp_path)
+    notify_calls = _quiet_main(monkeypatch)
+    monkeypatch.setattr(consent_email, "send_request", lambda *a_, **k: True)
+    seen: list = []
+    monkeypatch.setattr(
+        consent_email, "read_replies_with_status", _approve_all_read(seen)
+    )
+
+    calls: list = []
+
+    def execute(m):
+        calls.append(m)
+        if m is m2:
+            raise RuntimeError("rail connection reset")
+        return {"status": "sent"}
+
+    monkeypatch.setattr(h, "execute", execute)
+
+    with pytest.raises(RuntimeError):
+        monedula.main()
+    assert calls == [m1, m2]
+
+    ok = monedula.main()
+    assert calls == [m1, m2]  # m1 settled, m2 unknown — neither re-submitted
+    assert ok is False
+    assert any("unknown" in c[0].lower() for c in notify_calls)
+
+
+def test_terms_changing_between_approval_and_execute_holds(monkeypatch, tmp_path):
+    """Approval read, then the payee changes before execute: nothing pays."""
+    h = _Handler("therapy", label="Studio Example", amount=60, calendar=True)
+    h.profile.wise_iban = "PAYEE-ORIGINAL"
+    match = {"trigger": "calendar", "handler": "therapy"}
+    h._match_fn = lambda events: [match]
+    _email_env(monkeypatch)
+    _install(monkeypatch, [h], tmp_path)
+    _quiet_main(monkeypatch)
+    monkeypatch.setattr(consent_email, "send_request", lambda *a_, **k: True)
+
+    def read_then_change(tokens, on_sender_rejected=None, **k):
+        text = f"RE: x\nATTENDED {subject_marker(tokens[0])}"
+        h.profile.wise_iban = "PAYEE-CHANGED"  # changes after the approval
+        return ReadRepliesOutcome(kind="ok", texts=[text])
+
+    monkeypatch.setattr(consent_email, "read_replies_with_status", read_then_change)
+    monedula.main()
+    assert h.execute_calls == []
+    # The outstanding request is dropped so the next tick re-asks.
+    assert not (tmp_path / "consent.json").exists()
+
+
+def test_unreadable_payment_journal_holds_every_payment(monkeypatch, tmp_path):
+    h = _Handler("therapy", label="Studio Example", amount=60, calendar=True)
+    match = {"trigger": "calendar", "handler": "therapy"}
+    h._match_fn = lambda events: [match]
+    _email_env(monkeypatch)
+    _install(monkeypatch, [h], tmp_path)
+    notify_calls = _quiet_main(monkeypatch)
+    monkeypatch.setattr(consent_email, "send_request", lambda *a_, **k: True)
+    seen: list = []
+    monkeypatch.setattr(
+        consent_email, "read_replies_with_status", _approve_all_read(seen)
+    )
+    (tmp_path / payment_journal.JOURNAL_NAME).write_text("{not json")
+
+    ok = monedula.main()
+    assert ok is False
+    assert h.execute_calls == []
+    assert any("payment_journal_unreadable" in c[0] for c in notify_calls)
