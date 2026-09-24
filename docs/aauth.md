@@ -45,11 +45,11 @@ All agent identities share one issuer (`iss = https://markmhendrickson.com`). Ea
 
 The repo currently maintains **two parallel keypair formats** for two contexts:
 
-1. **JWK format** (`.creds/aauth_agent_*.private.jwk`) — used by the Cursor IDE MCP proxy, consumed by the full RFC 9421 signer (`execution/scripts/aauth_signer.py`). Public keys publish to `markmhendrickson.com/.well-known/jwks.json`. ES256 P-256 only. **No provisioning script for this flavor exists on `main`** — it is not what `execution/scripts/aauth_provision_identity.py` (below) provisions.
+1. **JWK format** (`.creds/aauth_agent_*.private.jwk`) — used by the Cursor IDE MCP proxy, consumed by the full RFC 9421 signer (`execution/scripts/aauth_signer.py`). Public keys publish to `markmhendrickson.com/.well-known/jwks.json`. ES256 P-256 only. **No provisioning script for this flavor exists on `main`** — it is not what `execution/scripts/mint_daemon_keypair.py` (below) provisions.
 
-2. **PEM format** (`ateles-private/keys/<daemon>.json`, with `sub`, `key_id`, `algorithm`, and PEM-encoded private/public material) — used by some T3 daemons (e.g. `a2a_executor.py`, `a2a_gateway.py`) via `lib/daemon_runtime/aauth_signer.py`, which produces a lighter `X-AAuth-Token` JWT (not full RFC 9421).
+2. **PEM format** (`ateles-private/keys/<daemon>.json`, with `sub`, `key_id`, `algorithm`, and PEM-encoded private/public material) — used by some T3 daemons (e.g. `a2a_executor.py`, `a2a_gateway.py`) via `lib/daemon_runtime/aauth_signer.py`, which produces a lighter `X-AAuth-Token` JWT (not full RFC 9421). `docs/aauth/keys.md` calls this the "legacy" format, still supported but superseded by (3) below on next rotation.
 
-3. **JWK format, T3/T4 flavor** (`ateles-private/keys/<role>.jwk.json`) — used via `lib/daemon_runtime/aauth_httpsig.py`, a full RFC 9421 signer that matches Neotoma's `aauthVerify` wire format (verified end-to-end in `execution/scripts/verify_aauth_signer.py`). **Not yet published to JWKS** — only Neotoma can verify these today (via local key resolution or because the daemon talks to Neotoma over a trusted connection). Provisioned by `execution/scripts/aauth_provision_identity.py --role <role>` (see below).
+3. **JWK format, T3/T4 flavor (canonical)** (`ateles-private/keys/<role>.jwk.json`) — used via `lib/daemon_runtime/aauth_httpsig.py`, a full RFC 9421 signer that matches Neotoma's `aauthVerify` wire format (verified end-to-end in `execution/scripts/verify_aauth_signer.py`), and also loaded by `lib/daemon_runtime/neotoma_signed.py`'s `agent_identity()` for the dispatcher-signed gate-writeback path (see below). **Not yet published to JWKS** — only Neotoma can verify these today (via local key resolution or because the daemon talks to Neotoma over a trusted connection). Provisioned by `execution/scripts/mint_daemon_keypair.py --name <role>` (see below and `docs/aauth/keys.md`, the canonical doc for this format's layout and rotation).
 
 Unifying these formats and publishing all public keys to the same JWKS is on the to-do list below.
 
@@ -78,7 +78,7 @@ Apis dispatcher process itself, acting on the lens's behalf.
   **lens's own `sub`** explicitly (never the dispatcher's ambient identity, never the shared bearer) — and
   reads the write back to confirm it landed as claimed. `signed_request` resolves the lens's signing key
   via `agent_identity(lens_agent, sub=...)`, which loads `ateles-private/keys/<lens_agent>.jwk.json` — the
-  SAME path `aauth_provision_identity.py` (below) provisions. `sign_off` never falls back to the shared
+  SAME path `mint_daemon_keypair.py` (below) provisions. `sign_off` never falls back to the shared
   bearer on any failure (a missing key, a signing error, a non-2xx response): it returns
   `SignOffOutcome(ok=False, ...)` and the gate stays `pending` — the same fail-closed *outcome*
   `gate_writeback_identity_error` used to enforce, now produced at write time instead of launch time.
@@ -154,12 +154,12 @@ These are two distinct implementations for two distinct contexts:
 
 | File | Role |
 |---|---|
-| `execution/scripts/aauth_provision_identity.py` | Generates an ES256 P-256 keypair for one **T3/T4 role** and writes the private JWK to `ateles-private/keys/<role>.jwk.json` (mode 0600) — the flavor `lib/daemon_runtime/aauth_httpsig.py` consumes. Never prints the private key. Does **not** touch `.creds/`, `jwks.json`, or `aauth-agent.json` — those belong to the separate Cursor-proxy flavor, which has no provisioning script on `main` today. Run once per new agent role, or with `--force` to rotate. |
+| `execution/scripts/mint_daemon_keypair.py` | **Canonical** minting script for one T3/T4 role's ES256 P-256 keypair, written to `ateles-private/keys/<role>.jwk.json` (mode 0600, written that way from creation, no window at a looser mode) — the flavor `lib/daemon_runtime/aauth_httpsig.py` and `lib/daemon_runtime/neotoma_signed.py`'s `agent_identity()` both consume. Never prints the private scalar or public coordinates. Does **not** touch `.creds/`, `jwks.json`, or `aauth-agent.json` — those belong to the separate Cursor-proxy flavor, which has no provisioning script on `main` today. Refuses to overwrite an existing key unless `--force` is passed (rotation). Validates `--name` against path traversal, `\`, and NUL bytes. Full layout and rotation procedure: `docs/aauth/keys.md`. There is deliberately only ONE script that writes this format — see that file's module docstring for the "extend, don't parallel" rule this follows. |
 
 Usage:
 ```bash
 # Provision a new agent identity (or rotate with --force):
-python3 execution/scripts/aauth_provision_identity.py --role accipiter
+python3 execution/scripts/mint_daemon_keypair.py --name accipiter
 
 # Then, as the OPERATOR (own authenticated Neotoma session — not this script,
 # not an unattended agent), register the matching agent_grant:
@@ -405,7 +405,7 @@ Most T3/T4 roles already have a `ateles-private/keys/<role>.jwk.json` (the `aaut
 For a role that does not yet have one, mint with:
 
 ```bash
-python3 execution/scripts/aauth_provision_identity.py --role <role>
+python3 execution/scripts/mint_daemon_keypair.py --name <role>
 ```
 
 This writes directly to the format `lib/daemon_runtime/aauth_httpsig.py` already loads — no PEM/JWK
@@ -496,7 +496,7 @@ ateles/
 │   └── aauth_agent_cursor.private.jwk     ← JWK format, mode 600 (Cursor IDE only)
 ├── execution/
 │   ├── scripts/
-│   │   ├── aauth_provision_identity.py    ← mint a T3/T4 role's ateles-private/keys/<role>.jwk.json
+│   │   ├── mint_daemon_keypair.py         ← mint a T3/T4 role's ateles-private/keys/<role>.jwk.json (canonical)
 │   │   ├── aauth_signer.py                ← full RFC 9421 signer (Cursor proxy)
 │   │   ├── verify_aauth_signer.py         ← interop proof for lib/daemon_runtime/aauth_httpsig.py
 │   │   ├── mcp_identity_proxy.py          ← Cursor → Neotoma proxy with AAuth
