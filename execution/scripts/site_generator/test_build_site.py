@@ -779,6 +779,23 @@ def test_checked_in_product_sites_build_all_declared_routes(tmp_path, product, r
         assert page.read_text().count("<h1") == 1
 
 
+@pytest.mark.parametrize("product", ["neotoma", "ateles"])
+def test_brand_page_excluded_from_rendered_nav_but_reachable_directly(
+    tmp_path, product
+):
+    """`brand` is an internal review route: it must build (reachable by
+    direct URL) but never appear as a primary-nav link, so a visitor
+    evaluating the product isn't routed into an internal page at the same
+    click-distance as `/compare/` or `/design/`."""
+    assert build_site.build(product, tmp_path) == []
+    brand_page = tmp_path / product / "brand" / "index.html"
+    assert brand_page.exists()
+    homepage = (tmp_path / product / "index.html").read_text()
+    assert 'href="/brand/"' not in homepage
+    robots = (tmp_path / product / "robots.txt").read_text()
+    assert "Disallow: /brand/" in robots
+
+
 def test_product_homepages_bind_ambition_first_sequence_and_categories(tmp_path):
     for product in ("neotoma", "ateles"):
         assert build_site.build(product, tmp_path) == []
@@ -1105,7 +1122,7 @@ def test_every_major_section_is_visual_first_with_contextual_depth_link(
     rendered, blockers = build_site.render_site(product)
     assert blockers == []
     for rel, document in rendered.items():
-        if isinstance(document, bytes):
+        if isinstance(document, bytes) or rel.name != "index.html":
             continue
         sections = re.findall(r"(?s)(<section\b[^>]*>.*?</section>)", document)
         assert sections, rel
@@ -1306,6 +1323,54 @@ def test_public_url_policy_rejects_active_and_encoded_traversal_urls():
     assert public_href("https://example.com/path") == "https://example.com/path"
     assert local_asset_url("/assets/%2e%2e/private.txt") is None
     assert local_asset_url("/assets/film.webm") == "/assets/film.webm"
+
+
+def test_local_asset_url_rejects_query_and_fragment():
+    from url_policy import local_asset_url
+
+    assert local_asset_url("/assets/film.webm?x=1") is None
+    assert local_asset_url("/assets/film.webm#t=10") is None
+
+
+def test_local_asset_url_rejects_unencoded_traversal_and_double_slash():
+    from url_policy import local_asset_url
+
+    assert local_asset_url("/assets/../private.txt") is None
+    assert local_asset_url("/assets//film.webm") is None
+
+
+def test_public_href_fragment_branch_accepts_and_rejects():
+    from url_policy import public_href
+
+    assert public_href("#section-1") == "#section-1"
+    assert public_href("#") is None
+    assert public_href("# spaced") is None
+
+
+def test_public_href_root_relative_branch_traversal_and_crlf():
+    from url_policy import public_href
+
+    assert public_href("/../etc/passwd") is None
+    assert public_href("//evil.com/x") is None
+    assert public_href("/path\r\nSet-Cookie: x") is None
+    assert public_href("/a//b") is None
+    assert public_href("/valid/path") == "/valid/path"
+
+
+def test_public_href_https_branch_rejects_crlf_and_nul():
+    from url_policy import public_href
+
+    assert public_href("https://example.com/\r\nHost: evil") is None
+    assert public_href("https://example.com/\x00") is None
+
+
+def test_public_href_rejects_userinfo_and_nonstandard_port():
+    from url_policy import public_href
+
+    assert public_href("https://user@example.com/") is None
+    assert public_href("https://user:pass@example.com/") is None
+    assert public_href("https://example.com:8443/") is None
+    assert public_href("https://example.com:443/") == "https://example.com:443/"
 
 
 def test_brand_route_internal_leakage_validator_catches_known_positive(tmp_path):

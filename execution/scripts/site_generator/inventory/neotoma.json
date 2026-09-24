@@ -95,6 +95,7 @@
       "slug": "brand",
       "path": "/brand/",
       "nav_label": "Brand",
+      "nav_visibility": "hidden",
       "title": "Neotoma brand system — expression, assets, and production",
       "meta_description": "The approved and provisional copy, visual, cinematic, and asset system for Neotoma.",
       "template": "brand_system_viewer",
