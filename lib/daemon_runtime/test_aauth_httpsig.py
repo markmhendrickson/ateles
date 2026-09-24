@@ -26,6 +26,7 @@ from daemon_runtime.aauth_httpsig import (
     content_digest,
     jwk_thumbprint,
     load_ec_private_key_from_jwk,
+    load_http_sig_signer,
     public_part_of,
 )
 
@@ -170,3 +171,34 @@ def test_rejects_non_ec_jwk() -> None:
 
     with pytest.raises(AAuthSigningError):
         HttpSigSigner(private_jwk={"kty": "RSA", "n": "x", "e": "AQAB"}, sub="s", iss="s")
+
+
+def test_load_http_sig_signer_binds_existing_file_subject(tmp_path) -> None:
+    jwk = _valid_test_jwk()
+    path = tmp_path / "apis.jwk.json"
+    path.write_text(json.dumps(jwk))
+
+    signer = load_http_sig_signer(
+        path,
+        expected_sub="tester@ateles-swarm",
+        issuer="https://issuer.example",
+    )
+
+    assert signer.sub == "tester@ateles-swarm"
+    assert signer.iss == "https://issuer.example"
+    assert signer.thumbprint == jwk_thumbprint(public_part_of(jwk))
+    assert "d" not in signer.public_jwk
+
+
+def test_load_http_sig_signer_rejects_subject_substitution(tmp_path) -> None:
+    from daemon_runtime.aauth_httpsig import AAuthSigningError
+
+    path = tmp_path / "apis.jwk.json"
+    path.write_text(json.dumps(_valid_test_jwk()))
+
+    with pytest.raises(AAuthSigningError, match="subject"):
+        load_http_sig_signer(
+            path,
+            expected_sub="other@ateles-swarm",
+            issuer="https://issuer.example",
+        )

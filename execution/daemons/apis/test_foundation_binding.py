@@ -190,7 +190,7 @@ class TestSpecSectionPrompt:
         assert SENTINEL in prompt
         assert "<<<DESIGN_BASIS>>>" in prompt and "<<<END_DESIGN_BASIS>>>" in prompt
         assert "no design applies" in prompt
-        assert "gate_status.pm" in prompt  # the gate sign-off block survives
+        assert "GATE" in prompt  # the gate verdict block survives
 
     def test_arch_gets_kernel_and_the_check_of_the_stated_basis(
         self, root: Path
