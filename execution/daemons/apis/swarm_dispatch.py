@@ -4784,29 +4784,63 @@ class SwarmDispatcher:
             # spec incrementally (and re-running only replaces the marked block).
             await self._mirror_spec_to_issue(trigger, state)
 
-            # ateles#795 amended ADR, extended to the Phase-1 pm gate: the
-            # dispatcher — never the lens's own MCP session — makes the
-            # system-of-record gate write, SIGNED as the lens. Mirrors the
-            # PR-panel loop's per-lens `sign_off` call in
-            # `_run_pr_review_panel` exactly, narrowed to the ONE pre-impl
-            # gate the additive-spec pipeline itself clears (`pm` — ux/arch
-            # clear later via that same panel loop once a PR exists to
-            # review). Only when this section OWNS a gate (`section.lens`)
-            # and `sign_off_is_warranted` finds an explicit CLEAR verdict
-            # token in its stdout (Falco's CONFIRMED BLOCKING finding, PR
-            # #1181: `result.ok` alone says only that the process exited
-            # zero, and `body_has_blocking_findings("")` is False, so the
-            # old `result.ok and not body_has_blocking_findings(...)` check
-            # treated an empty or unparseable-but-successful run — and a
+            # ateles#795 amended ADR, extended to every Phase-1 gate this
+            # pipeline seats: the dispatcher — never the lens's own MCP
+            # session — makes the system-of-record gate write, SIGNED as the
+            # lens. Mirrors the PR-panel loop's per-lens `sign_off` call in
+            # `_handle_pr` exactly: any section whose lens OWNS a
+            # PRE_IMPL_GATES gate signs off here, not only `pm`.
+            #
+            # ateles#1220/#1223 (found 2026-09-24): the pm-only version of
+            # this block — introduced by 7b8880d0 to close the pm
+            # correct()-sink Falco flagged on #1181 — never wired ux/arch at
+            # all. That commit's own rationale said ux/arch "clear later via
+            # the PR review panel's existing sign_off call once a PR opens",
+            # which is false for two reasons live in production: (1) Lanius's
+            # own gate check (`_gates_green`, ateles#460) runs on the ISSUE
+            # itself, before any PR exists, so an issue whose workflow
+            # declares ux/arch can never hand off to build — #1220 logged
+            # exactly this ("gate_status still has ux, arch uncleared — not
+            # handing off to build") four minutes after pm signed; and (2)
+            # even once a PR does open, the PR panel's `_handle_pr` loop
+            # seats a lens and calls `sign_off` only when
+            # `gate_awaits_sign_off` finds a LIVE pending/unproven gate for
+            # it — a lens whose section here never ran at all (this pipeline
+            # is additive: ux/arch sections are conditional on
+            # `_selected_sections`) still needs THIS pipeline to be the one
+            # that clears its gate when it does run here. This was
+            # never-wired, not a regression: ux/arch sign-off never existed
+            # in the issue pipeline before 7b8880d0 either (`git log -p`
+            # shows no prior sign_off call site for the additive-spec
+            # pipeline).
+            #
+            # Whether THIS section owns a gate this pipeline clears: any
+            # section whose lens is one of PRE_IMPL_GATES (pm, ux, arch) —
+            # not only pm, exactly as `_handle_pr`'s per-lens loop signs
+            # whichever gate the seated lens owns. Unlike that PR-panel loop
+            # (which re-proves `signed_off` provenance across repeated
+            # rounds via `gate_awaits_sign_off`/`reprove_signed_off_gates`),
+            # this pipeline runs each section exactly once per issue-opened
+            # trigger, so it keeps the original pm behaviour of always
+            # attempting the sign-off for its own gate on a clear verdict —
+            # `sign_off` itself is documented to ALWAYS RE-SIGN an
+            # already-`signed_off` gate, so re-attempting costs nothing and
+            # re-proof is unnecessary here. `sign_off_is_warranted` finds an
+            # explicit CLEAR verdict token in the section's stdout (Falco's
+            # CONFIRMED BLOCKING finding, PR #1181: `result.ok` alone says
+            # only that the process exited zero, and a
             # `**BLOCKED**`/`**REQUEST_CHANGES**` verdict with no
-            # `[BLOCKING]`-marked line — as clean). A failed sign_off does
-            # not fail the pipeline: the review itself succeeded, so this is
-            # surfaced, never swallowed.
-            if section.lens == "pm" and result.ok:
+            # `[BLOCKING]`-marked line must not read as clean). A non-clear
+            # verdict (REQUEST_CHANGES / [BLOCKING] / unparseable) never
+            # reaches `sign_off` — it stays pending and is surfaced exactly
+            # as pm's is. A failed sign_off does not fail the pipeline: the
+            # review itself succeeded, so this is surfaced, never swallowed.
+            signs_gate = section.lens in PRE_IMPL_GATES
+            if signs_gate and result.ok:
                 if not sign_off_is_warranted(result.stdout, lens_agent=section.agent):
                     log.info(
-                        f"[{DAEMON_NAME}] {ref}: pm verdict is not an "
-                        "explicit clear (blocked/unparseable/blocking "
+                        f"[{DAEMON_NAME}] {ref}: {section.lens} verdict is "
+                        "not an explicit clear (blocked/unparseable/blocking "
                         "finding) — leaving gate pending, no sign_off "
                         "attempted"
                     )
@@ -4815,9 +4849,11 @@ class SwarmDispatcher:
                     ):
                         unreadable_verdicts.append(
                             (
-                                "pm",
+                                section.lens,
                                 section.agent,
-                                attribution_header(section.agent, "pm gate owner"),
+                                attribution_header(
+                                    section.agent, f"{section.lens} gate owner"
+                                ),
                                 describe_gate_verdict_position(
                                     result.stdout, lens_agent=section.agent
                                 ),
@@ -4842,7 +4878,7 @@ class SwarmDispatcher:
                     sign_off_outcome = await gate_store.sign_off(
                         trigger.repository,
                         trigger.number,
-                        "pm",
+                        section.lens,
                         section.agent,
                         issue_head,
                     )
@@ -4854,13 +4890,13 @@ class SwarmDispatcher:
                     else:
                         log.error(
                             f"[{DAEMON_NAME}] {ref}: sign_off FAILED for "
-                            f"gate pm lens {section.agent}: "
+                            f"gate {section.lens} lens {section.agent}: "
                             f"{sign_off_failure_class(sign_off_outcome.error)} "
                             f"(gate re-read as {sign_off_outcome.observed_state!r})"
                         )
                         failed_sign_offs.append(
                             (
-                                "pm",
+                                section.lens,
                                 section.agent,
                                 sign_off_outcome.error,
                                 sign_off_outcome.observed_state,
@@ -10255,6 +10291,41 @@ class SwarmDispatcher:
                 "pending pm gate deadlocks any PR that closes this issue, so "
                 "do not leave it blocked without saying why.\n\n"
                 + gate_verdict_instruction(section.agent, "pm gate owner")
+            )
+        elif section.lens in PRE_IMPL_GATES:
+            # ateles#1233: ux (Accipiter) and arch (Waxwing) own pre-impl
+            # gates too, and `_run_issue_spec_pipeline` signs their gate from
+            # their reply exactly as it signs pm's. But `lens_own_verdict`
+            # reads a verdict ONLY from the reply's first two lines, and until
+            # this block the ux/arch prompt never asked for one: it asked for
+            # a fenced spec section and nothing else. Their generated skills
+            # still say to `correct(gate_status...)` themselves, which the
+            # gate-owner deny now refuses, so the lens had no way left to
+            # record a verdict at all. On ateles#1221 both ran, wrote their
+            # sections, posted no verdict, and ux/arch stayed pending.
+            pm_gate_block = (
+                f"\n\nGATE: you own the `{section.lens}` pre-implementation "
+                "gate for this issue, and it is decided from YOUR reply. State "
+                "your verdict in ONE GitHub comment on the issue, in the "
+                "contract's format (attribution header, then the verdict "
+                "line), and repeat that header and verdict line at the very "
+                "START of your reply here, BEFORE the `<<<SPEC_SECTION>>>` "
+                f"fence: {GATE_VERDICT_POSITION_RULE}. The dispatcher — never "
+                "this session — records the system-of-record gate clearance, "
+                "signed with your own AAuth identity, after reading your "
+                "verdict. You have no durable write to make here; do not "
+                "call `correct` on `gate_status` or `current_owner`.\n"
+                f"- When the issue PASSES your `{section.lens}` review, the "
+                "verdict line is `**SIGNED_OFF**`, with NO `[BLOCKING]` marker "
+                "anywhere in the reply.\n"
+                "- Only when it GENUINELY FAILS, the verdict line is "
+                f"`**BLOCKED**`, with a `[BLOCKING] {section.lens}: <what is "
+                "missing>` line saying exactly what must change. A pending "
+                f"`{section.lens}` gate keeps this issue from reaching build, "
+                "so do not leave it blocked without saying why.\n\n"
+                + gate_verdict_instruction(
+                    section.agent, f"{section.lens} gate owner"
+                )
             )
 
         # Foundation binding (docs/foundation/conformance.md): the pm gate
