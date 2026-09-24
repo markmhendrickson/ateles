@@ -44,6 +44,21 @@ import httpx
 
 log = logging.getLogger("apis.issue_spec")
 
+# Idempotency-mismatch is Neotoma's signal that a payload was already stored
+# under this key with different content (see PostResult.error_code below).
+# It is the specific, actionable case for the create branch below: it means
+# the entity already exists — load() missed it — and the fix is to reload and
+# CORRECT, never to retry the same store (which would clobber every OTHER
+# agent's section field, since the create-branch payload only carries the ONE
+# section this call is writing).
+ERR_IDEMPOTENCY_MISMATCH = "ERR_IDEMPOTENCY_MISMATCH"
+
+# Cap on entities/query pages load() will walk looking for a match. Bounds a
+# pathological cursor loop (a server bug returning a cursor forever) while
+# comfortably covering real corpus sizes: 922 issue_spec entities today at
+# 500/page is 2 pages, so 40 pages is far beyond any real backlog.
+MAX_LOAD_PAGES = 40
+
 
 # ── Managed-marker constants ─────────────────────────────────────────────────
 # The mirror writes the assembled spec between these HTML comment markers in the
@@ -269,15 +284,33 @@ class IssueSpecStore:
     def __init__(self, base_url: str, token: str):
         self.base_url = base_url.rstrip("/")
         self.token = token
+        # Set by _post() after every call; see its docstring.
+        self.last_error: str | None = None
+        self.last_error_code: str | None = None
+        self.last_error_status: int | None = None
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
 
     async def _post(self, path: str, payload: dict) -> dict | None:
+        """POST to Neotoma. Returns the parsed JSON body, or None on failure.
+
+        On failure the status code and a truncated, redacted error body are
+        stashed on ``self.last_error`` / ``self.last_error_code`` /
+        ``self.last_error_status`` so a caller that needs to distinguish
+        failure REASONS (e.g. an idempotency-key collision vs. a transient
+        502) can — a bare "failed: <exception str>" log line was silently
+        losing the response body, which is the one place Neotoma states WHY a
+        400 happened (ateles#499).
+        """
+        self.last_error = None
+        self.last_error_code = None
+        self.last_error_status = None
         if not self.token:
             log.warning(
                 "[apis.issue_spec] NEOTOMA_BEARER_TOKEN unset — %s skipped", path
             )
+            self.last_error = "NEOTOMA_BEARER_TOKEN unset"
             return None
         try:
             async with httpx.AsyncClient(timeout=30) as client:
@@ -290,7 +323,27 @@ class IssueSpecStore:
                 if resp.content:
                     return resp.json()
                 return {}
+        except httpx.HTTPStatusError as exc:
+            # The response body is where Neotoma states the ACTUAL reason
+            # (error_code + message) — capture and log it, redacted/truncated,
+            # rather than the bare "400 Bad Request" the exception str gives.
+            self.last_error_status = exc.response.status_code
+            body_text = _redact(exc.response.text or "")[:500]
+            self.last_error = body_text
+            try:
+                body_json = exc.response.json()
+                self.last_error_code = body_json.get("error_code") or (
+                    body_json.get("error") or {}
+                ).get("code")
+            except Exception:  # noqa: BLE001 — body may not be JSON
+                pass
+            log.error(
+                "[apis.issue_spec] %s failed: HTTP %s %s",
+                path, exc.response.status_code, body_text,
+            )
+            return None
         except Exception as exc:  # noqa: BLE001 — best-effort, never crash
+            self.last_error = str(exc)
             log.error("[apis.issue_spec] %s failed: %s", path, exc)
             return None
 
@@ -300,6 +353,18 @@ class IssueSpecStore:
         Matches on the ``repo`` + ``issue_number`` fields of the ``issue_spec``
         snapshot.  A missing token, missing entity, or fetch error all degrade
         to a fresh empty ``SpecState`` so the caller can still create it.
+
+        PAGINATES through the full corpus (``cursor``) rather than reading one
+        page: with 900+ issue_spec entities in prod, a single un-paginated
+        page (previously a bare ``limit: 200``) silently missed any entity
+        sorting past it, reporting "no entity" for one that already exists.
+        upsert_section then took the CREATE branch with a content-bound,
+        per-issue-constant idempotency key that the entity's real first create
+        had already consumed — so Neotoma correctly refused the mismatched
+        replay with 400 ERR_IDEMPOTENCY_MISMATCH, forever, for that issue
+        (ateles#499; first observed 2026-08-09, e.g. markmhendrickson/ateles#403
+        and #1189). Paginating here is what makes the create branch's own
+        reload-on-failure fallback (below) actually able to find the entity.
         """
         state = SpecState(repo=repo, issue_number=issue_number, title=title)
         # NOTE: the prod Neotoma REST surface exposes the read as POST
@@ -309,37 +374,43 @@ class IssueSpecStore:
         # could abort the completion/auto-build handoff. /entities/query
         # returns the same {entities:[{snapshot:{...}}]} shape this parser
         # expects.
-        data = await self._post(
-            "entities/query",
-            {
+        cursor: str | None = None
+        for _page in range(MAX_LOAD_PAGES):
+            body: dict = {
                 "entity_type": self.ENTITY_TYPE,
-                "limit": 200,
+                "limit": 500,
                 "include_snapshots": True,
-            },
-        )
-        if not data:
-            return state
-        for entity in data.get("entities", []):
-            snap = entity.get("snapshot") or {}
-            if (
-                snap.get("repo") == repo
-                and str(snap.get("issue_number")) == str(issue_number)
-            ):
-                state.entity_id = entity.get("entity_id", "")
-                state.title = snap.get("title", title) or title
-                state.sections = {
-                    field: snap[field]
-                    for field in SECTION_FIELDS
-                    if snap.get(field)
-                }
-                seq = snap.get("sequence_state")
-                if isinstance(seq, list):
-                    state.sequence_state = [str(x) for x in seq]
-                elif isinstance(seq, str) and seq:
-                    # Tolerate a comma-joined string form from schema inference.
-                    state.sequence_state = [
-                        p.strip() for p in seq.split(",") if p.strip()
-                    ]
+            }
+            if cursor:
+                body["cursor"] = cursor
+            data = await self._post("entities/query", body)
+            if not data:
+                return state
+            for entity in data.get("entities", []):
+                snap = entity.get("snapshot") or {}
+                if (
+                    snap.get("repo") == repo
+                    and str(snap.get("issue_number")) == str(issue_number)
+                ):
+                    state.entity_id = entity.get("entity_id", "")
+                    state.title = snap.get("title", title) or title
+                    state.sections = {
+                        field: snap[field]
+                        for field in SECTION_FIELDS
+                        if snap.get(field)
+                    }
+                    seq = snap.get("sequence_state")
+                    if isinstance(seq, list):
+                        state.sequence_state = [str(x) for x in seq]
+                    elif isinstance(seq, str) and seq:
+                        # Tolerate a comma-joined string form from schema
+                        # inference.
+                        state.sequence_state = [
+                            p.strip() for p in seq.split(",") if p.strip()
+                        ]
+                    return state
+            cursor = data.get("next_cursor")
+            if not cursor:
                 break
         return state
 
@@ -382,28 +453,82 @@ class IssueSpecStore:
                 section.field: text,
                 "last_updated_at": now,
             }
+            # The idempotency key carries a timestamp component (unlike the
+            # old bare `issue-spec-create-{key}`), because a per-issue-CONSTANT
+            # key means every retry after the entity already exists reuses a
+            # key Neotoma already bound to different content, and it correctly
+            # 400s ERR_IDEMPOTENCY_MISMATCH forever rather than silently
+            # accepting a second, different payload under the same key
+            # (ateles#499). Uniqueness here does not risk a duplicate entity:
+            # identity is resolved server-side by the repo+issue_number
+            # composite rule, not by the idempotency key.
             result = await self._post(
                 "store",
                 {
                     "entities": [entity],
-                    "idempotency_key": f"issue-spec-create-{key}",
+                    "idempotency_key": f"issue-spec-create-{key}-{now}",
                 },
             )
             # Best-effort entity_id recovery so subsequent sections CORRECT.
             new_id = _extract_entity_id(result)
             if new_id:
                 state.entity_id = new_id
-            else:
-                # Fall back to a load so later sections can correct in place.
-                reloaded = await self.load(
-                    state.repo, state.issue_number, state.title
+                return state
+
+            mismatch = self.last_error_code == ERR_IDEMPOTENCY_MISMATCH
+            if mismatch:
+                # This specific code means the entity ALREADY EXISTS under a
+                # key some earlier attempt consumed with different content —
+                # i.e. load() missed a real entity. Reload (paginated) rather
+                # than retrying the store: retrying would clobber every OTHER
+                # agent's section field, since this payload carries only the
+                # ONE section being written right now.
+                log.warning(
+                    "[apis.issue_spec] %s: create collided with an existing "
+                    "entity (idempotency mismatch) — load() missed it; "
+                    "reloading to correct in place instead of overwriting",
+                    key,
                 )
-                if reloaded.entity_id:
-                    state.entity_id = reloaded.entity_id
-                    # Preserve the section we just wrote in the in-memory view.
-                    reloaded.sections = state.sections
-                    reloaded.sequence_state = state.sequence_state
-                    return reloaded
+
+            # Fall back to a load so later sections can correct in place.
+            # (Also the general-error recovery path for any other create
+            # failure — a transient 502, a timeout, etc.)
+            reloaded = await self.load(
+                state.repo, state.issue_number, state.title
+            )
+            if reloaded.entity_id:
+                state.entity_id = reloaded.entity_id
+                # Preserve the section we just wrote in the in-memory view.
+                reloaded.sections = state.sections
+                reloaded.sequence_state = state.sequence_state
+                return reloaded
+
+            # Reload also failed to recover an id: this section's write is
+            # LOST for this run (kept only in the in-memory `state` the
+            # caller holds, which does not survive the process). Surface it
+            # — once per issue, re-asserted if it keeps failing — rather than
+            # letting the bare ERROR line above be the only trace, which is
+            # exactly how ateles#499's 474 failures went unnoticed for six
+            # weeks.
+            reason = self.last_error_code or self.last_error_status or "unknown"
+            # Reuse unroutable_ledger's existing disk-backed dedup+reassert
+            # primitive rather than building a parallel one (CLAUDE.md:
+            # "extend the mechanism that already generalizes"). It already
+            # dedups an arbitrary string key with a reassert window and
+            # survives a daemon restart — note_undefined_role's shape (dedup
+            # on a bare key, no fingerprint) is exactly what a failing
+            # spec_key needs, and its persistence is exercised by
+            # test_unroutable_ledger.py already.
+            from unroutable_ledger import shared_ledger
+
+            shared_ledger().note_undefined_role(f"issue_spec_store:{key}")
+            log.error(
+                "[apis.issue_spec] %s section for %s LOST this run — create "
+                "failed (%s) and the reload fallback could not recover an "
+                "entity_id either; escalated once via the unroutable ledger "
+                "(re-asserted if it keeps failing)",
+                section.key, key, reason,
+            )
             return state
 
         # Existing entity: correct ONLY this section's field + sequence_state.
@@ -447,6 +572,22 @@ class IssueSpecStore:
                 ),
             },
         )
+
+
+def _redact(text: str) -> str:
+    """Strip anything Authorization-shaped before a response body hits a log.
+
+    Neotoma error bodies are JSON diagnostics (error_code/message/hint), not
+    secrets, but this is a cheap belt-and-braces against a future response
+    shape that echoes a header back (some frameworks do, on a 4xx).
+    """
+    import re
+
+    return re.sub(
+        r'(?i)(authorization["\']?\s*[:=]\s*["\']?)bearer\s+\S+',
+        r"\1<redacted>",
+        text,
+    )
 
 
 def _extract_entity_id(store_result: dict | None) -> str:

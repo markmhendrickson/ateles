@@ -277,3 +277,254 @@ def test_spec_key_format():
 
 def test_section_fields_match_sections():
     assert SECTION_FIELDS == tuple(s.field for s in SECTIONS)
+
+
+# ── ateles#499: load() must paginate, and a stale idempotency key must not ──
+# ── 400 forever once an entity it missed already exists ─────────────────────
+#
+# Reproduces the real prod failure (474 store-failed 400s since 2026-08-09,
+# e.g. markmhendrickson/ateles#403 and #1189): load() queried ONE page
+# (`limit: 200`, no cursor walk) of entities/query. With 900+ issue_spec
+# entities in prod, an issue whose entity sorted past page 1 was invisible to
+# load(), so upsert_section took the CREATE branch for an issue that already
+# HAD an entity. Neotoma's identity resolver recognizes the repo+issue_number
+# collision, but the create branch's idempotency key
+# (`issue-spec-create-{key}`, a bare per-issue CONSTANT) had already been
+# consumed by that issue's real first create with DIFFERENT content, so every
+# subsequent mis-detected retry got a permanent, actionable
+# ERR_IDEMPOTENCY_MISMATCH 400 — reproduced live against prod Neotoma with
+# `commit: false` during diagnosis (see the PR description).
+
+
+class _PaginatingStubStore(IssueSpecStore):
+    """Simulates a Neotoma corpus large enough to need cursor pagination.
+
+    ``page_size`` entities are returned per entities/query call; a cursor
+    threads through until the corpus is exhausted. This is the shape that
+    caught the real bug: the pre-fix load() read exactly one page and never
+    followed the cursor.
+    """
+
+    def __init__(self, page_size=2, extra_entities=0):
+        super().__init__(base_url="http://x", token="tok")
+        self.calls = []
+        self._server = {}
+        self._next_id = 1
+        self.page_size = page_size
+        # Pad the corpus with unrelated entities BEFORE the real one, so a
+        # non-paginating load() misses it (mirrors prod: 900+ issue_spec rows,
+        # sorted by entity_id, with any one issue's row potentially anywhere).
+        for i in range(extra_entities):
+            eid = f"ent_padding_{i:04d}"
+            self._server[("padding/repo", i)] = {
+                "entity_id": eid,
+                "snapshot": {"repo": "padding/repo", "issue_number": i},
+            }
+        # Idempotency-key ledger: key -> content signature of the payload that
+        # consumed it, so a mismatched replay can be detected like the real
+        # Neotoma /store endpoint does.
+        self._idempotency: dict[str, str] = {}
+
+    def _content_signature(self, payload: dict) -> str:
+        import json as _json
+
+        return _json.dumps(payload.get("entities"), sort_keys=True, default=str)
+
+    async def _post(self, path, payload):
+        self.calls.append((path, payload))
+        if path == "store":
+            idem_key = payload.get("idempotency_key")
+            sig = self._content_signature(payload)
+            if idem_key is not None:
+                prior_sig = self._idempotency.get(idem_key)
+                if prior_sig is not None and prior_sig != sig:
+                    # Real Neotoma behaviour: same key, different content ->
+                    # 400 ERR_IDEMPOTENCY_MISMATCH, and _post's real
+                    # implementation stashes the code on self.last_error_code.
+                    self.last_error_code = "ERR_IDEMPOTENCY_MISMATCH"
+                    self.last_error_status = 400
+                    self.last_error = (
+                        f'idempotency_key "{idem_key}" was already used with '
+                        "different content"
+                    )
+                    return None
+                self._idempotency[idem_key] = sig
+            ent = payload["entities"][0]
+            key = (ent["repo"], ent["issue_number"])
+            snap = {k: v for k, v in ent.items() if k != "entity_type"}
+            self.last_error_code = None
+            self.last_error_status = None
+            self.last_error = None
+            existing = self._server.get(key)
+            if existing is not None:
+                # Real Neotoma resolves identity by the composite
+                # repo+issue_number rule regardless of idempotency_key —
+                # confirmed live with commit:false against prod during
+                # diagnosis (action: "would_match_existing", entities_created:
+                # 0). A fresh idempotency key does NOT mint a duplicate
+                # entity; it MERGES the new fields into the existing row.
+                existing["snapshot"].update(snap)
+                return {"entities": [{"entity_id": existing["entity_id"]}]}
+            eid = f"ent_{self._next_id}"
+            self._next_id += 1
+            self._server[key] = {"entity_id": eid, "snapshot": snap}
+            return {"entities": [{"entity_id": eid}]}
+        if path == "correct":
+            for rec in self._server.values():
+                if rec["entity_id"] == payload["entity_id"]:
+                    rec["snapshot"][payload["field"]] = payload["value"]
+            self.last_error_code = None
+            self.last_error_status = None
+            self.last_error = None
+            return {}
+        if path == "entities/query":
+            cursor = payload.get("cursor")
+            all_items = list(self._server.values())
+            start = int(cursor) if cursor else 0
+            page = all_items[start : start + self.page_size]
+            next_start = start + self.page_size
+            resp = {
+                "entities": [
+                    {"entity_id": r["entity_id"], "snapshot": r["snapshot"]}
+                    for r in page
+                ]
+            }
+            if next_start < len(all_items):
+                resp["next_cursor"] = str(next_start)
+            self.last_error_code = None
+            self.last_error_status = None
+            self.last_error = None
+            return resp
+        return {}
+
+
+def test_load_paginates_past_the_first_page_to_find_a_later_entity():
+    """RED on the pre-fix load(): a match sorting past page 1 must still be found.
+
+    5 padding rows + page_size=2 forces 3+ pages before the real entity is
+    reached. The pre-fix load() called entities/query exactly once and never
+    followed `next_cursor`, so it returned an empty SpecState here.
+    """
+    store = _PaginatingStubStore(page_size=2, extra_entities=5)
+    state = asyncio.run(
+        store.upsert_section(
+            SpecState(repo="owner/repo", issue_number=1189, title="T"),
+            _section("pm"),
+            "PM scope",
+        )
+    )
+    assert state.entity_id, "entity should have been created"
+
+    reloaded = asyncio.run(store.load("owner/repo", 1189, "T"))
+    assert reloaded.entity_id == state.entity_id, (
+        "load() must paginate through entities/query (following next_cursor) "
+        "to find an entity that sorts past the first page — a single-page "
+        "read is exactly the ateles#499 defect"
+    )
+    assert reloaded.sections.get("pm_section") == "PM scope"
+
+    # The paginating stub must actually have been asked for more than one
+    # page — otherwise this test would pass vacuously without exercising the
+    # fix at all (a test that cannot fail on the thing it watches is
+    # decoration).
+    query_calls = [c for c in store.calls if c[0] == "entities/query"]
+    assert len(query_calls) >= 3, (
+        "expected load() to walk multiple pages via cursor; got "
+        f"{len(query_calls)} entities/query call(s)"
+    )
+
+
+def test_missed_entity_does_not_400_forever_on_stale_idempotency_key():
+    """RED on pre-fix upsert_section: a second dispatch for the SAME issue
+    after load() (transiently) missed the entity must not permanently fail.
+
+    Simulates the real failure sequence: pm section creates the entity
+    (consuming idempotency key K with content C1); a later run's load() fails
+    to see it (here: because the corpus paginated past it and the stub's
+    server dict was queried with a stale/short page — modeled directly by
+    forcing entity_id back to "" to simulate a load() miss) and eng's
+    upsert_section takes the CREATE branch again, reusing THE SAME
+    per-issue-constant key with DIFFERENT content (C2, the eng section text).
+    Pre-fix: the create branch always sent `issue-spec-create-{key}` with no
+    variance, so C1 != C2 under the same key -> permanent
+    ERR_IDEMPOTENCY_MISMATCH, and pre-fix's reload fallback used the SAME
+    un-paginated load() that missed the entity in the first place, so it never
+    recovered — the eng section is silently lost forever.
+    """
+    store = _PaginatingStubStore(page_size=500, extra_entities=0)
+    state = asyncio.run(
+        store.upsert_section(
+            SpecState(repo="owner/repo", issue_number=1189, title="T"),
+            _section("pm"),
+            "PM scope",
+        )
+    )
+    real_entity_id = state.entity_id
+    assert real_entity_id
+
+    # Simulate a subsequent dispatch whose load() missed the already-created
+    # entity (the ateles#499 scenario) by starting a FRESH SpecState with no
+    # entity_id, as load() would hand back on a miss.
+    fresh_state = SpecState(repo="owner/repo", issue_number=1189, title="T")
+    fresh_state = asyncio.run(
+        store.upsert_section(fresh_state, _section("eng"), "ENG plan")
+    )
+
+    assert fresh_state.entity_id == real_entity_id, (
+        "after a create collides on a stale idempotency key, upsert_section "
+        "must recover the EXISTING entity_id (via a paginated reload) rather "
+        "than permanently losing the section — this is the exact shape of "
+        "the 474 store-failed 400s in ateles#499"
+    )
+    # The pm section written by the first call must survive untouched — the
+    # recovery path must never overwrite a sibling section.
+    server_snap = store._server[("owner/repo", 1189)]["snapshot"]
+    assert server_snap.get("pm_section") == "PM scope"
+    assert server_snap.get("eng_section") == "ENG plan"
+
+
+def test_post_captures_status_and_error_code_on_http_error(monkeypatch):
+    """RED on pre-fix _post: the response body (status + error_code) that
+    Neotoma sends on a 400 was discarded — only the bare exception string
+    ("400 Bad Request") reached the log, per ateles#499's own description
+    ("store failures logged without a reason").
+    """
+    import httpx as httpx_mod
+
+    class _FakeResponse:
+        status_code = 400
+        text = '{"error_code": "ERR_IDEMPOTENCY_MISMATCH", "message": "boom"}'
+
+        def json(self):
+            return {"error_code": "ERR_IDEMPOTENCY_MISMATCH", "message": "boom"}
+
+        def raise_for_status(self):
+            raise httpx_mod.HTTPStatusError(
+                "400 Bad Request", request=None, response=self
+            )
+
+        @property
+        def content(self):
+            return self.text.encode()
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            return _FakeResponse()
+
+    monkeypatch.setattr(httpx_mod, "AsyncClient", lambda **k: _FakeClient())
+
+    store = IssueSpecStore(base_url="http://x", token="tok")
+    result = asyncio.run(store._post("store", {"entities": [{}]}))
+    assert result is None
+    assert store.last_error_status == 400
+    assert store.last_error_code == "ERR_IDEMPOTENCY_MISMATCH", (
+        "the error_code from the response BODY must be captured, not just "
+        "the bare '400 Bad Request' exception string"
+    )
+    assert store.last_error and "boom" in store.last_error
