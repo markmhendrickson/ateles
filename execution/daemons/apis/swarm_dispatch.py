@@ -704,7 +704,9 @@ def gate_verdict_unreadable_marker(gate: str, head: str) -> str:
 # ateles#1181: outcomes of the one follow-up a gate-owning lens gets when its
 # reply is refused for its format only. `cleared` is the only outcome that
 # signs; `blocked` and `not_clear` are readable non-passing verdicts and post
-# nothing further; the rest post the unreadable-verdict notice.
+# nothing further; the rest post the unreadable-verdict notice. `not_eligible`
+# covers a first reply that states no clear verdict to restate
+# (`misplaced_clear_verdicts`): it never gets a follow-up.
 GATE_RETRY_CLEARED = "cleared"
 GATE_RETRY_BLOCKED = "blocked"
 GATE_RETRY_NOT_CLEAR = "not_clear"
@@ -712,8 +714,16 @@ GATE_RETRY_UNREADABLE = "unreadable"
 GATE_RETRY_FAILED = "failed"
 GATE_RETRY_ALREADY_USED = "already_retried"
 GATE_RETRY_NOT_ELIGIBLE = "not_eligible"
+# The follow-up's clear verdict is not one the first reply stated.
+GATE_RETRY_DISAGREED = "disagreed"
 GATE_RETRY_NOTICE_OUTCOMES = frozenset(
-    {GATE_RETRY_UNREADABLE, GATE_RETRY_FAILED, GATE_RETRY_ALREADY_USED}
+    {
+        GATE_RETRY_NOT_ELIGIBLE,
+        GATE_RETRY_UNREADABLE,
+        GATE_RETRY_FAILED,
+        GATE_RETRY_ALREADY_USED,
+        GATE_RETRY_DISAGREED,
+    }
 )
 # Names the follow-up prompt, so a log reader (and a test double) can tell it
 # from the review itself.
@@ -1093,6 +1103,46 @@ def gate_verdict_format_rejected(stdout: str | None, *, lens_agent: str) -> bool
     if output_has_blocking_verdict(stdout):
         return False
     return not body_has_blocking_findings(stdout)
+
+
+def misplaced_clear_verdicts(stdout: str | None, *, lens_agent: str) -> frozenset[str]:
+    """The clear verdicts a format-refused reply ALREADY states, or nothing.
+
+    ateles#1181, review of PR #1228 at e49692e0: the one follow-up
+    (`_retry_gate_verdict_format`) is a fresh run with no memory, so it may
+    only ask a lens to RESTATE a verdict it already gave, never to form one.
+    Returns the lower-cased clear tokens (`signed_off`, `approve`) the reply
+    carries in the contract's bold form (`_REVIEW_VERDICT`, the verdict
+    vocabulary's own matcher: `**SIGNED_OFF**`, `**APPROVE**`), and an empty
+    set, meaning "no follow-up", unless ALL of these hold:
+
+      - the reply is refused for format only (`gate_verdict_format_rejected`:
+        no verdict at the fixed position, no blocking token, no
+        `[BLOCKING]` line);
+      - it carries at least one bold verdict token, and every bold verdict
+        token in it is a clear one (a `**COMMENT**` beside a
+        `**SIGNED_OFF**` is ambiguous, so it gets none);
+      - it carries at most one attribution header, and any header names this
+        lens (a quoted review by another agent is not this lens's verdict).
+
+    Strict on purpose: `**arch gate: SIGNED_OFF**` is not the bold token, so
+    a reply that only says that (PR #1173's recorded arch reply) gets the
+    notice, not a follow-up.
+    """
+    if not gate_verdict_format_rejected(stdout, lens_agent=lens_agent):
+        return frozenset()
+    text = _normalize_for_blocking_scan(stdout or "")
+    tokens = frozenset(tok.lower() for tok in _REVIEW_VERDICT.findall(text))
+    if not tokens or not tokens <= SIGN_OFF_CLEAR_VERDICTS:
+        return frozenset()
+    if text.count(_HEADER_EMOJI) > 1:
+        return frozenset()
+    want = (lens_agent or "").strip().lower()
+    for line in text.splitlines():
+        header = _OWN_HEADER_RE.match(line.strip())
+        if header and header.group("name").strip().lower() != want:
+            return frozenset()
+    return tokens
 
 
 _PLAIN_REVIEW_LINE_RE = re.compile(r"^review:[a-z0-9_-]+$", re.I)
@@ -1978,8 +2028,10 @@ def gate_verdict_retry_prompt(
     `--print` without capturing a session id, codex runs `--ephemeral`), so
     this is a fresh run. It carries the lens's OWN first reply, the stdout the
     dispatcher already holds, never the posted GitHub comment, and asks for
-    two lines only. The reply it produces is judged by the unchanged
-    `sign_off_is_warranted`.
+    two lines only: the header, and the verdict the quoted reply ALREADY
+    states, or `**BLOCKED**` if it states none. The reply it produces is
+    judged by the unchanged `sign_off_is_warranted`, and must agree with the
+    first reply (`_retry_gate_verdict_format`).
     """
     return (
         f"Invoke the {agent} agent per your appended system prompt.\n\n"
@@ -1997,9 +2049,11 @@ def gate_verdict_retry_prompt(
         "----- END YOUR PREVIOUS REPLY -----\n\n"
         "Reply with exactly two lines and nothing else, before or after:\n"
         f"line 1: {header}\n"
-        "line 2: your verdict for the review you just posted, as one bold "
-        "token: `**SIGNED_OFF**` or `**APPROVE**` if it passes your gate, "
-        "`**BLOCKED**` or `**REQUEST_CHANGES**` if it does not.\n"
+        "line 2: the verdict your quoted reply already states, restated as "
+        "one bold token exactly as it appears there (`**SIGNED_OFF**` or "
+        "`**APPROVE**`). Do not form a new verdict. If the quoted reply does "
+        "not state a verdict, or you are not sure which it states, line 2 is "
+        "`**BLOCKED**`.\n"
         "Do not add a marker, a summary, a link, or any other line."
     )
 
@@ -11663,12 +11717,27 @@ class SwarmDispatcher:
           - a first reply with any blocking verdict or finding is not
             eligible, so a genuine REQUEST_CHANGES/BLOCKED can never be
             re-asked into a clear;
+          - rule 1: a first reply that states no clear verdict in the bold
+            vocabulary form is not eligible either (`misplaced_clear_verdicts`),
+            so the follow-up only ever RESTATES a verdict, never creates one;
+          - rule 2: the follow-up clears only when its verdict is one of the
+            clear tokens the first reply stated; anything else is
+            `disagreed`;
           - at most one follow-up per lens per head (`_gate_format_retries`).
 
         Returns one of the `GATE_RETRY_*` outcomes and logs it. Never raises.
         """
         ref = f"{t.repository}#{t.number}"
-        if not gate_verdict_format_rejected(first_reply, lens_agent=lens.agent):
+        # Rule 1: only a MISPLACED verdict is re-asked. A reply that states no
+        # clear verdict (a bare `Posted: <url>`, a summary) goes straight to
+        # the notice: a memoryless follow-up would have to guess.
+        stated = misplaced_clear_verdicts(first_reply, lens_agent=lens.agent)
+        if not stated:
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: {lens.lens} reply states no clear "
+                f"verdict to restate — no follow-up; outcome "
+                f"{GATE_RETRY_NOT_ELIGIBLE}"
+            )
             return GATE_RETRY_NOT_ELIGIBLE
         key = f"{ref}@{head or 'unknown'}:{lens.gate}"
         retried = getattr(self, "_gate_format_retries", None)
@@ -11723,7 +11792,12 @@ class SwarmDispatcher:
         ):
             outcome = GATE_RETRY_BLOCKED
         elif sign_off_is_warranted(second, lens_agent=lens.agent):
-            outcome = GATE_RETRY_CLEARED
+            # Rule 2: the restated verdict must be one the first reply stated.
+            # Strict: `**APPROVE**` restated as `**SIGNED_OFF**` disagrees.
+            restated = lens_own_verdict(second, lens_agent=lens.agent)
+            outcome = (
+                GATE_RETRY_CLEARED if restated in stated else GATE_RETRY_DISAGREED
+            )
         elif gate_verdict_format_rejected(second, lens_agent=lens.agent):
             outcome = GATE_RETRY_UNREADABLE
         else:
