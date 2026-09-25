@@ -150,35 +150,77 @@ conversation.
 # this server. They are not the swarm's governing rules, which live on the
 # record as `agent_policy` rows and change without a deploy.
 #
-# Phase E2's exit gate requires a rule written to its authoritative type to be
-# observed in an agent's resolved context on BOTH transports: a dispatched
-# invocation, and a session resumed past a compaction boundary. The dispatch
-# side is `AgentLoader.render_policy_prompt` (ateles#1118). THIS is the session
-# side, and the `instructions` block is the channel the plan names — the only
-# one clearing both constraints:
+# CORRECTED 2026-09-25 (ateles#1243, ateles#1254): the design below shipped
+# under PR #1184 on the belief that MCP `instructions` was the channel with
+# the most room. Measured evidence says the opposite:
 #
-#   * a SessionStart hook is SKIPPED at launch (including --continue/--resume)
-#     and caps at 10,000 characters;
-#   * CLAUDE.md is re-injected from disk, but WHICH disk is undetermined —
-#     220 copies in 26 versions were measured on this machine (ateles#1124);
-#   * MCP `instructions` has no documented cap and is re-attached at EVERY
-#     compaction from the LIVE connection, so a server unreachable at startup
-#     recovers at the next boundary.
+#   * MCP `instructions` is capped at roughly 2,048 characters ACROSS ALL
+#     CONNECTED SERVERS COMBINED, and the client truncates it SILENTLY. A
+#     local Claude Code log reads `Server instructions truncated from 4989 to
+#     2048 chars`; see also anthropics/claude-code#43474. This is real but
+#     undocumented — it was not "no cap," it was an unmeasured one.
+#   * The rendered rule corpus on `main` measured 17,996 characters — about
+#     9x the shared budget — so nearly all of it was silently dropped before
+#     ever reaching a session. What arrived was whatever survived truncation,
+#     not the rules.
+#   * "A SessionStart hook is SKIPPED at launch (including --continue/
+#     --resume)" was FALSE: a resumed session received both
+#     `SessionStart:resume` and `SessionStart:compact` hook output. Hooks do
+#     cap below their full size — a 16.3 KB hook output was replaced with a
+#     file pointer plus a 2 KB preview (ateles#1254) — but the exact
+#     threshold is unmeasured, and it is a per-hook budget, not "skipped."
 #
-# Reuses the dispatch renderer rather than reimplementing the resolve
-# (CLAUDE.md: extend the mechanism that already generalizes). One resolve, one
-# scoping predicate (`policy_binds_agent`), two transports.
+# So this field is no longer where the rule corpus is delivered. It carries
+# only the static operating rules above plus a short pointer: standing rules
+# live in Neotoma as `agent_policy` entities (each with an `applies_when`
+# trigger) and should be retrieved from Neotoma before acting in a situation
+# they cover. Real delivery of the corpus is moving to a SessionStart-hook-
+# injected `applies_when` index — separate work, tracked under ateles#1254 —
+# sized to that channel's own (unmeasured but real) budget instead of this
+# one's ~2,048-character shared ceiling.
+#
+# The live resolve and `policy_binds_agent` scoping predicate stay in place
+# below: `AgentLoader.render_policy_prompt` is still the dispatch-side
+# renderer (ateles#1118) and other callers still use it. This function now
+# only measures its output against a small fixed budget rather than
+# forwarding it verbatim.
 SESSION_PRINCIPAL = os.environ.get("ATELES_SESSION_PRINCIPAL", "ateles@ateles-swarm")
+
+# Pointer sentence replacing the rendered rule corpus. Standing rules are
+# retrieved from Neotoma on demand rather than pushed through this channel.
+RULE_INDEX_POINTER = (
+    "\n\nStanding rules live in Neotoma as `agent_policy` entities, each with "
+    "an `applies_when` trigger condition. Retrieve them from Neotoma before "
+    "acting in a situation one covers."
+)
+
+# Total budget for the rendered `instructions` field, measured in characters.
+# Target ~1,200 to leave headroom under the ~2,048-character cap MCP clients
+# apply across ALL connected servers combined (ateles#1243) — this server is
+# never the only one connected.
+INSTRUCTIONS_BUDGET_CHARS = 1200
 
 
 def render_server_instructions(principal: str = "") -> str:
-    """Static operating rules, plus the live rules bound to `principal`.
+    """Static operating rules, plus a pointer to the live rule record.
 
-    Fail-SOFT by design, and the asymmetry is deliberate: an unreachable or
-    empty record must not strip the static rules a session needs to use this
-    server at all. But it must not pass SILENTLY either — the loader logs the
-    unpopulated-scoping-field case loudly (ateles#1118), and a resolve that
-    raises is logged here. Absence of rules is reported, never inferred.
+    Fail-SOFT by design: an unreachable `agent_policy` resolve must not strip
+    the static rules a session needs to use this server at all. It must not
+    pass SILENTLY either — a resolve that raises is logged here, and the
+    pointer sentence itself is what tells the session where the real rules
+    live, since the corpus is no longer rendered inline (ateles#1243).
+
+    The resolve below is a reachability probe ONLY, kept as a monitoring
+    signal: its result — success, no rows, or exception — never affects the
+    string this function returns. Both the success path and the `except`
+    path fall through to the same `SERVER_INSTRUCTIONS + RULE_INDEX_POINTER`
+    (or the budget fallback). Nothing here checks that the resolved record is
+    bound to this principal, or even that it returned any rows — only that
+    the call did not raise, which is logged on failure and otherwise
+    discarded. That is deliberate: the whole point of this fix is that the
+    corpus does not fit the channel, so nothing here should re-introduce a
+    path where its TEXT could reach the instructions field and grow past the
+    budget again.
     """
     sub = principal or SESSION_PRINCIPAL
     try:
@@ -186,25 +228,35 @@ def render_server_instructions(principal: str = "") -> str:
             sys.path.insert(0, str(_REPO_ROOT))
         from lib.daemon_runtime.agent_loader import AgentLoader
 
-        block = AgentLoader(sub.split("@")[0]).render_policy_prompt()
+        # Reachability probe only — kept as a monitoring signal (logged on
+        # failure below). Its return value is intentionally discarded and
+        # never gates or feeds the served string; do not delete this as
+        # "dead code" without also removing the log line it feeds.
+        AgentLoader(sub.split("@")[0]).render_policy_prompt()
     except Exception as exc:  # noqa: BLE001 — never block the server on this
         log.error(
             "[ateles-mcp] could not resolve agent_policy for %r: %s — serving "
-            "the static operating rules WITHOUT the swarm's governing rules. "
-            "Sessions will not see rules written to the record.",
+            "the static operating rules and pointer without confirming the "
+            "live record is reachable.",
             sub,
             exc,
         )
-        return SERVER_INSTRUCTIONS
-    if not block:
+
+    rendered = SERVER_INSTRUCTIONS + RULE_INDEX_POINTER
+    if len(rendered) > INSTRUCTIONS_BUDGET_CHARS:
+        # Must never happen with the fixed static text above, but a future
+        # edit to SERVER_INSTRUCTIONS or the pointer could push this over —
+        # fail loudly rather than let the MCP client silently truncate
+        # mid-rule the way ateles#1243 documented.
         log.warning(
-            "[ateles-mcp] no agent_policy rows bind %r — serving static rules "
-            "only. If rules exist on the record, check `scope` and `agent_sub` "
-            "(docs/foundation/data_model.md).",
-            sub,
+            "[ateles-mcp] rendered instructions (%d chars) exceed the "
+            "%d-char budget — serving the static rules alone rather than "
+            "risk client-side truncation.",
+            len(rendered),
+            INSTRUCTIONS_BUDGET_CHARS,
         )
         return SERVER_INSTRUCTIONS
-    return SERVER_INSTRUCTIONS + block
+    return rendered
 
 
 # ── Neotoma HTTP helpers ─────────────────────────────────────────────────────
