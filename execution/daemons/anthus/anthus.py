@@ -524,9 +524,19 @@ async def _fetch_comments(snap: dict) -> list:
 async def _handle_escalation(event: NeotomaEvent) -> None:
     """Surface escalation entities to Ateles via Notifier."""
     status = (event.snapshot.get("status") or "").lower()
-    dedupe_key = f"escalation:{event.entity_id}"
     if status in ("resolved", "closed"):
-        _notifier.clear_dedupe(dedupe_key)
+        # dedupe scope: per-entity + priority (severity upgrade = new key).
+        # Clear BOTH priority keys on resolve: an escalation observed at
+        # OPERATOR_DECISION and later upgraded to BLOCKER on the same entity
+        # (ateles#1216) may have marked either or both keys, and clearing
+        # only one would leave a later reopen at the uncleared priority
+        # silently suppressed.
+        _notifier.clear_dedupe(  # scope: per-entity + priority
+            f"escalation:{event.entity_id}:{Priority.OPERATOR_DECISION.value}"
+        )
+        _notifier.clear_dedupe(  # scope: per-entity + priority
+            f"escalation:{event.entity_id}:{Priority.BLOCKER.value}"
+        )
         return
 
     severity = event.snapshot.get("severity", "unknown")
@@ -538,6 +548,13 @@ async def _handle_escalation(event: NeotomaEvent) -> None:
 
     text = summary or title or reason or linked_task
     priority = Priority.BLOCKER if blocking else Priority.OPERATOR_DECISION
+    # dedupe scope: per-entity + priority. Composing priority INTO the key
+    # (rather than deduping on entity id alone) is the ateles#1216 fix: an
+    # escalation that goes out at OPERATOR_DECISION and is later raised to
+    # BLOCKER on the same entity is a distinct key, so the upgrade is
+    # delivered once instead of being suppressed as a repeat of the lower
+    # priority notice.
+    dedupe_key = f"escalation:{event.entity_id}:{priority.value}"
     email_eligible = bool(text)
     if not text:
         log.warning(
@@ -556,7 +573,7 @@ async def _handle_escalation(event: NeotomaEvent) -> None:
         f"Escalation [{severity}]: {text}",
         priority=priority,
         handler=DAEMON_NAME,
-        dedupe_key=dedupe_key,
+        dedupe_key=dedupe_key,  # scope: per-entity + priority
         email_eligible=email_eligible,
     )
 

@@ -90,7 +90,7 @@ def _notify(
             message,
             priority=p,
             handler="monedula",
-            dedupe_key=dedupe_key,
+            dedupe_key=dedupe_key,  # scope: caller-determined (pass-through)
             email_eligible=email_eligible,
         )
     except Exception:
@@ -102,11 +102,12 @@ def _clear_notify_dedupe(dedupe_key: str) -> None:
     if _notifier is None:
         return
     try:
-        _notifier.clear_dedupe(dedupe_key)
+        _notifier.clear_dedupe(dedupe_key)  # scope: caller-determined (pass-through)
     except Exception:
         pass
 
 
+# dedupe scope: global (daemon-wide condition, not per-entity/PR/head).
 # Stable dedupe key for the consent-channel-timeout alert (ateles#1127). Must
 # NOT vary per tick — no timestamp, no streak count, no pending-handler list —
 # or it defeats the dedupe the same way a changing message would. Scoped to
@@ -114,6 +115,7 @@ def _clear_notify_dedupe(dedupe_key: str) -> None:
 # the message body and in the escalation entity, just not in the key.
 _CONSENT_CHANNEL_DEDUPE_KEY = "monedula:consent_channel_failed"
 
+# dedupe scope: global (daemon-wide condition, not per-entity/PR/head).
 # Same shape, different condition: a calendar-fetch outage also re-evaluates
 # on every ~15-minute tick with no dedupe today. Not observed to have fired
 # in the 2026-09-13..09-20 email audit, but the retry loop is identical in
@@ -1097,7 +1099,7 @@ def main() -> bool:
                 f"monedula: calendar fetch failed for {yesterday_str} — "
                 "recurring payment detection is DOWN; will retry next tick",
                 priority="blocker",
-                dedupe_key=_CALENDAR_FETCH_DEDUPE_KEY,
+                dedupe_key=_CALENDAR_FETCH_DEDUPE_KEY,  # scope: global
             )
             # Do NOT return: a calendar outage says nothing about whether an
             # invoice is due. Recurring payments are skipped this tick (no
@@ -1110,7 +1112,7 @@ def main() -> bool:
             # failure reports again instead of staying silently suppressed by
             # a stale key (ateles#1127).
             _mark_ran_today()
-            _clear_notify_dedupe(_CALENDAR_FETCH_DEDUPE_KEY)
+            _clear_notify_dedupe(_CALENDAR_FETCH_DEDUPE_KEY)  # scope: global
 
     # Find triggered handlers from calendar
     triggered: list[tuple] = []  # [(handler, [match, ...]), ...]
@@ -1181,7 +1183,7 @@ def main() -> bool:
             f"payments pending ({handler_names}) — {streak} consecutive "
             "failure(s). Payments BLOCKED, not declined. See escalation.",
             priority="blocker",
-            dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
+            dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,  # scope: global
             # Not actionable from the email body alone: there is nothing to
             # decide or reply to here, only a pointer to "see escalation"
             # elsewhere. Stays on Telegram (and the escalation entity already
@@ -1208,7 +1210,7 @@ def main() -> bool:
     # The channel is demonstrably working again — release the dedupe key so a
     # FUTURE timeout (a genuine recurrence, not a continuation of this one)
     # notifies instead of staying silently suppressed forever (ateles#1127).
-    _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
+    _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)  # scope: global
     reply = poll_result.text
     approved = _parse_reply(reply, handler_names)
 

@@ -576,13 +576,26 @@ def _pr_dispatcher_binding_fail(monkeypatch, tmp_path, sent, *, claim_returns=Tr
     return SwarmDispatcher(_notifier(tmp_path, sent), _config()), calls
 
 
-def test_self_review_refused_global_key_once_across_prs(monkeypatch, tmp_path):
+def test_self_review_refused_per_pr_does_not_suppress_sibling_pr(monkeypatch, tmp_path):
+    """ateles#1216: the key was global ("self-review-refused"), so PR A
+    holding the condition open silenced the identical notice on PR B. The
+    fix keys per PR (repo#number) — both must send."""
     sent = []
     d, _ = _pr_dispatcher_binding_fail(monkeypatch, tmp_path, sent, claim_returns=True)
     asyncio.run(d._handle_pr(_trigger(number=1)))
     asyncio.run(d._handle_pr(_trigger(number=2)))
-    assert len(sent) == 1
+    assert len(sent) == 2
     assert "1139" in sent[0]
+    assert "1139" in sent[1]
+
+
+def test_self_review_refused_same_pr_repeat_still_suppressed(monkeypatch, tmp_path):
+    """A true repeat — same PR, condition still open — stays deduped."""
+    sent = []
+    d, _ = _pr_dispatcher_binding_fail(monkeypatch, tmp_path, sent, claim_returns=True)
+    asyncio.run(d._handle_pr(_trigger(number=1)))
+    asyncio.run(d._handle_pr(_trigger(number=1)))
+    assert len(sent) == 1
 
 
 def test_self_review_refused_claim_false_still_sends_once(monkeypatch, tmp_path):
@@ -623,7 +636,46 @@ def test_self_review_refused_clear_then_resend(monkeypatch, tmp_path):
     assert len(refusal_sends) == 2
 
 
-def test_self_review_refused_body_cites_1139_and_is_not_per_pr(monkeypatch, tmp_path):
+def test_self_review_refused_clear_on_pr_a_does_not_unsilence_pr_b(
+    monkeypatch, tmp_path
+):
+    """Per-PR keys must be independent in BOTH directions: clearing PR A's
+    key (a verified binding receipt lands) must not touch PR B's — B stays
+    suppressed on a repeat, and a fresh failure on A can resend."""
+    sent = []
+    d, _ = _pr_dispatcher_binding_fail(monkeypatch, tmp_path, sent, claim_returns=True)
+    asyncio.run(d._handle_pr(_trigger(number=1)))
+    asyncio.run(d._handle_pr(_trigger(number=2)))
+    assert len(sent) == 2  # both PRs notified once each
+
+    async def fake_emit_ok(self, trigger, verdict, body, **kwargs):
+        return ReviewBindingReceipt(
+            review_id="1",
+            reviewer_login="markmhendrickson-ateles-vanellus",
+            commit_id="a" * 40,
+            state="APPROVED",
+        )
+
+    # PR A's binding receipt verifies — clears A's key only.
+    monkeypatch.setattr(SwarmDispatcher, "_emit_formal_review", fake_emit_ok)
+    asyncio.run(d._handle_pr(_trigger(number=1)))
+    assert len(sent) == 2  # A resolved silently (verified path, no re-send)
+
+    # PR B repeats the SAME open condition — still suppressed (B's key was
+    # never touched by A's clear).
+    async def fake_emit_fail(self, trigger, verdict, body, **kwargs):
+        return None
+
+    monkeypatch.setattr(SwarmDispatcher, "_emit_formal_review", fake_emit_fail)
+    asyncio.run(d._handle_pr(_trigger(number=2)))
+    assert len(sent) == 2
+
+    # PR A fails again post-clear — a FRESH condition, must resend.
+    asyncio.run(d._handle_pr(_trigger(number=1)))
+    assert len(sent) == 3
+
+
+def test_self_review_refused_body_cites_1139(monkeypatch, tmp_path):
     sent = []
     d, _ = _pr_dispatcher_binding_fail(monkeypatch, tmp_path, sent)
     asyncio.run(d._handle_pr(_trigger()))
