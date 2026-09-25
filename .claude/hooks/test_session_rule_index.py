@@ -27,8 +27,8 @@ Cases:
 """
 from __future__ import annotations
 
-import json
 import http.server
+import json
 import socket
 import subprocess
 import sys
@@ -204,6 +204,26 @@ class TestPreambleFirstOverSubprocess:
         assert result.stdout.index("ent_always_rule") < result.stdout.index(
             "ent_conditional_first_in_feed"
         )
+
+
+# ---------------------------------------------------------------------------
+# 5. A large corpus degrades (tiers), it does not fail open.
+# ---------------------------------------------------------------------------
+class TestLargeCorpusDegradesRatherThanFailsOpen:
+    def test_60_rules_over_the_real_subprocess_path_still_renders_a_tier(self, fake_neotoma):
+        base_url, handler = fake_neotoma
+        handler.rows = [
+            _row("ent_always1", rule="Never skip the safety check.", applies_when="always"),
+        ] + [
+            _row(f"ent_cond{i:03d}", rule="Rule body text here.", applies_when=f"condition {i}")
+            for i in range(60)
+        ]
+        result = _run(REPO_ROOT, base_url=base_url)
+        assert result.returncode == 0
+        # NOT the fail-open notice — a real rendered index, some tier.
+        assert "could not be loaded" not in result.stdout
+        assert "<!-- tier:" in result.stdout
+        assert "ent_always1" in result.stdout
 
 
 # ---------------------------------------------------------------------------

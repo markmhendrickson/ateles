@@ -85,43 +85,146 @@ class TestPreambleRendersFirst:
 
 
 # ---------------------------------------------------------------------------
-# 2. Budget guard trips on a large corpus, never truncates mid-rule
+# 2. Tiered rendering: size DEGRADES the index, never fails it open.
 # ---------------------------------------------------------------------------
-class TestBudgetGuardNeverTruncates:
-    def test_60_rules_at_300_chars_each_trips_the_guard(self):
-        big_rule = "X" * 280 + " done."
+class TestTieredRendering:
+    def test_small_corpus_selects_tier_a(self):
         rows = [
-            _row(f"ent_bulk{i:03d}", rule=big_rule, applies_when=f"condition {i}")
+            _row("ent_always1", rule="Never skip the safety check.", applies_when="always"),
+            _row("ent_cond1", rule="Verify before merging.", applies_when="opening a PR"),
+        ]
+        skills = renderer.render_skills(rows)
+        text = renderer.render_index_text(skills, budget_chars=8000)
+        assert "<!-- tier: A -->" in text
+        assert "Verify before merging" in text  # tier A keeps the imperative
+
+    def test_51_rules_at_realistic_lengths_selects_tier_b_and_fits(self):
+        # Mirrors the coordinator's live measurement: 51 active rules (2
+        # always, 49 conditional), realistic rule/applies_when lengths.
+        # A trigger-only (tier B) render of a corpus this size is ~4,895
+        # chars per that measurement — well within 8,000 — while tier A
+        # (imperative kept) is expected to overflow it.
+        rows = [
+            _row(
+                "ent_always1",
+                rule="Never bypass the pre-commit hook with --no-verify.",
+                applies_when="always",
+            ),
+            _row(
+                "ent_always2",
+                rule="Always verify the GitHub identity a token resolves to before any write.",
+                applies_when="always",
+            ),
+        ]
+        realistic_rule = (
+            "Check the existing tasks, issues, and PRs before starting new "
+            "work so the swarm neither duplicates work nor re-decides a "
+            "settled question."
+        )
+        realistic_trigger_templates = [
+            "opening a pull request",
+            "sending an email on the operator's behalf",
+            "dispatching a task to another agent",
+            "merging a PR blocked only by mechanics",
+            "restarting a daemon after a merge",
+            "filing a GitHub issue",
+            "writing to a shared Neotoma plan",
+            "renaming an agent or daemon",
+        ]
+        rows += [
+            _row(
+                f"ent_cond{i:03d}",
+                rule=realistic_rule,
+                applies_when=realistic_trigger_templates[i % len(realistic_trigger_templates)],
+            )
+            for i in range(49)
+        ]
+        skills = renderer.render_skills(rows)
+        text = renderer.render_index_text(skills, budget_chars=8000)
+        assert len(text) <= 8000
+        assert "<!-- tier: B -->" in text
+        # Tier B keeps the trigger and id but drops the imperative sentence.
+        assert "Check the existing tasks" not in text
+        assert "opening a pull request" in text
+        assert all(f"ent_cond{i:03d}" in text for i in range(49))
+
+    def test_tier_c_orders_mandatory_first_never_cuts_a_line_and_states_omitted_count(self):
+        # A corpus large enough that even tier B overflows an artificially
+        # tiny budget — forces tier C. 40 rules, alternating mandatory and
+        # advisory, so mandatory-first ordering is actually exercised.
+        rows = [
+            _row("ent_always1", rule="Never skip the safety check.", applies_when="always"),
+        ]
+        for i in range(40):
+            rows.append(
+                _row(
+                    f"ent_cond{i:03d}",
+                    rule="Rule body text.",
+                    applies_when=f"condition number {i} occurring",
+                    rule_kind="mandatory" if i % 2 == 0 else "advisory",
+                )
+            )
+        skills = renderer.render_skills(rows)
+        # Small enough that tier B (measured ~2,329 chars for this corpus)
+        # cannot fit all 40 conditional lines, but large enough that SOME
+        # whole lines still fit at tier C (preamble + closing alone is
+        # ~237 chars; ~10-12 conditional lines fit in the remainder).
+        tiny_budget = 1000
+        text = renderer.render_index_text(skills, budget_chars=tiny_budget)
+
+        assert len(text) <= tiny_budget
+        assert "<!-- tier: C -->" in text
+        assert "omitted for space" in text
+
+        # Never cuts a line mid-way: every "- When ..." line in the output is
+        # a complete, well-formed line (ends with a closing bracket for an
+        # entity-id line, or is the omitted-count line).
+        for line in text.splitlines():
+            if line.startswith("- When "):
+                assert line.rstrip().endswith("]"), f"cut mid-line: {line!r}"
+
+        # Mandatory-first: the first conditional entity id actually kept
+        # must be a mandatory rule (ent_cond000, ent_cond002, ... are
+        # mandatory by construction above).
+        kept_ids = [
+            line.split("[")[-1].rstrip("]")
+            for line in text.splitlines()
+            if line.startswith("- When ") and line.rstrip().endswith("]")
+        ]
+        assert kept_ids, "tier C kept no conditional rules at all"
+        first_kept_index = int(kept_ids[0].replace("ent_cond", ""))
+        assert first_kept_index % 2 == 0, "tier C did not order mandatory rules first"
+
+    def test_size_overflow_no_longer_produces_the_fail_open_notice(self):
+        # Historical behaviour (pre-tiering): an over-budget corpus raised
+        # PolicyIndexError, which the hook turned into the fail-open notice.
+        # The operator ruling reverses this — size must degrade, not fail
+        # open — so a corpus that is merely large must return SOME rendered
+        # text (some tier), never raise.
+        rows = [_row("ent_always1", applies_when="always")]
+        rows += [
+            _row(f"ent_cond{i:03d}", applies_when=f"condition {i}")
             for i in range(60)
         ]
         skills = renderer.render_skills(rows)
+        text = renderer.render_index_text(skills, budget_chars=8000)  # must not raise
+        assert text  # a real, non-empty rendered index
+        assert any(f"<!-- tier: {t} -->" in text for t in ("A", "B", "C"))
 
-        with pytest.raises(renderer.PolicyIndexError) as exc_info:
-            renderer.render_index_text(skills, budget_chars=8000)
-
-        msg = str(exc_info.value)
-        assert "over the 8000-char budget" in msg
-        assert "60 rules" in msg
-
-    def test_guard_message_never_contains_a_truncated_index_as_a_return_value(self):
-        # The function must RAISE, not return a shortened string — assert the
-        # call raises and that nothing partial is silently handed back by
-        # confirming render_index_text has no successful return path here.
-        big_rule = "Y" * 280 + " done."
-        rows = [_row(f"ent_bulk{i:03d}", rule=big_rule) for i in range(60)]
+    def test_even_tier_c_unfittable_still_raises_loudly(self):
+        # The ONE case that still must raise: the budget is too small even
+        # for the preamble + closing line with every conditional rule
+        # dropped. Nothing smaller is left to render.
+        rows = [
+            _row(
+                "ent_always1",
+                rule="X" * 500,
+                applies_when="always",
+            )
+        ]
         skills = renderer.render_skills(rows)
         with pytest.raises(renderer.PolicyIndexError):
-            result = renderer.render_index_text(skills, budget_chars=8000)
-            # If no exception were raised, fail explicitly rather than let a
-            # truncated string pass silently through an unreached assertion.
-            pytest.fail(f"expected PolicyIndexError, got a string of len {len(result)}")
-
-    def test_a_small_corpus_stays_under_budget_and_returns_normally(self):
-        rows = [_row("ent_small1", applies_when="always", rule="Short rule.")]
-        skills = renderer.render_skills(rows)
-        text = renderer.render_index_text(skills, budget_chars=8000)
-        assert "ent_small1" in text
-        assert len(text) <= 8000
+            renderer.render_index_text(skills, budget_chars=20)
 
 
 # ---------------------------------------------------------------------------

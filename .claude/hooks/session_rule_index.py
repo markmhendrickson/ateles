@@ -10,6 +10,18 @@ cleared, or is compacted, and prints the always-applies preamble plus one
 line per conditional rule so the session can fetch the full rule by entity
 id before acting on it.
 
+TIERED, NOT FAIL-OPEN, ON SIZE. The first live measurement against real
+Neotoma (53 rows, 50 session-scoped) rendered to 12,633 chars — over budget.
+Operator ruling (ateles#1261 follow-up): a corpus too large for the budget
+must DEGRADE the index, never fail open — fail-open is reserved for Neotoma
+being unreachable or the renderer itself raising, never merely for being
+over budget. `policy_skill_renderer.render_index_text` now tries three
+tiers (full conditional lines -> trigger+id only -> mandatory-first with an
+omitted-count line) and only raises if even the smallest tier (preamble +
+closing line, every conditional rule dropped) still doesn't fit — that is
+the one case this hook still treats as fail-open, because there is nothing
+smaller left to render.
+
 NO GENERATED FILES. This prints to stdout only — nothing is written to disk.
 A file copy per checkout is how CLAUDE.md drifted into 31 versions across
 repos; that failure mode is exactly what "render live" avoids.
@@ -25,13 +37,17 @@ its sibling code — like every other hook in this directory
 to `Path(__file__).resolve()`, which is fixed at wherever the script
 physically lives, not at whatever directory launched it.
 
-Fail-open for the SESSION: if Neotoma is unreachable, or the renderer's
-import fails (e.g. no `httpx` in this Python environment — the renderer
-imports `agent_loader.policy_binds_agent`, which hard-imports httpx), print
-ONE line saying the rules could not be loaded and exit 0. Never crash a
-session start, and never truncate mid-rule — a budget overflow is also a
-one-line notice, not a partial index (docs/foundation/principles.md#1: a
-mechanism that fails silently past its own limit is not a control).
+Fail-open for the SESSION only when there is genuinely nothing to render: if
+Neotoma is unreachable, the renderer's import fails (e.g. no `httpx` in this
+Python environment — the renderer imports `agent_loader.policy_binds_agent`,
+which hard-imports httpx), or the corpus cannot fit even the smallest tier
+(`PolicyIndexError`, see policy_skill_renderer.py). Any of these print ONE
+line saying the rules could not be loaded and exit 0. Never crash a session
+start, and never truncate a line mid-rule — but an over-budget corpus is
+NOT one of these cases: it degrades through tiers A -> B -> C instead
+(docs/foundation/principles.md#1: a mechanism that fails silently past its
+own limit is not a control; degrading loudly, tier by tier, is what keeps
+this one a control rather than documentation).
 
 Budget: 8,000 characters, conservative below the ~10,000-char Claude Code
 hook-output cap documented for `additionalContext`/plain stdout (multiple
@@ -73,7 +89,11 @@ def _log(msg: str) -> None:
 
 
 def _render() -> str | None:
-    """Live-render the index, or None on any failure (fail-open)."""
+    """Live-render the index, or None on a genuine failure (fail-open):
+    Neotoma unreachable, the renderer unimportable, or a corpus too large
+    even for tier C. A merely large corpus does NOT hit this path — it
+    returns a tiered (A/B/C) string from render_index_text instead.
+    """
     try:
         if str(_REPO_ROOT) not in sys.path:
             sys.path.insert(0, str(_REPO_ROOT))
