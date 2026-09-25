@@ -33,6 +33,11 @@ def _swarm_mailbox(monkeypatch, tmp_path):
     """
     cfg = tmp_path / "swarm-gws"
     cfg.mkdir(exist_ok=True)
+    # The gate compares the swarm address against OPERATOR_EMAIL, so a test
+    # must not depend on the host supplying one (monedula loads the host's
+    # ~/.config/neotoma/.env at import; CI has none). Tests that need a
+    # specific operator address override this.
+    monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
     monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
     monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(cfg))
 
