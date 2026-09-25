@@ -854,7 +854,12 @@ What the workflow never writes is stated once: a descendant's status, any derive
 statement, or anything on a record the task is not `PART_OF`
 (`planning_model.md#the-mechanism-against-cross-record-collision-is-the-subject`). A finding that a
 child record has no live `planning` task is remedied at `amend` by creating that child's first instance,
-which is what makes an unmaintained record a finding rather than a silence.
+which is what makes an unmaintained record a finding rather than a silence. Under decision 116 two more
+things run here: an authoring task for a created workflow is a planning task `PART_OF` its originating task's
+plan, and `amend` may carry its `workflow` declaration write, a governance write approved by blast tier and
+not an `amend_<level>` action; and `survey` counts the tasks each workflow created under the record has
+carried, the read that raises the proposal to make one core at five
+(`#a-workflow-created-for-one-task`).
 
 **Stages:** reading (`survey`); judgement (`judge`); writing (`amend`).
 
@@ -1015,12 +1020,12 @@ disclosed as a limitation because it is one: nothing above closes the recursion,
 
 - `route` names a declaration that fits, holds the task on one amendment where a declaration nearly fits, or opens the authoring of a new one; the task is never held for similar tasks.
 - A task waits only on the one amendment or the one authoring its own routing needs, as a dependency its intake batch records, bounded by `route`'s `hold_bound`.
-- A new or amended declaration whose steps are all low-blast is approved by the swarm, the approver distinct from the proposer; one that adds a consent point, an `operator_only` action, or a high-blast action is approved by the operator.
-- A run, or a step's verdict, may propose an amendment to the declaration it ran under — as a standing finding where it names a defect, as an improvement proposal where it names none — and the proposing batch never approves it.
-- The task that authors a new declaration goes through the planning workflow once that workflow's draft declaration is active, and through operator-only until then.
+- A new or amended declaration whose steps are all low-blast is approved by the swarm, the approver distinct from the proposer; one that adds a consent point, an `operator_only` action, or a high-blast action is approved by the operator, and so is any amendment that removes or weakens a consent point, a review step, or a closing condition.
+- A run, or a step's verdict, may propose an amendment to the declaration it ran under — as a standing finding where it names a defect, as an improvement proposal where it names none, an entity of its own linked to the run that raised it — and the proposing batch never approves it.
+- The task that authors a new declaration is `PART_OF` the originating task's plan and goes through the planning workflow once that workflow's draft declaration is active, whose `amend` step carries the declaration write; it goes through operator-only until then.
 - A created workflow is named for its class of work, deduplicated against the declarations in force, and stays declared whether or not a second task uses it.
 - Nothing retires a declaration automatically; a declaration is retired only when someone raises a retirement task.
-- A created workflow becomes core by the operator's decision, proposed once it has carried five or more tasks.
+- A created workflow becomes core by the operator's decision, proposed once planning's `survey` counts five or more tasks it has carried.
 
 **Ruled (decision 116, 2026-09-25, the operator's).** Registered in
 `conformance.md#the-register-of-open-design-decisions`. The ruling, verbatim: "Workflows are most powerful
@@ -1033,7 +1038,11 @@ declaration (`workflow_declaration_approval_by_blast_tier`), what a near fit doe
 (`near_fit_task_amends_workflow_first`), and that no declaration retires automatically
 (`workflows_never_retire_automatically`); three defaults were taken without objection — the workflow that
 carries an authoring task, the term for an improvement that names no defect, and when a created workflow
-becomes core (`workflow_decision_116_defaults`).
+becomes core (`workflow_decision_116_defaults`). The four questions that left open were settled the same
+day: that removing or weakening a protection goes to the operator
+(`workflow_protection_removals_need_operator`, the operator's ruling), and, as defaults taken without
+objection, where an authoring task sits in the planning hierarchy, what record an improvement proposal is,
+and which step counts toward a workflow becoming core (`workflow_decision_116_defaults_2`).
 
 **What this changes, and what it leaves alone.** Before this ruling, a task no declaration fitted had two
 exits at `route`: none, which ends its chain with the work undone, or operator-only, which hands the operator
@@ -1103,7 +1112,17 @@ class (`gates_and_workflows.md#confidence-and-three-blast-tiers`): a declaration
 the policy places low is the swarm's to approve, and one that introduces a `consent` step, an
 `operator_only` action, or a class the policy places high is the operator's. A class the policy lists in
 neither set resolves to `NEVER` and is the operator's, as everywhere. An amendment is judged by what it adds:
-an amendment that adds none of the three is the swarm's, whatever the declaration already held.
+an amendment that adds none of the three is the swarm's, whatever the declaration already held — unless it
+takes a protection away.
+
+**An amendment that removes or weakens a consent point, a review step, or a closing condition is the
+operator's, even where every step that remains is low-blast.** Losing a protection is treated as adding
+risk, which is the fail-closed direction (principle 5): a declaration from which a consent step or a review
+step has been removed, or whose closing condition now accepts what it used to refuse, can take effects the
+operator relied on its catching, and the tier of the steps that remain says nothing about what the removed
+one caught. Whether an amendment weakens a condition is judged against the declaration in force; where the
+approving principal cannot tell that it does not, it is treated as a weakening and goes to the operator,
+since "cannot tell" is not a conclusion that it is safe (principle 7).
 
 **The swarm's approval is never the proposer's.** The principal that approves a declaration or an amendment
 is distinct from the one that proposed it — the author of the authoring task's declaration, or the step owner
@@ -1116,7 +1135,8 @@ operator writes a policy value for it, and a grant is made class by class. This 
 it is narrower than the `workflow` class: the class is split by blast tier. A write to a `workflow`
 declaration carries, as its class, the highest tier among the action classes its steps take or, for an
 amendment, among those it adds — so that the low-tier declaration write is a class the operator has granted
-the swarm and the high-tier and `NEVER` writes stay reserved. The reservation is unchanged for every other
+the swarm and the high-tier and `NEVER` writes stay reserved. An amendment that removes or weakens a
+protection carries the reserved class whatever its tier, so no grant of the low tier reaches it. The reservation is unchanged for every other
 governance class, and the operator reserves the low tier again by removing the grant.
 
 ### A run may propose an amendment to its own declaration
@@ -1130,7 +1150,11 @@ judged on the standing axis like any other and scoped narrowest-first to the ste
 correction this batch's work owes is made in the batch, and the change to the declaration is owed besides.
 Where it names no defect — the declaration did what it says, and could say more — it is an
 [improvement proposal](vocabulary.md#improvement-proposal), a term distinct from finding, so that a finding
-keeps meaning a defect or an objection and carries severity, and a proposal to improve carries none.
+keeps meaning a defect or an objection and carries severity, and a proposal to improve carries none. An
+improvement proposal is an entity of its own, not a field on the verdict, and it is linked to the run that
+raised it by the relationship types a finding already uses: `PART_OF` → the verdict that carries it, and
+`REFERS_TO` → the batch it was raised on (`data_model.md#relationships`). No relationship type is minted for
+it.
 
 **Both reach the declaration through the learning loop, decision 17, and through nothing shorter.** Each
 produces a task that `REFERS_TO` what proposed it; the task enters intake and goes through a workflow; the
@@ -1144,11 +1168,17 @@ the `priority_rubric` at its own intake.
 
 ### A workflow created for one task
 
-**The task that authors it goes through the planning workflow, and through operator-only until that
-workflow can carry it.** Authoring a declaration is survey, judgement, and a write through the gate, the
-shape `#planning` already has; once the planning workflow's draft declaration is active, an authoring task
-is routed to it. Until then, the authoring task is routed to operator-only (`#operator-only`), which is also
-where the first declaration for a declaration scope comes from, as an operator act
+**The task that authors it sits under the originating task's plan and goes through the planning workflow,
+and through operator-only until that workflow can carry it.** The authoring task is `PART_OF` the planning
+record the originating task is under — the first record on its ascent — which meets `#planning`'s entry
+condition that a planning task be `PART_OF` exactly one planning record. Authoring a declaration is survey,
+judgement, and a write through the gate, the shape `#planning` already has, and planning's `amend` step may
+carry the declaration write: beside its `amend_<level>` actions it takes a governance write to the
+`workflow` declaration, approved under the blast-tier approval above and not under the record's
+`amend_<level>` class, since a declaration is a governance type and not a planning one. Once the planning
+workflow's draft declaration is active, an authoring task is routed to it. Until then, it is routed to
+operator-only (`#operator-only`), which is also where the first declaration for a declaration scope comes
+from, as an operator act
 (`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`).
 
 **It is named for its class of work, and deduplicated before it is written.** The workflow type names what
@@ -1172,11 +1202,14 @@ sweep proposes retiring an unused declaration. A declaration is retired only whe
 retirement task, which is a change to the swarm like any other: it enters intake, goes through a workflow,
 and its write is a governance write approved under the blast-tier approval above.
 
-**It becomes core by the operator's decision, proposed once it has carried five or more tasks.** The count
-is a derived read over the batches that ran under the declaration, never a counter kept on it (principle
-11). When it reaches five, the proposal that the workflow become core is carried to the operator as a task;
-the operator decides, and a workflow made core gains a section in this document through a PR like any change
-to the foundation (`conformance.md#amending-a-foundation-document`).
+**It becomes core by the operator's decision, proposed once it has carried five or more tasks, and the
+planning workflow's `survey` step is what counts.** The `survey` of the planning record its authoring task
+sat under reads, for each workflow created under that record, the tasks it has carried — a derived read over
+the batches that ran under the declaration, named on `survey`'s verdict with its other reads, never a counter
+kept on the declaration (principle 11). At five, the proposal is raised through planning's own steps, since
+`survey` writes nothing but what it read: `judge` records it, and `amend` creates the task that carries it to
+the operator. The operator decides, and a workflow made core gains a section in this document through a PR
+like any change to the foundation (`conformance.md#amending-a-foundation-document`).
 
 ## Whether a stage names anything a step does not
 

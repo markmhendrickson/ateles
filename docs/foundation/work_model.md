@@ -726,11 +726,14 @@ whose work is a new declaration. Either way the intake batch records a dependenc
 would be false without it. The hold waits on one change made for this task and on nothing another task does,
 so it is not the wait for similar tasks the ruling forbids. The change is a change to the swarm and is
 executed as one (`#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`): it enters its
-own intake, goes through a workflow — the planning workflow once that workflow's draft declaration is
-active, operator-only until then — and its declaration write is a governance write the action gate
-evaluates. The swarm approves it where every step it adds is low-blast, with an approver distinct from the
-proposer, and the operator where it adds a consent point, an `operator_only` action, or a high-blast action:
-decision 18's reservation, granted for the low tier of the `workflow` class and kept for the rest. Above
+own intake, sits `PART_OF` the originating task's plan, goes through a workflow — the planning workflow once
+that workflow's draft declaration is active, whose `amend` step carries the declaration write, and
+operator-only until then — and its declaration write is a governance write the action gate evaluates. The
+swarm approves it where every step it adds is low-blast, with an approver distinct from the proposer, and the
+operator where it adds a consent point, an `operator_only` action, or a high-blast action, or removes or
+weakens a consent point, a review step, or a closing condition, since losing a protection is treated as
+adding risk: decision 18's reservation, granted for the low tier of the `workflow` class and kept for the
+rest. Above
 decision 100's tier the declaration is proven first
 (`#whether-a-newly-declared-workflow-is-proven-before-it-binds-production-work`). When the declaration lands
 and is read back, the dependency ends and `route` signs naming it.
@@ -738,7 +741,8 @@ and is read back, the dependency ends and `route` signs naming it.
 **Every batch may improve the declaration it ran under, and the batch does not wait for the improvement.**
 A step owner who finds that the task's context shows the declaration could serve its class better records a
 standing finding where the declaration fell short, or an [improvement proposal](vocabulary.md#improvement-proposal)
-where it did not, scoped to the step or the workflow; the change reaches the declaration through the task
+where it did not — an entity of its own, `PART_OF` the verdict and `REFERS_TO` the batch, as a finding is —
+scoped to the step or the workflow; the change reaches the declaration through the task
 decision 17 describes, never as a write the proposing batch makes
 (`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
 The ruling ranks this path with the authoring path: improving existing workflows is as important as creating

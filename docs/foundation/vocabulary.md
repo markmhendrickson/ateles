@@ -1088,7 +1088,8 @@ under could serve its class better, where nothing the declaration did was a defe
 The rule that turns on it: like a standing [finding](#finding), it produces a task that `REFERS_TO` it, and
 that task's work is an amendment to the declaration, a [governance write](#governance-write) approved at the [action gate](#action-gate) — by the
 swarm where the amendment adds only low-blast [steps](#step), by the [operator](#operator) where it adds a consent point, an
-`operator_only` [action](#action), or a high-blast action — and never by the batch that proposed it (decision 116).
+`operator_only` [action](#action), or a high-blast action, or removes or weakens a consent point, a [review step](#review-step), or a
+closing condition — and never by the batch that proposed it (decision 116).
 Unlike a finding it carries no severity, blocks nothing, and has no one-off form: it is about the declaration,
 never about the batch's work. Swap test against [finding](#finding): "the step owner recorded a finding" asserts
 that something was wrong and binds the [conclusion](#conclusion); "the step owner recorded an improvement
@@ -1098,6 +1099,9 @@ a proposal" asks that an initiative be accepted, under proposal rights a grant c
 an improvement proposal" asks nothing of the initiative class and is made by any step owner on its own verdict,
 so the second sentence cannot be read as the first. The name is the operator's (decision 116), and the word it
 shares with [proposal](#proposal) is not a [claim](#claim) that it is one.
+**Field:** `improvement_proposal` — an entity of its own, never a field on the verdict: `PART_OF` the verdict
+that carries it and `REFERS_TO` the batch it was raised on, the relationship types a finding uses
+(`data_model.md#concepts`).
 **See:** [`workflows.md#a-workflow-is-created-for-the-task-no-declaration-fits-and-improved-by-every-task-it-carries`](workflows.md#a-workflow-is-created-for-the-task-no-declaration-fits-and-improved-by-every-task-it-carries).
 **Never:** —
 **Not for:** a [finding](#finding) for a proposal that names no defect (a finding is a defect or an objection);
