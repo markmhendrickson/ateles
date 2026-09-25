@@ -9,13 +9,21 @@ checkpoint, plus the operator's approval when the rule reaches sessions. That
 approval step is a follow-up; until it exists, proposals wait.
 
 The rule the approval step must follow: it checks the VERIFIED SIGNER on the
-stored record, never a field. The proposal's observation must carry
-`provenance.agent_sub` equal to the proposer's swarm identity at a
-verified-signature tier (`neotoma_signed.check_observation_attribution`), the
-approver must be a different signed identity, and an unsigned proposal is
-refused. `proposing_agent_sub` is self-reported; anyone holding the bearer can
-write it. The approver applies only `proposed_change` and approves its digest;
-for a suspension, `target_entity_id` must equal `proposed_change.entity_id`.
+stored record, never a field, and it checks it PER FIELD. Every observation
+that set one of the fields that define what the proposal would change
+(`PROPOSAL_DEFINING_FIELDS`: `proposed_change`, `target_entity_type`,
+`target_entity_id`) must carry `provenance.agent_sub` equal to the proposer's
+swarm identity at a verified-signature tier
+(`neotoma_signed.check_observation_attribution`); at least one such
+observation must have set `proposed_change`; and the approver must be a
+different signed identity. Some signed observation on the entity is not
+enough: a signed evidence correction onto a proposal whose `proposed_change`
+came in on the bearer does not make that change signed. `proposing_agent_sub`
+is self-reported; anyone holding the bearer can write it. The approver
+applies only `proposed_change` and approves its digest; for a suspension,
+`target_entity_id` must equal `proposed_change.entity_id`. The generalizer
+applies the same check before adding evidence to an open proposal
+(:func:`proposal_signed_by_proposer`).
 
   • CONFIDENCE   — a cluster must reach the agent's `drift_signal_threshold`
                    (independent corroborations) before anything is proposed.
@@ -55,11 +63,23 @@ import httpx
 try:  # package import (production) and bare import (in-dir pytest) both work
     from .drift import DriftCluster, DriftSignal, cluster_signals, contradicts
     from .agent_loader import policy_binds_agent
-    from .neotoma_signed import NeotomaWriteError, NeotomaWriter, canonical_entity_type
+    from .neotoma_signed import (
+        NeotomaWriteError,
+        NeotomaWriter,
+        SigningMode,
+        canonical_entity_type,
+        check_observation_attribution,
+    )
 except ImportError:  # pragma: no cover
     from drift import DriftCluster, DriftSignal, cluster_signals, contradicts
     from agent_loader import policy_binds_agent
-    from neotoma_signed import NeotomaWriteError, NeotomaWriter, canonical_entity_type
+    from neotoma_signed import (
+        NeotomaWriteError,
+        NeotomaWriter,
+        SigningMode,
+        canonical_entity_type,
+        check_observation_attribution,
+    )
 
 log = logging.getLogger("daemon_runtime.generalizer")
 
@@ -521,6 +541,77 @@ async def fetch_open_policy_proposals(bearer: str) -> list[dict] | None:
     return None
 
 
+# The fields that define what a proposal would change. Whoever set these is
+# who proposed it; `drift_signal_refs` and the status fields are evidence and
+# bookkeeping.
+PROPOSAL_DEFINING_FIELDS = ("proposed_change", "target_entity_type", "target_entity_id")
+OBSERVATION_PAGE = 100
+OBSERVATION_MAX_PAGES = 5
+
+
+def _as_mapping(value: Any) -> dict:
+    """A JSON object column as a dict: stores return either a dict or its JSON text."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def defining_fields_signed_by(observations: list[dict], expected_sub: str) -> bool:
+    """Whether every observation that set a defining field is signed as ``expected_sub``.
+
+    Passes only when at least one observation set ``proposed_change`` and every
+    observation that set any of :data:`PROPOSAL_DEFINING_FIELDS` (the store
+    that opened the proposal, and any later correction of those fields) carries
+    ``provenance.agent_sub == expected_sub`` at a verified-signature tier.
+    """
+    defining = []
+    for obs in observations:
+        fields = _as_mapping(obs.get("fields"))
+        if any(f in fields for f in PROPOSAL_DEFINING_FIELDS):
+            defining.append((obs, fields))
+    if not any("proposed_change" in fields for _, fields in defining):
+        return False
+    for obs, _ in defining:
+        view = {**obs, "provenance": _as_mapping(obs.get("provenance"))}
+        obs_id = str(obs.get("id") or "")
+        if not obs_id or not check_observation_attribution([view], obs_id, expected_sub).ok:
+            return False
+    return True
+
+
+async def proposal_signed_by_proposer(entity_id: str, bearer: str) -> bool | None:
+    """Whether a proposal's defining fields were all signed by the generalizer's identity.
+
+    None when the observations cannot be read in full (a failed read, or more
+    than the page cap): the caller cannot tell, so it opens nothing this tick.
+    """
+    observations: list[dict] = []
+    for page in range(OBSERVATION_MAX_PAGES):
+        data = await _post(
+            "observations/query",
+            {
+                "entity_id": entity_id,
+                "limit": OBSERVATION_PAGE,
+                "offset": page * OBSERVATION_PAGE,
+            },
+            bearer,
+        )
+        if data is None:
+            return None
+        obs = [o for o in (data.get("observations") or []) if isinstance(o, dict)]
+        observations.extend(obs)
+        if len(obs) < OBSERVATION_PAGE:
+            return defining_fields_signed_by(observations, PROPOSER_SUB)
+    log.warning(f"observation read for proposal {entity_id} hit its page cap")
+    return None
+
+
 async def _add_evidence(proposal: dict, refs: list[str], bearer: str) -> str | None:
     """Fold a cluster's new evidence into an already-open proposal instead of opening another.
 
@@ -566,12 +657,21 @@ async def create_policy_proposal(cluster: DriftCluster, bearer: str) -> str | No
     rule can be proposed again only on evidence the decided one did not carry
     (the idempotency key is the identity plus the evidence set).
 
-    Approval, when built, must check who signed the proposal on the stored
-    record, not the `proposing_agent_sub` field: the observation's
-    `provenance.agent_sub` must be the proposer's swarm identity at a
-    verified-signature tier, and a proposal without a signed observation is
-    refused. `proposing_agent_sub` is self-reported and any bearer holder can
-    write it. The approver applies only `proposed_change`, and approves its
+    With Anthus's switch `shadow` or `on`, evidence is added only to an open
+    proposal whose defining fields (`proposed_change`, `target_entity_type`,
+    `target_entity_id`) were set, in every observation that set them, by
+    `anthus@ateles-swarm` at a verified-signature tier
+    (:func:`proposal_signed_by_proposer`). A same-rule proposal someone wrote
+    with the bearer is passed over and a signed one is opened beside it, so a
+    planted proposal can neither borrow Anthus's signature nor suppress the
+    genuine one. If the signer cannot be read, nothing is opened this tick.
+
+    Approval, when built, must apply the same per-field check to the stored
+    record, not trust the `proposing_agent_sub` field, which is self-reported
+    and writable by any bearer holder, nor accept some other signed
+    observation on the entity (such as a signed evidence correction). A
+    proposal whose defining fields are not all signed by the proposer is
+    refused. The approver applies only `proposed_change`, and approves its
     digest.
     """
     fields = proposed_policy_fields(cluster)
@@ -583,9 +683,32 @@ async def create_policy_proposal(cluster: DriftCluster, bearer: str) -> str | No
             f"could not read open proposals; not proposing for {cluster.agent} this tick"
         )
         return None
+    # Evidence goes only onto a proposal the generalizer itself signed. With
+    # Anthus's switch off its own proposals are bearer writes too, so the
+    # signer cannot tell them from a planted one; its evidence correction then
+    # also goes out on the bearer, lending no signature, and the approval rule
+    # refuses every bearer proposal regardless.
+    require_signed = _writer(bearer).mode != SigningMode.OFF
     for existing in open_proposals:
-        if _identity_of(existing) == identity:
-            return await _add_evidence(existing, cluster.source_refs, bearer)
+        if _identity_of(existing) != identity:
+            continue
+        if require_signed:
+            if existing.get("proposing_agent_sub") != PROPOSER_SUB:
+                continue
+            signed = await proposal_signed_by_proposer(existing.get("_entity_id", ""), bearer)
+            if signed is None:
+                log.warning(
+                    f"could not read who signed proposal {existing.get('_entity_id')}; "
+                    f"not proposing for {cluster.agent} this tick"
+                )
+                return None
+            if not signed:
+                log.warning(
+                    f"open proposal {existing.get('_entity_id')} has the same rule but its "
+                    f"proposed change was not signed as {PROPOSER_SUB}; not adding evidence to it"
+                )
+                continue
+        return await _add_evidence(existing, cluster.source_refs, bearer)
     evidence = _content_digest(sorted(set(cluster.source_refs)))
     payload = {
         "entity_type": PROPOSAL_ENTITY_TYPE,

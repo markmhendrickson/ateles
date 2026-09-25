@@ -11,9 +11,17 @@ any other, with the daemon's name substituted.
 - **Governance writes are always signed.** A write to a governance type
   (`GOVERNANCE_ENTITY_TYPES`, matched under any spelling Neotoma folds: case,
   separators, accents, simple plurals), to `issue.gate_status`, onto a
-  governance entity by relationship, or a correct whose target turns out to be
-  a governance entity, is signed or refused. The switch below does not apply to
-  it and there is no bearer fallback.
+  governance entity by relationship, or onto an existing entity named by id
+  whose real type turns out to be governance, is signed or refused. The ids
+  resolved are a store entity's `target_id` (fields written through it are
+  judged against the target's real type, so `gate_status` onto an issue
+  counts), a correct's `entity_id`, and every relationship endpoint. A failed
+  lookup counts as governance. The switch below does not apply to it and there
+  is no bearer fallback.
+- **Only known endpoints.** The client sends `store`, `correct`,
+  `create_relationship` and `create_relationships`, each classified on the
+  keys Neotoma reads for that endpoint. Any other path is refused before
+  anything is sent.
 - **Every other write follows the daemon's switch.** Unset, the daemon keeps
   writing with the bearer exactly as before.
 - **The identity is pinned.** The daemon signs as `<agent>@ateles-swarm`, with

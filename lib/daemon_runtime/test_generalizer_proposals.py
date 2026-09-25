@@ -147,7 +147,8 @@ def test_switch_unset_proposals_stay_bearer_writes(sent):
     assert "signature" not in headers
 
 
-def test_switched_on_proposals_are_signed_as_anthus(sent, monkeypatch, tmp_path):
+def _anthus_key(tmp_path, monkeypatch) -> None:
+    """Give Anthus a signing key and point the client at it."""
     nums = ec.generate_private_key(ec.SECP256R1()).private_numbers()
 
     def b64u(i: int) -> str:
@@ -167,6 +168,10 @@ def test_switched_on_proposals_are_signed_as_anthus(sent, monkeypatch, tmp_path)
         )
     )
     monkeypatch.setattr(ns, "AAUTH_KEYS_DIR", str(tmp_path))
+
+
+def test_switched_on_proposals_are_signed_as_anthus(sent, monkeypatch, tmp_path):
+    _anthus_key(tmp_path, monkeypatch)
     monkeypatch.setenv("ATELES_SIGNED_WRITES_ANTHUS", "on")
 
     asyncio.run(gz._act_on_cluster(_cluster(), [], 3, "tok"))
@@ -191,12 +196,39 @@ class _FakeNeotoma:
 
     def __init__(self):
         self.entities: dict[str, dict] = {}  # id -> snapshot (with entity_type)
+        self.observations: dict[str, list[dict]] = {}  # id -> observations, oldest first
         self.requests: list[tuple[str, str, dict]] = []
+
+    @staticmethod
+    def _provenance(request: httpx.Request) -> dict:
+        """What Neotoma records: the signed sub at `software`, or no sub for a bearer write."""
+        m = re.fullmatch(r'aasig=jwt;jwt="([^"]+)"', request.headers.get("signature-key", ""))
+        if not m:
+            return {"agent_sub": None, "attribution_tier": "anonymous"}
+        claims = pyjwt.decode(m.group(1), options={"verify_signature": False})
+        return {"agent_sub": claims["sub"], "attribution_tier": "software"}
+
+    def observe(self, eid: str, fields: dict, provenance: dict) -> None:
+        obs = self.observations.setdefault(eid, [])
+        obs.append({"id": f"obs_{eid}_{len(obs)}", "entity_id": eid,
+                    "fields": fields, "provenance": provenance})
+
+    def plant(self, snapshot: dict, provenance: dict) -> str:
+        """Put an entity on record as if some other writer had stored it."""
+        eid = f"ent_{len(self.entities)}"
+        self.entities[eid] = dict(snapshot)
+        fields = {k: v for k, v in snapshot.items() if k != "entity_type"}
+        self.observe(eid, fields, provenance)
+        return eid
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         body = json.loads(request.content or b"{}") if request.content else {}
         self.requests.append((request.method, path, body))
+        if path.endswith("/observations/query"):
+            obs = list(reversed(self.observations.get(body.get("entity_id"), [])))
+            off, lim = body.get("offset", 0), body.get("limit", 100)
+            return httpx.Response(200, json={"observations": obs[off : off + lim]})
         if request.method == "GET" and path.startswith("/entities/"):
             snap = self.entities.get(path.rsplit("/", 1)[-1])
             if snap is None:
@@ -212,6 +244,7 @@ class _FakeNeotoma:
             return httpx.Response(200, json={"entities": ents[off : off + lim]})
         if path.endswith("/correct"):
             self.entities[body["entity_id"]][body["field"]] = body["value"]
+            self.observe(body["entity_id"], {body["field"]: body["value"]}, self._provenance(request))
             return httpx.Response(
                 200, json={"entity_id": body["entity_id"], "observation_id": "obs_c"}
             )
@@ -219,6 +252,9 @@ class _FakeNeotoma:
         for ent in body.get("entities", []):
             eid = f"ent_{len(self.entities)}"
             self.entities[eid] = dict(ent)
+            self.observe(
+                eid, {k: v for k, v in ent.items() if k != "entity_type"}, self._provenance(request)
+            )
             stored.append({"entity_id": eid, "observation_id": f"obs_{eid}"})
         return httpx.Response(200, json={"entities": stored})
 
@@ -303,3 +339,106 @@ def test_unreadable_open_proposals_opens_nothing(sent, monkeypatch):
     monkeypatch.setattr(gz, "_post", fail)
     assert asyncio.run(gz.create_policy_proposal(_cluster(3), "tok")) is None
     assert not _entities(sent, "strategy_revision_proposal")
+
+
+# ── evidence goes only onto a proposal Anthus itself signed (security round 2) ──
+
+
+def _planted_twin(neotoma, provenance) -> str:
+    """A same-rule open proposal, written by someone else with ``provenance``."""
+    fields = gz.proposed_policy_fields(_cluster(3))
+    change = {"op": "create", "entity_type": "agent_policy", "fields": fields}
+    return neotoma.plant(
+        {
+            "entity_type": "strategy_revision_proposal",
+            "proposing_agent_sub": gz.PROPOSER_SUB,  # self-reported, so it proves nothing
+            "target_entity_id": fields["agent_sub"],
+            "target_entity_type": "agent_policy",
+            "drift_signal_refs": ["ref0", "ref1", "ref2"],
+            "proposed_change": gz._canonical(change),
+            "operator_decision": "pending",
+            "status": "pending",
+        },
+        provenance,
+    )
+
+
+BEARER_PROVENANCE = {"agent_sub": None, "attribution_tier": "anonymous"}
+
+
+def test_signed_anthus_does_not_add_evidence_to_a_bearer_written_proposal(
+    neotoma, monkeypatch, tmp_path
+):
+    _anthus_key(tmp_path, monkeypatch)
+    monkeypatch.setenv("ATELES_SIGNED_WRITES_ANTHUS", "on")
+    planted = _planted_twin(neotoma, BEARER_PROVENANCE)
+
+    eid = asyncio.run(gz.create_policy_proposal(_cluster(4), "tok"))
+
+    # No signed correction onto the planted proposal...
+    assert not [r for r in neotoma.requests if r[1].endswith("/correct")]
+    assert neotoma.entities[planted]["drift_signal_refs"] == ["ref0", "ref1", "ref2"]
+    # ...and the genuine proposal is opened beside it, signed as Anthus.
+    assert eid and eid != planted
+    assert len(neotoma.proposals()) == 2
+    assert neotoma.observations[eid][0]["provenance"]["agent_sub"] == gz.PROPOSER_SUB
+
+
+def test_signed_anthus_adds_evidence_to_its_own_signed_proposal(neotoma, monkeypatch, tmp_path):
+    _anthus_key(tmp_path, monkeypatch)
+    monkeypatch.setenv("ATELES_SIGNED_WRITES_ANTHUS", "on")
+    asyncio.run(gz._act_on_cluster(_cluster(3), [], 3, "tok"))
+    asyncio.run(gz._act_on_cluster(_cluster(4), [], 3, "tok"))
+
+    [proposal] = neotoma.proposals()
+    assert proposal["drift_signal_refs"] == ["ref0", "ref1", "ref2", "ref3"]
+
+
+def test_a_bearer_correction_of_proposed_change_makes_a_proposal_untrusted(
+    neotoma, monkeypatch, tmp_path
+):
+    """Signed at birth, then its proposed_change rewritten on the bearer: not Anthus's any more."""
+    _anthus_key(tmp_path, monkeypatch)
+    monkeypatch.setenv("ATELES_SIGNED_WRITES_ANTHUS", "on")
+    first = asyncio.run(gz.create_policy_proposal(_cluster(3), "tok"))
+    snap = neotoma.entities[first]
+    neotoma.observe(first, {"proposed_change": snap["proposed_change"]}, BEARER_PROVENANCE)
+
+    second = asyncio.run(gz.create_policy_proposal(_cluster(4), "tok"))
+    assert second != first
+    assert neotoma.entities[first]["drift_signal_refs"] == ["ref0", "ref1", "ref2"]
+
+
+def test_a_signed_evidence_correction_does_not_vouch_for_the_proposal():
+    """Some signed observation on the entity is not enough: the defining fields must be signed."""
+    signed = {"agent_sub": gz.PROPOSER_SUB, "attribution_tier": "software"}
+    observations = [
+        {"id": "o2", "fields": {"drift_signal_refs": ["r"]}, "provenance": signed},
+        {"id": "o1", "fields": {"proposed_change": "{}", "target_entity_id": "x"},
+         "provenance": BEARER_PROVENANCE},
+    ]
+    assert not gz.defining_fields_signed_by(observations, gz.PROPOSER_SUB)
+    observations[1]["provenance"] = signed
+    assert gz.defining_fields_signed_by(observations, gz.PROPOSER_SUB)
+    # Another swarm identity is not the proposer.
+    observations[1]["provenance"] = {"agent_sub": "corvus@ateles-swarm", "attribution_tier": "software"}
+    assert not gz.defining_fields_signed_by(observations, gz.PROPOSER_SUB)
+    # A provenance stored as JSON text is read the same way.
+    observations[1]["provenance"] = json.dumps(signed)
+    assert gz.defining_fields_signed_by(observations, gz.PROPOSER_SUB)
+    # No observation that set proposed_change at all: refused.
+    assert not gz.defining_fields_signed_by(observations[:1], gz.PROPOSER_SUB)
+
+
+def test_unreadable_signer_opens_nothing(neotoma, monkeypatch, tmp_path):
+    _anthus_key(tmp_path, monkeypatch)
+    monkeypatch.setenv("ATELES_SIGNED_WRITES_ANTHUS", "on")
+    _planted_twin(neotoma, BEARER_PROVENANCE)
+    real_post = gz._post
+
+    async def no_observations(path, body, bearer):
+        return None if path == "observations/query" else await real_post(path, body, bearer)
+
+    monkeypatch.setattr(gz, "_post", no_observations)
+    assert asyncio.run(gz.create_policy_proposal(_cluster(4), "tok")) is None
+    assert len(neotoma.proposals()) == 1

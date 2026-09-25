@@ -19,10 +19,15 @@ Two transports live here, sharing one key resolution (:func:`agent_identity`):
     - type names are compared folded (:func:`canonical_entity_type`: case,
       separators, accents, simple plurals), because Neotoma files a variant
       spelling under the registered type it folds onto;
-    - an existing entity the body names by id (a correct's target, a
-      relationship endpoint) has its real type looked up first, because
-      ``/correct`` does not check the declared type; a failed lookup counts
-      as governance;
+    - the write is classified by endpoint (:data:`SUPPORTED_WRITE_PATHS`:
+      ``store``, ``correct``, ``create_relationship(s)``), each reading only
+      the keys Neotoma reads for it; any other endpoint is refused unsent;
+    - an existing entity the body names by id (a store entity's
+      ``target_id``, a correct's ``entity_id``, a relationship endpoint) has
+      its real type looked up first, and every field written onto it is
+      judged against that type, because neither the store's extend path nor
+      ``/correct`` checks the declared type; a failed lookup counts as
+      governance;
     - a caller's ``entity_types`` can only add types to the check, never
       replace the body's.
   - **Every other write follows the daemon's switch,**
@@ -377,71 +382,171 @@ def is_governance_write(entity_type: object, field_name: "str | None" = None) ->
     return bool(field_name) and _is_governance_field(entity_type, field_name)
 
 
-def body_touches_governance(body: Mapping[str, Any]) -> bool:
-    """Whether a ``/store`` or ``/correct`` body writes any governance type or field.
+# The write endpoints this client sends, each with the keys by which its body
+# names an entity already on record (neotoma ``origin/main``: the request
+# schemas in ``action_schemas.ts`` and the store resolver):
+#
+# - ``store``: ``entities[].target_id`` (extend mode: the resolver returns the
+#   target as the entity to write, without comparing its stored type with the
+#   declared one) and ``relationships[].{source,target}_entity_id``;
+# - ``correct``: ``entity_id`` (the declared ``entity_type`` is not checked
+#   against it);
+# - ``create_relationship``: ``source_entity_id`` / ``target_entity_id``;
+# - ``create_relationships``: the same, per item of ``relationships``.
+#
+# Any other endpoint is refused before anything is sent: an endpoint whose id
+# keys are not enumerated here cannot be classified, so it is not guessed at.
+SUPPORTED_WRITE_PATHS: frozenset[str] = frozenset(
+    {"store", "correct", "create_relationship", "create_relationships"}
+)
 
-    A body of any other shape (no ``entities`` list and no ``entity_type``)
-    counts as governance, for the reason :func:`is_governance_write` gives. So
-    does a store whose ``relationships`` are malformed, or whose relationship
-    names an endpoint by index outside ``entities``. An endpoint named by
-    ``*_entity_id`` points at an entity already on record, whose type the body
-    does not carry: :class:`NeotomaWriter` resolves those types before
-    classifying (see :func:`referenced_entities`).
-    """
+
+def _write_path(path: object) -> str:
+    return str(path or "").strip().strip("/")
+
+
+def _endpoint_ids_ok(rel: Mapping[str, Any]) -> bool:
+    return all(
+        isinstance(rel.get(k), str) and bool(rel.get(k))
+        for k in ("source_entity_id", "target_entity_id")
+    )
+
+
+def _store_touches_governance(body: Mapping[str, Any]) -> bool:
     entities = body.get("entities")
-    if isinstance(entities, list):
-        if not entities:
+    if not isinstance(entities, list) or not entities:
+        return True
+    for ent in entities:
+        if not isinstance(ent, Mapping):
             return True
-        for ent in entities:
-            if not isinstance(ent, Mapping):
-                return True
-            et = ent.get("entity_type")
-            if is_governance_write(et):
-                return True
-            if any(_is_governance_field(et, k) for k in ent):
-                return True
-        rels = body.get("relationships")
-        if rels is None:
-            return False
-        if not isinstance(rels, list):
+        et = ent.get("entity_type")
+        if is_governance_write(et):
             return True
-        for rel in rels:
-            if not isinstance(rel, Mapping):
-                return True
-            for end in ("source", "target"):
-                idx = rel.get(f"{end}_index")
-                eid = rel.get(f"{end}_entity_id")
-                if idx is None and not eid:
-                    return True
-                if idx is not None and not (
-                    isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < len(entities)
-                ):
-                    return True
+        if any(_is_governance_field(et, k) for k in ent):
+            return True
+        tid = ent.get("target_id")
+        if "target_id" in ent and not (isinstance(tid, str) and tid):
+            return True  # an extend whose target cannot be read
+    rels = body.get("relationships")
+    if rels is None:
         return False
-    if "entity_type" in body or "field" in body:
+    if not isinstance(rels, list):
+        return True
+    for rel in rels:
+        if not isinstance(rel, Mapping):
+            return True
+        for end in ("source", "target"):
+            idx = rel.get(f"{end}_index")
+            eid = rel.get(f"{end}_entity_id")
+            if idx is None and not eid:
+                return True
+            if idx is not None and not (
+                isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < len(entities)
+            ):
+                return True
+    return False
+
+
+def write_touches_governance(path: str, body: Mapping[str, Any]) -> bool:
+    """Whether a write to ``path`` with ``body`` declares a governance type or field.
+
+    Classified by endpoint, never by body shape: each endpoint in
+    :data:`SUPPORTED_WRITE_PATHS` reads only the keys Neotoma reads for it. A
+    body without its endpoint's shape counts as governance, and so does any
+    other endpoint. An existing entity the body names by id is resolved
+    separately (:func:`referenced_entities`); this judges only what the body
+    declares.
+    """
+    path = _write_path(path)
+    if not isinstance(body, Mapping):
+        return True
+    if path == "store":
+        return _store_touches_governance(body)
+    if path == "correct":
+        eid = body.get("entity_id")
+        if not (isinstance(eid, str) and eid):
+            return True
         return is_governance_write(body.get("entity_type"), body.get("field"))
+    if path == "create_relationship":
+        return not _endpoint_ids_ok(body)
+    if path == "create_relationships":
+        rels = body.get("relationships")
+        if not isinstance(rels, list) or not rels:
+            return True
+        return not all(isinstance(r, Mapping) and _endpoint_ids_ok(r) for r in rels)
     return True
 
 
-def referenced_entities(body: Mapping[str, Any]) -> list[tuple[str, "str | None"]]:
+def _inferred_path(body: Mapping[str, Any]) -> "str | None":
+    if isinstance(body.get("entities"), list):
+        return "store"
+    if "entity_type" in body or "field" in body:
+        return "correct"
+    return None
+
+
+def body_touches_governance(body: Mapping[str, Any]) -> bool:
+    """:func:`write_touches_governance` with the endpoint inferred from the body.
+
+    A body with an ``entities`` list is read as a store, one with an
+    ``entity_type`` or ``field`` as a correct; any other shape counts as
+    governance. :class:`NeotomaWriter` does not use this: it is told the
+    endpoint and classifies on that.
+    """
+    path = _inferred_path(body)
+    return True if path is None else write_touches_governance(path, body)
+
+
+def referenced_entities(
+    body: Mapping[str, Any], path: "str | None" = None
+) -> list[tuple[str, "str | None"]]:
     """``(entity_id, field)`` for every existing entity a write body touches by id.
 
-    A ``/correct`` body names its target by ``entity_id`` and declares an
-    ``entity_type`` Neotoma does not check against the target, so the declared
-    type cannot be trusted. A store's relationships can name endpoints by
-    ``*_entity_id``, and an edge onto a governance entity is a governance write.
+    Read per endpoint (see :data:`SUPPORTED_WRITE_PATHS`), so a key that
+    belongs to another endpoint's shape can neither add an id nor hide one:
+
+    - ``store``: each entity's ``target_id``, once with no field and once per
+      key the entity carries, so a governance field (``gate_status`` onto an
+      issue reached through ``target_id``) is judged against the target's
+      real type; and each relationship's ``*_entity_id``;
+    - ``correct``: ``entity_id`` with the corrected field, always, whatever
+      else the body carries;
+    - ``create_relationship`` / ``create_relationships``: both endpoints of
+      every edge.
+
+    With no ``path`` the endpoint is inferred as in :func:`body_touches_governance`.
     """
+    path = _write_path(path if path is not None else (_inferred_path(body) or ""))
     out: list[tuple[str, "str | None"]] = []
-    if isinstance(body.get("entities"), list):
-        for rel in body.get("relationships") or []:
+
+    def edge_ids(rels: object) -> None:
+        for rel in rels if isinstance(rels, list) else []:
             if isinstance(rel, Mapping):
                 for end in ("source", "target"):
                     eid = rel.get(f"{end}_entity_id")
                     if isinstance(eid, str) and eid:
                         out.append((eid, None))
-    elif body.get("entity_id"):
-        fld = body.get("field")
-        out.append((str(body["entity_id"]), str(fld) if fld is not None else None))
+
+    if path == "store":
+        for ent in body.get("entities") or []:
+            if not isinstance(ent, Mapping):
+                continue
+            tid = ent.get("target_id")
+            if isinstance(tid, str) and tid:
+                out.append((tid, None))
+                out.extend(
+                    (tid, str(k)) for k in ent if k not in ("entity_type", "target_id")
+                )
+        edge_ids(body.get("relationships"))
+    elif path == "correct":
+        eid = body.get("entity_id")
+        if eid:
+            fld = body.get("field")
+            out.append((str(eid), str(fld) if fld is not None else None))
+    elif path == "create_relationship":
+        edge_ids([body])
+    elif path == "create_relationships":
+        edge_ids(body.get("relationships"))
     return out
 
 
@@ -660,8 +765,8 @@ class NeotomaWriter:
         a write governance: nothing a caller passes can declassify a body that
         writes a governance type.
         """
-        path = path.lstrip("/")
-        governance = body_touches_governance(body)
+        path = _write_path(path)
+        governance = write_touches_governance(path, body)
         if entity_types is not None:
             governance = governance or any(is_governance_write(t) for t in entity_types)
         governance = governance or any(is_governance_write(t, f) for t, f in referenced)
@@ -713,12 +818,15 @@ class NeotomaWriter:
         target, a relationship endpoint) has its real type looked up first, and
         a failed lookup counts as governance.
         """
+        _require_supported(path)
         entity_types = None if entity_types is None else list(entity_types)
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            referenced = [
-                (await self._alookup_type(client, eid), fld)
-                for eid, fld in self._ids_to_resolve(body, entity_types)
-            ]
+            ids = self._ids_to_resolve(path, body, entity_types)
+            types: dict[str, "str | None"] = {}
+            for eid, _ in ids:
+                if eid not in types:
+                    types[eid] = await self._alookup_type(client, eid)
+            referenced = [(types[eid], fld) for eid, fld in ids]
             attempt = self._first_attempt(path, body, entity_types, referenced)
             while True:
                 resp = await client.post(attempt.url, headers=attempt.headers, content=attempt.content)
@@ -771,12 +879,15 @@ class NeotomaWriter:
         self, path: str, body: dict, *, entity_types: "Iterable[str] | None" = None
     ) -> WriteResult:
         """POST a write; same classification as :meth:`apost`."""
+        _require_supported(path)
         entity_types = None if entity_types is None else list(entity_types)
         with httpx.Client(timeout=self.timeout) as client:
-            referenced = [
-                (self._lookup_type(client, eid), fld)
-                for eid, fld in self._ids_to_resolve(body, entity_types)
-            ]
+            ids = self._ids_to_resolve(path, body, entity_types)
+            types: dict[str, "str | None"] = {}
+            for eid, _ in ids:
+                if eid not in types:
+                    types[eid] = self._lookup_type(client, eid)
+            referenced = [(types[eid], fld) for eid, fld in ids]
             attempt = self._first_attempt(path, body, entity_types, referenced)
             while True:
                 resp = client.post(attempt.url, headers=attempt.headers, content=attempt.content)
@@ -826,18 +937,18 @@ class NeotomaWriter:
 
     @staticmethod
     def _ids_to_resolve(
-        body: dict, entity_types: "Iterable[str] | None"
+        path: str, body: dict, entity_types: "Iterable[str] | None"
     ) -> list[tuple[str, "str | None"]]:
         """Entities whose real type must be read before classifying; none if already governance.
 
         A write the body (or the caller's extra types) already classes as
         governance is signed whatever its targets are, so it costs no read.
         """
-        if body_touches_governance(body):
+        if write_touches_governance(path, body):
             return []
         if entity_types is not None and any(is_governance_write(t) for t in entity_types):
             return []
-        return referenced_entities(body)
+        return referenced_entities(body, path)
 
     def _type_lookup_request(self, entity_id: str) -> "tuple[str, dict[str, str]] | None":
         """A GET of one entity: bearer when present, else signed; None if neither is possible."""
@@ -893,6 +1004,15 @@ class NeotomaWriter:
                 path="observations/query", body=body,
             )
         return self._signed_attempt("observations/query", body, governance=False)
+
+
+def _require_supported(path: str) -> None:
+    """Refuse, before anything is sent, a write to an endpoint the classifier does not know."""
+    if _write_path(path) not in SUPPORTED_WRITE_PATHS:
+        raise NeotomaWriteError(
+            f"/{_write_path(path)} is not a write endpoint this client classifies "
+            f"(supported: {', '.join(sorted(SUPPORTED_WRITE_PATHS))})"
+        )
 
 
 def _pinned_issuer(key_path: Path) -> str:

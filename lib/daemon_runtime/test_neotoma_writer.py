@@ -786,3 +786,132 @@ def test_signing_issuer_is_pinned_not_ambient(tmp_path, monkeypatch):
     (keys / "anthus.jwk.json").write_text(json.dumps(jwk))
     w2 = ns.NeotomaWriter("anthus", mode=ns.SigningMode.ON, base_url=BASE, bearer="tok", keys_dir=keys)
     assert w2._load_signer().iss == "https://issuer-in-key.example"
+
+
+# ── store target_id, and endpoint-scoped classification (security round 2) ──
+
+
+def _extend(entity_type: str, target_id: str, **fields) -> dict:
+    return {
+        "entities": [{"entity_type": entity_type, "target_id": target_id, **fields}],
+        "idempotency_key": "k",
+    }
+
+
+@pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
+def test_store_target_id_onto_an_agent_policy_is_governance(tmp_path, http, sync):
+    """A store declared `task` that extends an agent_policy by target_id is signed or refused."""
+    rec = http(_typed_entities({"ent_pol": "agent_policy", "ent_task": "task"}))
+    w = _writer(tmp_path, mode=ns.SigningMode.OFF, with_key=False)
+
+    def store(body):
+        if sync:
+            return w.post("store", body)
+        return asyncio.run(w.apost("store", body))
+
+    with pytest.raises(ns.SignedWriteError):
+        store(_extend("task", "ent_pol", rule="planted"))
+    assert _posts(rec) == []
+    # The real type was looked up, once.
+    gets = [r for r in rec.requests if r.method == "GET"]
+    assert [r.url.path for r in gets] == ["/entities/ent_pol"]
+    # A target that cannot be resolved is governance too.
+    with pytest.raises(ns.SignedWriteError):
+        store(_extend("task", "ent_unknown", title="t"))
+    assert _posts(rec) == []
+    # Extending a real task stays on the switch (bearer, with it off).
+    store(_extend("task", "ent_task", title="t"))
+    [post] = _posts(rec)
+    assert post.headers["authorization"] == "Bearer tok"
+
+
+def test_store_target_id_onto_an_agent_policy_is_signed_when_a_key_exists(tmp_path, http):
+    rec = http(_typed_entities({"ent_pol": "agent_policy"}))
+    w = _writer(tmp_path, mode=ns.SigningMode.OFF)
+    result = w.post("store", _extend("task", "ent_pol", rule="r"))
+    assert result.signed
+    [post] = _posts(rec)
+    assert "authorization" not in post.headers
+    assert post.headers["x-agent-label"] == ANTHUS
+
+
+def test_store_target_id_onto_an_issue_gate_status_is_governance(tmp_path, http):
+    """gate_status reached through target_id is judged against the target's real type."""
+    rec = http(_typed_entities({"ent_issue": "issue"}))
+    w = _writer(tmp_path, mode=ns.SigningMode.SHADOW, with_key=False)
+    with pytest.raises(ns.SignedWriteError):
+        w.post("store", _extend("task", "ent_issue", gate_status='{"pm":"clear"}'))
+    assert _posts(rec) == []
+    # Another field onto the same issue is ordinary (shadow, no key: bearer fallback).
+    w.post("store", _extend("task", "ent_issue", title="t"))
+    [post] = _posts(rec)
+    assert post.headers["authorization"] == "Bearer tok"
+
+
+@pytest.mark.parametrize("bad", ["", None, 7, ["ent_pol"]], ids=["empty", "null", "int", "list"])
+def test_store_with_an_unreadable_target_id_is_governance(bad):
+    assert ns.write_touches_governance("store", _extend("task", bad))
+
+
+def test_correct_resolves_entity_id_even_with_a_stray_entities_list(tmp_path, http):
+    rec = http(_typed_entities({"ent_pol": "agent_policy", "ent_task": "task"}))
+    w = _writer(tmp_path, mode=ns.SigningMode.OFF, with_key=False)
+    body = {
+        "entity_type": "task",
+        "entity_id": "ent_pol",
+        "field": "status",
+        "value": "x",
+        "idempotency_key": "k",
+        "entities": [{"entity_type": "task", "title": "decoy"}],
+    }
+    with pytest.raises(ns.SignedWriteError):
+        w.post("correct", body)
+    assert _posts(rec) == []
+    w.post("correct", {**body, "entity_id": "ent_task"})
+    [post] = _posts(rec)
+    assert post.headers["authorization"] == "Bearer tok"
+
+
+@pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
+def test_create_relationship_endpoints_are_resolved(tmp_path, http, sync):
+    rec = http(_typed_entities({"ent_pol": "agent_policy", "ent_a": "task", "ent_b": "task"}))
+    w = _writer(tmp_path, mode=ns.SigningMode.OFF, with_key=False)
+
+    def post(path, body):
+        if sync:
+            return w.post(path, body)
+        return asyncio.run(w.apost(path, body))
+
+    edge = {"relationship_type": "REFERS_TO", "source_entity_id": "ent_a"}
+    with pytest.raises(ns.SignedWriteError):
+        post("create_relationship", {**edge, "target_entity_id": "ent_pol"})
+    with pytest.raises(ns.SignedWriteError):
+        post("create_relationships", {"relationships": [
+            {**edge, "target_entity_id": "ent_b"}, {**edge, "target_entity_id": "ent_pol"},
+        ]})
+    with pytest.raises(ns.SignedWriteError):  # missing endpoint
+        post("create_relationship", edge)
+    assert _posts(rec) == []
+    post("create_relationship", {**edge, "target_entity_id": "ent_b"})
+    [p] = _posts(rec)
+    assert p.headers["authorization"] == "Bearer tok"
+
+
+@pytest.mark.parametrize(
+    "path", ["entities/merge", "entities/split", "delete_entity", "observations/create", "store?x=1", ""]
+)
+def test_unsupported_endpoints_are_refused_before_anything_is_sent(tmp_path, http, path):
+    rec = http()
+    w = _writer(tmp_path, mode=ns.SigningMode.ON)
+    body = {"entity_type": "task", "from_entity_id": "ent_a", "to_entity_id": "ent_b"}
+    with pytest.raises(ns.NeotomaWriteError, match="not a write endpoint"):
+        w.post(path, body)
+    with pytest.raises(ns.NeotomaWriteError, match="not a write endpoint"):
+        asyncio.run(w.apost(path, body))
+    assert rec.requests == []
+
+
+def test_supported_endpoints_are_the_ones_the_classifier_reads():
+    assert ns.SUPPORTED_WRITE_PATHS == {
+        "store", "correct", "create_relationship", "create_relationships"
+    }
