@@ -44,11 +44,12 @@ Two transports live here, sharing one key resolution (:func:`agent_identity`):
   and checks it carries the expected ``agent_sub`` AND the expected
   ``agent_thumbprint`` (this writer's own key, :attr:`NeotomaWriter.thumbprint`)
   at a signed tier, because a 2xx says nothing about who the server recorded
-  as the writer, and ``agent_sub`` alone is a label the writer's own token
-  claims — unverified by Neotoma against any key (Falco, PR #1274 round 3).
-  The thumbprint is what the signature actually proves: it is the RFC 7638
-  thumbprint of the public key the signature verified against, the same value
-  an ``agent_grant``'s ``match_thumbprint`` pins.
+  as the writer. This check compares the key thumbprint Neotoma records for
+  the observation (Falco, PR #1274 round 3), not the ``agent_sub`` label
+  alone. What a verified signature actually proves is the key, which Neotoma
+  records as ``provenance.agent_thumbprint`` — the RFC 7638 thumbprint of the
+  public key the signature verified against, the same value an
+  ``agent_grant``'s ``match_thumbprint`` pins.
 
 * :func:`signed_request` — the older per-request ``node signed_fetch.mjs``
   path. Its remaining callers (``gate_waive.IssueGateStore.sign_off`` and the
@@ -734,13 +735,13 @@ class NeotomaWriter:
         """RFC 7638 thumbprint of this writer's own key — what a verified
 
         signature actually proves, and what :meth:`confirm_attribution` pins
-        alongside ``agent_sub`` (Falco, PR #1274 round 3: ``agent_sub`` is a
-        label the caller's token claims, unverified; the thumbprint is the
-        key the signature verified against, the same value an
-        ``agent_grant``'s ``match_thumbprint`` pins). Raises
-        :class:`AAuthSigningError` if this writer has no usable key — callers
-        that need attribution confirmed should let that propagate rather than
-        confirm against a sub alone.
+        alongside ``agent_sub`` (Falco, PR #1274 round 3: the check compares
+        the key thumbprint Neotoma records for the observation, not the
+        ``agent_sub`` label alone; the thumbprint is the key the signature
+        verified against, the same value an ``agent_grant``'s
+        ``match_thumbprint`` pins). Raises :class:`AAuthSigningError` if this
+        writer has no usable key — callers that need attribution confirmed
+        should let that propagate rather than confirm against a sub alone.
         """
         return self._load_signer().thumbprint
 
