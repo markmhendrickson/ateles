@@ -65,6 +65,13 @@ log = logging.getLogger(__name__)
 # every agent — the opposite of what global means.
 POLICY_SCOPES_REACHING_EVERY_AGENT = frozenset({"global", "swarm"})
 
+# The whole closed vocabulary `data_model.md` gives `agent_policy.scope`:
+# the two that reach every agent, plus `agent`, which reaches only the agent
+# its `agent_sub` names. Derived from the set above rather than restated, so
+# the two cannot drift. A reader that must refuse a scope value outside the
+# vocabulary (the session index, ateles#1268) tests membership here.
+POLICY_SCOPES = POLICY_SCOPES_REACHING_EVERY_AGENT | frozenset({"agent"})
+
 
 def policy_binds_agent(snap: dict, agent_sub: str) -> bool:
     """Whether one `agent_policy` row binds the agent named by `agent_sub`.
@@ -82,6 +89,65 @@ def policy_binds_agent(snap: dict, agent_sub: str) -> bool:
         return True
     row_sub = str(snap.get("agent_sub") or "").strip()
     return bool(row_sub) and row_sub == agent_sub
+
+
+# Statuses that count as "live" for any reader of agent_policy. Shared so a
+# session-wide reader and a per-agent reader can never define "active" two
+# different ways (ateles#1268 round-2, Waxwing: two independent
+# fetch-and-filter implementations for the same read can silently diverge).
+POLICY_LIVE_STATUSES = frozenset({"active", "provisional"})
+
+# The query body every agent_policy reader sends. POST /entities/query is the
+# canonical list route — GET /entities/agent_policy 404s on the hosted
+# instance (same gotcha as _load_by_name below and issue_spec.py). Shared so
+# the query shape (entity_type, limit, include_snapshots) cannot drift
+# between readers.
+POLICY_QUERY_BODY: dict = {
+    "entity_type": "agent_policy",
+    "limit": 200,
+    "include_snapshots": True,
+}
+
+
+def unwrap_policy_entities(data: dict) -> list[dict]:
+    """The ONE unwrap-and-status-filter step for an `/entities/query` response
+    against `entity_type=agent_policy`. Transport-agnostic: takes the already-
+    parsed JSON body, so both the httpx-based reader (`AgentLoader`, this
+    module) and a stdlib-only `urllib` reader (the SessionStart hook via
+    `policy_skill_renderer.py`, which cannot import httpx) can call this same
+    function after making the request their own way — the ONE place the
+    unwrap shape and the "what counts as live" status set are defined
+    (Waxwing, ateles#1268 round 2: "route the renderer through it... so
+    there's ONE reader of agent_policy").
+
+    Unwraps the response's double-nested `snapshot.snapshot` shape (the same
+    quirk `_load_by_name` and `render_agent_docs.py`'s `_unwrap` handle for
+    `agent_definition`), filters to `status in (active, provisional)`, and
+    stamps `_entity_id` onto each returned snapshot from the entity wrapper.
+    Applies NO scope filter — scope semantics differ between a single-agent
+    reader (`AgentLoader.load_active_policies`, `policy_binds_agent(snap,
+    agent_sub)`) and a session-wide reader (the union across every named
+    agent), so scoping stays the caller's job; this function only answers
+    "what rows exist and are live," never "who they bind."
+    """
+    entities = (
+        (data.get("entities") or data.get("results") or [])
+        if isinstance(data, dict)
+        else []
+    )
+    out: list[dict] = []
+    for e in entities:
+        if not isinstance(e, dict):
+            continue
+        outer = e.get("snapshot") or {}
+        snap = outer.get("snapshot", outer) if isinstance(outer, dict) else {}
+        if not isinstance(snap, dict) or not snap:
+            continue
+        if str(snap.get("status", "")).strip().lower() not in POLICY_LIVE_STATUSES:
+            continue
+        snap["_entity_id"] = e.get("entity_id") or snap.get("entity_id", "")
+        out.append(snap)
+    return out
 
 
 NEOTOMA_BASE_URL = os.environ.get(
@@ -461,13 +527,7 @@ class AgentLoader:
             # is the MCP TOOL name, not a REST path, and 404s on the hosted
             # instance — see _load_by_name and issue_spec.py for the same gotcha.
             data = self._neotoma(
-                "POST",
-                f"{NEOTOMA_BASE_URL}/entities/query",
-                {
-                    "entity_type": "agent_policy",
-                    "limit": 200,
-                    "include_snapshots": True,
-                },
+                "POST", f"{NEOTOMA_BASE_URL}/entities/query", POLICY_QUERY_BODY
             )
         except Exception as exc:
             log.error(
@@ -476,22 +536,19 @@ class AgentLoader:
             )
             return []
 
+        # Shared unwrap+status-filter — the ONE reader of agent_policy's
+        # response shape, also used by policy_skill_renderer.py's session-wide
+        # fetch (ateles#1268 round 2, Waxwing). Scoping (which rows bind THIS
+        # agent) stays here, since that predicate differs from the session-
+        # wide caller's union.
+        live_rows = unwrap_policy_entities(data)
+
         out: list[dict] = []
-        rows = 0
         scoping_populated = 0
-        for e in data.get("entities", []):
-            # /entities/query returns the field dict either flat under
-            # "snapshot" or nested one level deeper; accept both.
-            outer = e.get("snapshot") or {}
-            snap = outer.get("snapshot", outer) if isinstance(outer, dict) else {}
-            if not snap:
-                continue
-            rows += 1
+        for snap in live_rows:
             if str(snap.get("agent_sub") or "").strip():
                 scoping_populated += 1
             if not policy_binds_agent(snap, agent_sub):
-                continue
-            if snap.get("status") not in ("active", "provisional"):
                 continue
             out.append(snap)
 
@@ -503,14 +560,14 @@ class AgentLoader:
         #
         # Distinguishing the two cases is the point: an empty result is only
         # trustworthy when the field the filter reads is populated SOMEWHERE.
-        if rows and not scoping_populated:
+        if live_rows and not scoping_populated:
             log.error(
-                f"[{self.agent_name}] agent_policy returned {rows} row(s) but "
-                "`agent_sub` is unpopulated on EVERY one — the filter matched "
-                "nothing because the scoping field is empty, not because this "
-                "agent has no policies. Dispatching WITHOUT policies. Backfill "
-                "`agent_sub` (docs/foundation/data_model.md names it the one "
-                "field that scopes a rule to an agent)."
+                f"[{self.agent_name}] agent_policy returned {len(live_rows)} "
+                "row(s) but `agent_sub` is unpopulated on EVERY one — the "
+                "filter matched nothing because the scoping field is empty, "
+                "not because this agent has no policies. Dispatching WITHOUT "
+                "policies. Backfill `agent_sub` (docs/foundation/data_model.md "
+                "names it the one field that scopes a rule to an agent)."
             )
         return out
 
