@@ -34,6 +34,16 @@ Explicitly NOT covered (allowed):
   - Read-only git (status/log/diff/show/rev-parse/worktree list) and all reads,
     including one whose path, rev, or pathspec merely CONTAINS a mutation word
     (`git log -- checkouts.md`, `git show origin/main:src/switcher.ts`).
+  - A read-only subcommand whose NAME merely contains a mutation word
+    (`git merge-base`, `git checkout-index`) — distinct from the path/pathspec
+    case above; the subcommand token itself, not its argument text, is what
+    matched before ateles#1265.
+  - Heredoc BODY content, even when it quotes a mutation phrase verbatim (an
+    issue body, a Neotoma `agent_policy` string) — the body is stripped before
+    any keyword matching, so it is inert regardless of which command consumes
+    the heredoc. This does NOT exempt a real mutating command that follows
+    the heredoc in the same Bash call; only the lines between the opening
+    marker and the closing tag are removed.
   - An actual `git worktree add` invocation itself (that is the remedy), and
     `git worktree remove` without `--force`, which is its counterpart and
     mutates no repository state — but only the segment(s) that ARE such an
@@ -56,6 +66,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _session_integrity import read_hook_input, log  # noqa: E402
+from _command_segments import (  # noqa: E402
+    join_line_continuations,
+    split_segments,
+    strip_heredoc_bodies,
+)
 
 # git subcommands / flag-forms that MUTATE the repo or its refs.
 # A plain `checkout <branch>` / `switch <branch>` also mutates a shared clone's
@@ -70,17 +85,29 @@ from _session_integrity import read_hook_input, log  # noqa: E402
 # this file's own docstring promises to allow. `clean`, `push`, and `restore`
 # carried the boundary from the start; the other nine did not, and the
 # inconsistency was visible within one expression (ateles#829).
+#
+# `\b` alone is not enough: a hyphen is a WORD-BOUNDARY character, so
+# `\bmerge\b` also matches the "merge" inside `merge-base` and `\bcheckout\b`
+# matches the "checkout" inside `checkout-index` — both real, READ-ONLY git
+# plumbing subcommands whose names merely CONTAIN a mutation word (ateles#1265
+# / #1220). Each bare word-shaped alternative below therefore also carries a
+# negative lookahead `(?![\w-])` disallowing a following word character OR
+# hyphen, so the match must be the ENTIRE subcommand token, not a prefix of a
+# longer one. This does not touch the phrase-form alternatives (`branch -D`,
+# `stash pop`, `rm --cached`, `tag -d`, `worktree remove --force`), which
+# already have internal structure past the bare word and are unaffected by
+# this class of bug.
 _GIT_MUTATION_RE = re.compile(
     r"\bgit\b[^\n;|&]*?\b("
-    r"commit\b|merge\b|rebase\b|cherry-pick\b|revert\b|"
-    r"reset\b|apply\b|am\b|"
-    r"checkout\b|switch\b|"                       # any checkout/switch (incl. plain branch move)
+    r"commit(?![\w-])|merge(?![\w-])|rebase(?![\w-])|cherry-pick(?![\w-])|revert(?![\w-])|"
+    r"reset(?![\w-])|apply(?![\w-])|am(?![\w-])|"
+    r"checkout(?![\w-])|switch(?![\w-])|"          # any checkout/switch (incl. plain branch move)
     r"branch\s+-\w*[fDdm]|"                       # force/delete/move branch
     r"stash\s+(pop|apply|drop|push|save)|"
-    r"clean\b|"
+    r"clean(?![\w-])|"
     r"rm\s+--cached|"
-    r"push\b|tag\s+-\w*[df]|"
-    r"restore\b|"
+    r"push(?![\w-])|tag\s+-\w*[df]|"
+    r"restore(?![\w-])|"
     # A FORCED worktree removal, which is the one form of `worktree remove`
     # that discards work rather than deleting an already-clean directory. The
     # unforced form is permitted by `_is_permitted_worktree_call`, which runs
@@ -268,20 +295,6 @@ def check_path_target(raw_path: str, ateles: Path):
     return guidance(top)
 
 
-def _split_segments(command: str):
-    """Split a compound command into ordered &&/;/|/newline segments.
-
-    A plain split is enough here — we don't need a shell parser, just enough
-    to separate invocations so each one can be evaluated on its own terms
-    instead of via first-match-in-the-whole-string regexes. re.split keeps
-    this simple; segments are stripped but otherwise left as raw text for
-    the existing per-segment regexes to match against. Splits on newlines
-    too: a multi-line Bash block (`cmd1\ncmd2`) is just as much a compound
-    command as one joined with `&&`.
-    """
-    return [seg.strip() for seg in re.split(r"&&|;|\||\n", command) if seg.strip()]
-
-
 # Flag VALUES and quoted strings are data, not the git subcommand. `git log
 # --grep=reset` and `git commit -m "reset the thing"` both contain a mutation
 # keyword in their text, but only the second is a mutation. Scrub argument
@@ -297,11 +310,35 @@ _ARG_PAYLOAD_RE = re.compile(
     re.VERBOSE,
 )
 
+# `bash -c '<script>'` / `sh -c "<script>"` / `zsh -c '<script>'`: the quoted
+# argument here is not DATA, it is a COMMAND to be executed — the opposite of
+# the `-m "message"` / `--grep=pattern` case _ARG_PAYLOAD_RE exists to scrub.
+# Blanking it would blind the guard to a real mutation smuggled through a
+# shell-executor wrapper (`bash -c "git -C <sibling> merge foo"`), which is
+# exactly the class of loophole ateles#1265 requires stay closed. Detected
+# narrowly (a `-c` shell executor as the WHOLE segment's leader) so this
+# never widens into a general "don't scrub quotes" rule that would reopen the
+# `echo "do a git merge later"` false positive the scrub exists to prevent.
+_SHELL_EXECUTOR_C_RE = re.compile(r"^\s*(?:bash|sh|zsh)\s+-c\s+", re.IGNORECASE)
+
 
 def _scrub_arg_payloads(segment: str) -> str:
     """Blank out flag values / quoted payloads so keyword matching sees only
     the invocation's own words. Length is not preserved; callers only ask
-    boolean 'does a mutation keyword appear' questions of the result."""
+    boolean 'does a mutation keyword appear' questions of the result.
+
+    Exception: a `bash -c`/`sh -c`/`zsh -c` executor's quoted script argument
+    is left with its surrounding quotes stripped rather than blanked, so a
+    real mutating invocation inside it is still visible to the mutation
+    regex — see `_SHELL_EXECUTOR_C_RE`.
+    """
+    m = _SHELL_EXECUTOR_C_RE.match(segment)
+    if m:
+        prefix = segment[: m.end()]
+        rest = segment[m.end():].strip()
+        if len(rest) >= 2 and rest[0] == rest[-1] and rest[0] in "'\"":
+            rest = rest[1:-1]
+        return f"{prefix}{rest}"
     return _ARG_PAYLOAD_RE.sub(" ", segment)
 
 
@@ -343,7 +380,7 @@ def check_bash(command: str, ateles: Path):
     # persistent-cwd-across-calls case is why the never-work-in-shared-clones
     # rule also lives in operator memory, not only in this hook.
     cd_state = None
-    for segment in _split_segments(command):
+    for segment in split_segments(command):
         # This segment's own `cd` (if any) updates state for THIS and later
         # segments — extracted once up front regardless of which branch
         # below fires. Note: a real shell would apply `cd` before evaluating
@@ -403,11 +440,23 @@ def main() -> int:
     # text "worktree add" must not be treated as the remedy); otherwise fall
     # through to check_bash for the real per-segment check.
     if tool == "Bash":
-        cmd = ti.get("command", "")
+        # Strip heredoc BODY content before any keyword matching, so an issue
+        # body / agent_policy string quoted in a heredoc that merely contains
+        # a mutation phrase is invisible to the regexes below (ateles#1265).
+        # This does not exempt a real mutation that follows the heredoc in
+        # the same command — only the lines strictly between the opener and
+        # closing tag are removed. Heredoc stripping runs FIRST because a
+        # heredoc body's internal newlines must survive intact for the opener/
+        # closer scan; line-continuation folding runs on what remains, same
+        # order as git_stash_guard.py. Without this fold, `_GIT_MUTATION_RE`'s
+        # `[^\n;|&]*?` gap (which explicitly excludes newlines) would miss a
+        # real mutation split across a `\`-continued line
+        # (`git -C <sibling> \<newline>merge foo`).
+        cmd = join_line_continuations(strip_heredoc_bodies(ti.get("command", "")))
         if not _GIT_MUTATION_RE.search(_scrub_arg_payloads(cmd)):
             return 0
         if _GIT_WORKTREE_ALLOWED_RE.search(cmd):
-            segments = _split_segments(cmd)
+            segments = split_segments(cmd)
             if all(
                 _is_permitted_worktree_call(seg)
                 or not _GIT_MUTATION_RE.search(_scrub_arg_payloads(seg))
@@ -424,7 +473,7 @@ def main() -> int:
             ti.get("file_path") or ti.get("notebook_path") or "", ateles
         )
     elif tool == "Bash":
-        reason = check_bash(ti.get("command", ""), ateles)
+        reason = check_bash(cmd, ateles)
 
     if reason:
         log(f"blocked {tool} against shared sibling clone")
