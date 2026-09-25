@@ -11,7 +11,7 @@ during review), and the operator's 2026-09-05 12:52 memo (revision 21: workflows
 for changing the swarm's own operation), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18,
 23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default),
 and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: one live instance,
-completion creates the next, `FOLLOWS` task to task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the task-sources index, the intake rule, and open decision 36). Supersedes `docs/archive/task_execution_loop.md`. What is built
+completion creates the next, `FOLLOWS` task to task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the task-sources index, the intake rule, and open decision 36), and the operator's 2026-09-25 ruling on dynamic workflows (revision 125, decision 116: a task no declaration fits is carried by one declared for it, and never held for similar tasks). Supersedes `docs/archive/task_execution_loop.md`. What is built
 is `status.md`; how each concept is recorded is `data_model.md`.
 Amendment history: `revisions.md#work_modelmd`.
 ## Purpose
@@ -154,7 +154,9 @@ names, a record in the record and an external one alike, and nothing on relevanc
 beyond that is hydration's, per step (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`).
 Tasks a batch creates
 (children, detached tasks, tasks extracted from a meeting) enter intake themselves; a child may take
-intake's declared fast path and never skips intake.
+intake's declared fast path and never skips intake. `route` names a declaration that fits the task or opens
+the authoring of one for it, and never holds the task for similar tasks to appear
+(`#a-task-no-declaration-fits-is-carried-by-one-declared-for-it-and-no-task-waits-for-similar-tasks`).
 
 **What a task being assembled looks like is open (decision 84, 2026-09-07, on the operator's question).**
 Registered in `conformance.md#the-register-of-open-design-decisions`, argued below.
@@ -698,6 +700,47 @@ and an `enabled` field on it is the maintained state invariant 11 forbids
 (`principles.md#11-state-that-needs-a-watchdog-belongs-in-a-relationship-not-a-field`). So the state is an
 edge or the absence of a proving record, and this ruling does not choose between them. What it does settle
 is that the choice is between those two and not between them and a flag.
+
+### A task no declaration fits is carried by one declared for it, and no task waits for similar tasks
+
+**Ruled (decision 116, 2026-09-25, the operator's).** Registered in
+`conformance.md#the-register-of-open-design-decisions`, and argued with its rules in
+`workflows.md#a-workflow-is-created-for-the-task-no-declaration-fits-and-improved-by-every-task-it-carries`.
+Every task is executed by a workflow as soon as possible, and when no declaration fits, one is created for
+that task. This section states what the ruling means for the work model; the rules for fit, authoring,
+amendment, naming, and retirement are stated once, in `workflows.md` (principle 9).
+
+**No task waits for other tasks to exist.** The batch rules above already make a batch of one a batch and
+forbid a sweeper grouping tasks by a predicate over the record
+(`#how-a-batch-is-formed-and-what-chooses-its-workflow`), so holding a task until similar tasks appear was
+never a formation rule; the ruling makes it a stated prohibition at the one place it could have been
+introduced, `route`. A task's intake closes on its own properties, and its successor batch opens with the
+tasks that verdict carried, one or many.
+
+**The one wait the ruling admits is on the task's own workflow, and it is decision 14's.** Where no
+declaration fits, `route` creates the task whose work is the new declaration and its batch records a
+dependency on that task (`#a-batch-may-depend-on-a-task-it-created`); `route`'s verdict would be false
+without it, because it would name a workflow that does not exist. That task is a change to the swarm and is
+executed as one (`#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`): it enters its
+own intake, goes through a workflow, and its declaration is a governance write the action gate evaluates —
+reserved to the operator under decision 18 until the operator grants the class, and proven first where
+decision 100's tier requires it (`#whether-a-newly-declared-workflow-is-proven-before-it-binds-production-work`).
+When the declaration lands and is read back, the dependency ends and `route` signs naming it.
+
+**Every batch may improve the declaration it ran under, and the batch does not wait for the improvement.**
+A step owner who finds that the task's context shows the declaration could serve its class better records a
+standing finding scoped to the step or the workflow, and the change reaches the declaration through the
+institutionalization task decision 17 describes, never as a write the proposing batch makes
+(`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
+The ruling ranks this path with the authoring path: improving existing workflows is as important as creating
+new ones.
+
+**What this does not change.** The workflow is still chosen once, by the verdict that names the successor,
+and a batch still goes through one workflow for its whole life; a declaration amended while a batch runs
+under it binds the next batch, not this one. The bootstrapping limitation is unchanged: the first
+declaration for a declaration scope, and the first workflow that can carry the authoring of declarations, are
+operator acts (`#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`), and which
+workflow carries an authoring task once one exists is registered as open under decision 116.
 
 ### What goes through a workflow is a batch of tasks
 
