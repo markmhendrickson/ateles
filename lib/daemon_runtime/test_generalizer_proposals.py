@@ -184,3 +184,122 @@ def test_switched_on_proposals_are_signed_as_anthus(sent, monkeypatch, tmp_path)
             pyjwt.decode(token, options={"verify_signature": False})["sub"]
             == "anthus@ateles-swarm"
         )
+
+
+class _FakeNeotoma:
+    """A stateful stand-in: stores land as entities that later queries return."""
+
+    def __init__(self):
+        self.entities: dict[str, dict] = {}  # id -> snapshot (with entity_type)
+        self.requests: list[tuple[str, str, dict]] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        body = json.loads(request.content or b"{}") if request.content else {}
+        self.requests.append((request.method, path, body))
+        if request.method == "GET" and path.startswith("/entities/"):
+            snap = self.entities.get(path.rsplit("/", 1)[-1])
+            if snap is None:
+                return httpx.Response(404, json={"error": "not found"})
+            return httpx.Response(200, json={"entity_type": snap["entity_type"]})
+        if path.endswith("/entities/query"):
+            ents = [
+                {"entity_id": eid, "snapshot": dict(snap)}
+                for eid, snap in self.entities.items()
+                if snap["entity_type"] == body.get("entity_type")
+            ]
+            off, lim = body.get("offset", 0), body.get("limit", 100)
+            return httpx.Response(200, json={"entities": ents[off : off + lim]})
+        if path.endswith("/correct"):
+            self.entities[body["entity_id"]][body["field"]] = body["value"]
+            return httpx.Response(
+                200, json={"entity_id": body["entity_id"], "observation_id": "obs_c"}
+            )
+        stored = []
+        for ent in body.get("entities", []):
+            eid = f"ent_{len(self.entities)}"
+            self.entities[eid] = dict(ent)
+            stored.append({"entity_id": eid, "observation_id": f"obs_{eid}"})
+        return httpx.Response(200, json={"entities": stored})
+
+    def proposals(self) -> list[dict]:
+        return [
+            s for s in self.entities.values()
+            if s["entity_type"] == "strategy_revision_proposal"
+        ]
+
+
+@pytest.fixture
+def neotoma(monkeypatch):
+    fake = _FakeNeotoma()
+    transport = httpx.MockTransport(fake.handler)
+    real_async = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kw: real_async(
+            transport=transport, **{k: v for k, v in kw.items() if k != "transport"}
+        ),
+    )
+    monkeypatch.delenv("ATELES_SIGNED_WRITES_ANTHUS", raising=False)
+    return fake
+
+
+def test_a_growing_cluster_keeps_one_open_proposal(neotoma):
+    """3 signals on one tick, 4 on the next, same rule: exactly one proposal."""
+    asyncio.run(gz._act_on_cluster(_cluster(3), [], 3, "tok"))
+    asyncio.run(gz._act_on_cluster(_cluster(4), [], 3, "tok"))
+
+    [proposal] = neotoma.proposals()
+    # The fourth signal's evidence was added to the open proposal...
+    assert proposal["drift_signal_refs"] == ["ref0", "ref1", "ref2", "ref3"]
+    # ...without touching what an approver approves.
+    change = json.loads(proposal["proposed_change"])
+    assert change["fields"]["rule"] == RULE
+    assert json.loads(change["fields"]["body"])["drift_signal_refs"] == [
+        "ref0", "ref1", "ref2"
+    ]
+
+
+def test_same_cluster_again_opens_nothing_and_writes_nothing(neotoma):
+    asyncio.run(gz._act_on_cluster(_cluster(3), [], 3, "tok"))
+    before = len(neotoma.requests)
+    asyncio.run(gz._act_on_cluster(_cluster(3), [], 3, "tok"))
+    assert len(neotoma.proposals()) == 1
+    writes = [r for r in neotoma.requests[before:] if r[0] == "POST" and not r[1].endswith("/entities/query")]
+    assert writes == []
+
+
+def test_a_decided_proposal_is_not_open(neotoma):
+    asyncio.run(gz._act_on_cluster(_cluster(3), [], 3, "tok"))
+    [(eid, snap)] = [
+        (k, v) for k, v in neotoma.entities.items()
+        if v["entity_type"] == "strategy_revision_proposal"
+    ]
+    snap["status"] = "rejected"
+    snap["operator_decision"] = "rejected"
+    asyncio.run(gz._act_on_cluster(_cluster(4), [], 3, "tok"))
+    assert len(neotoma.proposals()) == 2
+
+
+def test_proposal_identity_ignores_evidence_and_spacing():
+    a = gz.proposed_policy_fields(_cluster(3))
+    b = gz.proposed_policy_fields(_cluster(5))
+    assert a["body"] != b["body"]
+    ident = lambda f: gz.proposal_identity(  # noqa: E731
+        {"op": "create", "entity_type": "agent_policy", "fields": f}
+    )
+    assert ident(a) == ident(b)
+    assert ident({**a, "rule": "  read a WRITE back   before reporting success "}) == ident(a)
+    assert ident({**a, "rule": "A different rule."}) != ident(a)
+    assert ident({**a, "applies_when": "on release"}) != ident(a)
+    assert ident({**a, "agent_sub": "falco@ateles-swarm"}) != ident(a)
+
+
+def test_unreadable_open_proposals_opens_nothing(sent, monkeypatch):
+    async def fail(*a, **k):
+        return None
+
+    monkeypatch.setattr(gz, "_post", fail)
+    assert asyncio.run(gz.create_policy_proposal(_cluster(3), "tok")) is None
+    assert not _entities(sent, "strategy_revision_proposal")

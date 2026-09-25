@@ -160,7 +160,7 @@ Companion report (not a foundation design document; not in the review reading li
   secrets, identities, and grants a new operator must supply.
 - [**Setup**](setup.md) — Neotoma, venv, AAuth keypairs, grants, first daemon under launchd.
 - [**Secrets management**](secrets_management.md) — the SOPS + age model, offline materialization.
-- [**AAuth**](aauth.md) · [**Keys**](aauth/keys.md) — agent identity, keypair format, signing.
+- [**AAuth**](aauth.md) · [**Keys**](aauth/keys.md) · [**Signed daemon writes**](aauth/signed_daemon_writes.md) — agent identity, keypair format, signing, switching a daemon's Neotoma writes to signed.
 - [**Cloud hosting**](cloud_hosting.md) — running daemons under docker-compose on a small ARM host.
 
 ## P3 · Operate & extend

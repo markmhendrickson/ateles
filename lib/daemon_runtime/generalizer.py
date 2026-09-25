@@ -8,6 +8,15 @@ rule only when a different signed swarm identity approves it through a
 checkpoint, plus the operator's approval when the rule reaches sessions. That
 approval step is a follow-up; until it exists, proposals wait.
 
+The rule the approval step must follow: it checks the VERIFIED SIGNER on the
+stored record, never a field. The proposal's observation must carry
+`provenance.agent_sub` equal to the proposer's swarm identity at a
+verified-signature tier (`neotoma_signed.check_observation_attribution`), the
+approver must be a different signed identity, and an unsigned proposal is
+refused. `proposing_agent_sub` is self-reported; anyone holding the bearer can
+write it. The approver applies only `proposed_change` and approves its digest;
+for a suspension, `target_entity_id` must equal `proposed_change.entity_id`.
+
   • CONFIDENCE   — a cluster must reach the agent's `drift_signal_threshold`
                    (independent corroborations) before anything is proposed.
   • AGENT-LOCAL  — a cluster inside the agent-local envelope becomes an
@@ -46,11 +55,11 @@ import httpx
 try:  # package import (production) and bare import (in-dir pytest) both work
     from .drift import DriftCluster, DriftSignal, cluster_signals, contradicts
     from .agent_loader import policy_binds_agent
-    from .neotoma_signed import NeotomaWriteError, NeotomaWriter
+    from .neotoma_signed import NeotomaWriteError, NeotomaWriter, canonical_entity_type
 except ImportError:  # pragma: no cover
     from drift import DriftCluster, DriftSignal, cluster_signals, contradicts
     from agent_loader import policy_binds_agent
-    from neotoma_signed import NeotomaWriteError, NeotomaWriter
+    from neotoma_signed import NeotomaWriteError, NeotomaWriter, canonical_entity_type
 
 log = logging.getLogger("daemon_runtime.generalizer")
 
@@ -353,7 +362,7 @@ async def _write(body: dict, bearer: str) -> dict | None:
         return (await _writer(bearer).apost("store", body)).data
     except NeotomaWriteError as exc:
         if exc.status == 400 and "IDEMPOTENCY" in str(exc).upper():
-            # The same proposal (same content digest) is already on record.
+            # The same write (same idempotency key) is already on record.
             log.debug(f"store: already recorded ({body.get('idempotency_key')})")
         else:
             log.error(f"store failed: {exc}")
@@ -361,6 +370,26 @@ async def _write(body: dict, bearer: str) -> dict | None:
     except Exception as exc:  # noqa: BLE001 — learning must never break dispatch
         log.error(f"store request failed: {exc}")
         return None
+
+
+async def _correct(
+    entity_type: str, entity_id: str, field_name: str, value: Any, key: str, bearer: str
+) -> bool:
+    """Correct one field through the signed client. Best-effort and loud, like `_write`."""
+    try:
+        await _writer(bearer).acorrect(
+            entity_type, entity_id, field_name, value, idempotency_key=key
+        )
+        return True
+    except NeotomaWriteError as exc:
+        if exc.status == 400 and "IDEMPOTENCY" in str(exc).upper():
+            log.debug(f"correct: already recorded ({key})")
+            return True
+        log.error(f"correct {entity_type}.{field_name} on {entity_id} failed: {exc}")
+        return False
+    except Exception as exc:  # noqa: BLE001 — learning must never break dispatch
+        log.error(f"correct request failed: {exc}")
+        return False
 
 
 def _canonical(value: Any) -> str:
@@ -401,6 +430,123 @@ def proposed_policy_fields(cluster: DriftCluster) -> dict:
     }
 
 
+def _canonical_text(value: Any) -> str:
+    """Rule text as compared for identity: whitespace collapsed, case-folded, no trailing stop."""
+    return " ".join(str(value or "").split()).casefold().rstrip(" .")
+
+
+def proposal_identity(change: dict) -> str:
+    """Digest of WHAT a proposal would change, not of the evidence behind it.
+
+    For a new rule: the canonical rule text, scope, target agent and
+    `applies_when`. The evidence (`drift_signal_refs`, counts, the maturation
+    `body`) and bookkeeping (`description`, `proposed_at`) are left out, so a
+    cluster that grows by one corroborating signal between ticks has the same
+    identity as it had before. For any other change (a suspension) the whole
+    change is the identity; it carries no evidence.
+    """
+    op = change.get("op")
+    fields = change.get("fields") or {}
+    if op == "create":
+        ident: dict[str, Any] = {
+            "op": "create",
+            "entity_type": canonical_entity_type(change.get("entity_type", "")),
+            "scope": _canonical_text(fields.get("scope")),
+            "target": _canonical_text(fields.get("agent_sub")),
+            "rule": _canonical_text(fields.get("rule")),
+            "applies_when": _canonical_text(fields.get("applies_when")),
+        }
+    else:
+        ident = {
+            "op": op,
+            "entity_type": canonical_entity_type(change.get("entity_type", "")),
+            "entity_id": change.get("entity_id"),
+            "fields": fields,
+        }
+    return _content_digest(ident)
+
+
+# A proposal is OPEN until someone decides it. Only an explicit pending (or a
+# missing value) is open; any recorded decision closes it.
+_OPEN_VALUES = frozenset({"", "pending"})
+PROPOSAL_QUERY_PAGE = 200
+PROPOSAL_QUERY_MAX_PAGES = 10
+
+
+def _is_open(snap: dict) -> bool:
+    status = str(snap.get("status") or "").strip().lower()
+    decision = str(snap.get("operator_decision") or "").strip().lower()
+    return status in _OPEN_VALUES and decision in _OPEN_VALUES
+
+
+def _identity_of(snap: dict) -> str | None:
+    try:
+        change = json.loads(snap.get("proposed_change") or "")
+    except (TypeError, ValueError):
+        return None
+    return proposal_identity(change) if isinstance(change, dict) else None
+
+
+async def fetch_open_policy_proposals(bearer: str) -> list[dict] | None:
+    """Open `strategy_revision_proposal`s against `agent_policy`, or None if unreadable.
+
+    None is not an empty list: a failed read means the generalizer cannot tell
+    whether a proposal is already open, so it opens nothing this tick rather
+    than risk a duplicate. The cluster is re-seen next tick.
+    """
+    out: list[dict] = []
+    for page in range(PROPOSAL_QUERY_MAX_PAGES):
+        data = await _post(
+            "entities/query",
+            {
+                "entity_type": PROPOSAL_ENTITY_TYPE,
+                "limit": PROPOSAL_QUERY_PAGE,
+                "offset": page * PROPOSAL_QUERY_PAGE,
+                "include_snapshots": True,
+            },
+            bearer,
+        )
+        if data is None:
+            return None
+        ents = data.get("entities") or []
+        for e in ents:
+            snap = dict(e.get("snapshot") or {})
+            if snap.get("target_entity_type") != "agent_policy" or not _is_open(snap):
+                continue
+            snap["_entity_id"] = e.get("entity_id", "")
+            out.append(snap)
+        if len(ents) < PROPOSAL_QUERY_PAGE:
+            return out
+    log.warning("open-proposal scan hit its page cap; not opening a proposal this tick")
+    return None
+
+
+async def _add_evidence(proposal: dict, refs: list[str], bearer: str) -> str | None:
+    """Fold a cluster's new evidence into an already-open proposal instead of opening another.
+
+    Only `drift_signal_refs` changes. `proposed_change`, the content an
+    approver approves, is left exactly as proposed.
+    """
+    eid = proposal.get("_entity_id") or None
+    if not eid:
+        return None
+    old = [str(r) for r in (proposal.get("drift_signal_refs") or [])]
+    merged = old + [r for r in refs if r not in old]
+    if merged == old:
+        return eid
+    ok = await _correct(
+        PROPOSAL_ENTITY_TYPE,
+        eid,
+        "drift_signal_refs",
+        merged,
+        f"proposal-evidence-{eid}-{_content_digest(merged)[:16]}",
+        bearer,
+    )
+    if ok:
+        log.info(f"added {len(merged) - len(old)} signal(s) to open proposal {eid}")
+    return eid
+
+
 async def create_policy_proposal(cluster: DriftCluster, bearer: str) -> str | None:
     """Propose a new agent-local agent_policy. Never writes agent_policy itself.
 
@@ -408,12 +554,39 @@ async def create_policy_proposal(cluster: DriftCluster, bearer: str) -> str | No
     `proposed_change` is the canonical JSON of the proposed row, so an approver
     approves exact content and can hash it. `target_entity_id` is the agent the
     rule would bind, the same convention the agent_definition proposals use.
-    The idempotency key carries the content digest, so re-seeing the same
-    cluster on a later tick does not open a second proposal.
+
+    One open proposal per proposed rule. A proposal's identity is
+    :func:`proposal_identity` of its change: the rule text, scope, target and
+    `applies_when`, never the evidence. Anthus re-clusters every tick, so a
+    cluster seen again usually carries more signals than last time. Before
+    storing, this reads the open proposals against `agent_policy`; if one has
+    the same identity, the new signals are added to its `drift_signal_refs`
+    and no second proposal is opened. If that read fails, nothing is opened
+    this tick. Once a proposal is decided it is no longer open, so the same
+    rule can be proposed again only on evidence the decided one did not carry
+    (the idempotency key is the identity plus the evidence set).
+
+    Approval, when built, must check who signed the proposal on the stored
+    record, not the `proposing_agent_sub` field: the observation's
+    `provenance.agent_sub` must be the proposer's swarm identity at a
+    verified-signature tier, and a proposal without a signed observation is
+    refused. `proposing_agent_sub` is self-reported and any bearer holder can
+    write it. The approver applies only `proposed_change`, and approves its
+    digest.
     """
     fields = proposed_policy_fields(cluster)
     change = {"op": "create", "entity_type": "agent_policy", "fields": fields}
-    digest = _content_digest(change)
+    identity = proposal_identity(change)
+    open_proposals = await fetch_open_policy_proposals(bearer)
+    if open_proposals is None:
+        log.warning(
+            f"could not read open proposals; not proposing for {cluster.agent} this tick"
+        )
+        return None
+    for existing in open_proposals:
+        if _identity_of(existing) == identity:
+            return await _add_evidence(existing, cluster.source_refs, bearer)
+    evidence = _content_digest(sorted(set(cluster.source_refs)))
     payload = {
         "entity_type": PROPOSAL_ENTITY_TYPE,
         "proposing_agent_sub": PROPOSER_SUB,
@@ -428,7 +601,7 @@ async def create_policy_proposal(cluster: DriftCluster, bearer: str) -> str | No
     }
     body = {
         "entities": [payload],
-        "idempotency_key": f"policy-proposal-{digest[:32]}",
+        "idempotency_key": f"policy-proposal-{identity[:32]}-{evidence[:12]}",
         "strict": True,
     }
     data = await _write(body, bearer)

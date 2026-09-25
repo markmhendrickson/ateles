@@ -14,12 +14,26 @@ Two transports live here, sharing one key resolution (:func:`agent_identity`):
     and sent with the signature as its only credential. If it cannot be
     signed, or the server refuses the signature, it raises
     :class:`SignedWriteError`. There is no fallback, whatever the daemon's
-    switch says.
+    switch says. Classification fails closed at every input:
+
+    - type names are compared folded (:func:`canonical_entity_type`: case,
+      separators, accents, simple plurals), because Neotoma files a variant
+      spelling under the registered type it folds onto;
+    - an existing entity the body names by id (a correct's target, a
+      relationship endpoint) has its real type looked up first, because
+      ``/correct`` does not check the declared type; a failed lookup counts
+      as governance;
+    - a caller's ``entity_types`` can only add types to the check, never
+      replace the body's.
   - **Every other write follows the daemon's switch,**
     ``ATELES_SIGNED_WRITES_<DAEMON>`` (see :func:`signing_mode`): ``off``
     (the default, today's bearer write), ``shadow`` (sign; on a signing
     failure log at ERROR and fall back to the bearer) or ``on`` (sign; a
     signing failure raises). An unrecognised value reads as ``on``.
+
+  The signing identity comes from the key file and this module only: the
+  ``sub`` is pinned to ``<agent>@ateles-swarm``, and the issuer to the key
+  file's ``iss`` (else the default), never an ambient ``NEOTOMA_AAUTH_*``.
 
   :meth:`NeotomaWriter.confirm_attribution` reads a written observation back
   and checks it carries the expected ``agent_sub`` at a signed tier, because a
@@ -46,18 +60,31 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from urllib.parse import quote
 
 import httpx
 
 try:  # package import (production) and bare import (in-dir tests) both work
-    from .aauth_httpsig import AAuthSigningError, HttpSigSigner, load_http_sig_signer
+    from .aauth_httpsig import (
+        DEFAULT_AAUTH_ISSUER,
+        AAuthSigningError,
+        HttpSigSigner,
+        load_http_sig_signer,
+    )
 except ImportError:  # pragma: no cover
-    from aauth_httpsig import AAuthSigningError, HttpSigSigner, load_http_sig_signer
+    from aauth_httpsig import (
+        DEFAULT_AAUTH_ISSUER,
+        AAuthSigningError,
+        HttpSigSigner,
+        load_http_sig_signer,
+    )
 
 log = logging.getLogger("daemon_runtime.neotoma_signed")
 
@@ -254,26 +281,112 @@ def signing_mode(daemon: str, env: "Mapping[str, str] | None" = None) -> Signing
     return SigningMode.ON
 
 
+# Word forms Neotoma's singulariser leaves alone (entity_type_guard.ts
+# IRREGULAR_SINGULAR_NAMES, the entries that could end a type name).
+_NOT_PLURAL = frozenset({"news", "data", "analytics", "status", "address"})
+
+
+def canonical_entity_type(entity_type: str) -> str:
+    """The spelling a type name is compared under: folded the way Neotoma folds it, and further.
+
+    Neotoma's store does not match a declared type exactly: a type with no
+    exact active schema is filed under a registered one that matches it
+    case-insensitively, by singular form, or by schema alias
+    (``entity_type_equivalence.ts``), and alias matching also drops accents.
+    So ``Agent_Policy``, ``AGENT_POLICY`` and ``agent_policies`` can all land
+    as ``agent_policy``. This folds at least as far: compatibility-normalise,
+    drop accents and invisible format characters, case-fold, turn every run of
+    anything but ``[a-z0-9]`` into ``_``, and trim ``_``. Folding further than
+    the server does only ever classes more writes as governance, which is the
+    restrictive direction.
+    """
+    s = unicodedata.normalize("NFKD", str(entity_type))
+    s = "".join(
+        c for c in s if not unicodedata.combining(c) and unicodedata.category(c) != "Cf"
+    )
+    return re.sub(r"[^a-z0-9]+", "_", s.casefold()).strip("_")
+
+
+def _singular(name: str) -> str:
+    """Neotoma's ``suggestSingular`` rules, applied to a canonical name."""
+    if name in _NOT_PLURAL or name.split("_")[-1] in _NOT_PLURAL:
+        return name
+    if re.search(r"[^aeiou]ies$", name):
+        return name[:-3] + "y"
+    if re.search(r"(s|x|z|ch|sh)es$", name):
+        return name[:-2]
+    if re.search(r"[a-z]s$", name) and not name.endswith("ss"):
+        return name[:-1]
+    return name
+
+
+def _type_forms(canonical: str) -> set[str]:
+    """Every spelling of ``canonical`` a governance type is matched against."""
+    forms = {canonical, _singular(canonical)}
+    # Separators folded away too, so ``agentpolicy`` or ``agent__policy``
+    # cannot slip past on spacing alone.
+    return forms | {f.replace("_", "") for f in forms}
+
+
+_GOVERNANCE_FORMS: frozenset[str] = frozenset(
+    form for t in GOVERNANCE_ENTITY_TYPES for form in _type_forms(canonical_entity_type(t))
+)
+_GOVERNANCE_FIELD_FORMS: frozenset[tuple[str, str]] = frozenset(
+    (form, canonical_entity_type(f))
+    for t, f in GOVERNANCE_FIELDS
+    for form in _type_forms(canonical_entity_type(t))
+)
+
+
+def is_governance_type(entity_type: object) -> bool:
+    """Whether ``entity_type`` names a governance type under any spelling Neotoma folds.
+
+    A missing, non-string or blank type counts as governance: a write whose
+    type cannot be read is not known to be safe. Schema aliases a user
+    registers are not knowable here without a registry read; Neotoma's built-in
+    definitions declare none for these types (``agent_grant`` declares
+    ``aliases: []``), and the server-side floor (neotoma#2497) must classify on
+    the type the server resolves, not the one declared.
+    """
+    if not isinstance(entity_type, str):
+        return True
+    canonical = canonical_entity_type(entity_type)
+    if not canonical:
+        return True
+    return bool(_type_forms(canonical) & _GOVERNANCE_FORMS)
+
+
+def _is_governance_field(entity_type: object, field_name: object) -> bool:
+    if not isinstance(entity_type, str) or field_name is None:
+        return False
+    fld = canonical_entity_type(str(field_name))
+    return any(
+        (form, fld) in _GOVERNANCE_FIELD_FORMS
+        for form in _type_forms(canonical_entity_type(entity_type))
+    )
+
+
 def is_governance_write(entity_type: object, field_name: "str | None" = None) -> bool:
     """True when a write to ``entity_type`` (and ``field_name``) must be signed.
 
-    An entity type that is missing or not a string counts as governance: a write
-    whose type cannot be read is not known to be safe, so it takes the
-    restrictive branch.
+    The type is matched under :func:`canonical_entity_type`, not exactly, and
+    an unreadable type counts as governance (see :func:`is_governance_type`).
     """
-    if not isinstance(entity_type, str) or not entity_type.strip():
+    if is_governance_type(entity_type):
         return True
-    et = entity_type.strip()
-    if et in GOVERNANCE_ENTITY_TYPES:
-        return True
-    return bool(field_name) and (et, str(field_name)) in GOVERNANCE_FIELDS
+    return bool(field_name) and _is_governance_field(entity_type, field_name)
 
 
 def body_touches_governance(body: Mapping[str, Any]) -> bool:
     """Whether a ``/store`` or ``/correct`` body writes any governance type or field.
 
     A body of any other shape (no ``entities`` list and no ``entity_type``)
-    counts as governance, for the reason :func:`is_governance_write` gives.
+    counts as governance, for the reason :func:`is_governance_write` gives. So
+    does a store whose ``relationships`` are malformed, or whose relationship
+    names an endpoint by index outside ``entities``. An endpoint named by
+    ``*_entity_id`` points at an entity already on record, whose type the body
+    does not carry: :class:`NeotomaWriter` resolves those types before
+    classifying (see :func:`referenced_entities`).
     """
     entities = body.get("entities")
     if isinstance(entities, list):
@@ -285,12 +398,51 @@ def body_touches_governance(body: Mapping[str, Any]) -> bool:
             et = ent.get("entity_type")
             if is_governance_write(et):
                 return True
-            if any((et, str(k)) in GOVERNANCE_FIELDS for k in ent):
+            if any(_is_governance_field(et, k) for k in ent):
                 return True
+        rels = body.get("relationships")
+        if rels is None:
+            return False
+        if not isinstance(rels, list):
+            return True
+        for rel in rels:
+            if not isinstance(rel, Mapping):
+                return True
+            for end in ("source", "target"):
+                idx = rel.get(f"{end}_index")
+                eid = rel.get(f"{end}_entity_id")
+                if idx is None and not eid:
+                    return True
+                if idx is not None and not (
+                    isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < len(entities)
+                ):
+                    return True
         return False
     if "entity_type" in body or "field" in body:
         return is_governance_write(body.get("entity_type"), body.get("field"))
     return True
+
+
+def referenced_entities(body: Mapping[str, Any]) -> list[tuple[str, "str | None"]]:
+    """``(entity_id, field)`` for every existing entity a write body touches by id.
+
+    A ``/correct`` body names its target by ``entity_id`` and declares an
+    ``entity_type`` Neotoma does not check against the target, so the declared
+    type cannot be trusted. A store's relationships can name endpoints by
+    ``*_entity_id``, and an edge onto a governance entity is a governance write.
+    """
+    out: list[tuple[str, "str | None"]] = []
+    if isinstance(body.get("entities"), list):
+        for rel in body.get("relationships") or []:
+            if isinstance(rel, Mapping):
+                for end in ("source", "target"):
+                    eid = rel.get(f"{end}_entity_id")
+                    if isinstance(eid, str) and eid:
+                        out.append((eid, None))
+    elif body.get("entity_id"):
+        fld = body.get("field")
+        out.append((str(body["entity_id"]), str(fld) if fld is not None else None))
+    return out
 
 
 @dataclass
@@ -429,7 +581,10 @@ class NeotomaWriter:
         ident = agent_identity(self.agent_name, sub=self.sub, keys_dir=self._keys_dir)
         if ident is None:
             raise AAuthSigningError(f"no usable AAuth JWK for agent {self.agent_name!r}")
-        self._signer = load_http_sig_signer(Path(ident["key"]), expected_sub=self.sub)
+        key = Path(ident["key"])
+        self._signer = load_http_sig_signer(
+            key, expected_sub=self.sub, issuer=_pinned_issuer(key)
+        )
         return self._signer
 
     def _bearer_attempt(self, path: str, body: dict, governance: bool) -> _Attempt:
@@ -491,14 +646,25 @@ class NeotomaWriter:
         return self._bearer_attempt(attempt_path, body, governance)
 
     def _first_attempt(
-        self, path: str, body: dict, entity_types: "Iterable[str] | None"
+        self,
+        path: str,
+        body: dict,
+        entity_types: "Iterable[str] | None",
+        referenced: "Iterable[tuple[str | None, str | None]]" = (),
     ) -> _Attempt:
+        """Classify the write and build its first request.
+
+        ``body`` is always inspected. ``entity_types`` and ``referenced`` (the
+        resolved ``(type, field)`` of every existing entity the body names by
+        id; a type of None means the lookup failed) can only ADD to what makes
+        a write governance: nothing a caller passes can declassify a body that
+        writes a governance type.
+        """
         path = path.lstrip("/")
+        governance = body_touches_governance(body)
         if entity_types is not None:
-            types = list(entity_types)
-            governance = not types or any(is_governance_write(t) for t in types)
-        else:
-            governance = body_touches_governance(body)
+            governance = governance or any(is_governance_write(t) for t in entity_types)
+        governance = governance or any(is_governance_write(t, f) for t, f in referenced)
         if not governance and self.mode == SigningMode.OFF:
             return self._bearer_attempt(path, body, governance)
         try:
@@ -539,9 +705,21 @@ class NeotomaWriter:
     async def apost(
         self, path: str, body: dict, *, entity_types: "Iterable[str] | None" = None
     ) -> WriteResult:
-        """POST a write. ``entity_types`` overrides reading the types from ``body``."""
-        attempt = self._first_attempt(path, body, entity_types)
+        """POST a write.
+
+        The types are always read from ``body``. ``entity_types`` names extra
+        types to class the write by; it can make a write governance, never
+        ordinary. Every existing entity the body names by id (a correct's
+        target, a relationship endpoint) has its real type looked up first, and
+        a failed lookup counts as governance.
+        """
+        entity_types = None if entity_types is None else list(entity_types)
         async with httpx.AsyncClient(timeout=self.timeout) as client:
+            referenced = [
+                (await self._alookup_type(client, eid), fld)
+                for eid, fld in self._ids_to_resolve(body, entity_types)
+            ]
+            attempt = self._first_attempt(path, body, entity_types, referenced)
             while True:
                 resp = await client.post(attempt.url, headers=attempt.headers, content=attempt.content)
                 nxt = self._after_response(attempt, resp.status_code, resp.text)
@@ -592,8 +770,14 @@ class NeotomaWriter:
     def post(
         self, path: str, body: dict, *, entity_types: "Iterable[str] | None" = None
     ) -> WriteResult:
-        attempt = self._first_attempt(path, body, entity_types)
+        """POST a write; same classification as :meth:`apost`."""
+        entity_types = None if entity_types is None else list(entity_types)
         with httpx.Client(timeout=self.timeout) as client:
+            referenced = [
+                (self._lookup_type(client, eid), fld)
+                for eid, fld in self._ids_to_resolve(body, entity_types)
+            ]
+            attempt = self._first_attempt(path, body, entity_types, referenced)
             while True:
                 resp = client.post(attempt.url, headers=attempt.headers, content=attempt.content)
                 nxt = self._after_response(attempt, resp.status_code, resp.text)
@@ -638,6 +822,61 @@ class NeotomaWriter:
                     return check
         return AttributionCheck(True, "every observation signed as expected")
 
+    # ── target-type lookup (a correct's declared type is not checked by /correct) ──
+
+    @staticmethod
+    def _ids_to_resolve(
+        body: dict, entity_types: "Iterable[str] | None"
+    ) -> list[tuple[str, "str | None"]]:
+        """Entities whose real type must be read before classifying; none if already governance.
+
+        A write the body (or the caller's extra types) already classes as
+        governance is signed whatever its targets are, so it costs no read.
+        """
+        if body_touches_governance(body):
+            return []
+        if entity_types is not None and any(is_governance_write(t) for t in entity_types):
+            return []
+        return referenced_entities(body)
+
+    def _type_lookup_request(self, entity_id: str) -> "tuple[str, dict[str, str]] | None":
+        """A GET of one entity: bearer when present, else signed; None if neither is possible."""
+        url = f"{self.base_url}/entities/{quote(str(entity_id), safe='')}"
+        if self._bearer:
+            return url, {"Authorization": f"Bearer {self._bearer}"}
+        try:
+            signer = self._load_signer()
+        except AAuthSigningError:
+            return None
+        headers = {
+            k.lower(): v
+            for k, v in signer.sign_headers(method="GET", url=url, body=None, content_type=None).items()
+        }
+        headers["x-agent-label"] = self.sub
+        return url, headers
+
+    def _lookup_type(self, client: httpx.Client, entity_id: str) -> "str | None":
+        req = self._type_lookup_request(entity_id)
+        if req is None:
+            return None
+        try:
+            resp = client.get(req[0], headers=req[1])
+        except httpx.HTTPError as exc:
+            log.warning("type lookup for %s failed: %s", entity_id, exc)
+            return None
+        return _entity_type_from(resp.status_code, resp.text)
+
+    async def _alookup_type(self, client: httpx.AsyncClient, entity_id: str) -> "str | None":
+        req = self._type_lookup_request(entity_id)
+        if req is None:
+            return None
+        try:
+            resp = await client.get(req[0], headers=req[1])
+        except httpx.HTTPError as exc:
+            log.warning("type lookup for %s failed: %s", entity_id, exc)
+            return None
+        return _entity_type_from(resp.status_code, resp.text)
+
     def _readback_attempt(self, entity_id: str, page: int) -> _Attempt:
         """A read of one entity's observations: bearer when present, else signed."""
         body = {
@@ -654,6 +893,39 @@ class NeotomaWriter:
                 path="observations/query", body=body,
             )
         return self._signed_attempt("observations/query", body, governance=False)
+
+
+def _pinned_issuer(key_path: Path) -> str:
+    """The issuer to sign under: the key file's own ``iss``, else the default.
+
+    Never the ambient ``NEOTOMA_AAUTH_ISS``, which :func:`load_http_sig_signer`
+    would otherwise consult: like the ``sub``, the identity a daemon signs as
+    comes from its key file and this module, never from its environment.
+    """
+    try:
+        raw = json.loads(key_path.read_text())
+    except Exception as exc:  # noqa: BLE001 — name the file, never its contents
+        raise AAuthSigningError(f"could not load AAuth JWK from {key_path.name}") from exc
+    iss = str(raw.get("iss") or "").strip() if isinstance(raw, dict) else ""
+    return iss or DEFAULT_AAUTH_ISSUER
+
+
+def _entity_type_from(status: int, text: str) -> "str | None":
+    """The ``entity_type`` of a ``GET /entities/{id}`` response, or None when unreadable."""
+    if status >= 400:
+        return None
+    try:
+        data = json.loads(text) if text else {}
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    for src in (data, data.get("entity"), data.get("snapshot")):
+        if isinstance(src, Mapping):
+            et = src.get("entity_type")
+            if isinstance(et, str) and et.strip():
+                return et
+    return None
 
 
 def _refuses_signed_identity(status: int, text: str) -> bool:

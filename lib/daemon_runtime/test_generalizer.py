@@ -11,7 +11,7 @@ import asyncio
 
 import generalizer as gz
 import pytest
-from drift import DriftCluster, DriftSignal, cluster_signals, parse_drift_signals
+from drift import DriftCluster, cluster_signals, parse_drift_signals
 from generalizer import (
     DEFAULT_POLICY_CAP_PER_AGENT,
     Action,
