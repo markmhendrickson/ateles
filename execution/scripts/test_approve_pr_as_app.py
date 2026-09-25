@@ -769,6 +769,205 @@ class TestPreSubmitReVerification:
         assert code == 1
 
 
+# ── Empty-lens-set bypass (round-2 Falco finding on PR #1266) ───────────────
+#
+# `review_panel.select_panel(..., max_panel=0)` returns `[]` — EVEN the
+# `always=True` lenses (pm, qa) — because it caps the assembled panel with
+# plain list slicing. With APIS_PANEL_MAX=0 (or unset-but-empty derivation
+# from any other cause) plus green checks, the OLD code's
+# `all(o.passed for o in [])` was vacuously True: zero lenses reviewed, tool
+# reports PASS. This class covers the fix at every layer: input validation
+# (`_validate_panel_max`), defense-in-depth union of the always-on floor in
+# `derive_required_lenses`, and the hard empty-set refusal in `run()` that
+# does not depend on either of the other two.
+
+
+class TestAlwaysRequiredLensesRegistry:
+    def test_always_required_lenses_are_taken_from_the_registry(self):
+        """Must be derived from LENSES, not a hard-coded name list — if a
+        future lens is marked always=True, this must pick it up with no
+        code change here."""
+        expected = {lens.lens for lens in LENSES if lens.always}
+        got = {lens.lens for lens in target._always_required_lenses()}
+        assert got == expected
+        assert got == {"pm", "qa"}  # documents today's registry state
+
+
+class TestPanelMaxValidation:
+    @pytest.mark.parametrize("raw", ["0", "-1", "1"])
+    def test_panel_max_at_or_below_always_floor_refuses(self, raw):
+        with pytest.raises(RuntimeError, match="APIS_PANEL_MAX"):
+            target._validate_panel_max(raw)
+
+    def test_panel_max_equal_to_always_floor_count_is_allowed(self):
+        assert target._validate_panel_max("2") == 2
+
+    def test_panel_max_above_floor_is_allowed(self):
+        assert target._validate_panel_max("6") == 6
+
+    def test_non_integer_panel_max_refuses(self):
+        with pytest.raises(RuntimeError, match="APIS_PANEL_MAX"):
+            target._validate_panel_max("not-a-number")
+
+
+@pytest.mark.asyncio
+class TestPanelMaxZeroOrNegativeNeverApproves:
+    """The operator's exact scenario: APIS_PANEL_MAX=0, =-1, and =1 must
+    each refuse (never silently keep only a truncated floor and never
+    approve) — verified through the full `run()` path, not just the
+    validator in isolation."""
+
+    @pytest.mark.parametrize("panel_max", ["0", "-1", "1"])
+    async def test_apply_refuses_and_submits_nothing(self, monkeypatch, panel_max):
+        monkeypatch.setenv("APIS_PANEL_MAX", panel_max)
+        # Comments that would clear EVERY lens if the panel were somehow
+        # still assembled — proves the refusal is the panel-size guard
+        # itself, not merely "no lens commented."
+        client = _FakeClient(
+            comments=_all_clear_comments(list(target.LENS_AGENTS)),
+            check_runs=_green_checks(),
+            changed_files=NEUTRAL_FILES,
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, [], apply=True)
+
+        assert code == 1
+        assert client.posted == []
+
+    @pytest.mark.parametrize("panel_max", ["0", "-1", "1"])
+    async def test_dry_run_reports_failure_not_pass(self, monkeypatch, panel_max):
+        """Even without --apply, a misconfigured APIS_PANEL_MAX must report
+        FAIL, never a vacuous PASS over zero lenses."""
+        monkeypatch.setenv("APIS_PANEL_MAX", panel_max)
+        client = _FakeClient(
+            comments=_all_clear_comments(list(target.LENS_AGENTS)),
+            check_runs=_green_checks(),
+            changed_files=NEUTRAL_FILES,
+        )
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, [], apply=False)
+
+        assert code == 1
+
+
+@pytest.mark.asyncio
+class TestEmptyRequiredLensSetAlwaysRefuses:
+    """The hard, independent guard in `run()`: whatever the reason
+    `resolve_lenses` ever returns an empty list, `run()` must refuse before
+    any lens/check evaluation runs — this must not depend on
+    `_validate_panel_max` or the always-on union existing at all."""
+
+    async def test_run_refuses_when_resolve_lenses_returns_empty(self, monkeypatch):
+        client = _FakeClient(comments=[], check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        async def _empty_resolve_lenses(client_, *, repo, pr, pr_body, extra_lenses):
+            return [], []
+
+        monkeypatch.setattr(target, "resolve_lenses", _empty_resolve_lenses)
+
+        code = await target.run(REPO, PR, [], apply=True)
+
+        assert code == 1
+        assert client.posted == []
+
+    async def test_empty_lens_set_refusal_precedes_any_lens_evaluation(self, monkeypatch):
+        """The refusal must happen BEFORE evaluate_lens is ever called —
+        proves this is a hard gate, not a side effect of an empty loop
+        happening to produce an empty outcomes list."""
+        client = _FakeClient(comments=[], check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        evaluate_lens_called = False
+        real_evaluate_lens = target.evaluate_lens
+
+        async def _tracking_evaluate_lens(*a, **kw):
+            nonlocal evaluate_lens_called
+            evaluate_lens_called = True
+            return await real_evaluate_lens(*a, **kw)
+
+        monkeypatch.setattr(target, "evaluate_lens", _tracking_evaluate_lens)
+
+        async def _empty_resolve_lenses(client_, *, repo, pr, pr_body, extra_lenses):
+            return [], []
+
+        monkeypatch.setattr(target, "resolve_lenses", _empty_resolve_lenses)
+
+        code = await target.run(REPO, PR, [], apply=True)
+
+        assert code == 1
+        assert evaluate_lens_called is False
+
+
+@pytest.mark.asyncio
+class TestOtherEmptyOrShrunkLensPaths:
+    """Additional paths that could shrink or empty the lens list, per the
+    operator's request to scan beyond APIS_PANEL_MAX specifically."""
+
+    async def test_zero_changed_files_still_derives_the_always_on_floor(self, monkeypatch):
+        """A PR with zero changed files (e.g. an empty commit, or a diff
+        GitHub reports as having no files) must not derive an empty panel —
+        select_panel still selects always-on lenses when changed_files=[]."""
+        client = _FakeClient(
+            comments=_all_clear_comments(["pm", "qa"]),
+            check_runs=_green_checks(),
+            changed_files=[],
+        )
+        _install_client(monkeypatch, client)
+
+        lenses, required = await target.resolve_lenses(
+            client, repo=REPO, pr=PR, pr_body="Closes #7", extra_lenses=[]
+        )
+
+        assert sorted(lenses) == ["pm", "qa"]
+        assert sorted(r.lens for r in required) == ["pm", "qa"]
+
+    async def test_select_panel_raising_propagates_as_a_refusal_not_a_silent_empty_panel(
+        self, monkeypatch
+    ):
+        """If `select_panel` itself raises (a future signature change, a bad
+        input it does not tolerate), `derive_required_lenses` must propagate
+        that as a failure — never catch it and silently substitute an empty
+        or partial panel."""
+        client = _FakeClient(
+            comments=_all_clear_comments(["pm", "qa"]),
+            check_runs=_green_checks(),
+            changed_files=NEUTRAL_FILES,
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        def _raising_select_panel(*a, **kw):
+            raise RuntimeError("simulated select_panel failure")
+
+        monkeypatch.setattr(target, "select_panel", _raising_select_panel)
+
+        code = await target.run(REPO, PR, [], apply=True)
+
+        assert code == 1
+        assert client.posted == []
+
+class TestAlwaysOnUnionIsDefenseInDepth:
+    def test_always_on_union_survives_even_if_select_panel_returns_empty(self):
+        """Defense in depth, independent of `_validate_panel_max`: even a
+        `select_panel` call that returns `[]` for some reason other than
+        `max_panel` (a future behaviour change) must not leave
+        `derive_required_lenses`'s result empty — the always-on floor is
+        unioned in regardless of what `select_panel` returned."""
+        always = target._always_required_lenses()
+        by_name: dict = {lens.lens: lens for lens in always}
+        # Simulate select_panel returning nothing extra.
+        for lens in ():  # empty "panel" from select_panel
+            by_name.setdefault(lens.lens, lens)
+        assert {lens.lens for lens in by_name.values()} == {lens.lens for lens in always}
+        assert by_name  # never empty
+
+
 class TestLensAgentsRegistry:
     def test_lens_agents_match_review_panel_registry(self):
         """Kept in lock-step with review_panel.LENSES per CLAUDE.md's

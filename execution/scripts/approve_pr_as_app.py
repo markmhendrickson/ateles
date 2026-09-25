@@ -87,7 +87,7 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 
 import httpx  # noqa: E402
 
-from review_panel import Lens, select_panel  # noqa: E402
+from review_panel import LENSES, Lens, select_panel  # noqa: E402
 from swarm_dispatch import (  # noqa: E402
     EXPECTATION_MARKER,
     SwarmDispatcher,
@@ -288,6 +288,52 @@ def _why_lens_selected(lens: Lens, *, changed_files: list[str], gate_contributor
     return "selected by the panel (reason not otherwise categorized)"
 
 
+def _always_required_lenses() -> list[Lens]:
+    """Every lens `review_panel.LENSES` marks `always=True` — taken from the
+    live registry, never a hard-coded name list, so a future lens the
+    registry marks always-on is covered automatically. Currently `pm` and
+    `qa`, but this function must never assume that."""
+    return [lens for lens in LENSES if lens.always]
+
+
+def _validate_panel_max(raw: str) -> int:
+    """Parse and validate `APIS_PANEL_MAX`, or raise a clear config-error.
+
+    round-2 Falco finding on PR #1266: `select_panel(..., max_panel=0)`
+    returns `[]` — even the `always=True` lenses — because it slices the
+    assembled panel with Python's own `list[:max_panel]` semantics, and a
+    NEGATIVE `max_panel` is worse: `list[:-1]` silently drops from the END
+    rather than emptying the list, so `APIS_PANEL_MAX=-1` drops exactly one
+    always-on lens (whichever sorts last) instead of refusing outright —
+    `all(o.passed for o in [])` and `all(o.passed for o in <n-1 lenses>)` are
+    both silent, wrong "pass"es, just of different sizes. A value below the
+    number of always-required lenses can NEVER produce a panel that includes
+    all of them (`select_panel` slices AFTER assembling gate-owners +
+    security + always-on + other-blocking + forward-looking, so nothing this
+    tool's own union step does afterward can recover a lens `select_panel`
+    truncated away — see the union step below, which is defense in depth for
+    a DIFFERENT failure mode: `select_panel` itself changing behaviour, not
+    this one). So this is validated as a configuration ERROR, not silently
+    capped or silently worked around.
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            f"APIS_PANEL_MAX={raw!r} is not a valid integer — refusing rather than "
+            "silently falling back to a default"
+        ) from None
+    floor_count = len(_always_required_lenses())
+    if value < floor_count:
+        raise RuntimeError(
+            f"APIS_PANEL_MAX={value} is below the number of always-required lenses "
+            f"({floor_count}: {', '.join(sorted(lens.lens for lens in _always_required_lenses()))}) "
+            "— a panel this small can never include every always-on lens, so this is a "
+            "configuration error, not a value to silently cap or work around"
+        )
+    return value
+
+
 async def derive_required_lenses(
     client: httpx.AsyncClient, *, repo: str, pr: int, pr_body: str
 ) -> list[RequiredLens]:
@@ -301,12 +347,24 @@ async def derive_required_lenses(
     reimplemented, so this tool's idea of "required" cannot silently diverge
     from the pipeline's (round-1 pm/arch finding on PR #1266: the previous
     `DEFAULT_LENSES` was a hand-typed tuple that already disagreed with
-    `PRE_IMPL_GATES` on `ux`). `max_panel` is left at `select_panel`'s
-    pipeline default (`APIS_PANEL_MAX`, else 6) rather than uncapped: a floor
-    this tool cannot shrink below the panel the pipeline itself would have
-    capped at is still a legitimate floor — capping is the pipeline's own
-    scarce-attention policy, not a hole in the gate.
+    `PRE_IMPL_GATES` on `ux`). `max_panel` is validated (see
+    `_validate_panel_max`) rather than passed through raw — a misconfigured
+    or malicious `APIS_PANEL_MAX` must be a refusal, never a silently
+    emptied or truncated panel (round-2 Falco finding: `APIS_PANEL_MAX=0`
+    made `select_panel` return `[]`, even dropping the always-on lenses, so
+    `all(o.passed for o in [])` vacuously passed with zero lenses reviewed).
+
+    Defense in depth beyond validating the input: the always-required lenses
+    (`_always_required_lenses()`, taken from the registry) are UNIONED into
+    the result after calling `select_panel`, never trusted to have survived
+    the cap alone. This guards a different failure mode than the input
+    validation above — `select_panel`'s own internal logic changing in a way
+    that drops an always-on lens even for a valid `max_panel` — so both
+    layers stay even though a validated `max_panel` should already make this
+    redundant today.
     """
+    panel_max = _validate_panel_max(os.environ.get("APIS_PANEL_MAX", "6"))
+
     changed_files = await _changed_files(client, repo, pr)
     parent_issue = SwarmDispatcher._parent_issue_number(pr_body, repo)
 
@@ -314,12 +372,20 @@ async def derive_required_lenses(
     if parent_issue is not None:
         gate_contributors = await _preregistered_gate_contributors(client, repo, parent_issue)
 
-    panel_max = int(os.environ.get("APIS_PANEL_MAX", "6"))
     panel = select_panel(
         gate_contributors=gate_contributors,
         changed_files=changed_files,
         max_panel=panel_max,
     )
+
+    # Defense in depth: union the always-on floor back in by lens name, in
+    # case select_panel's own behaviour ever changes. Order: always-on
+    # lenses first (they are the true floor), then whatever select_panel
+    # additionally selected, deduplicated by lens name.
+    by_name: dict[str, Lens] = {lens.lens: lens for lens in _always_required_lenses()}
+    for lens in panel:
+        by_name.setdefault(lens.lens, lens)
+
     return [
         RequiredLens(
             lens.lens,
@@ -327,7 +393,7 @@ async def derive_required_lenses(
                 lens, changed_files=changed_files, gate_contributors=gate_contributors
             ),
         )
-        for lens in panel
+        for lens in by_name.values()
     ]
 
 
@@ -652,9 +718,32 @@ async def run(repo: str, pr: int, extra_lenses: list[str], *, apply: bool) -> in
             return 1
         pr_body = pr_data.get("body") or ""
 
-        lenses, required = await resolve_lenses(
-            client, repo=repo, pr=pr, pr_body=pr_body, extra_lenses=extra_lenses
-        )
+        try:
+            lenses, required = await resolve_lenses(
+                client, repo=repo, pr=pr, pr_body=pr_body, extra_lenses=extra_lenses
+            )
+        except Exception as exc:
+            print(f"refusing: could not derive the required-lens set: {exc}")
+            return 1
+
+        # Hard, explicit, first-line-of-defense refusal (round-2 Falco
+        # finding on PR #1266): whatever the reason a required-lens set ever
+        # comes back empty — a bug in `select_panel`, a future code path
+        # this tool has not anticipated, a `--lenses` computation error —
+        # `all(o.passed for o in [])` is vacuously True over an empty list,
+        # so an empty lens set must never be allowed to reach the pass/fail
+        # computation at all. This check runs BEFORE any lens or check is
+        # evaluated, and does not rely on `_validate_panel_max` or the
+        # always-on union in `derive_required_lenses` alone — a second,
+        # independent layer for the one invariant that must never fail
+        # silently.
+        if not lenses:
+            print(
+                "refusing: the required-lens set resolved to EMPTY — approving with zero "
+                "lenses reviewed is never valid, regardless of cause"
+            )
+            return 1
+
         floor_names = {r.lens for r in required}
         added = [lens for lens in lenses if lens not in floor_names]
         _print_derived_lenses(required, added)
