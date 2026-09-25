@@ -9,6 +9,8 @@ explicit --to on replies, and fail-open behavior.
 from __future__ import annotations
 
 import subprocess
+from contextlib import contextmanager
+from typing import Any, Iterator
 from unittest.mock import patch
 
 from lib.approval import email_channel as ec
@@ -20,6 +22,51 @@ def _ok(stdout=""):
 
 def _fail(stderr="boom"):
     return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=stderr)
+
+
+_AUTH_PASS_FOR_OPERATOR = object()
+
+
+def _google_pass_for_operator_domain() -> dict:
+    import os as _os
+    domain = _os.environ.get("OPERATOR_EMAIL", "").rpartition("@")[2].strip().lower()
+    value = (f"mx.google.com; dkim=pass header.i=@{domain} header.s=s; "
+             f"dmarc=pass (p=NONE) header.from={domain}")
+    return {"id": "m", "payload": {"headers": [
+        {"name": "Authentication-Results", "value": value}]}}
+
+
+@contextmanager
+def _mock_inbox(gws_json: Any = None, *, side_effect: Any = None,
+                auth: Any = _AUTH_PASS_FOR_OPERATOR) -> Iterator[None]:
+    """Patch the inbox path the way production reaches it.
+
+    ``read_replies_with_status`` early-returns ``gws_cli_missing`` when
+    ``_gws()`` is falsy, before any mocked ``gws_json``. Tests that only
+    patch ``gws_json`` therefore pass on a machine with ``gws`` on PATH and
+    fail in CI (ateles#1202). Always stub ``_gws`` present when exercising
+    triage/+read behavior.
+
+    ``auth``: by default the Authentication-Results metadata fetch is answered
+    with a Google-stamped DMARC/DKIM pass for OPERATOR_EMAIL's domain, so tests
+    about sender/body/transport keep testing exactly that. Pass ``auth=None``
+    to leave the metadata call to the test's own ``side_effect``.
+    """
+    if side_effect is not None:
+        inner = side_effect
+    else:
+        def inner(args, timeout=45, _v=gws_json):
+            return _v
+
+    def dispatch(args, timeout=45):
+        if auth is _AUTH_PASS_FOR_OPERATOR and \
+                list(args[:4]) == ["gmail", "users", "messages", "get"]:
+            return _google_pass_for_operator_domain()
+        return inner(args, timeout=timeout)
+
+    with patch.object(ec, "_gws", return_value="/bin/gws"), \
+         patch.object(ec, "gws_json", side_effect=dispatch):
+        yield
 
 
 class TestGate:
@@ -118,7 +165,7 @@ class TestReadReplies:
                 return {"body_text": "APPROVE"}
             return None
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             texts = ec.read_replies(["TOK"])
         # Only the RE: message's body is read; the outbound one is skipped.
         assert len(texts) == 1
@@ -135,13 +182,13 @@ class TestReadReplies:
                                       "from": "op@example.com"}]}
             return {"body_text": "SKIP"}
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             ec.read_replies(["TOK"], on_reply_message=lambda tok, mid: seen.append((tok, mid)))
         assert seen == [("TOK", "m1")]
 
     def test_triage_failure_is_fail_open_empty(self, monkeypatch):
         monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
-        with patch.object(ec, "gws_json", return_value=None):
+        with _mock_inbox(None):
             assert ec.read_replies(["TOK"]) == []
 
     def test_prefers_body_text_over_html(self, monkeypatch):
@@ -156,7 +203,7 @@ class TestReadReplies:
                                       "from": "op@example.com"}]}
             return {"body_text": "approve v0.20.0", "body_html": "<p>ignored</p>"}
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             texts = ec.read_replies(["TOK"])
         assert "approve v0.20.0" in texts[0]
         assert "ignored" not in texts[0]
@@ -176,7 +223,7 @@ class TestReadReplies:
                                       "from": "op@example.com"}]}
             return {"body_html": "<div dir=\"ltr\">approve v0.20.0</div>"}
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             texts = ec.read_replies(["TOK"])
         assert "approve v0.20.0" in texts[0]
         # The real end-to-end guarantee: this HTML-only reply registers as APPROVE.
@@ -218,6 +265,9 @@ class TestReplyInThread:
 
 class TestGwsJson:
     def test_strips_banner_before_json(self, monkeypatch):
+        # gws_json makes no call without a configured swarm mailbox, which
+        # needs an operator address to compare against.
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
         out = "keyring banner line\nWARNING: something\n{\"ok\": true}"
         with patch.object(ec.shutil, "which", return_value="/bin/gws"), \
              patch.object(ec.subprocess, "run", return_value=_ok(out)):
@@ -286,7 +336,7 @@ class TestSenderVerification:
                 return self._triage(from_addr)
             return {"body_text": "APPROVE"}
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             return ec.read_replies(["TOK"])
 
     # ── The core requirement ────────────────────────────────────────────────
@@ -333,7 +383,7 @@ class TestSenderVerification:
                 return self._triage("op@example.com")
             return {"body_text": "APPROVE"}
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             assert ec.read_replies(["TOK"]) == []
 
     # ── Address-form handling (must not become a bypass) ────────────────────
@@ -373,7 +423,7 @@ class TestSenderVerification:
                 return self._triage("attacker@evil.example")
             return {"body_text": "APPROVE"}
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             ec.read_replies(["TOK"],
                             on_reply_message=lambda t, m: seen.append((t, m)))
         assert seen == []
@@ -392,7 +442,7 @@ class TestSenderVerification:
             reads.append(args)
             return {"body_text": "APPROVE"}
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             ec.read_replies(["TOK"])
         assert reads == []
 
@@ -414,5 +464,493 @@ class TestSenderVerification:
                 return self._triage("not-an-address")
             return {"body_text": "APPROVE"}
 
-        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+        with _mock_inbox(side_effect=fake_gws_json):
             assert ec.read_replies(["TOK"]) == []
+
+
+class TestReadRepliesWithStatus:
+    """ateles#1178: statusful read distinguishes empty-ok from transport failure."""
+
+    def test_read_replies_with_status_ok_empty_texts(self, monkeypatch):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
+        with _mock_inbox({"messages": []}):
+            outcome = ec.read_replies_with_status(["TOK"])
+        assert outcome.kind == "ok"
+        assert outcome.texts == []
+
+    def test_read_replies_with_status_transport_error_is_not_ok(self, monkeypatch):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
+        with _mock_inbox(None):
+            outcome = ec.read_replies_with_status(["TOK"])
+        assert outcome.kind == "transport_error"
+        assert outcome.texts == []
+        assert "operator@example.com" not in (outcome.detail or "")
+
+    def test_read_replies_with_status_gws_cli_missing(self, monkeypatch):
+        # Effect: missing gws is transport_error with a specific detail, not
+        # conflated with an empty inbox (the CI false-green ateles#1202 class).
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
+        with patch.object(ec, "_gws", return_value=None):
+            outcome = ec.read_replies_with_status(["TOK"])
+        assert outcome.kind == "transport_error"
+        assert outcome.detail == "gws_cli_missing"
+        assert outcome.texts == []
+
+    def test_read_replies_with_status_disabled(self, monkeypatch):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "0")
+        outcome = ec.read_replies_with_status(["TOK"])
+        assert outcome.kind == "disabled"
+
+    def test_read_replies_wrapper_preserves_fail_open_list(self, monkeypatch):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
+        with _mock_inbox(None):
+            assert ec.read_replies(["TOK"]) == []
+
+
+# ── Sender domain authentication + complete-read (PR #1202 security review) ──
+
+import json as _json
+
+_GOOGLE_DMARC_PASS = (
+    "mx.google.com;\r\n"
+    "       dkim=pass header.i=@example.com header.s=sel header.b=abc;\r\n"
+    "       spf=pass (google.com: domain of op@example.com designates 192.0.2.1 "
+    "as permitted sender) smtp.mailfrom=op@example.com;\r\n"
+    "       dmarc=pass (p=NONE sp=QUARANTINE dis=NONE) header.from=example.com"
+)
+
+
+def _metadata(auth_values: list[str]) -> dict:
+    headers = [{"name": "From", "value": "op@example.com"}]
+    headers += [{"name": "Authentication-Results", "value": v} for v in auth_values]
+    return {"id": "m", "payload": {"headers": headers}}
+
+
+def _is_metadata_get(args) -> bool:
+    return list(args[:4]) == ["gmail", "users", "messages", "get"]
+
+
+def _metadata_id(args) -> str:
+    return _json.loads(args[args.index("--params") + 1])["id"]
+
+
+class TestSenderDomainAuthentication:
+    """A matching From address is necessary but NOT sufficient.
+
+    A From header is caller-supplied text. The verdict counts only when Gmail's
+    own receiving server (authserv-id ``mx.google.com``) recorded that the
+    operator's domain authorized the message — DMARC pass for that domain, or a
+    DKIM pass whose signing domain is that domain. Anything else — header
+    missing, failing, unparseable, or stamped by another server — is
+    ``unknown``, and unknown is not the operator.
+    """
+
+    def _run(self, monkeypatch, auth, *, reads=None):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+
+        def fake_gws_json(args, timeout=45):
+            if "+triage" in args:
+                return {"messages": [{"id": "m1",
+                                      "subject": "RE: x [APPROVE-TOK]",
+                                      "from": "Op <op@example.com>"}]}
+            if _is_metadata_get(args):
+                return auth if isinstance(auth, dict) or auth is None \
+                    else _metadata(auth)
+            if reads is not None:
+                reads.append(args)
+            return {"body_text": "APPROVE"}
+
+        with _mock_inbox(side_effect=fake_gws_json, auth=None):
+            return ec.read_replies_with_status(["TOK"])
+
+    # ── yields its verdict ──
+
+    def test_dmarc_pass_for_operator_domain_yields_verdict(self, monkeypatch):
+        out = self._run(monkeypatch, [_GOOGLE_DMARC_PASS])
+        assert out.kind == "ok"
+        assert len(out.texts) == 1 and "APPROVE" in out.texts[0]
+
+    def test_aligned_dkim_pass_without_dmarc_yields_verdict(self, monkeypatch):
+        out = self._run(monkeypatch, [
+            "mx.google.com; dkim=pass header.i=@example.com header.s=s header.b=x"])
+        assert out.kind == "ok" and len(out.texts) == 1
+
+    def test_dkim_header_d_aligned_yields_verdict(self, monkeypatch):
+        out = self._run(monkeypatch, [
+            "mx.google.com; dkim=pass header.d=example.com header.s=s"])
+        assert out.kind == "ok" and len(out.texts) == 1
+
+    # ── held: no verdict ──
+
+    def test_missing_authentication_results_is_held(self, monkeypatch):
+        out = self._run(monkeypatch, [])
+        assert out.texts == []
+
+    def test_failing_dmarc_and_dkim_is_held(self, monkeypatch):
+        out = self._run(monkeypatch, [
+            "mx.google.com; dkim=fail header.i=@example.com; spf=softfail "
+            "smtp.mailfrom=op@example.com; dmarc=fail (p=NONE) header.from=example.com"])
+        assert out.texts == []
+
+    def test_unparseable_authentication_results_is_held(self, monkeypatch):
+        out = self._run(monkeypatch, ["%%% not an auth header"])
+        assert out.texts == []
+
+    def test_empty_authentication_results_value_is_held(self, monkeypatch):
+        out = self._run(monkeypatch, [""])
+        assert out.texts == []
+
+    def test_non_google_authserv_id_is_held(self, monkeypatch):
+        out = self._run(monkeypatch, [
+            "mx.evil.example; dmarc=pass header.from=example.com; "
+            "dkim=pass header.i=@example.com"])
+        assert out.texts == []
+
+    def test_google_lookalike_authserv_id_is_held(self, monkeypatch):
+        out = self._run(monkeypatch, [
+            "mx.google.com.evil.example; dmarc=pass header.from=example.com"])
+        assert out.texts == []
+
+    def test_pass_for_a_different_domain_is_held(self, monkeypatch):
+        out = self._run(monkeypatch, [
+            "mx.google.com; dkim=pass header.i=@evil.example; "
+            "dmarc=pass header.from=evil.example"])
+        assert out.texts == []
+
+    def test_dkim_pass_for_parent_or_sub_domain_is_held(self, monkeypatch):
+        out = self._run(monkeypatch, [
+            "mx.google.com; dkim=pass header.i=@mail.example.com"])
+        assert out.texts == []
+
+    def test_pass_only_inside_a_comment_is_held(self, monkeypatch):
+        out = self._run(monkeypatch, [
+            "mx.google.com; dmarc=fail (dmarc=pass header.from=example.com) "
+            "header.from=example.com"])
+        assert out.texts == []
+
+    def test_only_the_topmost_google_result_counts(self, monkeypatch):
+        """Gmail prepends its own result; a lower header carrying the same
+        authserv-id did not come from this receipt and must not override it."""
+        out = self._run(monkeypatch, [
+            "mx.google.com; dmarc=fail header.from=example.com",
+            "mx.google.com; dmarc=pass header.from=example.com"])
+        assert out.texts == []
+
+    def test_body_is_never_fetched_for_an_unauthenticated_reply(self, monkeypatch):
+        reads: list = []
+        self._run(monkeypatch, [], reads=reads)
+        assert reads == []
+
+    def test_unauthenticated_reply_fires_sender_rejected(self, monkeypatch):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+        rejected = []
+
+        def fake_gws_json(args, timeout=45):
+            if "+triage" in args:
+                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                                      "from": "op@example.com"}]}
+            if _is_metadata_get(args):
+                return _metadata([])
+            return {"body_text": "APPROVE"}
+
+        with _mock_inbox(side_effect=fake_gws_json, auth=None):
+            ec.read_replies_with_status(
+                ["TOK"], on_sender_rejected=lambda: rejected.append(1))
+        assert rejected == [1]
+
+    def test_unauthenticated_operator_reply_fires_its_own_callback(self, monkeypatch):
+        """Address matched, authentication missing: a distinct signal from a
+        non-operator sender, and the reply is still ignored."""
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+        rejected, unauth = [], []
+
+        def fake_gws_json(args, timeout=45):
+            if "+triage" in args:
+                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                                      "from": "op@example.com"}]}
+            if _is_metadata_get(args):
+                return _metadata([])
+            return {"body_text": "APPROVE"}
+
+        with _mock_inbox(side_effect=fake_gws_json, auth=None):
+            out = ec.read_replies_with_status(
+                ["TOK"],
+                on_sender_rejected=lambda: rejected.append(1),
+                on_unauthenticated_operator_reply=lambda: unauth.append(1),
+            )
+        assert unauth == [1]
+        assert rejected == []
+        assert out.kind == "ok" and out.texts == []
+
+    def test_unreadable_metadata_response_is_not_ok(self, monkeypatch):
+        """We could not read the authentication result at all: that is a read
+        failure, never an 'ok, nothing authenticated' and never a pass."""
+        assert self._run(monkeypatch, None).kind != "ok"
+        assert self._run(monkeypatch, {"unexpected": True}).kind != "ok"
+
+    def test_fail_open_wrapper_also_drops_unauthenticated(self, monkeypatch):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+
+        def fake_gws_json(args, timeout=45):
+            if "+triage" in args:
+                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                                      "from": "op@example.com"}]}
+            if _is_metadata_get(args):
+                return _metadata([])
+            return {"body_text": "APPROVE"}
+
+        with _mock_inbox(side_effect=fake_gws_json, auth=None):
+            assert ec.read_replies(["TOK"]) == []
+
+
+class TestPartialReadFailsClosed:
+    """Any per-message or per-token fetch failure fails the WHOLE read.
+
+    A verdict set assembled from the messages that happened to load is not the
+    operator's verdict set: a SKIP in the message that failed would be silently
+    replaced by an APPROVE in the one that loaded.
+    """
+
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+
+    def test_one_body_read_fails_other_succeeds_is_not_ok(self, monkeypatch):
+        self._env(monkeypatch)
+
+        def fake_gws_json(args, timeout=45):
+            if "+triage" in args:
+                return {"messages": [
+                    {"id": "m1", "subject": "RE: x [APPROVE-TOK]", "from": "op@example.com"},
+                    {"id": "m2", "subject": "RE: x [APPROVE-TOK]", "from": "op@example.com"},
+                ]}
+            if "+read" in args and args[args.index("--id") + 1] == "m2":
+                return None
+            return {"body_text": "APPROVE"}
+
+        with _mock_inbox(side_effect=fake_gws_json):
+            out = ec.read_replies_with_status(["TOK"])
+        assert out.kind == "transport_error"
+        assert out.texts == []
+
+    def test_one_metadata_fetch_fails_other_succeeds_is_not_ok(self, monkeypatch):
+        self._env(monkeypatch)
+
+        def fake_gws_json(args, timeout=45):
+            if "+triage" in args:
+                return {"messages": [
+                    {"id": "m1", "subject": "RE: x [APPROVE-TOK]", "from": "op@example.com"},
+                    {"id": "m2", "subject": "RE: x [APPROVE-TOK]", "from": "op@example.com"},
+                ]}
+            if _is_metadata_get(args):
+                return None if _metadata_id(args) == "m2" else _metadata([_GOOGLE_DMARC_PASS])
+            return {"body_text": "APPROVE"}
+
+        with _mock_inbox(side_effect=fake_gws_json, auth=None):
+            out = ec.read_replies_with_status(["TOK"])
+        assert out.kind == "transport_error"
+        assert out.texts == []
+
+    def test_one_token_triage_fails_other_succeeds_is_not_ok(self, monkeypatch):
+        self._env(monkeypatch)
+
+        def fake_gws_json(args, timeout=45):
+            if "+triage" in args:
+                if any("TOK2" in a for a in args):
+                    return None
+                return {"messages": [
+                    {"id": "m1", "subject": "RE: x [APPROVE-TOK1]", "from": "op@example.com"}]}
+            return {"body_text": "APPROVE"}
+
+        with _mock_inbox(side_effect=fake_gws_json):
+            out = ec.read_replies_with_status(["TOK1", "TOK2"])
+        assert out.kind == "transport_error"
+        assert out.texts == []
+
+
+class TestSwarmMailboxConfigured:
+    """Email consent needs a mailbox separate from the operator's (ateles#1221)."""
+
+    def _env(self, monkeypatch, *, swarm, cfg):
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+        if swarm is None:
+            monkeypatch.delenv("ATELES_SWARM_EMAIL", raising=False)
+        else:
+            monkeypatch.setenv("ATELES_SWARM_EMAIL", swarm)
+        if cfg is None:
+            monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR", raising=False)
+        else:
+            monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", cfg)
+
+    def test_distinct_address_and_existing_config_dir(self, monkeypatch, tmp_path):
+        self._env(monkeypatch, swarm="swarm@example.net", cfg=str(tmp_path))
+        assert ec.swarm_mailbox_configured() is True
+
+    def test_unset_swarm_address(self, monkeypatch, tmp_path):
+        self._env(monkeypatch, swarm=None, cfg=str(tmp_path))
+        assert ec.swarm_mailbox_configured() is False
+
+    def test_swarm_address_same_as_operator(self, monkeypatch, tmp_path):
+        self._env(monkeypatch, swarm="Op <OP@example.com>", cfg=str(tmp_path))
+        assert ec.swarm_mailbox_configured() is False
+
+    def test_missing_config_dir(self, monkeypatch, tmp_path):
+        self._env(monkeypatch, swarm="swarm@example.net", cfg=None)
+        assert ec.swarm_mailbox_configured() is False
+        self._env(monkeypatch, swarm="swarm@example.net", cfg=str(tmp_path / "nope"))
+        assert ec.swarm_mailbox_configured() is False
+
+    def test_unparseable_swarm_address(self, monkeypatch, tmp_path):
+        self._env(monkeypatch, swarm="not-an-address", cfg=str(tmp_path))
+        assert ec.swarm_mailbox_configured() is False
+
+
+# ── Swarm mailbox routing (ateles#1221 consent half, folded into PR #1202) ───
+
+
+def _subprocess_mailbox(calls: list, *, auth_value: str | None, body: str = "ATTENDED",
+                        sender: str = "Op <op@example.com>"):
+    """Fake gws at the subprocess boundary: records (argv, env) for every call
+    and answers as a mailbox holding one reply from ``sender``."""
+    import json as _j
+
+    def run(cmd, **kw):
+        calls.append((list(cmd), kw.get("env")))
+        args = list(cmd[1:])
+        if "+triage" in args:
+            out = {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                                 "from": sender}]}
+        elif args[:4] == ["gmail", "users", "messages", "get"]:
+            headers = [] if auth_value is None else [
+                {"name": "Authentication-Results", "value": auth_value}]
+            out = {"id": "m1", "payload": {"headers": headers}}
+        elif "+read" in args:
+            out = {"body_text": body}
+        else:
+            out = {}
+        return subprocess.CompletedProcess(cmd, 0, stdout=_j.dumps(out), stderr="")
+
+    return run
+
+
+_GMAIL_PASS = ("mx.google.com; dkim=pass header.i=@example.com header.s=s; "
+               "dmarc=pass (p=NONE) header.from=example.com")
+
+
+class TestSwarmMailboxRouting:
+    def _arm(self, monkeypatch):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+        import os as _os
+        return _os.environ["ATELES_SWARM_GWS_CONFIG_DIR"]
+
+    def test_request_is_sent_from_swarm_to_operator_as_the_swarm_mailbox(self, monkeypatch):
+        import os as _os
+        swarm_dir = self._arm(monkeypatch)
+        calls: list = []
+        with patch.object(ec.shutil, "which", return_value="/bin/gws"), \
+             patch.object(ec.subprocess, "run",
+                          side_effect=_subprocess_mailbox(calls, auth_value=None)):
+            assert ec.send_request("Subj [APPROVE-TOK]", "body") is True
+        (argv, env), = calls
+        assert argv[argv.index("--to") + 1] == "op@example.com"
+        assert argv[argv.index("--from") + 1] == "swarm@example.net"
+        assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == swarm_dir
+        # Scoped to the subprocess: the process env is not mutated.
+        assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in _os.environ
+
+    def test_every_reply_read_call_runs_as_the_swarm_mailbox(self, monkeypatch):
+        swarm_dir = self._arm(monkeypatch)
+        calls: list = []
+        with patch.object(ec.shutil, "which", return_value="/bin/gws"), \
+             patch.object(ec.subprocess, "run",
+                          side_effect=_subprocess_mailbox(calls, auth_value=_GMAIL_PASS)):
+            out = ec.read_replies_with_status(["TOK"])
+        # An authenticated inbound operator reply in the swarm mailbox counts.
+        assert out.kind == "ok" and len(out.texts) == 1
+        kinds = {("+triage" in a and "triage") or ("+read" in a and "read")
+                 or ("get" in a and "metadata") for a, _ in calls}
+        assert kinds == {"triage", "metadata", "read"}
+        assert all(env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == swarm_dir
+                   for _, env in calls)
+
+    def test_in_thread_reply_runs_as_the_swarm_mailbox(self, monkeypatch, tmp_path):
+        swarm_dir = self._arm(monkeypatch)
+        calls: list = []
+        with patch.object(ec.shutil, "which", return_value="/bin/gws"), \
+             patch.object(ec.subprocess, "run",
+                          side_effect=_subprocess_mailbox(calls, auth_value=None)):
+            assert ec.reply_in_thread("m1", "done", cwd=str(tmp_path)) is True
+        (argv, env), = calls
+        assert argv[argv.index("--from") + 1] == "swarm@example.net"
+        assert argv[argv.index("--to") + 1] == "op@example.com"
+        assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == swarm_dir
+
+    def test_unconfigured_swarm_mailbox_makes_no_gws_call_at_all(self, monkeypatch):
+        """Never fall back to the operator's mailbox, even when the process env
+        already points gws somewhere."""
+        self._arm(monkeypatch)
+        monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR")
+        monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "/operator/default")
+        with patch.object(ec.shutil, "which", return_value="/bin/gws"), \
+             patch.object(ec.subprocess, "run") as run:
+            assert ec.send_request("s", "b") is False
+            out = ec.read_replies_with_status(["TOK"])
+            assert ec.reply_in_thread("m1", "b") is False
+            assert ec.gws_json(["gmail", "+triage"]) is None
+        run.assert_not_called()
+        assert out.kind == "transport_error"
+        assert out.detail == "swarm_mailbox_unconfigured"
+
+
+class TestAuthservIdConfig:
+    _ORG = "mx.example.org; dmarc=pass header.from=example.com"
+
+    def test_default_is_gmail(self, monkeypatch):
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+        assert ec.trusted_authserv_id() == "mx.google.com"
+        assert ec.sender_domain_authenticated([_GMAIL_PASS]) is True
+        assert ec.sender_domain_authenticated([self._ORG]) is False
+
+    def test_override_trusts_only_the_configured_server(self, monkeypatch):
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+        monkeypatch.setenv("ATELES_MAIL_AUTHSERV_ID", "MX.Example.org")
+        assert ec.trusted_authserv_id() == "mx.example.org"
+        assert ec.sender_domain_authenticated([self._ORG]) is True
+        assert ec.sender_domain_authenticated([_GMAIL_PASS]) is False
+
+    def test_override_applies_end_to_end_on_the_read_path(self, monkeypatch):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+        monkeypatch.setenv("ATELES_MAIL_AUTHSERV_ID", "mx.example.org")
+        for auth, expected in ((self._ORG, 1), (_GMAIL_PASS, 0)):
+            calls: list = []
+            with patch.object(ec.shutil, "which", return_value="/bin/gws"), \
+                 patch.object(ec.subprocess, "run",
+                              side_effect=_subprocess_mailbox(calls, auth_value=auth)):
+                out = ec.read_replies_with_status(["TOK"])
+            assert out.kind == "ok" and len(out.texts) == expected
+
+
+class TestSwarmMailboxProblems:
+    def test_each_missing_variable_is_named(self, monkeypatch):
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+        monkeypatch.delenv("ATELES_SWARM_EMAIL")
+        only_email = " ".join(ec.swarm_mailbox_problems())
+        assert "ATELES_SWARM_EMAIL" in only_email
+        assert "ATELES_SWARM_GWS_CONFIG_DIR" not in only_email
+        monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR")
+        both = " ".join(ec.swarm_mailbox_problems())
+        assert "ATELES_SWARM_EMAIL" in both and "ATELES_SWARM_GWS_CONFIG_DIR" in both
+        monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
+        only_dir = " ".join(ec.swarm_mailbox_problems())
+        assert "ATELES_SWARM_GWS_CONFIG_DIR" in only_dir
+        assert "ATELES_SWARM_EMAIL" not in only_dir
