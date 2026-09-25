@@ -11,7 +11,11 @@ import transcribe_audio as ta
 def storage(tmp_path, monkeypatch):
     audio = tmp_path / "synthetic.wav"
     audio.write_bytes(b"RIFF-synthetic-audio")
-    state = {"drop": None, "linked": True, "mismatch": False}
+    # declared=None mirrors a schema that declares every field Tyto writes;
+    # a set limits the snapshot to those fields, the way Neotoma routes an
+    # undeclared field to raw_fragments instead of the snapshot.
+    state = {"drop": None, "linked": True, "mismatch": False, "declared": None,
+             "schema_lookup": True, "source_hash": None, "prior": None}
     monkeypatch.setattr(ta, "_neotoma_cli_available", lambda: True)
     monkeypatch.setattr(ta, "_neotoma_auth_preflight", lambda: (True, "ok"))
     monkeypatch.setattr(ta, "_neotoma_prod_cli_argv", lambda args: ["neotoma", *args])
@@ -31,17 +35,34 @@ def storage(tmp_path, monkeypatch):
             stderr="ERR_IDEMPOTENCY_MISMATCH ent_000000000000000000000001" if state["mismatch"] else "")
     monkeypatch.setattr(ta.subprocess, "run", run)
     def read(args):
+        if args[0] == "schemas":
+            if not state["schema_lookup"]:
+                return None
+            fields = state["declared"] if state["declared"] is not None else set(state["entity"])
+            return {"schema": {"entity_type": "transcription",
+                               "fields": {f: {"type": "string"} for f in fields}}}
+        if args[:2] == ["entities", "search"]:
+            prior = state["prior"]
+            return {"entities": [{"id": prior["id"]}] if prior else [], "total": int(bool(prior))}
+        if args[:2] == ["entities", "get"] and state["prior"] and args[2] == state["prior"]["id"]:
+            return {"entity": {"id": state["prior"]["id"], "snapshot": state["prior"]["snapshot"]}}
         if args[0] == "entities":
             snapshot = {k: v for k, v in state["entity"].items() if k != state["drop"]}
+            if state["declared"] is not None:
+                snapshot = {k: v for k, v in snapshot.items() if k in state["declared"]}
             return {"entity": {"id": "ent_fixture", "snapshot": snapshot}}
         if args[0] == "observations":
             return {"observations": [{"entity_id": "ent_fixture", "source_id": "src_fixture"}] if state["linked"] else []}
+        content_hash = state["source_hash"] or ta._audio_content_hash(audio)
+        if args[:2] == ["sources", "list"]:
+            return {"sources": [{"id": "src_fixture", "content_hash": content_hash}]}
         if args[0] == "sources":
-            return {"source": {"id": "src_fixture", "content_hash": ta._audio_content_hash(audio)}}
+            return {"source": {"id": "src_fixture", "content_hash": content_hash}}
         raise AssertionError(args)
     monkeypatch.setattr(ta, "_neotoma_cli_json", read)
     def save(**kwargs):
         return ta.save_transcription(audio, {"transcription_text": "Synthetic transcript.", "transcription_engine": "local_whisper_cpp"}, extra_entity_fields={"capture_method": "voice_memo", "consent_basis": "unknown"}, **kwargs)
+    state["audio"] = audio
     return state, save
 
 
@@ -54,10 +75,172 @@ def test_dropped_mandatory_field_is_partial_ingestion(storage, field, capsys):
     assert "NEOTOMA_TRANSCRIPTION_ENTITY_ID=" not in capsys.readouterr().out
 
 
-def test_missing_source_link_is_partial_ingestion(storage):
+def test_audio_source_without_an_observation_link_is_a_landed_store(storage, capsys):
+    """`ingest --source-file` stores the audio as its own source and ties no
+    observation from it to the entity — the entity's observations cite the
+    JSON payload source. Live 2026-09-25: a landed memo's audio source held the
+    right bytes and had zero observations. A check that demands the link can
+    never pass on this write path, so the store must be judged on the source
+    it actually wrote."""
     state, save = storage
     state["linked"] = False
-    with pytest.raises(RuntimeError, match="incomplete"):
+    assert save()["entity_id"] == "ent_fixture"
+    assert "NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_fixture" in capsys.readouterr().out
+
+
+def test_audio_source_holding_other_bytes_is_partial_ingestion(storage):
+    state, save = storage
+    state["source_hash"] = "0" * 64
+    with pytest.raises(RuntimeError, match="audio source hash mismatch"):
+        save()
+
+
+# ── Read-back verifies only what the schema declares (2026-09-25) ────────────
+#
+# transcription 1.3.0 declared none of the five provenance fields, so Neotoma
+# kept them out of the snapshot and every memo's read-back failed although the
+# store had landed; the daemon then re-stored it every five minutes.
+
+_SCHEMA_1_3_0 = {
+    "transcription_id", "audio_file_path", "audio_file_name", "source_directory",
+    "language", "transcription_date", "audio_duration_seconds", "file_size_bytes",
+    "transcription_text", "word_count", "recorded_at",
+}
+
+
+def test_undeclared_provenance_fields_do_not_fail_a_landed_store(storage, capsys):
+    state, save = storage
+    state["declared"] = set(_SCHEMA_1_3_0)
+    assert save()["entity_id"] == "ent_fixture"
+    captured = capsys.readouterr()
+    assert "NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_fixture" in captured.out
+    # The gap is reported, not hidden.
+    for field in ("audio_content_sha256", "original_source_file", "capture_method",
+                  "transcription_engine", "consent_basis"):
+        assert field in captured.err
+
+
+def test_declared_provenance_field_that_is_dropped_still_fails(storage):
+    state, save = storage
+    state["declared"] = set(_SCHEMA_1_3_0) | {"capture_method"}
+    state["drop"] = "capture_method"
+    with pytest.raises(RuntimeError, match="read-back mismatch for capture_method"):
+        save()
+
+
+def test_transcript_is_verified_even_when_the_schema_omits_it(storage):
+    state, save = storage
+    state["declared"] = set(_SCHEMA_1_3_0) - {"transcription_text"}
+    with pytest.raises(RuntimeError, match="transcription_text"):
+        save()
+
+
+def test_failed_schema_lookup_verifies_every_field(storage):
+    """No schema answer must not quietly narrow the check (fail closed)."""
+    state, save = storage
+    state["schema_lookup"] = False
+    state["drop"] = "consent_basis"
+    with pytest.raises(RuntimeError, match="consent_basis"):
+        save()
+
+
+# ── Audio too large for the hosted transport (2026-09-25) ────────────────────
+#
+# Neotoma's CLI refuses a remote upload over ~7.5 MB before any HTTP call, so a
+# two-minute .qta memo could never be attached and was retried every five
+# minutes. It is now stored without the audio, with the reason on the record.
+
+
+def test_oversize_audio_is_stored_without_attachment_and_says_why(storage, monkeypatch, capsys):
+    state, save = storage
+    monkeypatch.setenv("NEOTOMA_PROD_BASE_URL", "https://neotoma.example.invalid")
+    monkeypatch.setenv("NEOTOMA_REMOTE_UPLOAD_MAX_BYTES", "4")
+    assert save()["entity_id"] == "ent_fixture"
+    assert "ingest" not in state["cmd"] and "--source-file" not in state["cmd"]
+    assert state["cmd"][:2] == ["neotoma", "store"]
+    assert state["entity"]["audio_attachment_status"] == "omitted_exceeds_remote_upload_limit"
+    assert "remote upload limit is 4 bytes" in state["entity"]["audio_attachment_note"]
+    assert "without the audio attachment" in capsys.readouterr().err
+
+
+def test_oversize_attachment_status_is_read_back(storage, monkeypatch):
+    state, save = storage
+    monkeypatch.setenv("NEOTOMA_PROD_BASE_URL", "https://neotoma.example.invalid")
+    monkeypatch.setenv("NEOTOMA_REMOTE_UPLOAD_MAX_BYTES", "4")
+    state["drop"] = "audio_attachment_status"
+    with pytest.raises(RuntimeError, match="audio_attachment_status"):
+        save()
+
+
+def test_default_remote_limit_matches_the_neotoma_cli():
+    assert ta._DEFAULT_REMOTE_UPLOAD_MAX_BYTES == 7549747
+
+
+def test_audio_under_the_remote_limit_is_still_attached(storage, monkeypatch):
+    state, save = storage
+    monkeypatch.setenv("NEOTOMA_PROD_BASE_URL", "https://neotoma.example.invalid")
+    save()
+    assert "--source-file" in state["cmd"]
+    assert "audio_attachment_status" not in state["entity"]
+
+
+def test_localhost_target_attaches_regardless_of_remote_limit(storage, monkeypatch):
+    state, save = storage
+    monkeypatch.setenv("NEOTOMA_PROD_BASE_URL", "http://127.0.0.1:3080")
+    monkeypatch.setenv("NEOTOMA_REMOTE_UPLOAD_MAX_BYTES", "4")
+    save()
+    assert "--source-file" in state["cmd"]
+    assert "audio_attachment_status" not in state["entity"]
+
+
+# ── ERR_IDEMPOTENCY_MISMATCH means the first write landed (2026-09-25) ───────
+#
+# The payload carries today's date, so a retry on a later day re-sends the
+# same content key with different bytes and is rejected forever. The prior
+# write is the durable record: resolve it and read it back.
+
+
+def _prior(state, **overrides):
+    snapshot = {
+        "audio_file_path": str(state["audio"].resolve()),
+        "file_size_bytes": state["audio"].stat().st_size,
+        "transcription_text": "Transcript stored by an earlier attempt.",
+    }
+    snapshot.update(overrides)
+    state["prior"] = {"id": "ent_prior", "snapshot": snapshot}
+
+
+def test_idempotency_mismatch_resolves_and_verifies_the_prior_write(storage, capsys):
+    state, save = storage
+    state["mismatch"] = True
+    _prior(state)
+    assert save()["entity_id"] == "ent_prior"
+    captured = capsys.readouterr()
+    assert "NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_prior" in captured.out
+    assert "Recovered prior transcription write ent_prior" in captured.err
+
+
+def test_idempotency_mismatch_with_no_prior_entity_stays_a_named_failure(storage):
+    state, save = storage
+    state["mismatch"] = True
+    with pytest.raises(RuntimeError, match="ERR_IDEMPOTENCY_MISMATCH"):
+        save()
+
+
+def test_idempotency_mismatch_prior_write_for_other_bytes_is_not_success(storage):
+    state, save = storage
+    state["mismatch"] = True
+    _prior(state, file_size_bytes=1)
+    with pytest.raises(RuntimeError, match="file_size_bytes"):
+        save()
+
+
+def test_idempotency_mismatch_prior_write_without_audio_is_not_success(storage):
+    state, save = storage
+    state["mismatch"] = True
+    state["source_hash"] = "0" * 64
+    _prior(state)
+    with pytest.raises(RuntimeError, match="no stored audio source"):
         save()
 
 

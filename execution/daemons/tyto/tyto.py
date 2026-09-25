@@ -61,7 +61,12 @@ Environment variables:
   TYTO_VOICE_MEMO_RETRY_STATE  Durable pending-retry journal (default:
                             ~/.local/state/ateles/tyto-voice-memo-retries.json).
   TYTO_VOICE_MEMO_RETRY_SECS  Delay after a failed memo transcription before
-                            retrying (default: 300).
+                            retrying (default: 300). Doubles on each further
+                            failure, capped at TYTO_RETRY_MAX_DELAY_SECS.
+  TYTO_RETRY_MAX_ATTEMPTS   Attempts per recording before a transient failure is
+                            given up on and journaled as permanent (default: 6).
+                            Applies to every recording watcher.
+  TYTO_RETRY_MAX_DELAY_SECS  Ceiling on the doubled retry delay (default: 21600).
   TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS  Outer deadline for a transcription
                             subprocess (default: 1800). A timed-out recording
                             remains eligible for the next poll/retry.
@@ -214,6 +219,15 @@ VOICE_MEMO_RETRY_STATE = Path(
     )
 )
 VOICE_MEMO_RETRY_SECS = int(os.environ.get("TYTO_VOICE_MEMO_RETRY_SECS", "300"))
+# Per-recording attempt cap. ateles#1084 capped only failures it could name as
+# permanent; every other failure was retried every five minutes with no limit,
+# so a failure the classifier did not recognise (a read-back mismatch, then
+# ERR_IDEMPOTENCY_MISMATCH) looped for a week and grew the error log to ~575 MB.
+# The cap is what bounds a failure nobody anticipated.
+RETRY_MAX_ATTEMPTS = max(1, int(os.environ.get("TYTO_RETRY_MAX_ATTEMPTS", "6")))
+RETRY_MAX_DELAY_SECS = max(0, int(os.environ.get("TYTO_RETRY_MAX_DELAY_SECS", "21600")))
+# Journaled when the attempt cap, not a recognised rejection, stops a recording.
+RETRY_LIMIT_ERROR_CODE = "ERR_RETRY_LIMIT_EXCEEDED"
 TRANSCRIBE_PROCESS_TIMEOUT_SECS = max(
     1, int(os.environ.get("TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS", "1800"))
 )
@@ -569,7 +583,14 @@ class ScreenshotWatcher:
 # alerts on the same channel). A memo that fails with one of these codes is
 # recorded as permanently failed after one attempt and never retried again;
 # an unrecognized error stays transient so recoverable work is preserved.
-PERMANENT_STORE_ERROR_CODES = ("ERR_FILE_PATH_IS_SERVER_LOCAL",)
+#
+# ERR_IDEMPOTENCY_MISMATCH reaches the daemon only after transcribe_audio.py has
+# tried to resolve the prior write under the same content key and could not
+# find it; re-sending under that key is rejected identically every time.
+PERMANENT_STORE_ERROR_CODES = (
+    "ERR_FILE_PATH_IS_SERVER_LOCAL",
+    "ERR_IDEMPOTENCY_MISMATCH",
+)
 
 
 def _classify_store_error(exc: BaseException) -> str | None:
@@ -579,6 +600,22 @@ def _classify_store_error(exc: BaseException) -> str | None:
         if code in text:
             return code
     return None
+
+
+def _subprocess_failure_detail(stderr: str) -> str:
+    """Short stderr excerpt that still names any permanent error code.
+
+    The excerpt is cut at 300 characters to keep alerts readable, but a
+    transcript sidecar line or a long JSON envelope can push the code past the
+    cut, and a code that is cut off cannot be classified as permanent.
+    """
+    text = (stderr or "").strip()
+    detail = text[:300]
+    for code in PERMANENT_STORE_ERROR_CODES:
+        if code in text and code not in detail:
+            detail += f" [error_code={code}]"
+            break
+    return detail
 
 
 class RecordingWatcher:
@@ -613,6 +650,8 @@ class RecordingWatcher:
         retry_state_path: Path | None = None,
         retry_secs: int = 300,
         max_files_per_poll: int | None = None,
+        max_attempts: int | None = None,
+        max_retry_delay_secs: int | None = None,
     ) -> None:
         self._dir = watch_dir
         self._notifier = notifier
@@ -644,6 +683,16 @@ class RecordingWatcher:
             None if max_files_per_poll is None else max(1, max_files_per_poll)
         )
         self._pending_retries: dict[Path, float] = {}
+        # Failed attempts per path, journaled beside its retry time so the cap
+        # survives a restart. Cleared on success.
+        self._attempts: dict[Path, int] = {}
+        self._max_attempts = max(
+            1, RETRY_MAX_ATTEMPTS if max_attempts is None else max_attempts
+        )
+        self._max_retry_delay_secs = max(
+            0,
+            RETRY_MAX_DELAY_SECS if max_retry_delay_secs is None else max_retry_delay_secs,
+        )
         # Permanent failures: path → {"error_code", "at", "notified"}. A path
         # in here is never retried again and is skipped by every later poll
         # (ateles#1083 — a deterministic rejection retried forever, which
@@ -689,6 +738,9 @@ class RecordingWatcher:
                 self._pending_retries[Path(item["path"])] = float(
                     item.get("retry_after", 0)
                 )
+                attempts = int(item.get("attempts", 0) or 0)
+                if attempts > 0:
+                    self._attempts[Path(item["path"])] = attempts
             for item in payload.get("hard_failed", []) or []:
                 if not isinstance(item, dict) or not isinstance(item.get("path"), str):
                     raise ValueError("invalid hard-failed entry")
@@ -713,7 +765,11 @@ class RecordingWatcher:
         payload = {
             "version": 2,
             "pending": [
-                {"path": str(path), "retry_after": retry_after}
+                {
+                    "path": str(path),
+                    "retry_after": retry_after,
+                    "attempts": self._attempts.get(path, 0),
+                }
                 for path, retry_after in sorted(
                     self._pending_retries.items(), key=lambda item: str(item[0])
                 )
@@ -749,7 +805,13 @@ class RecordingWatcher:
 
     def _clear_pending(self, path: Path) -> bool:
         self._pending_retries.pop(path, None)
+        self._attempts.pop(path, None)
         return self._save_retry_state()
+
+    def _retry_delay(self, attempts: int) -> float:
+        """Delay before the next attempt: retry_secs, doubling per failure, capped."""
+        delay = self._retry_secs * (2 ** max(0, attempts - 1))
+        return float(min(delay, self._max_retry_delay_secs or delay))
 
     def _mark_hard_failed(self, path: Path, error_code: str) -> bool:
         """Record a permanent failure once and stop this path from ever retrying.
@@ -759,6 +821,7 @@ class RecordingWatcher:
         notification for the same permanent failure.
         """
         self._pending_retries.pop(path, None)
+        self._attempts.pop(path, None)
         existing = self._hard_failed.get(path)
         if existing is None:
             self._hard_failed[path] = {
@@ -958,24 +1021,34 @@ class RecordingWatcher:
                         self._transcribed.discard(path)
                 else:
                     self._pending_retries.pop(path, None)
-            elif outcome == "permanent" and durable_retry:
-                # Only the durably-journaled watcher (Voice Memos) can make a
-                # failure permanent; other watchers have no journal to record
-                # it in and fall through to the transient path below.
-                self._mark_hard_failed(path, error_code or "unknown")
-                self._notifier.send(
-                    f"Transcription permanently failed for {path.name}: "
-                    f"{error_code} (will not retry)",
-                    priority=Priority.BLOCKER,
-                    handler=DAEMON_NAME,
-                )
-                self._mark_hard_failure_notified(path)
+                    self._attempts.pop(path, None)
             else:
-                retry_after = datetime.now(tz=UTC).timestamp() + self._retry_secs
-                if durable_retry:
-                    self._mark_pending(path, retry_after)
+                attempts = self._attempts.get(path, 0) + 1
+                self._attempts[path] = attempts
+                if outcome != "permanent" and attempts >= self._max_attempts:
+                    # A failure nothing recognised as permanent, repeated until
+                    # the cap. Give up the same way a named rejection does.
+                    outcome = "permanent"
+                    error_code = f"{RETRY_LIMIT_ERROR_CODE} after {attempts} attempts"
+                if outcome == "permanent":
+                    # Watchers without a journal hold this in memory only, so
+                    # a restart gives the recording one more bounded run.
+                    self._mark_hard_failed(path, error_code or "unknown")
+                    self._notifier.send(
+                        f"Transcription permanently failed for {path.name}: "
+                        f"{error_code} (will not retry)",
+                        priority=Priority.BLOCKER,
+                        handler=DAEMON_NAME,
+                    )
+                    self._mark_hard_failure_notified(path)
                 else:
-                    self._pending_retries[path] = retry_after
+                    retry_after = (
+                        datetime.now(tz=UTC).timestamp() + self._retry_delay(attempts)
+                    )
+                    if durable_retry:
+                        self._mark_pending(path, retry_after)
+                    else:
+                        self._pending_retries[path] = retry_after
             processed += 1
             if (
                 self._max_files_per_poll is not None
@@ -1197,7 +1270,7 @@ class RecordingWatcher:
                     )
                     raise RuntimeError(
                         f"backend={backend}: fallback transcription also failed: "
-                        f"{result2.stderr.strip()[:300]}"
+                        f"{_subprocess_failure_detail(result2.stderr)}"
                     )
                 entity_id = _extract_entity_id(result2.stdout)
                 backend = _extract_backend(result2.stdout, "local_whisper_cpp")
@@ -1212,7 +1285,7 @@ class RecordingWatcher:
             else:
                 backend = _extract_backend(result.stdout, fallback)
                 raise RuntimeError(
-                    f"backend={backend}: {result.stderr.strip()[:300]}"
+                    f"backend={backend}: {_subprocess_failure_detail(result.stderr)}"
                 )
         else:
             entity_id = _extract_entity_id(result.stdout)
