@@ -11922,3 +11922,428 @@ class TestCallersTreatAFailedSignOffAsNotCleared:
 
         assert build_calls == [], "a failed pm sign_off must not count as a cleared gate"
         assert any("gates not green" in m for m in notifier.sent)
+
+
+# ── Label gate (bootstrap mode / canary lane) ───────────────────────────────
+#
+# ATELES_SWARM_REQUIRE_LABEL / DispatchConfig.require_label. Unset (empty
+# string, the default) must reproduce today's behaviour exactly. Set, the
+# automatic issue_opened and PR pipelines in handle_trigger must run ONLY for
+# work carrying the configured label (on the PR itself, or its linked parent
+# issue) — everything else is skipped with one INFO log line and NO GitHub
+# writes. Operator overrides (/swarm-run, /confirm-gates-clear) call
+# _handle_issue_opened / _handle_pr directly and so never reach this gate.
+
+
+class TestLabelGate:
+    def _dispatcher(self, monkeypatch, *, require_label="", fetch_issue=None):
+        d = SwarmDispatcher(_StubNotifier(), _config(require_label=require_label))
+        if fetch_issue is not None:
+            monkeypatch.setattr(SwarmDispatcher, "_fetch_issue_fields", fetch_issue)
+        return d
+
+    # ── _label_gate_allows unit behaviour ───────────────────────────────────
+
+    def test_gate_unset_allows_unlabelled_issue(self, monkeypatch):
+        d = self._dispatcher(monkeypatch, require_label="")
+        allowed = asyncio.run(
+            d._label_gate_allows(_issue_trigger(labels=[]))
+        )
+        assert allowed is True
+
+    def test_gate_unset_allows_unlabelled_pr(self, monkeypatch):
+        d = self._dispatcher(monkeypatch, require_label="")
+        allowed = asyncio.run(
+            d._label_gate_allows(_trigger(body="no parent reference", labels=[]))
+        )
+        assert allowed is True
+
+    def test_gate_set_blocks_unlabelled_issue(self, monkeypatch, caplog):
+        d = self._dispatcher(monkeypatch, require_label="swarm-canary")
+        with caplog.at_level(logging.INFO):
+            allowed = asyncio.run(
+                d._label_gate_allows(_issue_trigger(labels=["bug"]))
+            )
+        assert allowed is False
+        assert any(
+            "label gate active" in rec.message and "issue_opened" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_gate_set_allows_labelled_issue(self, monkeypatch):
+        d = self._dispatcher(monkeypatch, require_label="swarm-canary")
+        allowed = asyncio.run(
+            d._label_gate_allows(_issue_trigger(labels=["swarm-canary", "bug"]))
+        )
+        assert allowed is True
+
+    def test_gate_set_blocks_unlabelled_pr_with_no_parent(self, monkeypatch):
+        d = self._dispatcher(monkeypatch, require_label="swarm-canary")
+        allowed = asyncio.run(
+            d._label_gate_allows(_trigger(body="no parent reference", labels=[]))
+        )
+        assert allowed is False
+
+    def test_gate_set_allows_pr_carrying_the_label_directly(self, monkeypatch):
+        d = self._dispatcher(monkeypatch, require_label="swarm-canary")
+        allowed = asyncio.run(
+            d._label_gate_allows(
+                _trigger(body="Closes #80.", labels=["swarm-canary"])
+            )
+        )
+        assert allowed is True
+
+    def test_gate_set_allows_pr_whose_parent_issue_is_labelled(self, monkeypatch):
+        async def fake_fetch(self, repository, issue_number):
+            assert (repository, issue_number) == ("owner/repo", 80)
+            return {"labels": [{"name": "swarm-canary"}]}
+
+        d = self._dispatcher(monkeypatch, require_label="swarm-canary", fetch_issue=fake_fetch)
+        allowed = asyncio.run(
+            d._label_gate_allows(_trigger(body="Closes #80.", labels=[]))
+        )
+        assert allowed is True
+
+    def test_gate_set_blocks_pr_whose_parent_issue_is_unlabelled(self, monkeypatch):
+        async def fake_fetch(self, repository, issue_number):
+            return {"labels": [{"name": "bug"}]}
+
+        d = self._dispatcher(monkeypatch, require_label="swarm-canary", fetch_issue=fake_fetch)
+        allowed = asyncio.run(
+            d._label_gate_allows(_trigger(body="Closes #80.", labels=[]))
+        )
+        assert allowed is False
+
+    def test_gate_fails_closed_when_parent_issue_unresolvable(self, monkeypatch, caplog):
+        async def fake_fetch(self, repository, issue_number):
+            return None  # network/API failure
+
+        d = self._dispatcher(monkeypatch, require_label="swarm-canary", fetch_issue=fake_fetch)
+        with caplog.at_level(logging.INFO):
+            allowed = asyncio.run(
+                d._label_gate_allows(_trigger(body="Closes #80.", labels=[]))
+            )
+        assert allowed is False
+        assert any("failing closed" in rec.message for rec in caplog.records)
+
+    # ── handle_trigger integration: the gate must sit in front of dispatch,
+    #    post no GitHub writes when it skips, and never touch operator paths.
+
+    def test_handle_trigger_unset_dispatches_issue_pipeline_unchanged(self, monkeypatch):
+        calls = []
+
+        async def fake_issue_opened(self, trigger):
+            calls.append("issue_opened")
+
+        async def fake_log_harness(self, trigger):
+            calls.append("harness_event")
+
+        monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_issue_opened)
+        monkeypatch.setattr(SwarmDispatcher, "_log_harness_event", fake_log_harness)
+
+        d = self._dispatcher(monkeypatch, require_label="")
+        asyncio.run(d.handle_trigger(_issue_trigger(labels=[])))
+
+        assert calls == ["harness_event", "issue_opened"]
+
+    def test_handle_trigger_unset_dispatches_pr_pipeline_unchanged(self, monkeypatch):
+        calls = []
+
+        async def fake_handle_pr(self, trigger):
+            calls.append("handle_pr")
+
+        async def fake_log_harness(self, trigger):
+            calls.append("harness_event")
+
+        monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+        monkeypatch.setattr(SwarmDispatcher, "_log_harness_event", fake_log_harness)
+
+        d = self._dispatcher(monkeypatch, require_label="")
+        asyncio.run(d.handle_trigger(_trigger(body="Closes #80.", labels=[])))
+
+        assert calls == ["harness_event", "handle_pr"]
+
+    def test_handle_trigger_set_skips_unlabelled_issue_no_pipeline_no_github_writes(
+        self, monkeypatch
+    ):
+        calls = []
+
+        async def fake_issue_opened(self, trigger):
+            calls.append("issue_opened")  # must never be called
+
+        async def fake_log_harness(self, trigger):
+            calls.append("harness_event")
+
+        monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_issue_opened)
+        monkeypatch.setattr(SwarmDispatcher, "_log_harness_event", fake_log_harness)
+        # httpx.AsyncClient is the only path to a GitHub write; if the gate
+        # short-circuits correctly, nothing ever constructs one from here.
+        monkeypatch.setattr(
+            httpx, "AsyncClient",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("no HTTP client must be created when the gate skips")
+            ),
+        )
+
+        d = self._dispatcher(monkeypatch, require_label="swarm-canary")
+        asyncio.run(d.handle_trigger(_issue_trigger(labels=["bug"])))
+
+        assert calls == ["harness_event"]
+        assert "issue_opened" not in calls
+
+    def test_handle_trigger_set_runs_pipeline_for_labelled_issue(self, monkeypatch):
+        calls = []
+
+        async def fake_issue_opened(self, trigger):
+            calls.append("issue_opened")
+
+        async def fake_log_harness(self, trigger):
+            calls.append("harness_event")
+
+        monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_issue_opened)
+        monkeypatch.setattr(SwarmDispatcher, "_log_harness_event", fake_log_harness)
+
+        d = self._dispatcher(monkeypatch, require_label="swarm-canary")
+        asyncio.run(d.handle_trigger(_issue_trigger(labels=["swarm-canary"])))
+
+        assert calls == ["harness_event", "issue_opened"]
+
+    def test_handle_trigger_set_runs_pr_pipeline_when_parent_issue_labelled(
+        self, monkeypatch
+    ):
+        calls = []
+
+        async def fake_handle_pr(self, trigger):
+            calls.append("handle_pr")
+
+        async def fake_log_harness(self, trigger):
+            calls.append("harness_event")
+
+        async def fake_fetch(self, repository, issue_number):
+            return {"labels": [{"name": "swarm-canary"}]}
+
+        monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+        monkeypatch.setattr(SwarmDispatcher, "_log_harness_event", fake_log_harness)
+        monkeypatch.setattr(SwarmDispatcher, "_fetch_issue_fields", fake_fetch)
+
+        d = self._dispatcher(monkeypatch, require_label="swarm-canary")
+        asyncio.run(
+            d.handle_trigger(_trigger(body="Closes #80.", labels=[]))
+        )
+
+        assert calls == ["harness_event", "handle_pr"]
+
+    def test_handle_trigger_set_skips_unlabelled_pr_no_pipeline(self, monkeypatch):
+        calls = []
+
+        async def fake_handle_pr(self, trigger):
+            calls.append("handle_pr")  # must never be called
+
+        async def fake_log_harness(self, trigger):
+            calls.append("harness_event")
+
+        async def fake_fetch(self, repository, issue_number):
+            return {"labels": [{"name": "bug"}]}
+
+        monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+        monkeypatch.setattr(SwarmDispatcher, "_log_harness_event", fake_log_harness)
+        monkeypatch.setattr(SwarmDispatcher, "_fetch_issue_fields", fake_fetch)
+
+        d = self._dispatcher(monkeypatch, require_label="swarm-canary")
+        asyncio.run(
+            d.handle_trigger(_trigger(body="Closes #80.", labels=[]))
+        )
+
+        assert calls == ["harness_event"]
+        assert "handle_pr" not in calls
+
+    # ── operator overrides must ignore the gate entirely ────────────────────
+
+    def test_swarm_run_bypasses_label_gate_on_unlabelled_issue(self, monkeypatch):
+        """/swarm-run calls _handle_issue_opened directly (never through
+        handle_trigger's gated dispatch), so it must still run regardless of
+        the label gate — per the bootstrap-mode design, operator overrides
+        always work."""
+        calls = []
+
+        async def fake_issue_opened(self, trigger):
+            calls.append("issue_opened")
+
+        async def fake_post_swarm_run_comment(self, trigger):
+            return None
+
+        monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_issue_opened)
+        monkeypatch.setattr(
+            SwarmDispatcher, "_post_swarm_run_comment", fake_post_swarm_run_comment
+        )
+
+        d = self._dispatcher(monkeypatch, require_label="swarm-canary")
+        comment_trigger = SwarmTrigger(
+            kind="issue_comment",
+            repository="owner/repo",
+            number=100,
+            title="A new feature",
+            body="Please build a thing.",
+            author="reporter",
+            html_url="https://github.com/owner/repo/issues/100",
+            delivery_id="swarm-run-1",
+            action="created",
+            labels=["bug"],  # deliberately NOT swarm-canary
+            comment_id=1,
+            comment_author=_OPERATOR_LOGIN,
+            comment_body=_SWARM_RUN_CMD,
+            comment_on_pr=False,
+        )
+        asyncio.run(d._handle_swarm_run(comment_trigger))
+
+        assert calls == ["issue_opened"], (
+            "/swarm-run must bypass the label gate — it is the operator "
+            "override the gate is explicitly required to leave alone"
+        )
+
+    def test_confirm_gates_clear_bypasses_label_gate_on_unlabelled_pr(self, monkeypatch):
+        """/confirm-gates-clear re-triggers _handle_pr directly, so it too must
+        run regardless of the label gate."""
+        calls = []
+
+        async def fake_handle_pr(self, trigger):
+            calls.append("handle_pr")
+
+        async def fake_waive_gates(self, trigger):
+            return None
+
+        monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle_pr)
+        monkeypatch.setattr(SwarmDispatcher, "_waive_gates", fake_waive_gates)
+
+        d = self._dispatcher(monkeypatch, require_label="swarm-canary")
+        comment_trigger = SwarmTrigger(
+            kind="issue_comment",
+            repository="owner/repo",
+            number=87,
+            title="A pull request",
+            body="Closes #80.",
+            author="someone",
+            html_url="https://github.com/owner/repo/pull/87",
+            delivery_id="confirm-gates-1",
+            action="created",
+            labels=["bug"],  # deliberately NOT swarm-canary
+            comment_id=2,
+            comment_author=_OPERATOR_LOGIN,
+            comment_body=_CONFIRM_GATES_CLEAR_CMD,
+            comment_on_pr=True,
+        )
+        asyncio.run(d._handle_confirm_gates_clear(comment_trigger))
+
+        assert calls == ["handle_pr"], (
+            "/confirm-gates-clear must bypass the label gate — it is the "
+            "operator override the gate is explicitly required to leave alone"
+        )
+
+    # ── operations triggers unaffected ──────────────────────────────────────
+
+    def test_ci_status_trigger_unaffected_by_label_gate(self, monkeypatch):
+        calls = []
+
+        async def fake_ci_status(self, trigger):
+            calls.append("ci_status")
+
+        async def fake_log_harness(self, trigger):
+            calls.append("harness_event")
+
+        monkeypatch.setattr(SwarmDispatcher, "_handle_ci_status", fake_ci_status)
+        monkeypatch.setattr(SwarmDispatcher, "_log_harness_event", fake_log_harness)
+
+        d = self._dispatcher(monkeypatch, require_label="swarm-canary")
+        ci_trigger = SwarmTrigger(
+            kind="ci_status",
+            repository="owner/repo",
+            number=0,
+            title="",
+            body="",
+            author="",
+            html_url="",
+            delivery_id="ci-1",
+            action="completed",
+            ci_head_sha="a" * 40,
+            ci_conclusion="success",
+        )
+        asyncio.run(d.handle_trigger(ci_trigger))
+
+        assert calls == ["harness_event", "ci_status"], (
+            "CI-status handling is not a software-review pipeline and must "
+            "run regardless of the label gate"
+        )
+
+    def test_push_main_trigger_unaffected_by_label_gate(self, monkeypatch):
+        calls = []
+
+        async def fake_push_main(self, trigger):
+            calls.append("push_main")
+
+        async def fake_log_harness(self, trigger):
+            calls.append("harness_event")
+
+        monkeypatch.setattr(SwarmDispatcher, "_handle_push_main", fake_push_main)
+        monkeypatch.setattr(SwarmDispatcher, "_log_harness_event", fake_log_harness)
+
+        d = self._dispatcher(monkeypatch, require_label="swarm-canary")
+        push_trigger = SwarmTrigger(
+            kind="push_main",
+            repository="owner/repo",
+            number=0,
+            title="a commit",
+            body="",
+            author="someone",
+            html_url="",
+            delivery_id="push-1",
+            action="push",
+            push_ref="refs/heads/main",
+            push_after="b" * 40,
+        )
+        asyncio.run(d.handle_trigger(push_trigger))
+
+        assert calls == ["harness_event", "push_main"], (
+            "auto-release (push_main) is an operations trigger, not a "
+            "software-review pipeline, and must run regardless of the label gate"
+        )
+
+    def test_pr_review_trigger_unaffected_by_label_gate(self, monkeypatch):
+        calls = []
+
+        async def fake_pr_review(self, trigger):
+            calls.append("pr_review")
+
+        async def fake_log_harness(self, trigger):
+            calls.append("harness_event")
+
+        monkeypatch.setattr(SwarmDispatcher, "_handle_pr_review", fake_pr_review)
+        monkeypatch.setattr(SwarmDispatcher, "_log_harness_event", fake_log_harness)
+
+        d = self._dispatcher(monkeypatch, require_label="swarm-canary")
+        review_trigger = SwarmTrigger(
+            kind="pr_review",
+            repository="owner/repo",
+            number=87,
+            title="A pull request",
+            body="Closes #80.",
+            author="someone",
+            html_url="https://github.com/owner/repo/pull/87",
+            delivery_id="review-1",
+            action="submitted",
+            review_state="approved",
+            review_author=_OPERATOR_LOGIN,
+        )
+        asyncio.run(d.handle_trigger(review_trigger))
+
+        assert calls == ["harness_event", "pr_review"], (
+            "the approval loop is not a software-review pipeline and must "
+            "run regardless of the label gate"
+        )
+
+    # ── config default parity ────────────────────────────────────────────────
+
+    def test_require_label_defaults_to_empty_string(self):
+        # Constructing with no override must read the real env var default —
+        # confirms an operator who never sets ATELES_SWARM_REQUIRE_LABEL gets
+        # exactly today's behaviour, not a hidden non-empty default.
+        assert DispatchConfig(neotoma_token="", github_token="").require_label == ""

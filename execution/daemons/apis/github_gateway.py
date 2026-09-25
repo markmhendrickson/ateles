@@ -55,6 +55,8 @@ from typing import Any, Awaitable, Callable
 
 from aiohttp import web
 
+from lib.daemon_runtime import label_gate as _label_gate
+
 log = logging.getLogger("apis.github_gateway")
 
 # Operator GitHub login used to attribute an email-reply approval. Kept in sync
@@ -63,9 +65,38 @@ log = logging.getLogger("apis.github_gateway")
 _OPERATOR_LOGIN = os.environ.get("APIS_OPERATOR_LOGIN", "markmhendrickson")
 
 # GitHub actions that fire the PR pipeline. `synchronize` re-runs review on
-# new pushes; `reopened` re-enters the pipeline after a close.
-PR_ACTIONS = {"opened", "reopened", "synchronize"}
-ISSUE_ACTIONS = {"opened"}
+# new pushes; `reopened` re-enters the pipeline after a close. `labeled` lets a
+# label added AFTER the PR opened (e.g. the swarm-canary label, see
+# ATELES_SWARM_REQUIRE_LABEL in swarm_dispatch.py) start the pipeline for it —
+# without this, a PR opened before the label existed could never enter the
+# gated lane.
+#
+# IMPORTANT: `labeled` is filtered at THIS layer (_labeled_event_admitted,
+# below), not left to the dispatcher's label-gate check. Naively adding
+# "labeled" to these sets is a known bug this file used to ship (Pavo/Waxwing/
+# Loxia review on ateles#1269): parse_github_event would build a real
+# pr_labeled/issue_opened trigger for EVERY label add on EVERY issue/PR, and
+# handle_trigger's `elif trigger.is_pr:` branch accepts any "pr_*" kind — so
+# with the gate UNSET (the documented default, "today's behaviour exactly"),
+# adding any label to any PR silently re-ran the full review panel, and any
+# label to any issue silently reran the issue pipeline. That is a NEW
+# review-trigger, active in the unset/default configuration, that CLAUDE.md's
+# documented contract (PR_ACTIONS = {opened, reopened, synchronize} as the
+# only events that re-run PR review) never allowed. The label-gate check
+# downstream only decided whether the panel *proceeded* once triggered — it
+# never neutralized the trigger construction itself for the unset case.
+#
+# The fix: a `labeled` delivery is admitted into ISSUE_ACTIONS/PR_ACTIONS
+# querying below, but parse_github_event calls _labeled_event_admitted BEFORE
+# building any trigger for it, and returns None (dropped, DEBUG-logged) unless
+# the gate is SET and the label just added is exactly the configured one. This
+# keeps the "unset = unchanged" guarantee true at the layer that actually
+# decides whether work starts, not just at the layer that decides whether it
+# proceeds once started.
+PR_ACTIONS = {"opened", "reopened", "synchronize", "labeled"}
+# Same rationale for issues: a `labeled` action lets a label added after the
+# issue opened start the issue pipeline for it — filtered the same way.
+ISSUE_ACTIONS = {"opened", "labeled"}
 # issue_comment events (ateles#112): any new comment on an issue or PR.
 ISSUE_COMMENT_ACTIONS = {"created"}
 # pull_request_review events (approval loop): the operator clicking "Approve"
@@ -82,13 +113,73 @@ CHECK_SUITE_ACTIONS = {"completed"}
 # branch deletions are ignored. `push` carries no `action` field.
 RELEASE_PUSH_REF = os.environ.get("APIS_RELEASE_PUSH_REF", "refs/heads/main")
 
+# Label gate (bootstrap mode / canary lane). Read here, independently of
+# swarm_dispatch.DispatchConfig.require_label, for the same reason
+# _OPERATOR_LOGIN is duplicated above: swarm_dispatch imports SwarmTrigger
+# from this module, so importing swarm_dispatch back would be circular. Both
+# reads go through lib/daemon_runtime/label_gate.required_label (the same
+# helper Anthus uses), so an empty/whitespace value reads as "gate inactive"
+# identically everywhere.
+_REQUIRE_LABEL = _label_gate.required_label()
+
+
+def _labeled_event_admitted(payload: dict[str, Any], ref: str) -> bool:
+    """Decide whether a `labeled` action may build a trigger at all.
+
+    A `labeled` delivery must NEVER reach `_handle_issue_opened` / `_handle_pr`
+    unless the label gate is SET and the label just added
+    (`payload["label"]["name"]`) is exactly the configured one. This is
+    deliberately checked HERE, at the trigger layer, before any SwarmTrigger
+    for a `labeled` action is constructed — not left to the dispatcher's
+    `_label_gate_allows`, which only decides whether an already-built trigger
+    proceeds. The bug this closes (ateles#1269 review round): with the gate
+    UNSET, `_label_gate_allows` short-circuits to True, so if a `labeled`
+    trigger were built unconditionally here, EVERY label add on EVERY PR
+    would silently re-run the full review panel (same for issues and the
+    issue pipeline) — a new review-trigger CLAUDE.md's documented contract
+    (`PR_ACTIONS = {opened, reopened, synchronize}`) never allowed, active
+    even in the default/unset configuration.
+
+    Returns True only when: the gate is set (non-empty `_REQUIRE_LABEL`) AND
+    the label GitHub reports as just added on this delivery equals it exactly
+    (case-sensitive, matching GitHub's own label-name convention). Every other
+    case — gate unset, a different label added, a malformed/missing `label`
+    object — returns False and is dropped with a DEBUG line naming why,
+    before `parse_github_event` builds anything for it.
+    """
+    if not _REQUIRE_LABEL:
+        log.debug(
+            f"[apis] labeled event on {ref} dropped — label gate is unset "
+            "(labeled actions only admit a trigger when "
+            "ATELES_SWARM_REQUIRE_LABEL is configured)"
+        )
+        return False
+    # A `label` that is not a dict (a string, a list, null) is malformed and
+    # denied here, rather than raising AttributeError into the aiohttp handler
+    # and surfacing as a 500 (Falco + qa, #1269 round 3). Same for a name that
+    # is not a string.
+    raw_label = payload.get("label")
+    added_label = raw_label.get("name", "") if isinstance(raw_label, dict) else ""
+    if not isinstance(added_label, str) or not _label_gate.carries_label(
+        _REQUIRE_LABEL, [added_label]
+    ):
+        log.debug(
+            f"[apis] labeled event on {ref} dropped — label added "
+            f"({added_label!r}) does not match the configured gate label "
+            f"({_REQUIRE_LABEL!r})"
+        )
+        return False
+    return True
+
 
 @dataclass
 class SwarmTrigger:
     """Normalized GitHub event handed to the dispatch pipelines."""
 
     kind: str  # "issue_opened" | "pr_opened" | "pr_reopened" | "pr_synchronize"
-              # | "issue_comment"
+              # | "pr_labeled" | "issue_comment"
+              # (issue_opened covers both the "opened" and "labeled" issue
+              # actions — trigger.action carries which one fired)
     repository: str  # "owner/name"
     number: int
     title: str
@@ -178,6 +269,10 @@ def parse_github_event(
         # PRs also surface via the issues API; only real issues trigger here.
         if "pull_request" in issue:
             return None
+        if action == "labeled" and not _labeled_event_admitted(
+            payload, f"{repository}#{issue.get('number', 0)}"
+        ):
+            return None
         return SwarmTrigger(
             kind="issue_opened",
             repository=repository,
@@ -194,6 +289,10 @@ def parse_github_event(
 
     if event_type == "pull_request" and action in PR_ACTIONS:
         pr = payload.get("pull_request") or {}
+        if action == "labeled" and not _labeled_event_admitted(
+            payload, f"{repository}#{pr.get('number', 0)}"
+        ):
+            return None
         return SwarmTrigger(
             kind=f"pr_{action}",
             repository=repository,

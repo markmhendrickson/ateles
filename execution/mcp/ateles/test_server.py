@@ -1534,3 +1534,33 @@ class TestInstructionsBudgetRedGreen:
             "failure mode ateles#1243 measured on main (17,996 chars against "
             "a ~2,048-char shared client cap)"
         )
+
+
+# ── get_dispatch_health: label gate surfacing ───────────────────────────────
+#
+# ATELES_SWARM_REQUIRE_LABEL (bootstrap mode / canary lane, swarm_dispatch.py)
+# must be surfaced here so "nothing is being reviewed" reads as the label gate
+# working as designed rather than as a broken dispatcher.
+
+
+class TestDispatchHealthLabelGate:
+    def test_unset_reports_gate_inactive(self, monkeypatch):
+        monkeypatch.delenv("ATELES_SWARM_REQUIRE_LABEL", raising=False)
+        result = srv._get_dispatch_health()
+        assert result["label_gate_active"] is False
+        assert result["label_gate_label"] is None
+
+    def test_set_reports_gate_active_with_label(self, monkeypatch):
+        monkeypatch.setenv("ATELES_SWARM_REQUIRE_LABEL", "swarm-canary")
+        result = srv._get_dispatch_health()
+        assert result["label_gate_active"] is True
+        assert result["label_gate_label"] == "swarm-canary"
+        assert "swarm-canary" in result["interpretation"]
+
+    def test_set_empty_string_reports_gate_inactive(self, monkeypatch):
+        # Whitespace-only / empty-string env values must not read as "active
+        # with an empty label" — same treatment as fully unset.
+        monkeypatch.setenv("ATELES_SWARM_REQUIRE_LABEL", "   ")
+        result = srv._get_dispatch_health()
+        assert result["label_gate_active"] is False
+        assert result["label_gate_label"] is None

@@ -1984,6 +1984,17 @@ def _get_dispatch_health() -> dict:
     result["dispatch_failure_dir"] = str(failure_dir)
     result["recent_dispatch_failures"] = failures
 
+    # Label gate (bootstrap mode / canary lane): report whether the automatic
+    # issue/PR pipelines are currently restricted to a single label, so
+    # "nothing is being reviewed" reads as an active, deliberate posture
+    # rather than a broken dispatcher. Read directly from the env var
+    # swarm_dispatch.DispatchConfig also reads (ATELES_SWARM_REQUIRE_LABEL) —
+    # this MCP does not import swarm_dispatch, so the env var is the single
+    # source rather than a second copy of the default.
+    require_label = os.environ.get("ATELES_SWARM_REQUIRE_LABEL", "").strip()
+    result["label_gate_active"] = bool(require_label)
+    result["label_gate_label"] = require_label or None
+
     running = result.get("running")
     if running is True:
         health = "dispatcher is loaded and running"
@@ -1994,6 +2005,12 @@ def _get_dispatch_health() -> dict:
     recent_failures = result.get("dispatch_failures_last_24h")
     if recent_failures:
         health += f"; {recent_failures} dispatch failure(s) logged in the last 24h"
+    if require_label:
+        health += (
+            f"; label gate ACTIVE — automatic issue/PR pipelines run only for "
+            f"work labelled {require_label!r} (operator overrides /swarm-run "
+            "and /confirm-gates-clear still work regardless of label)"
+        )
     result["interpretation"] = health
     return result
 
@@ -2157,9 +2174,12 @@ TOOLS = [
         name="get_dispatch_health",
         description=(
             "Read-only. Report whether the apis dispatcher daemon is loaded and running, "
-            "its recent issue-pipeline log activity, and how many dispatch failures have "
-            "been logged recently. Use it to tell 'the swarm is working on it' apart from "
-            "'nothing is running at all'."
+            "its recent issue-pipeline log activity, how many dispatch failures have "
+            "been logged recently, and whether a label gate (ATELES_SWARM_REQUIRE_LABEL, "
+            "bootstrap-mode canary lane) is currently restricting the automatic issue/PR "
+            "pipelines to a single label. Use it to tell 'the swarm is working on it' apart "
+            "from 'nothing is running at all', and 'nothing is being reviewed because the "
+            "label gate is active by design' apart from a broken pipeline."
         ),
         inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
     ),
