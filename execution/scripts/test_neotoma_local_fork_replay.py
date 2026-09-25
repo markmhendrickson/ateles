@@ -3753,3 +3753,498 @@ def test_on_identity_conflict_does_not_match_unrelated_400(tmp_path, monkeypatch
     assert exc_info.value.code == 1
     err = capsys.readouterr().err
     assert "code=E_WRITE_FAILED" in err
+
+
+# =============================================================================
+# Live migration run (2026-09-25) local patches, upstreamed as CLI flags:
+#   --write-retries / NEOTOMA_REPLAY_WRITE_RETRY (per-write retry)
+#   self-referential relationship skip (always on, not opt-in)
+#   --skip-applied-from / NEOTOMA_REPLAY_SKIP_LOCAL_IDS_FILE (resume)
+# =============================================================================
+
+
+def _add_relationship_row(db_path, local_id, rel_type, source_entity_id, target_entity_id, created_at):
+    """Insert one relationship_observations row into a DB built by
+    _make_replay_observations_db (which creates the table but never
+    populates it -- only its own `rows` param feeds `observations`)."""
+    import sqlite3 as _sqlite3
+
+    conn = _sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO relationship_observations (id, relationship_key, "
+        "relationship_type, source_entity_id, target_entity_id, source_id, "
+        "interpretation_id, observed_at, specificity_score, source_priority, "
+        "metadata, created_at, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            local_id,
+            f"{rel_type}:{source_entity_id}:{target_entity_id}",
+            rel_type,
+            source_entity_id,
+            target_entity_id,
+            "src-1",
+            None,
+            created_at,
+            1.0,
+            1,
+            json.dumps({}),
+            created_at,
+            "user-1",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+# --- signed_write retry -----------------------------------------------------
+
+
+def test_signed_write_retries_503_then_succeeds(monkeypatch):
+    """A 503 (transient hosted failure) is retried under --write-retries,
+    and the eventual 200 is returned once the retry succeeds. Backoff sleep
+    is monkeypatched to a no-op so the test does not actually wait 15s."""
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod.time, "sleep", lambda *_a, **_kw: None)
+    _mod.WRITE_RETRIES_OVERRIDE["value"] = 5
+
+    calls = []
+
+    def fake_once(method, base_url, path, sign_as, body=None, timeout=180):
+        calls.append(1)
+        if len(calls) == 1:
+            return 503, {"error": "service unavailable"}
+        return 200, {"success": True}
+
+    monkeypatch.setattr(_mod, "_signed_write_once", fake_once)
+
+    status, resp = _mod.signed_write(
+        "POST", "https://hosted.example.invalid", "/store", "ateles@ateles-swarm", {}
+    )
+
+    assert status == 200
+    assert resp == {"success": True}
+    assert len(calls) == 2
+
+
+def test_signed_write_retries_401_hosted_restart(monkeypatch):
+    """A 401 is retried too -- hosted restarts during a deploy can return a
+    transient 401 on an otherwise-validly-signed write (the signature is
+    fine; the process serving it just cycled)."""
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod.time, "sleep", lambda *_a, **_kw: None)
+    _mod.WRITE_RETRIES_OVERRIDE["value"] = 5
+
+    calls = []
+
+    def fake_once(method, base_url, path, sign_as, body=None, timeout=180):
+        calls.append(1)
+        if len(calls) == 1:
+            return 401, {"error": "unauthorized"}
+        return 201, {"success": True}
+
+    monkeypatch.setattr(_mod, "_signed_write_once", fake_once)
+
+    status, resp = _mod.signed_write(
+        "POST", "https://hosted.example.invalid", "/store", "ateles@ateles-swarm", {}
+    )
+
+    assert status == 201
+    assert len(calls) == 2
+
+
+def test_signed_write_does_not_retry_identity_conflict_500(monkeypatch):
+    """A 500 carrying an identity_conflict marker is a deterministic
+    refusal, not a transient failure -- signed_write must return it
+    immediately, on the first attempt, even with retries enabled."""
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod.time, "sleep", lambda *_a, **_kw: None)
+    _mod.WRITE_RETRIES_OVERRIDE["value"] = 5
+
+    calls = []
+
+    def fake_once(method, base_url, path, sign_as, body=None, timeout=180):
+        calls.append(1)
+        return 500, {
+            "error": {
+                "code": "ERR_MERGE_REFUSED",
+                "details": {"reason": "identity_conflict", "entity_id": "ent_x"},
+            }
+        }
+
+    monkeypatch.setattr(_mod, "_signed_write_once", fake_once)
+
+    status, resp = _mod.signed_write(
+        "POST", "https://hosted.example.invalid", "/store", "ateles@ateles-swarm", {}
+    )
+
+    assert status == 500
+    assert len(calls) == 1  # never retried
+
+
+def test_signed_write_no_retry_by_default(monkeypatch):
+    """WRITE_RETRIES_OVERRIDE unset and NEOTOMA_REPLAY_WRITE_RETRY unset:
+    signed_write makes exactly one attempt, matching this script's
+    long-standing default behavior."""
+    import os as _os
+    import neotoma_local_fork_replay as _mod
+
+    _os.environ.pop("NEOTOMA_REPLAY_WRITE_RETRY", None)
+    _mod.WRITE_RETRIES_OVERRIDE["value"] = None
+    monkeypatch.setattr(_mod.time, "sleep", lambda *_a, **_kw: None)
+
+    calls = []
+
+    def fake_once(method, base_url, path, sign_as, body=None, timeout=180):
+        calls.append(1)
+        return 503, {"error": "service unavailable"}
+
+    monkeypatch.setattr(_mod, "_signed_write_once", fake_once)
+
+    status, resp = _mod.signed_write(
+        "POST", "https://hosted.example.invalid", "/store", "ateles@ateles-swarm", {}
+    )
+
+    assert status == 503
+    assert len(calls) == 1
+
+
+def test_resolve_write_retries_env_var_means_five(monkeypatch):
+    import os as _os
+    import neotoma_local_fork_replay as _mod
+
+    _mod.WRITE_RETRIES_OVERRIDE["value"] = None
+    monkeypatch.setenv("NEOTOMA_REPLAY_WRITE_RETRY", "1")
+    assert _mod._resolve_write_retries() == 5
+    _os.environ.pop("NEOTOMA_REPLAY_WRITE_RETRY", None)
+
+
+def test_is_retryable_write_failure_matrix():
+    import neotoma_local_fork_replay as _mod
+
+    assert _mod._is_retryable_write_failure(401, {}) is True
+    assert _mod._is_retryable_write_failure(500, {"error": "DB_QUERY_FAILED"}) is True
+    assert _mod._is_retryable_write_failure(502, {}) is True
+    assert _mod._is_retryable_write_failure(503, {}) is True
+    assert _mod._is_retryable_write_failure(504, {}) is True
+    assert (
+        _mod._is_retryable_write_failure(
+            500, {"error": {"details": {"reason": "identity_conflict"}}}
+        )
+        is False
+    )
+    assert _mod._is_retryable_write_failure(400, {}) is False
+    assert _mod._is_retryable_write_failure(200, {}) is False
+
+
+def test_cli_write_retries_flag_end_to_end(tmp_path, monkeypatch, capsys):
+    """--write-retries 5 threaded through main() actually retries a 503
+    from /store before succeeding, and the run completes (exit 0, applied
+    counted) rather than failing on the first transient error."""
+    _set_replay_env(monkeypatch)
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(_mod.time, "sleep", lambda *_a, **_kw: None)
+    db_path = _make_replay_observations_db(
+        tmp_path,
+        "fork.db",
+        [("ent_a", "issue", {"repo": "owner/repo", "github_number": 1}, "2026-01-02T00:00:00Z")],
+    )
+
+    attempts = {"count": 0}
+
+    # Patch _signed_write_once (the single-attempt primitive), not
+    # signed_write itself -- signed_write is the real retry wrapper under
+    # test here, and main() must actually route --write-retries into it via
+    # WRITE_RETRIES_OVERRIDE for this to exercise the real CLI wiring.
+    def fake_once(method, base_url, path, sign_as, body=None, timeout=180):
+        if path == "/store":
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                return 503, {"error": "service unavailable"}
+            return 201, {"success": True}
+        raise AssertionError(f"unexpected signed write: {method} {path}")
+
+    def fake_http_request(method, base_url, path, token, body=None, **kwargs):
+        if path == "/health":
+            return 200, {"ok": True}
+        if path.startswith("/entities?entity_type=agent_grant"):
+            return 200, {"entities": [_permissive_grant_entity()]}
+        if path.startswith("/schemas/"):
+            return 404, {"error": "not found"}
+        if path.startswith("/entities/"):
+            return 404, {"error": "not found"}
+        raise AssertionError(f"unexpected http_request call: {method} {path}")
+
+    monkeypatch.setattr(_mod, "http_request", fake_http_request)
+    monkeypatch.setattr(_mod, "_signed_write_once", fake_once)
+
+    _run_main_with_argv(monkeypatch, [
+        "replay",
+        "--db", db_path,
+        "--cutover", "2026-01-01T00:00:00Z",
+        "--log", str(tmp_path / "action.jsonl"),
+        "--apply", "--no-extend-schemas",
+        "--write-retries", "5",
+    ])
+
+    out = capsys.readouterr().out
+    assert "applied: 1" in out
+    assert attempts["count"] == 2
+
+
+# --- self-referential relationship skip -------------------------------------
+
+
+def test_self_loop_relationship_skipped_and_counted(tmp_path, monkeypatch, capsys):
+    """A relationship_observations row whose source_entity_id equals its
+    target_entity_id is excluded before the plan is built (hosted returns a
+    500 on these every time) and counted in
+    relationships_self_loop_skipped -- never sent to /create_relationship."""
+    _set_replay_env(monkeypatch)
+    db_path = _make_replay_observations_db(tmp_path, "fork.db", [])
+    _add_relationship_row(
+        db_path, "rel-1", "REFERS_TO", "ent_a", "ent_a", "2026-01-02T00:00:00Z"
+    )
+    _add_relationship_row(
+        db_path, "rel-2", "REFERS_TO", "ent_a", "ent_b", "2026-01-02T00:00:00Z"
+    )
+
+    _fake_hosted_replay_router(monkeypatch)
+    import neotoma_local_fork_replay as _mod
+
+    # _fake_hosted_replay_router's fake_signed_write only knows /store and
+    # the schema-extension paths -- extend it here to also accept
+    # /create_relationship, since this test's surviving (non-self-loop) row
+    # reaches that call.
+    prior_signed_write = _mod.signed_write
+
+    def fake_signed_write_with_relationships(method, base_url, path, sign_as, body=None, **kwargs):
+        if path == "/create_relationship":
+            return 201, {"success": True}
+        return prior_signed_write(method, base_url, path, sign_as, body, **kwargs)
+
+    monkeypatch.setattr(_mod, "signed_write", fake_signed_write_with_relationships)
+
+    _run_main_with_argv(monkeypatch, [
+        "replay",
+        "--db", db_path,
+        "--cutover", "2026-01-01T00:00:00Z",
+        "--log", str(tmp_path / "action.jsonl"),
+        "--apply", "--no-extend-schemas",
+    ])
+
+    out = capsys.readouterr().out
+    assert "relationships_self_loop_skipped: 1" in out
+    # Only the non-self-loop relationship reaches the plan (the self-loop is
+    # dropped before the plan is built, not merely skipped at apply time).
+    assert "planned: 1" in out
+
+
+def test_self_loop_relationship_skipped_in_dry_run_too(tmp_path, monkeypatch, capsys):
+    """The self-loop skip is unconditional -- it is not gated behind
+    --apply, so a dry-run also reports it (it is not an opt-in policy the
+    way --on-identity-conflict=skip is)."""
+    _set_replay_env(monkeypatch)
+    db_path = _make_replay_observations_db(tmp_path, "fork.db", [])
+    _add_relationship_row(
+        db_path, "rel-1", "REFERS_TO", "ent_a", "ent_a", "2026-01-02T00:00:00Z"
+    )
+
+    result = _run_cli([
+        "replay",
+        "--db", db_path,
+        "--cutover", "2026-01-01T00:00:00Z",
+        "--log", str(tmp_path / "action.jsonl"),
+    ])
+
+    assert "NO_CHANGES" in result.stdout
+
+
+# --- --skip-applied-from / resume -------------------------------------------
+
+
+def test_skip_applied_from_txt_file_skips_observation(tmp_path, monkeypatch, capsys):
+    """A plain newline-separated local-id .txt file (the
+    NEOTOMA_REPLAY_SKIP_LOCAL_IDS_FILE shape) skips the matching
+    observation row and counts it in
+    observations_already_applied_skipped."""
+    _set_replay_env(monkeypatch)
+    db_path = _make_replay_observations_db(
+        tmp_path,
+        "fork.db",
+        [
+            ("ent_a", "issue", {"repo": "owner/repo", "github_number": 1}, "2026-01-02T00:00:00Z"),
+            ("ent_b", "issue", {"repo": "owner/repo", "github_number": 2}, "2026-01-02T00:00:00Z"),
+        ],
+    )
+    skip_file = tmp_path / "already_applied.txt"
+    skip_file.write_text("obs-0\n", encoding="utf-8")
+
+    _fake_hosted_replay_router(monkeypatch)
+
+    _run_main_with_argv(monkeypatch, [
+        "replay",
+        "--db", db_path,
+        "--cutover", "2026-01-01T00:00:00Z",
+        "--log", str(tmp_path / "action.jsonl"),
+        "--apply", "--no-extend-schemas",
+        "--skip-applied-from", str(skip_file),
+    ])
+
+    out = capsys.readouterr().out
+    assert "observations_already_applied_skipped: 1" in out
+    assert "planned: 1" in out
+    assert "applied: 1" in out
+
+
+def test_skip_applied_from_jsonl_action_log_only_counts_applied_action(tmp_path, monkeypatch, capsys):
+    """A .jsonl action log (this script's own --log output) is read for
+    resume: only lines with action=="applied" count as already-applied --
+    a line logging a prior skip/defer/failure must NOT cause this run to
+    skip retrying that row."""
+    _set_replay_env(monkeypatch)
+    db_path = _make_replay_observations_db(
+        tmp_path,
+        "fork.db",
+        [
+            ("ent_a", "issue", {"repo": "owner/repo", "github_number": 1}, "2026-01-02T00:00:00Z"),
+            ("ent_b", "issue", {"repo": "owner/repo", "github_number": 2}, "2026-01-02T00:00:00Z"),
+        ],
+    )
+    prior_log = tmp_path / "prior_run.jsonl"
+    prior_log.write_text(
+        "\n".join([
+            json.dumps({"local_id": "obs-0", "action": "applied"}),
+            json.dumps({"local_id": "obs-1", "action": "apply_failed"}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    _fake_hosted_replay_router(monkeypatch)
+
+    _run_main_with_argv(monkeypatch, [
+        "replay",
+        "--db", db_path,
+        "--cutover", "2026-01-01T00:00:00Z",
+        "--log", str(tmp_path / "action.jsonl"),
+        "--apply", "--no-extend-schemas",
+        "--skip-applied-from", str(prior_log),
+    ])
+
+    out = capsys.readouterr().out
+    assert "observations_already_applied_skipped: 1" in out
+    # obs-1 (apply_failed last time) is retried this run, not skipped.
+    assert "planned: 1" in out
+    assert "applied: 1" in out
+
+
+def test_skip_applied_from_env_var_equivalent(tmp_path, monkeypatch, capsys):
+    """NEOTOMA_REPLAY_SKIP_LOCAL_IDS_FILE behaves the same as
+    --skip-applied-from when the CLI flag is left unset. Two observations
+    so the run has a genuine plan left (skipping the only candidate would
+    hit the early NO_CHANGES return before run_counts/the summary print at
+    all, which is covered separately by
+    test_skip_applied_from_env_var_no_changes_path_reports_skip_count)."""
+    _set_replay_env(monkeypatch)
+    db_path = _make_replay_observations_db(
+        tmp_path,
+        "fork.db",
+        [
+            ("ent_a", "issue", {"repo": "owner/repo", "github_number": 1}, "2026-01-02T00:00:00Z"),
+            ("ent_b", "issue", {"repo": "owner/repo", "github_number": 2}, "2026-01-02T00:00:00Z"),
+        ],
+    )
+    skip_file = tmp_path / "already_applied.txt"
+    skip_file.write_text("obs-0\n", encoding="utf-8")
+    monkeypatch.setenv("NEOTOMA_REPLAY_SKIP_LOCAL_IDS_FILE", str(skip_file))
+
+    _fake_hosted_replay_router(monkeypatch)
+
+    _run_main_with_argv(monkeypatch, [
+        "replay",
+        "--db", db_path,
+        "--cutover", "2026-01-01T00:00:00Z",
+        "--log", str(tmp_path / "action.jsonl"),
+        "--apply", "--no-extend-schemas",
+    ])
+
+    out = capsys.readouterr().out
+    assert "observations_already_applied_skipped: 1" in out
+    assert "planned: 1" in out
+    assert "applied: 1" in out
+
+
+def test_skip_applied_from_env_var_no_changes_path_reports_skip_count(tmp_path, monkeypatch, capsys):
+    """When --skip-applied-from/the env var skips EVERY candidate row, the
+    run correctly has nothing left to replay and takes the early
+    NO_CHANGES path -- but that path must still surface how many rows were
+    skipped as already-applied, so a resumed run's console output doesn't
+    look identical to a run that genuinely found nothing."""
+    _set_replay_env(monkeypatch)
+    db_path = _make_replay_observations_db(
+        tmp_path,
+        "fork.db",
+        [("ent_a", "issue", {"repo": "owner/repo", "github_number": 1}, "2026-01-02T00:00:00Z")],
+    )
+    skip_file = tmp_path / "already_applied.txt"
+    skip_file.write_text("obs-0\n", encoding="utf-8")
+    monkeypatch.setenv("NEOTOMA_REPLAY_SKIP_LOCAL_IDS_FILE", str(skip_file))
+
+    _fake_hosted_replay_router(monkeypatch)
+
+    _run_main_with_argv(monkeypatch, [
+        "replay",
+        "--db", db_path,
+        "--cutover", "2026-01-01T00:00:00Z",
+        "--log", str(tmp_path / "action.jsonl"),
+        "--apply", "--no-extend-schemas",
+    ])
+
+    out = capsys.readouterr().out
+    assert "NO_CHANGES" in out
+    assert "observations_already_applied_skipped: 1" in out
+
+    monkeypatch.delenv("NEOTOMA_REPLAY_SKIP_LOCAL_IDS_FILE", raising=False)
+
+
+def test_skip_applied_from_missing_file_is_harmless(tmp_path, monkeypatch, capsys):
+    """A nonexistent --skip-applied-from path must not crash the run --
+    load_skip_applied_local_ids skips files it can't find rather than
+    raising, so a resume aid never itself breaks a run."""
+    _set_replay_env(monkeypatch)
+    db_path = _make_replay_observations_db(
+        tmp_path,
+        "fork.db",
+        [("ent_a", "issue", {"repo": "owner/repo", "github_number": 1}, "2026-01-02T00:00:00Z")],
+    )
+    _fake_hosted_replay_router(monkeypatch)
+
+    _run_main_with_argv(monkeypatch, [
+        "replay",
+        "--db", db_path,
+        "--cutover", "2026-01-01T00:00:00Z",
+        "--log", str(tmp_path / "action.jsonl"),
+        "--apply", "--no-extend-schemas",
+        "--skip-applied-from", str(tmp_path / "does_not_exist.txt"),
+    ])
+
+    out = capsys.readouterr().out
+    assert "observations_already_applied_skipped: 0" in out
+    assert "applied: 1" in out
+
+
+def test_load_skip_applied_local_ids_unions_multiple_files(tmp_path):
+    import neotoma_local_fork_replay as _mod
+
+    f1 = tmp_path / "a.txt"
+    f1.write_text("id-1\nid-2\n", encoding="utf-8")
+    f2 = tmp_path / "b.jsonl"
+    f2.write_text(
+        json.dumps({"local_id": "id-3", "action": "applied"}) + "\n",
+        encoding="utf-8",
+    )
+
+    ids = _mod.load_skip_applied_local_ids([str(f1), str(f2)])
+    assert ids == {"id-1", "id-2", "id-3"}

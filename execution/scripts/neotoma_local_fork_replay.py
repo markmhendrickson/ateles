@@ -691,6 +691,55 @@ def load_candidates(conn: sqlite3.Connection, cutover_ts: str, entity_ids=None):
     return obs, rels, srcs, excluded_schema_lag
 
 
+def load_skip_applied_local_ids(paths) -> set:
+    """Load the set of local row ids to SKIP because an earlier interrupted
+    run already applied them -- the --skip-applied-from / resume feature.
+
+    `paths` is an iterable of file paths, each either:
+      - a .jsonl action log written by this script's own log_action() calls
+        (one JSON object per line, each with a "local_id" and an "action"
+        key) -- only lines whose action is "applied" contribute an id, so a
+        line logging a skip/defer/failure from the prior run is correctly
+        NOT treated as already-applied and is retried this run; or
+      - a plain .txt file of local ids, one per line (the
+        NEOTOMA_REPLAY_SKIP_LOCAL_IDS_FILE shape from the live migration
+        run) -- every non-blank line is treated as an already-applied id.
+
+    A file is read as JSONL if every non-blank line parses as JSON with a
+    "local_id" key; otherwise it falls back to the plain-text one-id-per-line
+    form. Missing files and malformed individual lines are skipped rather
+    than raising -- a resume aid must never itself crash a run; the worst
+    case of skipping too little is a redundant (idempotent, so harmless)
+    re-send, never skipping too much.
+    """
+    ids: set = set()
+    for path in paths or []:
+        if not path or not os.path.exists(path):
+            continue
+        with open(path, "r", encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f.readlines() if ln.strip()]
+        if not lines:
+            continue
+        jsonl_ids: set = set()
+        looks_like_jsonl = True
+        for ln in lines:
+            try:
+                obj = json.loads(ln)
+            except (TypeError, ValueError):
+                looks_like_jsonl = False
+                break
+            if not isinstance(obj, dict) or "local_id" not in obj:
+                looks_like_jsonl = False
+                break
+            if obj.get("action") == "applied":
+                jsonl_ids.add(obj["local_id"])
+        if looks_like_jsonl:
+            ids |= jsonl_ids
+        else:
+            ids |= set(lines)
+    return ids
+
+
 def build_entity_record(entity_type: str, target_id: str, fields: dict) -> dict:
     """Build one element of a /store request's `entities` array.
 
@@ -2894,7 +2943,7 @@ def preflight_check_grant_covers_plan(
     )
 
 
-def signed_write(
+def _signed_write_once(
     method: str,
     base_url: str,
     path: str,
@@ -2902,7 +2951,7 @@ def signed_write(
     body: dict | None = None,
     timeout: int = HTTP_CLIENT_TIMEOUT_SECONDS,
 ) -> tuple[int, dict]:
-    """Perform a hosted WRITE signed as `sign_as` (never the shared bearer).
+    """Perform ONE hosted WRITE signed as `sign_as` (never the shared bearer).
 
     Thin wrapper around neotoma_signed.signed_request that enables the
     NEOTOMA_AAUTH_VIA_CLI feature flag for the duration of the call (the
@@ -2911,6 +2960,9 @@ def signed_write(
     one exception type and fail the run with E_SIGNING_UNAVAILABLE / stop on
     any write error, matching this script's existing "stop on any write
     error" behavior for the bearer path.
+
+    No retry here -- see signed_write, the public entry point every caller
+    in this script actually uses, for the opt-in per-write retry policy.
     """
     if _neotoma_signed is None:
         raise RuntimeError("neotoma_signed is unavailable -- cannot sign this write")
@@ -2926,6 +2978,120 @@ def signed_write(
             os.environ.pop("NEOTOMA_AAUTH_VIA_CLI", None)
         else:
             os.environ["NEOTOMA_AAUTH_VIA_CLI"] = prior
+
+
+# Per-write retry backoff schedule (seconds), live migration run 2026-09-25:
+# hosted restarts during a deploy return a transient 401 on an otherwise-valid
+# signed write (the signature is fine; the process serving it just cycled),
+# and a 500/502/503/504 can likewise be transient rather than a real refusal.
+# Retrying is safe here specifically because every write this script sends
+# carries a deterministic idempotency key (observations: migrate-<date>-obs-
+# <local_id>; relationships: idempotent via relationship_key; reconcile:
+# migrate-<date>-recon-<entity_id>-<field-set-hash>) -- re-sending the same
+# body after a transient failure either lands once or is a no-op against the
+# row the first attempt already created, never a duplicate.
+SIGNED_WRITE_RETRY_BACKOFF_SECONDS = [15, 30, 60, 120, 240]
+
+# A 500 is retried ONLY when it is a genuine transient hosted failure, never
+# when it carries a structured refusal this script must not paper over: a
+# hosted identity_conflict (ERR_STORE_RESOLUTION_FAILED / ERR_MERGE_REFUSED
+# with details.reason == "identity_conflict", the same condition
+# --on-identity-conflict inspects) is a deterministic "this write is wrong
+# as constructed" answer that retrying would only repeat verbatim, and
+# retrying it would also mask the --on-identity-conflict=stop/skip decision
+# this script's caller needs to make exactly once, not on every retry
+# attempt.
+_NON_RETRYABLE_500_MARKERS = ("identity_conflict", "ERR_MERGE_REFUSED")
+
+
+def _is_retryable_write_failure(status: int, resp) -> bool:
+    """True if a signed-write (status, resp) pair should be retried under
+    NEOTOMA_REPLAY_WRITE_RETRY=1 -- 401 (hosted restart mid-deploy), 502,
+    503, 504 unconditionally, and 500 UNLESS it carries an identity-conflict
+    marker (see _NON_RETRYABLE_500_MARKERS). A 400 is never retryable
+    (client-side refusal, e.g. a validation error or an identity conflict
+    surfaced as 400 rather than 500) -- retrying a request the server has
+    already durably rejected risks nothing per idempotency, but it also
+    burns the run's whole backoff budget on a failure that will never
+    resolve by waiting.
+    """
+    if status in (401, 502, 503, 504):
+        return True
+    if status == 500:
+        try:
+            serialized = json.dumps(resp)
+        except (TypeError, ValueError):
+            serialized = str(resp)
+        if any(marker in serialized for marker in _NON_RETRYABLE_500_MARKERS):
+            return False
+        return True
+    return False
+
+
+def signed_write(
+    method: str,
+    base_url: str,
+    path: str,
+    sign_as: str,
+    body: dict | None = None,
+    timeout: int = HTTP_CLIENT_TIMEOUT_SECONDS,
+) -> tuple[int, dict]:
+    """Perform a hosted WRITE signed as `sign_as` (never the shared bearer),
+    with an opt-in per-write retry for transient hosted failures.
+
+    Retry is OFF by default (single attempt, matching this script's
+    long-standing "stop on any write error" behavior) -- opt in with
+    --write-retries N (a CLI flag threaded down from main() into the calls
+    this script itself makes) or NEOTOMA_REPLAY_WRITE_RETRY=1 (equivalent to
+    N=5, the live migration run's setting). Retries only the status codes
+    _is_retryable_write_failure allows (401/500/502/503/504, excluding a
+    500 carrying an identity_conflict marker), sleeping
+    SIGNED_WRITE_RETRY_BACKOFF_SECONDS[attempt] between attempts (15, 30,
+    60, 120, 240s) and logging each retry to stdout so a long run's console
+    output shows exactly when and why it paused. Safe under repeated
+    retries because every write this script sends carries a deterministic
+    idempotency key (see the module docstring's idempotency key scheme).
+    """
+    retries = _resolve_write_retries()
+    status, resp = _signed_write_once(method, base_url, path, sign_as, body, timeout)
+    attempt = 0
+    while attempt < retries and _is_retryable_write_failure(status, resp):
+        delay = SIGNED_WRITE_RETRY_BACKOFF_SECONDS[
+            min(attempt, len(SIGNED_WRITE_RETRY_BACKOFF_SECONDS) - 1)
+        ]
+        print(
+            f"  RETRY {attempt + 1}/{retries} after status={status} on {method} {path} "
+            f"-- waiting {delay}s (idempotency key makes this safe)",
+            file=sys.stderr,
+        )
+        time.sleep(delay)
+        attempt += 1
+        status, resp = _signed_write_once(method, base_url, path, sign_as, body, timeout)
+    return status, resp
+
+
+def _resolve_write_retries() -> int:
+    """Resolve the effective retry count for signed_write.
+
+    NEOTOMA_REPLAY_WRITE_RETRY=1 (the live migration run's env-gated
+    switch) means 5 retries -- the full SIGNED_WRITE_RETRY_BACKOFF_SECONDS
+    schedule. The --write-retries N CLI flag (threaded through
+    WRITE_RETRIES_OVERRIDE below) takes precedence when explicitly set,
+    matching the --on-extension-failure/--on-identity-conflict precedent:
+    an explicit flag always wins over the env var, the env var is only a
+    fallback for when the flag is left at its default.
+    """
+    if WRITE_RETRIES_OVERRIDE["value"] is not None:
+        return WRITE_RETRIES_OVERRIDE["value"]
+    return 5 if os.environ.get("NEOTOMA_REPLAY_WRITE_RETRY") == "1" else 0
+
+
+# Mutable holder (not a bare module global) so tests can monkeypatch the
+# resolved value without reaching into argparse Namespace plumbing; set once
+# in main() from args.write_retries before any signed_write call, exactly
+# like args.on_extension_failure/args.on_identity_conflict are resolved
+# before the apply loop runs.
+WRITE_RETRIES_OVERRIDE: dict = {"value": None}
 
 
 def emit_error(
@@ -2985,10 +3151,15 @@ def print_run_banner(
 
 def print_run_summary(counts: dict) -> None:
     """End-of-run summary counts (Accipiter ux spec item 9): planned,
-    applied, skipped, deferred, failed, unresolved, plus (replay only, both
-    default to 0 and only move under their opt-in continue/skip policy)
-    schema_extension_failures (--on-extension-failure=continue) and
-    skipped_identity_conflicts (--on-identity-conflict=skip).
+    applied, skipped, deferred, failed, unresolved, plus (replay only, all
+    default to 0 and only move under their opt-in policy or when the
+    condition they count is actually present in this run's data)
+    schema_extension_failures (--on-extension-failure=continue),
+    skipped_identity_conflicts (--on-identity-conflict=skip),
+    relationships_self_loop_skipped (source_entity_id == target_entity_id,
+    always excluded -- not opt-in), and observations_already_applied_skipped
+    / relationships_already_applied_skipped (--skip-applied-from /
+    NEOTOMA_REPLAY_SKIP_LOCAL_IDS_FILE resume).
     """
     print()
     print("=== Run summary ===")
@@ -3001,6 +3172,9 @@ def print_run_summary(counts: dict) -> None:
         "unresolved",
         "schema_extension_failures",
         "skipped_identity_conflicts",
+        "relationships_self_loop_skipped",
+        "observations_already_applied_skipped",
+        "relationships_already_applied_skipped",
     ):
         print(f"  {key}: {counts.get(key, 0)}")
 
@@ -3185,6 +3359,50 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "and continues to the next planned action. Equivalent to "
             "setting NEOTOMA_REPLAY_IDENTITY_CONFLICTS=skip; the CLI flag "
             "takes precedence when both are given."
+        ),
+    )
+    replay_sp.add_argument(
+        "--write-retries",
+        dest="write_retries",
+        type=int,
+        default=None,
+        help=(
+            "Retry a signed write (POST /store or /create_relationship) up "
+            "to N times on a transient hosted failure -- 401 (hosted "
+            "restarts mid-deploy return a transient 401 on an otherwise-"
+            "valid signed write), 500 (unless it carries an "
+            "identity_conflict marker -- that is a deterministic refusal, "
+            "not a transient failure, and is never retried), 502, 503, or "
+            "504. Backoff is fixed at 15/30/60/120/240s per attempt "
+            "(capped at N=5 worth of delays). Safe because every write "
+            "this script sends carries a deterministic idempotency key. "
+            "Default 0 (no retry, matching this script's existing "
+            "behavior). Equivalent to setting NEOTOMA_REPLAY_WRITE_RETRY=1 "
+            "(which means N=5); the CLI flag takes precedence when both "
+            "are given."
+        ),
+    )
+    replay_sp.add_argument(
+        "--skip-applied-from",
+        dest="skip_applied_from",
+        nargs="+",
+        default=None,
+        help=(
+            "Resume an interrupted run: one or more paths to an earlier "
+            "run's action-log .jsonl (only its action=applied lines count) "
+            "or a plain newline-separated local-id .txt file (the "
+            "NEOTOMA_REPLAY_SKIP_LOCAL_IDS_FILE shape). Every "
+            "relationship_observations and observations row whose local id "
+            "appears in any of these files is skipped and counted "
+            "separately in the run summary (relationships_already_applied_"
+            "skipped / observations_already_applied_skipped), so an "
+            "interrupted long run does not re-send thousands of writes "
+            "hosted already durably has. Equivalent to setting "
+            "NEOTOMA_REPLAY_SKIP_LOCAL_IDS_FILE=<path> (single file, "
+            "plain-text form only); when both are given, the ids from "
+            "both are unioned rather than one silently overriding the "
+            "other, since resuming from two different logs is a real use "
+            "case (each pass of a partial run leaves its own log)."
         ),
     )
 
@@ -3372,6 +3590,18 @@ def main() -> None:
                 if os.environ.get("NEOTOMA_REPLAY_IDENTITY_CONFLICTS") == "skip"
                 else "stop"
             )
+        # --write-retries: same precedence rule as the two flags above --
+        # an explicitly-passed flag (including --write-retries 0) always
+        # wins; only an UNSET flag falls back to the env var equivalent.
+        # WRITE_RETRIES_OVERRIDE is a module-level mutable holder (not a
+        # plain global) so signed_write -- called from many places, some
+        # deep in reconcile/gate-restore paths that don't thread args
+        # through -- can read the resolved value without a signature
+        # change to every caller.
+        if getattr(args, "write_retries", None) is not None:
+            WRITE_RETRIES_OVERRIDE["value"] = args.write_retries
+        elif os.environ.get("NEOTOMA_REPLAY_WRITE_RETRY") == "1":
+            WRITE_RETRIES_OVERRIDE["value"] = 5
 
     base_url = get_base_url()
     token = get_token()
@@ -3405,6 +3635,38 @@ def main() -> None:
     )
     if args.limit:
         obs, rels, srcs = obs[: args.limit], rels[: args.limit], srcs[: args.limit]
+
+    # --skip-applied-from / NEOTOMA_REPLAY_SKIP_LOCAL_IDS_FILE (resume):
+    # union both sources rather than the flag overriding the env var, since
+    # resuming from more than one prior run's log at once is a real case.
+    # Filtered AFTER --limit so a resumed run's --limit still counts against
+    # the same candidate set an equivalent fresh run would see.
+    skip_paths = list(getattr(args, "skip_applied_from", None) or [])
+    env_skip_path = os.environ.get("NEOTOMA_REPLAY_SKIP_LOCAL_IDS_FILE")
+    if env_skip_path:
+        skip_paths.append(env_skip_path)
+    already_applied_local_ids = load_skip_applied_local_ids(skip_paths)
+    observations_already_applied_skipped = 0
+    relationships_already_applied_skipped = 0
+    if already_applied_local_ids:
+        kept_obs = [row for row in obs if row[0] not in already_applied_local_ids]
+        observations_already_applied_skipped = len(obs) - len(kept_obs)
+        obs = kept_obs
+        kept_rels = [row for row in rels if row[0] not in already_applied_local_ids]
+        relationships_already_applied_skipped = len(rels) - len(kept_rels)
+        rels = kept_rels
+
+    # Self-referential relationships (source_entity_id == target_entity_id):
+    # hosted's POST /create_relationship returns a 500 on these every time
+    # (live migration run, 2026-09-25) -- there is no legitimate self-edge
+    # this script needs to replay, and retrying a deterministic 500 would
+    # just burn the write-retry budget on every single one. Excluded here,
+    # before the plan is built, so they never reach the apply loop at all
+    # and are counted once, unconditionally (not gated behind --apply --
+    # a dry-run should also report how many would be skipped).
+    non_self_loop_rels = [row for row in rels if row[3] != row[4]]
+    relationships_self_loop_skipped = len(rels) - len(non_self_loop_rels)
+    rels = non_self_loop_rels
 
     if apply_mode:
         # Pre-flight (ateles#1223 follow-up): compute every (op, entity_type)
@@ -3462,6 +3724,19 @@ def main() -> None:
 
     if not obs and not rels and not srcs:
         print("NO_CHANGES: nothing to replay (no post-cutover rows matched the filters).")
+        if observations_already_applied_skipped or relationships_already_applied_skipped:
+            print(
+                f"  (observations_already_applied_skipped: "
+                f"{observations_already_applied_skipped}, "
+                f"relationships_already_applied_skipped: "
+                f"{relationships_already_applied_skipped} -- everything "
+                "candidate this run saw was already applied in an earlier "
+                "run per --skip-applied-from)"
+            )
+        if relationships_self_loop_skipped:
+            print(
+                f"  (relationships_self_loop_skipped: {relationships_self_loop_skipped})"
+            )
         print(f"Action log: {args.log}")
         return
 
@@ -3709,6 +3984,9 @@ def main() -> None:
         "unresolved": 0,
         "schema_extension_failures": pre_plan_counts["schema_extension_failures"],
         "skipped_identity_conflicts": 0,
+        "relationships_self_loop_skipped": relationships_self_loop_skipped,
+        "observations_already_applied_skipped": observations_already_applied_skipped,
+        "relationships_already_applied_skipped": relationships_already_applied_skipped,
     }
     with open(log_path, "a", encoding="utf-8") as log_fh:
         for (

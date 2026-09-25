@@ -213,6 +213,67 @@ migration run used; the CLI flag takes precedence when both are given):
 the env vars exist for reproducing that specific run's command line, not as
 the primary interface.
 
+## Long runs against a restarting host
+
+A replay against a large local fork can take long enough that hosted gets
+redeployed mid-run. Two flags exist specifically for that:
+
+- **`--write-retries N`** (env equivalent `NEOTOMA_REPLAY_WRITE_RETRY=1`,
+  meaning N=5) — retries a signed write (`POST /store` or
+  `/create_relationship`) on a transient hosted failure: **401** (a hosted
+  restart mid-deploy can return a transient 401 on an otherwise-validly-signed
+  write — the signature is fine, the process serving it just cycled), **500**
+  (unless it carries an `identity_conflict` marker, which is a deterministic
+  refusal handled by `--on-identity-conflict`, never retried), **502**,
+  **503**, **504**. Backoff is fixed at 15/30/60/120/240s per attempt. Safe
+  under retry because every write this script sends carries a deterministic
+  idempotency key (see the script's module docstring) — a retried write
+  either lands once or is a no-op against the row the first attempt already
+  created.
+- **`--skip-applied-from <path> [<path> ...]`** (env equivalent
+  `NEOTOMA_REPLAY_SKIP_LOCAL_IDS_FILE=<path>`, single file) — resume an
+  interrupted run without re-sending everything from the start. Each path is
+  either a prior run's own `--log` JSONL (only its `action=="applied"` lines
+  count — a line that logged a skip, defer, or failure from the earlier run
+  is correctly retried this run, not skipped) or a plain newline-separated
+  local-id `.txt` file. Multiple files are unioned. Skipped rows are counted
+  separately in the run summary (`observations_already_applied_skipped`,
+  `relationships_already_applied_skipped`) rather than folded into `skipped`,
+  so it's visible how much of a run's `planned` count shrank because of
+  resume versus because of `--only-missing`.
+
+Combine both for a long run against a host that may redeploy underneath it:
+
+```bash
+NEOTOMA_REPLAY_CONFIRM_APPLY=yes python3 execution/scripts/neotoma_local_fork_replay.py replay \
+  --db /tmp/neotoma-fork-frozen.db \
+  --cutover 2026-08-04T00:00:00Z \
+  --apply --write-retries 5 \
+  --skip-applied-from /tmp/prior-run-1.jsonl /tmp/prior-run-2.jsonl
+```
+
+Self-referential relationships (`source_entity_id == target_entity_id`) are
+**always** excluded before the plan is built, in every mode and even in a
+dry-run — hosted returns a 500 on these unconditionally, and retrying a
+deterministic 500 under `--write-retries` would just burn the backoff budget
+on every single one. Counted as `relationships_self_loop_skipped`; this is
+not an opt-in policy, so there is no flag to turn it off.
+
+**Locally deleted entities replay as deleted, harmlessly, on every pass.**
+When a local fork's own last observation for an entity carries
+`_deleted: true`, that observation replays a soft-delete write — with the
+same deterministic idempotency key as every other write from that row — and
+re-probes as "missing" on hosted on the *next* pass too (a soft-deleted
+entity still 404s the existence probe the same way a genuinely-missing one
+does). This is harmless: the idempotency key means the write is a no-op
+after the first time it actually lands, and the local fork's own record
+already says the entity is deleted. But it means a converged migration can
+still show a nonzero `planned`/`applied` count purely from these rows on
+every re-run — **exclude entities whose last local observation carries
+`_deleted: true` before treating "nothing new was written" as the
+convergence signal** (the Final convergence check below is about the count
+going to `NO_CHANGES`, not about zero `applied` on every single row type).
+
 ## Interpreting classifications, summaries, exit codes, and the JSONL log
 
 - **`class=a_missing`** (replay) — the entity is confirmed absent on hosted
@@ -233,11 +294,19 @@ log as one object per line with keys `entity_id`, `entity_type`,
 `classification`, `action`, `http_status` (never field values). The
 end-of-run summary's `planned`/`applied`/`skipped`/`deferred`/`failed`/
 `unresolved` counts are the first place to look after any run; an empty plan
-prints `NO_CHANGES` and exits 0 without printing an apply hint. Two further
-counts, `schema_extension_failures` and `skipped_identity_conflicts`, always
-print (0 unless their opt-in `continue`/`skip` policy above is in effect) —
+prints `NO_CHANGES` and exits 0 without printing an apply hint (and, if
+`--skip-applied-from`/the resume env var caused that, the skip counts print
+alongside `NO_CHANGES` too, so a resumed no-op run doesn't look identical to
+a run that genuinely found nothing). Five further counts always print (0
+unless their condition is present in this run's data):
+`schema_extension_failures` and `skipped_identity_conflicts` are opt-in
+(`--on-extension-failure=continue` / `--on-identity-conflict=skip` above) —
 a non-zero value there after a `continue`/`skip` run is the count to check
 against what you expected before treating the run as fully converged.
+`relationships_self_loop_skipped` is unconditional (see Long runs above).
+`observations_already_applied_skipped` and
+`relationships_already_applied_skipped` move only under `--skip-applied-from`
+/ the resume env var.
 
 ## Recovery procedures, by error code
 
