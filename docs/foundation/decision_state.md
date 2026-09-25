@@ -44,7 +44,7 @@ Each of these reads **open** to anything reading the corpus. The ruling is on th
 | 107 | what a principal's **acts-as** `principal_binding` carries, and whether that edge is presented … | `origin/codex/foundation-decisions-99-102-107-109` | nothing blocks it: stage 1 registers the edge type and its four fields, not … |
 | 108 | whether an `agent` may hold an **acts-as** `principal_binding` to another `agent` — … | `origin/codex/foundation-decisions-99-102-107-109` | decision 48, whose counting rule reads this edge and reasons about interests without stating … |
 | 109 | whether an `operator` may hold an **acts-as** `principal_binding` — the corpus says … | `origin/codex/foundation-decisions-99-102-107-109` | decision 48's counting rule, which would read such an edge and count two operators … |
-| 111 | whether a rule's end may be a **condition** rather than a date … | `origin/ruling-925-relationship-grants` | the live rows that carry a condition in `scope`, which both defeats that field's … |
+| 111 | whether a rule's end may be a **condition** rather than a date … | `origin/foundation/decision-111-rule-end-task`, `origin/ruling-925-relationship-grants` | the live rows that carry a condition in `scope`, which both defeats that field's … |
 
 ## The register on three axes
 
@@ -149,7 +149,7 @@ Each of these reads **open** to anything reading the corpus. The ruling is on th
 | 108 | whether an `agent` may hold an **acts-as** `principal_binding` to another `agent` — … | yes | no | unknown | `origin/codex/foundation-decisions-99-102-107-109` | decision 48, whose counting rule reads this edge and reasons about interests without stating … |
 | 109 | whether an `operator` may hold an **acts-as** `principal_binding` — the corpus says … | yes | no | unknown | `origin/codex/foundation-decisions-99-102-107-109` | decision 48's counting rule, which would read such an edge and count two operators … |
 | 110 | whether a **role** may be seated to review what a principal produced … | yes | yes | unknown | — | nothing in the design; a declaration whose steps seat a producing role and a … |
-| 111 | whether a rule's end may be a **condition** rather than a date … | yes | no | unknown | `origin/ruling-925-relationship-grants` | the live rows that carry a condition in `scope`, which both defeats that field's … |
+| 111 | whether a rule's end may be a **condition** rather than a date … | yes | no | unknown | `origin/foundation/decision-111-rule-end-task`, `origin/ruling-925-relationship-grants` | the live rows that carry a condition in `scope`, which both defeats that field's … |
 
 ## What was read
 

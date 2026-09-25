@@ -1076,12 +1076,16 @@ numbers are separate and only two of these are opened as decisions below.
   of the two a `recommended` or `operating_discipline` rule becomes decides whether it binds, which
   `conformance_suite.md` WM-22/WM-24 reserve to the gate and ateles#1115 asks the operator to rule. No
   bulk coercion: a rule silently promoted to `mandatory` is as wrong as one silently demoted.
-  **(c) a rule bound to a condition.** The design's `effective_until` takes a date and the row states the
-  gap rather than closing it. The source's answer is to write the condition into `scope` as prose — live
-  on at least one rule, whose `scope` reads "… until the full console provides the same projection" —
-  which both defeats the closed `scope` vocabulary and puts a rule's expiry somewhere no filter reads.
-  The mapping cannot be made until the design rules between the two candidates the row names, so these
-  rows carry their condition as declared-but-unmodelled and are **not** coerced into a date.
+  **(c) a rule bound to a condition.** The design's `effective_until` takes a date only; a rule whose end
+  is a real-world condition instead carries a `REFERS_TO` edge to the task whose closing ends it (decision
+  111, ruled 2026-09-25). The source's answer is to write the condition into `scope` as prose — live on at
+  least one rule, whose `scope` reads "… until the full console provides the same projection" — which both
+  defeats the closed `scope` vocabulary and puts a rule's expiry somewhere no filter reads. The rule no
+  longer blocks the mapping, but the mapping itself is not performed here: each such row needs an actual
+  task naming the condition, created and linked by `REFERS_TO` before `scope` is corrected back to one of
+  its three closed values, and that task-creation write is future migration work this decision unblocks
+  rather than work this pass does. Until it lands, these rows carry their condition as
+  declared-but-unmodelled and are **not** coerced into a date.
   **(d) `description` versus `rule`.** The source makes `description` required and `rule` optional, and
   nine rows carry only a `description` — an abstract of a rule whose normative body was never ingested.
   The design's row makes `rule` the field a reader applies. This one **is** a tolerant-reader case in
