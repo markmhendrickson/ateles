@@ -60,7 +60,7 @@ Loaded automatically from `~/.config/neotoma/.env` at startup.
 | `MONEDULA_CONSENT_CHANNEL` | Optional override: `email` \| `telegram` |
 | `TELEGRAM_BOT_TOKEN` | Telegram break-glass only |
 | `TELEGRAM_CHAT_ID` | Telegram break-glass only |
-| `TELEGRAM_ALLOWED_USER_ID` | Operator Telegram user ID (required when Telegram selected) |
+| `TELEGRAM_ALLOWED_USER_ID` | Operator's Telegram user ID. **Required when Telegram is selected.** Unset or non-numeric ⇒ the gate refuses every reply (`channel_error`) and escalates — it is never a wildcard. See "Who may approve (Telegram)" below. |
 | `TELEGRAM_TOPIC_PAYMENTS` | Thread ID for payments topic |
 | `MONEDULA_DEAD_GATE_THRESHOLD` | Consecutive channel failures before dead-gate alarm (default `3`) |
 | `WISE_API_TOKEN` | Wise API bearer token |
@@ -156,7 +156,69 @@ tracked in ateles#890.
 ### Who may approve (Telegram)
 
 `TELEGRAM_ALLOWED_USER_ID` names the single principal permitted to authorize a
-payment when Telegram is selected. Unset or non-numeric ⇒ `channel_error`.
+payment when Telegram is selected. It is resolved **before** polling, and the
+gate fails closed on every uncertain case:
+
+| Condition | Outcome |
+|---|---|
+| Message from the configured operator | approval accepted |
+| Message from anyone else in the chat | ignored, logged |
+| `TELEGRAM_ALLOWED_USER_ID` unset | `channel_error` + escalation, no reply accepted |
+| `TELEGRAM_ALLOWED_USER_ID` non-numeric | `channel_error` + escalation |
+| Message with no sender id (channel post) | ignored |
+
+Absence of a configured principal is the **absence of authority, never a
+wildcard**. Before this was enforced, an unset value skipped the identity check
+altogether (`if allowed_user_id and ...` short-circuits on `None`), so any member
+of the group topic could authorize an irreversible transfer.
+
+A misconfiguration surfaces as `channel_error` rather than `timeout` on purpose:
+#554 exists because a broken gate was indistinguishable from an operator
+declining, and a silently-degraded principal check would rebuild that same
+failure one layer down.
+
+## Consent gate (ateles#554)
+
+The **only** mechanisms that may authorize a payment are an explicit operator
+consent reply: an email reply as described above, or — when Telegram
+break-glass is selected — a Telegram attendance reply, parsed by `_parse_reply`
+(see `test_parse_reply.py` for the accepted forms — a bare "yes" is
+intentionally rejected).
+
+`telegram_poll_approval` returns one of three outcomes:
+
+- **`reply`** — a real message arrived. `_parse_reply` decides approval as
+  always. An explicit decline (`"no"`, unrecognized text, a bare "yes") is a
+  clean run: exit 0, no escalation, same as it has always been.
+- **`timeout`** — the poll ran to its deadline with no message. Treated as a
+  **channel failure**, not a decline — the operator may never have seen the
+  prompt. Payment is blocked, an `escalation` entity is written to Neotoma,
+  and the process exits 1.
+- **`channel_error`** — missing credentials, an HTTP error (409 Conflict
+  chief among them), or a malformed Telegram response. Same handling as
+  `timeout`.
+
+On the email path the same separation holds: send, read and configuration
+failures are `blocked`, never `skipped` (see "Consent states" above).
+
+A channel failure and a decline are deliberately never allowed to look the
+same in the log or in the exit code again — that indistinguishability is
+what let a 0/480 gate run silently for ten weeks (ateles#554).
+
+**Dead-gate alarm.** `MONEDULA_DEAD_GATE_THRESHOLD` (default 3) consecutive
+channel failures — with no reply landing in between — additionally fire a
+`monedula_dead_consent_gate` escalation at `severity=critical`. Any reply,
+approved or declined, resets the streak: it proves the channel works.
+
+**`payment_approved` is vestigial.** An earlier, unmerged branch
+(`feat/monedula-task-autoexecute`, PR #249) read a `payment_approved` boolean
+off the linked Neotoma task and executed payment directly from it, with no
+interactive confirmation. That branch never merged to `main` and the field is
+not wired to anything — `monedula.py` does not read it, and must not. If
+`payment_approved` is ever intended as a real authorization path it needs a
+deliberate design decision, code, and tests of its own; until then it may
+persist as a dead field on task entities, and no code path may use it to gate
+`handler.execute`.
 
 ## Logs
 
@@ -169,6 +231,11 @@ Log events include: `consent_channel_selected`, `consent_request_suppressed`,
 Logs never expose addresses, account identifiers, message bodies, or secrets.
 
 ## Idempotency
+
+A `.monedula_last_run` file in the daemon directory records the day the
+calendar leg was claimed. Later launchd invocations the same day skip the
+calendar fetch (one-off profiles are still evaluated every tick) — preventing
+double-payment if launchd retries or the machine wakes mid-day.
 
 Local consent mark: `.monedula_consent_email.json` — fingerprint, request
 generation and `sent_at` only; cleared when a pending set ends.
@@ -183,3 +250,19 @@ increasing request generation. Do not delete it: an unreadable journal holds
 every payment, and a missing one while a consent request is outstanding is
 treated the same way.
 Stranded Notifier dedupe: `monedula:stranded:<sorted keys fp>`.
+
+## Constraints
+
+Standing rules enforced for every payment Monedula makes (see project `CLAUDE.md`):
+
+- **Never hardcode payee data.** IBANs, wallet addresses, amounts, and contact
+  details are read from env or parquet — never inlined in code.
+- **Yoga payments carry no memo / OP_RETURN.** Do not pass a `memo` on the yoga
+  BTC path.
+- **Yoga / therapy tasks are never marked completed.** Only the `due_date` is
+  advanced — these are recurring obligations, not one-off tasks.
+- **Payment paths are idempotent.** Guard against double-send (see Idempotency
+  above) on every execution route. On the email consent path that guard is
+  the durable payment journal (`.monedula_payment_journal.json`, see
+  Idempotency above): an obligation with a recorded outcome is never paid
+  again, and one with intent but no outcome is held, never retried.
