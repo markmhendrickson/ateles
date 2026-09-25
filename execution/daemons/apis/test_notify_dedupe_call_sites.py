@@ -839,8 +839,10 @@ def test_process_blocked_claim_false_still_sends_once(monkeypatch, tmp_path):
 
 
 class _CapturingClient:
-    """Minimal httpx.AsyncClient stand-in: GET (list comments) returns an
-    empty list (no prior deferral markers), POST captures the comment body."""
+    """Minimal httpx.AsyncClient stand-in: GET (list comments) returns the
+    comments POSTed so far (so _claim_escalation's marker-existence check
+    behaves like real GitHub across calls within a test), POST captures and
+    records the comment body."""
 
     def __init__(self, **kwargs):
         pass
@@ -852,7 +854,9 @@ class _CapturingClient:
         pass
 
     async def get(self, url, **kwargs):
-        return _FakeListResp([])
+        return _FakeListResp(
+            [{"id": i, "body": b} for i, b in enumerate(_CapturingClient.posted)]
+        )
 
     async def post(self, url, **kwargs):
         _CapturingClient.posted.append(kwargs.get("json", {}).get("body", ""))

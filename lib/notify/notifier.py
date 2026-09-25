@@ -550,31 +550,6 @@ class Notifier:
         with self._notification_lock:
             return key in self._dedupe_journal
 
-    def is_dedupe_duplicate(self, key: str) -> bool:
-        """Public query: has ``key`` already been reported and not cleared?
-
-        For a caller whose condition has a side effect beyond the
-        notification itself — e.g. a durable GitHub comment posted alongside
-        the ``send()`` call — that also needs to be gated on the SAME dedupe
-        decision. ``send()``'s own return value is not enough for this: it
-        is ``False`` both when suppressed as a duplicate and when a message
-        is legitimately held (silence window, digest queue), and those two
-        cases must not be conflated by a caller deciding whether to also
-        post a comment. Check this BEFORE calling ``send(dedupe_key=key)``
-        — that call marks the key, so checking after would always read
-        True. Never raises.
-        """
-        try:
-            return self._is_duplicate(key)
-        except Exception as exc:  # noqa: BLE001 — never crash a notification
-            log.warning(
-                "[notify] could not check dedupe key %r (%s) — treating as "
-                "not-duplicate (fail open toward sending)",
-                key,
-                exc,
-            )
-            return False
-
     def _mark_dedupe_notified(self, key: str, handler: str = "") -> None:
         """Record that ``key`` has been reported. Never raises."""
         with self._notification_lock:

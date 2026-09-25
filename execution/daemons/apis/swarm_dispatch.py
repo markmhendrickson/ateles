@@ -12358,15 +12358,17 @@ class SwarmDispatcher:
 
         # dedupe scope: per-PR + head + the exact set of missing lenses (each
         # paired with its own failure reason). Only the non-auto-resume branch
-        # gets a key. auto_resume (usage limit / provider capacity) already
-        # self-clears via the GitHub marker delete-and-repost above and is
-        # Priority.INFO, which the notifier never marks (INFO is never
-        # delivered — see Notifier._send_locked), so composing a key there
-        # would be inert for send() and would still need to gate the comment
-        # post separately; out of scope here since every dispatcher trigger
-        # against a recovering capacity window is already a legitimate "still
-        # waiting, new reset time" update, not a repeat of an unchanged
-        # condition.
+        # gets a key; the same string doubles as notifier.send()'s dedupe_key
+        # AND _claim_escalation's `kind` below, so the Telegram-side repeat
+        # and the GitHub-comment repeat are gated on the identical condition.
+        # auto_resume (usage limit / provider capacity) already self-clears
+        # via the GitHub marker delete-and-repost below and is Priority.INFO,
+        # which the notifier never marks (INFO is never delivered — see
+        # Notifier._send_locked), so composing a key there would be inert for
+        # send() and would still need to gate the comment post separately;
+        # out of scope here since every dispatcher trigger against a
+        # recovering capacity window is already a legitimate "still waiting,
+        # new reset time" update, not a repeat of an unchanged condition.
         #
         # This blanket key also, as a side effect, suppresses the repeat on
         # the "PR head changed during review or could not be verified" call
@@ -12396,10 +12398,6 @@ class SwarmDispatcher:
             )
             dedupe_key = f"panel-incomplete:{ref}:{resolved_head}:{missing}"
 
-        already_reported = bool(
-            dedupe_key and self.notifier.is_dedupe_duplicate(dedupe_key)
-        )
-
         try:
             if auto_resume:
                 message = (
@@ -12422,46 +12420,53 @@ class SwarmDispatcher:
         except Exception as exc:
             log.error(f"[{DAEMON_NAME}] review-incomplete notice failed: {exc}", exc_info=True)
 
-        if already_reported:
-            # The GitHub comment carries the SAME condition as the send()
-            # above and must be gated identically — otherwise the notifier
-            # side is deduped while the PR thread still grows one identical
-            # comment per trigger (the observed defect: 23 byte-identical
-            # comments over 6 days on #1085). Checked before send() marked
-            # the key, so this reads the state as of entry to this call.
-            log.info(
-                f"[{DAEMON_NAME}] {ref}: suppressing repeat review-incomplete "
-                f"comment for open condition {dedupe_key!r}"
+        detail = completed_note + failed_note
+
+        def _review_incomplete_copy(status_copy: str) -> str:
+            return (
+                f"⚠️ **Review incomplete — {reason}.** The `{agent}` review did "
+                "not complete. This is **not** a verdict."
+                + detail
+                + " "
+                + status_copy
+                + "\n\n_Posted by the Apis dispatcher — distinct from a `vanellus-"
+                "aggregation` verdict on purpose, so an incomplete review is never "
+                "mistaken for a completed one._"
+            )
+
+        if not auto_resume:
+            # Non-auto-resume incomplete-panel comments route through the same
+            # once-per-condition GitHub-marker gate every sibling escalation
+            # uses (process-blocked / unparseable-verdict / auto-fix-exhausted
+            # / binding-review-*) rather than a second, locally-journaled
+            # dedupe primitive — see _claim_escalation. `dedupe_key` doubles
+            # as the escalation `kind`: per-PR + head + missing-lens set, so a
+            # new push or a different failure composition re-notifies.
+            status_copy = (
+                "Operator attention is required before a current-head review is "
+                "run again."
+            )
+            missing = ",".join(
+                f"{lens}:{failure}" for lens, failure in sorted(failed_lenses)
+            )
+            kind = dedupe_key or f"panel-incomplete:{ref}:{resolved_head}:{missing}"
+            await self._claim_escalation(
+                t, kind, detail=_review_incomplete_copy(status_copy)
             )
             return
 
         repo_token = _token_for_repo(t.repository)
         if not repo_token:
             return
-        detail = completed_note + failed_note
-        if auto_resume:
-            status_copy = (
-                "The review will resume automatically when capacity is expected "
-                f"to return (scheduled ~`{iso}`); no operator action is required."
-            )
-            marker = self._REVIEW_DEFERRED_MARKER.format(iso=iso) + "\n"
-        else:
-            status_copy = (
-                "Operator attention is required before a current-head review is "
-                "run again."
-            )
-            marker = ""
+        status_copy = (
+            "The review will resume automatically when capacity is expected "
+            f"to return (scheduled ~`{iso}`); no operator action is required."
+        )
+        marker = self._REVIEW_DEFERRED_MARKER.format(iso=iso) + "\n"
         body = (
             marker
             + f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
-            + f"⚠️ **Review incomplete — {reason}.** The `{agent}` review did "
-            + "not complete. This is **not** a verdict."
-            + detail
-            + " "
-            + status_copy
-            + "\n\n_Posted by the Apis dispatcher — distinct from a `vanellus-"
-            + "aggregation` verdict on purpose, so an incomplete review is never "
-            + "mistaken for a completed one._"
+            + _review_incomplete_copy(status_copy)
         )
         url = f"https://api.github.com/repos/{t.repository}/issues/{t.number}/comments"
         try:
@@ -12501,8 +12506,7 @@ class SwarmDispatcher:
                 post.raise_for_status()
                 log.info(
                     f"[{DAEMON_NAME}] posted review-incomplete notice on "
-                    f"{t.repository}#{t.number}"
-                    + (f" (resume {iso})" if auto_resume else "")
+                    f"{t.repository}#{t.number} (resume {iso})"
                 )
         except Exception as exc:
             log.error(
