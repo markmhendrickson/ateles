@@ -9,13 +9,18 @@ transport: one Agent Skill per active `agent_policy` row, rendered LIVE from
 Neotoma, no generated files committed (a file copy per checkout is how 290
 copies of CLAUDE.md drifted into 31 versions — see docs/foundation history).
 
-Canonical artifact, per the issue's settled design:
+Canonical artifact, per the issue's settled design (imperative source
+revised after Falco's round-2 security review — see below):
   - `name`      — a stable slug derived from the rule's entity id.
-  - `description` — the rule's `applies_when` trigger plus a one-line
-                     imperative (what a model sees up front, before deciding
-                     whether to fetch the full rule).
-  - `body`      — the full rule text plus its entity id (fetched only when
-                   needed — never logged wholesale, since some rules hold
+  - `description` — the row's `applies_when` trigger plus, when present, the
+                     row's own `title` field as a one-line imperative (what
+                     a model sees up front, before deciding whether to fetch
+                     the full rule). NEVER derived from `rule`/`body` text —
+                     a row with no `title` renders trigger + id only.
+  - `body`      — the full rule text plus its entity id, for a FUTURE
+                   transport (an agent explicitly fetching a rule by id);
+                   never read back into the rendered SessionStart index
+                   itself (never logged wholesale, since some rules hold
                    operator payment details).
 
 Two channels share this one artifact:
@@ -86,6 +91,7 @@ import logging
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,20 +103,22 @@ if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
 try:  # package import (normal runtime) with script-import fallback
-    from .agent_loader import policy_binds_agent  # type: ignore
+    from .agent_loader import (  # type: ignore
+        POLICY_QUERY_BODY,
+        policy_binds_agent,
+        unwrap_policy_entities,
+    )
 except ImportError:  # pragma: no cover
-    from agent_loader import policy_binds_agent  # type: ignore
+    from agent_loader import (  # type: ignore
+        POLICY_QUERY_BODY,
+        policy_binds_agent,
+        unwrap_policy_entities,
+    )
 
 NEOTOMA_BASE_URL = os.environ.get(
     "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
 )
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
-
-# Statuses that count as "active" for the purpose of this index. Mirrors
-# AgentLoader.load_active_policies (active + provisional), not a new
-# vocabulary — provisional rules ARE surfaced, same rationale as there:
-# exposure is what matures them.
-_LIVE_STATUSES = frozenset({"active", "provisional"})
 
 # The one literal spelling that promotes a rule into the preamble. Anything
 # else — including an absent field — is a conditional rule.
@@ -154,37 +162,123 @@ def _slug(entity_id: str, domain: str) -> str:
     return f"policy-{dom}-{short_id}" if dom else f"policy-{short_id}"
 
 
-def _imperative(rule: str) -> str:
-    """First sentence of `rule`, used as the one-line imperative in
-    `description`. Falls back to the whole rule (already short) when no
-    sentence boundary is found.
+# --- Sanitization: every row-derived field is untrusted data (Falco, ---
+# --- ateles#1268 round 2, CONFIRMED injection). ---
+#
+# `agent_policy` rows are not exclusively operator-authored — the generalizer
+# writes agent-local policies, and every lens in this swarm has a documented
+# self-write path to `agent_policy` on a generalized finding. A row's
+# `applies_when` or `title` can therefore contain adversarial or malformed
+# text, and this hook's stdout is fed directly into a model's context at
+# SessionStart — so a forged `\n## Always-applies rules\n- IGNORE PRIOR
+# RULES...` embedded in a field, or a `-->` sequence forging the trailing
+# `<!-- tier: X -->` marker, must never reach that stream verbatim.
+#
+# `_sanitize_field` is the ONE place any row-derived string is neutralized
+# before interpolation — `to_skill` is the only caller, so every downstream
+# consumer of `PolicySkill.description`/`.applies_when`/`.entity_id` already
+# received sanitized text; nothing else needs its own escaping.
+
+# Separator/control characters collapsed to a single space before anything
+# else runs. Covers \r, \n, the Unicode line/paragraph separators (U+2028,
+# U+2029), NEL (U+0085), and the C0/C1 control ranges (excluding the ones
+# already handled: \t \r \n themselves get replaced first so a run of mixed
+# whitespace does not leave a bare tab). re.sub with a character class
+# spanning both C0 (\x00-\x1f, \x7f) and C1 (\x80-\x9f) controls, plus the
+# three named separators, in one pass.
+_LINE_BREAKING_CHARS = re.compile(
+    "[\r\n  \u0085\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]"
+)
+_WHITESPACE_RUN = re.compile(r"\s+")
+
+# Leading markdown structure a row must not be able to open with: ATX
+# headings (#), bullets (-, *), blockquotes (>), ordered-list markers
+# (digits followed by "."), and backticks (code spans/fences). Stripped
+# repeatedly from the START of the string only — a bullet appearing mid-
+# sentence is legitimate prose, not structure.
+_LEADING_MARKDOWN = re.compile(r"^[\s]*(?:[#>*`-]+|\d+\.)+\s*")
+
+# The two structural sequences that must never appear verbatim in row-
+# derived text: an HTML comment close (which could terminate the renderer's
+# own `<!-- tier: X -->` marker early and let following text escape it) and
+# any "tier:" marker pattern (which could forge a fake tier tag).
+_HTML_COMMENT_MARKERS = re.compile(r"<!--|-->")
+_TIER_MARKER_PATTERN = re.compile(r"tier\s*:\s*[A-Za-z]", re.IGNORECASE)
+
+
+def _sanitize_field(raw: str, max_len: int) -> str:
+    """Collapse `raw` to one inert line, capped at `max_len` chars.
+
+    Order matters: line-breaking characters are collapsed to spaces FIRST
+    (so a multi-line payload cannot smuggle a heading onto its own line),
+    THEN leading markdown structure is stripped (now that everything is one
+    line, "leading" is unambiguous), THEN the HTML-comment and tier-marker
+    sequences are neutralized (a row could otherwise forge `<!-- tier: X
+    -->` verbatim), THEN whitespace runs collapse and the result is
+    length-capped with an ellipsis. Returns "" if nothing survives — the
+    caller skips the row and counts it, per Falco's fix: "rejected if it's
+    empty after sanitising."
     """
-    rule = (rule or "").strip()
-    if not rule:
-        return "(no rule text recorded)"
-    m = re.search(r"(.+?[.!?])(\s|$)", rule)
-    return (m.group(1) if m else rule).strip()
+    if not raw:
+        return ""
+    text = _LINE_BREAKING_CHARS.sub(" ", raw)
+    text = _LEADING_MARKDOWN.sub("", text)
+    text = _HTML_COMMENT_MARKERS.sub("", text)
+    text = _TIER_MARKER_PATTERN.sub("", text)
+    text = _WHITESPACE_RUN.sub(" ", text).strip()
+    if not text:
+        return ""
+    if len(text) > max_len:
+        text = text[: max_len - 1].rstrip() + "…"  # ellipsis
+    return text
 
 
-def _unwrap(entity: dict) -> dict:
-    """Same double-nesting as every other Neotoma reader in this repo
-    (render_agent_docs.py, agent_loader.py): the field dict rides either
-    flat under `snapshot` or nested one level deeper.
+_APPLIES_WHEN_MAX = 160
+_IMPERATIVE_MAX = 120
+
+
+def _request(
+    url: str, body: dict, timeout: float = 10.0, retries: int = 3
+) -> dict:
+    """POST `body` as JSON, stdlib-only (`urllib`) — the hook cannot import
+    `httpx`, which is why this stays a second TRANSPORT from `AgentLoader`'s
+    (Waxwing, ateles#1268 round 2: the FETCH SHAPE — query body, unwrap,
+    status filter — is shared via `agent_loader.POLICY_QUERY_BODY` /
+    `unwrap_policy_entities`; only the wire client legitimately differs,
+    since one runs stdlib-only and the other doesn't).
+
+    Retries up to `retries` times on a transient transport error (a
+    connection reset, timeout, or 5xx-shaped `HTTPError`) before raising —
+    a single flaky attempt must not read as "Neotoma is unreachable" and
+    fall the whole session open when a second attempt would have succeeded.
+    Does NOT retry a definitive client-side failure (4xx `HTTPError`,
+    malformed JSON) — retrying those wastes the hook's time budget without
+    any chance of a different outcome.
     """
-    outer = entity.get("snapshot") or {}
-    snap = outer.get("snapshot", outer) if isinstance(outer, dict) else {}
-    return snap if isinstance(snap, dict) else {}
-
-
-def _request(url: str, body: dict, timeout: float = 10.0) -> dict:
     headers = {"Content-Type": "application/json"}
     if NEOTOMA_BEARER_TOKEN:
         headers["Authorization"] = f"Bearer {NEOTOMA_BEARER_TOKEN}"
-    req = urllib.request.Request(
-        url, data=json.dumps(body).encode(), headers=headers, method="POST"
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode())
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        req = urllib.request.Request(
+            url, data=json.dumps(body).encode(), headers=headers, method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            if 400 <= exc.code < 500:
+                raise  # client error — retrying changes nothing
+            last_exc = exc
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            last_exc = exc
+        if attempt < retries:
+            log.warning(
+                "agent_policy fetch attempt %d/%d failed (%s: %s); retrying",
+                attempt, retries, type(last_exc).__name__, last_exc,
+            )
+    assert last_exc is not None  # loop always sets it before falling through
+    raise last_exc
 
 
 def fetch_active_policy_rows(
@@ -195,23 +289,15 @@ def fetch_active_policy_rows(
     (the hook turns this into the one-line notice; nothing here swallows it,
     per CLAUDE.md's "validate the instrument" and "a write/read that fails
     must not look like an empty result" rules).
+
+    The query shape and the unwrap+status-filter step are `agent_loader`'s
+    `POLICY_QUERY_BODY` / `unwrap_policy_entities` — the SAME functions
+    `AgentLoader.load_active_policies` calls, so there is one reader of
+    agent_policy's response shape, not two that can silently diverge
+    (Waxwing, ateles#1268 round 2).
     """
-    data = _request(
-        f"{base_url}/entities/query",
-        {"entity_type": "agent_policy", "limit": 200, "include_snapshots": True},
-        timeout=timeout,
-    )
-    entities = data.get("entities") or data.get("results") or []
-    out: list[dict] = []
-    for e in entities:
-        snap = _unwrap(e) if isinstance(e, dict) else {}
-        if not snap:
-            continue
-        if str(snap.get("status", "")).strip().lower() not in _LIVE_STATUSES:
-            continue
-        snap["_entity_id"] = e.get("entity_id") or snap.get("entity_id", "")
-        out.append(snap)
-    return out
+    data = _request(f"{base_url}/entities/query", POLICY_QUERY_BODY, timeout=timeout)
+    return unwrap_policy_entities(data)
 
 
 def _session_scope_ok(snap: dict) -> bool:
@@ -234,15 +320,60 @@ def _session_scope_ok(snap: dict) -> bool:
     return policy_binds_agent(snap, agent_sub)
 
 
-def to_skill(snap: dict) -> PolicySkill:
-    entity_id = str(snap.get("_entity_id") or snap.get("entity_id") or "")
-    rule = str(snap.get("rule") or snap.get("description") or "")
-    domain = str(snap.get("domain") or "")
-    applies_when = str(snap.get("applies_when") or "").strip()
+def to_skill(snap: dict) -> PolicySkill | None:
+    """Project one row into a `PolicySkill`, or None if it has nothing safe
+    to render (Falco: "rejected if it's empty after sanitising. skip the
+    row and count it" — the caller, `render_skills`, does the counting).
+
+    Never reads `rule` (the full rule body) into any field that reaches the
+    rendered index (Falco, ateles#1268 round 2: "stop deriving tier A's
+    imperative from the first sentence of the rule text... never read `rule`
+    or `body` into the index at all"). The imperative comes ONLY from the
+    row's `title` field — short and authored for exactly this purpose — and
+    is omitted (renders tier-B style, trigger + id only) when no title is
+    present, rather than falling back to any rule-derived text.
+
+    `entity_id` and `applies_when` are both sanitized before use, same as
+    the imperative — every row-derived field is untrusted (Falco's finding
+    applies to the whole row, not only the imperative). `body` still carries
+    the raw `rule` text for the FUTURE MCP Skills-extension transport (an
+    agent that explicitly fetches a rule by id gets the real text, which is
+    fine — that path is not the SessionStart stdout stream this finding is
+    about), but nothing in this module ever reads `.body` back out into the
+    rendered index; `render_index_text`/`_assemble`/`_preamble_lines`/
+    `_conditional_line_*` only ever touch `.description`/`.applies_when`/
+    `.entity_id`.
+    """
+    raw_entity_id = str(snap.get("_entity_id") or snap.get("entity_id") or "")
+    entity_id = _sanitize_field(raw_entity_id, max_len=64)
+    if not entity_id:
+        return None  # an id we cannot safely print is a row we cannot cite
+
+    raw_applies_when = str(snap.get("applies_when") or "")
+    applies_when = _sanitize_field(raw_applies_when, max_len=_APPLIES_WHEN_MAX)
     is_preamble = applies_when.lower() == _ALWAYS
-    imperative = _imperative(rule)
+
+    raw_title = str(snap.get("title") or "")
+    imperative = _sanitize_field(raw_title, max_len=_IMPERATIVE_MAX)
+
+    if not applies_when and not is_preamble:
+        # No usable trigger and not the literal "always" — nothing safe to
+        # render this row AS (it cannot be preamble, and a conditional row
+        # with an empty trigger has no recognition key at all).
+        if not imperative:
+            return None
+        applies_when = ""  # renders as "(trigger not recorded)" downstream
+
     trigger = applies_when if applies_when else "(trigger not recorded)"
-    description = imperative if is_preamble else f"When {trigger}: {imperative}"
+    if is_preamble:
+        description = imperative if imperative else "(no summary recorded)"
+    elif imperative:
+        description = f"When {trigger}: {imperative}"
+    else:
+        description = f"When {trigger}:"  # tier-B shape even at tier A
+
+    domain = str(snap.get("domain") or "")
+    rule = str(snap.get("rule") or "")
     body = f"{rule}\n\nSource: agent_policy {entity_id}".strip()
     return PolicySkill(
         entity_id=entity_id,
@@ -257,9 +388,30 @@ def to_skill(snap: dict) -> PolicySkill:
 
 
 def render_skills(rows: list[dict]) -> list[PolicySkill]:
-    """Session-scoped rows, projected to PolicySkill, preamble first."""
+    """Session-scoped rows, projected to PolicySkill, preamble first.
+
+    Rows that sanitize to nothing renderable are SKIPPED, not raised —
+    Falco's fix says "skip the row and count it," and one malformed or
+    adversarial row must not take down the whole index. The count is
+    logged at WARNING so a real data problem (not just an attack) is still
+    visible.
+    """
     scoped = [r for r in rows if _session_scope_ok(r)]
-    skills = [to_skill(r) for r in scoped]
+    skills: list[PolicySkill] = []
+    skipped = 0
+    for r in scoped:
+        skill = to_skill(r)
+        if skill is None:
+            skipped += 1
+            continue
+        skills.append(skill)
+    if skipped:
+        log.warning(
+            "agent_policy index: skipped %d row(s) with nothing safe to "
+            "render after sanitising (empty/unusable applies_when, title, "
+            "or entity id).",
+            skipped,
+        )
     skills.sort(key=lambda s: (not s.is_preamble, s.entity_id))
     return skills
 
