@@ -3046,6 +3046,35 @@ class DispatchConfig:
         ).split(",")
         if r.strip()
     )
+    # Label gate (bootstrap mode / canary lane, agent_policy ent_d0f1a840e549b3b299f62397).
+    # UNSET (empty string, the default) means TODAY'S BEHAVIOUR EXACTLY: every
+    # opened issue and every opened/reopened/synchronized/labeled PR enters the
+    # automatic pipelines below, same as before this flag existed.
+    #
+    # SET (e.g. "swarm-canary"): the automatic issue pipeline
+    # (_handle_issue_opened) and the automatic PR review panel (_handle_pr) run
+    # ONLY for an issue or PR carrying this label. For a PR, the label may be on
+    # the PR itself OR on its linked parent issue (`Closes #N` / `Part of #N` /
+    # etc. — the same resolution _parent_issue_number already uses for gate
+    # inheritance): a PR opened against an issue that carries the canary label
+    # is canary work even before anyone remembers to label the PR too. Everything
+    # that does NOT carry the label is skipped with one INFO log line naming the
+    # skip reason, and posts no GitHub comments or reviews at all.
+    #
+    # This gate binds ONLY the two auto-triggered software-work pipelines
+    # (`handle_trigger`'s issue_opened/is_pr dispatch). It does not touch:
+    #   - operator overrides (/swarm-run, /confirm-gates-clear) — routed via
+    #     _handle_issue_comment, which calls _handle_issue_opened/_handle_pr
+    #     DIRECTLY and never passes through the gated dispatch in handle_trigger;
+    #   - the approval loop, CI-status handling, or auto-release (push_main) —
+    #     none of those are software-REVIEW pipelines and none are gated;
+    #   - any operational daemon (payments, email, Phoenicurus release, deploys).
+    #
+    # Deploying a change to this value only takes effect once the Apis launchd
+    # environment is updated and the daemon restarted (see docs/foundation
+    # deployment-checkout-freshness rule) — the running process, not this repo,
+    # decides which lane a live event takes.
+    require_label: str = os.environ.get("ATELES_SWARM_REQUIRE_LABEL", "").strip()
 
 
 class SwarmDispatcher:
@@ -3108,6 +3137,8 @@ class SwarmDispatcher:
                 return
             await self._log_harness_event(trigger)
             if trigger.kind == "issue_opened":
+                if not await self._label_gate_allows(trigger):
+                    return
                 await self._handle_issue_opened(trigger)
             elif trigger.kind == "pr_review":
                 await self._handle_pr_review(trigger)
@@ -3120,6 +3151,8 @@ class SwarmDispatcher:
             elif trigger.kind == "release_approve":
                 await self._handle_release_approve(trigger)
             elif trigger.is_pr:
+                if not await self._label_gate_allows(trigger):
+                    return
                 await self._handle_pr(trigger)
             elif trigger.kind == "issue_comment":
                 await self._handle_issue_comment(trigger)
@@ -3135,6 +3168,72 @@ class SwarmDispatcher:
                 priority=Priority.BLOCKER,
                 handler=DAEMON_NAME,
             )
+
+    # ── label gate (bootstrap mode / canary lane) ───────────────────────────
+
+    async def _label_gate_allows(self, trigger: SwarmTrigger) -> bool:
+        """Decide whether the automatic issue/PR pipeline may run for `trigger`.
+
+        Called ONLY from `handle_trigger`'s dispatch for `issue_opened` and PR
+        (`is_pr`) kinds — never from the operator-override paths
+        (_handle_swarm_run / _handle_confirm_gates_clear), which call
+        _handle_issue_opened / _handle_pr directly and so never reach this
+        check. That is deliberate: "operator overrides still work regardless
+        of label" per the bootstrap-mode design.
+
+        `config.require_label` unset (empty string, the default) always
+        returns True — today's behaviour exactly, no extra GitHub calls.
+
+        When set, an issue passes when the label is present on the issue
+        itself (`trigger.labels`, already populated by
+        github_gateway.parse_github_event from the webhook payload — no extra
+        fetch). A PR passes when the label is on the PR itself OR on its
+        linked parent issue (`_parent_issue_number` — the same `Closes #N` /
+        `Part of #N` resolution gate inheritance already uses), so a PR opened
+        against an already-labelled canary issue is recognised even before
+        anyone remembers to label the PR too.
+
+        On any failure to resolve the parent issue's labels, fails CLOSED
+        (returns False) rather than guessing a PR into the automatic lane —
+        the label gate's whole purpose is to keep bootstrap-mode PRs out of
+        swarm review, so an unresolvable label must never default to "allow".
+        """
+        label = self.config.require_label
+        if not label:
+            return True
+
+        ref = f"{trigger.repository}#{trigger.number}"
+
+        if label in trigger.labels:
+            return True
+
+        if trigger.is_pr:
+            parent = self._parent_issue_number(trigger.body, trigger.repository)
+            if parent is not None:
+                parent_issue = await self._fetch_issue_fields(
+                    trigger.repository, parent
+                )
+                if parent_issue is not None:
+                    parent_labels = {
+                        lbl.get("name", "")
+                        for lbl in parent_issue.get("labels", [])
+                    }
+                    if label in parent_labels:
+                        return True
+                else:
+                    log.info(
+                        f"[{DAEMON_NAME}] label gate: could not resolve parent "
+                        f"issue #{parent} labels for PR {ref} — failing closed "
+                        f"(required label {label!r} not confirmed)"
+                    )
+                    return False
+
+        log.info(
+            f"[{DAEMON_NAME}] label gate active (required={label!r}) — "
+            f"skipping {trigger.kind} for {ref}: label not present on "
+            + ("the PR or its linked parent issue" if trigger.is_pr else "the issue")
+        )
+        return False
 
     # ── issue.opened pipeline (ordered additive spec) ───────────────────────
 

@@ -63,9 +63,16 @@ log = logging.getLogger("apis.github_gateway")
 _OPERATOR_LOGIN = os.environ.get("APIS_OPERATOR_LOGIN", "markmhendrickson")
 
 # GitHub actions that fire the PR pipeline. `synchronize` re-runs review on
-# new pushes; `reopened` re-enters the pipeline after a close.
-PR_ACTIONS = {"opened", "reopened", "synchronize"}
-ISSUE_ACTIONS = {"opened"}
+# new pushes; `reopened` re-enters the pipeline after a close. `labeled` lets a
+# label added AFTER the PR opened (e.g. the swarm-canary label, see
+# ATELES_SWARM_REQUIRE_LABEL in swarm_dispatch.py) start the pipeline for it —
+# without this, a PR opened before the label existed could never enter the
+# gated lane. The dispatcher's own label-gate check decides whether the event
+# actually proceeds; this only controls what reaches that check.
+PR_ACTIONS = {"opened", "reopened", "synchronize", "labeled"}
+# Same rationale for issues: a `labeled` action lets a label added after the
+# issue opened start the issue pipeline for it.
+ISSUE_ACTIONS = {"opened", "labeled"}
 # issue_comment events (ateles#112): any new comment on an issue or PR.
 ISSUE_COMMENT_ACTIONS = {"created"}
 # pull_request_review events (approval loop): the operator clicking "Approve"
@@ -88,7 +95,9 @@ class SwarmTrigger:
     """Normalized GitHub event handed to the dispatch pipelines."""
 
     kind: str  # "issue_opened" | "pr_opened" | "pr_reopened" | "pr_synchronize"
-              # | "issue_comment"
+              # | "pr_labeled" | "issue_comment"
+              # (issue_opened covers both the "opened" and "labeled" issue
+              # actions — trigger.action carries which one fired)
     repository: str  # "owner/name"
     number: int
     title: str

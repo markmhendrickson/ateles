@@ -141,6 +141,37 @@ def test_pr_synchronize_parses():
     assert t.kind == "pr_synchronize"
 
 
+# ── `labeled` action (label gate: a label added after open must still be
+# able to start the pipeline for it) ────────────────────────────────────────
+
+
+def test_issue_labeled_parses_and_carries_the_new_label():
+    payload = _issue_payload(action="labeled", labels=[{"name": "swarm-canary"}])
+    t = parse_github_event("issues", payload, "d-label-1")
+    assert t is not None
+    assert t.kind == "issue_opened"
+    assert t.action == "labeled"
+    assert t.labels == ["swarm-canary"]
+    assert not t.is_pr
+
+
+def test_pr_labeled_parses():
+    t = parse_github_event("pull_request", _pr_payload(action="labeled"), "d-label-2")
+    assert t is not None
+    assert t.kind == "pr_labeled"
+    assert t.action == "labeled"
+    assert t.is_pr
+
+
+def test_labeled_is_in_both_action_sets():
+    # Guards the gateway-level wiring the label gate depends on: without
+    # "labeled" in these sets, parse_github_event drops the delivery before
+    # the dispatcher's label gate ever sees it, and a label added after open
+    # could never start the pipeline for it.
+    assert "labeled" in github_gateway.ISSUE_ACTIONS
+    assert "labeled" in github_gateway.PR_ACTIONS
+
+
 # ── pull_request_review parsing (approval loop) ─────────────────────────────
 
 
