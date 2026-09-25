@@ -19,10 +19,9 @@ thumbprint of the proposer's own key, at a verified-signature tier
 (`neotoma_signed.check_observation_attribution`, passed the proposer's
 `NeotomaWriter.thumbprint`); at least one such observation must have set
 `proposed_change`; and the approver must be a different signed identity.
-`agent_sub` alone is not enough: it is a label the writer's own token claims,
-which Neotoma does not verify against any key (Falco, PR #1274 round 3) — a
-signature by a different key carrying the same `agent_sub` label would pass
-an `agent_sub`-only check. The thumbprint is what the signature actually
+`agent_sub` alone is not enough: the check compares the key thumbprint
+Neotoma records for the observation (Falco, PR #1274 round 3), not the
+`agent_sub` label alone. The thumbprint is what the signature actually
 proves, and it is the same value an `agent_grant`'s `match_thumbprint` pins.
 Some signed observation on the entity is not enough: a signed evidence
 correction onto a proposal whose `proposed_change` came in on the bearer does
@@ -581,12 +580,10 @@ def defining_fields_signed_by(
     that opened the proposal, and any later correction of those fields) carries
     ``provenance.agent_sub == expected_sub`` AND
     ``provenance.agent_thumbprint == expected_thumbprint`` at a
-    verified-signature tier. The thumbprint is required, not optional:
-    ``agent_sub`` alone is a label the writer's own token claims, and Neotoma
-    does not verify it against any key (Falco, PR #1274 round 3) — a
-    different key whose token happens to carry the same ``sub`` would pass an
-    ``agent_sub``-only check. The thumbprint is what the signature actually
-    proves.
+    verified-signature tier. The thumbprint is required, not optional: the
+    check compares the key thumbprint Neotoma records for the observation
+    (Falco, PR #1274 round 3), not the ``agent_sub`` label alone. The
+    thumbprint is what the signature actually proves.
     """
     defining = []
     for obs in observations:

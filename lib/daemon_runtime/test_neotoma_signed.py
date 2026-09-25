@@ -143,10 +143,10 @@ class NeotomaSignedTest(unittest.TestCase):
 
 
 class CheckObservationAttributionTest(unittest.TestCase):
-    """PR #1274 round-3 (Falco): agent_sub is a label the caller's own token claims and
-    Neotoma does not verify it against any key. A verified signature actually proves the
-    KEY, which Neotoma records as provenance.agent_thumbprint — the value that must be
-    pinned alongside agent_sub, not agent_sub alone."""
+    """PR #1274 round-3 (Falco): this check compares the key thumbprint Neotoma
+    records for the observation, not the agent_sub label alone. A verified signature
+    actually proves the KEY, which Neotoma records as provenance.agent_thumbprint —
+    the value that must be pinned alongside agent_sub, not agent_sub alone."""
 
     SUB = "anthus@ateles-swarm"
     TIER = "software"

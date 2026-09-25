@@ -62,21 +62,16 @@ a hand edit there can be overwritten; change the snapshot instead.
      signed write to `agent_policy` must stay refused.
    - **When widening this (or any) grant, pin `match_thumbprint` to the
      agent's own key**, not `sub` alone — this is where widening belongs in
-     the switch-on order below, ahead of `shadow`. `sub` is a label the
-     agent's own token claims and Neotoma does not verify it against any
-     key. `match_thumbprint` is the RFC 7638 thumbprint of the agent's
-     public key — the same value the approval-rule signer check pins (see
-     `docs/data_types.md`'s `strategy_revision_proposal` section, and
-     Falco's PR #1274 round-3 finding). **Before neotoma#2506 is deployed,
-     pinning `match_thumbprint` does not yet change admission**: `scanForGrant`
-     admits on `sub`/issuer alone, so a grant matched only on those two would
-     admit a signature from a different key that happened to carry the same
-     label whether or not `match_thumbprint` is pinned. Once #2506 lands,
-     admission checks `match_thumbprint` too, so a grant pinned now is ready
-     the moment admission starts enforcing it — and the client-side signer
-     check below (`confirm_attribution` / the approval rule) already pins the
-     key regardless of grant admission, so #1274 is correct on both sides of
-     that deploy (Falco, PR #1274 round 4).
+     the switch-on order below, ahead of `shadow`. `match_thumbprint` is the
+     RFC 7638 thumbprint of the agent's public key — the same value the
+     approval-rule signer check pins (see `docs/data_types.md`'s
+     `strategy_revision_proposal` section, and Falco's PR #1274 round-3
+     finding). The check compares the key thumbprint Neotoma records for the
+     observation, not the `sub`/issuer label alone; pinning
+     `match_thumbprint` on the grant keeps admission bound to the same key
+     that value identifies. The client-side signer check below
+     (`confirm_attribution` / the approval rule) independently pins the key
+     regardless of grant admission (Falco, PR #1274 round 4).
 
    Probe before switching: a signed dry-run store (`commit: false`, nothing
    persisted) through the client for each type. An admitted type answers
@@ -103,10 +98,10 @@ observation back and passes only when `provenance.agent_sub` is the expected
 sub AND `provenance.agent_thumbprint` equals this writer's own key thumbprint
 (`NeotomaWriter.thumbprint`), at a verified-signature tier (`software`,
 `operator_attested`, `hardware`). The thumbprint check is required, not
-optional: `agent_sub` is a label the writer's own token claims, and Neotoma
-does not verify it against any key, so a different key whose token happened
-to carry the same `sub` would pass a sub-only check. The thumbprint is what
-the signature actually proves. By hand, for the entity the daemon just wrote:
+optional: the check compares the key thumbprint Neotoma records for the
+observation, which is what the signature actually proves, rather than
+relying on the `agent_sub` label alone. By hand, for the entity the daemon
+just wrote:
 
 ```sh
 # substitute the entity id the daemon just wrote

@@ -610,19 +610,18 @@ def check_observation_attribution(
     equals ``expected_sub``, its tier is one only a verified signature gets,
     AND its ``provenance.agent_thumbprint`` equals ``expected_thumbprint``.
 
-    ``agent_sub`` is a label the caller's own token claims; Neotoma does not
-    verify it against any key (Falco, PR #1274 round 3). What a verified
-    signature actually proves is the key, which Neotoma records as
-    ``provenance.agent_thumbprint`` — the RFC 7638 thumbprint of the public
-    JWK the signature verified against, the same value an ``agent_grant``'s
-    ``match_thumbprint`` pins. Checking ``agent_sub`` alone lets any signer
-    whose token carries the same ``sub`` label pass as the expected agent.
+    This check compares the key thumbprint Neotoma records for the
+    observation (Falco, PR #1274 round 3), not the ``agent_sub`` label
+    alone. What a verified signature actually proves is the key, which
+    Neotoma records as ``provenance.agent_thumbprint`` — the RFC 7638
+    thumbprint of the public JWK the signature verified against, the same
+    value an ``agent_grant``'s ``match_thumbprint`` pins.
     ``expected_thumbprint`` is therefore a required argument, not optional:
     every caller in this codebase can supply the expected signer's own
     thumbprint (it is the writer's own key), and a caller that cannot must
-    not silently fall back to a sub-only check that a different key's token
-    would pass (Falco, PR #1274 round 4 non-blocking note 1 — the defaulted
-    parameter was reachable by a future caller that never supplied it).
+    not silently fall back to a sub-only check (Falco, PR #1274 round 4
+    non-blocking note 1 — the defaulted parameter was reachable by a future
+    caller that never supplied it).
     """
     for obs in observations:
         if str(obs.get("id") or "") != observation_id:
