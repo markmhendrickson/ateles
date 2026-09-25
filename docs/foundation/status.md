@@ -4330,3 +4330,54 @@ condition). `status.md` grows by this entry alone. **Decision 73 stays open** an
 **Checks on this revision:** the vocabulary check reports 0 Never hits (106 Never items, 81 Not-for), the
 anchor check 0 broken links, `link_vocabulary_terms.py --check` every linkable first mention linked,
 `render_reading_projection.py --check` 20 files matching the matrix, and `test_foundation.py` 112 passed.
+
+## Revision 124 (2026-09-25): harness carriers — where the checkout stands against `harness_carriers.md`
+
+Read on 2026-09-25 against `origin/main` at `18d15c6e`, from GitHub (`gh`), and from the record for the two
+task entities named. Each line says what was read; an open issue is not evidence a defect is live. This is
+the design-versus-checkout accounting `harness_carriers.md` defers here.
+
+- **MCP server instructions: within the design.** The server's `instructions` carry a static block plus a
+  pointer under a 1,200-character budget with a refuse-rather-than-truncate guard (`INSTRUCTIONS_BUDGET_CHARS`
+  in `execution/mcp/ateles/server.py`, PR #1255, merged 2026-09-25). A stdio probe of the deployment
+  checkout's launcher measured 1,106 characters the same day (#1253 closing comment).
+- **Where the server runs from: fixed on the host, not in the repository.** #1253 was closed by repointing
+  the host's harness configuration at the deployment checkout. Its second proposed fix — extending the
+  startup freshness check to the MCP server — is not in the checkout: neither `server.py` nor
+  `run_ateles_mcp.sh` references `checkout_drift` or `checkout_identity`. A second host, or a reinstall,
+  reintroduces the defect unless the install path sets the launcher.
+- **Rule index by session-start hook: in review, and re-measured since its first commit.** PR #1268 (open,
+  review required) adds the live renderer and the hook, wired at repository level only; user-level wiring is
+  a manual step its body describes. Its first commit's live measurement against real Neotoma prod rendered
+  12,633 characters against its own 8,000-character budget, over budget, which at that point meant the hook
+  would print the one-line could-not-load notice on merge. A same-PR follow-up then added tiered rendering
+  (tiers A, B, C), and a re-render of the same live corpus against the tiered renderer measured **tier B,
+  about 5,093 characters** — the full 50-rule index reaching sessions, not the fail-open notice. A later
+  follow-up in the same PR narrowed session scoping to the single session principal rather than the union of
+  every named agent, which may lower the rendered row count further, but **no fresh live measurement exists
+  at that head (34016a7)** — #1268's own PR body says so plainly rather than inventing a number. Treat the
+  12,633-char figure as the pre-tiering measurement, not the current behavior; see #1268's PR body for the
+  current figures (#1261, #1254). The operator-approved-only trust gate the design requires is ruled on the
+  plan (#1270, `rule_trust_operator_approved_only`) and follows #1268; #1270 is open.
+- **Session-start context by hook: truncated.** The role-definition hook's output (about 16.3 KB) exceeds
+  the harness cap and reaches the session as a 2 KB preview (#1254, open). The hook reads a static file from
+  the checkout rather than rendering from the record (plan decision
+  `rule_delivery_is_a_resolution_problem_not_a_payload_problem`).
+- **Bundle rung: absent.** The repository ships no bundle manifest of any format; the first rung
+  `harness_carriers.md#targeting` assigns Claude Code is assembled by hand today (server registration,
+  opening sessions in a checkout for its repository-level hooks and skills).
+- **Integration rung: absent.** The Ateles MCP server speaks stdio only, so no consumer application's
+  integration directory can reach it; Claude chat and ChatGPT have no Ateles path.
+- **Local-file rung: absent.** No generated `AGENTS.md` or Cursor rules file exists for the harnesses that
+  get one; `CLAUDE.md` is hand-authored and is not a rendering of the record.
+- **Installer: absent.** The `ateles` command has `init`, `doctor`, and `provision` (the last a dry-run
+  planner) and no verb that detects a harness and installs its rung; the matrix is prose, not data an
+  installer reads (operator scope addition on #1262). `docs/install.md` records the manual path per harness.
+- **Launch path, per-tool deny.** Of the three command-line adapters the swarm starts, only the Claude Code
+  adapter can deny one MCP tool; a run owning a pending review step is refused on the other two
+  (`execution/daemons/apis/skill_runner.py`).
+- **Protocol era.** The server speaks the legacy era. The dual-era upgrade is task
+  `ent_2ef66f349c8c1c670ead1582` (pending, high), queued behind Neotoma's task
+  `ent_0b2da0b1a2d228ce3d981525` (neotoma#2070).
+- **Keying.** `harness_carriers.md` is not keyed: it owns no conformance-suite row, so the reading
+  projection would carry nothing for it. Key it when a suite row cites one of its anchors.
