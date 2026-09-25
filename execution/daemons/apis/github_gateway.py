@@ -55,6 +55,8 @@ from typing import Any, Awaitable, Callable
 
 from aiohttp import web
 
+from lib.daemon_runtime import label_gate as _label_gate
+
 log = logging.getLogger("apis.github_gateway")
 
 # Operator GitHub login used to attribute an email-reply approval. Kept in sync
@@ -115,9 +117,10 @@ RELEASE_PUSH_REF = os.environ.get("APIS_RELEASE_PUSH_REF", "refs/heads/main")
 # swarm_dispatch.DispatchConfig.require_label, for the same reason
 # _OPERATOR_LOGIN is duplicated above: swarm_dispatch imports SwarmTrigger
 # from this module, so importing swarm_dispatch back would be circular. Both
-# reads use the same env var and the same `.strip()` normalization, so an
-# empty/whitespace value reads as "gate inactive" identically in both places.
-_REQUIRE_LABEL = os.environ.get("ATELES_SWARM_REQUIRE_LABEL", "").strip()
+# reads go through lib/daemon_runtime/label_gate.required_label (the same
+# helper Anthus uses), so an empty/whitespace value reads as "gate inactive"
+# identically everywhere.
+_REQUIRE_LABEL = _label_gate.required_label()
 
 
 def _labeled_event_admitted(payload: dict[str, Any], ref: str) -> bool:
@@ -151,8 +154,15 @@ def _labeled_event_admitted(payload: dict[str, Any], ref: str) -> bool:
             "ATELES_SWARM_REQUIRE_LABEL is configured)"
         )
         return False
-    added_label = (payload.get("label") or {}).get("name", "")
-    if added_label != _REQUIRE_LABEL:
+    # A `label` that is not a dict (a string, a list, null) is malformed and
+    # denied here, rather than raising AttributeError into the aiohttp handler
+    # and surfacing as a 500 (Falco + qa, #1269 round 3). Same for a name that
+    # is not a string.
+    raw_label = payload.get("label")
+    added_label = raw_label.get("name", "") if isinstance(raw_label, dict) else ""
+    if not isinstance(added_label, str) or not _label_gate.carries_label(
+        _REQUIRE_LABEL, [added_label]
+    ):
         log.debug(
             f"[apis] labeled event on {ref} dropped — label added "
             f"({added_label!r}) does not match the configured gate label "

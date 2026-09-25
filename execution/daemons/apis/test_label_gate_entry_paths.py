@@ -439,3 +439,161 @@ def test_operator_overrides_do_not_consult_the_gate():
         assert not _calls_gate(name), (
             f"{name} is an operator override and must bypass the label gate"
         )
+
+
+# ── parent-issue labels: malformed data denies instead of raising ──────────
+
+
+@pytest.mark.parametrize(
+    "parent,allowed",
+    [
+        pytest.param({"labels": [{"name": CANARY}]}, True, id="well-formed"),
+        pytest.param({"labels": [CANARY]}, False, id="strings-not-dicts"),
+        pytest.param({"labels": None}, False, id="null"),
+        pytest.param({"labels": CANARY}, False, id="bare-string"),
+        pytest.param({"labels": [{"name": None}, 7]}, False, id="junk-entries"),
+        pytest.param({}, False, id="missing"),
+    ],
+)
+def test_parent_issue_label_parse_denies_on_bad_data(monkeypatch, parent, allowed):
+    """Falco #1269 round 3 (non-blocking): the parent-label read used to sit
+    outside the fetch's try and index `lbl.get` directly, so a malformed
+    parent `labels` raised out of the gate and ended a sweep pass early. It
+    now reuses `_label_names`, so bad data is a clean deny."""
+    d = _dispatcher(CANARY)
+
+    async def fetch(self, repository, issue_number):  # noqa: ANN001
+        return parent
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_fetch_issue_fields", fetch)
+    trigger = SwarmTrigger(
+        kind="pr_opened",
+        repository="o/r",
+        number=5,
+        title="t",
+        body="Closes #4",
+        author="someone",
+        html_url="u",
+        delivery_id="d",
+        action="opened",
+        labels=[],
+    )
+    assert asyncio.run(d._label_gate_allows(trigger, source="webhook")) is allowed
+
+
+# ── one gate, one definition: Apis and Anthus share lib/daemon_runtime ─────
+
+
+def test_apis_gate_helpers_come_from_the_shared_module():
+    """Apis and Anthus must not keep two notions of "labelled". The label
+    parser and the PR -> parent link parser are the shared module's own
+    objects, not copies."""
+    from lib.daemon_runtime import label_gate
+
+    import github_gateway
+
+    assert sd._label_names is label_gate.label_names
+    assert sd._PARENT_LINK is label_gate.PARENT_LINK
+    assert label_gate.REQUIRE_LABEL_ENV == "ATELES_SWARM_REQUIRE_LABEL"
+    gw_src = Path(github_gateway.__file__).read_text()
+    assert "_label_gate.required_label()" in gw_src
+    sd_src = Path(sd.__file__).read_text()
+    assert "_label_gate.required_label()" in sd_src
+    assert 'os.environ.get("ATELES_SWARM_REQUIRE_LABEL"' not in gw_src + sd_src
+
+
+# ── Anthus: the second automatic entry, outside this process ──────────────
+#
+# Falco #1269 round 3: the AST scan above only reads swarm_dispatch.py, so it
+# could not see Anthus (execution/daemons/anthus/), which starts gate-owner
+# agent runs from Neotoma issue/pull_request events on its own. These pin
+# that daemon's launch surface the same way: every agent spawn sits behind
+# `_label_gate_allows`, and nothing else in the daemon starts a process.
+
+_ANTHUS_DIR = Path(sd.__file__).resolve().parent.parent / "anthus"
+_ANTHUS = _ANTHUS_DIR / "anthus.py"
+_SPAWN_CALLS = {"create_subprocess_exec", "create_subprocess_shell", "Popen"}
+
+
+def _anthus_functions(path: Path):
+    tree = ast.parse(path.read_text())
+    return [
+        fn
+        for fn in ast.walk(tree)
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+
+
+def _call_name(node: ast.Call) -> str:
+    f = node.func
+    if isinstance(f, ast.Attribute):
+        return f.attr
+    if isinstance(f, ast.Name):
+        return f.id
+    return ""
+
+
+def _calls(fn, names: set[str]) -> list[ast.Call]:
+    return [
+        n
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and _call_name(n) in names
+    ]
+
+
+def test_anthus_only_spawn_agent_starts_a_process():
+    sources = [
+        p for p in sorted(_ANTHUS_DIR.glob("*.py")) if not p.name.startswith("test_")
+    ]
+    assert _ANTHUS in sources, "the instrument is pointed at the wrong directory"
+    spawners = sorted(
+        f"{p.name}:{fn.name}"
+        for p in sources
+        for fn in _anthus_functions(p)
+        if _calls(fn, _SPAWN_CALLS)
+    )
+    assert spawners == ["anthus.py:_spawn_agent"], (
+        "a new Anthus function starts a process; decide whether it launches "
+        f"issue/PR work and gate it: {spawners}"
+    )
+
+
+def test_anthus_every_agent_spawn_is_behind_the_label_gate():
+    """Every direct caller of `_spawn_agent` consults `_label_gate_allows`,
+    and does so BEFORE it selects a workflow or spawns anything — a gate
+    evaluated after the `feature` fallback has already dispatched is not a
+    gate."""
+    fns = _anthus_functions(_ANTHUS)
+    callers = [fn for fn in fns if _calls(fn, {"_spawn_agent"})]
+    assert [fn.name for fn in callers] == ["_orchestrate_workflow_for"], (
+        "the set of Anthus functions that spawn agents changed; classify the "
+        f"new one: {[fn.name for fn in callers]}"
+    )
+    for fn in callers:
+        gate = _calls(fn, {"_label_gate_allows"})
+        assert gate, f"{fn.name} spawns agents with no label-gate check"
+        first_gate = min(n.lineno for n in gate)
+        for sink in ("select_workflow", "fetch_workflow_definitions", "_spawn_agent"):
+            lines = [n.lineno for n in _calls(fn, {sink})]
+            assert lines and first_gate < min(lines), (
+                f"{fn.name}: the label gate must run before {sink}"
+            )
+
+
+def test_anthus_orchestration_has_one_door():
+    """`_orchestrate_workflow_for` is reached only from the SSE handler, so the
+    gate inside it covers every issue/PR event Anthus receives."""
+    fns = _anthus_functions(_ANTHUS)
+    callers = sorted(fn.name for fn in fns if _calls(fn, {"_orchestrate_workflow_for"}))
+    assert callers == ["handle_event"], callers
+
+
+def test_anthus_gate_reads_the_shared_env_helper():
+    fns = {fn.name: fn for fn in _anthus_functions(_ANTHUS)}
+    assert "_label_gate_allows" in fns, "Anthus has no label gate"
+    gate = fns["_label_gate_allows"]
+    assert _calls(gate, {"required_label"}), (
+        "Anthus must read ATELES_SWARM_REQUIRE_LABEL through "
+        "lib/daemon_runtime/label_gate.required_label, like Apis"
+    )
+    assert _calls(gate, {"carries_label"})

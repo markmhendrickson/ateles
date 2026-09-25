@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 import github_gateway
@@ -268,6 +269,23 @@ class TestLabeledEventTriggerLayerGate:
         )
         assert t is not None
         assert t.kind == "issue_opened"
+
+    @pytest.mark.parametrize("kind", ["issues", "pull_request"])
+    @pytest.mark.parametrize(
+        "bad_label",
+        ["swarm-canary", ["swarm-canary"], None, {"name": None}, {"name": 5}],
+        ids=["string", "list", "null", "name-null", "name-int"],
+    )
+    def test_gate_set_malformed_label_field_is_denied_not_raised(
+        self, monkeypatch, kind, bad_label
+    ):
+        # Falco + qa (#1269 round 3): a `label` that is not a dict used to
+        # raise AttributeError out of parse_github_event, which the aiohttp
+        # handler turns into a 500. Malformed input must be a clean deny.
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "swarm-canary")
+        payload = _labeled_payload(kind, "swarm-canary")
+        payload["label"] = bad_label
+        assert parse_github_event(kind, payload, "d-bad") is None
 
     def test_labeled_is_in_both_action_sets(self):
         # Guards the gateway-level wiring the label gate depends on: without

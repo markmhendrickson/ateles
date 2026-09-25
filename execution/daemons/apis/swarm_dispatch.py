@@ -113,6 +113,7 @@ from skill_runner import (
 )
 
 from lib.daemon_runtime.checkpoint_posture import PostureOutcome, evaluate_with_posture
+from lib.daemon_runtime import label_gate as _label_gate
 from lib.daemon_runtime.gating import load_policy
 from lib.notify import Notifier, Priority
 
@@ -145,16 +146,20 @@ DAEMON_NAME = "apis"
 # ("see #123 for background", "unlike #456"), and promoting it would attach
 # parents that the author never asserted — a wrong parent is worse than none,
 # because gate inheritance would then read the wrong issue's gates.
-_CLOSING_KEYWORDS = r"clos(?:e|es|ed)|fix(?:es|ed)?|resolv(?:e|es|ed)"
-_PARENTAGE_KEYWORDS = r"part\s+of|refs?|references?|parent|related\s+to"
+#
+# The keyword sets, the ref shape and PARENT_LINK live in
+# lib/daemon_runtime/label_gate.py (ateles#1269 round 4): the label gate's
+# PR-inherits-parent rule reads the same parent link in Apis and in Anthus,
+# so both import it from one place rather than keeping two regexes that can
+# drift. The names below are re-exports, unchanged in value.
+_CLOSING_KEYWORDS = _label_gate.CLOSING_KEYWORDS
+_PARENTAGE_KEYWORDS = _label_gate.PARENTAGE_KEYWORDS
 
 # Optional `owner/repo` qualifier so a cross-repo parent is expressible.
-_ISSUE_REF = r"(?:(?P<repo>[\w.-]+/[\w.-]+))?#(?P<number>\d+)"
+_ISSUE_REF = _label_gate.ISSUE_REF
 
 _CLOSURE_VERB = re.compile(rf"\b(?:{_CLOSING_KEYWORDS})\s*:?\s+{_ISSUE_REF}", re.I)
-_PARENT_LINK = re.compile(
-    rf"\b(?:{_CLOSING_KEYWORDS}|{_PARENTAGE_KEYWORDS})\s*:?\s+{_ISSUE_REF}", re.I
-)
+_PARENT_LINK = _label_gate.PARENT_LINK
 
 # Back-compat alias: `_PARENT_ISSUE` was the single conflated pattern. It now
 # names the parentage superset, which is what every one of its call sites
@@ -308,14 +313,9 @@ _BOT_SUFFIX = "[bot]"
 _BOT_INFIX_RE = re.compile(r"-ateles-")
 
 
-def _label_names(obj: dict) -> list[str]:
-    """Label names from a GitHub issue/PR API object (``labels`` is a list of
-    ``{"name": ...}`` dicts). Anything malformed is dropped, never raised on."""
-    return [
-        lbl.get("name", "")
-        for lbl in (obj.get("labels") or [])
-        if isinstance(lbl, dict) and lbl.get("name")
-    ]
+# Label names from a GitHub issue/PR API object; malformed entries are
+# dropped, never raised on. Shared with Anthus via lib/daemon_runtime/label_gate.
+_label_names = _label_gate.label_names
 
 
 def _is_bot_author(login: str) -> bool:
@@ -3097,11 +3097,19 @@ class DispatchConfig:
     #     approved-unmerged report) — none of those start software work;
     #   - any operational daemon (payments, email, Phoenicurus release, deploys).
     #
+    # Outside this process, the Anthus workflow orchestrator
+    # (execution/daemons/anthus/anthus.py, `_orchestrate_workflow_for`) starts
+    # gate-owner agent runs from Neotoma issue/pull_request events. It reads
+    # the SAME env var through the same helper
+    # (lib/daemon_runtime/label_gate.required_label) and applies the same
+    # match and PR-inherits-parent rule, so setting the gate binds both
+    # daemons — provided both launchd environments carry the value.
+    #
     # Deploying a change to this value only takes effect once the Apis launchd
     # environment is updated and the daemon restarted (see docs/foundation
     # deployment-checkout-freshness rule) — the running process, not this repo,
     # decides which lane a live event takes.
-    require_label: str = os.environ.get("ATELES_SWARM_REQUIRE_LABEL", "").strip()
+    require_label: str = _label_gate.required_label()
 
 
 class SwarmDispatcher:
@@ -3264,7 +3272,7 @@ class SwarmDispatcher:
 
         ref = f"{trigger.repository}#{trigger.number}"
 
-        if label in trigger.labels:
+        if _label_gate.carries_label(label, trigger.labels):
             return True
 
         if trigger.is_pr:
@@ -3277,11 +3285,13 @@ class SwarmDispatcher:
                 except Exception:  # fail closed, never crash the dispatch
                     parent_issue = None
                 if parent_issue is not None:
-                    parent_labels = {
-                        lbl.get("name", "")
-                        for lbl in parent_issue.get("labels", [])
-                    }
-                    if label in parent_labels:
+                    # `_label_names` drops malformed entries, so bad parent
+                    # data reads as "not labelled" (a deny) rather than
+                    # raising out of the gate and ending a sweep pass early
+                    # (Falco, #1269 round 3 non-blocking note).
+                    if _label_gate.carries_label(
+                        label, _label_names(parent_issue)
+                    ):
                         return True
                 else:
                     # log.warning, not log.info (Falco security review on
@@ -11184,12 +11194,7 @@ class SwarmDispatcher:
         direction: a missed parent posts a bypass notice, a wrong parent
         inherits gates from an unrelated issue.
         """
-        for m in _PARENT_LINK.finditer(pr_body or ""):
-            qualifier = m.group("repo")
-            if qualifier and qualifier.lower() != (repository or "").lower():
-                continue
-            return int(m.group("number"))
-        return None
+        return _label_gate.parent_issue_number(pr_body, repository)
 
     @staticmethod
     def _parent_issue_numbers(pr_body: str, repository: str = "") -> list[int]:
