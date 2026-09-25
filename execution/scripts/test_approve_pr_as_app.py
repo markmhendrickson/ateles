@@ -42,6 +42,8 @@ REPO = "owner/repo"
 PR = 42
 AUTHOR = "some-human-author"
 PARENT_ISSUE = 7
+BASE_REF = "main"
+REQUIRED_CHECK = "gitleaks (secrets + PII)"
 
 # Changed files that match NOTHING in review_panel's diff_patterns, so the
 # derived floor is exactly the always-on lenses (pm, qa) unless a test adds
@@ -115,6 +117,11 @@ class _FakeClient:
         pr_merged_at: str | None = None,
         pr_head_after_first_get: str | None = None,
         review_readback: dict | None = None,
+        protection_rsc: dict | None = None,
+        branch_payload: dict | int | None = None,
+        rules: list | int | None = None,
+        jobs: dict[int, dict] | None = None,
+        runners: list[dict] | None = None,
     ):
         self.comments = comments
         self.check_runs = check_runs
@@ -127,8 +134,32 @@ class _FakeClient:
         self.pr_merged_at = pr_merged_at
         self.pr_head_after_first_get = pr_head_after_first_get
         self.review_readback = review_readback
+        # Branch-protection / scheduling surfaces (operator ruling
+        # 2026-09-25, "not run (no runner)"). Defaults mirror the live repo:
+        # the dedicated protection endpoint 404s for a non-admin token, the
+        # branch summary requires only gitleaks, no ruleset requires a check,
+        # and the runner list is unreadable (None -> 403).
+        self.protection_rsc = protection_rsc
+        self.branch_payload = (
+            branch_payload
+            if branch_payload is not None
+            else {
+                "protected": True,
+                "protection": {
+                    "enabled": True,
+                    "required_status_checks": {
+                        "contexts": [REQUIRED_CHECK],
+                        "checks": [{"context": REQUIRED_CHECK, "app_id": 15368}],
+                    },
+                },
+            }
+        )
+        self.rules = rules if rules is not None else []
+        self.jobs = jobs or {}
+        self.runners = runners
         self.posted: list[dict] = []
         self.pr_get_count = 0
+        self.get_urls: list[str] = []
 
     async def __aenter__(self):
         return self
@@ -148,9 +179,35 @@ class _FakeClient:
             "user": {"login": self.pr_author},
             "state": self.pr_state,
             "merged_at": self.pr_merged_at,
+            "base": {"ref": BASE_REF},
         }
 
     async def get(self, url, headers=None, params=None):
+        self.get_urls.append(url)
+        page = (params or {}).get("page", 1)
+        if url.endswith(f"/branches/{BASE_REF}/protection/required_status_checks"):
+            if self.protection_rsc is None:
+                return _FakeResponse({"message": "Not Found"}, status_code=404)
+            return _FakeResponse(self.protection_rsc)
+        if url.endswith(f"/rules/branches/{BASE_REF}"):
+            if isinstance(self.rules, int):
+                return _FakeResponse({"message": "error"}, status_code=self.rules)
+            return _FakeResponse(self.rules if page == 1 else [])
+        if url.endswith(f"/branches/{BASE_REF}"):
+            if isinstance(self.branch_payload, int):
+                return _FakeResponse({"message": "error"}, status_code=self.branch_payload)
+            return _FakeResponse(self.branch_payload)
+        if "/actions/jobs/" in url:
+            job_id = int(url.rsplit("/", 1)[1])
+            if job_id not in self.jobs:
+                return _FakeResponse({"message": "Not Found"}, status_code=404)
+            return _FakeResponse(self.jobs[job_id])
+        if url.endswith("/actions/runners"):
+            if self.runners is None:
+                return _FakeResponse({"message": "forbidden"}, status_code=403)
+            return _FakeResponse(
+                {"total_count": len(self.runners), "runners": self.runners if page == 1 else []}
+            )
         if url.endswith(f"/pulls/{PR}"):
             return _FakeResponse(self._pr_payload())
         if url.endswith(f"/pulls/{PR}/files"):
@@ -351,8 +408,8 @@ class TestRedCheckRefuses:
 
         real_evaluate_checks = target.evaluate_checks
 
-        async def _always_green(client_, *, repo, head_sha):
-            outcomes, _ = await real_evaluate_checks(client_, repo=repo, head_sha=head_sha)
+        async def _always_green(client_, *, repo, head_sha, **kwargs):
+            outcomes, _ = await real_evaluate_checks(client_, repo=repo, head_sha=head_sha, **kwargs)
             return outcomes, True  # bug: reports green regardless of outcomes
 
         monkeypatch.setattr(target, "evaluate_checks", _always_green)
@@ -976,3 +1033,222 @@ class TestLensAgentsRegistry:
         registry = {lens.lens: lens.agent for lens in LENSES}
         for lens, agent in target.LENS_AGENTS.items():
             assert registry.get(lens) == agent, f"{lens}: {agent} != {registry.get(lens)}"
+
+
+# ── Unschedulable non-required checks: "not run (no runner)" ───────────────
+#
+# Operator ruling 2026-09-25: until a self-hosted runner exists for a check, a
+# check that branch protection does NOT require and that no online runner can
+# schedule is reported as "not run (no runner)" instead of failing the gate.
+# The ruling's fail-closed bounds are each pinned below. The two positive
+# tests (not-run passes) are red on origin/main, where every queued check
+# blocks; the negative tests pin behaviour main already had and that this
+# change must not weaken.
+
+INVENTORY = "canonical rule inventory"
+INVENTORY_JOB_ID = 108014743705
+INVENTORY_LABELS = ["self-hosted", "macOS", "canonical-rule-inventory"]
+NOT_RUN = "not run (no runner)"
+
+
+def _inventory_run(*, status: str = "queued", conclusion: str | None = None) -> dict:
+    return {"id": INVENTORY_JOB_ID, "name": INVENTORY, "status": status, "conclusion": conclusion}
+
+
+def _job(labels: list[str], *, status: str = "queued") -> dict[int, dict]:
+    return {INVENTORY_JOB_ID: {"id": INVENTORY_JOB_ID, "status": status, "labels": labels}}
+
+
+def _runner(labels: list[str], *, status: str = "online") -> dict:
+    return {"id": 1, "name": "r1", "status": status, "labels": [{"name": n} for n in labels]}
+
+
+def _required_gitleaks_run() -> dict:
+    return {"id": 1, "name": REQUIRED_CHECK, "status": "completed", "conclusion": "success"}
+
+
+def _inventory_client(**overrides) -> _FakeClient:
+    kwargs = dict(
+        comments=_all_clear_comments(ALL_FOUR),
+        check_runs=[_required_gitleaks_run(), _inventory_run()],
+        jobs=_job(INVENTORY_LABELS),
+        runners=[],
+    )
+    kwargs.update(overrides)
+    return _FakeClient(**kwargs)
+
+
+@pytest.mark.asyncio
+class TestUnschedulableNonRequiredCheckIsNotRun:
+    async def test_not_required_queued_no_matching_runner_is_not_run_and_gate_passes(
+        self, monkeypatch, capsys
+    ):
+        # Runner list readable: one online runner with other labels, and one
+        # runner WITH the labels but offline — neither can schedule the job.
+        client = _inventory_client(
+            runners=[
+                _runner(["self-hosted", "Linux", "X64"]),
+                _runner(INVENTORY_LABELS, status="offline"),
+            ]
+        )
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=False)
+        out = capsys.readouterr().out
+
+        assert code == 0
+        assert NOT_RUN in out
+        assert "no online runner has all of its labels" in out
+        assert "checks: GREEN" in out
+
+    async def test_apply_names_the_not_run_check_in_the_approval_body(self, monkeypatch):
+        client = _inventory_client()
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 0
+        assert len(client.posted) == 1
+        body = client.posted[0]["json"]["body"]
+        lines = [ln for ln in body.splitlines() if INVENTORY in ln]
+        assert len(lines) == 1
+        assert NOT_RUN in lines[0]
+        assert "not required by branch protection on `main`" in lines[0]
+
+    async def test_runner_list_unreadable_and_allowlisted_is_not_run(self, monkeypatch, capsys):
+        client = _inventory_client(runners=None)  # 403, as for a non-admin token
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=False)
+        out = capsys.readouterr().out
+
+        assert code == 0
+        assert NOT_RUN in out
+        assert "known-unprovisioned allowlist" in out
+
+    async def test_readable_protection_endpoint_is_honoured(self, monkeypatch, capsys):
+        client = _inventory_client(
+            protection_rsc={"contexts": [REQUIRED_CHECK], "checks": []},
+            branch_payload=500,  # must not be consulted once the protection API answered
+        )
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=False)
+
+        assert code == 0
+        assert NOT_RUN in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+class TestUnschedulableCheckFailClosedBounds:
+    async def _assert_blocks(self, monkeypatch, capsys, client: _FakeClient) -> None:
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+        out = capsys.readouterr().out
+        assert code == 1
+        assert client.posted == []
+        assert NOT_RUN not in out
+
+    async def test_required_queued_check_blocks(self, monkeypatch, capsys):
+        branch = {
+            "protected": True,
+            "protection": {
+                "enabled": True,
+                "required_status_checks": {"contexts": [REQUIRED_CHECK, INVENTORY]},
+            },
+        }
+        await self._assert_blocks(monkeypatch, capsys, _inventory_client(branch_payload=branch))
+
+    async def test_check_required_by_a_ruleset_blocks(self, monkeypatch, capsys):
+        rules = [
+            {
+                "type": "required_status_checks",
+                "parameters": {"required_status_checks": [{"context": INVENTORY}]},
+            }
+        ]
+        await self._assert_blocks(monkeypatch, capsys, _inventory_client(rules=rules))
+
+    async def test_matching_online_runner_means_pending_blocks(self, monkeypatch, capsys):
+        # Superset of the job's labels, online: the job CAN be scheduled.
+        runners = [_runner(["self-hosted", "macOS", "ARM64", "canonical-rule-inventory"])]
+        await self._assert_blocks(monkeypatch, capsys, _inventory_client(runners=runners))
+
+    async def test_failure_conclusion_always_blocks(self, monkeypatch, capsys):
+        client = _inventory_client(
+            check_runs=[
+                _required_gitleaks_run(),
+                _inventory_run(status="completed", conclusion="failure"),
+            ],
+            runners=None,
+        )
+        await self._assert_blocks(monkeypatch, capsys, client)
+
+    async def test_runner_list_unreadable_and_not_allowlisted_blocks(self, monkeypatch, capsys):
+        client = _inventory_client(jobs=_job(["self-hosted", "Linux", "gpu-box"]), runners=None)
+        await self._assert_blocks(monkeypatch, capsys, client)
+
+    async def test_protection_read_failure_blocks(self, monkeypatch, capsys):
+        # Protection API 404 (no admin) AND branch summary unreadable.
+        await self._assert_blocks(monkeypatch, capsys, _inventory_client(branch_payload=500))
+
+    async def test_protected_branch_with_redacted_protection_blocks(self, monkeypatch, capsys):
+        client = _inventory_client(branch_payload={"protected": True})
+        await self._assert_blocks(monkeypatch, capsys, client)
+
+    async def test_ruleset_read_failure_blocks(self, monkeypatch, capsys):
+        await self._assert_blocks(monkeypatch, capsys, _inventory_client(rules=403))
+
+    async def test_github_hosted_labels_never_qualify(self, monkeypatch, capsys):
+        for labels in (["ubuntu-latest"], ["self-hosted", "ubuntu-24.04"]):
+            client = _inventory_client(jobs=_job(labels))
+            await self._assert_blocks(monkeypatch, capsys, client)
+
+    async def test_in_progress_check_never_qualifies(self, monkeypatch, capsys):
+        client = _inventory_client(
+            check_runs=[_required_gitleaks_run(), _inventory_run(status="in_progress")]
+        )
+        await self._assert_blocks(monkeypatch, capsys, client)
+
+    async def test_unreadable_job_blocks(self, monkeypatch, capsys):
+        await self._assert_blocks(monkeypatch, capsys, _inventory_client(jobs={}))
+
+    async def test_removing_the_allowlist_entry_restores_enforcement(self, monkeypatch, capsys):
+        monkeypatch.setattr(target, "KNOWN_UNPROVISIONED_RUNNER_LABEL_SETS", frozenset())
+        await self._assert_blocks(monkeypatch, capsys, _inventory_client(runners=None))
+
+    async def test_every_check_not_run_is_no_signal_and_blocks(self, monkeypatch, capsys):
+        client = _inventory_client(check_runs=[_inventory_run()], legacy_status_total_count=0)
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+        assert code == 1
+        assert client.posted == []
+
+
+class TestAllowlistContents:
+    def test_allowlist_holds_only_the_inventory_label_set(self):
+        assert target.KNOWN_UNPROVISIONED_RUNNER_LABEL_SETS == frozenset(
+            {frozenset(lbl.casefold() for lbl in INVENTORY_LABELS)}
+        )
+
+    def test_allowlist_matches_the_workflow_runs_on(self):
+        workflow = (_REPO_ROOT / ".github" / "workflows" / "canonical-rule-inventory.yml").read_text()
+        assert "runs-on: [self-hosted, macOS, canonical-rule-inventory]" in workflow
+
+
+@pytest.mark.asyncio
+class TestNoSchedulingReadsWhenNothingIsPending:
+    async def test_all_completed_head_makes_no_protection_or_runner_calls(self, monkeypatch):
+        client = _FakeClient(comments=_all_clear_comments(ALL_FOUR), check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=False)
+
+        assert code == 0
+        assert not [
+            u
+            for u in client.get_urls
+            if "/branches/" in u or "/actions/" in u
+        ]

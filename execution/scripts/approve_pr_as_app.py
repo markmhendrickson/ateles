@@ -49,6 +49,18 @@ Reuse, not rebuild:
     trusted as proof, with no independent read-back — exactly the failure
     shape `docs/foundation/principles.md#1` names).
 
+Unschedulable non-required checks (operator ruling 2026-09-25): until a
+self-hosted runner exists for a check, a check that branch protection on the
+base branch does NOT require, and that is still queued with no online runner
+carrying all of its job's labels, is reported as "not run (no runner)" in the
+check table and named in the approval body instead of failing the gate. It
+binds again automatically once a matching runner is online. Fail-closed rules:
+unreadable protection makes every check required; an unreadable job or a
+GitHub-hosted label keeps the check blocking; an unreadable runner list keeps
+it blocking unless its exact label set is on
+`KNOWN_UNPROVISIONED_RUNNER_LABEL_SETS`; a completed check with a failing
+conclusion always blocks. See `_unscheduled_non_required_reason`.
+
 Usage:
     python3 execution/scripts/approve_pr_as_app.py --repo <owner/name> --pr <n> \\
         [--lenses pm,security] [--apply]
@@ -119,6 +131,43 @@ LENS_AGENTS: dict[str, str] = {
 
 _FAILING_CHECK_CONCLUSIONS = ("failure", "timed_out", "cancelled", "action_required")
 
+# ── Unschedulable non-required checks (operator ruling, 2026-09-25) ─────────
+#
+# Until a self-hosted runner exists for a check, a check that is NOT required
+# by branch protection on the base branch and that CANNOT be scheduled (it is
+# still queued/pending and no online runner in the repo has every label its
+# job needs) is reported as "not run (no runner)" instead of failing the gate.
+# Once a matching runner is online the check binds again automatically, since
+# the runner lookup then finds it schedulable. Every rule below fails closed:
+# anything this tool cannot read keeps the check blocking.
+NOT_RUN_NO_RUNNER = "not run (no runner)"
+
+# Check-run statuses that mean "waiting to be scheduled". `in_progress` means a
+# runner already picked the job up; `waiting` is an environment approval, not
+# a missing runner; neither qualifies.
+_UNSCHEDULED_STATUSES = frozenset({"queued", "pending"})
+
+# Known-unprovisioned self-hosted runner label sets. Consulted ONLY when the
+# repo's runner list cannot be read (`GET /actions/runners` needs admin, which
+# the read token usually lacks): a job whose runs-on label set EXACTLY equals
+# an entry here is treated as unschedulable. Removing an entry restores
+# enforcement for that check. Provisioning the runner is tracked by the
+# Neotoma task ent_45626c1604fefc32118ffd62; remove the entry when it lands.
+# Labels are compared case-insensitively, as GitHub matches them.
+KNOWN_UNPROVISIONED_RUNNER_LABEL_SETS: frozenset[frozenset[str]] = frozenset(
+    {
+        # .github/workflows/canonical-rule-inventory.yml, job "canonical rule inventory"
+        frozenset({"self-hosted", "macos", "canonical-rule-inventory"}),
+    }
+)
+
+# GitHub-hosted runner labels never qualify: a job on a hosted runner that sits
+# queued is a GitHub capacity problem, not a missing runner. A qualifying job
+# must carry `self-hosted` and none of these hosted image labels.
+_GITHUB_HOSTED_LABEL_RE = re.compile(
+    r"^(ubuntu|windows|macos)-(latest|\d[\w.-]*)$", re.I
+)
+
 GITHUB_API = "https://api.github.com"
 
 _EXPECTATION_MARKER_RE = re.compile(
@@ -160,10 +209,16 @@ class LensOutcome:
 
 
 class CheckOutcome:
-    def __init__(self, name: str, state: str, passed: bool) -> None:
+    def __init__(
+        self, name: str, state: str, passed: bool, *, not_run: bool = False, reason: str = ""
+    ) -> None:
         self.name = name
         self.state = state
         self.passed = passed
+        # True only for a non-required check that could not be scheduled (see
+        # NOT_RUN_NO_RUNNER); `reason` then says why it did not bind.
+        self.not_run = not_run
+        self.reason = reason
 
 
 async def _fetch_pr(client: httpx.AsyncClient, repo: str, pr: int) -> dict:
@@ -444,8 +499,261 @@ async def evaluate_lens(
     )
 
 
+def _contexts_from_required_status_checks(payload: object) -> set[str] | None:
+    """Context names from a classic-protection `required_status_checks` object
+    (`contexts` plus `checks[].context`), or None if the shape is unreadable."""
+    if not isinstance(payload, dict):
+        return None
+    contexts = payload.get("contexts")
+    checks = payload.get("checks")
+    if contexts is None and checks is None:
+        return None
+    out: set[str] = set()
+    for c in contexts or []:
+        if not isinstance(c, str):
+            return None
+        out.add(c)
+    for c in checks or []:
+        if not isinstance(c, dict) or not isinstance(c.get("context"), str):
+            return None
+        out.add(c["context"])
+    return out
+
+
+async def fetch_required_check_contexts(
+    client: httpx.AsyncClient, *, repo: str, base_ref: str
+) -> set[str] | None:
+    """Check contexts branch protection REQUIRES on *base_ref*, or None when
+    that cannot be established — and None means every check is treated as
+    required (fail closed).
+
+    Two sources, unioned, because either can require a check:
+      - classic branch protection: the protection API
+        (`branches/{base}/protection/required_status_checks`, admin only),
+        falling back to the `protection` summary `GET branches/{base}` serves
+        to read-only tokens — the dedicated endpoint answers 404 both for
+        "unprotected" and for "no admin access", so its 404 alone decides
+        nothing;
+      - repository rulesets: `rules/branches/{base}`, `required_status_checks`
+        rules.
+    Any read that fails or returns an unexpected shape returns None.
+    """
+    if not base_ref:
+        return None
+    headers = _github_headers()
+    try:
+        required: set[str] = set()
+
+        prot = await client.get(
+            f"{GITHUB_API}/repos/{repo}/branches/{base_ref}/protection/required_status_checks",
+            headers=headers,
+        )
+        if prot.status_code == 200:
+            classic = _contexts_from_required_status_checks(prot.json())
+            if classic is None:
+                return None
+        else:
+            branch = await client.get(
+                f"{GITHUB_API}/repos/{repo}/branches/{base_ref}", headers=headers
+            )
+            if branch.status_code != 200:
+                return None
+            data = branch.json() or {}
+            protected = data.get("protected")
+            if protected is False:
+                classic = set()
+            elif protected is True:
+                protection = data.get("protection")
+                if not isinstance(protection, dict):
+                    return None
+                classic = _contexts_from_required_status_checks(
+                    protection.get("required_status_checks")
+                )
+                if classic is None:
+                    return None
+            else:
+                return None
+        required |= classic
+
+        page = 1
+        while True:
+            rules_resp = await client.get(
+                f"{GITHUB_API}/repos/{repo}/rules/branches/{base_ref}",
+                headers=headers,
+                params={"per_page": 100, "page": page},
+            )
+            if rules_resp.status_code != 200:
+                return None
+            rules = rules_resp.json()
+            if not isinstance(rules, list):
+                return None
+            for rule in rules:
+                if not isinstance(rule, dict):
+                    return None
+                if rule.get("type") != "required_status_checks":
+                    continue
+                params = rule.get("parameters") or {}
+                for c in params.get("required_status_checks") or []:
+                    if not isinstance(c, dict) or not isinstance(c.get("context"), str):
+                        return None
+                    required.add(c["context"])
+            if len(rules) < 100:
+                break
+            page += 1
+        return required
+    except Exception:
+        return None
+
+
+async def _fetch_job_labels(
+    client: httpx.AsyncClient, *, repo: str, job_id: object
+) -> list[str] | None:
+    """The runs-on labels of an Actions job (a check-run's id IS its job id),
+    or None when unreadable. None keeps the check blocking."""
+    if not isinstance(job_id, int) or isinstance(job_id, bool):
+        return None
+    try:
+        resp = await client.get(
+            f"{GITHUB_API}/repos/{repo}/actions/jobs/{job_id}", headers=_github_headers()
+        )
+        if resp.status_code != 200:
+            return None
+        payload = resp.json() or {}
+        # The job itself must also still be waiting for a runner.
+        if str(payload.get("status") or "") not in _UNSCHEDULED_STATUSES:
+            return None
+        labels = payload.get("labels")
+        if not isinstance(labels, list) or not labels or not all(
+            isinstance(x, str) and x.strip() for x in labels
+        ):
+            return None
+        return [x.strip() for x in labels]
+    except Exception:
+        return None
+
+
+async def fetch_online_runner_label_sets(
+    client: httpx.AsyncClient, *, repo: str
+) -> list[frozenset[str]] | None:
+    """Casefolded label sets of every ONLINE self-hosted runner in *repo*, or
+    None when the runner list cannot be read (it needs admin)."""
+    out: list[frozenset[str]] = []
+    try:
+        page = 1
+        while True:
+            resp = await client.get(
+                f"{GITHUB_API}/repos/{repo}/actions/runners",
+                headers=_github_headers(),
+                params={"per_page": 100, "page": page},
+            )
+            if resp.status_code != 200:
+                return None
+            payload = resp.json()
+            if not isinstance(payload, dict) or not isinstance(payload.get("runners"), list):
+                return None
+            runners = payload["runners"]
+            for runner in runners:
+                if not isinstance(runner, dict):
+                    return None
+                if runner.get("status") != "online":
+                    continue
+                names = [
+                    lbl.get("name") for lbl in (runner.get("labels") or []) if isinstance(lbl, dict)
+                ]
+                out.append(frozenset(n.casefold() for n in names if isinstance(n, str)))
+            if len(runners) < 100:
+                break
+            page += 1
+        return out
+    except Exception:
+        return None
+
+
+class _SchedulingContext:
+    """Lazily reads, once per evaluation, what deciding "not run (no runner)"
+    needs: the base branch's required contexts and the repo's online runners.
+    Nothing is fetched unless a check is actually waiting to be scheduled, so
+    an all-completed head costs no extra API calls."""
+
+    _UNSET = object()
+
+    def __init__(self, client: httpx.AsyncClient, *, repo: str, base_ref: str) -> None:
+        self.client = client
+        self.repo = repo
+        self.base_ref = base_ref
+        self._required: object = self._UNSET
+        self._runners: object = self._UNSET
+
+    async def required_contexts(self) -> set[str] | None:
+        if self._required is self._UNSET:
+            self._required = await fetch_required_check_contexts(
+                self.client, repo=self.repo, base_ref=self.base_ref
+            )
+        return self._required  # type: ignore[return-value]
+
+    async def online_runner_label_sets(self) -> list[frozenset[str]] | None:
+        if self._runners is self._UNSET:
+            self._runners = await fetch_online_runner_label_sets(self.client, repo=self.repo)
+        return self._runners  # type: ignore[return-value]
+
+
+async def _unscheduled_non_required_reason(
+    ctx: _SchedulingContext, run: dict
+) -> str | None:
+    """Why *run* is a non-required check no runner can schedule, or None if it
+    does not qualify (and so keeps its ordinary pending/failing reading).
+
+    Qualifies only when ALL hold — each is a fail-closed step:
+      1. the check-run is still waiting to be scheduled (queued/pending) —
+         a completed run, including any failure conclusion, never qualifies;
+      2. branch protection on the base branch was read and does NOT require
+         this check's name (unreadable protection ⇒ every check required);
+      3. the job's runs-on labels were read, include `self-hosted`, and name
+         no GitHub-hosted image;
+      4. either the runner list was read and no ONLINE runner carries every
+         one of the job's labels, or — only if the runner list is unreadable —
+         the job's exact label set is on KNOWN_UNPROVISIONED_RUNNER_LABEL_SETS.
+    """
+    if str(run.get("status") or "") not in _UNSCHEDULED_STATUSES:
+        return None
+    if run.get("conclusion"):
+        return None
+    name = (run.get("name") or "").strip()
+    if not name:
+        return None
+
+    required = await ctx.required_contexts()
+    if required is None:
+        return None
+    if name.casefold() in {r.strip().casefold() for r in required}:
+        return None
+
+    labels = await _fetch_job_labels(ctx.client, repo=ctx.repo, job_id=run.get("id"))
+    if labels is None:
+        return None
+    wanted = frozenset(lbl.casefold() for lbl in labels)
+    if "self-hosted" not in wanted:
+        return None
+    if any(_GITHUB_HOSTED_LABEL_RE.match(lbl) for lbl in wanted):
+        return None
+
+    label_text = ", ".join(labels)
+    not_required = f"not required by branch protection on `{ctx.base_ref}`"
+    runners = await ctx.online_runner_label_sets()
+    if runners is None:
+        if wanted not in KNOWN_UNPROVISIONED_RUNNER_LABEL_SETS:
+            return None
+        return (
+            f"{not_required}; runner list unreadable, and its runner labels "
+            f"[{label_text}] are on the known-unprovisioned allowlist"
+        )
+    if any(wanted <= runner for runner in runners):
+        return None
+    return f"{not_required}; no online runner has all of its labels [{label_text}]"
+
+
 async def evaluate_checks(
-    client: httpx.AsyncClient, *, repo: str, head_sha: str
+    client: httpx.AsyncClient, *, repo: str, head_sha: str, base_ref: str = ""
 ) -> tuple[list[CheckOutcome], bool]:
     """Every required-looking check-run on *head_sha*; True iff ALL are green.
 
@@ -464,6 +772,13 @@ async def evaluate_checks(
     check-runs alone decide `all_green`. Still fails closed: zero check-runs
     AND zero legacy statuses (`total_count==0`) is treated as NOT green, since
     that means nothing has run yet, not that nothing needs to.
+
+    Operator ruling 2026-09-25: a check-run that is still queued, is not
+    required by branch protection on *base_ref*, and that no online runner
+    can schedule is reported as NOT_RUN_NO_RUNNER and does not fail the gate
+    (see `_unscheduled_non_required_reason` for the fail-closed conditions).
+    An empty *base_ref* disables this, so every pending check blocks. If every
+    check-run on the head is "not run", that is still no signal: not green.
     """
     status_resp = await client.get(
         f"{GITHUB_API}/repos/{repo}/commits/{head_sha}/status",
@@ -484,11 +799,22 @@ async def evaluate_checks(
     outcomes: list[CheckOutcome] = []
     legacy_statuses_green = legacy_status_count == 0 or combined_state in ("success", "")
     all_green = legacy_statuses_green
+    sched = _SchedulingContext(client, repo=repo, base_ref=base_ref)
     for run in runs:
         name = (run.get("name") or "").strip()
         status = run.get("status")
         conclusion = run.get("conclusion")
         if status != "completed":
+            not_run_reason = (
+                await _unscheduled_non_required_reason(sched, run) if base_ref else None
+            )
+            if not_run_reason:
+                outcomes.append(
+                    CheckOutcome(
+                        name, NOT_RUN_NO_RUNNER, True, not_run=True, reason=not_run_reason
+                    )
+                )
+                continue
             state = f"pending ({status})"
             passed = False
         elif conclusion in _FAILING_CHECK_CONCLUSIONS:
@@ -503,9 +829,11 @@ async def evaluate_checks(
         outcomes.append(CheckOutcome(name, state, passed))
         all_green = all_green and passed
 
-    if not runs and legacy_status_count == 0:
-        # No signal of any kind — nothing has run yet. Fail closed rather
-        # than approving a head CI has not touched.
+    ran = [o for o in outcomes if not o.not_run]
+    if not ran and legacy_status_count == 0:
+        # No signal of any kind — nothing has run yet (or every check-run is
+        # "not run"). Fail closed rather than approving a head CI has not
+        # touched.
         all_green = False
 
     return outcomes, all_green
@@ -518,6 +846,7 @@ async def submit_app_approval(
     pr: int,
     head_sha: str,
     lens_outcomes: list[LensOutcome],
+    check_outcomes: list[CheckOutcome] | None = None,
 ) -> dict:
     """Mint an App installation token and submit a formal APPROVE review.
 
@@ -599,6 +928,11 @@ async def submit_app_approval(
         body_lines.append(
             f"- **{outcome.lens}** ({outcome.agent}): `{outcome.verdict}` — {outcome.comment_url}"
         )
+    not_run = [c for c in (check_outcomes or []) if c.not_run]
+    if not_run:
+        body_lines.append("")
+    for c in not_run:
+        body_lines.append(f"- check `{c.name}` did not bind — {NOT_RUN_NO_RUNNER}: {c.reason}")
     body_lines.append("")
     body_lines.append(f"head_sha={head_sha}")
     body = "\n".join(body_lines)
@@ -690,8 +1024,11 @@ def _print_table(lens_outcomes: list[LensOutcome], check_outcomes: list[CheckOut
         print(f"{'check':<40} {'state':<20} pass/fail")
         print("-" * 80)
         for c in check_outcomes:
-            pf = "PASS" if c.passed else "FAIL"
+            pf = "NOT RUN" if c.not_run else ("PASS" if c.passed else "FAIL")
             print(f"{c.name:<40} {c.state:<20} {pf}")
+        for c in check_outcomes:
+            if c.not_run:
+                print(f"  {c.name}: did not bind — {c.reason}")
     print()
 
 
@@ -757,7 +1094,10 @@ async def run(repo: str, pr: int, extra_lenses: list[str], *, apply: bool) -> in
             )
             lens_outcomes.append(outcome)
 
-        check_outcomes, checks_green = await evaluate_checks(client, repo=repo, head_sha=head_sha)
+        base_ref = str((pr_data.get("base") or {}).get("ref") or "")
+        check_outcomes, checks_green = await evaluate_checks(
+            client, repo=repo, head_sha=head_sha, base_ref=base_ref
+        )
 
         _print_table(lens_outcomes, check_outcomes)
 
@@ -781,7 +1121,12 @@ async def run(repo: str, pr: int, extra_lenses: list[str], *, apply: bool) -> in
 
         try:
             review = await submit_app_approval(
-                client, repo=repo, pr=pr, head_sha=head_sha, lens_outcomes=lens_outcomes
+                client,
+                repo=repo,
+                pr=pr,
+                head_sha=head_sha,
+                lens_outcomes=lens_outcomes,
+                check_outcomes=check_outcomes,
             )
         except Exception as exc:
             print()
