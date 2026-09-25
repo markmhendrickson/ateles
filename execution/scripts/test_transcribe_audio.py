@@ -672,6 +672,8 @@ def test_attach_uses_remote_safe_ingest_not_server_local_file_path(tmp_path, mon
         return _Proc()
 
     def fake_cli_json(args):
+        if args[:2] == ["schemas", "get"]:
+            return None  # lookup unavailable: every required field is verified
         if args[:2] == ["entities", "get"]:
             return {"snapshot": captured["entities"][0]}
         if args[:2] == ["observations", "list"]:
