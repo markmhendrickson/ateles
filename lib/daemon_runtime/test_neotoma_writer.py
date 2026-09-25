@@ -329,10 +329,10 @@ def test_governance_field_on_an_ordinary_type_must_be_signed(tmp_path, http):
     rec = http(_typed_entities({"ent_i": "issue"}))
     w = _writer(tmp_path, mode=ns.SigningMode.OFF, with_key=False)
     with pytest.raises(ns.SignedWriteError):
-        w.correct("issue", "ent_i", "gate_status", "{}", idempotency_key="k")
+        w.correct("issue", "ent_i", "gate_status", "{}", idempotency_key="k")  # vocab-ok: retired name
     with pytest.raises(ns.SignedWriteError):
         w.store(
-            [{"entity_type": "issue", "title": "t", "gate_status": "{}"}],
+            [{"entity_type": "issue", "title": "t", "gate_status": "{}"}],  # vocab-ok: retired name
             idempotency_key="k",
         )
     assert rec.requests == []
@@ -486,8 +486,8 @@ def test_switch_name_per_daemon():
 # Design name → the name the live record still uses (docs/foundation/migration.md).
 _LIVE_NAME = {
     "agent": "agent_definition",
-    "workflow": "workflow_definition",
-    "action_policy": "execution_policy",
+    "workflow": "workflow_definition",  # vocab-ok: retired name the live record still uses
+    "action_policy": "execution_policy",  # vocab-ok: retired name the live record still uses
 }
 
 
@@ -506,7 +506,7 @@ def test_governance_set_covers_every_design_governance_type():
         assert t in ns.GOVERNANCE_ENTITY_TYPES, t
         if t in _LIVE_NAME:
             assert _LIVE_NAME[t] in ns.GOVERNANCE_ENTITY_TYPES, _LIVE_NAME[t]
-    for t in ("task_policy", "checkpoint_brief"):  # named by the ateles#1270 inventory
+    for t in ("task_policy", "checkpoint_brief"):  # vocab-ok: checkpoint_brief is retired, named by the ateles#1270 inventory
         assert t in ns.GOVERNANCE_ENTITY_TYPES
 
 

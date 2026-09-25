@@ -229,15 +229,17 @@ GOVERNANCE_ENTITY_TYPES: frozenset[str] = frozenset(
         "intake_rule",
         # live-record names for design types
         "agent_definition",
-        "workflow_definition",
-        "execution_policy",
+        "workflow_definition",  # vocab-ok: retired name the live record still uses (migration.md)
+        "execution_policy",  # vocab-ok: retired name the live record still uses (migration.md)
         # named by the ateles#1270 inventory
         "task_policy",
-        "checkpoint_brief",
+        "checkpoint_brief",  # vocab-ok: retired name the live record still uses (migration.md)
     }
 )
 # Authority carried by one field of an otherwise ordinary type.
-GOVERNANCE_FIELDS: frozenset[tuple[str, str]] = frozenset({("issue", "gate_status")})
+GOVERNANCE_FIELDS: frozenset[tuple[str, str]] = frozenset(
+    {("issue", "gate_status")}  # vocab-ok: retired name the live record still uses (migration.md)
+)
 
 # Tiers Neotoma assigns only to a verified signature.
 TRUSTED_ATTRIBUTION_TIERS: frozenset[str] = frozenset(
