@@ -397,9 +397,14 @@ guard that refuses to render rather than cutting a rule in half.
 - **Invalidated by:** a controlled hook emitting a known size and observed at the boundary, or a client
   release that documents the figure.
 - Sources: #1254 (a 16.3 KB output replaced by a pointer and a 2 KB preview at a compaction boundary);
-  PR #1268 (the secondary reports, a working budget of 8,000 characters, and a live render of the active
-  rule corpus measuring 12,633 characters on 2026-09-25, over that budget); the correction in PR #1255 that
-  session-start hooks do fire on resume and compaction.
+  PR #1268 (the secondary reports and a working budget of 8,000 characters; its first commit's live render of
+  the active rule corpus measured 12,633 characters, over that budget, before a same-PR follow-up added
+  tiered rendering — a re-render of the same live corpus against the tiered renderer measured tier B, about
+  5,093 characters, the full index reaching the session rather than the fail-open notice; a later follow-up
+  narrowed session scoping to the single session principal, which may change the row count, but no fresh live
+  measurement exists as of this PR's head — see #1268's PR body for the current figures and status.md's
+  entry on the rule-index hook for the head commit); the correction in PR #1255 that session-start hooks do
+  fire on resume and compaction.
 
 ### 3. Guaranteed-delivery channels and broader visibility
 

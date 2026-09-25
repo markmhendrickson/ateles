@@ -40,7 +40,8 @@ installer cannot disagree. It does not exist yet.
 ### Claude Code — target rung: bundle with a hook
 
 **What gets installed:** the Ateles MCP server (reach), the repository's skills and hooks (method,
-session-start context, guards), and — once it merges — the session-start rule index.
+session-start context, guards), and — once [#1268](https://github.com/markmhendrickson/ateles/pull/1268)
+merges — the session-start rule index.
 
 1. Register the server at user scope, pointing at the deployment checkout's launcher:
 

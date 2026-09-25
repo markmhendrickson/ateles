@@ -4346,11 +4346,18 @@ the design-versus-checkout accounting `harness_carriers.md` defers here.
   startup freshness check to the MCP server — is not in the checkout: neither `server.py` nor
   `run_ateles_mcp.sh` references `checkout_drift` or `checkout_identity`. A second host, or a reinstall,
   reintroduces the defect unless the install path sets the launcher.
-- **Rule index by session-start hook: in review, and over budget.** PR #1268 (open, review required) adds
-  the live renderer and the hook, wired at repository level only; user-level wiring is a manual step its
-  body describes. Its live measurement rendered 12,633 characters against its own 8,000-character budget,
-  so on merge the hook prints the one-line could-not-load notice until the corpus is trimmed or the cap is
-  measured higher (#1261, #1254). The operator-approved-only trust gate the design requires is ruled on the
+- **Rule index by session-start hook: in review, and re-measured since its first commit.** PR #1268 (open,
+  review required) adds the live renderer and the hook, wired at repository level only; user-level wiring is
+  a manual step its body describes. Its first commit's live measurement against real Neotoma prod rendered
+  12,633 characters against its own 8,000-character budget, over budget, which at that point meant the hook
+  would print the one-line could-not-load notice on merge. A same-PR follow-up then added tiered rendering
+  (tiers A, B, C), and a re-render of the same live corpus against the tiered renderer measured **tier B,
+  about 5,093 characters** — the full 50-rule index reaching sessions, not the fail-open notice. A later
+  follow-up in the same PR narrowed session scoping to the single session principal rather than the union of
+  every named agent, which may lower the rendered row count further, but **no fresh live measurement exists
+  at that head (34016a7)** — #1268's own PR body says so plainly rather than inventing a number. Treat the
+  12,633-char figure as the pre-tiering measurement, not the current behavior; see #1268's PR body for the
+  current figures (#1261, #1254). The operator-approved-only trust gate the design requires is ruled on the
   plan (#1270, `rule_trust_operator_approved_only`) and follows #1268; #1270 is open.
 - **Session-start context by hook: truncated.** The role-definition hook's output (about 16.3 KB) exceeds
   the harness cap and reaches the session as a 2 KB preview (#1254, open). The hook reads a static file from
