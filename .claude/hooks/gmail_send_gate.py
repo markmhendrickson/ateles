@@ -17,8 +17,10 @@ because the send is a side effect of an operation that reads as safe.
 This hook makes the failure structurally impossible rather than
 instruction-dependent. It blocks, at PreToolUse:
 
-  - `gws gmail users drafts update`  — the misfiring call; edit by building a
-    NEW draft instead (drafts create), which cannot deliver.
+  - `gws gmail users drafts update`  — the misfiring call. Operator ruling
+    2026-09-25: updating a staged draft in place (same id) is allowed, gated
+    on this same per-message override below — that per-command approval is
+    what makes the in-place edit safe, not rebuilding a new draft.
   - `gws gmail users drafts send`    — an explicit send, still operator-gated.
   - `gws gmail users messages send`  — likewise.
   - `gws gmail +send` / `+reply` / `+reply-all` / `+forward` — helper wrappers
