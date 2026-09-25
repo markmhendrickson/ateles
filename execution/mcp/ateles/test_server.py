@@ -1193,7 +1193,11 @@ class TestToolSchemas(unittest.TestCase):
     # Read-only swarm observability. resolve_checkpoint stays the ONLY mutating
     # tool: see the self-certification boundary note in server.py — a session
     # must not be able to advance its own gate.
-    OBSERVABILITY_TOOLS = {"get_gate_status", "list_pipeline_queue", "get_dispatch_health"}
+    OBSERVABILITY_TOOLS = {
+        "get_gate_status", "list_pipeline_queue", "get_dispatch_health",
+        # ateles#1275 slice 1: per-task timeline and change feed, read-only.
+        "get_task_timeline", "watch_swarm",
+    }
 
     def test_tools_defined(self):
         self.assertEqual(len(srv.TOOLS), len(self.ACTION_TOOLS | self.OBSERVABILITY_TOOLS))
@@ -1212,7 +1216,10 @@ class TestToolSchemas(unittest.TestCase):
         for name in self.OBSERVABILITY_TOOLS:
             fn = srv.TOOL_HANDLERS[name]
             chain = inspect.getsource(fn)
-            for impl in ("_get_gate_status", "_list_pipeline_queue", "_get_dispatch_health"):
+            for impl in (
+                "_get_gate_status", "_list_pipeline_queue", "_get_dispatch_health",
+                "_get_task_timeline", "_watch_swarm", "_watch_poll", "_watch_baseline",
+            ):
                 if impl in chain:
                     chain += inspect.getsource(getattr(srv, impl))
             self.assertNotIn("_correct(", chain, f"{name} must not write to Neotoma")
