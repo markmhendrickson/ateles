@@ -64,6 +64,10 @@ three SessionStart hooks that run in the same lifecycle event
 `reinject_working_method.py`), which each emit their own stdout against the
 same per-hook cap.
 
+Never follows a redirect: the renderer's transport refuses any 3xx, so the
+bearer token is only ever sent to the configured Neotoma host (a refused
+redirect is a transport failure and falls open like one).
+
 Never logs rule bodies — some `agent_policy` rows hold operator payment
 details (CLAUDE.md). Only the rendered index (which itself contains no rule
 bodies, only entity ids and one-line summaries) reaches stdout; anything

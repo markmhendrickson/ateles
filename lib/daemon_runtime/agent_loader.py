@@ -65,6 +65,13 @@ log = logging.getLogger(__name__)
 # every agent — the opposite of what global means.
 POLICY_SCOPES_REACHING_EVERY_AGENT = frozenset({"global", "swarm"})
 
+# The whole closed vocabulary `data_model.md` gives `agent_policy.scope`:
+# the two that reach every agent, plus `agent`, which reaches only the agent
+# its `agent_sub` names. Derived from the set above rather than restated, so
+# the two cannot drift. A reader that must refuse a scope value outside the
+# vocabulary (the session index, ateles#1268) tests membership here.
+POLICY_SCOPES = POLICY_SCOPES_REACHING_EVERY_AGENT | frozenset({"agent"})
+
 
 def policy_binds_agent(snap: dict, agent_sub: str) -> bool:
     """Whether one `agent_policy` row binds the agent named by `agent_sub`.

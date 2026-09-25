@@ -15,11 +15,13 @@ not merely to pass against current behaviour):
    the guard (raises `PolicyIndexError`) rather than returning a truncated
    string. Asserts the exception's message names the overflow, not a
    silently shortened index.
-3. `TestScopeFilterExcludesOtherAgent` — an `agent`-scoped row naming a
-   different agent than the session is evaluating for is excluded from
-   `render_skills`, while a `global`/`swarm` row and a same-agent row are
-   included. Exercises `_session_scope_ok`, which is built only from the
-   imported `policy_binds_agent` (never a second predicate).
+3. `TestScopeFilterExcludesOtherAgent` — driven through `render_skills`,
+   the path the hook runs: an `agent`-scoped row naming a different agent
+   than the session principal is withheld, a row whose `scope` is outside
+   the closed vocabulary is withheld whatever its `agent_sub`, and
+   `global`/`swarm` rows plus the principal's own rows are included.
+   `_session_scope_ok` is built only from the imported `policy_binds_agent`
+   and `POLICY_SCOPES` (never a second predicate).
 4. `TestUnreachableNeotomaFallsOpen` — `fetch_active_policy_rows` raising
    (the transport-failure path `session_rule_index.py` catches) is verified
    at the renderer boundary here; the hook-level "one-line notice + exit 0"
@@ -28,13 +30,24 @@ not merely to pass against current behaviour):
 
 from __future__ import annotations
 
+import http.server
+import itertools
 import json
+import random
+import re
+import threading
 import urllib.error
 
 import pytest
 
 import agent_loader
 import policy_skill_renderer as renderer
+
+
+# The session-principal contract, spelled literally so a test reads the same
+# against any revision of the renderer; `test_session_principal_matches_the_
+# mcp_servers` holds the renderer's constants equal to the MCP server's.
+_PRINCIPAL_ENV = "ATELES_SESSION_PRINCIPAL"
 
 
 def _row(
@@ -260,22 +273,90 @@ class TestScopeFilterExcludesOtherAgent:
         # broadcast to every session.
         assert "ent_agent_none" not in included_ids
 
-    def test_session_wide_render_includes_every_named_agent_scoped_row(self):
-        # A session is not one fixed agent — render_skills takes the UNION
-        # across every named agent, since a session may dispatch as any of
-        # them. This is what makes it a session index, not one agent's.
+    def test_agent_scoped_rows_render_only_for_the_session_principal(self, monkeypatch):
+        """Drives the SHIPPED path (render_skills -> _session_scope_ok) with
+        the principal taken from the environment, as the hook runs it. A row
+        scoped to the session principal is included; a row scoped to any
+        other agent is withheld. Red before ateles#1268 round 4: the check
+        compared a row's agent_sub with itself, so both rows were included.
+        """
+        monkeypatch.setenv(_PRINCIPAL_ENV, "turdus@ateles-swarm")
         rows = [
-            _row(
-                "ent_for_turdus", scope="agent", agent_sub="turdus@ateles-swarm",
-                applies_when="turdus doing something",
-            ),
-            _row(
-                "ent_for_lanius", scope="agent", agent_sub="lanius@ateles-swarm",
-                applies_when="lanius doing something",
-            ),
+            _row("ent_for_turdus", scope="agent", agent_sub="turdus@ateles-swarm",
+                 applies_when="turdus doing something"),
+            _row("ent_for_lanius", scope="agent", agent_sub="lanius@ateles-swarm",
+                 applies_when="lanius doing something"),
+            _row("ent_glob", scope="global", applies_when="doing X"),
         ]
         included_ids = {s.entity_id for s in renderer.render_skills(rows)}
-        assert included_ids == {"ent_for_turdus", "ent_for_lanius"}
+        assert included_ids == {"ent_for_turdus", "ent_glob"}
+
+    def test_default_principal_withholds_rows_scoped_to_other_agents(self, monkeypatch):
+        monkeypatch.delenv(_PRINCIPAL_ENV, raising=False)
+        rows = [
+            _row("ent_for_session", scope="agent",
+                 agent_sub="ateles@ateles-swarm", applies_when="a"),
+            _row("ent_for_lanius", scope="agent", agent_sub="lanius@ateles-swarm",
+                 applies_when="b"),
+        ]
+        included_ids = {s.entity_id for s in renderer.render_skills(rows)}
+        assert included_ids == {"ent_for_session"}
+
+    @pytest.mark.parametrize(
+        "scope", ["bogus-unrecognized-value", "", "  ", "Agents", "global-ish", "none"]
+    )
+    def test_scope_outside_the_closed_vocabulary_is_withheld(self, monkeypatch, scope):
+        """principles.md #5: an unreadable `scope` fails CLOSED, even when
+        `agent_sub` names exactly the session principal. Red before ateles#1268
+        round 4 for every non-empty agent_sub: the row was included."""
+        monkeypatch.setenv(_PRINCIPAL_ENV, "turdus@ateles-swarm")
+        row = _row("ent_badscope", scope=scope, agent_sub="turdus@ateles-swarm",
+                   applies_when="doing X", title="t")
+        assert renderer.render_skills([row]) == []
+        assert renderer._session_scope_ok(row) is False
+
+    def test_empty_principal_includes_no_agent_scoped_row(self, monkeypatch):
+        monkeypatch.setenv(_PRINCIPAL_ENV, "")
+        rows = [
+            _row("ent_a", scope="agent", agent_sub="turdus@ateles-swarm", applies_when="a"),
+            _row("ent_s", scope="swarm", applies_when="s"),
+        ]
+        included_ids = {s.entity_id for s in renderer.render_skills(rows)}
+        assert included_ids == {"ent_s"}
+
+    def test_scope_value_case_and_padding_are_normalized_not_refused(self, monkeypatch):
+        monkeypatch.setenv(_PRINCIPAL_ENV, "turdus@ateles-swarm")
+        rows = [
+            _row("ent_g", scope=" Global ", applies_when="g"),
+            _row("ent_a", scope="AGENT", agent_sub="turdus@ateles-swarm", applies_when="a"),
+        ]
+        included_ids = {s.entity_id for s in renderer.render_skills(rows)}
+        assert included_ids == {"ent_g", "ent_a"}
+
+    def test_scope_vocabulary_is_agent_loaders_closed_set(self):
+        assert renderer.POLICY_SCOPES is agent_loader.POLICY_SCOPES
+        assert agent_loader.POLICY_SCOPES == frozenset({"global", "swarm", "agent"})
+        assert agent_loader.POLICY_SCOPES_REACHING_EVERY_AGENT < agent_loader.POLICY_SCOPES
+
+    def test_session_principal_matches_the_mcp_servers(self):
+        """The index must scope to the same principal the MCP server's
+        session transport resolves rules for. Held equal by reading
+        server.py's `SESSION_PRINCIPAL = os.environ.get(<env>, <default>)`
+        as an AST, since importing the server pulls in its dependencies."""
+        import ast
+        from pathlib import Path
+
+        server = Path(__file__).resolve().parents[2] / "execution/mcp/ateles/server.py"
+        tree = ast.parse(server.read_text())
+        found = None
+        for node in tree.body:
+            if (
+                isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "SESSION_PRINCIPAL" for t in node.targets)
+            ):
+                call = node.value
+                found = (call.args[0].value, call.args[1].value)
+        assert found == (renderer.SESSION_PRINCIPAL_ENV, renderer.DEFAULT_SESSION_PRINCIPAL)
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +410,7 @@ class TestRetryOnTransientFailure:
                 raise renderer.urllib.error.URLError("connection reset")
             return _FakeResp()
 
-        monkeypatch.setattr(renderer.urllib.request, "urlopen", _urlopen)
+        monkeypatch.setattr(renderer, "_open", _urlopen)
         result = renderer._request("http://example.invalid/entities/query", {})
         assert result == good_payload
         assert calls["n"] == 2  # failed once, succeeded on retry
@@ -341,7 +422,7 @@ class TestRetryOnTransientFailure:
             calls["n"] += 1
             raise renderer.urllib.error.URLError("still down")
 
-        monkeypatch.setattr(renderer.urllib.request, "urlopen", _urlopen)
+        monkeypatch.setattr(renderer, "_open", _urlopen)
         with pytest.raises(renderer.urllib.error.URLError):
             renderer._request("http://example.invalid/entities/query", {}, retries=3)
         assert calls["n"] == 3
@@ -355,7 +436,7 @@ class TestRetryOnTransientFailure:
                 "http://x", 404, "not found", {}, None
             )
 
-        monkeypatch.setattr(renderer.urllib.request, "urlopen", _urlopen)
+        monkeypatch.setattr(renderer, "_open", _urlopen)
         with pytest.raises(renderer.urllib.error.HTTPError):
             renderer._request("http://example.invalid/entities/query", {}, retries=3)
         assert calls["n"] == 1  # no retry on a definitive client error
@@ -593,3 +674,159 @@ class TestMissingAppliesWhenNeverPromotes:
     def test_only_exact_always_promotes_to_preamble(self):
         assert renderer.to_skill(_row("ent_a", applies_when="Always")).is_preamble is True
         assert renderer.to_skill(_row("ent_b", applies_when="almost always")).is_preamble is False
+
+
+# ---------------------------------------------------------------------------
+# Sanitizer convergence (Falco, ateles#1268 round 3): a single deletion pass
+# lets nested or interleaved input rebuild the sequence it deleted. The
+# sanitizer must reach a fixed point. Inputs are GENERATED — every forbidden
+# token spliced into every split point of every other, plus seeded random
+# strings over the characters those tokens are made of — so the suite covers
+# the class rather than one hand-built payload.
+# ---------------------------------------------------------------------------
+
+_FORBIDDEN_TOKENS = ["<!--", "-->", "tier: B", "tier:A", "TIER : c", "## ", "- "]
+_TIER_RE = re.compile(r"tier\s*:\s*[A-Za-z]", re.IGNORECASE)
+_LEADING_STRUCTURE_RE = re.compile(r"^\s*(?:[#>*`-]|\d+\.)")
+
+
+def _splice(outer: str, inner: str) -> list[str]:
+    return [outer[:i] + inner + outer[i:] for i in range(1, len(outer))]
+
+
+def _nested_inputs() -> list[str]:
+    out: list[str] = []
+    toks = _FORBIDDEN_TOKENS
+    for outer, inner in itertools.product(toks, repeat=2):
+        for once in _splice(outer, inner):
+            out.append(once)
+            out.append(f"doing X {once} then Y")
+            out.append(f"{once}## heading")
+            for inner2 in toks:  # two levels deep
+                out.extend(_splice(once, inner2))
+    rng = random.Random(1268)
+    alphabet = list("<!->tierTIER: ABc#*`>1.\n\t ") + ["<!--", "-->", "tier:"]
+    for _ in range(4000):
+        out.append("".join(rng.choice(alphabet) for _ in range(rng.randint(1, 40))))
+    return out
+
+
+_NESTED_INPUTS = _nested_inputs()
+
+
+class TestSanitizerConverges:
+    @pytest.mark.parametrize("max_len", [renderer._APPLIES_WHEN_MAX, 12])
+    def test_sanitize_is_idempotent_over_nested_and_interleaved_input(self, max_len):
+        failures = [
+            x for x in _NESTED_INPUTS
+            if renderer._sanitize_field(renderer._sanitize_field(x, max_len), max_len)
+            != renderer._sanitize_field(x, max_len)
+        ]
+        assert failures == [], f"{len(failures)} non-idempotent inputs, e.g. {failures[:3]!r}"
+
+    def test_no_output_contains_a_comment_marker_or_tier_tag(self):
+        failures = []
+        for x in _NESTED_INPUTS:
+            y = renderer._sanitize_field(x, 10_000)
+            if "<!--" in y or "-->" in y or _TIER_RE.search(y):
+                failures.append(x)
+        assert failures == [], f"{len(failures)} inputs rebuilt a forbidden sequence"
+
+    def test_no_output_opens_with_markdown_structure(self):
+        failures = [
+            x for x in _NESTED_INPUTS
+            if _LEADING_STRUCTURE_RE.match(renderer._sanitize_field(x, 10_000))
+        ]
+        assert failures == [], f"{len(failures)} inputs left leading structure"
+
+    def test_rendered_index_carries_exactly_one_tier_marker(self):
+        rows = [
+            _row(f"ent_n{i}", applies_when=x, title=x)
+            for i, x in enumerate(_NESTED_INPUTS[:400])
+        ]
+        text = renderer.render_index_text(renderer.render_skills(rows), budget_chars=10**7)
+        assert len(_TIER_RE.findall(text)) == 1
+        assert text.count("<!--") == 1 and text.count("-->") == 1
+        assert text.rstrip().endswith("-->")
+
+
+class TestPreambleAndIdHardening:
+    @pytest.mark.parametrize(
+        "raw", ["<!---->always", "## always", "always<!-- -->", "- always", "tier: Xalways"]
+    )
+    def test_always_hidden_in_markup_does_not_promote(self, raw):
+        """Preamble is decided on the raw value, not the sanitized one."""
+        skill = renderer.to_skill(_row("ent_p", applies_when=raw, title="t"))
+        assert skill is not None
+        assert skill.is_preamble is False
+
+    def test_plain_always_with_whitespace_still_promotes(self):
+        assert renderer.to_skill(_row("ent_p", applies_when="  Always \n")).is_preamble is True
+
+    def test_entity_id_is_cut_to_the_id_charset(self):
+        skill = renderer.to_skill(
+            _row("ent_abc] [ent_decoy <!-- x", applies_when="doing X", title="t")
+        )
+        assert skill is not None
+        assert skill.entity_id == "ent_abcent_decoyx"
+
+
+# ---------------------------------------------------------------------------
+# Redirects are refused, so the bearer token never leaves the configured host
+# (Falco, ateles#1268 round 3, non-blocking). Real sockets on two ports: the
+# "Neotoma" answers 302 to a second server that records what it received.
+# ---------------------------------------------------------------------------
+
+
+def _serve(handler_cls):
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler_cls)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+class TestRedirectIsRefused:
+    def test_a_redirect_is_not_followed_and_the_token_is_not_forwarded(self, monkeypatch):
+        seen: list[dict] = []
+
+        class Sink(http.server.BaseHTTPRequestHandler):
+            def _answer(self):
+                seen.append(dict(self.headers))
+                body = b'{"entities": []}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            do_GET = do_POST = _answer  # noqa: N815
+
+            def log_message(self, *a):
+                pass
+
+        sink, sink_url = _serve(Sink)
+
+        class Redirector(http.server.BaseHTTPRequestHandler):
+            calls = 0
+
+            def do_POST(self):  # noqa: N802
+                type(self).calls += 1
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                self.send_response(302)
+                self.send_header("Location", f"{sink_url}/entities/query")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        origin, origin_url = _serve(Redirector)
+        monkeypatch.setattr(renderer, "NEOTOMA_BEARER_TOKEN", "fake-token-for-test")
+        try:
+            with pytest.raises(urllib.error.HTTPError) as info:
+                renderer.fetch_active_policy_rows(base_url=origin_url, timeout=5)
+        finally:
+            origin.shutdown()
+            sink.shutdown()
+        assert info.value.code == 302
+        assert seen == []  # the other host was never contacted
+        assert Redirector.calls == 1  # a refused redirect is not retried

@@ -59,13 +59,15 @@ so a session (and a test) can see which one ran without re-deriving it:
 
 Scope filter: `policy_binds_agent` (`lib/daemon_runtime/agent_loader.py`) is
 imported, never re-implemented — CLAUDE.md's "extend the mechanism that
-already generalizes" rule, and the specific mechanism ateles#1118 fixed.
-Reused for the SESSION case (not one dispatched agent) by evaluating it for
-`scope in {global, swarm}` OR an explicit `agent_sub` naming the session
-principal — the same row-level test the function already implements; a
-session-wide index takes the union across all agents' visibility instead of
-one agent's, so it is the `global`/`swarm` rows plus every `agent`-scoped row
-(a session may act as any agent depending on what it dispatches into).
+already generalizes" rule, and the specific mechanism ateles#1118 fixed. A
+session runs as ONE agent, the session principal (`ATELES_SESSION_PRINCIPAL`,
+default the operator's interactive agent — the same principal
+`execution/mcp/ateles/server.py` resolves rules for on the other session
+transport). The index holds the rows that bind that principal: every
+`global`/`swarm` row, plus an `agent`-scoped row only when its `agent_sub`
+names the principal. A row scoped to a different agent is withheld; a row
+whose `scope` is absent or outside the closed vocabulary
+(`agent_loader.POLICY_SCOPES`) is withheld too. See `_session_scope_ok`.
 
 `applies_when` is a newer field than the ones `docs/foundation/data_model.md`
 already documents for `agent_policy` (`rule`, `rule_kind`, `scope`,
@@ -73,8 +75,9 @@ already documents for `agent_policy` (`rule`, `rule_kind`, `scope`,
 it as the target of the skill migration's predicate collapse. Rows written
 before that field existed have none.
 
-THE RULE, STATED ONCE: a row is preamble if and only if `applies_when`
-case-insensitively equals "always". Every other case — a different value, or
+THE RULE, STATED ONCE: a row is preamble if and only if `applies_when`,
+whitespace-stripped and before any sanitizing, case-insensitively equals
+"always". Every other case — a different value, or
 the field absent entirely — is conditional. A conditional row with no
 `applies_when` renders its trigger as the literal placeholder
 "(trigger not recorded)" and is never promoted to the preamble on the
@@ -105,12 +108,14 @@ if str(_THIS_DIR) not in sys.path:
 try:  # package import (normal runtime) with script-import fallback
     from .agent_loader import (  # type: ignore
         POLICY_QUERY_BODY,
+        POLICY_SCOPES,
         policy_binds_agent,
         unwrap_policy_entities,
     )
 except ImportError:  # pragma: no cover
     from agent_loader import (  # type: ignore
         POLICY_QUERY_BODY,
+        POLICY_SCOPES,
         policy_binds_agent,
         unwrap_policy_entities,
     )
@@ -119,6 +124,24 @@ NEOTOMA_BASE_URL = os.environ.get(
     "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
 )
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
+
+# Which agent an interactive session IS, for scoping `agent`-scoped rows.
+# Not a new identity: this is the session principal the other session-side
+# transport already resolves agent_policy for — `execution/mcp/ateles/
+# server.py`'s `SESSION_PRINCIPAL`, same env var, same default (the
+# operator's interactive agent). Held equal to server.py's by
+# `test_session_principal_matches_the_mcp_servers` (an AST read, since
+# importing the MCP server pulls in its whole dependency set).
+SESSION_PRINCIPAL_ENV = "ATELES_SESSION_PRINCIPAL"
+DEFAULT_SESSION_PRINCIPAL = "ateles@ateles-swarm"
+
+
+def session_principal() -> str:
+    """The `agent_sub` this session evaluates `agent`-scoped rows against.
+    Read at call time, not import time, so the hook and tests see the
+    environment they actually run in. An explicitly empty value binds no
+    `agent`-scoped row (`policy_binds_agent` never matches an empty sub)."""
+    return os.environ.get(SESSION_PRINCIPAL_ENV, DEFAULT_SESSION_PRINCIPAL).strip()
 
 # The one literal spelling that promotes a rule into the preamble. Anything
 # else — including an absent field — is a conditional rule.
@@ -206,26 +229,46 @@ _HTML_COMMENT_MARKERS = re.compile(r"<!--|-->")
 _TIER_MARKER_PATTERN = re.compile(r"tier\s*:\s*[A-Za-z]", re.IGNORECASE)
 
 
-def _sanitize_field(raw: str, max_len: int) -> str:
-    """Collapse `raw` to one inert line, capped at `max_len` chars.
-
-    Order matters: line-breaking characters are collapsed to spaces FIRST
-    (so a multi-line payload cannot smuggle a heading onto its own line),
-    THEN leading markdown structure is stripped (now that everything is one
-    line, "leading" is unambiguous), THEN the HTML-comment and tier-marker
-    sequences are neutralized (a row could otherwise forge `<!-- tier: X
-    -->` verbatim), THEN whitespace runs collapse and the result is
-    length-capped with an ellipsis. Returns "" if nothing survives — the
-    caller skips the row and counts it, per Falco's fix: "rejected if it's
-    empty after sanitising."
-    """
-    if not raw:
-        return ""
-    text = _LINE_BREAKING_CHARS.sub(" ", raw)
+def _sanitize_pass(text: str) -> str:
+    """One pass of the neutralizing steps, in order: line-breaking/control
+    characters to spaces, leading markdown structure stripped, HTML-comment
+    and tier-marker sequences deleted, whitespace collapsed and trimmed."""
+    text = _LINE_BREAKING_CHARS.sub(" ", text)
     text = _LEADING_MARKDOWN.sub("", text)
     text = _HTML_COMMENT_MARKERS.sub("", text)
     text = _TIER_MARKER_PATTERN.sub("", text)
-    text = _WHITESPACE_RUN.sub(" ", text).strip()
+    return _WHITESPACE_RUN.sub(" ", text).strip()
+
+
+def _sanitize_field(raw: str, max_len: int) -> str:
+    """Collapse `raw` to one inert line, capped at `max_len` chars.
+
+    Runs `_sanitize_pass` REPEATEDLY until the text stops changing. One pass
+    is not enough: a deletion can join the characters on either side of it
+    into a new forbidden sequence (a comment marker or tier tag nested inside
+    another rebuilds the outer one), and deleting a leading comment can
+    expose a leading `##` that the markdown strip already ran past (Falco,
+    ateles#1268 round 3). At the fixed point none of the forbidden sequences
+    is present and there is no leading markdown, so the result is idempotent:
+    `_sanitize_field(_sanitize_field(x, n), n) == _sanitize_field(x, n)`.
+    Every pass that changes the text either shortens it or only swaps
+    characters for spaces once, so the loop terminates; the iteration cap is
+    a backstop, not the mechanism.
+
+    Length is capped AFTER the fixed point, with an ellipsis. Cutting a clean
+    string cannot create a forbidden sequence (every substring of a clean
+    string is clean), so the cap preserves both properties. Returns "" if
+    nothing survives — the caller skips the row and counts it, per Falco's
+    round-2 fix: "rejected if it's empty after sanitising."
+    """
+    if not raw:
+        return ""
+    text = raw
+    for _ in range(len(raw) + 2):
+        cleaned = _sanitize_pass(text)
+        if cleaned == text:
+            break
+        text = cleaned
     if not text:
         return ""
     if len(text) > max_len:
@@ -233,8 +276,36 @@ def _sanitize_field(raw: str, max_len: int) -> str:
     return text
 
 
+_ENTITY_ID_DISALLOWED = re.compile(r"[^A-Za-z0-9_]")
+
 _APPLIES_WHEN_MAX = 160
 _IMPERATIVE_MAX = 120
+
+
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect. `urllib`'s default handler follows a 3xx on a
+    POST and re-sends the request headers, `Authorization` included, to
+    whatever host the `Location` names (Falco, ateles#1268 round 3). The
+    bearer token must never leave the configured Neotoma host, and Neotoma's
+    query route has no legitimate reason to redirect, so a redirect is an
+    error here — the same posture as `agent_loader`'s httpx transport, which
+    does not follow redirects."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(
+            req.full_url, code,
+            f"redirect refused (would have gone to another location): {msg}",
+            headers, fp,
+        )
+
+
+_OPENER = urllib.request.build_opener(_RefuseRedirect)
+
+
+def _open(req: urllib.request.Request, timeout: float):
+    """The one place a request leaves this module: through the opener that
+    refuses redirects, never the global `urllib.request.urlopen`."""
+    return _OPENER.open(req, timeout=timeout)
 
 
 def _request(
@@ -251,9 +322,12 @@ def _request(
     connection reset, timeout, or 5xx-shaped `HTTPError`) before raising —
     a single flaky attempt must not read as "Neotoma is unreachable" and
     fall the whole session open when a second attempt would have succeeded.
-    Does NOT retry a definitive client-side failure (4xx `HTTPError`,
-    malformed JSON) — retrying those wastes the hook's time budget without
-    any chance of a different outcome.
+    Does NOT retry a definitive failure (a refused 3xx redirect, a 4xx
+    `HTTPError`, malformed JSON) — retrying those wastes the hook's time
+    budget without any chance of a different outcome.
+
+    Never follows a redirect (`_RefuseRedirect`), so the `Authorization`
+    header is only ever sent to `url`'s own host.
     """
     headers = {"Content-Type": "application/json"}
     if NEOTOMA_BEARER_TOKEN:
@@ -264,11 +338,11 @@ def _request(
             url, data=json.dumps(body).encode(), headers=headers, method="POST"
         )
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with _open(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as exc:
-            if 400 <= exc.code < 500:
-                raise  # client error — retrying changes nothing
+            if exc.code < 500:
+                raise  # refused redirect or client error — retrying changes nothing
             last_exc = exc
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             last_exc = exc
@@ -300,24 +374,37 @@ def fetch_active_policy_rows(
     return unwrap_policy_entities(data)
 
 
-def _session_scope_ok(snap: dict) -> bool:
-    """Session-wide visibility test, built ONLY from `policy_binds_agent` —
-    never a second predicate (CLAUDE.md: "reuse `policy_binds_agent`, do not
-    write a second predicate"). A session is not one fixed agent, so it takes
-    the union `policy_binds_agent` already computes per-agent: global/swarm
-    rows bind unconditionally (any `agent_sub` value proves that), and an
-    `agent`-scoped row binds because a session may dispatch as that agent.
+def _session_scope_ok(snap: dict, principal: str | None = None) -> bool:
+    """Whether one row belongs in THIS session's index.
+
+    A session runs as one agent — the session principal (`session_principal()`,
+    default the operator's interactive agent) — so a row is in scope exactly
+    when it binds that agent, decided by the daemon dispatcher's own
+    predicate, `policy_binds_agent(snap, principal)`, with the principal
+    supplied from OUTSIDE the row. (An earlier revision passed the row's own
+    `agent_sub` back in as the identity, which compared the field with itself
+    and admitted every row that had one — ateles#1268 rounds 1 and 3.)
+
+    Case by case:
+      - `scope` absent, empty, or outside the closed vocabulary
+        (`agent_loader.POLICY_SCOPES`: global, swarm, agent) -> withheld,
+        whatever `agent_sub` says. `scope` carries the reach of a rule, so an
+        unreadable value fails CLOSED (principles.md #5). This is stricter than
+        `policy_binds_agent` alone, which would still bind such a row to an
+        exactly-matching `agent_sub`; the session index refuses it outright.
+      - `global` / `swarm` -> included.
+      - `agent` -> included only when `agent_sub` equals the session
+        principal. A row scoped to any other agent is withheld, as is one
+        with no `agent_sub`. If the principal is set to an empty string, no
+        `agent`-scoped row is included.
+
+    `principal=None` reads `session_principal()`; tests pass one explicitly.
     """
     scope = str(snap.get("scope") or "").strip().lower()
-    if scope in ("global", "swarm"):
-        return policy_binds_agent(snap, "")  # agent_sub irrelevant at this scope
-    agent_sub = str(snap.get("agent_sub") or "").strip()
-    if not agent_sub:
-        # An `agent`-scoped row with no `agent_sub` is refused at the write
-        # per data_model.md — but a live row of unknown scope must still fail
-        # CLOSED (principles.md #5) rather than broadcast to every session.
+    if scope not in POLICY_SCOPES:
         return False
-    return policy_binds_agent(snap, agent_sub)
+    sub = session_principal() if principal is None else principal.strip()
+    return policy_binds_agent(snap, sub)
 
 
 def to_skill(snap: dict) -> PolicySkill | None:
@@ -333,9 +420,10 @@ def to_skill(snap: dict) -> PolicySkill | None:
     is omitted (renders tier-B style, trigger + id only) when no title is
     present, rather than falling back to any rule-derived text.
 
-    `entity_id` and `applies_when` are both sanitized before use, same as
-    the imperative — every row-derived field is untrusted (Falco's finding
-    applies to the whole row, not only the imperative). `body` still carries
+    `applies_when` is sanitized before use, same as the imperative, and
+    `entity_id` is cut to the id charset — every row-derived field is
+    untrusted (Falco's finding applies to the whole row, not only the
+    imperative). `body` still carries
     the raw `rule` text for the FUTURE MCP Skills-extension transport (an
     agent that explicitly fetches a rule by id gets the real text, which is
     fine — that path is not the SessionStart stdout stream this finding is
@@ -345,13 +433,21 @@ def to_skill(snap: dict) -> PolicySkill | None:
     `.entity_id`.
     """
     raw_entity_id = str(snap.get("_entity_id") or snap.get("entity_id") or "")
-    entity_id = _sanitize_field(raw_entity_id, max_len=64)
+    # The server assigns entity ids from a fixed charset; nothing outside it
+    # (spaces, brackets, markup) can be legitimate, so it is dropped rather
+    # than sanitized (Falco, ateles#1268 round 3).
+    entity_id = _ENTITY_ID_DISALLOWED.sub("", raw_entity_id)[:64]
     if not entity_id:
         return None  # an id we cannot safely print is a row we cannot cite
 
     raw_applies_when = str(snap.get("applies_when") or "")
     applies_when = _sanitize_field(raw_applies_when, max_len=_APPLIES_WHEN_MAX)
-    is_preamble = applies_when.lower() == _ALWAYS
+    # Preamble is decided on the RAW value, whitespace-stripped — never on
+    # the sanitized one. Sanitizing deletes markup, so "always" wrapped in a
+    # comment or a heading marker would otherwise promote a row to
+    # always-applies: the broader reading on the field that carries the
+    # safety meaning (principles.md #5; Falco, ateles#1268 round 3).
+    is_preamble = raw_applies_when.strip().lower() == _ALWAYS
 
     raw_title = str(snap.get("title") or "")
     imperative = _sanitize_field(raw_title, max_len=_IMPERATIVE_MAX)
@@ -387,8 +483,13 @@ def to_skill(snap: dict) -> PolicySkill | None:
     )
 
 
-def render_skills(rows: list[dict]) -> list[PolicySkill]:
+def render_skills(
+    rows: list[dict], principal: str | None = None
+) -> list[PolicySkill]:
     """Session-scoped rows, projected to PolicySkill, preamble first.
+
+    Scoping is `_session_scope_ok(row, principal)`; `principal=None` means
+    the session principal from the environment (see `session_principal`).
 
     Rows that sanitize to nothing renderable are SKIPPED, not raised —
     Falco's fix says "skip the row and count it," and one malformed or
@@ -396,7 +497,7 @@ def render_skills(rows: list[dict]) -> list[PolicySkill]:
     logged at WARNING so a real data problem (not just an attack) is still
     visible.
     """
-    scoped = [r for r in rows if _session_scope_ok(r)]
+    scoped = [r for r in rows if _session_scope_ok(r, principal)]
     skills: list[PolicySkill] = []
     skipped = 0
     for r in scoped:

@@ -23,6 +23,8 @@ Cases:
      `Path(__file__)`, never from cwd or CLAUDE_PROJECT_DIR.
   3. Unreachable Neotoma (NEOTOMA_BASE_URL pointed at a closed port) — one
      stderr line, stdout carries the fail-open notice, exit 0.
+  3b. A 302 from Neotoma to another host is refused: the other host never
+      receives a request (so never the bearer token), and the hook falls open.
   4. Preamble-first ordering survives the actual subprocess/JSON round trip.
 """
 from __future__ import annotations
@@ -187,6 +189,65 @@ class TestUnreachableNeotomaFallsOpen:
         result = _run(REPO_ROOT, base_url=closed_port_url)
         assert "operator" not in result.stdout.lower()
         assert "payment" not in result.stdout.lower()
+
+
+# ---------------------------------------------------------------------------
+# 3b. A redirect is refused, so the bearer token never reaches another host
+#     (Falco, ateles#1268 round 3). The fake Neotoma answers 302 pointing at
+#     a second server on another port, which records any request it gets.
+# ---------------------------------------------------------------------------
+class TestRedirectIsRefusedOverSubprocess:
+    def test_bearer_token_never_follows_a_redirect_to_another_host(self):
+        seen: list[dict] = []
+
+        class Sink(http.server.BaseHTTPRequestHandler):
+            def _answer(self):
+                seen.append(dict(self.headers))
+                body = json.dumps({"entities": [_row("ent_from_sink", applies_when="x")]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            do_GET = do_POST = _answer  # noqa: N815
+
+            def log_message(self, *a):  # noqa: A003
+                pass
+
+        sink = http.server.HTTPServer(("127.0.0.1", 0), Sink)
+        sink_url = f"http://127.0.0.1:{sink.server_address[1]}"
+
+        class Redirector(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                self.send_response(302)
+                self.send_header("Location", f"{sink_url}/entities/query")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *a):  # noqa: A003
+                pass
+
+        origin = http.server.HTTPServer(("127.0.0.1", 0), Redirector)
+        threads = [
+            threading.Thread(target=srv.serve_forever, daemon=True) for srv in (sink, origin)
+        ]
+        for t in threads:
+            t.start()
+        try:
+            result = _run(
+                REPO_ROOT,
+                base_url=f"http://127.0.0.1:{origin.server_address[1]}",
+                extra_env={"NEOTOMA_BEARER_TOKEN": "fake-token-for-test"},
+            )
+        finally:
+            origin.shutdown()
+            sink.shutdown()
+        assert result.returncode == 0
+        assert seen == [], "the hook followed the redirect to another host"
+        assert "ent_from_sink" not in result.stdout
+        assert "could not be loaded" in result.stdout  # fail-open notice
+        assert "fake-token-for-test" not in result.stdout + result.stderr
 
 
 # ---------------------------------------------------------------------------
