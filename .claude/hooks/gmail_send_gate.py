@@ -17,8 +17,10 @@ because the send is a side effect of an operation that reads as safe.
 This hook makes the failure structurally impossible rather than
 instruction-dependent. It blocks, at PreToolUse:
 
-  - `gws gmail users drafts update`  — the misfiring call; edit by building a
-    NEW draft instead (drafts create), which cannot deliver.
+  - `gws gmail users drafts update`  — the misfiring call. Operator ruling
+    2026-09-25: updating a staged draft in place (same id) is allowed, gated
+    on this same per-message override below — that per-command approval is
+    what makes the in-place edit safe, not rebuilding a new draft.
   - `gws gmail users drafts send`    — an explicit send, still operator-gated.
   - `gws gmail users messages send`  — likewise.
   - `gws gmail +send` / `+reply` / `+reply-all` / `+forward` — helper wrappers
@@ -67,9 +69,10 @@ SENDING_PATTERNS = [
         re.compile(r"\bgws\b.*\bgmail\b.*\busers\b.*\bdrafts\b.*\bupdate\b"),
         "drafts update",
         "`drafts update` can CONSUME the draft and send it — this is the call that "
-        "delivered an unapproved reply on 2026-07-31. To edit a staged draft, build a "
-        "NEW draft with `drafts create` (optionally deleting the old one afterwards); "
-        "create cannot deliver.",
+        "delivered an unapproved reply on 2026-07-31. Operator ruling 2026-09-25: "
+        "updating a staged draft in place (same id) is allowed once the operator has "
+        "approved THIS message — re-run with the override prefixed inline, exactly as "
+        "below. An exported/ambient override does not count.",
     ),
     (
         re.compile(r"\bgws\b.*\bgmail\b.*\busers\b.*\bdrafts\b.*\bsend\b"),
