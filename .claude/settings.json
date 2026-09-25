@@ -49,6 +49,15 @@
             "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/reinject_working_method.py\""
           }
         ]
+      },
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/session_rule_index.py\""
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
