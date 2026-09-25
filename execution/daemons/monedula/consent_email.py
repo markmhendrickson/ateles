@@ -34,6 +34,7 @@ from lib.approval.email_channel import (
     read_replies_with_status,
     send_request,
     swarm_mailbox_configured,
+    swarm_mailbox_problems,
 )
 from lib.approval.tokens import parse_verdict, subject_marker, token_for
 
@@ -50,11 +51,17 @@ UNAUTH_DEDUPE_NAME = ".monedula_consent_unauthenticated.json"
 # own self-sent replies never carry. Held with this reason instead of sending
 # a request nobody can answer.
 REASON_NEEDS_SWARM_MAILBOX = "consent_email_needs_swarm_mailbox"
-NEEDS_SWARM_MAILBOX_HINT = (
-    "email consent needs a separate swarm mailbox; see ateles#1221 "
-    "(set ATELES_SWARM_EMAIL and ATELES_SWARM_GWS_CONFIG_DIR to the swarm's "
-    "own mailbox). No consent request was sent; payments held"
-)
+def needs_swarm_mailbox_hint() -> str:
+    """Recovery text naming exactly which swarm-mailbox variable(s) to fix."""
+    problems = swarm_mailbox_problems() or [
+        "ATELES_SWARM_EMAIL and ATELES_SWARM_GWS_CONFIG_DIR must name the "
+        "swarm's own mailbox"
+    ]
+    return (
+        "email consent needs a separate swarm mailbox; see ateles#1221. "
+        + "; ".join(problems)
+        + ". No consent request was sent; payments held"
+    )
 
 # A reply from the operator's address that could not be authenticated.
 # Distinct from a non-operator sender: it may be a genuine reply.
@@ -683,11 +690,11 @@ def unauthenticated_reply_message(payment_date: str) -> str:
         f"monedula: a reply to the payment consent request for {payment_date} "
         "came from your address but could not be authenticated, so it was NOT "
         "accepted and no payment was made. Payments stay held. "
-        "Most likely the request was sent from, and your reply read in, the "
-        "same mailbox; email consent needs a separate swarm mailbox (see "
-        "ateles#1221 — ATELES_SWARM_EMAIL and ATELES_SWARM_GWS_CONFIG_DIR). "
-        "Once that is set up, reply again to the current consent request from "
-        "your own mailbox."
+        "Check that you replied from your own mailbox, that "
+        "ATELES_SWARM_GWS_CONFIG_DIR is signed in as the swarm's mailbox "
+        "rather than yours, and that ATELES_MAIL_AUTHSERV_ID matches the "
+        "swarm mailbox's provider. Then reply again to the current consent "
+        "request."
     )
 
 

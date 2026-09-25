@@ -1169,7 +1169,7 @@ def test_unauthenticated_operator_reply_notifies_once_per_request_and_holds(
     msg, key = notices[0]
     assert "could not be authenticated" in msg
     assert "no payment was made" in msg
-    assert "ateles#1221" in msg
+    assert "ATELES_SWARM_GWS_CONFIG_DIR" in msg
     assert "operator@example.com" not in msg and "60" not in msg
     assert key.startswith("monedula:consent_reply_unauthenticated:")
 
@@ -1289,3 +1289,131 @@ def test_correction_email_quotes_line_says_nothing_paid_and_gives_per_item_forms
         [(cal, [{}]), (one, [{}])], "2026-09-22", state_path=tmp_path / "m.json"
     )
     assert len([s for s in sends if "correction" in s[0]]) == 1
+
+
+# ── Swarm mailbox routing (ateles#1221 consent half, folded into PR #1202) ───
+
+
+def test_calendar_read_keeps_the_operator_default_gws_config(monkeypatch, tmp_path):
+    """Only consent runs as the swarm mailbox; the calendar is the operator's."""
+    import os as _os
+    import subprocess as _sp
+
+    swarm_dir = _os.environ["ATELES_SWARM_GWS_CONFIG_DIR"]
+    monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", raising=False)
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/gws")
+    seen: list = []
+
+    def fake_run(cmd, **kw):
+        seen.append((list(cmd), kw.get("env")))
+        return _sp.CompletedProcess(cmd, 0, stdout='{"items": []}', stderr="")
+
+    monkeypatch.setattr(monedula.subprocess, "run", fake_run)
+    assert monedula.fetch_yesterday_events() == []
+    (argv, env), = seen
+    assert argv[1:4] == ["calendar", "events", "list"]
+    assert (env or {}).get("GOOGLE_WORKSPACE_CLI_CONFIG_DIR") != swarm_dir
+    assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in (env or {})
+
+
+def test_consent_round_trip_through_the_swarm_mailbox_pays_once(monkeypatch, tmp_path):
+    """Effect test at the gws subprocess boundary: the request goes From the
+    swarm To the operator as the swarm mailbox; the operator's authenticated
+    reply arrives in the swarm mailbox; that reply is what pays — once."""
+    import json as _j
+    import os as _os
+    import subprocess as _sp
+
+    swarm_dir = _os.environ["ATELES_SWARM_GWS_CONFIG_DIR"]
+    _email_env(monkeypatch)
+    h = _Handler("therapy", label="Studio Example", amount=60, calendar=True)
+    match = {"trigger": "calendar", "handler": "therapy"}
+    # Calendar-gated: triggers only while yesterday's events are fetched.
+    h._match_fn = lambda events: [match] if events else []
+    _install(monkeypatch, [h], tmp_path)
+    _quiet_main(monkeypatch)
+    # Resolve only gws, so nothing else on the host (activity reporter) runs.
+    monkeypatch.setattr(
+        _ec.shutil, "which", lambda name: "/bin/gws" if name == "gws" else None
+    )
+
+    calls: list = []
+    sent_subjects: list = []
+    auth = ("mx.google.com; dkim=pass header.i=@example.com header.s=s; "
+            "dmarc=pass (p=NONE) header.from=example.com")
+
+    def fake_run(cmd, **kw):
+        calls.append((list(cmd), kw.get("env")))
+        args = list(cmd[1:])
+        out: object = {}
+        if args[:2] == ["gmail", "+" + "send"]:
+            sent_subjects.append(args[args.index("--subject") + 1])
+        elif "+triage" in args:
+            out = {"messages": [
+                {"id": "r1", "subject": f"RE: {s}", "from": "Op <operator@example.com>"}
+                for s in sent_subjects
+            ]}
+        elif args[:4] == ["gmail", "users", "messages", "get"]:
+            out = {"id": "r1", "payload": {"headers": [
+                {"name": "Authentication-Results", "value": auth}]}}
+        elif "+read" in args:
+            out = {"body_text": "ATTENDED"}
+        return _sp.CompletedProcess(cmd, 0, stdout=_j.dumps(out), stderr="")
+
+    monkeypatch.setattr(_ec.subprocess, "run", fake_run)
+
+    for _ in range(3):
+        monedula.main()
+
+    assert h.execute_calls == [match]
+    sends = [(a, e) for a, e in calls if a[1:3] == ["gmail", "+" + "send"]]
+    assert len(sends) == 1
+    argv, env = sends[0]
+    assert argv[argv.index("--from") + 1] == "swarm@example.net"
+    assert argv[argv.index("--to") + 1] == "operator@example.com"
+    assert calls, "consent made gws calls"
+    assert all(e["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == swarm_dir for _, e in calls)
+
+
+def test_unauthenticated_reply_in_swarm_mailbox_does_not_pay(monkeypatch, tmp_path):
+    import json as _j
+    import subprocess as _sp
+
+    _email_env(monkeypatch)
+    h = _Handler("therapy", label="Studio Example", amount=60, calendar=True)
+    _install(monkeypatch, [h], tmp_path)
+    _quiet_main(monkeypatch)
+    # Resolve only gws, so nothing else on the host (activity reporter) runs.
+    monkeypatch.setattr(
+        _ec.shutil, "which", lambda name: "/bin/gws" if name == "gws" else None
+    )
+    sent: list = []
+
+    def fake_run(cmd, **kw):
+        args = list(cmd[1:])
+        out: object = {}
+        if args[:2] == ["gmail", "+" + "send"]:
+            sent.append(args[args.index("--subject") + 1])
+        elif "+triage" in args:
+            out = {"messages": [{"id": "r1", "subject": f"RE: {s}",
+                                 "from": "operator@example.com"} for s in sent]}
+        elif args[:4] == ["gmail", "users", "messages", "get"]:
+            out = {"id": "r1", "payload": {"headers": []}}
+        elif "+read" in args:
+            out = {"body_text": "ATTENDED"}
+        return _sp.CompletedProcess(cmd, 0, stdout=_j.dumps(out), stderr="")
+
+    monkeypatch.setattr(_ec.subprocess, "run", fake_run)
+    for _ in range(2):
+        monedula.main()
+    assert h.execute_calls == []
+
+
+def test_needs_swarm_mailbox_hint_names_the_missing_variable(monkeypatch):
+    monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
+    monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR")
+    hint = consent_email.needs_swarm_mailbox_hint()
+    assert "ateles#1221" in hint
+    assert "ATELES_SWARM_GWS_CONFIG_DIR" in hint
+    assert "ATELES_SWARM_EMAIL" not in hint
+    assert "payments held" in hint

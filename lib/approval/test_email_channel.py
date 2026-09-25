@@ -265,6 +265,9 @@ class TestReplyInThread:
 
 class TestGwsJson:
     def test_strips_banner_before_json(self, monkeypatch):
+        # gws_json makes no call without a configured swarm mailbox, which
+        # needs an operator address to compare against.
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
         out = "keyring banner line\nWARNING: something\n{\"ok\": true}"
         with patch.object(ec.shutil, "which", return_value="/bin/gws"), \
              patch.object(ec.subprocess, "run", return_value=_ok(out)):
@@ -808,3 +811,146 @@ class TestSwarmMailboxConfigured:
     def test_unparseable_swarm_address(self, monkeypatch, tmp_path):
         self._env(monkeypatch, swarm="not-an-address", cfg=str(tmp_path))
         assert ec.swarm_mailbox_configured() is False
+
+
+# ── Swarm mailbox routing (ateles#1221 consent half, folded into PR #1202) ───
+
+
+def _subprocess_mailbox(calls: list, *, auth_value: str | None, body: str = "ATTENDED",
+                        sender: str = "Op <op@example.com>"):
+    """Fake gws at the subprocess boundary: records (argv, env) for every call
+    and answers as a mailbox holding one reply from ``sender``."""
+    import json as _j
+
+    def run(cmd, **kw):
+        calls.append((list(cmd), kw.get("env")))
+        args = list(cmd[1:])
+        if "+triage" in args:
+            out = {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                                 "from": sender}]}
+        elif args[:4] == ["gmail", "users", "messages", "get"]:
+            headers = [] if auth_value is None else [
+                {"name": "Authentication-Results", "value": auth_value}]
+            out = {"id": "m1", "payload": {"headers": headers}}
+        elif "+read" in args:
+            out = {"body_text": body}
+        else:
+            out = {}
+        return subprocess.CompletedProcess(cmd, 0, stdout=_j.dumps(out), stderr="")
+
+    return run
+
+
+_GMAIL_PASS = ("mx.google.com; dkim=pass header.i=@example.com header.s=s; "
+               "dmarc=pass (p=NONE) header.from=example.com")
+
+
+class TestSwarmMailboxRouting:
+    def _arm(self, monkeypatch):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+        import os as _os
+        return _os.environ["ATELES_SWARM_GWS_CONFIG_DIR"]
+
+    def test_request_is_sent_from_swarm_to_operator_as_the_swarm_mailbox(self, monkeypatch):
+        import os as _os
+        swarm_dir = self._arm(monkeypatch)
+        calls: list = []
+        with patch.object(ec.shutil, "which", return_value="/bin/gws"), \
+             patch.object(ec.subprocess, "run",
+                          side_effect=_subprocess_mailbox(calls, auth_value=None)):
+            assert ec.send_request("Subj [APPROVE-TOK]", "body") is True
+        (argv, env), = calls
+        assert argv[argv.index("--to") + 1] == "op@example.com"
+        assert argv[argv.index("--from") + 1] == "swarm@example.net"
+        assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == swarm_dir
+        # Scoped to the subprocess: the process env is not mutated.
+        assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in _os.environ
+
+    def test_every_reply_read_call_runs_as_the_swarm_mailbox(self, monkeypatch):
+        swarm_dir = self._arm(monkeypatch)
+        calls: list = []
+        with patch.object(ec.shutil, "which", return_value="/bin/gws"), \
+             patch.object(ec.subprocess, "run",
+                          side_effect=_subprocess_mailbox(calls, auth_value=_GMAIL_PASS)):
+            out = ec.read_replies_with_status(["TOK"])
+        # An authenticated inbound operator reply in the swarm mailbox counts.
+        assert out.kind == "ok" and len(out.texts) == 1
+        kinds = {("+triage" in a and "triage") or ("+read" in a and "read")
+                 or ("get" in a and "metadata") for a, _ in calls}
+        assert kinds == {"triage", "metadata", "read"}
+        assert all(env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == swarm_dir
+                   for _, env in calls)
+
+    def test_in_thread_reply_runs_as_the_swarm_mailbox(self, monkeypatch, tmp_path):
+        swarm_dir = self._arm(monkeypatch)
+        calls: list = []
+        with patch.object(ec.shutil, "which", return_value="/bin/gws"), \
+             patch.object(ec.subprocess, "run",
+                          side_effect=_subprocess_mailbox(calls, auth_value=None)):
+            assert ec.reply_in_thread("m1", "done", cwd=str(tmp_path)) is True
+        (argv, env), = calls
+        assert argv[argv.index("--from") + 1] == "swarm@example.net"
+        assert argv[argv.index("--to") + 1] == "op@example.com"
+        assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == swarm_dir
+
+    def test_unconfigured_swarm_mailbox_makes_no_gws_call_at_all(self, monkeypatch):
+        """Never fall back to the operator's mailbox, even when the process env
+        already points gws somewhere."""
+        self._arm(monkeypatch)
+        monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR")
+        monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "/operator/default")
+        with patch.object(ec.shutil, "which", return_value="/bin/gws"), \
+             patch.object(ec.subprocess, "run") as run:
+            assert ec.send_request("s", "b") is False
+            out = ec.read_replies_with_status(["TOK"])
+            assert ec.reply_in_thread("m1", "b") is False
+            assert ec.gws_json(["gmail", "+triage"]) is None
+        run.assert_not_called()
+        assert out.kind == "transport_error"
+        assert out.detail == "swarm_mailbox_unconfigured"
+
+
+class TestAuthservIdConfig:
+    _ORG = "mx.example.org; dmarc=pass header.from=example.com"
+
+    def test_default_is_gmail(self, monkeypatch):
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+        assert ec.trusted_authserv_id() == "mx.google.com"
+        assert ec.sender_domain_authenticated([_GMAIL_PASS]) is True
+        assert ec.sender_domain_authenticated([self._ORG]) is False
+
+    def test_override_trusts_only_the_configured_server(self, monkeypatch):
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+        monkeypatch.setenv("ATELES_MAIL_AUTHSERV_ID", "MX.Example.org")
+        assert ec.trusted_authserv_id() == "mx.example.org"
+        assert ec.sender_domain_authenticated([self._ORG]) is True
+        assert ec.sender_domain_authenticated([_GMAIL_PASS]) is False
+
+    def test_override_applies_end_to_end_on_the_read_path(self, monkeypatch):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+        monkeypatch.setenv("ATELES_MAIL_AUTHSERV_ID", "mx.example.org")
+        for auth, expected in ((self._ORG, 1), (_GMAIL_PASS, 0)):
+            calls: list = []
+            with patch.object(ec.shutil, "which", return_value="/bin/gws"), \
+                 patch.object(ec.subprocess, "run",
+                              side_effect=_subprocess_mailbox(calls, auth_value=auth)):
+                out = ec.read_replies_with_status(["TOK"])
+            assert out.kind == "ok" and len(out.texts) == expected
+
+
+class TestSwarmMailboxProblems:
+    def test_each_missing_variable_is_named(self, monkeypatch):
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+        monkeypatch.delenv("ATELES_SWARM_EMAIL")
+        only_email = " ".join(ec.swarm_mailbox_problems())
+        assert "ATELES_SWARM_EMAIL" in only_email
+        assert "ATELES_SWARM_GWS_CONFIG_DIR" not in only_email
+        monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR")
+        both = " ".join(ec.swarm_mailbox_problems())
+        assert "ATELES_SWARM_EMAIL" in both and "ATELES_SWARM_GWS_CONFIG_DIR" in both
+        monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
+        only_dir = " ".join(ec.swarm_mailbox_problems())
+        assert "ATELES_SWARM_GWS_CONFIG_DIR" in only_dir
+        assert "ATELES_SWARM_EMAIL" not in only_dir

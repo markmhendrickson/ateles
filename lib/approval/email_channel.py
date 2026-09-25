@@ -7,14 +7,22 @@ Every function is FAIL-OPEN: a missing gws CLI, unset env, non-zero exit, or a
 transport error logs a warning and returns a benign empty/false value. None of
 them raise into the caller's daemon loop.
 
+MAILBOX: every gws call here runs as the swarm's OWN mailbox — the subprocess
+gets ``GOOGLE_WORKSPACE_CLI_CONFIG_DIR=$ATELES_SWARM_GWS_CONFIG_DIR`` in its
+env only (the calling process's env is never mutated, so e.g. Monedula's
+calendar read keeps the operator's default config). When the swarm mailbox is
+not configured no gws call is made at all: consent never falls back to the
+operator's mailbox (ateles#1221).
+
 Env contract:
   ATELES_NOTIFY_EMAIL  "1" arms the channel; anything else → every call no-ops
   OPERATOR_EMAIL       request recipient AND the verified reply --to
-  ATELES_SWARM_EMAIL   optional From: (the swarm's own address)
-  ATELES_SWARM_GWS_CONFIG_DIR  gws config dir for the swarm's OWN mailbox
-                       (ateles#1221). Consent that depends on authenticated
-                       replies needs both swarm vars — see
-                       ``swarm_mailbox_configured``.
+  ATELES_SWARM_EMAIL   the swarm mailbox's address: From: of every request
+  ATELES_SWARM_GWS_CONFIG_DIR  gws config dir signed in as the swarm mailbox;
+                       every gws call here runs with it (see MAILBOX above)
+  ATELES_MAIL_AUTHSERV_ID  authserv-id of the receiving server whose
+                       Authentication-Results are trusted (default
+                       ``mx.google.com``)
 """
 
 from __future__ import annotations
@@ -95,6 +103,69 @@ def _swarm_from() -> str:
     return os.environ.get("ATELES_SWARM_EMAIL", "").strip()
 
 
+_GWS_CONFIG_ENV = "GOOGLE_WORKSPACE_CLI_CONFIG_DIR"
+
+
+def _swarm_config_dir() -> str:
+    return os.path.expanduser(
+        os.environ.get("ATELES_SWARM_GWS_CONFIG_DIR", "").strip()
+    )
+
+
+def swarm_mailbox_problems() -> list[str]:
+    """What is missing for a separate swarm mailbox, one entry per variable.
+
+    Empty list ⇔ ``swarm_mailbox_configured()``. Each entry names the exact
+    env var and what is wrong with it, so an operator who fixed one sees the
+    other rather than the same generic text. Never contains a value.
+    """
+    problems: list[str] = []
+    raw_swarm = _swarm_from()
+    swarm = _parse_address(raw_swarm)
+    operator = _parse_address(operator_email())
+    if not raw_swarm:
+        problems.append("ATELES_SWARM_EMAIL is not set (the swarm mailbox's address)")
+    elif not swarm:
+        problems.append("ATELES_SWARM_EMAIL is not a valid email address")
+    elif operator and swarm == operator:
+        problems.append(
+            "ATELES_SWARM_EMAIL is the operator's own address; it must be the "
+            "swarm's separate mailbox"
+        )
+    if not operator:
+        problems.append("OPERATOR_EMAIL is not set or not a valid email address")
+    cfg = _swarm_config_dir()
+    if not cfg:
+        problems.append(
+            "ATELES_SWARM_GWS_CONFIG_DIR is not set (the gws config directory "
+            "signed in as the swarm mailbox)"
+        )
+    elif not os.path.isdir(cfg):
+        problems.append(
+            "ATELES_SWARM_GWS_CONFIG_DIR does not point to an existing directory"
+        )
+    return problems
+
+
+def _gws_env() -> dict[str, str] | None:
+    """Subprocess env for a gws call as the swarm mailbox, or None (no call).
+
+    A copy of the process env with the gws config dir pointed at the swarm
+    mailbox. The process's own env is untouched. None when the swarm mailbox
+    is not configured — callers then make NO gws call, so nothing ever runs
+    against the operator's default mailbox.
+    """
+    if not swarm_mailbox_configured():
+        log.warning(
+            "approval: swarm mailbox not configured — no gws call made "
+            "(consent never uses the operator's mailbox)"
+        )
+        return None
+    env = dict(os.environ)
+    env[_GWS_CONFIG_ENV] = _swarm_config_dir()
+    return env
+
+
 def swarm_mailbox_configured() -> bool:
     """True only when a SEPARATE swarm mailbox is configured (ateles#1221).
 
@@ -112,12 +183,7 @@ def swarm_mailbox_configured() -> bool:
       - ``ATELES_SWARM_GWS_CONFIG_DIR`` names an existing directory (the
         swarm mailbox's own gws credentials)
     """
-    swarm = _parse_address(_swarm_from())
-    operator = _parse_address(operator_email())
-    if not swarm or not operator or swarm == operator:
-        return False
-    config_dir = os.environ.get("ATELES_SWARM_GWS_CONFIG_DIR", "").strip()
-    return bool(config_dir) and os.path.isdir(os.path.expanduser(config_dir))
+    return not swarm_mailbox_problems()
 
 
 def _gws() -> str | None:
@@ -133,9 +199,12 @@ def gws_json(args: list[str], timeout: int = 45) -> Any:
     gws = _gws()
     if not gws:
         return None
+    env = _gws_env()
+    if env is None:
+        return None
     try:
         r = subprocess.run([gws, *args], capture_output=True, text=True,
-                           timeout=timeout, env=os.environ)
+                           timeout=timeout, env=env)
         if r.returncode != 0:
             log.warning(f"gws {args[:2]} failed: {(r.stderr or '').strip()[:160]}")
             return None
@@ -161,14 +230,16 @@ def send_request(subject: str, body: str, to: str | None = None) -> bool:
     gws = _gws()
     if not gws or not recipient:
         return False
+    env = _gws_env()
+    if env is None:
+        return False
+    # From the swarm mailbox To the operator: the reply then arrives in the
+    # swarm mailbox as genuinely inbound mail the receiving server authenticates.
     cmd = [gws, "gmail", "+send", "--to", recipient,
-           "--subject", subject, "--body", body]
-    swarm = _swarm_from()
-    if swarm:
-        cmd += ["--from", swarm]
+           "--subject", subject, "--body", body, "--from", _swarm_from()]
     try:
         r = subprocess.run(cmd, timeout=60, capture_output=True, text=True,
-                           env=os.environ)
+                           env=env)
         if r.returncode != 0:
             log.warning(f"approval email send failed (rc={r.returncode}): "
                         f"{(r.stderr or '').strip()[:160]}")
@@ -235,9 +306,16 @@ def sender_is_operator(from_header: str) -> bool:
     return sender == operator
 
 
-# The only receiving server whose authentication verdict we accept: Gmail's own
-# inbound MTA, which stamps this authserv-id on mail it receives for the mailbox.
-_TRUSTED_AUTHSERV_ID = "mx.google.com"
+# The only receiving server whose authentication verdict we accept: by default
+# Gmail's own inbound MTA, which stamps this authserv-id on mail it receives
+# for the mailbox. Config, not code, so a move off Gmail is an env change.
+DEFAULT_AUTHSERV_ID = "mx.google.com"
+
+
+def trusted_authserv_id() -> str:
+    """``ATELES_MAIL_AUTHSERV_ID`` (lowercased), or the Gmail default."""
+    value = os.environ.get("ATELES_MAIL_AUTHSERV_ID", "").strip().lower()
+    return value or DEFAULT_AUTHSERV_ID
 
 
 def _strip_comments(value: str) -> str:
@@ -282,7 +360,12 @@ def _auth_result_authorizes(header_value: str, domain: str) -> bool:
     parts = [p.strip() for p in value.split(";")]
     # First element is the authserv-id, optionally followed by a version.
     authserv = (parts[0].split() or [""])[0].lower()
-    if authserv != _TRUSTED_AUTHSERV_ID:
+    expected = trusted_authserv_id()
+    if authserv != expected:
+        log.warning(
+            f"approval: Authentication-Results stamped by {authserv[:80]!r}, "
+            f"expected {expected!r} (ATELES_MAIL_AUTHSERV_ID) — not trusted"
+        )
         return False
     for resinfo in parts[1:]:
         tokens = resinfo.split()
@@ -391,6 +474,12 @@ def read_replies_with_status(
     if not _gws():
         return ReadRepliesOutcome(
             kind="transport_error", texts=[], detail="gws_cli_missing"
+        )
+    if not swarm_mailbox_configured():
+        # Replies are read only from the swarm mailbox, never from the
+        # operator's (ateles#1221). Unconfigured is a failed read, not "none".
+        return ReadRepliesOutcome(
+            kind="transport_error", texts=[], detail="swarm_mailbox_unconfigured"
         )
 
     texts: list[str] = []
@@ -546,12 +635,13 @@ def reply_in_thread(message_id: str, body: str,
     if not gws or not message_id or not recipient:
         return False
 
+    env = _gws_env()
+    if env is None:
+        return False
+
     base = Path(cwd) if cwd else Path.cwd()
     cmd = [gws, "gmail", "+reply", "--message-id", message_id,
-           "--body", body, "--to", recipient]
-    swarm = _swarm_from()
-    if swarm:
-        cmd += ["--from", swarm]
+           "--body", body, "--to", recipient, "--from", _swarm_from()]
 
     staged: list[Path] = []
     stage_dir = base / ".approval_attach_tmp"
@@ -569,7 +659,7 @@ def reply_in_thread(message_id: str, body: str,
 
     try:
         r = subprocess.run(cmd, timeout=60, capture_output=True, text=True,
-                           cwd=str(base), env=os.environ)
+                           cwd=str(base), env=env)
         if r.returncode != 0:
             log.warning(f"+reply failed (rc={r.returncode}): "
                         f"{(r.stderr or '').strip()[:160]}")

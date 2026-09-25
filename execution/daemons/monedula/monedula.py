@@ -967,8 +967,9 @@ def _notify_unauthenticated_reply(
             "operator's address but could not be authenticated, so it was not "
             "accepted. No payment was made; payments stay held.\n\n"
             f"pending_handlers={handler_names} payment_date={yesterday_str}\n\n"
-            "Likely cause: request and reply share one mailbox; email consent "
-            "needs a separate swarm mailbox (ateles#1221).\n\n"
+            "Check that the reply came from the operator's own mailbox, that "
+            "ATELES_SWARM_GWS_CONFIG_DIR is signed in as the swarm mailbox, and "
+            "that ATELES_MAIL_AUTHSERV_ID matches its provider.\n\n"
             "Escalated by the Monedula payment daemon."
         ),
         "severity": "warning",
@@ -1396,7 +1397,7 @@ def main() -> bool:
     if channel == "email":
         import payment_journal
         from consent_email import (
-            NEEDS_SWARM_MAILBOX_HINT,
+            needs_swarm_mailbox_hint,
             REASON_NEEDS_SWARM_MAILBOX,
             clear_consent_state,
             journal_path,
@@ -1442,7 +1443,7 @@ def main() -> bool:
                     "the payment journal could not be read or written; no payment "
                     "executed; inspect it before anything is paid"
                 ),
-                REASON_NEEDS_SWARM_MAILBOX: NEEDS_SWARM_MAILBOX_HINT,
+                REASON_NEEDS_SWARM_MAILBOX: needs_swarm_mailbox_hint(),
             }.get(reason, "arm ATELES_NOTIFY_EMAIL/OPERATOR_EMAIL or reply to consent thread")
             _notify(
                 _consent_failure_notify_body(

@@ -10,14 +10,29 @@ consent), executes approved payments, and confirms.
 **Email consent** is the default when Telegram credentials are absent.
 **Telegram break-glass** is an explicit override only.
 
-> **Email consent requires a separate swarm mailbox.** A consent reply is
-> accepted only when it carries authentication evidence stamped by the
-> receiving mail server. A reply sent from, and read in, the operator's own
-> mailbox is self-sent and never carries it, so with one shared mailbox
-> every genuine approval would be held. Until the swarm has its own mailbox
-> (`ATELES_SWARM_EMAIL` + `ATELES_SWARM_GWS_CONFIG_DIR`, built in
-> ateles#1221), Monedula sends **no** consent request, holds every payment,
-> and raises one deduped blocker: `consent_email_needs_swarm_mailbox`.
+> **Email consent runs through the swarm's own mailbox.** It works once
+> `ATELES_SWARM_EMAIL` and `ATELES_SWARM_GWS_CONFIG_DIR` are set (see
+> "Swarm mailbox" below). The request goes **from** the swarm mailbox **to**
+> `OPERATOR_EMAIL`; the operator's reply arrives in the swarm mailbox as
+> genuinely inbound mail, which the receiving server authenticates. A reply
+> is accepted only with that authentication evidence — which is why the
+> operator's own mailbox can never be used: a reply sent from, and read in,
+> the same mailbox is self-sent and carries none. If either variable is
+> missing or wrong, Monedula sends **no** consent request, makes no mail call
+> at all, holds every payment, and raises one deduped blocker,
+> `consent_email_needs_swarm_mailbox`, naming the variable to fix.
+
+## Swarm mailbox
+
+| Variable | What it is |
+|----------|------------|
+| `ATELES_SWARM_EMAIL` | The swarm mailbox's own email address — a separate account, never the operator's. Every consent request is sent From it. Lives in the private env, never in this repo. |
+| `ATELES_SWARM_GWS_CONFIG_DIR` | Path to a `gws` config directory that is signed in as that swarm account (for example `~/.config/gws-swarm`). Every consent mail call — send the request, search and read replies, reply in thread — runs with `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` set to it, in that subprocess only. Must exist. |
+| `ATELES_MAIL_AUTHSERV_ID` | Optional. The receiving server whose `Authentication-Results` are trusted; default `mx.google.com` (Gmail). Change only when the swarm mailbox moves off Gmail. |
+
+Everything else Monedula does with `gws` — the operator's calendar read —
+keeps the operator's default config. The general Notifier's email delivery is
+not moved to the swarm mailbox by this change; that remains ateles#1221.
 
 This change does **not** enable global Notifier email for unrelated daemons
 (Apis/Anthus flood — see ateles#1165). Monedula calls `lib.approval` directly.
@@ -29,7 +44,7 @@ This change does **not** enable global Notifier email for unrelated daemons
 | `MONEDULA_CONSENT_CHANNEL=email` | Email consent | `env` |
 | `MONEDULA_CONSENT_CHANNEL=telegram` | Telegram break-glass | `env` |
 | Telegram creds absent + `ATELES_NOTIFY_EMAIL=1` + `OPERATOR_EMAIL` set | Email consent | `automatic` |
-| Email selected but no separate swarm mailbox | Blocker (`consent_email_needs_swarm_mailbox`) — no request sent | — |
+| Email selected but swarm mailbox not configured | Blocker (`consent_email_needs_swarm_mailbox`) — no request sent, no mail call made | — |
 | Both Telegram creds + operator principal resolve | Telegram break-glass | `automatic` |
 | Nothing configured | Blocker (`consent_channel_unconfigured`) | — |
 
@@ -54,9 +69,10 @@ Loaded automatically from `~/.config/neotoma/.env` at startup.
 | Variable | Purpose |
 |----------|---------|
 | `ATELES_NOTIFY_EMAIL` | `"1"` arms `lib.approval` email send/read for Monedula consent |
-| `OPERATOR_EMAIL` | Consent request recipient; exact-match From: for replies |
-| `ATELES_SWARM_EMAIL` | **Required for email consent.** The swarm's own address; must differ from `OPERATOR_EMAIL` |
-| `ATELES_SWARM_GWS_CONFIG_DIR` | **Required for email consent.** gws config directory for the swarm's own mailbox (ateles#1221); must exist |
+| `OPERATOR_EMAIL` | Consent request recipient (To:); exact-match From: for replies |
+| `ATELES_SWARM_EMAIL` | **Required for email consent.** The swarm mailbox's address; must differ from `OPERATOR_EMAIL`. See "Swarm mailbox" |
+| `ATELES_SWARM_GWS_CONFIG_DIR` | **Required for email consent.** gws config directory signed in as the swarm mailbox; must exist. See "Swarm mailbox" |
+| `ATELES_MAIL_AUTHSERV_ID` | Optional trusted receiving-server id (default `mx.google.com`). See "Swarm mailbox" |
 | `MONEDULA_CONSENT_CHANNEL` | Optional override: `email` \| `telegram` |
 | `TELEGRAM_BOT_TOKEN` | Telegram break-glass only |
 | `TELEGRAM_CHAT_ID` | Telegram break-glass only |
@@ -135,9 +151,9 @@ chmod +x install.sh
 | `consent_channel_unconfigured` | Set `MONEDULA_CONSENT_CHANNEL`, or arm `ATELES_NOTIFY_EMAIL=1` + `OPERATOR_EMAIL`, or Telegram break-glass vars |
 | `consent_request_send_failed` | Request not delivered; payments blocked; next tick retries; check `gws gmail +send` |
 | `consent_reply_read_failed` | Replies could not be checked; no payment executed; check `gws`/mailbox |
-| `consent_email_needs_swarm_mailbox` | Email consent selected but no separate swarm mailbox is configured. No request sent; every payment held. Set up the swarm mailbox (ateles#1221): `ATELES_SWARM_EMAIL` (distinct from `OPERATOR_EMAIL`) and `ATELES_SWARM_GWS_CONFIG_DIR`. Notifier key `monedula:consent_email_needs_swarm_mailbox` |
+| `consent_email_needs_swarm_mailbox` | Email consent selected but the swarm mailbox is not configured. No request sent, no mail call made; every payment held. The alert names the variable to fix: `ATELES_SWARM_EMAIL` (distinct from `OPERATOR_EMAIL`) and/or `ATELES_SWARM_GWS_CONFIG_DIR` (an existing gws config dir signed in as the swarm account). See "Swarm mailbox". Notifier key `monedula:consent_email_needs_swarm_mailbox` |
 | `consent_reply_sender_rejected` | A reply carried the consent marker but its From: is not the operator's address. Ignored; payments held; nothing is sent back to that sender |
-| `consent_reply_unauthenticated` | A reply came from the operator's address but could not be authenticated, so it was **not** accepted; payments held. One notice + escalation per request (Notifier key `monedula:consent_reply_unauthenticated:<fp>:g<gen>`). Usually means request and reply share one mailbox — check the swarm mailbox setup (ateles#1221), then reply again to the current request |
+| `consent_reply_unauthenticated` | A reply came from the operator's address but could not be authenticated, so it was **not** accepted; payments held. One notice + escalation per request (Notifier key `monedula:consent_reply_unauthenticated:<fp>:g<gen>`). Check that the reply was sent from the operator's own mailbox, that `ATELES_SWARM_GWS_CONFIG_DIR` is signed in as the swarm account (not the operator's), and that `ATELES_MAIL_AUTHSERV_ID` matches the swarm mailbox's provider; then reply again to the current request |
 | `consent_reply_unrecognized` | Authenticated but unparseable line; hold item; correction mail explains form |
 | `payment_journal_unreadable` | The payment journal could not be read or written; every payment held; inspect `.monedula_payment_journal.json` before anything is paid |
 | `payment_outcome_unknown` | A transfer was attempted and its outcome never recorded (crash or rail error mid-transfer). Held and never retried automatically; check the rail, then resolve by hand |
