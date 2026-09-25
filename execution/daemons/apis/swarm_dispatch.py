@@ -308,6 +308,16 @@ _BOT_SUFFIX = "[bot]"
 _BOT_INFIX_RE = re.compile(r"-ateles-")
 
 
+def _label_names(obj: dict) -> list[str]:
+    """Label names from a GitHub issue/PR API object (``labels`` is a list of
+    ``{"name": ...}`` dicts). Anything malformed is dropped, never raised on."""
+    return [
+        lbl.get("name", "")
+        for lbl in (obj.get("labels") or [])
+        if isinstance(lbl, dict) and lbl.get("name")
+    ]
+
+
 def _is_bot_author(login: str) -> bool:
     """Return True when *login* is a known swarm/machine identity.
 
@@ -3061,13 +3071,30 @@ class DispatchConfig:
     # that does NOT carry the label is skipped with one INFO log line naming the
     # skip reason, and posts no GitHub comments or reviews at all.
     #
-    # This gate binds ONLY the two auto-triggered software-work pipelines
-    # (`handle_trigger`'s issue_opened/is_pr dispatch). It does not touch:
+    # The gate binds EVERY automatic entry into software work on an issue or PR
+    # (ateles#1269 round 3 — Falco/Pavo found the sweeps bypassing it). Each
+    # site below calls `_label_gate_allows(trigger, source=...)` before it
+    # dispatches, and `test_label_gate_binds_every_automatic_entry` fails if a
+    # new direct caller of `_handle_issue_opened` / `_handle_pr` appears
+    # without being classified:
+    #   - handle_trigger: issue_opened and PR (opened/reopened/synchronize/
+    #     labeled) webhook deliveries;
+    #   - resume_interrupted_pipelines (boot) -> _handle_issue_opened;
+    #   - resume_deferred_reviews, resume_stalled_reviews (600s sweep loop)
+    #     -> _handle_pr;
+    #   - resume_missing_lens_reviews (600s loop) -> one lens re-dispatch;
+    #   - resume_unactioned_revisions (600s loop) -> Cicada revision;
+    #   - _handle_ci_status_for_current_head: the CI-red route to Cicada and
+    #     the CI-green auto-merge re-panel via _handle_pr.
+    # It does not touch:
     #   - operator overrides (/swarm-run, /confirm-gates-clear) — routed via
     #     _handle_issue_comment, which calls _handle_issue_opened/_handle_pr
-    #     DIRECTLY and never passes through the gated dispatch in handle_trigger;
-    #   - the approval loop, CI-status handling, or auto-release (push_main) —
-    #     none of those are software-REVIEW pipelines and none are gated;
+    #     DIRECTLY with no gate check, deliberately;
+    #   - the approval loop (pr_review, email_approve), auto-release
+    #     (push_main, release_approve, and the release-branch CI retry), the
+    #     operator-gated merge-readiness signal on CI green, and housekeeping
+    #     sweeps (verdict supersession, closed-issue markers, the
+    #     approved-unmerged report) — none of those start software work;
     #   - any operational daemon (payments, email, Phoenicurus release, deploys).
     #
     # Deploying a change to this value only takes effect once the Apis launchd
@@ -3124,6 +3151,9 @@ class SwarmDispatcher:
         # exception or cancellation leave ``handled`` false so the waiter
         # re-enters and re-fetches the live head and aggregate required-CI state.
         self._ci_head_claims: dict[tuple[str, int, str], _CIHeadClaim] = {}
+        # (source, "owner/repo#N") pairs whose label-gate skip has already been
+        # logged at WARNING by a periodic sweep — see `_label_gate_log`.
+        self._label_gate_warned: set[tuple[str, str]] = set()
 
     async def handle_trigger(self, trigger: SwarmTrigger) -> None:
         """Entry point handed to the webhook gateway. Never raises."""
@@ -3171,15 +3201,27 @@ class SwarmDispatcher:
 
     # ── label gate (bootstrap mode / canary lane) ───────────────────────────
 
-    async def _label_gate_allows(self, trigger: SwarmTrigger) -> bool:
-        """Decide whether the automatic issue/PR pipeline may run for `trigger`.
+    async def _label_gate_allows(
+        self, trigger: SwarmTrigger, *, source: str = "webhook"
+    ) -> bool:
+        """Decide whether automatic software work may run for `trigger`.
 
-        Called ONLY from `handle_trigger`'s dispatch for `issue_opened` and PR
-        (`is_pr`) kinds — never from the operator-override paths
+        Called from EVERY automatic entry into issue/PR software work — the
+        `handle_trigger` dispatch for `issue_opened` and PR (`is_pr`) kinds,
+        and the boot resume sweep, the 600s review/revision/missing-lens
+        sweeps, and the delayed-CI path (see the list on
+        `DispatchConfig.require_label`). `source` names the entry for the skip
+        log. Never called from the operator-override paths
         (_handle_swarm_run / _handle_confirm_gates_clear), which call
-        _handle_issue_opened / _handle_pr directly and so never reach this
-        check. That is deliberate: "operator overrides still work regardless
-        of label" per the bootstrap-mode design.
+        _handle_issue_opened / _handle_pr directly. That is deliberate:
+        "operator overrides still work regardless of label" per the
+        bootstrap-mode design.
+
+        Sweep sources re-find the same skipped PR every pass, so their skip
+        is logged at WARNING once per (source, ref) per process and at DEBUG
+        after that — loud enough to be seen, without one warning per open PR
+        every ten minutes burying everything else. Webhook skips are one
+        event each and always log at WARNING.
 
         TWO-LAYER design (ateles#1269 review round — Pavo/Waxwing/Loxia all
         flagged the same defect in round 1): a `labeled` GitHub action is
@@ -3228,9 +3270,12 @@ class SwarmDispatcher:
         if trigger.is_pr:
             parent = self._parent_issue_number(trigger.body, trigger.repository)
             if parent is not None:
-                parent_issue = await self._fetch_issue_fields(
-                    trigger.repository, parent
-                )
+                try:
+                    parent_issue = await self._fetch_issue_fields(
+                        trigger.repository, parent
+                    )
+                except Exception:  # fail closed, never crash the dispatch
+                    parent_issue = None
                 if parent_issue is not None:
                     parent_labels = {
                         lbl.get("name", "")
@@ -3248,10 +3293,12 @@ class SwarmDispatcher:
                     # so an INFO-level skip in a busy daemon's log stream is
                     # easy to miss — "the label gate ate my review" must not
                     # be a silent failure mode.
-                    log.warning(
-                        f"[{DAEMON_NAME}] label gate: could not resolve parent "
-                        f"issue #{parent} labels for PR {ref} — failing closed "
-                        f"(required label {label!r} not confirmed)"
+                    self._label_gate_log(
+                        source,
+                        ref,
+                        f"[{DAEMON_NAME}] label gate ({source}): could not "
+                        f"resolve parent issue #{parent} labels for PR {ref} — "
+                        f"failing closed (required label {label!r} not confirmed)",
                     )
                     return False
 
@@ -3259,12 +3306,26 @@ class SwarmDispatcher:
         # branch above (Falco security review on ateles#1269): a suppressed
         # automatic review/pipeline run must be loud enough to be seen in a
         # log stream sized for a busy daemon, not merely present in it.
-        log.warning(
+        self._label_gate_log(
+            source,
+            ref,
             f"[{DAEMON_NAME}] label gate active (required={label!r}) — "
-            f"skipping {trigger.kind} for {ref}: label not present on "
-            + ("the PR or its linked parent issue" if trigger.is_pr else "the issue")
+            f"skipping {trigger.kind} for {ref} ({source}): label not present on "
+            + ("the PR or its linked parent issue" if trigger.is_pr else "the issue"),
         )
         return False
+
+    def _label_gate_log(self, source: str, ref: str, message: str) -> None:
+        """WARNING for a webhook skip; WARNING once then DEBUG for a sweep skip."""
+        if source == "webhook":
+            log.warning(message)
+            return
+        key = (source, ref)
+        if key in self._label_gate_warned:
+            log.debug(message)
+            return
+        self._label_gate_warned.add(key)
+        log.warning(message + " (logged once per process; later passes at DEBUG)")
 
     # ── issue.opened pipeline (ordered additive spec) ───────────────────────
 
@@ -3499,6 +3560,29 @@ class SwarmDispatcher:
             for issue in issues:
                 ref = f"{repository}#{issue.get('number')}"
                 stage = issue.get("_marker_stage", "inflight")
+                resume_trigger = SwarmTrigger(
+                    kind="issue_opened",
+                    repository=repository,
+                    number=issue.get("number", 0),
+                    title=issue.get("title", ""),
+                    body=issue.get("body") or "",
+                    author=(issue.get("user") or {}).get("login", ""),
+                    html_url=issue.get("html_url", ""),
+                    delivery_id=f"resume-{issue.get('number')}",
+                    action="opened",
+                    labels=_label_names(issue),
+                )
+                # Label gate (ateles#1269): a boot resume is an automatic
+                # entry into the issue pipeline like any webhook, so it must
+                # not carry unlabelled work past the gate. Checked before the
+                # resume notification so a skipped issue pages nobody. The
+                # marker is left in place: if the gate is later lifted, the
+                # next boot resumes the issue as it would have.
+                if not await self._label_gate_allows(
+                    resume_trigger, source="resume_interrupted_pipelines"
+                ):
+                    summary["label_gated"] = summary.get("label_gated", 0) + 1
+                    continue
                 log.info(
                     f"[{DAEMON_NAME}] resume sweep: {ref} has a '{stage}' "
                     "pipeline marker — the daemon restarted mid-run; re-running"
@@ -3511,24 +3595,7 @@ class SwarmDispatcher:
                 )
                 resume_started_at = datetime.now(timezone.utc)
                 try:
-                    await self._handle_issue_opened(
-                        SwarmTrigger(
-                            kind="issue_opened",
-                            repository=repository,
-                            number=issue.get("number", 0),
-                            title=issue.get("title", ""),
-                            body=issue.get("body") or "",
-                            author=(issue.get("user") or {}).get("login", ""),
-                            html_url=issue.get("html_url", ""),
-                            delivery_id=f"resume-{issue.get('number')}",
-                            action="opened",
-                            labels=[
-                                lbl.get("name", "")
-                                for lbl in (issue.get("labels") or [])
-                                if isinstance(lbl, dict)
-                            ],
-                        )
-                    )
+                    await self._handle_issue_opened(resume_trigger)
                     summary["resumed"] += 1
                     if not await self._pipeline_advanced_past_triage(
                         repository, issue.get("number", 0), resume_started_at
@@ -3719,10 +3786,6 @@ class SwarmDispatcher:
             summary["not_yet"] += prs["not_yet"]
             for pr in prs["due"]:
                 ref = f"{repository}#{pr.get('number')}"
-                log.info(
-                    f"[{DAEMON_NAME}] deferred-review sweep: {ref} deferral has "
-                    "matured — re-running the panel"
-                )
                 try:
                     trigger = SwarmTrigger(
                         kind="pr_synchronize",
@@ -3737,6 +3800,19 @@ class SwarmDispatcher:
                         head_ref=(pr.get("head") or {}).get("ref", ""),
                         base_ref=(pr.get("base") or {}).get("ref", ""),
                         head_sha=(pr.get("head") or {}).get("sha", ""),
+                        labels=_label_names(pr),
+                    )
+                    # Label gate (ateles#1269): this sweep re-enters the full
+                    # review panel on a timer, so it passes the same gate a
+                    # webhook delivery does.
+                    if not await self._label_gate_allows(
+                        trigger, source="resume_deferred_reviews"
+                    ):
+                        summary["label_gated"] = summary.get("label_gated", 0) + 1
+                        continue
+                    log.info(
+                        f"[{DAEMON_NAME}] deferred-review sweep: {ref} deferral "
+                        "has matured — re-running the panel"
                     )
                     await self._handle_pr(trigger)
                     summary["resumed"] += 1
@@ -3804,6 +3880,16 @@ class SwarmDispatcher:
             for pr in candidates:
                 number = int(pr.get("number"))
                 ref = f"{repository}#{number}"
+                # Label gate (ateles#1269), checked BEFORE the retry budget: a
+                # PR the gate keeps out has no review BECAUSE of the gate, so
+                # it must neither be re-dispatched nor count toward the
+                # stalled-review escalation that would page the operator.
+                if not await self._label_gate_allows(
+                    self._pr_trigger_from_api(repository, pr),
+                    source="resume_stalled_reviews",
+                ):
+                    summary["label_gated"] = summary.get("label_gated", 0) + 1
+                    continue
                 attempts = self._stall_retries.get(ref, 0)
 
                 if attempts >= max_retries:
@@ -3846,6 +3932,7 @@ class SwarmDispatcher:
                         head_ref=(pr.get("head") or {}).get("ref", ""),
                         base_ref=(pr.get("base") or {}).get("ref", ""),
                         head_sha=(pr.get("head") or {}).get("sha", ""),
+                        labels=_label_names(pr),
                     )
                     await self._handle_pr(trigger)
                     summary["resumed"] += 1
@@ -3913,6 +4000,16 @@ class SwarmDispatcher:
             for pr in candidates:
                 number = int(pr.get("number"))
                 ref = f"{repository}#{number}"
+                # Label gate (ateles#1269): dispatching Cicada to revise a PR
+                # is automatic software work, the thing bootstrap mode keeps
+                # to the canary lane. Checked before the retry budget so a
+                # gated PR never escalates as "stuck".
+                if not await self._label_gate_allows(
+                    self._pr_trigger_from_api(repository, pr),
+                    source="resume_unactioned_revisions",
+                ):
+                    summary["label_gated"] = summary.get("label_gated", 0) + 1
+                    continue
                 # Keyed by head SHA, not by ref: a NEW push is a new attempt and
                 # must reset the budget. Keying by ref alone would let three
                 # failures on one revision permanently suppress every later
@@ -4387,6 +4484,15 @@ class SwarmDispatcher:
             for pr, lenses in candidates:
                 number = int(pr.get("number"))
                 ref = f"{repository}#{number}"
+                # Label gate (ateles#1269): re-dispatching a lens is an
+                # automatic review run; a gated PR gets none, and never
+                # escalates as a lens that "produced no verdict".
+                if not await self._label_gate_allows(
+                    self._pr_trigger_from_api(repository, pr),
+                    source="resume_missing_lens_reviews",
+                ):
+                    summary["label_gated"] = summary.get("label_gated", 0) + 1
+                    continue
                 summary["scanned"] += len(lenses)
                 escalated = self._missing_lens_escalated.setdefault(ref, set())
                 per_lens = self._missing_lens_retries.setdefault(ref, {})
@@ -8524,6 +8630,14 @@ class SwarmDispatcher:
         # review state: a broken build must be fixed to merge.
         ci = await self._required_ci_state(pr_trigger)
         if ci == "failing":
+            # Label gate (ateles#1269): routing a red build to Cicada is
+            # automatic software work on the PR. A gated PR is left to the
+            # session that owns it; handled=True, since there is nothing for a
+            # coalesced waiter to redo.
+            if not await self._label_gate_allows(
+                pr_trigger, source="ci_status_route_ci_failure"
+            ):
+                return True
             log.info(f"[{DAEMON_NAME}] {ref}: CI completed failing — routing to fix")
             await self._route_ci_failure(pr_trigger, parent)
             return True
@@ -8562,6 +8676,13 @@ class SwarmDispatcher:
             # security_finding state, and only then reaches readiness with the
             # fresh binding receipt it created. Never reconstruct GitHub
             # approval and merge directly from this delayed callback.
+            # Label gate (ateles#1269): the re-panel re-enters _handle_pr, the
+            # automatic review panel, so it passes the same gate a webhook
+            # delivery does.
+            if not await self._label_gate_allows(
+                pr_trigger, source="ci_status_repanel"
+            ):
+                return True
             log.info(
                 f"[{DAEMON_NAME}] {ref}: CI green + review clear — re-running "
                 "the exact-head panel to re-prove canonical durability"
@@ -9240,6 +9361,7 @@ class SwarmDispatcher:
             head_ref=(pr.get("head") or {}).get("ref", ""),
             base_ref=(pr.get("base") or {}).get("ref", ""),
             head_sha=(pr.get("head") or {}).get("sha", ""),
+            labels=_label_names(pr),
         )
 
     async def _handle_push_main(self, trigger: SwarmTrigger) -> None:
