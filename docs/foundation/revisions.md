@@ -76,6 +76,9 @@ A sweep over `origin/main`, every origin branch, and every `refs/pull/*/head` re
 refs — gives 117, so the decision-35 vocabulary pass takes 118, one number across all thirteen documents it
 amends. The sweep was run twice, before writing and immediately before committing, with the same result
 both times.
+A sweep over `origin/main`, every origin branch, and every `refs/pull/*/head` ref on 2026-09-25 — 920
+refs — gives 123, so the harness-carriers pass takes 124, one number across all three documents it amends
+(`harness_carriers.md`, `conformance.md`, and `status.md`, the last recording it as a section of its own).
 
 ## `authority_model.md`
 
@@ -230,6 +233,7 @@ both times.
 | 115 | the decision-48/101 endpoint pass of 2026-09-11 | row 48's status cell amended to name the **acts-as** binding, with the reason it is that edge and not the agent's AAuth edge; decisions 107, 108, and 109 opened — what the acts-as edge carries and whether it is presented, whether an agent may hold one to another agent, and whether an operator may hold one. All three are endpoint-semantics questions decision 101 leaves unstated and stage 1's one-way registration does not close, since what it registers is the edge and its fields, not the vocabulary of kinds or a constraint on endpoints |
 | 116 | the decision-106 opening of 2026-09-10 | decision 106 opened — what a verdict on an issue is pinned to, and what a change to the thing it judged does to it. Registered **open** and deliberately unruled, with three candidates (the verdict carrying the body state it read, a derived staleness read, and the design declining to pin on an issue) and the asymmetry that motivates it: a conclusion that holds work is recoverable because the work does not proceed, while one that permits work is not, because nothing waits. The blocking cell names decision 72, whose pinning rule this asks whether an issue inherits, and `github.md#issues`, which already makes an issue an artifact and already handles `issues.edited` as an observation, so the state a pin would read exists and nothing reads it |
 | 118 | the decision-35 vocabulary pass of 2026-09-15 | register row 35 records the name taken (`vendor_binding`), the substitution landed, and the distinguishing rule that separates the merged binding from `deployment_configuration`; register row 90's blocking cell records the *no third name for it* clause as amended, with none of its three rules changed; the direction-of-truth row for external-system mapping names one binding type rather than two |
+| 124 | the harness-carriers pass of 2026-09-25 | `harness_carriers.md` registered in `conformance.md#scope` as an authored companion, not keyed and not inlined, with the reason it is not keyed yet |
 
 ## `conformance_suite.md`
 
@@ -333,6 +337,12 @@ both times.
 | 50 | the minimization-recalibration pass of 2026-09-06 | refusal 1 narrowed to a third party's Article 9 data, capture generous otherwise under the broadened purpose |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
 | 118 | the decision-35 vocabulary pass of 2026-09-15 | the binding substituted to `vendor_binding` in the scope line and the inbound table's untracked-mailbox row; no claim changed |
+
+## `harness_carriers.md`
+
+| Revision | Pass | What changed |
+|---|---|---|
+| 124 | the harness-carriers pass of 2026-09-25 | document added: the payloads the swarm needs inside a harness, the five carriers, the payload-by-carrier matrix marking each cell guaranteed, discretionary, not applicable, or unverified, the delivery ladder and each evaluated harness's rung, where each payload binds, and the dated measured constraints; consolidates plan `ent_81aadb43caf2fa493361e8ed` decisions `carrier_design_docs`, `harness_delivery_ladder`, and `agent_skills_canonical_rule_index`, with the others its front matter names |
 
 ## `migration.md`
 

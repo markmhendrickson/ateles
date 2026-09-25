@@ -106,6 +106,11 @@ Authored companions (design prose; **not** inlined into review prompts):
   discovered mid-workflow at each blast tier, the halt, and intake into a successor.
 - [**Workflows**](foundation/workflows.md) — designs of the core workflows (intake and successors);
   purpose, steps, fast paths — binds via `workflow` entities and `render_workflow_docs.py --check`.
+- [**Harness carriers**](foundation/harness_carriers.md) — how the swarm gets each payload (tools,
+  procedures, rules, session-start context, guards, identity, interface, long-lived work, operator
+  decisions) into each harness through each carrier (protocol, integration, bundle, local file, hook): the
+  payload-by-carrier matrix marking delivery guaranteed or discretionary, each harness's rung, where each
+  payload binds, and the dated measured constraints.
 - [**Migration**](foundation/migration.md) — the population plan's second leg: how the record an instance
   already holds is carried into the design's types — each type's disposition (keep, re-type, derive,
   retire, introduce), the record primitive that carries it, the order and its dependencies, what is
@@ -158,6 +163,8 @@ Companion report (not a foundation design document; not in the review reading li
 
 - [**Forking & adoption**](forking.md) — what's operator-specific vs. portable; the context entities,
   secrets, identities, and grants a new operator must supply.
+- [**Install**](install.md) — getting Ateles and Neotoma into each harness: the default command, per-harness
+  steps and verification, and the install paths that do not exist yet.
 - [**Setup**](setup.md) — Neotoma, venv, AAuth keypairs, grants, first daemon under launchd.
 - [**Secrets management**](secrets_management.md) — the SOPS + age model, offline materialization.
 - [**AAuth**](aauth.md) · [**Keys**](aauth/keys.md) — agent identity, keypair format, signing.

@@ -44,6 +44,13 @@ partitioning, per-tenant AAuth subject namespacing, grant admission's tenant mat
 beneficiary ownership changes. It was authored outside this directory and moved in whole, so its
 argument predates the set's conventions and its five open decisions are registered like any other's.
 
+`docs/foundation/harness_carriers.md` is in the set as of revision 124 (2026-09-25), an authored companion,
+not keyed and not inlined: it states which harness carrier delivers which payload and where each payload
+binds, applying decisions 42, 86, 87, 96, and 97 without restating them. It is not keyed because it owns no
+row in the conformance suite yet, so the reading projection would carry nothing for it; the same budget
+reasoning that governs `workflows.md` and `scenarios.md` applies, and whether to key it is recorded in
+`status.md`, not here.
+
 `docs/foundation/revisions.md` is a companion of a different kind: provenance, not argument. It carries
 the amendment history every document used to hold in its own front matter (decision 74). It is never keyed
 and never inlined — it states no rule, so no reviewer reads it to judge a change — and it is not shortened,
