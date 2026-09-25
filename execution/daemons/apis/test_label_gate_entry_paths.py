@@ -597,3 +597,108 @@ def test_anthus_gate_reads_the_shared_env_helper():
         "lib/daemon_runtime/label_gate.required_label, like Apis"
     )
     assert _calls(gate, {"carries_label"})
+
+
+# ── Formica and neotoma-agent: the triage-label lanes ─────────────────────
+#
+# Security review on #1269: two more daemons start Cicada/Vanellus from Neotoma
+# issue/pull_request events keyed only on their own triage label
+# (`triage:formica`, `triage:neotoma-agent`), outside both scans above. These
+# pin each daemon's launch surface: `_spawn_claude_skill` is its only process
+# launch, it consults the gate before launching, and every `handle_event`
+# branch that notifies or dispatches consults the gate first. Behaviour for the
+# same lanes: execution/daemons/test_triage_lane_label_gate.py.
+
+_DAEMONS_DIR = Path(sd.__file__).resolve().parent.parent
+_TRIAGE_LANES = [
+    pytest.param(_DAEMONS_DIR / "formica" / "formica.py", id="formica"),
+    pytest.param(
+        _DAEMONS_DIR / "neotoma-agent" / "neotoma_agent.py", id="neotoma-agent"
+    ),
+]
+_TRIAGE_SINKS = {"dispatch_cicada", "dispatch_vanellus", "_spawn_claude_skill"}
+
+
+@pytest.mark.parametrize("path", _TRIAGE_LANES)
+def test_triage_lane_only_spawn_skill_starts_a_process(path):
+    assert path.exists(), "the instrument is pointed at the wrong file"
+    sources = [
+        p for p in sorted(path.parent.glob("*.py")) if not p.name.startswith("test_")
+    ]
+    spawners = sorted(
+        f"{p.name}:{fn.name}"
+        for p in sources
+        for fn in _anthus_functions(p)
+        if _calls(fn, _SPAWN_CALLS)
+    )
+    assert spawners == [f"{path.name}:_spawn_claude_skill"], (
+        f"a new {path.name} function starts a process; decide whether it "
+        f"launches issue/PR work and gate it: {spawners}"
+    )
+
+
+@pytest.mark.parametrize("path", _TRIAGE_LANES)
+def test_triage_lane_spawn_checks_gate_before_launch(path):
+    fns = {fn.name: fn for fn in _anthus_functions(path)}
+    spawn = fns["_spawn_claude_skill"]
+    gate = _calls(spawn, {"_label_gate_allows"})
+    assert gate, f"{path.name}: _spawn_claude_skill launches with no label gate"
+    launches = _calls(spawn, _SPAWN_CALLS)
+    assert launches and min(n.lineno for n in gate) < min(
+        n.lineno for n in launches
+    ), f"{path.name}: the label gate must run before the process launch"
+
+
+@pytest.mark.parametrize("path", _TRIAGE_LANES)
+def test_triage_lane_handle_event_gates_every_dispatch_branch(path):
+    """Each `handle_event` branch that dispatches work consults the gate before
+    it notifies or dispatches — so a gated item neither pages nor launches."""
+    fns = {fn.name: fn for fn in _anthus_functions(path)}
+    handler = fns["handle_event"]
+    branches = 0
+    for node in ast.walk(handler):
+        if not isinstance(node, ast.If):
+            continue
+        body_calls = [
+            n
+            for stmt in node.body
+            for n in ast.walk(stmt)
+            if isinstance(n, ast.Call)
+        ]
+        sinks = [n for n in body_calls if _call_name(n) in _TRIAGE_SINKS]
+        if not sinks:
+            continue
+        branches += 1
+        gate = [n for n in body_calls if _call_name(n) == "_label_gate_allows"]
+        assert gate, f"{path.name}: a dispatch branch at line {node.lineno} is ungated"
+        first_gate = min(n.lineno for n in gate)
+        guarded = sinks + [n for n in body_calls if _call_name(n) == "send"]
+        assert first_gate < min(n.lineno for n in guarded), (
+            f"{path.name}: line {node.lineno}: gate must run before notify/dispatch"
+        )
+    assert branches == 2, (
+        f"{path.name}: expected the issue and pull_request dispatch branches, "
+        f"found {branches}; classify any new one"
+    )
+    # Only handle_event (and, in Formica, its dispatch_* helpers) reach a sink.
+    callers = sorted(
+        fn.name
+        for fn in fns.values()
+        if _calls(fn, _TRIAGE_SINKS) and fn.name not in _TRIAGE_SINKS
+    )
+    assert callers == ["handle_event"], callers
+
+
+@pytest.mark.parametrize("path", _TRIAGE_LANES)
+def test_triage_lane_gate_reads_the_shared_module(path):
+    fns = {fn.name: fn for fn in _anthus_functions(path)}
+    assert "_label_gate_allows" in fns, f"{path.name} has no label gate"
+    gate = fns["_label_gate_allows"]
+    assert _calls(gate, {"required_label"}), (
+        f"{path.name} must read ATELES_SWARM_REQUIRE_LABEL through "
+        "lib/daemon_runtime/label_gate.required_label, like Apis and Anthus"
+    )
+    assert _calls(gate, {"carries_label"})
+    src = path.read_text()
+    assert "from lib.daemon_runtime import label_gate" in src
+    assert 'os.environ.get("ATELES_SWARM_REQUIRE_LABEL"' not in src

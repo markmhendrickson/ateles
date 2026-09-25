@@ -33,6 +33,11 @@ Environment variables:
   FORMICA_AGENT_DEFINITION_ID Neotoma entity ID for Formica's agent_definition
   FORMICA_DRY_RUN             Set to "1" to log events without dispatching agents
   FORMICA_TRIAGE_LABEL        Issue label that gates dispatch (default: "triage:formica")
+  ATELES_SWARM_REQUIRE_LABEL  Label gate (bootstrap mode / canary lane). When set,
+                              an issue/PR must ALSO carry this label, in addition
+                              to FORMICA_TRIAGE_LABEL, before any agent is spawned
+                              (same gate as Apis and Anthus;
+                              lib/daemon_runtime/label_gate). Unset: unchanged.
   FORMICA_CLAUDE_BIN          Absolute path to `claude` binary (default: auto-detect on PATH)
   FORMICA_DISPATCH_TIMEOUT    Per-dispatch timeout in seconds (default: 1800)
   ATELES_REPO_PATH            Local path to ateles clone (default: ~/repos/ateles)
@@ -63,6 +68,7 @@ from lib.daemon_runtime import (  # noqa: E402
     SSEClient,
     hydrate_snapshot,
 )
+from lib.daemon_runtime import label_gate  # noqa: E402
 from lib.notify import Notifier, Priority  # noqa: E402
 from lib.activity import ActivityLogger  # noqa: E402
 
@@ -133,6 +139,55 @@ def _has_triage_label(snapshot: dict) -> bool:
     return FORMICA_TRIAGE_LABEL.lower() in labels_lower
 
 
+# ── Label gate (bootstrap mode / canary lane) ────────────────────────────────
+#
+# ateles#1269 added ATELES_SWARM_REQUIRE_LABEL so that, in bootstrap mode, the
+# swarm starts agent work only on labelled (canary) items. Apis and Anthus read
+# it; Formica did not, so an item carrying only `triage:formica` still reached
+# Cicada/Vanellus with the gate set (security review on #1269). Formica now
+# requires BOTH labels while the gate is set: its own triage label says "this is
+# Formica's", the canary label says "the operator put this in the canary lane".
+#
+# Formica reads labels from the Neotoma snapshot only, so the canary label must
+# be on the item itself: a PR does NOT inherit it from a parent issue here, and
+# anything unreadable counts as unlabelled. The gate fails closed.
+
+# Work entities whose skip has already been logged at WARNING. Formica sees the
+# same issue/PR again on every event, so later skips log at DEBUG.
+_label_gate_warned: set[str] = set()
+
+
+def _label_gate_log(entity_id: str, message: str) -> None:
+    """WARNING once per work entity per process, DEBUG after that."""
+    if entity_id in _label_gate_warned:
+        log.debug(message)
+        return
+    _label_gate_warned.add(entity_id)
+    log.warning(message + " (logged once per process; later events at DEBUG)")
+
+
+def _label_gate_allows(entity_id: str, snapshot: dict, kind: str) -> bool:
+    """True when the swarm label gate lets Formica act on this item.
+
+    Gate unset -> True (behaviour unchanged). Gate set -> True only when the
+    snapshot's labels carry the configured label exactly
+    (`label_gate.carries_label`). Malformed or missing labels deny.
+    """
+    required = label_gate.required_label()
+    if not required:
+        return True
+    raw = snapshot.get("labels") if isinstance(snapshot, dict) else None
+    if label_gate.carries_label(required, label_gate.snapshot_label_names(raw)):
+        return True
+    _label_gate_log(
+        entity_id,
+        f"[{DAEMON_NAME}] label gate active (required={required!r}) — skipping "
+        f"{kind} {entity_id}: label not present on the item (it needs both "
+        f"{FORMICA_TRIAGE_LABEL!r} and {required!r}; failing closed)",
+    )
+    return False
+
+
 # ── T4 agent dispatch ──────────────────────────────────────────────────────────
 
 
@@ -149,7 +204,14 @@ async def _spawn_claude_skill(
 
     Failures are reported via lib/notify/ and logged but do not crash
     Formica — one bad issue must not take down the daemon.
+
+    This is the only place Formica starts a process, so the label gate is
+    checked here too: `handle_event` checks it first (so a gated item pages
+    nobody), and this check makes every current and future caller bound by it.
     """
+    if not _label_gate_allows(entity_id, snapshot, f"{skill} dispatch for"):
+        return
+
     if CLAUDE_BIN is None:
         log.warning(
             f"[{DAEMON_NAME}] CLAUDE_BIN not configured and `claude` not on "
@@ -344,6 +406,8 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChe
                 f"missing label {FORMICA_TRIAGE_LABEL!r}"
             )
             return
+        if not _label_gate_allows(entity_id, snapshot, "issue"):
+            return
 
         notifier.send(
             f"Issue [{audience}/{priority_level}]: {title[:80]}\n  {entity_id}",
@@ -360,6 +424,8 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChe
                 f"[{DAEMON_NAME}] PR {entity_id} skipped — "
                 f"missing label {FORMICA_TRIAGE_LABEL!r}"
             )
+            return
+        if not _label_gate_allows(entity_id, snapshot, "pull_request"):
             return
 
         notifier.send(
@@ -390,6 +456,10 @@ async def main() -> None:
         f"[{DAEMON_NAME}] dry_run={DRY_RUN} claude_bin={CLAUDE_BIN or '<not-found>'}"
     )
     log.info(f"[{DAEMON_NAME}] dispatch_timeout={DISPATCH_TIMEOUT_SECONDS}s")
+    log.info(
+        f"[{DAEMON_NAME}] triage_label={FORMICA_TRIAGE_LABEL!r} "
+        f"swarm_require_label={label_gate.required_label() or '<unset>'!r}"
+    )
 
     # 1. Load agent_definition from Neotoma
     agent_def = AgentLoader(DAEMON_NAME).load()
