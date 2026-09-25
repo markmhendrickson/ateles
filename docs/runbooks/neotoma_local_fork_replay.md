@@ -148,6 +148,71 @@ by hand.
 ... replay --db <path> --cutover <ts> --log /tmp/my-run.jsonl
 ```
 
+## `--on-extension-failure` and `--on-identity-conflict`: continuing past two known, narrow failure modes
+
+Both default to `stop` (this script's existing fail-closed behavior) and are
+`replay`-only. Reach for either only when the failure it names is the one
+you are actually seeing — neither should be turned on pre-emptively "just in
+case", since each widens what a run will silently pass over rather than
+halt on.
+
+- **`--on-extension-failure {stop,continue}`** — a schema-extension write
+  (`POST /update_schema_incremental` or `/register_schema`, under
+  `--extend-schemas`) can fail for a specific `entity_type` while every
+  other type extends fine; hosted has been observed returning
+  `DB_QUERY_FAILED` this way for a fixed set of types
+  ([neotoma#2496](https://github.com/markmhendrickson/neotoma/issues/2496):
+  `contract_review`, `email_message`, `generic`, `incident`,
+  `legal_research`, `legal_review`, `repository`). Under `stop` (default)
+  the whole run halts before any `/store` call for ANY type, including ones
+  whose extension already succeeded. Under `continue`, that one type's
+  extension is recorded as `{"applied": false, "error": ...}` and the run
+  proceeds — its undeclared fields are never registered and stay on the raw
+  observations (sent as-is, not stripped, not retried as declared). Use
+  this when you have already confirmed the failure is neotoma#2496 (or the
+  same shape: a per-type 5xx from the extension route) and want the rest of
+  the run's types to proceed rather than blocking on a type whose fix is
+  tracked upstream.
+- **`--on-identity-conflict {stop,skip}`** — a class-a `/store` write that
+  forces `target_id` onto a specific local `entity_id` can 400 with
+  `ERR_STORE_RESOLUTION_FAILED` or `ERR_MERGE_REFUSED` and
+  `details.reason == "identity_conflict"` — hosted already holds the SAME
+  canonical identity (e.g. an issue's `repo` + `github_number`) under a
+  DIFFERENT `entity_id`. This is the same class of conflict
+  `canonical_identity_lookup` (ateles#998) exists to avoid earlier in the
+  pipeline, reachable here when that earlier check didn't catch it. Writing
+  onto the hosted entity by forcing `target_id` risks overwriting newer
+  hosted state with older local-fork data. Under `stop` (default) the write
+  failure halts the run like any other `E_WRITE_FAILED`. Under `skip`, the
+  write is skipped (never retried forcing the local id, never merged) and
+  logged as `action=skipped_identity_conflict` with the hosted
+  `entity_id` it collided with, so the field-level reconcile pass
+  (`reconcile` mode) can pick it up deliberately afterward.
+
+Both are matched on the response's structured `error.code` /
+`error.details.reason`, never a substring search of the response body, so
+an unrelated 400 that happens to mention "conflict" in its message is still
+treated as an ordinary write failure.
+
+```bash
+# Continue past a known per-type schema-extension failure (neotoma#2496)
+# rather than blocking the whole run on it.
+... replay --db <path> --cutover <ts> --apply --extend-schemas \
+  --on-extension-failure continue
+
+# Skip a class-a write that collides with an existing hosted identity under
+# a different entity_id, instead of stopping the run.
+... replay --db <path> --cutover <ts> --apply \
+  --on-identity-conflict skip
+```
+
+Equivalent env vars (kept for the exact command line the 2026-09-25
+migration run used; the CLI flag takes precedence when both are given):
+`NEOTOMA_REPLAY_EXTENSION_FAILURES=continue` and
+`NEOTOMA_REPLAY_IDENTITY_CONFLICTS=skip`. Prefer the flags in a new run —
+the env vars exist for reproducing that specific run's command line, not as
+the primary interface.
+
 ## Interpreting classifications, summaries, exit codes, and the JSONL log
 
 - **`class=a_missing`** (replay) — the entity is confirmed absent on hosted
@@ -168,7 +233,11 @@ log as one object per line with keys `entity_id`, `entity_type`,
 `classification`, `action`, `http_status` (never field values). The
 end-of-run summary's `planned`/`applied`/`skipped`/`deferred`/`failed`/
 `unresolved` counts are the first place to look after any run; an empty plan
-prints `NO_CHANGES` and exits 0 without printing an apply hint.
+prints `NO_CHANGES` and exits 0 without printing an apply hint. Two further
+counts, `schema_extension_failures` and `skipped_identity_conflicts`, always
+print (0 unless their opt-in `continue`/`skip` policy above is in effect) —
+a non-zero value there after a `continue`/`skip` run is the count to check
+against what you expected before treating the run as fully converged.
 
 ## Recovery procedures, by error code
 
@@ -179,7 +248,7 @@ prints `NO_CHANGES` and exits 0 without printing an apply hint.
 | `E_HOSTED_STATE_UNKNOWN` | A probe got a 5xx/401/403/timeout, never a confirmed 200 or 404 | Check hosted health/credentials, then re-run the identical command — idempotency keys make this safe. |
 | `E_SCHEMA_NOT_VERIFIED` | An additive schema extension reported success but a re-fetch doesn't show the field as declared, or a field was predicted `UNKNOWN_FIELD` under `--unknown-fields=stop` | Inspect the hosted schema for the named entity_type; re-run with `--unknown-fields=warn` only after reviewing, or fix the schema first. |
 | `E_HOSTED_UNHEALTHY` | `/health` failed before or during an apply run | Wait for hosted to recover; re-run the same command (already-applied writes are idempotent no-ops). |
-| `E_WRITE_FAILED` | A write returned a non-2xx or ambiguous result | Inspect the log entry for that `entity_id`; re-run the same command. |
+| `E_WRITE_FAILED` | A write returned a non-2xx or ambiguous result | Inspect the log entry for that `entity_id`; re-run the same command. If it's a confirmed 400 `identity_conflict` (`error.details.reason`), consider `--on-identity-conflict skip` instead of re-running unchanged — a plain re-run will hit the same conflict every time. |
 | `E_SANITY_THRESHOLD` | `restore-gates` proposes more than 150 issue changes in one dry run | Review the dry-run report; narrow with `--limit` or `--entity-ids`/`--exclude-entity-ids`. |
 | `NO_CHANGES` | Nothing eligible to write, filters matched nothing, or hosted already converged | Nothing to do; this is a successful, no-op outcome (exit 0). |
 | `DEFERRED` | A row can't be replayed in this mode (currently: source blobs) | Tracked separately, never counted as applied; handle in a follow-up pass. |

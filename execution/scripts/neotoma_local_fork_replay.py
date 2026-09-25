@@ -2985,11 +2985,23 @@ def print_run_banner(
 
 def print_run_summary(counts: dict) -> None:
     """End-of-run summary counts (Accipiter ux spec item 9): planned,
-    applied, skipped, deferred, failed, unresolved.
+    applied, skipped, deferred, failed, unresolved, plus (replay only, both
+    default to 0 and only move under their opt-in continue/skip policy)
+    schema_extension_failures (--on-extension-failure=continue) and
+    skipped_identity_conflicts (--on-identity-conflict=skip).
     """
     print()
     print("=== Run summary ===")
-    for key in ("planned", "applied", "skipped", "deferred", "failed", "unresolved"):
+    for key in (
+        "planned",
+        "applied",
+        "skipped",
+        "deferred",
+        "failed",
+        "unresolved",
+        "schema_extension_failures",
+        "skipped_identity_conflicts",
+    ):
         print(f"  {key}: {counts.get(key, 0)}")
 
 
@@ -3134,6 +3146,46 @@ def build_arg_parser() -> argparse.ArgumentParser:
         dest="extend_schemas",
         action="store_false",
         help="Disable schema auto-extension even under --apply.",
+    )
+    replay_sp.add_argument(
+        "--on-extension-failure",
+        dest="on_extension_failure",
+        choices=("stop", "continue"),
+        default=None,
+        help=(
+            "Policy when a schema extension write (POST "
+            "/update_schema_incremental or /register_schema, under "
+            "--extend-schemas) fails, e.g. a hosted DB_QUERY_FAILED for a "
+            "specific entity_type (markmhendrickson/neotoma#2496). 'stop' "
+            "(default) halts the run, matching this script's existing "
+            "fail-closed behavior. 'continue' logs a WARN, records "
+            "{'applied': False, 'error': ...} for that entity_type, and "
+            "proceeds -- that type's undeclared fields stay unregistered "
+            "and remain on the raw observations rather than as declared "
+            "schema fields. Equivalent to setting "
+            "NEOTOMA_REPLAY_EXTENSION_FAILURES=continue; the CLI flag "
+            "takes precedence when both are given."
+        ),
+    )
+    replay_sp.add_argument(
+        "--on-identity-conflict",
+        dest="on_identity_conflict",
+        choices=("stop", "skip"),
+        default=None,
+        help=(
+            "Policy when a class-a /store write with target_id returns a "
+            "400 identity_conflict (ERR_STORE_RESOLUTION_FAILED or "
+            "ERR_MERGE_REFUSED with details.reason == 'identity_conflict') "
+            "-- hosted already holds this canonical identity (e.g. issue "
+            "repo+number) under a different entity_id. Writing onto the "
+            "local entity_id could overwrite newer hosted state. 'stop' "
+            "(default) halts the run, matching this script's existing "
+            "fail-closed behavior. 'skip' logs "
+            "action=skipped_identity_conflict with the hosted entity_id "
+            "and continues to the next planned action. Equivalent to "
+            "setting NEOTOMA_REPLAY_IDENTITY_CONFLICTS=skip; the CLI flag "
+            "takes precedence when both are given."
+        ),
     )
 
     reconcile_sp = subparsers.add_parser(
@@ -3296,6 +3348,31 @@ def main() -> None:
     if getattr(args, "mode", None) == "replay" and args.extend_schemas is None:
         args.extend_schemas = bool(args.apply)
 
+    # --on-extension-failure / --on-identity-conflict: each argparse-defaults
+    # to None (not "stop") specifically so this block can tell "left at
+    # default" apart from "explicitly passed stop" -- an explicitly-passed
+    # flag always wins over the env var; when the flag is left unset we
+    # still honor a live run's env var, matching the 2026-09-25
+    # operator-approved migration run's command line
+    # (NEOTOMA_REPLAY_EXTENSION_FAILURES=continue /
+    # NEOTOMA_REPLAY_IDENTITY_CONFLICTS=skip) without requiring it to be
+    # re-typed as a flag; falls back to "stop" (fail-closed) when neither is
+    # set. Both env vars are equivalents for the live run, never a silent
+    # ambient override of an explicitly-passed flag.
+    if getattr(args, "mode", None) == "replay":
+        if args.on_extension_failure is None:
+            args.on_extension_failure = (
+                "continue"
+                if os.environ.get("NEOTOMA_REPLAY_EXTENSION_FAILURES") == "continue"
+                else "stop"
+            )
+        if args.on_identity_conflict is None:
+            args.on_identity_conflict = (
+                "skip"
+                if os.environ.get("NEOTOMA_REPLAY_IDENTITY_CONFLICTS") == "skip"
+                else "stop"
+            )
+
     base_url = get_base_url()
     token = get_token()
 
@@ -3422,6 +3499,11 @@ def main() -> None:
     # build_observation_payload will send), never a hardcoded field list.
     schema_extension_plan: dict[str, list[dict]] = {}
     schema_extension_results: dict[str, dict] = {}
+    # Counted here rather than in run_counts (not initialized until after
+    # `plan` is built, below) and folded into run_counts once it exists, so
+    # a --on-extension-failure=continue run still surfaces this count in the
+    # end-of-run summary.
+    pre_plan_counts = {"schema_extension_failures": 0}
     if args.extend_schemas:
         undeclared_samples: dict[str, dict] = {}
         for row in obs:
@@ -3464,9 +3546,31 @@ def main() -> None:
                 sign_as=args.sign_as,
             )
             if not ok:
+                detail = resp.get("error") if isinstance(resp, dict) else resp
+                if args.on_extension_failure == "continue":
+                    # Hosted has returned DB_QUERY_FAILED from
+                    # /update_schema_incremental for specific entity_types
+                    # (markmhendrickson/neotoma#2496: contract_review,
+                    # email_message, generic, incident, legal_research,
+                    # legal_review, repository). Rather than aborting the
+                    # whole run over one type's schema-extension failure,
+                    # record it and move on -- that type's undeclared fields
+                    # stay unregistered and remain on the raw observations
+                    # (never silently dropped, never retried as declared).
+                    print(
+                        f"  WARN schema extension failed for {entity_type}: {detail}; "
+                        "continuing under --on-extension-failure=continue -- its "
+                        "undeclared fields stay on the raw observations",
+                        file=sys.stderr,
+                    )
+                    schema_extension_results[entity_type] = {
+                        "applied": False,
+                        "error": str(detail),
+                    }
+                    pre_plan_counts["schema_extension_failures"] += 1
+                    continue
                 print(
-                    f"  ERROR extending schema for {entity_type}: "
-                    f"{resp.get('error') if isinstance(resp, dict) else resp}",
+                    f"  ERROR extending schema for {entity_type}: {detail}",
                     file=sys.stderr,
                 )
                 sys.exit(1)
@@ -3603,6 +3707,8 @@ def main() -> None:
         "deferred": 0,
         "failed": 0,
         "unresolved": 0,
+        "schema_extension_failures": pre_plan_counts["schema_extension_failures"],
+        "skipped_identity_conflicts": 0,
     }
     with open(log_path, "a", encoding="utf-8") as log_fh:
         for (
@@ -3810,6 +3916,56 @@ def main() -> None:
                 continue
 
             ok = status in (200, 201)
+            # Identity conflict (class-a /store writes with target_id only):
+            # hosted already holds this same canonical identity (e.g. issue
+            # repo+number) under a DIFFERENT entity_id than this run's local
+            # entity_id -- the same class of conflict canonical_identity_lookup
+            # exists to avoid (ateles#998, ERR_MERGE_REFUSED), but reachable
+            # here too when the probe missed it. Writing onto the hosted
+            # entity by forcing target_id could overwrite newer hosted
+            # values, so under --on-identity-conflict=skip this is logged
+            # and skipped rather than stopping the whole run. Matched on the
+            # structured details.reason, never a string search, so this
+            # never fires on an unrelated 400 that happens to mention the
+            # word "conflict".
+            if (
+                not ok
+                and status == 400
+                and kind == "observation"
+                and args.on_identity_conflict == "skip"
+                and isinstance(resp, dict)
+                and isinstance(resp.get("error"), dict)
+                and resp["error"].get("code") in (
+                    "ERR_STORE_RESOLUTION_FAILED",
+                    "ERR_MERGE_REFUSED",
+                )
+                and isinstance(resp["error"].get("details"), dict)
+                and resp["error"]["details"].get("reason") == "identity_conflict"
+            ):
+                hosted_entity_id = resp["error"]["details"].get("entity_id")
+                print(
+                    f"  SKIP identity_conflict: local {target_desc} already exists on "
+                    f"hosted under a different entity_id ({hosted_entity_id}) -- "
+                    "skipping under --on-identity-conflict=skip rather than risk "
+                    "overwriting newer hosted state"
+                )
+                log_action(
+                    log_fh,
+                    kind=kind,
+                    local_id=local_id,
+                    entity_id=target_desc,
+                    entity_type=entity_type,
+                    entity_class=entity_class,
+                    stripped_keys=stripped_keys,
+                    action="skipped_identity_conflict",
+                    idempotency_key=idem_key,
+                    http_status=status,
+                    hosted_entity_id=hosted_entity_id,
+                )
+                run_counts["skipped"] += 1
+                run_counts["skipped_identity_conflicts"] += 1
+                time.sleep(0.05)  # gentle rate limiting
+                continue
             unknown_field_warnings = []
             if ok and isinstance(resp, dict):
                 for w in resp.get("store_warnings") or []:

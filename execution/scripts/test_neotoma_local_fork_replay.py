@@ -3247,3 +3247,509 @@ def test_action_log_never_logs_field_contents(tmp_path, monkeypatch):
     assert lines
     for line in lines:
         json.loads(line)
+
+
+# =============================================================================
+# --on-extension-failure / --on-identity-conflict (PR #1167 follow-up,
+# ateles migration run 2026-09-25)
+# =============================================================================
+#
+# Two behaviours added locally, as env-gated switches, during a live
+# operator-approved migration run and now upstreamed as proper CLI flags
+# (env vars kept as equivalents so the live run's command line still works):
+#
+#   1. Schema-extension failure -> continue (default: stop). Hosted can
+#      return DB_QUERY_FAILED from /update_schema_incremental for specific
+#      entity_types (markmhendrickson/neotoma#2496). Under
+#      --on-extension-failure=continue, that one type's extension is
+#      recorded as failed and the run proceeds rather than aborting.
+#   2. Identity conflict -> skip (default: stop). A class-a /store write
+#      with target_id can 400 with ERR_STORE_RESOLUTION_FAILED /
+#      ERR_MERGE_REFUSED and details.reason == "identity_conflict" because
+#      hosted already holds the same canonical identity under a different
+#      entity_id. Under --on-identity-conflict=skip, that write is skipped
+#      (never force-written) and the run proceeds.
+#
+# Both default to "stop", matching this script's existing fail-closed
+# posture, and are tested end to end through main() (the replay subcommand's
+# plan/apply loop lives inline in main(), unlike run_reconciliation/
+# run_gate_restore) with http_request/signed_write fully mocked -- no live
+# HTTP, matching every other apply-mode test in this file.
+
+
+def _make_replay_observations_db(tmp_path, name, rows):
+    """rows: list of (entity_id, entity_type, fields_dict, created_at_iso).
+    Builds the full 14-column `observations` table load_candidates() reads
+    for `replay` mode (distinct from the 5-column table the restore-gates/
+    reconcile fixtures above use, which only scan_local_gate_candidates and
+    local_post_cutover_field_state need)."""
+    import sqlite3 as _sqlite3
+
+    db_path = tmp_path / name
+    conn = _sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE observations (id TEXT, entity_id TEXT, entity_type TEXT, "
+        "schema_version TEXT, source_id TEXT, interpretation_id TEXT, "
+        "observed_at TEXT, specificity_score REAL, source_priority INTEGER, "
+        "fields TEXT, created_at TEXT, user_id TEXT, idempotency_key TEXT, "
+        "observation_source TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE relationship_observations (id TEXT, relationship_key TEXT, "
+        "relationship_type TEXT, source_entity_id TEXT, target_entity_id TEXT, "
+        "source_id TEXT, interpretation_id TEXT, observed_at TEXT, "
+        "specificity_score REAL, source_priority INTEGER, metadata TEXT, "
+        "created_at TEXT, user_id TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE sources (id TEXT, user_id TEXT, content_hash TEXT, "
+        "mime_type TEXT, storage_url TEXT, file_size INTEGER, "
+        "original_filename TEXT, provenance TEXT, created_at TEXT, "
+        "idempotency_key TEXT, source_type TEXT, storage_mode TEXT, "
+        "reference_path TEXT)"
+    )
+    for i, (entity_id, entity_type, fields, created_at) in enumerate(rows):
+        conn.execute(
+            "INSERT INTO observations (id, entity_id, entity_type, "
+            "schema_version, source_id, interpretation_id, observed_at, "
+            "specificity_score, source_priority, fields, created_at, "
+            "user_id, idempotency_key, observation_source) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                f"obs-{i}",
+                entity_id,
+                entity_type,
+                "1",
+                "src-1",
+                None,
+                created_at,
+                1.0,
+                1,
+                json.dumps(fields),
+                created_at,
+                "user-1",
+                f"idem-{i}",
+                "import",
+            ),
+        )
+    conn.commit()
+    conn.close()
+    return str(db_path)
+
+
+def _run_main_with_argv(monkeypatch, argv):
+    """Invoke the script's real main() end to end via sys.argv, the same
+    entrypoint an actual `python3 neotoma_local_fork_replay.py ...` run
+    uses -- replay's plan/apply loop is inline in main(), so this is the
+    only way to exercise --on-extension-failure/--on-identity-conflict as a
+    real user would invoke them."""
+    import neotoma_local_fork_replay as _mod
+
+    monkeypatch.setattr(sys, "argv", ["neotoma_local_fork_replay.py", *argv])
+    _mod.main()
+
+
+def _fake_hosted_replay_router(
+    monkeypatch,
+    *,
+    schema_by_type=None,
+    entity_exists_ids=None,
+    store_response_by_entity_id=None,
+    extension_response=None,
+):
+    """Full router for a `replay --apply` run through main(): /health,
+    agent_grant pre-flight, /schemas/<type>, /entities/<id> existence
+    probes, /update_schema_incremental (extension), and /store.
+
+    schema_by_type: {entity_type: {"has_schema": bool, "declared_fields": [...]}}
+      -- controls get_schema_declared_fields; defaults to "no schema" (404)
+      for any type not listed.
+    entity_exists_ids: set of entity_ids that probe as existing (200) --
+      anything else probes 404 (a_missing, i.e. eligible to write).
+    store_response_by_entity_id: {entity_id: (status, resp_dict)} override
+      for the /store call for that entity_id; entities not listed get a
+      plain 201 success.
+    extension_response: (status, resp_dict) for /update_schema_incremental
+      calls, when the test drives extend-schemas explicitly.
+    """
+    import neotoma_local_fork_replay as _mod
+
+    schema_by_type = schema_by_type or {}
+    entity_exists_ids = entity_exists_ids or set()
+    store_response_by_entity_id = store_response_by_entity_id or {}
+    store_calls: list[dict] = []
+
+    def fake_http_request(method, base_url, path, token, body=None, **kwargs):
+        if path == "/health":
+            return 200, {"ok": True}
+        if path.startswith("/entities?entity_type=agent_grant"):
+            return 200, {"entities": [_permissive_grant_entity()]}
+        if path.startswith("/schemas/"):
+            entity_type = path.rsplit("/", 1)[-1]
+            info = schema_by_type.get(entity_type)
+            if info is None:
+                return 404, {"error": "not found"}
+            return 200, {
+                "schema_definition": {
+                    "fields": [{"name": n} for n in info.get("declared_fields", [])]
+                }
+            }
+        if path.startswith("/entities/"):
+            entity_id = path.rsplit("/", 1)[-1]
+            if entity_id in entity_exists_ids:
+                return 200, {"id": entity_id}
+            return 404, {"error": "not found"}
+        raise AssertionError(f"unexpected http_request call: {method} {path}")
+
+    def fake_signed_write(method, base_url, path, sign_as, body=None, **kwargs):
+        assert sign_as, "signed_write called with no signing identity"
+        if path in ("/update_schema_incremental", "/register_schema"):
+            if extension_response is not None:
+                return extension_response
+            return 200, {"success": True}
+        if path == "/store":
+            store_calls.append(body)
+            (entity_record,) = body["entities"]
+            entity_id = entity_record.get("target_id")
+            if entity_id in store_response_by_entity_id:
+                return store_response_by_entity_id[entity_id]
+            return 201, {"success": True}
+        raise AssertionError(f"unexpected signed write: {method} {path}")
+
+    monkeypatch.setattr(_mod, "http_request", fake_http_request)
+    monkeypatch.setattr(_mod, "signed_write", fake_signed_write)
+    return store_calls
+
+
+def _set_replay_env(monkeypatch):
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://hosted.example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setenv("NEOTOMA_REPLAY_CONFIRM_APPLY", "yes")
+    monkeypatch.delenv("NEOTOMA_REPLAY_EXTENSION_FAILURES", raising=False)
+    monkeypatch.delenv("NEOTOMA_REPLAY_IDENTITY_CONFLICTS", raising=False)
+
+
+# --- --on-extension-failure --------------------------------------------
+
+
+def test_on_extension_failure_default_stop_aborts_run(tmp_path, monkeypatch, capsys):
+    """Default behavior (no flag, no env var): a schema-extension failure
+    still halts the whole run before any /store call, exactly as before
+    this change -- the new flag must not weaken the existing fail-closed
+    default."""
+    import neotoma_local_fork_replay as _mod
+
+    _set_replay_env(monkeypatch)
+    db_path = _make_replay_observations_db(
+        tmp_path,
+        "fork.db",
+        [("ent_a", "generic", {"custom_field": "value"}, "2026-01-02T00:00:00Z")],
+    )
+    store_calls = _fake_hosted_replay_router(
+        monkeypatch,
+        extension_response=(500, {"error": "DB_QUERY_FAILED"}),
+    )
+
+    monkeypatch.setattr(sys, "argv", [
+        "neotoma_local_fork_replay.py", "replay",
+        "--db", db_path,
+        "--cutover", "2026-01-01T00:00:00Z",
+        "--log", str(tmp_path / "action.jsonl"),
+        "--apply", "--extend-schemas",
+    ])
+    with pytest.raises(SystemExit) as exc_info:
+        _mod.main()
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "ERROR extending schema for generic" in err
+    assert store_calls == []  # aborted before any /store write
+
+
+def test_on_extension_failure_continue_flag_records_failure_and_proceeds(
+    tmp_path, monkeypatch, capsys
+):
+    """--on-extension-failure=continue: the failing type's extension is
+    recorded as failed (WARN, not ERROR) and the run proceeds to write the
+    observation anyway (its undeclared field stays on the raw observation,
+    unregistered on the schema)."""
+    import neotoma_local_fork_replay as _mod
+
+    _set_replay_env(monkeypatch)
+    db_path = _make_replay_observations_db(
+        tmp_path,
+        "fork.db",
+        [("ent_a", "generic", {"custom_field": "value"}, "2026-01-02T00:00:00Z")],
+    )
+    store_calls = _fake_hosted_replay_router(
+        monkeypatch,
+        extension_response=(500, {"error": "DB_QUERY_FAILED"}),
+    )
+
+    monkeypatch.setattr(sys, "argv", [
+        "neotoma_local_fork_replay.py", "replay",
+        "--db", db_path,
+        "--cutover", "2026-01-01T00:00:00Z",
+        "--log", str(tmp_path / "action.jsonl"),
+        "--apply", "--extend-schemas",
+        "--on-extension-failure", "continue",
+    ])
+    _mod.main()
+
+    out, err = capsys.readouterr()
+    assert "WARN schema extension failed for generic" in err
+    assert "DB_QUERY_FAILED" in err
+    assert "schema_extension_failures: 1" in out
+    # The run proceeded to write the observation despite the extension
+    # failure -- proves "continue" actually continues, not just avoids exit.
+    assert len(store_calls) == 1
+
+
+def test_on_extension_failure_env_var_equivalent_to_continue_flag(
+    tmp_path, monkeypatch, capsys
+):
+    """NEOTOMA_REPLAY_EXTENSION_FAILURES=continue (the live migration run's
+    env-gated switch) behaves the same as --on-extension-failure=continue
+    when the CLI flag is left at its default."""
+    import neotoma_local_fork_replay as _mod
+
+    _set_replay_env(monkeypatch)
+    monkeypatch.setenv("NEOTOMA_REPLAY_EXTENSION_FAILURES", "continue")
+    db_path = _make_replay_observations_db(
+        tmp_path,
+        "fork.db",
+        [("ent_a", "generic", {"custom_field": "value"}, "2026-01-02T00:00:00Z")],
+    )
+    store_calls = _fake_hosted_replay_router(
+        monkeypatch,
+        extension_response=(500, {"error": "DB_QUERY_FAILED"}),
+    )
+
+    monkeypatch.setattr(sys, "argv", [
+        "neotoma_local_fork_replay.py", "replay",
+        "--db", db_path,
+        "--cutover", "2026-01-01T00:00:00Z",
+        "--log", str(tmp_path / "action.jsonl"),
+        "--apply", "--extend-schemas",
+    ])
+    _mod.main()
+
+    out, err = capsys.readouterr()
+    assert "WARN schema extension failed for generic" in err
+    assert len(store_calls) == 1
+
+
+def test_on_extension_failure_cli_flag_overrides_env_var(tmp_path, monkeypatch, capsys):
+    """An explicit --on-extension-failure=stop must win over an ambient
+    NEOTOMA_REPLAY_EXTENSION_FAILURES=continue -- the CLI flag is the
+    authoritative surface; the env var is only a fallback for when the flag
+    is left at its default."""
+    import neotoma_local_fork_replay as _mod
+
+    _set_replay_env(monkeypatch)
+    monkeypatch.setenv("NEOTOMA_REPLAY_EXTENSION_FAILURES", "continue")
+    db_path = _make_replay_observations_db(
+        tmp_path,
+        "fork.db",
+        [("ent_a", "generic", {"custom_field": "value"}, "2026-01-02T00:00:00Z")],
+    )
+    store_calls = _fake_hosted_replay_router(
+        monkeypatch,
+        extension_response=(500, {"error": "DB_QUERY_FAILED"}),
+    )
+
+    monkeypatch.setattr(sys, "argv", [
+        "neotoma_local_fork_replay.py", "replay",
+        "--db", db_path,
+        "--cutover", "2026-01-01T00:00:00Z",
+        "--log", str(tmp_path / "action.jsonl"),
+        "--apply", "--extend-schemas",
+        "--on-extension-failure", "stop",
+    ])
+    with pytest.raises(SystemExit) as exc_info:
+        _mod.main()
+
+    assert exc_info.value.code == 1
+    assert store_calls == []
+
+
+# --- --on-identity-conflict ---------------------------------------------
+
+
+def _identity_conflict_response(hosted_entity_id="ent_hosted_existing"):
+    return (
+        400,
+        {
+            "error": {
+                "code": "ERR_MERGE_REFUSED",
+                "message": "identity conflict",
+                "details": {
+                    "reason": "identity_conflict",
+                    "entity_id": hosted_entity_id,
+                },
+            }
+        },
+    )
+
+
+def test_on_identity_conflict_default_stop_fails_the_run(tmp_path, monkeypatch, capsys):
+    """Default behavior (no flag, no env var): an identity-conflict /store
+    response is treated like any other write failure and halts the run --
+    the new flag must not weaken the existing fail-closed default."""
+    _set_replay_env(monkeypatch)
+    db_path = _make_replay_observations_db(
+        tmp_path,
+        "fork.db",
+        [("ent_a", "issue", {"repo": "owner/repo", "github_number": 1}, "2026-01-02T00:00:00Z")],
+    )
+    _fake_hosted_replay_router(
+        monkeypatch,
+        store_response_by_entity_id={"ent_a": _identity_conflict_response()},
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_main_with_argv(monkeypatch, [
+            "replay",
+            "--db", db_path,
+            "--cutover", "2026-01-01T00:00:00Z",
+            "--log", str(tmp_path / "action.jsonl"),
+            "--apply", "--no-extend-schemas",
+        ])
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "code=E_WRITE_FAILED" in err
+
+
+def test_on_identity_conflict_skip_flag_skips_and_proceeds(tmp_path, monkeypatch, capsys):
+    """--on-identity-conflict=skip: the conflicting write is logged as
+    action=skipped_identity_conflict with the hosted entity_id and the run
+    completes (exit 0) rather than aborting."""
+    _set_replay_env(monkeypatch)
+    db_path = _make_replay_observations_db(
+        tmp_path,
+        "fork.db",
+        [("ent_a", "issue", {"repo": "owner/repo", "github_number": 1}, "2026-01-02T00:00:00Z")],
+    )
+    log_path = tmp_path / "action.jsonl"
+    _fake_hosted_replay_router(
+        monkeypatch,
+        store_response_by_entity_id={
+            "ent_a": _identity_conflict_response("ent_hosted_existing")
+        },
+    )
+
+    _run_main_with_argv(monkeypatch, [
+        "replay",
+        "--db", db_path,
+        "--cutover", "2026-01-01T00:00:00Z",
+        "--log", str(log_path),
+        "--apply", "--no-extend-schemas",
+        "--on-identity-conflict", "skip",
+    ])
+
+    out = capsys.readouterr().out
+    assert "SKIP identity_conflict" in out
+    assert "ent_hosted_existing" in out
+    assert "skipped_identity_conflicts: 1" in out
+
+    log_lines = [
+        json.loads(ln)
+        for ln in log_path.read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    skip_entries = [ln for ln in log_lines if ln.get("action") == "skipped_identity_conflict"]
+    assert len(skip_entries) == 1
+    assert skip_entries[0]["hosted_entity_id"] == "ent_hosted_existing"
+    assert skip_entries[0]["entity_id"] == "ent_a"
+
+
+def test_on_identity_conflict_env_var_equivalent_to_skip_flag(tmp_path, monkeypatch, capsys):
+    """NEOTOMA_REPLAY_IDENTITY_CONFLICTS=skip (the live migration run's
+    env-gated switch) behaves the same as --on-identity-conflict=skip when
+    the CLI flag is left at its default."""
+    _set_replay_env(monkeypatch)
+    monkeypatch.setenv("NEOTOMA_REPLAY_IDENTITY_CONFLICTS", "skip")
+    db_path = _make_replay_observations_db(
+        tmp_path,
+        "fork.db",
+        [("ent_a", "issue", {"repo": "owner/repo", "github_number": 1}, "2026-01-02T00:00:00Z")],
+    )
+    _fake_hosted_replay_router(
+        monkeypatch,
+        store_response_by_entity_id={"ent_a": _identity_conflict_response()},
+    )
+
+    _run_main_with_argv(monkeypatch, [
+        "replay",
+        "--db", db_path,
+        "--cutover", "2026-01-01T00:00:00Z",
+        "--log", str(tmp_path / "action.jsonl"),
+        "--apply", "--no-extend-schemas",
+    ])
+
+    out = capsys.readouterr().out
+    assert "SKIP identity_conflict" in out
+    assert "skipped_identity_conflicts: 1" in out
+
+
+def test_on_identity_conflict_cli_flag_overrides_env_var(tmp_path, monkeypatch, capsys):
+    """An explicit --on-identity-conflict=stop must win over an ambient
+    NEOTOMA_REPLAY_IDENTITY_CONFLICTS=skip -- the CLI flag is the
+    authoritative surface; the env var is only a fallback for when the flag
+    is left at its default."""
+    _set_replay_env(monkeypatch)
+    monkeypatch.setenv("NEOTOMA_REPLAY_IDENTITY_CONFLICTS", "skip")
+    db_path = _make_replay_observations_db(
+        tmp_path,
+        "fork.db",
+        [("ent_a", "issue", {"repo": "owner/repo", "github_number": 1}, "2026-01-02T00:00:00Z")],
+    )
+    _fake_hosted_replay_router(
+        monkeypatch,
+        store_response_by_entity_id={"ent_a": _identity_conflict_response()},
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_main_with_argv(monkeypatch, [
+            "replay",
+            "--db", db_path,
+            "--cutover", "2026-01-01T00:00:00Z",
+            "--log", str(tmp_path / "action.jsonl"),
+            "--apply", "--no-extend-schemas",
+            "--on-identity-conflict", "stop",
+        ])
+
+    assert exc_info.value.code == 1
+
+
+def test_on_identity_conflict_does_not_match_unrelated_400(tmp_path, monkeypatch, capsys):
+    """A 400 that isn't a structured identity_conflict (matched on
+    details.reason, never a string search) must still be treated as an
+    ordinary write failure even under --on-identity-conflict=skip."""
+    _set_replay_env(monkeypatch)
+    db_path = _make_replay_observations_db(
+        tmp_path,
+        "fork.db",
+        [("ent_a", "issue", {"repo": "owner/repo", "github_number": 1}, "2026-01-02T00:00:00Z")],
+    )
+    _fake_hosted_replay_router(
+        monkeypatch,
+        store_response_by_entity_id={
+            "ent_a": (400, {"error": {"code": "ERR_VALIDATION", "message": "bad field"}})
+        },
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_main_with_argv(monkeypatch, [
+            "replay",
+            "--db", db_path,
+            "--cutover", "2026-01-01T00:00:00Z",
+            "--log", str(tmp_path / "action.jsonl"),
+            "--apply", "--no-extend-schemas",
+            "--on-identity-conflict", "skip",
+        ])
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "code=E_WRITE_FAILED" in err
