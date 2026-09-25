@@ -33,6 +33,7 @@ from lib.approval.email_channel import (
     ReadRepliesOutcome,
     read_replies_with_status,
     send_request,
+    swarm_mailbox_configured,
 )
 from lib.approval.tokens import parse_verdict, subject_marker, token_for
 
@@ -42,6 +43,22 @@ log = logging.getLogger(__name__)
 
 STATE_FILE = Path(__file__).parent / ".monedula_consent_email.json"
 CORRECTION_DEDUPE_FILE = Path(__file__).parent / ".monedula_consent_correction.json"
+UNAUTH_DEDUPE_NAME = ".monedula_consent_unauthenticated.json"
+
+# Email consent cannot succeed without a separate swarm mailbox (ateles#1221):
+# a reply is accepted only with authentication evidence, which the operator's
+# own self-sent replies never carry. Held with this reason instead of sending
+# a request nobody can answer.
+REASON_NEEDS_SWARM_MAILBOX = "consent_email_needs_swarm_mailbox"
+NEEDS_SWARM_MAILBOX_HINT = (
+    "email consent needs a separate swarm mailbox; see ateles#1221 "
+    "(set ATELES_SWARM_EMAIL and ATELES_SWARM_GWS_CONFIG_DIR to the swarm's "
+    "own mailbox). No consent request was sent; payments held"
+)
+
+# A reply from the operator's address that could not be authenticated.
+# Distinct from a non-operator sender: it may be a genuine reply.
+REASON_REPLY_UNAUTHENTICATED = "consent_reply_unauthenticated"
 
 # Every Monedula profile settles in EUR (``amount_eur``; the Wise leg quotes
 # EUR→EUR). Bound explicitly so a future non-EUR profile changes the key.
@@ -98,6 +115,8 @@ class ConsentEmailResult:
     channel_ok: bool = True
     pending_items: list[PendingItem] = field(default_factory=list)
     generation: int = 0
+    # Replies from the operator's address that failed authentication this sweep.
+    unauthenticated_replies: int = 0
 
 
 def match_key(item: PendingItem) -> str:
@@ -449,8 +468,15 @@ def request_and_collect(
     *,
     state_path: Path | None = None,
     clear_failure_dedupe: Callable[[], None] | None = None,
+    on_unauthenticated_reply: Callable[[str, str], None] | None = None,
 ) -> ConsentEmailResult:
-    """Send-once consent email + statusful reply sweep for the pending set."""
+    """Send-once consent email + statusful reply sweep for the pending set.
+
+    ``on_unauthenticated_reply(message, dedupe_key)`` is called at most ONCE
+    per consent request (pending-set fingerprint + generation) when a reply
+    from the operator's address fails authentication, so the operator learns
+    the reply was received but not accepted. It never approves anything.
+    """
     path = state_path or STATE_FILE
     result = ConsentEmailResult()
 
@@ -473,6 +499,18 @@ def request_and_collect(
 
     # Terms (and therefore the fingerprint) do not depend on the generation.
     probe = build_pending_items(triggered, yesterday_str)
+
+    # Without a separate swarm mailbox no reply can ever be authenticated, so
+    # a request would only pretend to be actionable. Hold, send nothing, and
+    # let the caller surface one deduped blocker (ateles#1221).
+    if not swarm_mailbox_configured():
+        log.error(
+            f"{REASON_NEEDS_SWARM_MAILBOX} — request and replies would share "
+            "the operator's mailbox, so no reply can be authenticated; "
+            "no request sent, payments held"
+        )
+        result.pending_items = probe
+        return _block_all(probe, REASON_NEEDS_SWARM_MAILBOX)
     fp = pending_fingerprint(probe)
     mark = _load_mark(path)
     prior_fp = str(mark.get("fingerprint") or "")
@@ -554,14 +592,20 @@ def request_and_collect(
 
     tokens = [i.token for i in items]
     sender_rejected = {"n": 0}
+    unauthenticated = {"n": 0}
 
     def _on_rejected() -> None:
         sender_rejected["n"] += 1
         log.info("consent_reply_sender_rejected")
 
+    def _on_unauthenticated() -> None:
+        unauthenticated["n"] += 1
+        log.warning(REASON_REPLY_UNAUTHENTICATED)
+
     outcome: ReadRepliesOutcome = read_replies_with_status(
         tokens,
         on_sender_rejected=_on_rejected,
+        on_unauthenticated_operator_reply=_on_unauthenticated,
     )
 
     if outcome.kind in ("transport_error", "disabled"):
@@ -577,6 +621,16 @@ def request_and_collect(
         return result
 
     # kind == ok
+    if unauthenticated["n"]:
+        result.unauthenticated_replies = unauthenticated["n"]
+        result.reason_code = REASON_REPLY_UNAUTHENTICATED
+        _maybe_notify_unauthenticated(
+            items,
+            generation,
+            path.parent,
+            on_unauthenticated_reply,
+        )
+
     if not outcome.texts:
         for item in items:
             key = match_key(item)
@@ -602,6 +656,46 @@ def request_and_collect(
         _maybe_send_correction(items, outcome.texts, path.parent)
 
     return result
+
+
+def unauthenticated_reply_message(payment_date: str) -> str:
+    """Operator-facing notice: a reply arrived but was not accepted."""
+    return (
+        f"monedula: a reply to the payment consent request for {payment_date} "
+        "came from your address but could not be authenticated, so it was NOT "
+        "accepted and no payment was made. Payments stay held. "
+        "Most likely the request was sent from, and your reply read in, the "
+        "same mailbox; email consent needs a separate swarm mailbox (see "
+        "ateles#1221 — ATELES_SWARM_EMAIL and ATELES_SWARM_GWS_CONFIG_DIR). "
+        "Once that is set up, reply again to the current consent request from "
+        "your own mailbox."
+    )
+
+
+def _maybe_notify_unauthenticated(
+    items: list[PendingItem],
+    generation: int,
+    state_dir: Path,
+    notify: Callable[[str, str], None] | None,
+) -> None:
+    """Notify at most once per consent request (fingerprint + generation)."""
+    fp = pending_fingerprint(items)
+    dedupe_path = state_dir / UNAUTH_DEDUPE_NAME
+    prior = _load_mark(dedupe_path)
+    if prior.get("fingerprint") == fp and prior.get("generation") == int(generation):
+        return
+    if notify is None:
+        return
+    dedupe_key = f"monedula:{REASON_REPLY_UNAUTHENTICATED}:{fp}:g{int(generation)}"
+    try:
+        notify(unauthenticated_reply_message(items[0].payment_date), dedupe_key)
+    except Exception as exc:  # noqa: BLE001 — a notify failure must not approve
+        log.warning(f"{REASON_REPLY_UNAUTHENTICATED} notify failed: {exc}")
+        return
+    try:
+        _save_mark(dedupe_path, fp, time.time(), generation=generation)
+    except OSError as exc:
+        log.warning(f"could not persist unauthenticated-reply dedupe: {exc}")
 
 
 def _maybe_send_correction(

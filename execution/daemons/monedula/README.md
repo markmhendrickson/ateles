@@ -10,6 +10,15 @@ consent), executes approved payments, and confirms.
 **Email consent** is the default when Telegram credentials are absent.
 **Telegram break-glass** is an explicit override only.
 
+> **Email consent requires a separate swarm mailbox.** A consent reply is
+> accepted only when it carries authentication evidence stamped by the
+> receiving mail server. A reply sent from, and read in, the operator's own
+> mailbox is self-sent and never carries it, so with one shared mailbox
+> every genuine approval would be held. Until the swarm has its own mailbox
+> (`ATELES_SWARM_EMAIL` + `ATELES_SWARM_GWS_CONFIG_DIR`, built in
+> ateles#1221), Monedula sends **no** consent request, holds every payment,
+> and raises one deduped blocker: `consent_email_needs_swarm_mailbox`.
+
 This change does **not** enable global Notifier email for unrelated daemons
 (Apis/Anthus flood — see ateles#1165). Monedula calls `lib.approval` directly.
 
@@ -20,6 +29,7 @@ This change does **not** enable global Notifier email for unrelated daemons
 | `MONEDULA_CONSENT_CHANNEL=email` | Email consent | `env` |
 | `MONEDULA_CONSENT_CHANNEL=telegram` | Telegram break-glass | `env` |
 | Telegram creds absent + `ATELES_NOTIFY_EMAIL=1` + `OPERATOR_EMAIL` set | Email consent | `automatic` |
+| Email selected but no separate swarm mailbox | Blocker (`consent_email_needs_swarm_mailbox`) — no request sent | — |
 | Both Telegram creds + operator principal resolve | Telegram break-glass | `automatic` |
 | Nothing configured | Blocker (`consent_channel_unconfigured`) | — |
 
@@ -45,7 +55,8 @@ Loaded automatically from `~/.config/neotoma/.env` at startup.
 |----------|---------|
 | `ATELES_NOTIFY_EMAIL` | `"1"` arms `lib.approval` email send/read for Monedula consent |
 | `OPERATOR_EMAIL` | Consent request recipient; exact-match From: for replies |
-| `ATELES_SWARM_EMAIL` | Optional From: for outbound consent mail |
+| `ATELES_SWARM_EMAIL` | **Required for email consent.** The swarm's own address; must differ from `OPERATOR_EMAIL` |
+| `ATELES_SWARM_GWS_CONFIG_DIR` | **Required for email consent.** gws config directory for the swarm's own mailbox (ateles#1221); must exist |
 | `MONEDULA_CONSENT_CHANNEL` | Optional override: `email` \| `telegram` |
 | `TELEGRAM_BOT_TOKEN` | Telegram break-glass only |
 | `TELEGRAM_CHAT_ID` | Telegram break-glass only |
@@ -89,6 +100,10 @@ Bare `ATTENDED` without a marker on a multi-item set is unrecognized — no
 payment executes; one deduped in-thread correction explains the accepted form.
 
 Non-operator senders (`attacker@evil.example`) are ignored; payments stay held.
+A reply from the operator's own address that cannot be authenticated is also
+not accepted, but it is not silent: the operator gets one notice per request
+(`consent_reply_unauthenticated`) saying the reply arrived, was not accepted,
+and no payment was made.
 Stale-session tokens and ambiguous replies never execute payment.
 Each marker is bound to the item's exact terms (payee, amount, currency,
 session) and to the current request: if any term changes, or the request is
@@ -120,7 +135,9 @@ chmod +x install.sh
 | `consent_channel_unconfigured` | Set `MONEDULA_CONSENT_CHANNEL`, or arm `ATELES_NOTIFY_EMAIL=1` + `OPERATOR_EMAIL`, or Telegram break-glass vars |
 | `consent_request_send_failed` | Request not delivered; payments blocked; next tick retries; check `gws gmail +send` |
 | `consent_reply_read_failed` | Replies could not be checked; no payment executed; check `gws`/mailbox |
-| `consent_reply_sender_rejected` | Non-operator From:; payments held; do not expect a reply to the rejected sender |
+| `consent_email_needs_swarm_mailbox` | Email consent selected but no separate swarm mailbox is configured. No request sent; every payment held. Set up the swarm mailbox (ateles#1221): `ATELES_SWARM_EMAIL` (distinct from `OPERATOR_EMAIL`) and `ATELES_SWARM_GWS_CONFIG_DIR`. Notifier key `monedula:consent_email_needs_swarm_mailbox` |
+| `consent_reply_sender_rejected` | A reply carried the consent marker but its From: is not the operator's address. Ignored; payments held; nothing is sent back to that sender |
+| `consent_reply_unauthenticated` | A reply came from the operator's address but could not be authenticated, so it was **not** accepted; payments held. One notice + escalation per request (Notifier key `monedula:consent_reply_unauthenticated:<fp>:g<gen>`). Usually means request and reply share one mailbox — check the swarm mailbox setup (ateles#1221), then reply again to the current request |
 | `consent_reply_unrecognized` | Authenticated but unparseable line; hold item; correction mail explains form |
 | `payment_journal_unreadable` | The payment journal could not be read or written; every payment held; inspect `.monedula_payment_journal.json` before anything is paid |
 | `payment_outcome_unknown` | A transfer was attempted and its outcome never recorded (crash or rail error mid-transfer). Held and never retried automatically; check the rail, then resolve by hand |
@@ -147,7 +164,8 @@ payment when Telegram is selected. Unset or non-numeric ⇒ `channel_error`.
 
 Log events include: `consent_channel_selected`, `consent_request_suppressed`,
 `consent_request_send_failed`, `consent_reply_read_failed`,
-`consent_reply_sender_rejected`, `consent_reply_unrecognized`.
+`consent_reply_sender_rejected`, `consent_reply_unauthenticated`,
+`consent_reply_unrecognized`, `consent_email_needs_swarm_mailbox`.
 Logs never expose addresses, account identifiers, message bodies, or secrets.
 
 ## Idempotency

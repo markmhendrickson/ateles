@@ -661,6 +661,31 @@ class TestSenderDomainAuthentication:
                 ["TOK"], on_sender_rejected=lambda: rejected.append(1))
         assert rejected == [1]
 
+    def test_unauthenticated_operator_reply_fires_its_own_callback(self, monkeypatch):
+        """Address matched, authentication missing: a distinct signal from a
+        non-operator sender, and the reply is still ignored."""
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+        rejected, unauth = [], []
+
+        def fake_gws_json(args, timeout=45):
+            if "+triage" in args:
+                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                                      "from": "op@example.com"}]}
+            if _is_metadata_get(args):
+                return _metadata([])
+            return {"body_text": "APPROVE"}
+
+        with _mock_inbox(side_effect=fake_gws_json, auth=None):
+            out = ec.read_replies_with_status(
+                ["TOK"],
+                on_sender_rejected=lambda: rejected.append(1),
+                on_unauthenticated_operator_reply=lambda: unauth.append(1),
+            )
+        assert unauth == [1]
+        assert rejected == []
+        assert out.kind == "ok" and out.texts == []
+
     def test_unreadable_metadata_response_is_not_ok(self, monkeypatch):
         """We could not read the authentication result at all: that is a read
         failure, never an 'ok, nothing authenticated' and never a pass."""
@@ -746,3 +771,40 @@ class TestPartialReadFailsClosed:
             out = ec.read_replies_with_status(["TOK1", "TOK2"])
         assert out.kind == "transport_error"
         assert out.texts == []
+
+
+class TestSwarmMailboxConfigured:
+    """Email consent needs a mailbox separate from the operator's (ateles#1221)."""
+
+    def _env(self, monkeypatch, *, swarm, cfg):
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+        if swarm is None:
+            monkeypatch.delenv("ATELES_SWARM_EMAIL", raising=False)
+        else:
+            monkeypatch.setenv("ATELES_SWARM_EMAIL", swarm)
+        if cfg is None:
+            monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR", raising=False)
+        else:
+            monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", cfg)
+
+    def test_distinct_address_and_existing_config_dir(self, monkeypatch, tmp_path):
+        self._env(monkeypatch, swarm="swarm@example.net", cfg=str(tmp_path))
+        assert ec.swarm_mailbox_configured() is True
+
+    def test_unset_swarm_address(self, monkeypatch, tmp_path):
+        self._env(monkeypatch, swarm=None, cfg=str(tmp_path))
+        assert ec.swarm_mailbox_configured() is False
+
+    def test_swarm_address_same_as_operator(self, monkeypatch, tmp_path):
+        self._env(monkeypatch, swarm="Op <OP@example.com>", cfg=str(tmp_path))
+        assert ec.swarm_mailbox_configured() is False
+
+    def test_missing_config_dir(self, monkeypatch, tmp_path):
+        self._env(monkeypatch, swarm="swarm@example.net", cfg=None)
+        assert ec.swarm_mailbox_configured() is False
+        self._env(monkeypatch, swarm="swarm@example.net", cfg=str(tmp_path / "nope"))
+        assert ec.swarm_mailbox_configured() is False
+
+    def test_unparseable_swarm_address(self, monkeypatch, tmp_path):
+        self._env(monkeypatch, swarm="not-an-address", cfg=str(tmp_path))
+        assert ec.swarm_mailbox_configured() is False

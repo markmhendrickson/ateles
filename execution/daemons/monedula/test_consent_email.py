@@ -24,6 +24,19 @@ from lib.approval.email_channel import ReadRepliesOutcome
 from lib.approval.tokens import subject_marker, token_for
 
 
+@pytest.fixture(autouse=True)
+def _swarm_mailbox(monkeypatch, tmp_path):
+    """Email consent requires a separate swarm mailbox (ateles#1221).
+
+    Configure one by default so the flow under test is the one that can
+    actually succeed; tests of the unconfigured case remove it explicitly.
+    """
+    cfg = tmp_path / "swarm-gws"
+    cfg.mkdir(exist_ok=True)
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(cfg))
+
+
 class _Handler:
     def __init__(self, name: str, *, label: str, amount: int, calendar: bool = True):
         self.name = name
@@ -1039,3 +1052,186 @@ def test_unreadable_payment_journal_holds_every_payment(monkeypatch, tmp_path):
     assert ok is False
     assert h.execute_calls == []
     assert any("payment_journal_unreadable" in c[0] for c in notify_calls)
+
+
+# ── ux review (PR #1202): swarm-mailbox dependency + unauthenticated replies ─
+
+
+@pytest.mark.parametrize(
+    "setup",
+    ["unset", "same_as_operator", "no_config_dir"],
+)
+def test_no_separate_swarm_mailbox_holds_with_explicit_blocker_and_sends_nothing(
+    monkeypatch, tmp_path, setup
+):
+    """Request and replies in the operator's own mailbox can never produce an
+    authenticated reply, so no request is sent and consent is held with the
+    explicit blocker — not a request pretending to be actionable."""
+    if setup == "unset":
+        monkeypatch.delenv("ATELES_SWARM_EMAIL", raising=False)
+        monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR", raising=False)
+    elif setup == "same_as_operator":
+        monkeypatch.setenv("ATELES_SWARM_EMAIL", "Op <OPERATOR@example.com>")
+    else:
+        monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path / "missing"))
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+    monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
+    sends, reads = [], []
+    monkeypatch.setattr(
+        consent_email, "send_request", lambda *a, **k: sends.append(a) or True
+    )
+    monkeypatch.setattr(
+        consent_email,
+        "read_replies_with_status",
+        lambda *a, **k: reads.append(a) or ReadRepliesOutcome(kind="ok", texts=[]),
+    )
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json"
+    )
+    tok = _key_for(h, {}, "2026-09-22")
+    assert result.reason_code == consent_email.REASON_NEEDS_SWARM_MAILBOX
+    assert result.states[tok] == "blocked"
+    assert result.approved == set() and result.awaiting == set()
+    assert result.channel_ok is False
+    assert sends == [] and reads == []
+    assert not (tmp_path / "m.json").exists()
+
+
+def test_no_swarm_mailbox_main_surfaces_one_deduped_blocker_and_pays_nothing(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("ATELES_SWARM_EMAIL", raising=False)
+    monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR", raising=False)
+    _email_env(monkeypatch)
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    _install(monkeypatch, [h], tmp_path)
+    sends = []
+    monkeypatch.setattr(
+        consent_email, "send_request", lambda *a, **k: sends.append(a) or True
+    )
+    notify_calls = _quiet_main(monkeypatch)
+    for _ in range(2):
+        assert monedula.main() is False
+    assert h.execute_calls == []
+    assert sends == []
+    blockers = [c for c in notify_calls if c[1] == "blocker"]
+    assert blockers, "the blocker must reach the operator"
+    keys = {c[2].get("dedupe_key") for c in blockers}
+    assert keys == {"monedula:consent_email_needs_swarm_mailbox"}
+    assert all("ateles#1221" in c[0] for c in blockers)
+    assert all("separate swarm mailbox" in c[0] for c in blockers)
+
+
+def _unauth_read(calls: list):
+    """An operator-address reply that fails authentication, on every sweep."""
+
+    def fake_read(tokens, on_sender_rejected=None,
+                  on_unauthenticated_operator_reply=None, **k):
+        calls.append(1)
+        assert on_unauthenticated_operator_reply is not None, (
+            "consent must distinguish an unauthenticated operator reply from "
+            "a non-operator sender"
+        )
+        on_unauthenticated_operator_reply()
+        return ReadRepliesOutcome(kind="ok", texts=[])
+
+    return fake_read
+
+
+def test_unauthenticated_operator_reply_notifies_once_per_request_and_holds(
+    monkeypatch, tmp_path
+):
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+    monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
+    monkeypatch.setattr(consent_email, "send_request", lambda *a, **k: True)
+    monkeypatch.setattr(consent_email, "read_replies_with_status", _unauth_read([]))
+    notices: list = []
+    for _ in range(3):
+        result = consent_email.request_and_collect(
+            [(h, [{}])],
+            "2026-09-22",
+            state_path=tmp_path / "m.json",
+            on_unauthenticated_reply=lambda msg, key: notices.append((msg, key)),
+        )
+        tok = _key_for(h, {}, "2026-09-22")
+        assert result.approved == set()
+        assert result.states[tok] == "awaiting_approval"
+        assert result.reason_code == consent_email.REASON_REPLY_UNAUTHENTICATED
+        assert result.unauthenticated_replies == 1
+    assert len(notices) == 1, "deduped: one notice per consent request"
+    msg, key = notices[0]
+    assert "could not be authenticated" in msg
+    assert "no payment was made" in msg
+    assert "ateles#1221" in msg
+    assert "operator@example.com" not in msg and "60" not in msg
+    assert key.startswith("monedula:consent_reply_unauthenticated:")
+
+
+def test_unauthenticated_reply_notifies_again_for_a_new_request(monkeypatch, tmp_path):
+    h1 = _Handler("therapy", label="Studio Example", amount=60)
+    h2 = _Handler("yoga", label="Yoga Example", amount=60)
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+    monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
+    monkeypatch.setattr(consent_email, "send_request", lambda *a, **k: True)
+    monkeypatch.setattr(consent_email, "read_replies_with_status", _unauth_read([]))
+    notices: list = []
+    cb = lambda msg, key: notices.append(key)  # noqa: E731
+    path = tmp_path / "m.json"
+    consent_email.request_and_collect([(h1, [{}])], "2026-09-22", state_path=path,
+                                      on_unauthenticated_reply=cb)
+    consent_email.request_and_collect([(h1, [{}]), (h2, [{}])], "2026-09-22",
+                                      state_path=path, on_unauthenticated_reply=cb)
+    assert len(notices) == 2 and notices[0] != notices[1]
+
+
+def test_unauthenticated_reply_main_notifies_once_records_and_pays_nothing(
+    monkeypatch, tmp_path
+):
+    _email_env(monkeypatch)
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    _install(monkeypatch, [h], tmp_path)
+    monkeypatch.setattr(consent_email, "send_request", lambda *a, **k: True)
+    monkeypatch.setattr(consent_email, "read_replies_with_status", _unauth_read([]))
+    notify_calls = _quiet_main(monkeypatch)
+    escalations: list = []
+    monkeypatch.setattr(
+        monedula,
+        "_post_escalation_entity",
+        lambda entity, key: escalations.append((entity, key)) or True,
+    )
+    for _ in range(3):
+        monedula.main()
+    assert h.execute_calls == []
+    unauth = [c for c in notify_calls if "could not be authenticated" in c[0]]
+    assert len(unauth) == 1
+    assert unauth[0][1] == "blocker"
+    assert unauth[0][2]["dedupe_key"].startswith(
+        "monedula:consent_reply_unauthenticated:"
+    )
+    recorded = [e for e, _ in escalations
+                if "consent_reply_unauthenticated" in e.get("tags", [])]
+    assert len(recorded) == 1
+
+
+def test_real_read_unauthenticated_operator_reply_fires_distinct_signal(
+    monkeypatch, tmp_path
+):
+    """End to end through lib.approval: an operator-address reply without
+    authentication evidence is reported as unauthenticated, not as a
+    non-operator sender, and still approves nothing."""
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    items = consent_email.build_pending_items([(h, [{}])], "2026-09-22")
+    tok = items[0].token
+    key = consent_email.match_key(items[0])
+    _arm_email(monkeypatch)
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        tok, auth_by_id={"m1": []}, body_by_id={"m1": "ATTENDED"}))
+    notices: list = []
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json",
+        on_unauthenticated_reply=lambda msg, k: notices.append(k))
+    assert key not in result.approved
+    assert result.reason_code == consent_email.REASON_REPLY_UNAUTHENTICATED
+    assert len(notices) == 1

@@ -939,6 +939,52 @@ def _consent_failure_notify_body(
 
 _UNKNOWN_OUTCOME_DEDUPE_PREFIX = "monedula:payment_outcome_unknown"
 
+# Email consent held because no separate swarm mailbox is configured
+# (ateles#1221). Stable, so a standing gap alerts once, not every tick.
+_NEEDS_SWARM_MAILBOX_DEDUPE_KEY = "monedula:consent_email_needs_swarm_mailbox"
+
+
+def _notify_unauthenticated_reply(
+    message: str,
+    dedupe_key: str,
+    *,
+    handler_names: list[str],
+    yesterday_str: str,
+) -> None:
+    """A reply from the operator's address failed authentication.
+
+    Records an escalation and tells the operator the reply was received but
+    NOT accepted, so it is never mistaken for "no reply yet". Payments stay
+    held. ``consent_email`` calls this at most once per consent request; the
+    Notifier key and the escalation idempotency key carry the same identity.
+    Never carries addresses, amounts or message content.
+    """
+    entity = {
+        "entity_type": "escalation",
+        "title": "Monedula consent reply received but not authenticated",
+        "body": (
+            "A reply to a Monedula payment consent request came from the "
+            "operator's address but could not be authenticated, so it was not "
+            "accepted. No payment was made; payments stay held.\n\n"
+            f"pending_handlers={handler_names} payment_date={yesterday_str}\n\n"
+            "Likely cause: request and reply share one mailbox; email consent "
+            "needs a separate swarm mailbox (ateles#1221).\n\n"
+            "Escalated by the Monedula payment daemon."
+        ),
+        "severity": "warning",
+        "source_agent": "monedula@ateles-swarm",
+        "source_entity_type": "consent_gate",
+        "status": "open",
+        "tags": ["monedula", "payments", "consent_gate", "consent_reply_unauthenticated"],
+    }
+    _post_escalation_entity(entity, dedupe_key.replace(":", "-"))
+    _notify(
+        message,
+        priority="blocker",
+        dedupe_key=dedupe_key,
+        email_eligible=True,
+    )
+
 
 def _notify_unknown_outcome(labels: list[str], yesterday_str: str) -> None:
     """Escalate payments whose transfer was attempted but whose outcome was
@@ -1350,6 +1396,8 @@ def main() -> bool:
     if channel == "email":
         import payment_journal
         from consent_email import (
+            NEEDS_SWARM_MAILBOX_HINT,
+            REASON_NEEDS_SWARM_MAILBOX,
             clear_consent_state,
             journal_path,
             match_key,
@@ -1363,7 +1411,12 @@ def main() -> bool:
             clear_failure_dedupe=lambda: _clear_notify_dedupe(
                 _CONSENT_CHANNEL_DEDUPE_KEY
             ),
+            on_unauthenticated_reply=lambda msg, key: _notify_unauthenticated_reply(
+                msg, key, handler_names=handler_names, yesterday_str=yesterday_str
+            ),
         )
+        if consent.reason_code != REASON_NEEDS_SWARM_MAILBOX:
+            _clear_notify_dedupe(_NEEDS_SWARM_MAILBOX_DEDUPE_KEY)
         if not consent.channel_ok:
             reason = consent.reason_code or "consent_request_send_failed"
             streak = _record_gate_failure(reason)
@@ -1389,6 +1442,7 @@ def main() -> bool:
                     "the payment journal could not be read or written; no payment "
                     "executed; inspect it before anything is paid"
                 ),
+                REASON_NEEDS_SWARM_MAILBOX: NEEDS_SWARM_MAILBOX_HINT,
             }.get(reason, "arm ATELES_NOTIFY_EMAIL/OPERATOR_EMAIL or reply to consent thread")
             _notify(
                 _consent_failure_notify_body(
@@ -1397,7 +1451,13 @@ def main() -> bool:
                     recovery_hint=recovery,
                 ),
                 priority="blocker",
-                dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
+                # A standing config gap gets its own key so an earlier,
+                # unrelated channel alert cannot suppress it (and vice versa).
+                dedupe_key=(
+                    _NEEDS_SWARM_MAILBOX_DEDUPE_KEY
+                    if reason == REASON_NEEDS_SWARM_MAILBOX
+                    else _CONSENT_CHANNEL_DEDUPE_KEY
+                ),
                 email_eligible=True,
             )
             # Leave day unclaimed so the next tick retries send/read.

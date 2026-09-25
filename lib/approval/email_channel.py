@@ -11,6 +11,10 @@ Env contract:
   ATELES_NOTIFY_EMAIL  "1" arms the channel; anything else → every call no-ops
   OPERATOR_EMAIL       request recipient AND the verified reply --to
   ATELES_SWARM_EMAIL   optional From: (the swarm's own address)
+  ATELES_SWARM_GWS_CONFIG_DIR  gws config dir for the swarm's OWN mailbox
+                       (ateles#1221). Consent that depends on authenticated
+                       replies needs both swarm vars — see
+                       ``swarm_mailbox_configured``.
 """
 
 from __future__ import annotations
@@ -89,6 +93,31 @@ def operator_email() -> str:
 
 def _swarm_from() -> str:
     return os.environ.get("ATELES_SWARM_EMAIL", "").strip()
+
+
+def swarm_mailbox_configured() -> bool:
+    """True only when a SEPARATE swarm mailbox is configured (ateles#1221).
+
+    Reply authentication (``sender_domain_authenticated``) needs the evidence
+    Gmail's receiving server stamps on mail that arrives from another mailbox.
+    When the request is sent from, and replies are read in, the operator's own
+    mailbox, the operator's replies are self-sent and carry no such evidence,
+    so every genuine approval is held. Consent callers that depend on an
+    authenticated reply MUST check this and surface a blocker instead of
+    sending a request that cannot be answered.
+
+    FAIL CLOSED. Requires all of:
+      - ``ATELES_SWARM_EMAIL`` parses as an address
+      - it differs from ``OPERATOR_EMAIL`` (same address = same mailbox)
+      - ``ATELES_SWARM_GWS_CONFIG_DIR`` names an existing directory (the
+        swarm mailbox's own gws credentials)
+    """
+    swarm = _parse_address(_swarm_from())
+    operator = _parse_address(operator_email())
+    if not swarm or not operator or swarm == operator:
+        return False
+    config_dir = os.environ.get("ATELES_SWARM_GWS_CONFIG_DIR", "").strip()
+    return bool(config_dir) and os.path.isdir(os.path.expanduser(config_dir))
 
 
 def _gws() -> str | None:
@@ -337,6 +366,7 @@ def read_replies_with_status(
     max_msgs: int = 40,
     on_reply_message: Callable[[str, str], None] | None = None,
     on_sender_rejected: Callable[[], None] | None = None,
+    on_unauthenticated_operator_reply: Callable[[], None] | None = None,
 ) -> ReadRepliesOutcome:
     """Statusful inbox sweep — distinguish empty-ok from transport failure.
 
@@ -346,6 +376,13 @@ def read_replies_with_status(
 
     ``on_sender_rejected`` (optional) fires when a candidate reply fails
     ``sender_is_operator`` — no address argument (PII-safe for Monedula logs).
+
+    ``on_unauthenticated_operator_reply`` (optional) fires when a reply's
+    From: address IS the operator's but ``sender_domain_authenticated`` does
+    not pass — a reply that may be genuine but cannot be proven, which is a
+    different condition from a non-operator sender and needs a different
+    operator-facing message. The reply is still ignored. When this callback
+    is not given, ``on_sender_rejected`` fires instead (prior behaviour).
     """
     if not email_enabled():
         return ReadRepliesOutcome(kind="disabled", texts=[], detail="ATELES_NOTIFY_EMAIL")
@@ -414,11 +451,12 @@ def read_replies_with_status(
                     "approval: ignoring reply — sender domain authentication "
                     "absent or not a pass (address matched, identity unknown)"
                 )
-                if on_sender_rejected is not None:
+                cb = on_unauthenticated_operator_reply or on_sender_rejected
+                if cb is not None:
                     try:
-                        on_sender_rejected()
+                        cb()
                     except Exception as exc:  # noqa: BLE001
-                        log.warning(f"on_sender_rejected callback failed: {exc}")
+                        log.warning(f"reply-rejected callback failed: {exc}")
                 continue
             seen_ids.add(mid)
             body_data = gws_json(["gmail", "+read", "--id", mid, "--headers",

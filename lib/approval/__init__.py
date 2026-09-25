@@ -16,6 +16,7 @@ Env contract (read at call time, never hardcoded):
   ATELES_NOTIFY_EMAIL  "1" to arm the email channel; anything else disables it
   OPERATOR_EMAIL       recipient of approval requests + the verified reply --to
   ATELES_SWARM_EMAIL   optional From: for outbound (the swarm's own address)
+  ATELES_SWARM_GWS_CONFIG_DIR  the swarm mailbox's gws config (ateles#1221)
 
 Every function is FAIL-OPEN: a missing gws CLI, unset env, or a transport error
 returns a benign empty/false value and logs a warning — it never raises into the
@@ -32,6 +33,7 @@ from .email_channel import (
     ReadRepliesOutcome,
     reply_in_thread,
     sender_is_operator,
+    swarm_mailbox_configured,
 )
 
 __all__ = [
@@ -46,4 +48,5 @@ __all__ = [
     "ReadRepliesOutcome",
     "reply_in_thread",
     "sender_is_operator",
+    "swarm_mailbox_configured",
 ]
