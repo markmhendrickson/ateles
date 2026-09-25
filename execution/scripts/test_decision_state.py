@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -21,11 +22,23 @@ import check_plan_decision_citations as plan_check
 import render_decision_state as ds
 
 
-def register(**rows: str) -> str:
-    """A minimal register table with the given {number: status cell}."""
+def register(
+    questions: dict[str, str] | None = None,
+    argued_in: dict[str, str] | None = None,
+    **rows: str,
+) -> str:
+    """A minimal register table with the given {number: status cell}.
+
+    ``questions`` and ``argued_in`` override the default placeholder text for
+    specific row numbers -- needed by any test distinguishing rows on their
+    actual subject rather than merely on their number.
+    """
+    questions = questions or {}
+    argued_in = argued_in or {}
     head = "| # | The question | Argued in | Blocks | Status |\n|---|---|---|---|---|\n"
     body = "".join(
-        f"| {n} | question {n} | `doc.md#a{n}` | — | {cell} |\n"
+        f"| {n} | {questions.get(n, f'question {n}')} | "
+        f"`{argued_in.get(n, f'doc.md#a{n}')}` | — | {cell} |\n"
         for n, cell in rows.items()
     )
     return head + body
@@ -103,14 +116,26 @@ class TestThreeAxes(unittest.TestCase):
         )
         self.assertEqual(row.ruling_lives, "—")
 
-    def test_output_does_not_change_when_only_the_branch_count_changes(self):
-        """The document changes when a decision's state changes, not otherwise.
+    def test_committed_render_ignores_ruled_on_branches(self):
+        """The committed document is a pure function of main's own status.
 
-        Writing a branch count into the output made `--check` fail whenever
-        anyone updated a branch — red for a reason unrelated to any decision. A
-        check the reader learns to dismiss has stopped being a control.
+        `ruled_on_branches` only ever gets populated by `collect_branches`, and
+        `render()` -- the committed document -- must produce the same bytes
+        whether or not a Row happens to carry it. That is what makes the
+        committed file deterministic for a given commit: nothing about another
+        branch may leak into it, even via a field the dataclass still has for
+        `collect_branches`'s benefit.
         """
-        rows = [
+        bare = [
+            ds.Row(
+                number="101",
+                question="what the credential binding carries",
+                argued_in="`authority_model.md#x`",
+                blocks="stage 1",
+                main_status="open",
+            )
+        ]
+        with_branches = [
             ds.Row(
                 number="101",
                 question="what the credential binding carries",
@@ -120,11 +145,7 @@ class TestThreeAxes(unittest.TestCase):
                 ruled_on_branches=["origin/claude/decision-101"],
             )
         ]
-        few = ds.render(rows, ["origin/a"], ["origin/x"])
-        many = ds.render(
-            rows, ["origin/a", "origin/b", "origin/c"], ["origin/x", "origin/y"]
-        )
-        self.assertEqual(few, many)
+        self.assertEqual(ds.render(bare), ds.render(with_branches))
 
     def test_a_changed_ruling_does_change_the_output(self):
         """The other half: the check must still go red on what it watches."""
@@ -132,14 +153,9 @@ class TestThreeAxes(unittest.TestCase):
             number="101", question="q", argued_in="", blocks="", main_status="open"
         )
         ruled = ds.Row(
-            number="101",
-            question="q",
-            argued_in="",
-            blocks="",
-            main_status="open",
-            ruled_on_branches=["origin/claude/decision-101"],
+            number="101", question="q", argued_in="", blocks="", main_status="ruled"
         )
-        self.assertNotEqual(ds.render([base], [], []), ds.render([ruled], [], []))
+        self.assertNotEqual(ds.render([base]), ds.render([ruled]))
 
     def test_bare_anchor_citations_are_requalified_to_the_register(self):
         """In a register cell `#x` means conformance.md; copied here it would not."""
@@ -340,6 +356,302 @@ class TestSupersessionIsJudgedOnContent(unittest.TestCase):
                 src.split('"""')[-1],
                 f"is_superseded must not shell out ({forbidden!r} in its body)",
             )
+
+
+class FakeGit:
+    """Stubs `ds.run` so `collect_main`/`collect_branches` need no repository.
+
+    Maps ("git", "show", "<ref>:<path>") to register text per ref, and the
+    branch-listing call to a fixed set of refs. Anything else is an error --
+    a test that silently no-ops on an unmocked call would prove nothing.
+    """
+
+    def __init__(self, registers: dict[str, str], branch_refs: list[str] | None = None):
+        self.registers = registers
+        self.branch_refs = branch_refs if branch_refs is not None else list(registers)
+        self.calls: list[list[str]] = []
+
+    def __call__(self, args: list[str]) -> tuple[int, str]:
+        self.calls.append(args)
+        if args[:2] == ["git", "show"]:
+            ref = args[2].split(":", 1)[0]
+            text = self.registers.get(ref)
+            return (0, text) if text is not None else (1, "")
+        if tuple(args) == ds.BRANCH_LIST_ARGS:
+            lines = "\n".join(f"refs/remotes/{r}" for r in self.branch_refs if r != ds.MAIN_REF)
+            return (0, lines)
+        raise AssertionError(f"unmocked git call in FakeGit: {args!r}")
+
+
+class TestCommittedProjectionIsBranchIndependent(unittest.TestCase):
+    """An open PR's --check result must not move when an unrelated branch does.
+
+    This is the acceptance criterion the task states directly: the committed
+    `decision_state.md` used to sweep every `origin/*` branch, so any unrelated
+    push anywhere changed the committed file's bytes and failed `--check` on a
+    PR whose own diff never touched the register. `collect_main` reads only
+    `origin/main`, so it must return byte-identical rows regardless of what
+    other branches exist or say -- proven here by adding an unrelated branch,
+    a branch ruling the SAME row differently, and a branch that doesn't parse.
+    """
+
+    MAIN = register(**{"111": "**open**"})
+
+    def _rendered_with(self, registers: dict[str, str], branch_refs: list[str]) -> str:
+        fake = FakeGit(registers, branch_refs)
+        with unittest.mock.patch.object(ds, "run", fake):
+            rows = ds.collect_main()
+        return ds.render(rows)
+
+    def test_an_unrelated_branch_moving_does_not_change_the_committed_render(self):
+        baseline = self._rendered_with({ds.MAIN_REF: self.MAIN}, [])
+
+        with_unrelated_branch = self._rendered_with(
+            {
+                ds.MAIN_REF: self.MAIN,
+                "origin/some/unrelated-branch": register(**{"200": "**ruled** (2026-09-20)"}),
+            },
+            ["origin/some/unrelated-branch"],
+        )
+        self.assertEqual(baseline, with_unrelated_branch)
+
+        with_a_ruling_of_our_own_row = self._rendered_with(
+            {
+                ds.MAIN_REF: self.MAIN,
+                "origin/claude/rules-111": register(**{"111": "**ruled** (2026-09-24)"}),
+            },
+            ["origin/claude/rules-111"],
+        )
+        self.assertEqual(
+            baseline,
+            with_a_ruling_of_our_own_row,
+            "collect_main must not read any origin/* branch at all -- a "
+            "ruling that exists ONLY on a branch is invisible to the "
+            "committed document by design (see --branches instead)",
+        )
+
+    def test_collect_main_never_calls_the_branch_listing(self):
+        """The strongest form of the guarantee: main-only reading is structural."""
+        fake = FakeGit({ds.MAIN_REF: self.MAIN}, ["origin/decoy"])
+        with unittest.mock.patch.object(ds, "run", fake):
+            ds.collect_main()
+        for call in fake.calls:
+            self.assertNotEqual(
+                tuple(call),
+                ds.BRANCH_LIST_ARGS,
+                "collect_main must never enumerate origin/* branches -- doing "
+                "so is how a branch push reached the committed file before",
+            )
+
+
+class TestReusedRowNumberIsACollisionNeverARuling(unittest.TestCase):
+    """ateles#1288 / #1088: two branches claimed row 111 for different questions.
+
+    A number-only match reads the second branch's row as "main's row 111,
+    ruled, not yet merged" -- which is false; main's row 111 was never
+    unmerged, the branch was answering an unrelated question that happened to
+    reuse the number. subject_key (the row's own question text) must tell the
+    two apart, and a branch row whose key disagrees with main's row of the
+    same number must be reported as a collision and must never appear in
+    `ruled_on_branches`.
+    """
+
+    def test_same_number_different_subject_is_a_collision_not_a_ruling(self):
+        main_text = register(
+            questions={"111": "whether a rule's end may be a condition"},
+            argued_in={"111": "data_model.md#whether-a-rules-end-is-a-condition"},
+            **{"111": "**open**"},
+        )
+        branch_text = register(
+            questions={"111": "whether relationship grants inherit across a hierarchy"},
+            argued_in={"111": "work_model.md#relationship-grants-for-a-different-question"},
+            **{"111": "**ruled** (2026-09-24): unrelated ruling"},
+        )
+        fake = FakeGit(
+            {ds.MAIN_REF: main_text, "origin/ruling-925-relationship-grants": branch_text},
+            ["origin/ruling-925-relationship-grants"],
+        )
+        with unittest.mock.patch.object(ds, "run", fake):
+            rows, read, stale, collisions = ds.collect_branches(
+                ["origin/ruling-925-relationship-grants"]
+            )
+
+        row_111 = next(r for r in rows if r.number == "111")
+        self.assertEqual(
+            row_111.ruled_on_branches,
+            [],
+            "a collision must never be admitted into ruled_on_branches -- "
+            "that is exactly the misread that produced the live defect",
+        )
+        self.assertEqual(row_111.merged, "no")
+        self.assertEqual(len(collisions), 1)
+        self.assertEqual(collisions[0].number, "111")
+        self.assertEqual(collisions[0].branch, "origin/ruling-925-relationship-grants")
+        self.assertNotEqual(
+            collisions[0].main_subject_key, collisions[0].branch_subject_key
+        )
+        self.assertIn("condition", collisions[0].main_question)
+        self.assertIn("relationship grants", collisions[0].branch_question)
+
+    def test_same_number_same_subject_is_still_read_as_a_ruling(self):
+        """The ordinary case must survive: identical subject key, same row."""
+        question = "whether a rule's end may be a condition"
+        main_text = register(
+            questions={"111": question}, **{"111": "**open**"}
+        )
+        branch_text = register(
+            questions={"111": question},
+            **{"111": "**ruled** (2026-09-24): the real ruling"},
+        )
+        fake = FakeGit(
+            {ds.MAIN_REF: main_text, "origin/claude/decision-111": branch_text},
+            ["origin/claude/decision-111"],
+        )
+        with unittest.mock.patch.object(ds, "run", fake):
+            rows, read, stale, collisions = ds.collect_branches(
+                ["origin/claude/decision-111"]
+            )
+
+        row_111 = next(r for r in rows if r.number == "111")
+        self.assertEqual(row_111.ruled_on_branches, ["origin/claude/decision-111"])
+        self.assertEqual(row_111.ruled, "yes")
+        self.assertEqual(row_111.merged, "no")
+        self.assertEqual(collisions, [])
+
+    def test_same_question_survives_an_argued_in_anchor_rewrite(self):
+        """Row 99's live shape: ruling retitles the anchor, question is untouched.
+
+        Found while proving this generator against the corpus's actual open
+        branches rather than synthetic cases alone: row 99's anchor moved from
+        a heading describing the open question to one stating the ruling, with
+        the question column identical before and after. An anchor-keyed match
+        read that ordinary rename as a collision; the question-keyed match
+        must not.
+        """
+        question = (
+            "whether a swarm with several instances of the record has "
+            "planning of its own"
+        )
+        main_text = register(
+            questions={"99": question},
+            argued_in={"99": "planning_model.md#what-this-does-not-reach"},
+            **{"99": "**open**"},
+        )
+        branch_text = register(
+            questions={"99": question},
+            argued_in={"99": "planning_model.md#every-planning-record-belongs-to-an-instance"},
+            **{"99": "**ruled** (2026-09-20): ruled for the controlling instance"},
+        )
+        fake = FakeGit(
+            {ds.MAIN_REF: main_text, "origin/decisions-99": branch_text},
+            ["origin/decisions-99"],
+        )
+        with unittest.mock.patch.object(ds, "run", fake):
+            rows, read, stale, collisions = ds.collect_branches(["origin/decisions-99"])
+
+        self.assertEqual(collisions, [])
+        row_99 = next(r for r in rows if r.number == "99")
+        self.assertEqual(row_99.ruled_on_branches, ["origin/decisions-99"])
+
+    def test_a_reworded_question_under_the_same_argued_in_anchor_is_not_a_collision(self):
+        """Rows 84/102/107's live shape: prose tightened mid-draft, anchor stable.
+
+        The mirror image of row 99: an open PR branch reworded the question
+        column while ruling it, with `argued_in` never moving. A question-only
+        match would misread this as a collision; agreement on EITHER field
+        (same_subject) must not.
+        """
+        anchor = "work_model.md#what-distinguishes-a-task-being-assembled"
+        main_text = register(
+            questions={"84": "what distinguishes a task with no intake batch"},
+            argued_in={"84": anchor},
+            **{"84": "**open**"},
+        )
+        branch_text = register(
+            questions={"84": "what distinguishes a workflow-entering task still being assembled"},
+            argued_in={"84": anchor},
+            **{"84": "**ruled** (2026-09-24): ruled on the branch"},
+        )
+        fake = FakeGit(
+            {ds.MAIN_REF: main_text, "origin/decision-84": branch_text},
+            ["origin/decision-84"],
+        )
+        with unittest.mock.patch.object(ds, "run", fake):
+            rows, read, stale, collisions = ds.collect_branches(["origin/decision-84"])
+
+        self.assertEqual(collisions, [])
+        row_84 = next(r for r in rows if r.number == "84")
+        self.assertEqual(row_84.ruled_on_branches, ["origin/decision-84"])
+
+    def test_same_subject_true_when_only_question_agrees(self):
+        a = ("whether x is true", "doc.md#anchor-one")
+        b = ("whether x is true", "doc.md#a-different-anchor")
+        self.assertTrue(ds.same_subject(a, b))
+
+    def test_same_subject_true_when_only_argued_in_agrees(self):
+        a = ("an old phrasing of the question", "doc.md#anchor-one")
+        b = ("a reworded phrasing of the question", "doc.md#anchor-one")
+        self.assertTrue(ds.same_subject(a, b))
+
+    def test_same_subject_false_when_both_disagree(self):
+        """The #1288/#1088 shape: nothing in common on either field."""
+        a = ("whether a rule's end may be a condition", "data_model.md#anchor-one")
+        b = ("whether relationship grants inherit", "work_model.md#anchor-two")
+        self.assertFalse(ds.same_subject(a, b))
+
+    def test_same_subject_false_when_both_blank(self):
+        """A blank field never agrees with another blank field."""
+        self.assertFalse(ds.same_subject(("", ""), ("", "")))
+
+    def test_subject_key_is_case_insensitive_and_whitespace_normalized(self):
+        row_a = {"question": "Whether   X  is true", "argued_in": "", "status": "ruled"}
+        row_b = {"question": "whether x is true", "argued_in": "", "status": "ruled"}
+        self.assertEqual(ds.subject_key(row_a), ds.subject_key(row_b))
+
+    def test_subject_key_falls_back_to_argued_in_when_question_is_blank(self):
+        row = {"question": "—", "argued_in": "`doc.md#the-anchor`", "status": "open"}
+        question, argued_in = ds.subject_key(row)
+        self.assertEqual(question, "")
+        self.assertIn("the-anchor", argued_in)
+
+
+class TestCommittedOutputIsByteStableForACommit(unittest.TestCase):
+    """The acceptance criterion, stated as bytes: same commit, same output.
+
+    Rendering `collect_main()`'s result twice from the identical main register,
+    with different (even absent) branch state each time, must produce identical
+    bytes -- not merely equal-looking markdown. `--check` compares bytes, so
+    this is the literal thing the gate depends on.
+    """
+
+    def test_render_is_byte_identical_across_repeated_renders(self):
+        main_text = register(
+            **{
+                "1–12": "**ruled** (2026-01-01)",
+                "76": "**ruled** (2026-02-01)",
+                "84": "**open**",
+                "95": "**reopened** (2026-03-01)",
+            }
+        )
+        fake1 = FakeGit({ds.MAIN_REF: main_text}, [])
+        with unittest.mock.patch.object(ds, "run", fake1):
+            rendered_first = ds.render(ds.collect_main())
+
+        # A second render, from a DIFFERENT clone's view of the world (extra
+        # branches present, listed in a different order) but the SAME main
+        # register text -- the scenario an open PR is actually in each time CI
+        # re-runs it.
+        fake2 = FakeGit(
+            {ds.MAIN_REF: main_text, "origin/z/newer": register(**{"300": "**open**"})},
+            ["origin/z/newer"],
+        )
+        with unittest.mock.patch.object(ds, "run", fake2):
+            rendered_second = ds.render(ds.collect_main())
+
+        self.assertEqual(rendered_first, rendered_second)
+        self.assertEqual(
+            rendered_first.encode("utf-8"), rendered_second.encode("utf-8")
+        )
 
 
 if __name__ == "__main__":
