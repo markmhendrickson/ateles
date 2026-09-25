@@ -2,7 +2,7 @@
 """
 ateles — MCP server for Ateles swarm routing and checkpoint management.
 
-Provides seven tools that wrap multi-step Neotoma/GitHub query patterns into
+Provides nine tools that wrap multi-step Neotoma/GitHub query patterns into
 single calls, so any connected agent gets reliable swarm interaction without
 re-deriving the roster/policy/checkpoint dance — or the entity-read plus
 log-grep dance — each session.
@@ -19,6 +19,11 @@ Tools:
                         how long each has waited                  [read-only]
   get_dispatch_health — dispatcher liveness, recent activity, failures
                                                                   [read-only]
+  get_task_timeline   — one task's history, merged and time-ordered from the
+                        records the swarm writes, with sources and gaps
+                                                                  [read-only]
+  watch_swarm         — bounded long-poll: what changed since a cursor for the
+                        given tasks and checkpoints               [read-only]
 
 The observability tools never write gate state — see the SELF-CERTIFICATION
 BOUNDARY note above their implementations. Their reads fail CLOSED: a failed
@@ -55,7 +60,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -262,7 +267,12 @@ def render_server_instructions(principal: str = "") -> str:
 # ── Neotoma HTTP helpers ─────────────────────────────────────────────────────
 
 def _headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}
+    # An explicit User-Agent: the hosted instance sits behind Cloudflare, which
+    # refuses some library-default agents (error 1010).
+    return {
+        "Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}",
+        "User-Agent": "ateles-mcp/1.0",
+    }
 
 
 # Last transport failure, so callers can tell "Neotoma said no rows" apart from
@@ -2016,6 +2026,1197 @@ def _get_dispatch_health() -> dict:
 
 
 
+# ── Swarm watch: per-task timeline and change feed (read-only) ───────────────
+#
+# ateles#1275, slice 1. A session that starts a harness subagent gets a handle,
+# a completion notice, readable output, and a way to follow up. A session that
+# hands work to the swarm got none of these: the only way to learn what became
+# of a task was to re-read the entity by hand. These two tools are the first
+# half of that parity, and they are READ-ONLY like the observability tools
+# above — nothing here writes, so nothing here needs authority.
+#
+#   get_task_timeline(task_entity_id)  one task's history, merged and
+#                                      time-ordered from every record the swarm
+#                                      writes today, each entry carrying its
+#                                      source and timestamp
+#   watch_swarm(cursor, task_ids, ...) a bounded long-poll: what changed since
+#                                      the cursor for the given tasks (and,
+#                                      optionally, every checkpoint), plus a new
+#                                      cursor
+#
+# `watch.py` next to this file is the same watch code as a blocking CLI, so a
+# Claude Code session can run it in the background and be told when it exits.
+#
+# What the record can and cannot show (measured 2026-09-25, design comment on
+# ateles#1275). Every response states which sources it joined and names what it
+# could not see under `gaps`, so an absence is never mistaken for a fact:
+#
+#   * Runner events are not addressable per task. `skill_runner` writes them as
+#     observations of ~15 SHARED `harness_event` entities, roughly one per
+#     agent, so a snapshot filter on `task_entity_id` finds nothing. They are
+#     found here by scanning `harness_event` observations inside a BOUNDED time
+#     window around the task's own history. Beyond that window they are not
+#     looked for, and the response says so.
+#   * A runner's start and end carry no common id; they pair by agent and time.
+#   * A runner's output is a host-local file, and a timed-out run keeps none.
+#   * Most issue and PR runs carry no task reference at all, so PR and review
+#     events join only when the task is related to an issue or pull_request
+#     entity.
+#
+# Reads fail CLOSED: a failed read of the task itself is an `error`, never an
+# empty timeline; a failed read of a secondary source is listed under
+# `sources` with status "error" and named in `gaps`.
+
+#: How far around a task's own history to scan shared runner events, at most.
+TIMELINE_WINDOW_HOURS = float(os.environ.get("ATELES_TIMELINE_WINDOW_HOURS", "72"))
+#: Upper bound on harness_event observations read for one timeline. The window
+#: is scanned newest-first, so what a cap cuts off is the OLDEST part of it.
+TIMELINE_MAX_SCAN = int(os.environ.get("ATELES_TIMELINE_MAX_SCAN", "2000"))
+#: A runner start with no end, older than this, is reported as not live: the
+#: runner's own timeout (1800 s by default) has passed and the end was lost.
+RUNNER_LIVE_SECONDS = float(os.environ.get("ATELES_RUNNER_LIVE_SECONDS", "2100"))
+
+_OBS_PAGE = 500
+_ENTITY_OBS_PAGE = 200
+_WINDOW_LEAD_SECONDS = 60
+_WINDOW_TAIL_SECONDS = 300
+# Observations that land between the count and the scan shift every offset by
+# one; start this many rows early so none of the window is skipped.
+_SCAN_OFFSET_MARGIN = 25
+_TIMELINE_VALUE_CHARS = 240
+
+WATCH_MAX_WAIT_SECONDS = 45
+WATCH_POLL_SECONDS = float(os.environ.get("ATELES_WATCH_POLL_SECONDS", "5"))
+WATCH_MAX_TASKS = 10
+# The cursor re-reads this many seconds behind its own high-water mark and
+# drops what it has already seen by observation id. Streams are read one after
+# another, so a row written to an earlier stream while a later one was being
+# read must not fall behind the cursor.
+_CURSOR_OVERLAP_SECONDS = 30
+_CURSOR_MAX_SEEN = 300
+_CURSOR_PREFIX = "w1."
+
+# Injectable so tests can drive the long-poll without real waiting.
+_watch_sleep = time.sleep
+_watch_clock = time.monotonic
+
+_TASK_ID_RE = re.compile(r"^ent_[A-Za-z0-9]{8,64}$")
+# Apis writes task status as `taskstatus-<handler>-<task>-<status>-<trigger>`
+# (lib/daemon_runtime/task_lifecycle), and the reason/result companions alike.
+_IDEM_HANDLER_RE = re.compile(r"^task(?:status|reason|result)-([a-z0-9_]+)-")
+
+_TASK_FIELD_KINDS = {
+    "status": "status",
+    "blocked_reason": "reason",
+    "result": "result",
+    "assigned_to": "assignment",
+}
+_CREATE_MARKER_FIELDS = ("title", "description")
+
+
+def _lifecycle():
+    """The task status vocabulary, from its one definition.
+
+    Imported rather than copied: two copies of the terminal set are how
+    finished tasks kept being re-dispatched (ateles#1038, #1039).
+    """
+    from lib.daemon_runtime import task_lifecycle
+
+    return task_lifecycle
+
+
+def _status_view(raw: Any) -> dict:
+    tl = _lifecycle()
+    raw_s = str(raw or "").strip()
+    normalized = tl.normalize(raw_s) if raw_s else None
+    known = {s.value for s in tl.TaskStatus}
+    return {
+        "status": raw_s or None,
+        "status_normalized": normalized,
+        # Live tasks carry `ready` and `in_progress`, which the lifecycle does
+        # not declare. Say so rather than guess what they mean.
+        "status_known": bool(normalized) and normalized in known,
+        "terminal": tl.is_terminal(raw_s),
+    }
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts
+
+
+def _iso(ts: datetime) -> str:
+    return ts.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _clip(value: Any) -> Any:
+    if isinstance(value, str) and len(value) > _TIMELINE_VALUE_CHARS:
+        return value[: _TIMELINE_VALUE_CHARS - 1] + "…"
+    return value
+
+
+def _truthy(value: Any) -> bool:
+    return value is True or str(value).strip().lower() in {"true", "1", "yes"}
+
+
+def _observation_actor(obs: dict) -> str | None:
+    """Who wrote an observation, as far as the record says."""
+    fields = obs.get("fields") or {}
+    sub = fields.get("agent_sub")
+    if sub:
+        return str(sub).split("@")[0]
+    match = _IDEM_HANDLER_RE.match(str(obs.get("idempotency_key") or ""))
+    if match:
+        return match.group(1)
+    prov = obs.get("provenance")
+    if isinstance(prov, dict):
+        if prov.get("agent_sub"):
+            return str(prov["agent_sub"]).split("@")[0]
+        if prov.get("client_name"):
+            return f"client:{prov['client_name']}"
+    if fields.get("handler"):
+        return str(fields["handler"])
+    return None
+
+
+def _obs_query(body: dict) -> dict | None:
+    return _post("/observations/query", body)
+
+
+def _read_error(what: str) -> str:
+    return f"{what}: {_describe_transport_error() or 'request failed'}"
+
+
+def _observations_of(
+    entity_id: str, *, since: str | None = None, max_rows: int = 1000
+) -> tuple[list[dict] | None, str | None, bool]:
+    """Observations of one entity. Returns (rows, error, truncated)."""
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        body: dict[str, Any] = {
+            "entity_id": entity_id,
+            "limit": _ENTITY_OBS_PAGE,
+            "offset": offset,
+        }
+        if since:
+            body["created_since"] = since
+        data = _obs_query(body)
+        if data is None:
+            return None, _read_error(f"observations of {entity_id}"), False
+        batch = data.get("observations") or []
+        rows.extend(batch)
+        offset += len(batch)
+        total = data.get("total")
+        if (
+            not batch
+            or len(batch) < _ENTITY_OBS_PAGE
+            or (isinstance(total, int) and offset >= total)
+        ):
+            return rows, None, False
+        if len(rows) >= max_rows:
+            return rows, None, True
+
+
+def _obs_count(entity_type: str, since: str) -> int | None:
+    data = _obs_query({"entity_type": entity_type, "created_since": since, "limit": 1})
+    if data is None:
+        return None
+    total = data.get("total")
+    return int(total) if isinstance(total, (int, float)) else None
+
+
+def _scan_type_window(
+    entity_type: str, start: datetime, end: datetime, max_scan: int
+) -> dict:
+    """Every observation of *entity_type* with start <= observed_at <= end.
+
+    `/observations/query` has a lower time bound and no upper one, and returns
+    newest first. So count what is newer than `end`, skip that many rows, and
+    read forward from there to the start of the window. That reads the window
+    and not the days of traffic after it.
+    """
+    start_iso = _iso(start)
+    n_start = _obs_count(entity_type, start_iso)
+    if n_start is None:
+        return {"rows": [], "error": _read_error(f"{entity_type} count since {start_iso}")}
+    n_end = _obs_count(entity_type, _iso(end))
+    if n_end is None:
+        return {"rows": [], "error": _read_error(f"{entity_type} count since {_iso(end)}")}
+    offset = max(0, n_end - _SCAN_OFFSET_MARGIN)
+    rows: list[dict] = []
+    scanned = 0
+    complete = False
+    while scanned < max_scan:
+        limit = min(_OBS_PAGE, max_scan - scanned)
+        data = _obs_query(
+            {
+                "entity_type": entity_type,
+                "created_since": start_iso,
+                "offset": offset,
+                "limit": limit,
+            }
+        )
+        if data is None:
+            return {
+                "rows": rows,
+                "error": _read_error(f"{entity_type} scan at offset {offset}"),
+            }
+        batch = data.get("observations") or []
+        scanned += len(batch)
+        offset += len(batch)
+        for obs in batch:
+            at = _parse_ts(obs.get("observed_at"))
+            if at is not None and start <= at <= end:
+                rows.append(obs)
+        if len(batch) < limit:
+            complete = True
+            break
+    return {
+        "rows": rows,
+        "error": None,
+        "in_window": max(0, n_start - n_end),
+        "scanned": scanned,
+        "complete": complete,
+    }
+
+
+def _runner_entry(obs: dict) -> dict:
+    fields = obs.get("fields") or {}
+    tool = str(fields.get("tool_name") or "")
+    provider, _, agent = tool.partition(":")
+    agent = agent or (str(fields.get("agent_sub") or "").split("@")[0] or None)
+    at = _parse_ts(fields.get("event_at")) or _parse_ts(obs.get("observed_at"))
+    success = str(fields.get("success") or "").strip().lower()
+    entry: dict[str, Any] = {
+        "at": _iso(at) if at else obs.get("observed_at"),
+        "agent": agent,
+        "provider": fields.get("provider") or provider or None,
+        "by": agent,
+        "source": {
+            "type": "harness_event",
+            "entity_id": obs.get("entity_id"),
+            "observation_id": obs.get("id"),
+        },
+    }
+    if success == "partial":
+        entry.update(kind="runner_started", value=tool or None)
+    else:
+        summary = fields.get("output_summary")
+        if success == "true":
+            outcome = "ok"
+        elif "timeout" in str(summary or "").lower():
+            outcome = "timeout"
+        else:
+            outcome = "failed"
+        entry.update(
+            kind="runner_ended",
+            value=_clip(summary) if summary else f"success={success or 'unknown'}",
+            outcome=outcome,
+            duration_ms=fields.get("duration_ms"),
+        )
+    return entry
+
+
+def _is_runner_event(obs: dict, task_ids: set[str]) -> bool:
+    fields = obs.get("fields") or {}
+    return (
+        str(fields.get("event_type") or "") == "subprocess"
+        and str(fields.get("task_entity_id") or "") in task_ids
+    )
+
+
+def _task_obs_entries(
+    observations: list[dict], task_id: str, *, detect_create: bool = True
+) -> list[dict]:
+    """Timeline entries from a task's own observations."""
+    ordered = sorted(observations, key=lambda o: str(o.get("observed_at") or ""))
+    entries: list[dict] = []
+    for index, obs in enumerate(ordered):
+        fields = obs.get("fields") or {}
+        base = {
+            "at": obs.get("observed_at"),
+            "by": _observation_actor(obs),
+            "source": {
+                "type": "task",
+                "entity_id": task_id,
+                "observation_id": obs.get("id"),
+            },
+        }
+        is_create = detect_create and index == 0 and any(f in fields for f in _CREATE_MARKER_FIELDS)
+        if is_create:
+            entries.append({**base, "kind": "created", "value": fields.get("status")})
+            continue
+        for name, value in fields.items():
+            kind = _TASK_FIELD_KINDS.get(name, "field")
+            entry = {**base, "kind": kind, "value": _clip(value)}
+            if kind == "field":
+                entry["field"] = name
+            if kind == "reason" and value in ("", None):
+                entry["value"] = "(cleared)"
+            if kind == "status":
+                entry.update(
+                    status_normalized=_status_view(value)["status_normalized"],
+                )
+            entries.append(entry)
+    return entries
+
+
+def _checkpoint_entries(checkpoint_id: str, observations: list[dict]) -> list[dict]:
+    entries: list[dict] = []
+    for obs in sorted(observations, key=lambda o: str(o.get("observed_at") or "")):
+        fields = obs.get("fields") or {}
+        base = {
+            "at": obs.get("observed_at"),
+            "by": _observation_actor(obs),
+            "checkpoint_id": checkpoint_id,
+            "source": {
+                "type": "checkpoint_brief",
+                "entity_id": checkpoint_id,
+                "observation_id": obs.get("id"),
+            },
+        }
+        status = str(fields.get("status") or "").strip().lower()
+        if "task_entity_id" in fields or "checkpoint_name" in fields:
+            entries.append(
+                {
+                    **base,
+                    "kind": "checkpoint_raised",
+                    "value": _clip(
+                        f"{fields.get('checkpoint_name') or 'checkpoint'}: "
+                        f"{fields.get('reason') or ''}".strip()
+                    ),
+                    "blast_radius": fields.get("blast_radius"),
+                }
+            )
+        elif status in ("approved", "rejected"):
+            entries.append({**base, "kind": "checkpoint_resolved", "value": status})
+        elif status:
+            entries.append({**base, "kind": "checkpoint_status", "value": status})
+        if "resolved_dispatched" in fields and _truthy(fields.get("resolved_dispatched")):
+            entries.append({**base, "kind": "checkpoint_released", "value": "resolved_dispatched"})
+    return entries
+
+
+def _subject_ref(snap: dict) -> str | None:
+    repo = str(snap.get("repo") or snap.get("repository") or "").strip()
+    number = None
+    for key in ("pr_number", "issue_number", "github_number", "number"):
+        if snap.get(key) not in (None, ""):
+            number = snap.get(key)
+            break
+    if repo and "/" in repo and number is not None and str(number).isdigit():
+        return f"{repo}#{number}"
+    return None
+
+
+def _history_time(entry: dict) -> str | None:
+    for key in ("at", "timestamp", "ts", "changed_at", "time"):
+        if entry.get(key):
+            return str(entry[key])
+    return None
+
+
+class _TimelineBuilder:
+    """Accumulates one task's timeline, source by source.
+
+    Each `join_*` method reads one record, appends its entries to `timeline`,
+    and records under `sources` whether it joined, found nothing, could not be
+    joined, or failed — so the response can never present a failed read as an
+    absence.
+    """
+
+    def __init__(self, task_id: str, task: dict, window_hours: float | None):
+        self.task_id = task_id
+        self.task = task
+        self.snap = _snapshot_of(task)
+        self.status = _status_view(self.snap.get("status"))
+        self.now = datetime.now(timezone.utc)
+        hours = float(window_hours) if window_hours else TIMELINE_WINDOW_HOURS
+        self.hours = max(1.0, min(hours, 24 * 14))
+        self.timeline: list[dict] = []
+        self.sources: list[dict] = []
+        self.gaps: list[str] = []
+        self.related: list[dict] = []
+        self.refs: dict[str, dict] = {}
+        self.refs_known = True
+        self.rel_checkpoint_ids: set[str] = set()
+        self.checkpoints: list[dict] = []
+        self.runner_entries: list[dict] = []
+        self.github_rows: list[dict] = []
+        self.steps: list[dict] = []
+        self.window: dict[str, Any] = {}
+
+    def source(self, name: str, status: str, count: int | None = None, detail: str | None = None) -> None:
+        row: dict[str, Any] = {"source": name, "status": status}
+        if count is not None:
+            row["count"] = count
+        if detail:
+            row["detail"] = detail
+        self.sources.append(row)
+
+    @property
+    def subject_refs(self) -> set[str]:
+        refs = {r["ref"] for r in self.refs.values() if r.get("ref")}
+        own = _subject_ref(self.snap)
+        if own:
+            refs.add(own)
+        return refs
+
+    def join_task_observations(self, observations: list[dict], truncated: bool) -> None:
+        self.timeline.extend(_task_obs_entries(observations, self.task_id))
+        self.source("task observations", "joined", len(observations))
+        if truncated:
+            self.gaps.append("the task has more observations than were read; the oldest are missing")
+
+    def join_relationships(self) -> None:
+        rels = _get(f"/entities/{self.task_id}/relationships?expand_entities=true")
+        if rels is None:
+            self.refs_known = False
+            self.source("relationships", "error", detail=_read_error("relationships"))
+            self.gaps.append("relationships could not be read, so issue and PR refs are unknown")
+            return
+        related_entities = rels.get("related_entities") or {}
+        for rel in rels.get("relationships") or []:
+            outgoing = rel.get("source_entity_id") == self.task_id
+            other = rel.get("target_entity_id") if outgoing else rel.get("source_entity_id")
+            other_ent = related_entities.get(other) or {}
+            other_type = (
+                rel.get("target_entity_type") if outgoing else rel.get("source_entity_type")
+            ) or other_ent.get("entity_type")
+            self.related.append(
+                {
+                    "relationship": rel.get("relationship_type"),
+                    "direction": "outgoing" if outgoing else "incoming",
+                    "entity_id": other,
+                    "entity_type": other_type,
+                }
+            )
+            if other_type == "checkpoint_brief":
+                self.rel_checkpoint_ids.add(other)
+            if other_type in ("issue", "pull_request"):
+                osnap = _snapshot_of(other_ent) if other_ent else {}
+                self.refs[other] = {
+                    "entity_id": other,
+                    "kind": other_type,
+                    "ref": _subject_ref(osnap),
+                    "snapshot": osnap,
+                }
+        self.source("relationships", "joined", len(self.related))
+
+    def join_checkpoints(self) -> None:
+        page = _retrieve_page(
+            "checkpoint_brief",
+            snapshot_filters={"task_entity_id": {"op": "eq", "value": self.task_id}},
+            limit=50,
+        )
+        if page is None:
+            self.source("checkpoint_brief", "error", detail=_read_error("checkpoint_brief"))
+            self.gaps.append("checkpoints could not be read; an open checkpoint may be holding this task")
+            return
+        entities = list(page.get("entities") or [])
+        listed = {e.get("entity_id") for e in entities}
+        # A checkpoint linked by edge but missing its task_entity_id field.
+        for cid in sorted(self.rel_checkpoint_ids - listed):
+            ent = _get(f"/entities/{cid}")
+            if ent is not None:
+                entities.append(ent)
+        errors = 0
+        for ent in entities:
+            cid = ent.get("entity_id", ent.get("id", ""))
+            csnap = _snapshot_of(ent)
+            cobs, cerr, _ = _observations_of(cid, max_rows=200)
+            if cobs is None:
+                errors += 1
+                self.gaps.append(f"checkpoint {cid} history could not be read ({cerr})")
+                cobs = []
+            entries = _checkpoint_entries(cid, cobs)
+            self.timeline.extend(entries)
+            self.checkpoints.append(
+                {
+                    "checkpoint_id": cid,
+                    "status": csnap.get("status"),
+                    "resolved_dispatched": _truthy(csnap.get("resolved_dispatched")),
+                    "blast_radius": csnap.get("blast_radius"),
+                    "reason": _clip(csnap.get("reason")),
+                    "raised_at": next(
+                        (e["at"] for e in entries if e["kind"] == "checkpoint_raised"), None
+                    ),
+                }
+            )
+        status = "error" if errors else ("joined" if self.checkpoints else "none_found")
+        self.source("checkpoint_brief", status, len(self.checkpoints))
+
+    def _scan_bounds(self) -> tuple[datetime, datetime] | None:
+        created = _parse_ts(self.task.get("created_at")) or (
+            _parse_ts(self.timeline[0]["at"]) if self.timeline else None
+        )
+        if created is None:
+            return None
+        last = _parse_ts(self.task.get("last_observation_at"))
+        start = created - timedelta(seconds=_WINDOW_LEAD_SECONDS)
+        # A task that is still moving may have a runner that started after its
+        # last status write, so scan up to now. A settled task's runner events
+        # precede its last write by seconds.
+        settled = self.status["terminal"] or self.status["status_normalized"] in ("failed", "blocked")
+        end = (
+            min(self.now, (last or self.now) + timedelta(seconds=_WINDOW_TAIL_SECONDS))
+            if settled
+            else self.now
+        )
+        if end - start > timedelta(hours=self.hours):
+            start = end - timedelta(hours=self.hours)
+            self.gaps.append(
+                f"runner events were looked for only from {_iso(start)} "
+                f"(the last {self.hours:g} h of the task's history); earlier ones were not scanned"
+            )
+        return start, end
+
+    def join_harness_events(self) -> None:
+        bounds = self._scan_bounds()
+        if bounds is None:
+            self.source("harness_event", "not_joinable", detail="task has no timestamps")
+            return
+        start, end = bounds
+        scan = _scan_type_window("harness_event", start, end, TIMELINE_MAX_SCAN)
+        self.window = {
+            "start": _iso(start),
+            "end": _iso(end),
+            "harness_event_observations_in_window": scan.get("in_window"),
+            "scanned": scan.get("scanned"),
+            "complete": bool(scan.get("complete")) and not scan.get("error"),
+        }
+        if scan.get("error"):
+            self.source("harness_event", "error", detail=scan["error"])
+            self.gaps.append("runner events could not be read; who ran this task and how it ended is unknown")
+            return
+        if not scan.get("complete"):
+            self.gaps.append(
+                f"the window holds {scan.get('in_window')} harness_event observations and "
+                f"only the newest {scan.get('scanned')} were scanned; older runner events "
+                "in the window were not looked at"
+            )
+        refs = self.subject_refs
+        runner_rows = []
+        for obs in scan["rows"]:
+            if _is_runner_event(obs, {self.task_id}):
+                runner_rows.append(obs)
+            elif refs and str((obs.get("fields") or {}).get("subject_ref") or "") in refs:
+                self.github_rows.append(obs)
+        self.runner_entries = [_runner_entry(o) for o in runner_rows]
+        self.timeline.extend(self.runner_entries)
+        self.source(
+            "harness_event runner events",
+            "joined" if runner_rows else "none_found",
+            len(runner_rows),
+            "matched by task_entity_id within the scanned window only",
+        )
+
+    def join_github_events(self) -> None:
+        refs = self.subject_refs
+        if not refs:
+            if not self.refs_known:
+                self.source("PR and review events", "error", detail="relationships unreadable")
+                return
+            self.source(
+                "PR and review events",
+                "not_joinable",
+                detail="the task is related to no issue or pull_request entity and names no repo#number",
+            )
+            self.gaps.append(
+                "no issue or pull request is linked to this task, so PR, review and issue-gate "
+                "events could not be joined"
+            )
+            return
+        scan_failed = any(
+            row["source"] == "harness_event" and row["status"] in ("error", "not_joinable")
+            for row in self.sources
+        )
+        if scan_failed or not self.window:
+            self.source("PR and review events", "error", detail="the harness_event scan did not run")
+            return
+        for obs in self.github_rows:
+            fields = obs.get("fields") or {}
+            event_type = str(fields.get("event_type") or "")
+            self.timeline.append(
+                {
+                    "at": fields.get("occurred_at") or obs.get("observed_at"),
+                    "kind": "review" if "review" in event_type else "github_event",
+                    "value": _clip(f"{event_type}: {fields.get('summary') or ''}".strip()),
+                    "subject_ref": fields.get("subject_ref"),
+                    "by": _observation_actor(obs),
+                    "source": {
+                        "type": "harness_event",
+                        "entity_id": obs.get("entity_id"),
+                        "observation_id": obs.get("id"),
+                    },
+                }
+            )
+        self.source(
+            "PR and review events",
+            "joined" if self.github_rows else "none_found",
+            len(self.github_rows),
+            f"harness_event rows whose subject_ref is one of {sorted(refs)}",
+        )
+
+    def join_participation(self) -> None:
+        page = _retrieve_page(
+            "participation_record",
+            snapshot_filters={"work_entity_id": {"op": "eq", "value": self.task_id}},
+            limit=100,
+        )
+        if page is None:
+            self.source("participation_record", "error", detail=_read_error("participation_record"))
+            return
+        rows = page.get("entities") or []
+        for ent in rows:
+            psnap = _snapshot_of(ent)
+            gate = psnap.get("gate_name")
+            self.steps.append(
+                {
+                    "gate": gate,
+                    "status": psnap.get("status"),
+                    "agent": psnap.get("agent"),
+                    "source": "participation_record",
+                    "entity_id": ent.get("entity_id"),
+                }
+            )
+            for key, kind in (
+                ("dispatched_at", "step_opened"),
+                ("satisfied_at", "step_closed"),
+                ("skipped_at", "step_closed"),
+            ):
+                if psnap.get(key):
+                    self.timeline.append(
+                        {
+                            "at": psnap[key],
+                            "kind": kind,
+                            "value": f"{gate}: {key.removesuffix('_at')}",
+                            "by": psnap.get("agent"),
+                            "source": {"type": "participation_record", "entity_id": ent.get("entity_id")},
+                        }
+                    )
+        self.source("participation_record", "joined" if rows else "none_found", len(rows))
+
+    def join_gate_status(self) -> None:
+        if not self.refs:
+            return
+        joined = 0
+        for ref in self.refs.values():
+            rsnap = ref.get("snapshot") or {}
+            gate_status = rsnap.get("gate_status")
+            if isinstance(gate_status, str):
+                try:
+                    gate_status = json.loads(gate_status)
+                except (ValueError, TypeError):
+                    gate_status = None
+            if not isinstance(gate_status, dict):
+                continue
+            joined += 1
+            self.steps.append(
+                {
+                    "subject": ref.get("ref") or ref["entity_id"],
+                    "gate_status": gate_status,
+                    "blocking_gates": _blocking_gates(gate_status),
+                    "current_owner": rsnap.get("current_owner"),
+                    "source": f"{ref['kind']}.gate_status",
+                    "entity_id": ref["entity_id"],
+                }
+            )
+            for hist in _dedupe_history(_parse_owner_history(rsnap.get("owner_history"))):
+                at = _history_time(hist)
+                if at:
+                    self.timeline.append(
+                        {
+                            "at": at,
+                            "kind": "step",
+                            "value": _clip(json.dumps(hist, sort_keys=True, default=str)),
+                            "subject_ref": ref.get("ref"),
+                            "source": {"type": f"{ref['kind']}.owner_history", "entity_id": ref["entity_id"]},
+                        }
+                    )
+        self.source("issue / pull_request gate_status", "joined" if joined else "none_found", joined)
+
+    def join_escalations(self) -> None:
+        page = _retrieve_page(
+            "escalation",
+            snapshot_filters={"source_entity_id": {"op": "eq", "value": self.task_id}},
+            limit=50,
+        )
+        if page is None:
+            self.source("escalation", "error", detail=_read_error("escalation"))
+            return
+        rows = page.get("entities") or []
+        for ent in rows:
+            esnap = _snapshot_of(ent)
+            self.timeline.append(
+                {
+                    "at": ent.get("created_at") or ent.get("last_observation_at"),
+                    "kind": "escalation",
+                    "value": _clip(esnap.get("title")),
+                    "by": str(esnap.get("source_agent") or "").split("@")[0] or None,
+                    "source": {"type": "escalation", "entity_id": ent.get("entity_id")},
+                }
+            )
+        self.source("escalation", "joined" if rows else "none_found", len(rows))
+
+    def current(self) -> dict:
+        """What is happening now, derived from the joined records."""
+        starts = [e for e in self.runner_entries if e["kind"] == "runner_started"]
+        ends = [e for e in self.runner_entries if e["kind"] == "runner_ended"]
+        last_start = starts[-1] if starts else None
+        last_end = ends[-1] if ends else None
+        runner_open = bool(
+            last_start and (last_end is None or str(last_end["at"]) < str(last_start["at"]))
+        )
+        open_cp = next(
+            (c for c in self.checkpoints if str(c.get("status") or "").lower() == "awaiting_operator"),
+            None,
+        )
+        norm = self.status["status_normalized"]
+        current: dict[str, Any] = {"phase": "unknown", "agent": None, "since": None, "live": False}
+        if open_cp:
+            current.update(
+                phase="held_at_checkpoint",
+                since=open_cp.get("raised_at"),
+                open_checkpoint={
+                    "id": open_cp["checkpoint_id"],
+                    "reason": open_cp.get("reason"),
+                    "blast_radius": open_cp.get("blast_radius"),
+                },
+            )
+        elif runner_open and last_start:
+            started = _parse_ts(last_start["at"])
+            live = bool(started and (self.now - started).total_seconds() <= RUNNER_LIVE_SECONDS)
+            current.update(phase="executing", agent=last_start.get("agent"), since=last_start["at"], live=live)
+            if not live:
+                self.gaps.append(
+                    "a runner start has no matching end and is older than the runner timeout; "
+                    "its end event was probably lost, so whether it is still running is unknown"
+                )
+        elif self.status["terminal"] or norm in ("failed", "blocked", "declined"):
+            current.update(
+                phase="ended",
+                agent=(last_end or last_start or {}).get("agent"),
+                since=(last_end or {}).get("at") or self.task.get("last_observation_at"),
+            )
+        elif norm in ("pending", "routed", "ready"):
+            current.update(phase="waiting_to_claim")
+        elif norm == "awaiting_approval":
+            current.update(phase="held_at_checkpoint")
+            self.gaps.append("the task says awaiting_approval but no open checkpoint was found for it")
+        elif norm == "executing":
+            current.update(phase="executing")
+            self.gaps.append(
+                "the task says executing but no runner start was found in the scanned window; "
+                "stored status alone does not show that anything is running"
+            )
+        if not self.status["status_known"]:
+            self.gaps.append(
+                f"status {self.status['status']!r} is not a value the task lifecycle declares; "
+                "reported as stored, not interpreted"
+            )
+        return current
+
+    def result(self) -> dict:
+        self.timeline.sort(
+            key=lambda e: (_parse_ts(e.get("at")) or self.now, e.get("kind") != "created")
+        )
+        current = self.current()
+        last_end = next(
+            (e for e in reversed(self.runner_entries) if e["kind"] == "runner_ended"), None
+        )
+        self.gaps.extend(
+            [
+                "runner events live on shared per-agent harness_event entities and are found only "
+                "inside the scanned window; a start and its end share no id and are paired by agent and time",
+                "the runner's own output is a host-local file and is not in the record; a timed-out run keeps none",
+            ]
+        )
+        return {
+            "task": {
+                "id": self.task_id,
+                "title": self.snap.get("title"),
+                **self.status,
+                "assigned_to": self.snap.get("assigned_to") or None,
+                "priority": self.snap.get("priority"),
+                "created_at": self.task.get("created_at"),
+                "last_observation_at": self.task.get("last_observation_at"),
+            },
+            "current": current,
+            "timeline": self.timeline,
+            "checkpoints": self.checkpoints,
+            "steps": self.steps,
+            "related": self.related,
+            "output": {
+                "result": _clip(self.snap.get("result")) or None,
+                "blocked_reason": _clip(self.snap.get("blocked_reason")) or None,
+                "runner_outcome": (last_end or {}).get("value"),
+                "runner_output": None,
+            },
+            "window": self.window,
+            "sources": self.sources,
+            "gaps": self.gaps,
+        }
+
+
+def _get_task_timeline(task_entity_id: str, window_hours: float | None = None) -> dict:
+    task_id = str(task_entity_id or "").strip()
+    if not _TASK_ID_RE.match(task_id):
+        return {"error": f"task_entity_id must be an 'ent_…' id, got {task_entity_id!r}"}
+
+    task = _get(f"/entities/{task_id}")
+    if task is None:
+        return {
+            "error": f"task {task_id} not found or Neotoma unreachable",
+            "transport_error": _describe_transport_error(),
+        }
+    if _entity_type_of(task) not in ("task", ""):
+        return {"error": f"entity {task_id} is a {_entity_type_of(task)}, not a task"}
+
+    task_obs, err, truncated = _observations_of(task_id)
+    if task_obs is None:
+        # The task's own history is the spine of the timeline. Without it,
+        # anything returned would be a partial picture presented as a whole.
+        return {"error": f"could not read the task's observations: {err}"}
+
+    builder = _TimelineBuilder(task_id, task, window_hours)
+    builder.join_task_observations(task_obs, truncated)
+    builder.join_relationships()
+    builder.join_checkpoints()
+    builder.join_harness_events()
+    builder.join_github_events()
+    builder.join_participation()
+    builder.join_gate_status()
+    builder.join_escalations()
+    return builder.result()
+
+
+# ── watch_swarm ──────────────────────────────────────────────────────────────
+
+
+def _encode_cursor(since: str, seen: set[str] | list[str]) -> str:
+    payload = json.dumps({"t": since, "s": sorted(seen)}, separators=(",", ":"))
+    return _CURSOR_PREFIX + base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> tuple[str, set[str]] | None:
+    raw = str(cursor or "").strip()
+    if not raw.startswith(_CURSOR_PREFIX):
+        return None
+    body = raw[len(_CURSOR_PREFIX):]
+    try:
+        decoded = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    since = decoded.get("t")
+    seen = decoded.get("s") or []
+    if not isinstance(since, str) or _parse_ts(since) is None or not isinstance(seen, list):
+        return None
+    return since, {str(s) for s in seen}
+
+
+def _advance_cursor(since: str, seen: set[str], rows: list[dict]) -> str:
+    """New cursor over every row read this poll, matched or not.
+
+    Advancing over unmatched rows keeps each later poll short; the overlap and
+    the seen-id set keep a row that landed mid-poll from being skipped.
+    """
+    stamped = [(_parse_ts(r.get("observed_at")), str(r.get("id") or "")) for r in rows]
+    stamped = [(t, i) for t, i in stamped if t is not None and i]
+    old = _parse_ts(since)
+    if not stamped or old is None:
+        return _encode_cursor(since, seen)
+    high = max(t for t, _ in stamped)
+    new_since = max(old, high - timedelta(seconds=_CURSOR_OVERLAP_SECONDS))
+    new_seen = {i for t, i in stamped if t >= new_since}
+    if new_since == old:
+        new_seen |= seen
+    if len(new_seen) > _CURSOR_MAX_SEEN:
+        new_since = high
+        new_seen = {i for t, i in stamped if t >= high}
+    return _encode_cursor(_iso(new_since), new_seen)
+
+
+def _scan_since(entity_type: str, since: str, max_scan: int) -> tuple[list[dict] | None, str | None, bool]:
+    rows: list[dict] = []
+    offset = 0
+    while offset < max_scan:
+        limit = min(_OBS_PAGE, max_scan - offset)
+        data = _obs_query(
+            {"entity_type": entity_type, "created_since": since, "offset": offset, "limit": limit}
+        )
+        if data is None:
+            return None, _read_error(f"{entity_type} since {since}"), False
+        batch = data.get("observations") or []
+        rows.extend(batch)
+        offset += len(batch)
+        if len(batch) < limit:
+            return rows, None, False
+    return rows, None, True
+
+
+def _watch_poll(
+    since: str, seen: set[str], task_ids: list[str], include_checkpoints: bool
+) -> dict:
+    """One pass over every stream. Returns changes, the rows read, and errors."""
+    all_rows: list[dict] = []
+    changes: list[dict] = []
+    checkpoint_changes: list[dict] = []
+    errors: list[str] = []
+    gaps: list[str] = []
+    watched = set(task_ids)
+
+    for tid in task_ids:
+        obs, err, truncated = _observations_of(tid, since=since, max_rows=500)
+        if obs is None:
+            errors.append(err or f"observations of {tid}")
+            continue
+        all_rows.extend(obs)
+        fresh = [o for o in obs if str(o.get("id")) not in seen]
+        for entry in _task_obs_entries(fresh, tid, detect_create=False):
+            entry["subject"] = {"task": tid}
+            changes.append(entry)
+        if truncated:
+            gaps.append(f"more changes on {tid} than one poll reads; the oldest were skipped")
+
+    if task_ids:
+        rows, err, truncated = _scan_since("harness_event", since, TIMELINE_MAX_SCAN)
+        if rows is None:
+            errors.append(err or "harness_event")
+        else:
+            all_rows.extend(rows)
+            for obs in rows:
+                if str(obs.get("id")) in seen or not _is_runner_event(obs, watched):
+                    continue
+                entry = _runner_entry(obs)
+                entry["subject"] = {"task": str((obs.get("fields") or {}).get("task_entity_id"))}
+                changes.append(entry)
+            if truncated:
+                gaps.append(
+                    "more runner events since the cursor than one poll scans; older ones were skipped"
+                )
+
+    if include_checkpoints or task_ids:
+        rows, err, truncated = _scan_since("checkpoint_brief", since, 1000)
+        if rows is None:
+            errors.append(err or "checkpoint_brief")
+        else:
+            all_rows.extend(rows)
+            entity_cache: dict[str, dict | None] = {}
+            for obs in rows:
+                if str(obs.get("id")) in seen:
+                    continue
+                cid = str(obs.get("entity_id") or "")
+                fields = obs.get("fields") or {}
+                task_ref = fields.get("task_entity_id")
+                raised_at = obs.get("observed_at") if "task_entity_id" in fields else None
+                if task_ref is None or raised_at is None:
+                    if cid not in entity_cache:
+                        entity_cache[cid] = _get(f"/entities/{cid}")
+                    ent = entity_cache[cid]
+                    if ent is None:
+                        errors.append(_read_error(f"checkpoint {cid}"))
+                        continue
+                    task_ref = task_ref or _snapshot_of(ent).get("task_entity_id")
+                    raised_at = raised_at or ent.get("created_at")
+                    if not raised_at:
+                        gaps.append(f"checkpoint {cid} has no creation time; ordered last")
+                if not include_checkpoints and str(task_ref) not in watched:
+                    continue
+                for entry in _checkpoint_entries(cid, [obs]):
+                    entry["subject"] = {"checkpoint": cid, "task": task_ref}
+                    entry["raised_at"] = raised_at
+                    checkpoint_changes.append(entry)
+            if truncated:
+                gaps.append("more checkpoint changes since the cursor than one poll reads")
+
+    changes.sort(key=lambda e: str(e.get("at") or ""))
+    # Raised time first, never entity id: ids are random, so id order is noise.
+    checkpoint_changes.sort(
+        key=lambda e: (e.get("raised_at") is None, str(e.get("raised_at") or ""), str(e.get("at") or ""))
+    )
+    terminal = sorted(
+        {
+            e["subject"]["task"]
+            for e in changes
+            if e.get("kind") == "status" and _status_view(e.get("value"))["terminal"]
+        }
+    )
+    return {
+        "changes": changes,
+        "checkpoints": checkpoint_changes,
+        "terminal_subjects": terminal,
+        "rows": all_rows,
+        "errors": errors,
+        "gaps": gaps,
+    }
+
+
+def _watch_baseline(task_ids: list[str], include_checkpoints: bool) -> dict:
+    """First call: current state and a cursor at the record's newest write.
+
+    The cursor is taken from the newest observation Neotoma holds, so it is on
+    the record's own clock rather than this host's.
+    """
+    newest = _obs_query({"limit": 1})
+    if newest is None:
+        return {"error": _read_error("could not read the record's newest observation")}
+    rows = newest.get("observations") or []
+    if rows:
+        cursor = _encode_cursor(str(rows[0].get("observed_at")), {str(rows[0].get("id"))})
+    else:
+        cursor = _encode_cursor(_iso(datetime.now(timezone.utc)), set())
+
+    tasks: list[dict] = []
+    pending: list[dict] = []
+    errors: list[str] = []
+    for tid in task_ids:
+        ent = _get(f"/entities/{tid}")
+        if ent is None:
+            errors.append(_read_error(f"task {tid}"))
+            continue
+        snap = _snapshot_of(ent)
+        tasks.append(
+            {
+                "id": tid,
+                "title": snap.get("title"),
+                **_status_view(snap.get("status")),
+                "last_observation_at": ent.get("last_observation_at"),
+            }
+        )
+        page = _retrieve_page(
+            "checkpoint_brief",
+            snapshot_filters={
+                "task_entity_id": {"op": "eq", "value": tid},
+                "status": {"op": "eq", "value": "awaiting_operator"},
+            },
+            limit=20,
+        )
+        if page is None:
+            errors.append(_read_error(f"checkpoints of {tid}"))
+            continue
+        for cp in page.get("entities") or []:
+            cid = cp.get("entity_id", "")
+            full = _get(f"/entities/{cid}") or cp
+            csnap = _snapshot_of(full)
+            pending.append(
+                {
+                    "checkpoint_id": cid,
+                    "task": tid,
+                    "raised_at": full.get("created_at"),
+                    "blast_radius": csnap.get("blast_radius"),
+                    "reason": _clip(csnap.get("reason")),
+                }
+            )
+    if errors:
+        return {"error": "; ".join(errors)}
+    pending.sort(key=lambda c: (c.get("raised_at") is None, str(c.get("raised_at") or "")))
+    result: dict[str, Any] = {
+        "baseline": True,
+        "tasks": tasks,
+        "pending_checkpoints": pending,
+        "pending_checkpoints_order": "raised_at ascending",
+        "changes": [],
+        "checkpoints": [],
+        "terminal_subjects": sorted(t["id"] for t in tasks if t["terminal"]),
+        "cursor": cursor,
+    }
+    if include_checkpoints:
+        total_page = _retrieve_page(
+            "checkpoint_brief",
+            snapshot_filters={"status": {"op": "eq", "value": "awaiting_operator"}},
+            limit=1,
+            include_snapshots=False,
+        )
+        result["pending_checkpoints_total"] = (total_page or {}).get("total")
+        result["note"] = (
+            "Every checkpoint raised or resolved after this cursor is reported by the next "
+            "call, ordered by when it was raised. The existing queue is list_checkpoints'."
+        )
+    return result
+
+
+def _watch_swarm(
+    cursor: str | None = None,
+    task_ids: list[str] | None = None,
+    include_checkpoints: bool = False,
+    wait_seconds: float = 0,
+) -> dict:
+    ids = [str(t).strip() for t in (task_ids or []) if str(t).strip()]
+    bad = [t for t in ids if not _TASK_ID_RE.match(t)]
+    if bad:
+        return {"error": f"task_ids must be 'ent_…' ids, got {bad}"}
+    ids = list(dict.fromkeys(ids))
+    if len(ids) > WATCH_MAX_TASKS:
+        return {"error": f"watch at most {WATCH_MAX_TASKS} tasks per call, got {len(ids)}"}
+    if not ids and not include_checkpoints:
+        return {"error": "nothing to watch: pass task_ids, include_checkpoints, or both"}
+    try:
+        wait = float(wait_seconds or 0)
+    except (TypeError, ValueError):
+        return {"error": f"wait_seconds must be a number, got {wait_seconds!r}"}
+    wait = max(0.0, min(wait, float(WATCH_MAX_WAIT_SECONDS)))
+
+    if not cursor:
+        return _watch_baseline(ids, include_checkpoints)
+    decoded = _decode_cursor(cursor)
+    if decoded is None:
+        return {"error": "cursor is not one this server issued; call without a cursor to start"}
+    since, seen = decoded
+
+    started = _watch_clock()
+    deadline = started + wait
+    polls = 0
+    while True:
+        poll = _watch_poll(since, seen, ids, include_checkpoints)
+        polls += 1
+        if poll["errors"]:
+            # Fail closed, and keep the caller's cursor: nothing was consumed,
+            # so a retry sees everything this call could not.
+            return {
+                "error": "could not read the record for this watch",
+                "detail": poll["errors"],
+                "cursor": cursor,
+            }
+        new_cursor = _advance_cursor(since, seen, poll["rows"])
+        if poll["changes"] or poll["checkpoints"]:
+            return {
+                "changes": poll["changes"],
+                "checkpoints": poll["checkpoints"],
+                "checkpoints_order": "raised_at ascending",
+                "terminal_subjects": poll["terminal_subjects"],
+                "cursor": new_cursor,
+                "polls": polls,
+                "waited_seconds": round(_watch_clock() - started, 1),
+                "gaps": poll["gaps"],
+            }
+        cursor = new_cursor
+        since, seen = _decode_cursor(new_cursor) or (since, seen)
+        remaining = deadline - _watch_clock()
+        if remaining <= 0:
+            return {
+                "changes": [],
+                "checkpoints": [],
+                "terminal_subjects": [],
+                "cursor": new_cursor,
+                "polls": polls,
+                "waited_seconds": round(_watch_clock() - started, 1),
+                "timed_out": True,
+                "gaps": poll["gaps"],
+            }
+        _watch_sleep(min(WATCH_POLL_SECONDS, remaining))
+
+
 # ── MCP Server setup ─────────────────────────────────────────────────────────
 
 TOOLS = [
@@ -2183,6 +3384,80 @@ TOOLS = [
         ),
         inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
     ),
+    Tool(
+        name="get_task_timeline",
+        description=(
+            "Read-only. One swarm task's history, merged and time-ordered from what the "
+            "swarm records: the task's own status/reason/result observations, its "
+            "checkpoints (raised, resolved, released), runner start/end events found in "
+            "shared harness_event rows within a bounded window around the task, PR and "
+            "review events for a linked issue or PR, workflow-step rows, and escalations. "
+            "Every entry carries its source and timestamp. `current` derives what is "
+            "happening now; `sources` says which records were joined and `gaps` what the "
+            "record could not show. A failed read of the task returns an error, never an "
+            "empty timeline."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task_entity_id": {
+                    "type": "string",
+                    "description": "The Neotoma task entity id (ent_...).",
+                },
+                "window_hours": {
+                    "type": "number",
+                    "description": (
+                        "Most hours of the task's history to scan for runner events "
+                        f"(default {TIMELINE_WINDOW_HOURS:g})."
+                    ),
+                    "minimum": 1,
+                    "maximum": 336,
+                },
+            },
+            "required": ["task_entity_id"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="watch_swarm",
+        description=(
+            "Read-only bounded long-poll. Call once without `cursor` to get the watched "
+            "tasks' current state and a cursor; then call with that cursor and it waits up "
+            f"to `wait_seconds` (max {WATCH_MAX_WAIT_SECONDS}) and returns what changed "
+            "since: status, reason and result writes and runner start/end for `task_ids`, "
+            "and checkpoint changes for those tasks (or for every checkpoint when "
+            "`include_checkpoints` is true), ordered by when each checkpoint was raised. "
+            "Always returns a new cursor; an empty `changes` with a cursor means nothing "
+            "changed, and an `error` keeps your cursor so a retry loses nothing. Stateless: "
+            "the cursor carries the position."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "cursor": {
+                    "type": "string",
+                    "description": "Cursor from a previous watch_swarm or watch.py result.",
+                },
+                "task_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": WATCH_MAX_TASKS,
+                    "description": "Task entity ids to watch.",
+                },
+                "include_checkpoints": {
+                    "type": "boolean",
+                    "description": "Also report every checkpoint raised or resolved (default false).",
+                },
+                "wait_seconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": WATCH_MAX_WAIT_SECONDS,
+                    "description": "How long to wait for a change before returning (default 0).",
+                },
+            },
+            "additionalProperties": False,
+        },
+    ),
 ]
 
 TOOL_HANDLERS = {
@@ -2201,6 +3476,18 @@ TOOL_HANDLERS = {
     ),
     "list_pipeline_queue": lambda args: _list_pipeline_queue(),
     "get_dispatch_health": lambda args: _get_dispatch_health(),
+    # Both run in a worker thread: the timeline makes several reads and the
+    # watch sleeps between polls, and neither may stall the stdio event loop.
+    "get_task_timeline": lambda args: asyncio.to_thread(
+        _get_task_timeline, args["task_entity_id"], args.get("window_hours")
+    ),
+    "watch_swarm": lambda args: asyncio.to_thread(
+        _watch_swarm,
+        args.get("cursor"),
+        args.get("task_ids"),
+        bool(args.get("include_checkpoints", False)),
+        args.get("wait_seconds", 0),
+    ),
 }
 
 
