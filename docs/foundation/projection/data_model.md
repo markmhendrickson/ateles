@@ -5,7 +5,7 @@
 
 Every rule `data_model.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`data_model.md`](../data_model.md) and are not repeated here (decision 66).
 
-28 rules.
+30 rules.
 
 ## [Concepts](../data_model.md#concepts)
 
@@ -49,3 +49,11 @@ Every rule `data_model.md` owns, one entry each: the rule's own statement from `
 ## [Rendering](../data_model.md#rendering)
 
 - **DM-25** — the rule this heading states *[M (contract; existence is `status.md`'s)]*
+
+## [The registry is closed by default, and registering outside the declared set is a governance write](../data_model.md#the-registry-is-closed-by-default-and-registering-outside-the-declared-set-is-a-governance-write)
+
+- **DM-29** — (decision 113): an instance declares the set of types it holds; a registration outside that set is a governance write, refused at the record and admitted only on the engine's grant; an empty declaration is the absence of a boundary and not a closed registry *[M]*
+
+## [What the declared boundary refuses when the instance cannot evaluate it](../data_model.md#what-the-declared-boundary-refuses-when-the-instance-cannot-evaluate-it)
+
+- **DM-30** — (decision 114): the boundary read fails closed — a write is refused where the instance cannot read its declaration of what it holds — and an absent declaration stays distinct from an unreadable one *[M]*

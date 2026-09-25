@@ -21,17 +21,17 @@ Stage 0 of the rule migration, in the sense `migration.md` already gives the wor
 |---|---|
 | Distinct rules (clusters) | **52** |
 | …of those, still flagged NEEDS-SPLIT | **16** |
-| Statements of those rules, across all stores | **544** |
-| **Duplication factor** | **10.5×** |
+| Statements of those rules, across all stores | **543** |
+| **Duplication factor** | **10.4×** |
 | Clusters whose statements DIVERGE on binding force | **15** |
-| Normative statements scanned in total | 4448 |
-| …of those, matching no known rule kind | 3972 |
-| Statement values withheld from public output | 4448 |
+| Normative statements scanned in total | 4444 |
+| …of those, matching no known rule kind | 3969 |
+| Statement values withheld from public output | 4444 |
 | Stores inventoried | 17 |
 
 The duplication factor is the point. `migration.md` governs the target shape — *standing rules go to `task_policy` by kind, never by value* — so one rule stated in fourteen places collapses to ONE entity with fourteen locations, not fourteen entities. The factor is how much collapsing there is to do; the divergence count is how much of it needs a ruling rather than a merge.
 
-The factor is computed over the 544 statements that match a known rule kind, not over all 4448 scanned. The remainder are procedure, context, or rules whose kind has no signature yet — counting them would inflate the figure with statements the migration has nothing to collapse.
+The factor is computed over the 543 statements that match a known rule kind, not over all 4444 scanned. The remainder are procedure, context, or rules whose kind has no signature yet — counting them would inflate the figure with statements the migration has nothing to collapse.
 
 ### The earlier 13.9× was an upper bound on duplication, and a lower bound on the rule count
 
@@ -41,7 +41,7 @@ Its clustering merged by TOPIC. Statements that shared vocabulary landed togethe
 
 How it was caught matters more than the number. The operator noticed a rule he knew existed — *pose open decisions through the harness questions tool* — was absent from the 36. It had not been missed by the extractor: a `standing_rule` entity and eight further statements were all present in the document, absorbed into a cluster labelled *give status updates and open decisions unprompted*. Those are two rules. One says SURFACE a decision, the other says HOW; a turn that ends with a prose decision list satisfies the first and violates the second. The instrument could not see this, because nothing in it measured its own clustering. The `Distinct` column and the NEEDS-SPLIT verdict exist so the next over-merge is visible in the output rather than waiting on a reader's memory of a rule that should be there.
 
-This revision applies the merge test — two statements are the same rule only if a session cannot satisfy one while violating the other — and reports **52 rules at 10.5×**, with **16** clusters still flagged as buckets. The new figure is not proposed as final either: a NEEDS-SPLIT count above zero is the document saying so about itself.
+This revision applies the merge test — two statements are the same rule only if a session cannot satisfy one while violating the other — and reports **52 rules at 10.4×**, with **16** clusters still flagged as buckets. The new figure is not proposed as final either: a NEEDS-SPLIT count above zero is the document saying so about itself.
 
 ## The stores
 
@@ -54,7 +54,7 @@ This revision applies the merge test — two statements are the same rule only i
 | Skills (ateles repo) | `.claude/skills/<skill>` | 96 | 1377 | 2026-09-23 | yes |
 | foundation reference repo | `~/repos/<reference>` | 62 | 1178 | 2026-01-27 | cited, unread |
 | Skills (user root) | `~/.claude/skills/<skill>` | 37 | 839 | 2026-09-21 | yes |
-| Claude Code project memory | `~/.claude/projects/<project>/memory` | 344 | 666 | 2026-09-23 | per-project |
+| Claude Code project memory | `~/.claude/projects/<project>/memory` | 342 | 662 | 2026-09-23 | per-project |
 | ateles/CLAUDE.md | `CLAUDE.md` | 1 | 84 | 2026-09-23 | yes |
 | standing_rule entities | `<entity>` | 52 | 73 | 2026-09-22 | sidecar only |
 | Codex | `~/.codex/AGENTS.md` | 1 | 67 | 2026-09-14 | yes |
@@ -63,10 +63,10 @@ This revision applies the merge test — two statements are the same rule only i
 | neotoma/AGENTS.md | `~/repos/neotoma/AGENTS.md` | 1 | 30 | 2026-09-13 | yes |
 | task_policy entities | `<entity>` | 20 | 22 | 2026-09-09 | on retrieval |
 | Claude Code user rules | `~/.claude/CLAUDE.md` | 1 | 7 | 2026-07-16 | yes |
-| Cursor | `~/.cursor/rules` | 31 | 2 | 2026-09-23 | stale |
+| Cursor | `~/.cursor/rules` | 31 | 2 | 2026-09-13 | stale |
 | Canonical repository instruction roots | `~/repos/<canonical-roots>` | — | — | — | **UNREAD** |
-| ateles/CLAUDE.md checkout copies | `~/repos/<checkout>` | 145 | 0 | 2026-09-23 | divergent |
-| neotoma/AGENTS.md checkout copies | `~/repos/<checkout>` | 167 | 0 | 2026-09-23 | divergent |
+| ateles/CLAUDE.md checkout copies | `~/repos/<checkout>` | 137 | 0 | 2026-09-23 | divergent |
+| neotoma/AGENTS.md checkout copies | `~/repos/<checkout>` | 166 | 0 | 2026-09-23 | divergent |
 | OpenClaw | `~/.openclaw/agents/<agent>` | 0 | 0 | — | n/a |
 
 ## NEEDS-SPLIT: clusters that are still topical buckets
@@ -105,7 +105,7 @@ Both need a human read of their private sources against the merge test, exactly 
 
 The highest-value output. Each row is one rule whose statements do not agree on how strongly it binds. A consumer's behaviour then depends on which copy it happens to read, which is the failure ateles#1115 found in `agent_policy` (two live rows, same safety rule, one `recommended` and one `mandatory`) and ateles#1121 found between a foundation file and the lens that cites it. **A divergence needs a ruling, not a merge** — the migration cannot pick a side on its own.
 
-**A flagged divergence is a candidate, not a verdict.** The test reads prose, so it cannot tell a rule being STATED from a rule being DESCRIBED: a sentence explaining that a hook is deliberately fail-open reads as an advisory statement of the fail-closed rule. Spot-checked on two clusters at generation time — the consent-gate row is genuine (`CLAUDE.md` says proceed without asking; an `agent_policy` row says approval is mandatory), the fail-closed row is an artifact of exactly that confusion. Each row below needs a human read of its private sources before it is ruled on; use the `--private-diagnostics` locator map rather than looking for bodies in this public file. The value of the list is that it is 15 rows rather than 544.
+**A flagged divergence is a candidate, not a verdict.** The test reads prose, so it cannot tell a rule being STATED from a rule being DESCRIBED: a sentence explaining that a hook is deliberately fail-open reads as an advisory statement of the fail-closed rule. Spot-checked on two clusters at generation time — the consent-gate row is genuine (`CLAUDE.md` says proceed without asking; an `agent_policy` row says approval is mandatory), the fail-closed row is an artifact of exactly that confusion. Each row below needs a human read of its private sources before it is ruled on; use the `--private-diagnostics` locator map rather than looking for bodies in this public file. The value of the list is that it is 15 rows rather than 543.
 
 | Rule | Statements | Shapes present | Stores |
 |---|---|---|---|
@@ -163,12 +163,12 @@ One row per rule; every location it is stated. `agree` means every statement bin
 | `R-71cf59` | Commit and PR titles follow the live title convention | 6 | 5 | 3 | agree | agent_policy |
 | `R-bdb72b` | Never mark work done citing an unverifiable artifact | 6 | 5 | 4 | agree | agent_policy |
 | `R-fa2cbe` | Never assert what the operator feels, thinks, or said without evidence | 6 | 6 | 2 | DIVERGE | task_policy |
-| `R-f398b5` | Act on your recommendation; ask only at a real fork | 6 | 5 | 3 | agree | task_policy |
 | `R-86601c` | Recurring obligations roll their date; never complete | 6 | 5 | 6 | agree | task_policy |
 | `R-0cc9d7` | Give status updates unprompted, per workstream | 6 | 5 | 4 | DIVERGE | task_policy |
 | `R-580da5` | Tests follow this repo's naming and placement convention | 6 | 6 | 3 | agree | agent_policy |
 | `R-258f23` | A test that cannot fail on its subject is decoration | 6 | 4 | 6 | agree | agent_policy |
 | `R-57ff60` | Do not merge while a live blocking review stands | 5 | 5 | 5 | agree | docs/foundation/ |
+| `R-f398b5` | Act on your recommendation; ask only at a real fork | 5 | 4 | 3 | agree | task_policy |
 | `R-713e5d` | Store the full body, not a path or a summary standing in for it | 5 | 5 | 2 | DIVERGE | agent_policy |
 | `R-8d5e55` | Verify against the live system of record before asserting | 5 | 4 | 4 | agree | agent_policy |
 | `R-eecfc1` | End every turn with the decisions that need the operator | 4 | 3 | 4 | agree | task_policy |
@@ -858,19 +858,6 @@ Target home: **task_policy** · 6 statements, 6 distinct · **DIVERGE**
 | Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L13 |
 | Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L29 |
 
-#### `R-f398b5` — Act on your recommendation; ask only at a real fork
-
-Target home: **task_policy** · 6 statements, 5 distinct · agree
-
-| Store | Public location shape | At |
-|---|---|---|
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L32 |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 |
-| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L11 |
-| Codex | `~/.codex/AGENTS.md` | L61 |
-| ateles/CLAUDE.md | `CLAUDE.md` | L76 |
-
 #### `R-86601c` — Recurring obligations roll their date; never complete
 
 Target home: **task_policy** · 6 statements, 5 distinct · agree
@@ -934,6 +921,18 @@ Target home: **docs/foundation/** · 5 statements, 5 distinct · agree
 | Skills (ateles repo) | `.claude/skills/<skill>/SKILL.md` | L32 |
 | ateles/CLAUDE.md | `CLAUDE.md` | L109 |
 | standing_rule entities | `<entity>` | instruction |
+
+#### `R-f398b5` — Act on your recommendation; ask only at a real fork
+
+Target home: **task_policy** · 5 statements, 4 distinct · agree
+
+| Store | Public location shape | At |
+|---|---|---|
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L32 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L3 |
+| Claude Code project memory | `~/.claude/projects/<project>/memory/<file>` | L15 |
+| Codex | `~/.codex/AGENTS.md` | L61 |
+| ateles/CLAUDE.md | `CLAUDE.md` | L76 |
 
 #### `R-713e5d` — Store the full body, not a path or a summary standing in for it
 
@@ -1102,7 +1101,7 @@ Target home: **agent_policy** · 1 statements, 1 distinct · agree
 
 Every rule kind maps to a home in the authority table.
 
-3972 statements match no known rule kind. They are **not** classified into a neighbouring cluster: an over-eager merge would hide a divergence, which is the one output this inventory exists to produce. They are procedure, context, or rules whose kind has no signature yet — adding a signature to `KIND_SIGNATURES` is how the coverage grows.
+3969 statements match no known rule kind. They are **not** classified into a neighbouring cluster: an over-eager merge would hide a divergence, which is the one output this inventory exists to produce. They are procedure, context, or rules whose kind has no signature yet — adding a signature to `KIND_SIGNATURES` is how the coverage grows.
 
 ## Prior art: where this disagrees with the hand-count it replaces
 
@@ -1114,14 +1113,14 @@ That prose inventory is the input to this one, not a thing it discards: each of 
 |---|---|---|
 | OpenClaw holds 1 rule | **0** | The `1` is a directory, not a file. Beneath it: session state and a vendored Codex home whose shipped skills are a dependency, not operator rules. Sweeping it yields 21,411 statements from files the operator never wrote. |
 | Cursor holds 31 files (already corrected once from 5) | **31 files** | The current total is the measured store row above; live/backup/symlink composition remains internal diagnostic metadata rather than public path detail. |
-| Project memory: 329 files across 15 dirs | **344 files** | The current file total is derived from the measured store; private project-directory names are not emitted. |
+| Project memory: 329 files across 15 dirs | **342 files** | The current file total is derived from the measured store; private project-directory names are not emitted. |
 | 88 of 97 ateles skills contain rule language | **66 of 96** | Different instrument: the earlier count matched `do not` case-insensitively across the whole file. |
 | Five lenses cite five different foundation files, one consumer each | **confirmed as the store's reachability verdict** | Not re-derived; cited. See the foundation-repo reconciliation (2026-09-19). |
 | Six rule stores | **17 inventoried** | The store list was a floor. The additions: `task_policy` entities (a live store, not only a target), hooks (rules stated as code), skills split by root, and — the largest — the per-checkout copies below. |
 
 ### The store nobody had counted: one instruction file, many checkouts
 
-`CLAUDE.md` is re-injected from disk at every compaction, which is what makes it the home for standing instructions. The disk it is read from is the one in the session's own checkout. Measured on this machine: **145 copies of `ateles/CLAUDE.md` in 23 distinct versions**, and **167 copies of `neotoma/AGENTS.md` in 4 distinct versions**.
+`CLAUDE.md` is re-injected from disk at every compaction, which is what makes it the home for standing instructions. The disk it is read from is the one in the session's own checkout. Measured on this machine: **137 copies of `ateles/CLAUDE.md` in 22 distinct versions**, and **166 copies of `neotoma/AGENTS.md` in 4 distinct versions**.
 
 So a rule's reach is not whether it is in `CLAUDE.md` but which copy of `CLAUDE.md` the reader opened, and the deployment checkouts the daemons run from (`~/ateles-rc-src`, `~/neotoma-rc-src`) are two more copies again. This is `docs/foundation/principles.md#1` — a rule that lives in only one checkout does not bind — measured rather than asserted, and it is the concrete mechanism behind ateles#973, where a session ran for hours from a worktree whose `CLAUDE.md` lacked the never-stash rule and both compaction hooks.
 
