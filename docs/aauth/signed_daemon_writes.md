@@ -59,6 +59,15 @@ a hand edit there can be overwritten; change the snapshot instead.
      evidence to an open proposal's `drift_signal_refs`);
    - **never** `agent_policy`: the generalizer only proposes rules, and a
      signed write to `agent_policy` must stay refused.
+   - **When widening this (or any) grant, pin `match_thumbprint` to the
+     agent's own key**, not `sub` alone. `sub` is a label the agent's own
+     token claims and Neotoma does not verify it against any key; a grant
+     matched only on `sub`/issuer would admit a signature from a different
+     key that happened to carry the same label. `match_thumbprint` is the
+     RFC 7638 thumbprint of the agent's public key — the same value the
+     approval-rule signer check pins (see `docs/data_types.md`'s
+     `strategy_revision_proposal` section, and Falco's PR #1274 round-3
+     finding).
 
    Probe before switching: a signed dry-run store (`commit: false`, nothing
    persisted) through the client for each type. An admitted type answers
@@ -82,19 +91,26 @@ a hand edit there can be overwritten; change the snapshot instead.
 
 In code, `NeotomaWriter.confirm_attribution(result)` reads each written
 observation back and passes only when `provenance.agent_sub` is the expected
-sub at a verified-signature tier (`software`, `operator_attested`,
-`hardware`). By hand, for the entity the daemon just wrote:
+sub AND `provenance.agent_thumbprint` equals this writer's own key thumbprint
+(`NeotomaWriter.thumbprint`), at a verified-signature tier (`software`,
+`operator_attested`, `hardware`). The thumbprint check is required, not
+optional: `agent_sub` is a label the writer's own token claims, and Neotoma
+does not verify it against any key, so a different key whose token happened
+to carry the same `sub` would pass a sub-only check. The thumbprint is what
+the signature actually proves. By hand, for the entity the daemon just wrote:
 
 ```sh
 # substitute the entity id the daemon just wrote
 curl -s -H "Authorization: Bearer $NEOTOMA_BEARER_TOKEN" \
   -H 'content-type: application/json' "$NEOTOMA_BASE_URL/observations/query" \
   -d '{"entity_id":"<ent_id>","limit":5}' | \
-  jq '.observations | sort_by(.observed_at) | last | .provenance | {agent_sub, attribution_tier}'
+  jq '.observations | sort_by(.observed_at) | last | .provenance | {agent_sub, attribution_tier, agent_thumbprint}'
 ```
 
-Expect `{"agent_sub": "anthus@ateles-swarm", "attribution_tier": "software"}`.
-A `null` sub or an unsigned tier means the write went out on the bearer.
+Expect `{"agent_sub": "anthus@ateles-swarm", "attribution_tier": "software",
+"agent_thumbprint": "<Anthus's own key thumbprint>"}`. A `null` sub, an
+unsigned tier, or a thumbprint that does not match Anthus's key file means
+the write did not verifiably come from Anthus's own key.
 
 ## Rolling back
 

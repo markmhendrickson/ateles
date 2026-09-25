@@ -13,6 +13,7 @@ import base64
 import json
 import re
 
+import aauth_httpsig as ahs
 import generalizer as gz
 import httpx
 import jwt as pyjwt
@@ -201,12 +202,21 @@ class _FakeNeotoma:
 
     @staticmethod
     def _provenance(request: httpx.Request) -> dict:
-        """What Neotoma records: the signed sub at `software`, or no sub for a bearer write."""
+        """What Neotoma records: the signed sub + key thumbprint at `software`, or neither
+        for a bearer write. The real server derives agent_thumbprint from the verified
+        cnf.jwk in the agent token (RFC 7638), never from the unverified sub claim — this
+        fake must do the same so a test that plants a genuine signature is indistinguishable
+        from the real server's provenance (PR #1274 round-3 finding)."""
         m = re.fullmatch(r'aasig=jwt;jwt="([^"]+)"', request.headers.get("signature-key", ""))
         if not m:
             return {"agent_sub": None, "attribution_tier": "anonymous"}
         claims = pyjwt.decode(m.group(1), options={"verify_signature": False})
-        return {"agent_sub": claims["sub"], "attribution_tier": "software"}
+        thumbprint = ahs.jwk_thumbprint(claims["cnf"]["jwk"])
+        return {
+            "agent_sub": claims["sub"],
+            "attribution_tier": "software",
+            "agent_thumbprint": thumbprint,
+        }
 
     def observe(self, eid: str, fields: dict, provenance: dict) -> None:
         obs = self.observations.setdefault(eid, [])
@@ -409,25 +419,78 @@ def test_a_bearer_correction_of_proposed_change_makes_a_proposal_untrusted(
     assert neotoma.entities[first]["drift_signal_refs"] == ["ref0", "ref1", "ref2"]
 
 
+EXPECTED_TP = "anthus-own-key-thumbprint"
+
+
 def test_a_signed_evidence_correction_does_not_vouch_for_the_proposal():
     """Some signed observation on the entity is not enough: the defining fields must be signed."""
-    signed = {"agent_sub": gz.PROPOSER_SUB, "attribution_tier": "software"}
+    signed = {
+        "agent_sub": gz.PROPOSER_SUB,
+        "attribution_tier": "software",
+        "agent_thumbprint": EXPECTED_TP,
+    }
     observations = [
         {"id": "o2", "fields": {"drift_signal_refs": ["r"]}, "provenance": signed},
         {"id": "o1", "fields": {"proposed_change": "{}", "target_entity_id": "x"},
          "provenance": BEARER_PROVENANCE},
     ]
-    assert not gz.defining_fields_signed_by(observations, gz.PROPOSER_SUB)
+    assert not gz.defining_fields_signed_by(observations, gz.PROPOSER_SUB, EXPECTED_TP)
     observations[1]["provenance"] = signed
-    assert gz.defining_fields_signed_by(observations, gz.PROPOSER_SUB)
+    assert gz.defining_fields_signed_by(observations, gz.PROPOSER_SUB, EXPECTED_TP)
     # Another swarm identity is not the proposer.
-    observations[1]["provenance"] = {"agent_sub": "corvus@ateles-swarm", "attribution_tier": "software"}
-    assert not gz.defining_fields_signed_by(observations, gz.PROPOSER_SUB)
+    observations[1]["provenance"] = {
+        "agent_sub": "corvus@ateles-swarm", "attribution_tier": "software", "agent_thumbprint": EXPECTED_TP,
+    }
+    assert not gz.defining_fields_signed_by(observations, gz.PROPOSER_SUB, EXPECTED_TP)
     # A provenance stored as JSON text is read the same way.
     observations[1]["provenance"] = json.dumps(signed)
-    assert gz.defining_fields_signed_by(observations, gz.PROPOSER_SUB)
+    assert gz.defining_fields_signed_by(observations, gz.PROPOSER_SUB, EXPECTED_TP)
     # No observation that set proposed_change at all: refused.
-    assert not gz.defining_fields_signed_by(observations[:1], gz.PROPOSER_SUB)
+    assert not gz.defining_fields_signed_by(observations[:1], gz.PROPOSER_SUB, EXPECTED_TP)
+
+
+def test_sub_matches_but_thumbprint_does_not_is_not_accepted():
+    """PR #1274 round-3 (Falco): agent_sub is an unverified label; a DIFFERENT key whose
+    token happens to carry the proposer's sub must not vouch for the proposal's fields."""
+    right_sub_wrong_key = {
+        "agent_sub": gz.PROPOSER_SUB,
+        "attribution_tier": "software",
+        "agent_thumbprint": "a-different-agents-key-thumbprint",
+    }
+    observations = [
+        {"id": "o1", "fields": {"proposed_change": "{}", "target_entity_id": "x"},
+         "provenance": right_sub_wrong_key},
+    ]
+    assert not gz.defining_fields_signed_by(observations, gz.PROPOSER_SUB, EXPECTED_TP)
+
+
+def test_thumbprint_missing_is_not_accepted():
+    signed_no_thumbprint = {"agent_sub": gz.PROPOSER_SUB, "attribution_tier": "software"}
+    observations = [
+        {"id": "o1", "fields": {"proposed_change": "{}", "target_entity_id": "x"},
+         "provenance": signed_no_thumbprint},
+    ]
+    assert not gz.defining_fields_signed_by(observations, gz.PROPOSER_SUB, EXPECTED_TP)
+
+
+def test_sub_and_thumbprint_both_matching_is_accepted():
+    signed = {
+        "agent_sub": gz.PROPOSER_SUB,
+        "attribution_tier": "software",
+        "agent_thumbprint": EXPECTED_TP,
+    }
+    observations = [
+        {"id": "o1", "fields": {"proposed_change": "{}", "target_entity_id": "x"},
+         "provenance": signed},
+    ]
+    assert gz.defining_fields_signed_by(observations, gz.PROPOSER_SUB, EXPECTED_TP)
+
+
+def test_proposal_signed_by_proposer_returns_false_for_an_empty_entity_id():
+    """An empty entity_id must fail closed rather than sending entity_id: "" — Neotoma's
+    /observations/query applies the entity_id filter only when it is truthy, so an empty
+    id would widen the read to the caller's most recent observations generally."""
+    assert asyncio.run(gz.proposal_signed_by_proposer("", "tok")) is False
 
 
 def test_unreadable_signer_opens_nothing(neotoma, monkeypatch, tmp_path):

@@ -41,8 +41,14 @@ Two transports live here, sharing one key resolution (:func:`agent_identity`):
   file's ``iss`` (else the default), never an ambient ``NEOTOMA_AAUTH_*``.
 
   :meth:`NeotomaWriter.confirm_attribution` reads a written observation back
-  and checks it carries the expected ``agent_sub`` at a signed tier, because a
-  2xx says nothing about who the server recorded as the writer.
+  and checks it carries the expected ``agent_sub`` AND the expected
+  ``agent_thumbprint`` (this writer's own key, :attr:`NeotomaWriter.thumbprint`)
+  at a signed tier, because a 2xx says nothing about who the server recorded
+  as the writer, and ``agent_sub`` alone is a label the writer's own token
+  claims — unverified by Neotoma against any key (Falco, PR #1274 round 3).
+  The thumbprint is what the signature actually proves: it is the RFC 7638
+  thumbprint of the public key the signature verified against, the same value
+  an ``agent_grant``'s ``match_thumbprint`` pins.
 
 * :func:`signed_request` — the older per-request ``node signed_fetch.mjs``
   path. Its remaining callers (``gate_waive.IssueGateStore.sign_off`` and the
@@ -587,17 +593,33 @@ class AttributionCheck:
     observation_id: "str | None" = None
     agent_sub: "str | None" = None
     attribution_tier: "str | None" = None
+    agent_thumbprint: "str | None" = None
 
 
 def check_observation_attribution(
     observations: Iterable[Mapping[str, Any]],
     observation_id: str,
     expected_sub: str,
+    expected_thumbprint: "str | None" = None,
 ) -> AttributionCheck:
     """Find ``observation_id`` among ``observations`` and check who the server recorded.
 
     Passes only when the observation is present, its ``provenance.agent_sub``
-    equals ``expected_sub``, and its tier is one only a verified signature gets.
+    equals ``expected_sub``, its tier is one only a verified signature gets,
+    AND — when ``expected_thumbprint`` is given — its
+    ``provenance.agent_thumbprint`` equals ``expected_thumbprint``.
+
+    ``agent_sub`` is a label the caller's own token claims; Neotoma does not
+    verify it against any key (Falco, PR #1274 round 3). What a verified
+    signature actually proves is the key, which Neotoma records as
+    ``provenance.agent_thumbprint`` — the RFC 7638 thumbprint of the public
+    JWK the signature verified against, the same value an ``agent_grant``'s
+    ``match_thumbprint`` pins. Checking ``agent_sub`` alone lets any signer
+    whose token carries the same ``sub`` label pass as the expected agent.
+    Callers that can supply the expected signer's own thumbprint (every
+    caller in this codebase can — it is the writer's own key) MUST pass it;
+    the sub-only path (``expected_thumbprint=None``) exists only for callers
+    that predate a key being resolvable and must not gain new callers.
     """
     for obs in observations:
         if str(obs.get("id") or "") != observation_id:
@@ -607,17 +629,31 @@ def check_observation_attribution(
             prov = {}
         sub = prov.get("agent_sub")
         tier = prov.get("attribution_tier")
+        thumbprint = prov.get("agent_thumbprint")
         if sub != expected_sub:
             return AttributionCheck(
                 False, f"observation carries agent_sub {sub!r}, expected {expected_sub!r}",
-                observation_id, sub, tier,
+                observation_id, sub, tier, thumbprint,
             )
         if tier not in TRUSTED_ATTRIBUTION_TIERS:
             return AttributionCheck(
                 False, f"observation tier {tier!r} is not a verified-signature tier",
-                observation_id, sub, tier,
+                observation_id, sub, tier, thumbprint,
             )
-        return AttributionCheck(True, "signed as expected", observation_id, sub, tier)
+        if expected_thumbprint is not None:
+            if not thumbprint:
+                return AttributionCheck(
+                    False, "observation carries no agent_thumbprint",
+                    observation_id, sub, tier, thumbprint,
+                )
+            if thumbprint != expected_thumbprint:
+                return AttributionCheck(
+                    False,
+                    f"observation carries agent_thumbprint {thumbprint!r}, "
+                    f"expected {expected_thumbprint!r}",
+                    observation_id, sub, tier, thumbprint,
+                )
+        return AttributionCheck(True, "signed as expected", observation_id, sub, tier, thumbprint)
     return AttributionCheck(False, "observation not found on read-back", observation_id)
 
 
@@ -691,6 +727,21 @@ class NeotomaWriter:
             key, expected_sub=self.sub, issuer=_pinned_issuer(key)
         )
         return self._signer
+
+    @property
+    def thumbprint(self) -> str:
+        """RFC 7638 thumbprint of this writer's own key — what a verified
+
+        signature actually proves, and what :meth:`confirm_attribution` pins
+        alongside ``agent_sub`` (Falco, PR #1274 round 3: ``agent_sub`` is a
+        label the caller's token claims, unverified; the thumbprint is the
+        key the signature verified against, the same value an
+        ``agent_grant``'s ``match_thumbprint`` pins). Raises
+        :class:`AAuthSigningError` if this writer has no usable key — callers
+        that need attribution confirmed should let that propagate rather than
+        confirm against a sub alone.
+        """
+        return self._load_signer().thumbprint
 
     def _bearer_attempt(self, path: str, body: dict, governance: bool) -> _Attempt:
         if governance:  # defence in depth: nothing builds this, and nothing may
@@ -854,11 +905,21 @@ class NeotomaWriter:
     async def aconfirm_attribution(
         self, result: WriteResult, expected_sub: "str | None" = None
     ) -> AttributionCheck:
-        """Read back every observation ``result`` names; pass only if all carry ``expected_sub``."""
+        """Read back every observation ``result`` names; pass only if all carry ``expected_sub``
+
+        AND this writer's own key thumbprint (:attr:`thumbprint`) — the
+        property the signature actually proves. ``expected_sub`` defaults to
+        this writer's own sub; when it is overridden to a different identity
+        this method still checks against THIS writer's key, because a
+        ``NeotomaWriter`` only ever holds one key. A caller confirming a
+        different signer's attribution must resolve that signer's own
+        thumbprint and call :func:`check_observation_attribution` directly.
+        """
         pre = _precheck(result)
         if pre is not None:
             return pre
         want = expected_sub or self.sub
+        want_thumbprint = self.thumbprint
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             for entity_id, observation_id in result.observations():
                 check = AttributionCheck(False, "observation not found on read-back", observation_id)
@@ -866,7 +927,7 @@ class NeotomaWriter:
                     attempt = self._readback_attempt(entity_id, page)
                     resp = await client.post(attempt.url, headers=attempt.headers, content=attempt.content)
                     obs = _observations_from(resp.status_code, resp.text)
-                    check = check_observation_attribution(obs, observation_id, want)
+                    check = check_observation_attribution(obs, observation_id, want, want_thumbprint)
                     if check.ok or check.reason != "observation not found on read-back" or len(obs) < self.READBACK_PAGE:
                         break
                 if not check.ok:
@@ -915,10 +976,12 @@ class NeotomaWriter:
     def confirm_attribution(
         self, result: WriteResult, expected_sub: "str | None" = None
     ) -> AttributionCheck:
+        """Sync twin of :meth:`aconfirm_attribution` — see its docstring for the thumbprint pin."""
         pre = _precheck(result)
         if pre is not None:
             return pre
         want = expected_sub or self.sub
+        want_thumbprint = self.thumbprint
         with httpx.Client(timeout=self.timeout) as client:
             for entity_id, observation_id in result.observations():
                 check = AttributionCheck(False, "observation not found on read-back", observation_id)
@@ -926,7 +989,7 @@ class NeotomaWriter:
                     attempt = self._readback_attempt(entity_id, page)
                     resp = client.post(attempt.url, headers=attempt.headers, content=attempt.content)
                     obs = _observations_from(resp.status_code, resp.text)
-                    check = check_observation_attribution(obs, observation_id, want)
+                    check = check_observation_attribution(obs, observation_id, want, want_thumbprint)
                     if check.ok or check.reason != "observation not found on read-back" or len(obs) < self.READBACK_PAGE:
                         break
                 if not check.ok:

@@ -9,21 +9,28 @@ checkpoint, plus the operator's approval when the rule reaches sessions. That
 approval step is a follow-up; until it exists, proposals wait.
 
 The rule the approval step must follow: it checks the VERIFIED SIGNER on the
-stored record, never a field, and it checks it PER FIELD. Every observation
-that set one of the fields that define what the proposal would change
+stored record, never a field, and it checks it PER FIELD, and the signer is
+identified by ITS KEY, not by a label. Every observation that set one of the
+fields that define what the proposal would change
 (`PROPOSAL_DEFINING_FIELDS`: `proposed_change`, `target_entity_type`,
 `target_entity_id`) must carry `provenance.agent_sub` equal to the proposer's
-swarm identity at a verified-signature tier
-(`neotoma_signed.check_observation_attribution`); at least one such
-observation must have set `proposed_change`; and the approver must be a
-different signed identity. Some signed observation on the entity is not
-enough: a signed evidence correction onto a proposal whose `proposed_change`
-came in on the bearer does not make that change signed. `proposing_agent_sub`
-is self-reported; anyone holding the bearer can write it. The approver
-applies only `proposed_change` and approves its digest; for a suspension,
-`target_entity_id` must equal `proposed_change.entity_id`. The generalizer
-applies the same check before adding evidence to an open proposal
-(:func:`proposal_signed_by_proposer`).
+swarm identity AND `provenance.agent_thumbprint` equal to the RFC 7638
+thumbprint of the proposer's own key, at a verified-signature tier
+(`neotoma_signed.check_observation_attribution`, passed the proposer's
+`NeotomaWriter.thumbprint`); at least one such observation must have set
+`proposed_change`; and the approver must be a different signed identity.
+`agent_sub` alone is not enough: it is a label the writer's own token claims,
+which Neotoma does not verify against any key (Falco, PR #1274 round 3) — a
+signature by a different key carrying the same `agent_sub` label would pass
+an `agent_sub`-only check. The thumbprint is what the signature actually
+proves, and it is the same value an `agent_grant`'s `match_thumbprint` pins.
+Some signed observation on the entity is not enough: a signed evidence
+correction onto a proposal whose `proposed_change` came in on the bearer does
+not make that change signed. `proposing_agent_sub` is self-reported; anyone
+holding the bearer can write it. The approver applies only `proposed_change`
+and approves its digest; for a suspension, `target_entity_id` must equal
+`proposed_change.entity_id`. The generalizer applies the same check before
+adding evidence to an open proposal (:func:`proposal_signed_by_proposer`).
 
   • CONFIDENCE   — a cluster must reach the agent's `drift_signal_threshold`
                    (independent corroborations) before anything is proposed.
@@ -64,6 +71,7 @@ try:  # package import (production) and bare import (in-dir pytest) both work
     from .drift import DriftCluster, DriftSignal, cluster_signals, contradicts
     from .agent_loader import policy_binds_agent
     from .neotoma_signed import (
+        AAuthSigningError,
         NeotomaWriteError,
         NeotomaWriter,
         SigningMode,
@@ -74,6 +82,7 @@ except ImportError:  # pragma: no cover
     from drift import DriftCluster, DriftSignal, cluster_signals, contradicts
     from agent_loader import policy_binds_agent
     from neotoma_signed import (
+        AAuthSigningError,
         NeotomaWriteError,
         NeotomaWriter,
         SigningMode,
@@ -562,13 +571,22 @@ def _as_mapping(value: Any) -> dict:
     return {}
 
 
-def defining_fields_signed_by(observations: list[dict], expected_sub: str) -> bool:
-    """Whether every observation that set a defining field is signed as ``expected_sub``.
+def defining_fields_signed_by(
+    observations: list[dict], expected_sub: str, expected_thumbprint: str
+) -> bool:
+    """Whether every observation that set a defining field is signed by ``expected_thumbprint``.
 
     Passes only when at least one observation set ``proposed_change`` and every
     observation that set any of :data:`PROPOSAL_DEFINING_FIELDS` (the store
     that opened the proposal, and any later correction of those fields) carries
-    ``provenance.agent_sub == expected_sub`` at a verified-signature tier.
+    ``provenance.agent_sub == expected_sub`` AND
+    ``provenance.agent_thumbprint == expected_thumbprint`` at a
+    verified-signature tier. The thumbprint is required, not optional:
+    ``agent_sub`` alone is a label the writer's own token claims, and Neotoma
+    does not verify it against any key (Falco, PR #1274 round 3) — a
+    different key whose token happens to carry the same ``sub`` would pass an
+    ``agent_sub``-only check. The thumbprint is what the signature actually
+    proves.
     """
     defining = []
     for obs in observations:
@@ -580,7 +598,12 @@ def defining_fields_signed_by(observations: list[dict], expected_sub: str) -> bo
     for obs, _ in defining:
         view = {**obs, "provenance": _as_mapping(obs.get("provenance"))}
         obs_id = str(obs.get("id") or "")
-        if not obs_id or not check_observation_attribution([view], obs_id, expected_sub).ok:
+        if not obs_id:
+            return False
+        check = check_observation_attribution(
+            [view], obs_id, expected_sub, expected_thumbprint
+        )
+        if not check.ok:
             return False
     return True
 
@@ -590,7 +613,21 @@ async def proposal_signed_by_proposer(entity_id: str, bearer: str) -> bool | Non
 
     None when the observations cannot be read in full (a failed read, or more
     than the page cap): the caller cannot tell, so it opens nothing this tick.
+
+    ``entity_id`` empty (a proposal with no ``_entity_id``, which should be
+    unreachable — :func:`fetch_open_policy_proposals` always sets it from the
+    row) fails closed with ``False`` rather than sending ``entity_id: ""``:
+    Neotoma's ``/observations/query`` applies the ``entity_id`` filter only
+    when it is truthy, so an empty id would read the caller's most recent
+    observations generally instead of this entity's.
     """
+    if not entity_id:
+        return False
+    try:
+        expected_thumbprint = _writer(bearer).thumbprint
+    except AAuthSigningError:
+        log.warning("no usable AAuth key for the proposer; not proposing this tick")
+        return None
     observations: list[dict] = []
     for page in range(OBSERVATION_MAX_PAGES):
         data = await _post(
@@ -607,7 +644,7 @@ async def proposal_signed_by_proposer(entity_id: str, bearer: str) -> bool | Non
         obs = [o for o in (data.get("observations") or []) if isinstance(o, dict)]
         observations.extend(obs)
         if len(obs) < OBSERVATION_PAGE:
-            return defining_fields_signed_by(observations, PROPOSER_SUB)
+            return defining_fields_signed_by(observations, PROPOSER_SUB, expected_thumbprint)
     log.warning(f"observation read for proposal {entity_id} hit its page cap")
     return None
 

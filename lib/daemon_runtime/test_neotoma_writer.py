@@ -33,6 +33,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric import utils as asym_utils
 
+import aauth_httpsig as ahs
 import neotoma_signed as ns
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -512,18 +513,22 @@ def test_governance_set_covers_every_design_governance_type():
 # ── read-back ───────────────────────────────────────────────────────────────
 
 
-def _obs_response(sub, tier, obs_id="obs_1"):
+def _thumbprint_of(jwk: dict) -> str:
+    return ahs.jwk_thumbprint(ahs.public_part_of(jwk))
+
+
+def _obs_response(sub, tier, thumbprint=None, obs_id="obs_1"):
     def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/observations/query"):
+            prov = {"agent_sub": sub, "attribution_tier": tier}
+            if thumbprint is not None:
+                prov["agent_thumbprint"] = thumbprint
             return httpx.Response(
                 200,
                 json={
                     "observations": [
                         {"id": "obs_other", "provenance": {}},
-                        {
-                            "id": obs_id,
-                            "provenance": {"agent_sub": sub, "attribution_tier": tier},
-                        },
+                        {"id": obs_id, "provenance": prov},
                     ]
                 },
             )
@@ -532,9 +537,10 @@ def _obs_response(sub, tier, obs_id="obs_1"):
     return respond
 
 
-def test_confirm_attribution_passes_for_the_expected_signed_sub(tmp_path, http):
-    rec = http(_obs_response(ANTHUS, "software"))
-    w = _writer(tmp_path, mode=ns.SigningMode.ON)
+def test_confirm_attribution_passes_for_the_expected_signed_sub_and_thumbprint(tmp_path, http):
+    jwk = _write_jwk(tmp_path / "keys", "anthus")
+    rec = http(_obs_response(ANTHUS, "software", _thumbprint_of(jwk)))
+    w = ns.NeotomaWriter("anthus", mode=ns.SigningMode.ON, base_url=BASE, bearer="tok", keys_dir=tmp_path / "keys")
     result = w.post("store", _report_store_body())
     check = w.confirm_attribution(result)
     assert check.ok, check.reason
@@ -543,29 +549,63 @@ def test_confirm_attribution_passes_for_the_expected_signed_sub(tmp_path, http):
 
 
 @pytest.mark.parametrize(
-    "sub, tier",
-    [("apis@ateles-swarm", "software"), (ANTHUS, "unverified_client"), (None, None)],
+    "sub, tier, use_thumbprint",
+    [
+        ("apis@ateles-swarm", "software", True),
+        (ANTHUS, "unverified_client", True),
+        (None, None, True),
+    ],
     ids=["other-sub", "unverified-tier", "no-provenance"],
 )
-def test_confirm_attribution_fails_otherwise(tmp_path, http, sub, tier):
-    http(_obs_response(sub, tier))
-    w = _writer(tmp_path, mode=ns.SigningMode.ON)
+def test_confirm_attribution_fails_otherwise(tmp_path, http, sub, tier, use_thumbprint):
+    keys = tmp_path / "keys"
+    jwk = _write_jwk(keys, "anthus")
+    thumbprint = _thumbprint_of(jwk) if use_thumbprint else None
+    http(_obs_response(sub, tier, thumbprint))
+    w = ns.NeotomaWriter("anthus", mode=ns.SigningMode.ON, base_url=BASE, bearer="tok", keys_dir=keys)
     result = w.post("store", _report_store_body())
     assert w.confirm_attribution(result).ok is False
     assert asyncio.run(w.aconfirm_attribution(result)).ok is False
 
 
+def test_confirm_attribution_fails_when_sub_matches_but_thumbprint_does_not(tmp_path, http):
+    """Falco PR #1274 round-3 finding: agent_sub is an unverified label; a signature by a
+    DIFFERENT key whose token happens to carry the same sub must not pass."""
+    keys = tmp_path / "keys"
+    _write_jwk(keys, "anthus")
+    other_jwk = _write_jwk(tmp_path / "other_keys", "someone_else", sub=ANTHUS)
+    http(_obs_response(ANTHUS, "software", _thumbprint_of(other_jwk)))
+    w = ns.NeotomaWriter("anthus", mode=ns.SigningMode.ON, base_url=BASE, bearer="tok", keys_dir=keys)
+    result = w.post("store", _report_store_body())
+    check = w.confirm_attribution(result)
+    assert check.ok is False
+    assert "agent_thumbprint" in check.reason
+
+
+def test_confirm_attribution_fails_when_thumbprint_is_missing(tmp_path, http):
+    keys = tmp_path / "keys"
+    _write_jwk(keys, "anthus")
+    http(_obs_response(ANTHUS, "software", thumbprint=None))
+    w = ns.NeotomaWriter("anthus", mode=ns.SigningMode.ON, base_url=BASE, bearer="tok", keys_dir=keys)
+    result = w.post("store", _report_store_body())
+    check = w.confirm_attribution(result)
+    assert check.ok is False
+    assert "agent_thumbprint" in check.reason
+
+
 def test_confirm_attribution_fails_when_the_observation_is_missing(tmp_path, http):
-    http(_obs_response(ANTHUS, "software", obs_id="obs_elsewhere"))
-    w = _writer(tmp_path, mode=ns.SigningMode.ON)
+    jwk = _write_jwk(tmp_path / "keys", "anthus")
+    http(_obs_response(ANTHUS, "software", _thumbprint_of(jwk), obs_id="obs_elsewhere"))
+    w = ns.NeotomaWriter("anthus", mode=ns.SigningMode.ON, base_url=BASE, bearer="tok", keys_dir=tmp_path / "keys")
     result = w.post("store", _report_store_body())
     check = w.confirm_attribution(result)
     assert check.ok is False and "not found" in check.reason
 
 
 def test_confirm_attribution_fails_for_a_bearer_write(tmp_path, http):
-    http(_obs_response(ANTHUS, "software"))
-    w = _writer(tmp_path, mode=ns.SigningMode.OFF)
+    jwk = _write_jwk(tmp_path / "keys", "anthus")
+    http(_obs_response(ANTHUS, "software", _thumbprint_of(jwk)))
+    w = ns.NeotomaWriter("anthus", mode=ns.SigningMode.OFF, base_url=BASE, bearer="tok", keys_dir=tmp_path / "keys")
     result = w.post("store", _report_store_body())
     assert result.signed is False
     assert w.confirm_attribution(result).ok is False
