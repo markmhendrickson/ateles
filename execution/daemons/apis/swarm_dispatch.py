@@ -12480,7 +12480,16 @@ class SwarmDispatcher:
                 + ",".join(pair_strings)
             )
 
-        delivered = True
+        # Decide suppression BEFORE calling send(): send()'s own return value
+        # conflates "suppressed as a duplicate" with "attempted delivery and
+        # the transport failed" (Telegram/email/Apprise down still returns
+        # False for a BLOCKER that was NOT a duplicate). Gating the GitHub
+        # comment on that conflated value would silently drop the comment on
+        # every transport failure too — worse than the 23x-repost bug this
+        # fixes, since the operator would then get nothing on any channel and
+        # the key would still be marked notified. Checking the journal
+        # directly keeps the two failure modes distinct.
+        is_duplicate = bool(dedupe_key and self.notifier._is_duplicate(dedupe_key))
         try:
             if auto_resume:
                 message = (
@@ -12494,7 +12503,7 @@ class SwarmDispatcher:
                     f"{reason}. Operator attention is required."
                 )
                 priority = Priority.BLOCKER
-            delivered = self.notifier.send(
+            self.notifier.send(
                 message + completed_note + failed_note,
                 priority=priority,
                 handler=DAEMON_NAME,
@@ -12503,12 +12512,12 @@ class SwarmDispatcher:
         except Exception as exc:
             log.error(f"[{DAEMON_NAME}] review-incomplete notice failed: {exc}", exc_info=True)
 
-        # Both effects are gated by the SAME dedupe decision — a suppressed
-        # notifier.send() (delivered is False) must also suppress the GitHub
-        # comment post, or the two would split state (ateles#1250). The
-        # auto-resume branch never sets dedupe_key, so `delivered` stays True
-        # there and its own marker-based dedupe (below) is unaffected.
-        if dedupe_key and not delivered:
+        # Both effects are gated by the SAME dedupe decision, computed once
+        # above — a duplicate condition suppresses the GitHub comment too, so
+        # the two never split state (ateles#1250). The auto-resume branch
+        # never sets dedupe_key, so `is_duplicate` stays False there and its
+        # own marker-based dedupe (below) is unaffected.
+        if is_duplicate:
             return
 
         repo_token = _token_for_repo(t.repository)

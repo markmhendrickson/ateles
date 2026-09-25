@@ -88,10 +88,6 @@ class _StubNotifier:
         self.cleared = []
 
     def send(self, message, priority=None, handler=None, **kwargs):
-        # Always "delivers" — this stub does not model dedupe suppression, so
-        # it must return True (matching the real Notifier's non-suppressed
-        # case) rather than None/falsy, since ateles#1250 gates the GitHub
-        # comment post on this return value.
         self.sent.append(message)
         self.priorities.append(priority)
         self.sent_full.append((message, priority))
@@ -100,6 +96,13 @@ class _StubNotifier:
 
     def clear_dedupe(self, key):
         self.cleared.append(key)
+
+    def _is_duplicate(self, key):
+        # This stub never models dedupe state — every dedupe_key reads as
+        # never-before-seen, matching its existing "always delivers" stance.
+        # ateles#1250 checks this directly (not send()'s return value, which
+        # conflates dedupe suppression with transport delivery failure).
+        return False
 
 
 def _config(**overrides):
@@ -9641,6 +9644,41 @@ def test_panel_incomplete_dedupe_no_split_state_on_comment_failure(
     # comment attempt raised, so the SECOND call is still suppressed at the
     # notifier stage and never even attempts a (second) failing comment post.
     assert len(sent) == 1
+
+
+def test_panel_incomplete_transport_failure_does_not_suppress_the_comment(
+    monkeypatch, tmp_path
+):
+    """A NEW (never-before-seen) condition whose notifier transport fails
+    (Telegram/email/Apprise down) must still post the GitHub comment.
+
+    notifier.send()'s own return value conflates "suppressed as a duplicate"
+    with "attempted delivery and the transport failed" — both return False.
+    Gating the comment on that return value would silently drop the GitHub
+    comment on every transport hiccup too, even for a condition never
+    reported before, which is a worse regression than the 23x-repost bug
+    this PR fixes: the operator would get nothing on any channel, yet the
+    key would already be marked notified. The fix checks the dedupe journal
+    directly instead of trusting send()'s return value."""
+    comment_bodies: list[str] = []
+    monkeypatch.setattr(httpx, "AsyncClient", _capturing_github_client(comment_bodies))
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+    d, notifier, sent = _dedupe_dispatcher(tmp_path)
+    # Simulate every transport failing: _deliver() returns False even though
+    # this is the FIRST send for this dedupe_key (not a duplicate).
+    notifier._deliver = lambda m, **kw: False
+
+    trig = _trigger(number=1085, repository="owner/repo")
+    asyncio.run(
+        d._handle_panel_session_limit(
+            trig, None, "panel", "", "",
+            reason="incomplete review panel",
+            failed_lenses=(("pm", "timeout"),),
+            head="a" * 40,
+        )
+    )
+    assert len(comment_bodies) == 1
 
 
 def test_handle_pr_reports_successful_and_failed_lenses(monkeypatch):
