@@ -21,7 +21,7 @@ import copy
 import inspect
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -36,6 +36,7 @@ FIXTURE = json.loads(
 )
 TASK = FIXTURE["task_id"]
 CHECKPOINT = "ent_95d94353e7e8a5ec06c28334"
+FIXED_NOW = datetime(2026, 9, 27, tzinfo=timezone.utc)
 
 
 def _ts(value: str) -> datetime:
@@ -128,6 +129,10 @@ def fake(monkeypatch):
     neo = FakeNeotoma(FIXTURE)
     monkeypatch.setattr(srv, "_get", neo.get)
     monkeypatch.setattr(srv, "_post", neo.post)
+    # Pin the wall clock the cursor-age cap reads, so the fixture's dates do
+    # not age out of it as real time passes. raising=False: absent before the
+    # cap existed.
+    monkeypatch.setattr(srv, "_watch_now", lambda: FIXED_NOW, raising=False)
     return neo
 
 
@@ -479,8 +484,234 @@ def test_watch_and_timeline_never_write():
     """_correct and /store are the write paths; none of this code reaches them."""
     import watch
 
-    names = [n for n in dir(srv) if n.startswith(("_watch", "_get_task_timeline", "_scan_", "_observations_of", "_obs_", "_task_obs_", "_checkpoint_entries", "_runner_entry", "_advance_cursor"))]
+    names = [n for n in dir(srv) if n.startswith(("_watch", "_get_task_timeline", "_scan_", "_observations_of", "_obs_", "_task_obs_", "_checkpoint_entries", "_runner_entry", "_advance_cursor", "_not_a_task"))]
     source = "".join(inspect.getsource(getattr(srv, n)) for n in names if callable(getattr(srv, n)) and inspect.isfunction(getattr(srv, n)))
+    # Most of the timeline's reads live on this class, which the function
+    # filter above never inspects.
+    source += inspect.getsource(srv._TimelineBuilder)
     source += inspect.getsource(watch)
     for forbidden in ("_correct(", '"/correct"', '"/store"', "_post(\"/entities/", "delete"):
         assert forbidden not in source, forbidden
+
+
+# ── scope: tasks only, allowlisted fields only (Falco on #1281) ─────────────
+
+PAYMENT_PROFILE = "ent_0a1b2c3d4e5f60718293a4b5"
+_PAYMENT_FIELDS = {
+    "payee_name": "Example Payee Ltd",
+    "iban": "placeholder-account-ref-001",
+    "amount": 4321.5,
+    "currency": "EUR",
+}
+
+
+def _add_payment_profile(fake) -> None:
+    fake.add_observation(PAYMENT_PROFILE, "payment_profile", "2026-09-24T09:00:00.000Z", dict(_PAYMENT_FIELDS))
+
+
+def _leaks_payment_values(out: dict) -> bool:
+    blob = json.dumps(out, default=str)
+    return any(str(v) in blob for v in _PAYMENT_FIELDS.values())
+
+
+def test_timeline_refuses_a_payment_profile_id(fake):
+    _add_payment_profile(fake)
+    out = srv._get_task_timeline(PAYMENT_PROFILE)
+    assert "not a task" in out.get("error", ""), out
+    assert not _leaks_payment_values(out)
+
+
+def test_watch_baseline_refuses_a_payment_profile_id(fake):
+    _add_payment_profile(fake)
+    out = srv._watch_swarm(None, [PAYMENT_PROFILE], False, 0)
+    assert "not a task" in out.get("error", ""), out
+    assert out.get("refused") is True
+    assert not _leaks_payment_values(out)
+
+
+def test_watch_with_a_hand_built_cursor_refuses_a_payment_profile_id(fake, clock):
+    """Falco's probe: a crafted cursor skipped the baseline's check entirely."""
+    _add_payment_profile(fake)
+    cursor = srv._encode_cursor("2026-09-23T00:00:00.000Z", set())
+    out = srv._watch_swarm(cursor, [PAYMENT_PROFILE], False, 0)
+    assert "not a task" in out.get("error", ""), out
+    assert "changes" not in out
+    assert not _leaks_payment_values(out)
+    # Refused before any observation of it was read.
+    assert not any(body.get("entity_id") == PAYMENT_PROFILE for _, _, body in fake.calls)
+
+
+def test_an_entity_of_no_stated_type_is_refused(fake):
+    fake.add_observation(PAYMENT_PROFILE, "", "2026-09-24T09:00:00.000Z", dict(_PAYMENT_FIELDS))
+    fake.entities[PAYMENT_PROFILE].pop("entity_type")
+    assert "not a task" in srv._get_task_timeline(PAYMENT_PROFILE).get("error", "")
+    assert "not a task" in srv._watch_swarm(None, [PAYMENT_PROFILE], False, 0).get("error", "")
+
+
+_EXTRA_TASK_FIELDS = {
+    "description": "free text holding placeholder-secret-002",
+    "notes": "call the payee on their private line",
+    "amount": 987.65,
+    "beneficiary_name": "Example Beneficiary",
+    "payment_method": "wire",
+    "linked_email_thread_id": "thread-abc-123",
+}
+
+
+def _emitted_fields(entries: list[dict]) -> set[str]:
+    """Every task field name an entry list reports, by kind or by name."""
+    by_kind = {v: k for k, v in srv._TASK_FIELD_KINDS.items()} if hasattr(srv, "_TASK_FIELD_KINDS") else {}
+    names = set()
+    for e in entries:
+        if (e.get("source") or {}).get("type") != "task" or e.get("kind") == "created":
+            continue
+        names.add(e["field"] if e.get("kind") == "field" else by_kind.get(e.get("kind"), e.get("kind")))
+    return names
+
+
+def test_watch_emits_only_allowlisted_task_fields(fake, clock):
+    cursor = _baseline()["cursor"]
+    fake.add_observation(
+        TASK, "task", "2026-09-26T09:00:00.000Z",
+        {"status": "routed", "assigned_to": "corvus", "due_date": "2026-10-01", **_EXTRA_TASK_FIELDS},
+    )
+    out = srv._watch_swarm(cursor, [TASK], False, 0)
+    assert "error" not in out, out
+    assert _emitted_fields(out["changes"]) == {"status", "assigned_to", "due_date"}
+    blob = json.dumps(out, default=str)
+    for value in _EXTRA_TASK_FIELDS.values():
+        assert str(value) not in blob, value
+    for name in _EXTRA_TASK_FIELDS:
+        assert f'"{name}"' not in blob, name
+
+
+def test_timeline_emits_only_allowlisted_task_fields(fake):
+    fake.add_observation(
+        TASK, "task", "2026-09-22T19:40:00.000Z",
+        {"status": "failed", "owner": "apis", **_EXTRA_TASK_FIELDS},
+    )
+    out = srv._get_task_timeline(TASK)
+    assert "error" not in out, out
+    emitted = _emitted_fields(out["timeline"])
+    assert emitted <= srv._TASK_REPORTED_FIELDS, emitted - srv._TASK_REPORTED_FIELDS
+    assert "owner" in emitted
+    blob = json.dumps(out, default=str)
+    for value in _EXTRA_TASK_FIELDS.values():
+        assert str(value) not in blob, value
+    assert any("withheld" in g for g in out["gaps"])
+
+
+def test_the_allowlist_excludes_every_payment_contact_and_free_text_task_field():
+    for name in (
+        "description", "notes", "details", "summary", "context", "amount", "amount_eur",
+        "amount_eur_override", "currency", "payment_method", "payment_approved",
+        "payment_event_id", "beneficiary_name", "beneficiary_entity_id", "beneficiary_kind",
+        "contact_entity_id", "linked_email_message_id", "linked_email_draft_id",
+        "linked_email_thread_id", "location", "conversation_id",
+    ):
+        assert name not in srv._TASK_REPORTED_FIELDS, name
+
+
+# ── cursor age cap (Falco on #1281) ──────────────────────────────────────────
+
+
+def test_a_cursor_older_than_the_cap_is_refused_before_any_read(fake, clock):
+    stale = srv._encode_cursor(srv._iso(FIXED_NOW - timedelta(days=8)), set())
+    fake.calls.clear()
+    out = srv._watch_swarm(stale, [TASK], False, 0)
+    assert "fresh watch" in out.get("error", ""), out
+    assert out.get("cursor_expired") is True
+    assert fake.calls == []
+
+
+def test_an_epoch_cursor_is_refused(fake, clock):
+    epoch = srv._encode_cursor("1970-01-01T00:00:00.000Z", set())
+    out = srv._watch_swarm(epoch, [], True, 0)
+    assert "fresh watch" in out.get("error", ""), out
+
+
+def test_a_cursor_inside_the_cap_is_still_accepted(fake, clock):
+    recent = srv._encode_cursor(srv._iso(FIXED_NOW - timedelta(days=6)), set())
+    out = srv._watch_swarm(recent, [TASK], False, 0)
+    assert "error" not in out, out
+
+
+def test_cli_exits_two_on_an_expired_cursor_without_retrying(fake, clock, capsys):
+    import watch
+
+    stale = srv._encode_cursor(srv._iso(FIXED_NOW - timedelta(days=30)), set())
+    assert watch.main(["--task", TASK, "--no-env-file", "--cursor", stale]) == 2
+    assert clock["sleeps"] == []
+    assert "fresh watch" in capsys.readouterr().out
+
+
+# ── transport-error state is per call, not shared (Falco on #1281) ──────────
+
+
+def _patched_transport(monkeypatch):
+    import httpx
+
+    def request(method, url, **_kw):
+        req = httpx.Request(method, url)
+        if "/fail" in url:
+            return httpx.Response(503, request=req)
+        return httpx.Response(200, json={}, request=req)
+
+    monkeypatch.setattr(srv, "NEOTOMA_BEARER_TOKEN", "unit-test-placeholder")
+    monkeypatch.setattr(srv.httpx, "request", request)
+
+
+def test_a_worker_threads_success_does_not_clear_another_calls_error(monkeypatch):
+    """The interleaving Falco described, forced into order.
+
+    Call A (another tool, on the loop thread) fails and has not yet read its
+    error. A watch poll in a worker thread then succeeds, which clears the
+    error. With one shared global, A then reads None and reports "not found"
+    for an unreachable Neotoma.
+    """
+    import threading
+
+    _patched_transport(monkeypatch)
+    srv._clear_transport_error()
+    assert srv._get("/fail") is None
+    worker = threading.Thread(target=srv._get, args=("/ok",))
+    worker.start()
+    worker.join()
+    err = srv._describe_transport_error()
+    assert err is not None and "request_failed" in err, err
+    srv._clear_transport_error()
+
+
+def test_asyncio_to_thread_success_does_not_clear_the_callers_error(monkeypatch):
+    """Same interleaving through asyncio.to_thread, which is how the tools run."""
+    import asyncio
+
+    _patched_transport(monkeypatch)
+
+    async def run() -> str | None:
+        srv._get("/fail")
+        await asyncio.to_thread(srv._get, "/ok")
+        return srv._describe_transport_error()
+
+    err = asyncio.run(run())
+    assert err is not None and "request_failed" in err, err
+
+
+def test_a_worker_threads_failure_does_not_leak_into_another_call(monkeypatch):
+    import threading
+
+    _patched_transport(monkeypatch)
+    srv._clear_transport_error()
+    assert srv._get("/ok") == {}
+    worker = threading.Thread(target=srv._get, args=("/fail",))
+    worker.start()
+    worker.join()
+    assert srv._describe_transport_error() is None
+
+
+def test_within_one_call_the_error_behaves_as_before(monkeypatch):
+    _patched_transport(monkeypatch)
+    srv._get("/fail")
+    assert "request_failed" in (srv._describe_transport_error() or "")
+    srv._get("/ok")
+    assert srv._describe_transport_error() is None

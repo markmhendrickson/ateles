@@ -14,7 +14,8 @@ Read-only: it reads Neotoma and writes nothing.
 
 Exit codes:
   0  a matching change was seen, or the timeout passed (the output says which)
-  2  bad arguments
+  2  bad arguments, a watched id that is not a task, or a cursor too old to
+     resume (start again without --cursor)
   3  the record could not be read, three times running
 
 The last line printed is always `cursor: <cursor>`, so the session can pick up
@@ -162,6 +163,10 @@ def main(argv: list[str] | None = None) -> int:
             args.checkpoints,
             0 if not cursor else min(srv.WATCH_MAX_WAIT_SECONDS, max(0.0, remaining)),
         )
+        if result.get("refused"):
+            # Not a read failure: retrying the same arguments cannot succeed.
+            say(f"refused: {result['error']}")
+            return 2
         if "error" in result:
             errors += 1
             say(f"read failed ({errors}/{MAX_CONSECUTIVE_ERRORS}): {result['error']} {result.get('detail') or ''}".rstrip())

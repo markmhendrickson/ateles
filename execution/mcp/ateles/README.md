@@ -77,7 +77,8 @@ session when it exits, and the session then reads the timeline:
 `--until terminal` waits for done/declined/superseded instead of any change;
 `--checkpoints` also stops on any checkpoint raised or resolved; `--timeout`
 (default 3600 s) exits 0 saying nothing changed. Exit 3 means the record could not
-be read three times running. On a harness with no background path, poll instead:
+be read three times running; exit 2 means an id is not a task or the cursor is too
+old to resume. On a harness with no background path, poll instead:
 `watch_swarm(task_ids=["ent_…"])` once for a cursor, then
 `watch_swarm(cursor=<cursor>, task_ids=["ent_…"], wait_seconds=45)` repeatedly.
 Checkpoint changes come back ordered by when each checkpoint was raised.
@@ -106,6 +107,21 @@ What `get_task_timeline` joins today, and what it states it could not:
   what was scanned and `gaps` says what was not.
 - not in the record: the runner's output (a host-local file; a timed-out run
   keeps none).
+
+Scope of what both tools will read and report:
+
+- **Tasks only.** An id whose entity is not a `task`, or whose type the record
+  does not state, is refused. `watch_swarm` re-checks on every call, not only
+  the first, so a hand-built cursor cannot skip the check.
+- **Task fields from an allowlist.** Only lifecycle, ownership, scheduling and
+  routing fields (`status`, `blocked_reason`, `result`, `assigned_to`, `owner`,
+  `title`, `priority`, `due_date`, timestamps and the like; the set is
+  `_TASK_REPORTED_FIELDS` in `server.py`) are reported. Free text and payment-,
+  contact- and email-shaped fields are withheld, value and name.
+- **Cursors expire.** A cursor older than `ATELES_WATCH_MAX_CURSOR_AGE_HOURS`
+  (default 7 days) is refused with a message to start a fresh watch, so one
+  resumed poll cannot re-read an unbounded span. `watch.py` exits 2 on it
+  rather than retrying.
 
 ## Operator provisioning
 
@@ -142,6 +158,7 @@ What `get_task_timeline` joins today, and what it states it could not:
 | `ATELES_TIMELINE_WINDOW_HOURS` | `72` | Most hours of a task's history `get_task_timeline` scans for runner events |
 | `ATELES_TIMELINE_MAX_SCAN` | `2000` | Most `harness_event` observations one timeline or watch poll reads |
 | `ATELES_WATCH_POLL_SECONDS` | `5` | Interval between polls inside one `watch_swarm` wait |
+| `ATELES_WATCH_MAX_CURSOR_AGE_HOURS` | `168` (7 days) | Oldest cursor `watch_swarm` resumes from; older ones must start a fresh watch |
 | `ATELES_MCP_VENV` | `<repo>/.mcp-venv` | Override the interpreter environment |
 
 The wrapper reads `~/.config/neotoma/.env` itself (the path is overridable with

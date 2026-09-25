@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import hmac
 import inspect
 import json
@@ -283,23 +284,33 @@ def _headers() -> dict[str, str]:
 # [], and get_swarm_roster reported "swarm_roster not found" — a data-absence
 # message for a transport failure. The URL fix alone would leave the next wrong
 # endpoint, expired token, or outage just as silent.
-_last_transport_error: str | None = None
+#
+# Held in a ContextVar, not a module global. get_task_timeline and watch_swarm
+# run in worker threads (asyncio.to_thread copies the caller's context), so
+# their requests set and clear this concurrently with every other tool. With a
+# shared global, a watch poll's successful request could clear the error a
+# failed get_swarm_roster read had just recorded, and that tool would report
+# "not found" for what was an unreachable Neotoma — the failed-read-as-absence
+# case this exists to prevent. A ContextVar gives each asyncio task and each
+# worker thread its own value, so one call's success cannot erase another's
+# failure, and within one call it behaves exactly as the global did.
+_last_transport_error: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "ateles_last_transport_error", default=None
+)
 
 
 def _clear_transport_error() -> None:
-    global _last_transport_error
-    _last_transport_error = None
+    _last_transport_error.set(None)
 
 
 def _record_transport_error(kind: str, method: str, path: str, detail: str) -> None:
     """kind is the agent-actionable class: no_token | not_found | request_failed."""
-    global _last_transport_error
-    _last_transport_error = f"{kind}: {method} {path} — {detail}"
+    _last_transport_error.set(f"{kind}: {method} {path} — {detail}")
     log.warning("neotoma %s %s failed (%s): %s", method, path, kind, detail)
 
 
 def _describe_transport_error() -> str | None:
-    return _last_transport_error
+    return _last_transport_error.get()
 
 
 def _request(
@@ -2094,11 +2105,17 @@ WATCH_MAX_TASKS = 10
 # read must not fall behind the cursor.
 _CURSOR_OVERLAP_SECONDS = 30
 _CURSOR_MAX_SEEN = 300
+#: Oldest cursor a poll will resume from. A cursor far in the past makes the
+#: first poll re-read up to the scan caps and issue one GET per checkpoint it
+#: meets — hundreds of reads in one call against a hosted instance that has
+#: fallen over under bulk reads before. A watch that old is a new watch.
+WATCH_MAX_CURSOR_AGE_HOURS = float(os.environ.get("ATELES_WATCH_MAX_CURSOR_AGE_HOURS", str(24 * 7)))
 _CURSOR_PREFIX = "w1."
 
 # Injectable so tests can drive the long-poll without real waiting.
 _watch_sleep = time.sleep
 _watch_clock = time.monotonic
+_watch_now = lambda: datetime.now(timezone.utc)  # noqa: E731 — wall clock, for cursor age
 
 _TASK_ID_RE = re.compile(r"^ent_[A-Za-z0-9]{8,64}$")
 # Apis writes task status as `taskstatus-<handler>-<task>-<status>-<trigger>`
@@ -2112,6 +2129,57 @@ _TASK_FIELD_KINDS = {
     "assigned_to": "assignment",
 }
 _CREATE_MARKER_FIELDS = ("title", "description")
+
+#: The task fields these tools report. An allowlist, not a denylist: a task
+#: observation can carry any field an agent or operator wrote, and the task
+#: schema itself declares payment-, contact- and email-shaped ones (amount,
+#: currency, payment_method, beneficiary_name, contact_entity_id,
+#: linked_email_*), plus free text (description, notes, details, summary,
+#: context) that can hold anything. Only lifecycle, ownership, scheduling and
+#: routing fields are reported; every other field is withheld, value AND name.
+_TASK_REPORTED_FIELDS = frozenset(
+    {
+        # lifecycle
+        "status",
+        "blocked_reason",
+        "result",
+        "phase",
+        "attempt_count",
+        "action_type",
+        "confidence",
+        # ownership
+        "assigned_to",
+        "owner",
+        "executor",
+        # what it is
+        "title",
+        "priority",
+        "urgency",
+        "domain",
+        "area",
+        "component",
+        "parent_task_id",
+        # scheduling and timestamps
+        "due_date",
+        "start_date",
+        "created_at",
+        "updated_at",
+        "updated_date",
+        "completed_at",
+        "completed_date",
+        # what it touches in the repos
+        "repository",
+        "repository_name",
+        "repo",
+        "issue_number",
+        "pr_number",
+        "run_id",
+    }
+)
+_WITHHELD_FIELDS_GAP = (
+    "only task lifecycle, ownership, scheduling and routing fields are reported; "
+    "changes to any other task field (free text, payment, contact or email fields) are withheld"
+)
 
 
 def _lifecycle():
@@ -2355,6 +2423,8 @@ def _task_obs_entries(
             entries.append({**base, "kind": "created", "value": fields.get("status")})
             continue
         for name, value in fields.items():
+            if name not in _TASK_REPORTED_FIELDS:
+                continue
             kind = _TASK_FIELD_KINDS.get(name, "field")
             entry = {**base, "kind": kind, "value": _clip(value)}
             if kind == "field":
@@ -2838,6 +2908,7 @@ class _TimelineBuilder:
                 "runner events live on shared per-agent harness_event entities and are found only "
                 "inside the scanned window; a start and its end share no id and are paired by agent and time",
                 "the runner's own output is a host-local file and is not in the record; a timed-out run keeps none",
+                _WITHHELD_FIELDS_GAP,
             ]
         )
         return {
@@ -2867,6 +2938,19 @@ class _TimelineBuilder:
         }
 
 
+def _not_a_task(entity_id: str, entity: dict) -> str | None:
+    """Refusal text when *entity* is not a task, else None.
+
+    Both tools read only tasks. Fails closed: an entity whose type the record
+    does not state is refused too, since it cannot be shown to be a task —
+    without this, either tool is a read-any-entity primitive.
+    """
+    etype = _entity_type_of(entity)
+    if etype == "task":
+        return None
+    return f"entity {entity_id} is {('a ' + etype) if etype else 'of no stated type'}, not a task"
+
+
 def _get_task_timeline(task_entity_id: str, window_hours: float | None = None) -> dict:
     task_id = str(task_entity_id or "").strip()
     if not _TASK_ID_RE.match(task_id):
@@ -2878,8 +2962,9 @@ def _get_task_timeline(task_entity_id: str, window_hours: float | None = None) -
             "error": f"task {task_id} not found or Neotoma unreachable",
             "transport_error": _describe_transport_error(),
         }
-    if _entity_type_of(task) not in ("task", ""):
-        return {"error": f"entity {task_id} is a {_entity_type_of(task)}, not a task"}
+    refusal = _not_a_task(task_id, task)
+    if refusal:
+        return {"error": refusal}
 
     task_obs, err, truncated = _observations_of(task_id)
     if task_obs is None:
@@ -2976,6 +3061,8 @@ def _watch_poll(
     gaps: list[str] = []
     watched = set(task_ids)
 
+    if task_ids:
+        gaps.append(_WITHHELD_FIELDS_GAP)
     for tid in task_ids:
         obs, err, truncated = _observations_of(tid, since=since, max_rows=500)
         if obs is None:
@@ -3085,6 +3172,9 @@ def _watch_baseline(task_ids: list[str], include_checkpoints: bool) -> dict:
         if ent is None:
             errors.append(_read_error(f"task {tid}"))
             continue
+        refusal = _not_a_task(tid, ent)
+        if refusal:
+            return {"error": refusal, "refused": True}
         snap = _snapshot_of(ent)
         tasks.append(
             {
@@ -3130,6 +3220,7 @@ def _watch_baseline(task_ids: list[str], include_checkpoints: bool) -> dict:
         "checkpoints": [],
         "terminal_subjects": sorted(t["id"] for t in tasks if t["terminal"]),
         "cursor": cursor,
+        "gaps": [_WITHHELD_FIELDS_GAP] if tasks else [],
     }
     if include_checkpoints:
         total_page = _retrieve_page(
@@ -3173,6 +3264,35 @@ def _watch_swarm(
     if decoded is None:
         return {"error": "cursor is not one this server issued; call without a cursor to start"}
     since, seen = decoded
+    since_ts = _parse_ts(since)
+    max_age = timedelta(hours=WATCH_MAX_CURSOR_AGE_HOURS)
+    if since_ts is None or _watch_now() - since_ts > max_age:
+        return {
+            "error": (
+                f"cursor is from {since}, older than the {WATCH_MAX_CURSOR_AGE_HOURS:g} h a watch "
+                "may resume from; call without a cursor to start a fresh watch"
+            ),
+            "cursor_expired": True,
+            "refused": True,
+        }
+
+    # Re-check on every resumed call, not only at the baseline: a cursor call
+    # names its task ids afresh, and any of them may not be a task.
+    type_errors: list[str] = []
+    for tid in ids:
+        ent = _get(f"/entities/{tid}")
+        if ent is None:
+            type_errors.append(_read_error(f"task {tid}"))
+            continue
+        refusal = _not_a_task(tid, ent)
+        if refusal:
+            return {"error": refusal, "refused": True}
+    if type_errors:
+        return {
+            "error": "could not read the record for this watch",
+            "detail": type_errors,
+            "cursor": cursor,
+        }
 
     started = _watch_clock()
     deadline = started + wait
@@ -3429,7 +3549,9 @@ TOOLS = [
             "`include_checkpoints` is true), ordered by when each checkpoint was raised. "
             "Always returns a new cursor; an empty `changes` with a cursor means nothing "
             "changed, and an `error` keeps your cursor so a retry loses nothing. Stateless: "
-            "the cursor carries the position."
+            "the cursor carries the position. Task ids only; a cursor older than "
+            f"{WATCH_MAX_CURSOR_AGE_HOURS:g} h is refused (`cursor_expired`) and you start "
+            "again without one."
         ),
         inputSchema={
             "type": "object",
