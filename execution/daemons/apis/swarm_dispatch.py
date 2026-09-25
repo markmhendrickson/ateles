@@ -3181,8 +3181,26 @@ class SwarmDispatcher:
         check. That is deliberate: "operator overrides still work regardless
         of label" per the bootstrap-mode design.
 
+        TWO-LAYER design (ateles#1269 review round — Pavo/Waxwing/Loxia all
+        flagged the same defect in round 1): a `labeled` GitHub action is
+        filtered at the TRIGGER layer, in
+        `github_gateway._labeled_event_admitted`, before a SwarmTrigger for it
+        is even built — that layer drops every `labeled` delivery unless the
+        gate is set AND the label just added matches. This method never sees
+        a `labeled`-sourced trigger when the gate is unset, because one is
+        never constructed. This method's OWN job is narrower: given a trigger
+        that already exists (`opened`/`reopened`/`synchronize`, or a `labeled`
+        one that already passed the trigger-layer filter), decide whether the
+        gate lets that specific issue/PR through based on its labels —
+        including the PR-inherits-from-parent-issue case the trigger layer
+        cannot resolve (it has no gate-config-aware parent lookup).
+
         `config.require_label` unset (empty string, the default) always
-        returns True — today's behaviour exactly, no extra GitHub calls.
+        returns True — today's behaviour exactly, no extra GitHub calls. This
+        is safe BECAUSE the trigger layer already guarantees no `labeled`
+        event reaches here when unset; only `opened`/`reopened`/`synchronize`
+        (the pre-existing, CLAUDE.md-documented triggers) can arrive with the
+        gate off, and all of those passed through before this PR too.
 
         When set, an issue passes when the label is present on the issue
         itself (`trigger.labels`, already populated by
@@ -3221,14 +3239,27 @@ class SwarmDispatcher:
                     if label in parent_labels:
                         return True
                 else:
-                    log.info(
+                    # log.warning, not log.info (Falco security review on
+                    # ateles#1269): a gate silently dropping review/pipeline
+                    # work is a security-relevant suppression, same class as
+                    # the pre-existing non-operator-command rejection in
+                    # _handle_issue_comment, which already uses log.warning.
+                    # get_dispatch_health is pull-only (no push notification),
+                    # so an INFO-level skip in a busy daemon's log stream is
+                    # easy to miss — "the label gate ate my review" must not
+                    # be a silent failure mode.
+                    log.warning(
                         f"[{DAEMON_NAME}] label gate: could not resolve parent "
                         f"issue #{parent} labels for PR {ref} — failing closed "
                         f"(required label {label!r} not confirmed)"
                     )
                     return False
 
-        log.info(
+        # log.warning, not log.info — see the comment on the sibling skip
+        # branch above (Falco security review on ateles#1269): a suppressed
+        # automatic review/pipeline run must be loud enough to be seen in a
+        # log stream sized for a busy daemon, not merely present in it.
+        log.warning(
             f"[{DAEMON_NAME}] label gate active (required={label!r}) — "
             f"skipping {trigger.kind} for {ref}: label not present on "
             + ("the PR or its linked parent issue" if trigger.is_pr else "the issue")

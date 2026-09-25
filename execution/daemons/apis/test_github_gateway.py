@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -141,35 +142,227 @@ def test_pr_synchronize_parses():
     assert t.kind == "pr_synchronize"
 
 
-# ── `labeled` action (label gate: a label added after open must still be
-# able to start the pipeline for it) ────────────────────────────────────────
+# ── `labeled` action (trigger-layer gate) ───────────────────────────────────
+#
+# Round-1 review on ateles#1269 (Pavo/Waxwing/Loxia, same defect independently
+# found): naively admitting "labeled" into ISSUE_ACTIONS/PR_ACTIONS meant
+# parse_github_event built a real trigger for EVERY label add on EVERY
+# issue/PR, and handle_trigger's `is_pr` branch would run the full review
+# panel — even with ATELES_SWARM_REQUIRE_LABEL unset, which broke the
+# documented "unset = today's behaviour exactly" guarantee and CLAUDE.md's
+# PR_ACTIONS = {opened, reopened, synchronize} review-trigger contract.
+#
+# The fix moves the decision to THIS layer: _labeled_event_admitted must
+# return False (dropping the delivery before any SwarmTrigger is built)
+# unless the gate is SET and the label GitHub reports as just added
+# (payload["label"]["name"]) equals it exactly. These tests monkeypatch the
+# module-level `_REQUIRE_LABEL` (read once at import time, same as
+# RELEASE_PUSH_REF above) rather than the env var, since the module is
+# already imported by the time a test runs.
 
 
-def test_issue_labeled_parses_and_carries_the_new_label():
-    payload = _issue_payload(action="labeled", labels=[{"name": "swarm-canary"}])
-    t = parse_github_event("issues", payload, "d-label-1")
-    assert t is not None
-    assert t.kind == "issue_opened"
-    assert t.action == "labeled"
-    assert t.labels == ["swarm-canary"]
-    assert not t.is_pr
+def _labeled_payload(kind, added_label, *, existing_labels=None):
+    """A `labeled` payload carrying GitHub's own extra `label` field (the
+    label that was JUST added — distinct from `issue`/`pull_request`.labels,
+    which is the full current label set after the add)."""
+    labels = [{"name": lbl} for lbl in (existing_labels or [added_label])]
+    if kind == "issues":
+        payload = _issue_payload(action="labeled", labels=labels)
+    else:
+        payload = _pr_payload(action="labeled")
+        payload["pull_request"]["labels"] = labels
+    payload["label"] = {"name": added_label}
+    return payload
 
 
-def test_pr_labeled_parses():
-    t = parse_github_event("pull_request", _pr_payload(action="labeled"), "d-label-2")
-    assert t is not None
-    assert t.kind == "pr_labeled"
-    assert t.action == "labeled"
-    assert t.is_pr
+class TestLabeledEventTriggerLayerGate:
+    def test_gate_unset_issue_labeled_drops_before_building_a_trigger(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "")
+        with caplog.at_level(logging.DEBUG):
+            t = parse_github_event(
+                "issues", _labeled_payload("issues", "swarm-canary"), "d-1"
+            )
+        assert t is None
+        assert any("label gate is unset" in rec.message for rec in caplog.records)
 
+    def test_gate_unset_pr_labeled_drops_before_building_a_trigger(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "")
+        with caplog.at_level(logging.DEBUG):
+            t = parse_github_event(
+                "pull_request", _labeled_payload("pull_request", "needs-triage"), "d-2"
+            )
+        assert t is None
+        assert any("label gate is unset" in rec.message for rec in caplog.records)
 
-def test_labeled_is_in_both_action_sets():
-    # Guards the gateway-level wiring the label gate depends on: without
-    # "labeled" in these sets, parse_github_event drops the delivery before
-    # the dispatcher's label gate ever sees it, and a label added after open
-    # could never start the pipeline for it.
-    assert "labeled" in github_gateway.ISSUE_ACTIONS
-    assert "labeled" in github_gateway.PR_ACTIONS
+    def test_gate_set_issue_labeled_with_a_different_label_drops(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "swarm-canary")
+        with caplog.at_level(logging.DEBUG):
+            t = parse_github_event(
+                "issues", _labeled_payload("issues", "bug"), "d-3"
+            )
+        assert t is None
+        assert any("does not match" in rec.message for rec in caplog.records)
+
+    def test_gate_set_pr_labeled_with_a_different_label_drops(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "swarm-canary")
+        with caplog.at_level(logging.DEBUG):
+            t = parse_github_event(
+                "pull_request",
+                _labeled_payload("pull_request", "wontfix"),
+                "d-4",
+            )
+        assert t is None
+        assert any("does not match" in rec.message for rec in caplog.records)
+
+    def test_gate_set_issue_labeled_with_the_configured_label_starts_pipeline(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "swarm-canary")
+        t = parse_github_event(
+            "issues", _labeled_payload("issues", "swarm-canary"), "d-5"
+        )
+        assert t is not None
+        assert t.kind == "issue_opened"
+        assert t.action == "labeled"
+        assert t.labels == ["swarm-canary"]
+        assert not t.is_pr
+
+    def test_gate_set_pr_labeled_with_the_configured_label_starts_panel(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "swarm-canary")
+        t = parse_github_event(
+            "pull_request",
+            _labeled_payload("pull_request", "swarm-canary"),
+            "d-6",
+        )
+        assert t is not None
+        assert t.kind == "pr_labeled"
+        assert t.action == "labeled"
+        assert t.is_pr
+
+    def test_gate_set_configured_label_among_several_existing_labels_admits(
+        self, monkeypatch
+    ):
+        # The label GitHub reports as "just added" is what gates admission,
+        # not merely whether the configured label is somewhere in the full
+        # current label set — but a real "labeled" delivery's `label` field
+        # and its full `labels` list agree on the added label, so this should
+        # pass either way. Guards against a future refactor that switches to
+        # checking the full labels list instead of the specific added one.
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "swarm-canary")
+        t = parse_github_event(
+            "issues",
+            _labeled_payload(
+                "issues", "swarm-canary", existing_labels=["bug", "swarm-canary"]
+            ),
+            "d-7",
+        )
+        assert t is not None
+        assert t.kind == "issue_opened"
+
+    def test_labeled_is_in_both_action_sets(self):
+        # Guards the gateway-level wiring the label gate depends on: without
+        # "labeled" in these sets, parse_github_event would drop the delivery
+        # before _labeled_event_admitted ever runs, and a label added after
+        # open could never start the pipeline for it even with a matching
+        # gate configured.
+        assert "labeled" in github_gateway.ISSUE_ACTIONS
+        assert "labeled" in github_gateway.PR_ACTIONS
+
+    # ── end-to-end through the real webhook receiver: a labeled delivery
+    #    with the gate unset must invoke the handler ZERO times and post no
+    #    response beyond the gateway's own ACK — nothing downstream ever
+    #    sees a trigger, which is the property the coordinator's fix review
+    #    asked to be proven "starts nothing and posts nothing".
+
+    def test_end_to_end_pr_labeled_with_gate_unset_never_invokes_handler(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "")
+        handler_calls = []
+
+        async def run() -> int:
+            async def handler(trigger):
+                handler_calls.append(trigger)
+
+            app = make_app(TEST_HMAC_KEY, handler)
+            body = json.dumps(_labeled_payload("pull_request", "needs-triage")).encode()
+            headers = {
+                "X-GitHub-Event": "pull_request",
+                "X-Hub-Signature-256": _sign(body),
+            }
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/github/webhook", data=body, headers=headers)
+                return resp.status
+
+        status = asyncio.run(run())
+        assert status == 200
+        assert handler_calls == [], (
+            "a labeled PR event with the gate unset must never reach the "
+            "handler — no pipeline, no review panel, no GitHub write"
+        )
+
+    def test_end_to_end_issue_labeled_with_gate_unset_never_invokes_handler(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "")
+        handler_calls = []
+
+        async def run() -> int:
+            async def handler(trigger):
+                handler_calls.append(trigger)
+
+            app = make_app(TEST_HMAC_KEY, handler)
+            body = json.dumps(_labeled_payload("issues", "swarm-canary")).encode()
+            headers = {
+                "X-GitHub-Event": "issues",
+                "X-Hub-Signature-256": _sign(body),
+            }
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/github/webhook", data=body, headers=headers)
+                return resp.status
+
+        status = asyncio.run(run())
+        assert status == 200
+        assert handler_calls == [], (
+            "an issue-labeled event with the gate unset must never reach "
+            "the handler, even when the label added happens to be the one "
+            "an operator might later configure as the gate label"
+        )
+
+    def test_end_to_end_pr_labeled_with_matching_gate_invokes_handler(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "swarm-canary")
+        handler_calls = []
+
+        async def run() -> int:
+            async def handler(trigger):
+                handler_calls.append(trigger)
+
+            app = make_app(TEST_HMAC_KEY, handler)
+            body = json.dumps(_labeled_payload("pull_request", "swarm-canary")).encode()
+            headers = {
+                "X-GitHub-Event": "pull_request",
+                "X-Hub-Signature-256": _sign(body),
+            }
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/github/webhook", data=body, headers=headers)
+                return resp.status
+
+        status = asyncio.run(run())
+        assert status == 200
+        assert len(handler_calls) == 1
+        assert handler_calls[0].kind == "pr_labeled"
 
 
 # ── pull_request_review parsing (approval loop) ─────────────────────────────
