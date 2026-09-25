@@ -360,12 +360,17 @@ def _line_marker_token(line: str) -> str | None:
 def overlay_verdicts(
     items: list[PendingItem],
     texts: list[str],
+    unrecognized_lines: list[str] | None = None,
 ) -> tuple[dict[str, HandlerState], bool]:
     """Apply Design/UX verdict overlay on top of ``parse_verdict``.
 
     Returns (match_token → state, unrecognized_seen).
     SKIP is decisive per match token: once skipped, a later APPROVE/ATTENDED
     for the same token cannot revive it.
+
+    ``unrecognized_lines``, when given, collects each operator line that was
+    not understood (in order, without duplicates) so the correction mail can
+    quote it back.
     """
     states: dict[str, HandlerState] = {
         match_key(i): "awaiting_approval" for i in items
@@ -374,6 +379,12 @@ def overlay_verdicts(
     unrecognized = False
     multi = len(items) > 1
     by_token = {i.token.upper(): i for i in items}
+
+    def _flag(line: str) -> None:
+        nonlocal unrecognized
+        unrecognized = True
+        if unrecognized_lines is not None and line not in unrecognized_lines:
+            unrecognized_lines.append(line)
 
     def _decide(item: PendingItem, state: HandlerState) -> None:
         key = match_key(item)
@@ -398,15 +409,15 @@ def overlay_verdicts(
             bound_tok = line_tok or (None if multi else subject_tok)
 
             if first == "PAID":
-                unrecognized = True
+                _flag(line)
                 continue
 
             if first == "SKIP":
                 if multi and not line_tok:
-                    unrecognized = True
+                    _flag(line)
                     continue
                 if not bound_tok or bound_tok not in by_token:
-                    unrecognized = True
+                    _flag(line)
                     continue
                 item = by_token[bound_tok]
                 _decide(item, "skipped")
@@ -414,29 +425,29 @@ def overlay_verdicts(
 
             if first == "ATTENDED":
                 if multi and not line_tok:
-                    unrecognized = True
+                    _flag(line)
                     continue
                 if not bound_tok or bound_tok not in by_token:
-                    unrecognized = True
+                    _flag(line)
                     continue
                 item = by_token[bound_tok]
                 if not item.is_calendar:
-                    unrecognized = True
+                    _flag(line)
                     continue
                 _decide(item, "approved")
                 continue
 
             if first in ("APPROVE", "YES"):
                 if multi and not line_tok:
-                    unrecognized = True
+                    _flag(line)
                     continue
                 if not bound_tok or bound_tok not in by_token:
-                    unrecognized = True
+                    _flag(line)
                     continue
                 item = by_token[bound_tok]
                 if item.is_calendar:
                     # Calendar requires ATTENDED — bare APPROVE/YES holds.
-                    unrecognized = True
+                    _flag(line)
                     continue
                 # Use parse_verdict for non-calendar approve forms.
                 verdict = parse_verdict(text, item.token)
@@ -445,7 +456,7 @@ def overlay_verdicts(
                 elif verdict is False:
                     _decide(item, "skipped")
                 else:
-                    unrecognized = True
+                    _flag(line)
                 continue
 
             # Authenticated but unparseable content on a line that looks like
@@ -455,7 +466,7 @@ def overlay_verdicts(
                     w in line.upper()
                     for w in ("APPROVE", "SKIP", "ATTENDED", "YES", "PAID")
                 ):
-                    unrecognized = True
+                    _flag(line)
 
     for key, state in decisions.items():
         states[key] = state
@@ -639,7 +650,10 @@ def request_and_collect(
         log.info(f"awaiting_approval count={len(items)}")
         return result
 
-    states, unrecognized = overlay_verdicts(items, outcome.texts)
+    unrecognized_lines: list[str] = []
+    states, unrecognized = overlay_verdicts(
+        items, outcome.texts, unrecognized_lines=unrecognized_lines
+    )
     result.states = states
     for key, state in states.items():
         if state == "approved":
@@ -653,7 +667,12 @@ def request_and_collect(
 
     if unrecognized:
         result.reason_code = "consent_reply_unrecognized"
-        _maybe_send_correction(items, outcome.texts, path.parent)
+        _maybe_send_correction(
+            items,
+            unrecognized_lines,
+            path.parent,
+            no_reply_needed=settled | unknown,
+        )
 
     return result
 
@@ -698,29 +717,87 @@ def _maybe_notify_unauthenticated(
         log.warning(f"could not persist unauthenticated-reply dedupe: {exc}")
 
 
+_QUOTED_LINES_MAX = 5
+_QUOTED_LINE_CHARS = 200
+
+
+def accepted_reply_form(item: PendingItem) -> str:
+    """The exact reply lines that answer one item: its verb plus its marker."""
+    marker = subject_marker(item.token)
+    verb = "ATTENDED" if item.is_calendar else "APPROVE"
+    return f"{verb} {marker}   or   SKIP {marker}"
+
+
+def build_correction_body(
+    items: list[PendingItem],
+    unrecognized_lines: list[str],
+    *,
+    no_reply_needed: set[str] | None = None,
+) -> tuple[str, str]:
+    """Operator-facing correction: what was not understood, that nothing was
+    paid, and the exact accepted form for each item still awaiting a reply."""
+    date = items[0].payment_date if items else ""
+    subject = f"[Ateles] Monedula consent correction {date}: reply not understood"
+    skip = no_reply_needed or set()
+    open_items = [i for i in items if i.obligation not in skip] or list(items)
+
+    lines: list[str] = [
+        f"Your reply to the Monedula payment consent request for {date} "
+        "was not understood, so no payment was made. The payments below are "
+        "still waiting for your answer.",
+        "",
+    ]
+    quoted = [ln for ln in unrecognized_lines if ln.strip()][:_QUOTED_LINES_MAX]
+    if quoted:
+        lines.append("Not understood:")
+        for ln in quoted:
+            text = ln.strip()
+            if len(text) > _QUOTED_LINE_CHARS:
+                text = text[: _QUOTED_LINE_CHARS - 1] + "…"
+            lines.append(f"  > {text}")
+        lines.append("")
+    lines.append(
+        "To answer, reply to the consent request with one of these lines for "
+        "each payment, copied exactly (keep the code in brackets):"
+    )
+    lines.append("")
+    for item in open_items:
+        lines.append(f"{item.label} ({CURRENCY} {item.amount_eur}):")
+        lines.append(f"  {accepted_reply_form(item)}")
+    lines.append("")
+    if any(i.is_calendar for i in open_items):
+        lines.append(
+            "Sessions from your calendar need ATTENDED; APPROVE or YES will "
+            "not approve them."
+        )
+    if any(not i.is_calendar for i in open_items):
+        lines.append("One-off payments need APPROVE.")
+    lines.append(
+        "SKIP means do not pay. PAID is not an answer. "
+        "Until you reply, nothing is paid."
+    )
+    return subject, "\n".join(lines)
+
+
 def _maybe_send_correction(
     items: list[PendingItem],
-    texts: list[str],
+    unrecognized_lines: list[str],
     state_dir: Path,
+    *,
+    no_reply_needed: set[str] | None = None,
 ) -> None:
-    """One deduped in-thread correction for unrecognized authenticated replies."""
+    """One deduped correction for unrecognized authenticated replies."""
     dedupe_path = state_dir / ".monedula_consent_correction.json"
     fp = pending_fingerprint(items)
     prior = _load_mark(dedupe_path)
     if prior.get("fingerprint") == fp:
         return
-    # Best-effort: reply_in_thread needs a message id we do not always have.
-    # Use send_request as fallback with Design correction copy (no PII).
-    body = (
-        "no payment was made; identify the unrecognized line and show the "
-        "accepted form. Multi-item: ATTENDED/APPROVE/SKIP plus the item's "
-        "[APPROVE-…] marker. Calendar items require ATTENDED."
+    # reply_in_thread needs a message id we do not always have, so the
+    # correction goes out as its own mail.
+    subject, body = build_correction_body(
+        items, unrecognized_lines, no_reply_needed=no_reply_needed
     )
-    # Prefer in-thread if we can discover nothing better — fallback to new mail.
-    sent = send_request(
-        f"[Ateles] Monedula consent correction {items[0].payment_date}",
-        body,
-    )
+    sent = send_request(subject, body)
     if sent:
         _save_mark(dedupe_path, fp, time.time(), generation=0)
         log.info("consent_reply_unrecognized — correction sent (deduped)")

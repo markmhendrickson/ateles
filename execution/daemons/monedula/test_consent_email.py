@@ -1240,3 +1240,52 @@ def test_real_read_unauthenticated_operator_reply_fires_distinct_signal(
     assert key not in result.approved
     assert result.reason_code == consent_email.REASON_REPLY_UNAUTHENTICATED
     assert len(notices) == 1
+
+
+# ── ux review (PR #1202 @ 33039cb2): correction email copy ───────────────────
+
+
+def test_correction_email_quotes_line_says_nothing_paid_and_gives_per_item_forms(
+    monkeypatch, tmp_path
+):
+    cal = _Handler("therapy", label="Studio Example", amount=60, calendar=True)
+    one = _Handler("invoice", label="Invoice Example", amount=25, calendar=False)
+    sends: list = []
+    monkeypatch.setattr(
+        consent_email, "send_request", lambda *a, **k: sends.append(a) or True
+    )
+    monkeypatch.setattr(
+        consent_email,
+        "read_replies_with_status",
+        lambda *a, **k: ReadRepliesOutcome(
+            kind="ok", texts=["RE: consent\nATTENDED both please\n"]
+        ),
+    )
+    result = consent_email.request_and_collect(
+        [(cal, [{}]), (one, [{}])], "2026-09-22", state_path=tmp_path / "m.json"
+    )
+    assert result.reason_code == "consent_reply_unrecognized"
+    assert result.approved == set()
+    corrections = [s for s in sends if "correction" in s[0]]
+    assert len(corrections) == 1
+    subject, body = corrections[0][0], corrections[0][1]
+    assert "not understood" in subject
+    # Operator-addressed, complete sentence — not an internal fragment.
+    assert body.startswith("Your reply to the Monedula payment consent request")
+    assert "no payment was made" in body
+    assert "> ATTENDED both please" in body
+    by_name = {i.handler_name: i for i in result.pending_items}
+    cal_marker = subject_marker(by_name["therapy"].token)
+    one_marker = subject_marker(by_name["invoice"].token)
+    assert f"ATTENDED {cal_marker}" in body
+    assert f"SKIP {cal_marker}" in body
+    assert f"APPROVE {one_marker}" in body
+    assert f"SKIP {one_marker}" in body
+    assert f"APPROVE {cal_marker}" not in body, "calendar items need ATTENDED"
+    assert "identify the unrecognized line" not in body
+
+    # Deduped: a repeat sweep of the same request sends no second correction.
+    consent_email.request_and_collect(
+        [(cal, [{}]), (one, [{}])], "2026-09-22", state_path=tmp_path / "m.json"
+    )
+    assert len([s for s in sends if "correction" in s[0]]) == 1
