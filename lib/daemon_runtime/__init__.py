@@ -34,20 +34,60 @@ See individual modules for full API.
 # This centralizes what was previously per-daemon bootstrap — every daemon that
 # imports lib.daemon_runtime now inherits real credentials automatically.
 # Override only empty values and plist placeholders (wrapped in __...__).
+#
+# Skipped entirely under pytest (ateles#1285): the operator's materialized
+# dotenv carries operator-behaviour switches too — e.g.
+# ATELES_SWARM_REQUIRE_LABEL for the bootstrap canary gate — and loading it
+# at import time silently turned that gate ON for every local test run on a
+# machine with the file present, while CI (which has no such file) stayed
+# green. A test that wants a real credential or switch must set it itself.
+# `ATELES_SKIP_DOTENV=1` is the explicit override for a non-pytest caller
+# that wants the same isolation (e.g. a script under test harness control);
+# `_dotenv_should_load` is exported so a root conftest.py can arm it via
+# monkeypatch without relying on sys.modules ordering.
 import os as _os  # noqa: E402
+import sys as _sys  # noqa: E402
 from pathlib import Path as _Path  # noqa: E402
 
-_NEOTOMA_ENV_FILE = _Path.home() / ".config" / "neotoma" / ".env"
-if _NEOTOMA_ENV_FILE.exists():
-    for _line in _NEOTOMA_ENV_FILE.read_text().splitlines():
+
+def _dotenv_should_load(environ: dict | None = None, modules: dict | None = None) -> bool:
+    """False when this import should NOT pull the operator's dotenv into
+    os.environ — under pytest, or when ATELES_SKIP_DOTENV is set truthy."""
+    env = _os.environ if environ is None else environ
+    mods = _sys.modules if modules is None else modules
+    if (env.get("ATELES_SKIP_DOTENV") or "").strip().lower() in ("1", "true", "yes"):
+        return False
+    if "pytest" in mods or env.get("PYTEST_CURRENT_TEST") is not None:
+        return False
+    return True
+
+
+def _dotenv_path(environ: dict | None = None) -> _Path:
+    """The dotenv file to load, overridable for tests via ATELES_DOTENV_FILE."""
+    env = _os.environ if environ is None else environ
+    override = env.get("ATELES_DOTENV_FILE")
+    if override:
+        return _Path(override)
+    return _Path.home() / ".config" / "neotoma" / ".env"
+
+
+def _load_dotenv_into_environ(path: _Path, environ: dict) -> None:
+    if not path.exists():
+        return
+    for _line in path.read_text().splitlines():
         _line = _line.strip()
         if _line and not _line.startswith("#") and "=" in _line:
             _k, _, _v = _line.partition("=")
             _k = _k.strip()
             _v = _v.strip().strip('"').strip("'")
-            _existing = _os.environ.get(_k, "")
+            _existing = environ.get(_k, "")
             if not _existing or (_existing.startswith("__") and _existing.endswith("__")):
-                _os.environ[_k] = _v
+                environ[_k] = _v
+
+
+_NEOTOMA_ENV_FILE = _dotenv_path()
+if _dotenv_should_load():
+    _load_dotenv_into_environ(_NEOTOMA_ENV_FILE, _os.environ)
 
 from .aauth_signer import AAuthSigner
 from .agent_loader import (
