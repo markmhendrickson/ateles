@@ -221,9 +221,39 @@ PII_PATTERNS: tuple[tuple[str, str], ...] = (
 # Allowed because they name a SYSTEM, not an operator value. An agent's AAuth
 # sub and the swarm domain are role identifiers and appear throughout the
 # public corpus already.
+#
+# WHOLE-MATCH, not substring. `PII_ALLOW.search()` against the matched email
+# let a crafted address smuggle an allowed token through as a SUBSTRING of an
+# attacker-controlled string: an address of the shape `<local>@ateles-swarm.test`
+# contains `@ateles-swarm`, `<local>@neotoma.test` contains `@neotoma`, one of
+# the shape `<local>@markmhendrickson.com.<attacker-domain>` contains
+# `markmhendrickson.com`, and `evil-noreply@github.com` contains `noreply@` --
+# each of those shapes cleared the old screen (see
+# `test_rule_inventory_pii_screen.py::PiiAllowWholeMatchTest`, which pins the
+# exact fixtures). Each alternative below is now an EXACT allowed suffix,
+# matched with `fullmatch` (not `search`) against the full matched text, so a
+# token merely present somewhere inside a longer attacker-controlled string
+# can no longer pass:
+#   - `@ateles-swarm` / `@neotoma` are bare AAuth role-identifier suffixes with
+#     no TLD of their own (`apis@ateles-swarm`, `formica@ateles-swarm` --
+#     see docs/taxonomy.md); allowing an open-ended `@ateles-swarm\.[\w.]+` or
+#     `@neotoma\.[\w.]+` would itself re-admit the attacker-domain shapes
+#     above under any attacker-chosen suffix, so both stay anchored to the
+#     bare suffix and nothing after it.
+#   - `markmhendrickson\.com` is kept as a full-address form
+#     (`...@markmhendrickson\.com`, anchored with `$`) rather than a bare
+#     domain fragment, so a longer attacker domain cannot match as a prefix
+#     of a legitimate one either.
 PII_ALLOW = re.compile(
-    r"@ateles-swarm|@anthropic\.com|noreply@|example\.(?:com|org)|"
-    r"markmhendrickson\.com|@neotoma|user@host",
+    r"^(?:"
+    r"[\w.+-]+@ateles-swarm"
+    r"|[\w.+-]+@anthropic\.com"
+    r"|noreply@[\w-]+\.[\w.]+"
+    r"|[\w.+-]+@example\.(?:com|org)"
+    r"|[\w.+-]+@markmhendrickson\.com"
+    r"|[\w.+-]+@neotoma"
+    r"|user@host"
+    r")$",
     re.I,
 )
 
@@ -259,7 +289,7 @@ def screen_for_pii(text: str) -> tuple[bool, list[str]]:
     reasons = []
     for name, pat in PII_PATTERNS:
         for m in re.finditer(pat, text):
-            if PII_ALLOW.search(m.group(0)):
+            if PII_ALLOW.fullmatch(m.group(0)):
                 continue
             reasons.append(name)
             break
