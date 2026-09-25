@@ -310,3 +310,79 @@ class TestSettingsContract:
             set(m.split("|")) >= {"startup", "resume", "clear", "compact"}
             for m in matchers
         )
+
+
+# ---------------------------------------------------------------------------
+# 6. Budget — measured against the real Claude Code hook-output cap
+#    (ateles#1254 follow-up, task ent_3b6b010658ce88f6be9e19ac).
+# ---------------------------------------------------------------------------
+class TestBudgetIsMeasuredAndSafelyBelowTheHardCap:
+    """The 10,000-char hook-stdout cap this pins is a DIRECT measurement,
+    not a cited figure: a throwaway probe hook was driven headless via
+    `claude -p --settings <scratch settings.json>` at several sizes, and the
+    session's own transcript (`hook_success` attachment's `content` field —
+    what actually reached context) was read back and binary-searched. 10,000
+    chars reached context byte-for-byte; 10,001 was replaced with a
+    `<persisted-output>` pointer + ~2KB preview. See
+    session_rule_index.py's module docstring for the full method. These
+    tests do not re-run that probe (it needs a live `claude` binary and
+    network access this suite should not depend on) — they pin the BUDGET
+    this hook sets FROM that measurement, so a future edit that widens
+    BUDGET_CHARS past the safety margin is caught here rather than only
+    being caught by a truncated session in the field.
+    """
+
+    def test_budget_leaves_margin_below_the_measured_10000_char_cap(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("session_rule_index", HOOK)
+        module = importlib.util.module_from_spec(spec)
+        # session_rule_index.py resolves lib/ relative to its OWN file path
+        # at import time (`_LIB_DIR`), so a plain exec_module here is safe —
+        # it does not need CLAUDE_PROJECT_DIR or any sys.path setup this
+        # test would otherwise have to replicate.
+        spec.loader.exec_module(module)
+        measured_cap = 10_000
+        assert module.BUDGET_CHARS < measured_cap, (
+            "BUDGET_CHARS must stay below the measured 10,000-char hook "
+            "stdout cap, or content beyond the cap silently becomes a "
+            "<persisted-output> pointer + preview instead of reaching "
+            "context."
+        )
+        # Margin covers the hook's own ~62-byte header
+        # ("# Agent policy rule index...\n\n") plus the two print() trailing
+        # newlines and a buffer for measurement variance — not a tight
+        # equality, since the exact overhead is not the safety property;
+        # staying clear of the cliff is.
+        margin = measured_cap - module.BUDGET_CHARS
+        assert 50 <= margin <= 1000, (
+            f"BUDGET_CHARS margin below the hard cap is {margin} chars — "
+            "expected a deliberate safety margin (roughly 50-1000 chars), "
+            "not zero margin and not so much slack that tier A degrades "
+            "long before it needs to."
+        )
+
+    def test_hook_header_and_budget_together_stay_under_the_measured_cap(
+        self, fake_neotoma
+    ):
+        """End-to-end: the ACTUAL hook stdout (header + rendered index),
+        not just the renderer's own budget parameter, must fit under the
+        measured 10,000-char cap for a corpus sized right at the budget."""
+        base_url, handler = fake_neotoma
+        # A corpus intentionally larger than the budget so the renderer is
+        # exercised at whichever tier it lands on — the assertion is on the
+        # hook's TOTAL stdout, which must respect the cap regardless of tier.
+        handler.rows = [
+            _row("ent_always1", rule="Never skip the thing.", applies_when="always"),
+        ] + [
+            _row(f"ent_cond{i:03d}", rule="Rule body text here.", applies_when=f"condition {i}")
+            for i in range(80)
+        ]
+        result = _run(REPO_ROOT, base_url=base_url)
+        assert result.returncode == 0
+        assert len(result.stdout) < 10_000, (
+            f"hook stdout is {len(result.stdout)} chars — at or past the "
+            "measured 10,000-char cap, so Claude Code would replace it "
+            "with a <persisted-output> pointer + preview instead of "
+            "delivering the rendered rule index into context."
+        )

@@ -49,20 +49,44 @@ NOT one of these cases: it degrades through tiers A -> B -> C instead
 own limit is not a control; degrading loudly, tier by tier, is what keeps
 this one a control rather than documentation).
 
-Budget: 8,000 characters, conservative below the ~10,000-char Claude Code
-hook-output cap documented for `additionalContext`/plain stdout (multiple
-independent secondary sources — GitHub issues anthropics/claude-code#44086,
-#94358, #70460 — cite this figure from the official Hooks reference at
-code.claude.com/docs/en/hooks; a direct WebFetch of that page during this
-build did not itself surface the number in the crawled text, so the figure
-is corroborated by several converging sources rather than confirmed by a
-first-party quote this build captured directly — treat it as empirically
-unconfirmed by this build and needing a live before/after measurement to
-pin down exactly). This hook's own budget leaves headroom for the OTHER
-three SessionStart hooks that run in the same lifecycle event
-(`ateles-session-start.sh`, `session_start.py`, and on compact
-`reinject_working_method.py`), which each emit their own stdout against the
-same per-hook cap.
+Budget: 9,800 characters, measured directly (ateles#1254 follow-up) rather
+than inferred from secondary sources. Method: a throwaway SessionStart hook
+(`probe.py`) printed an exact byte count of numbered filler text into a
+scratch project directory, driven headless via `claude -p --settings
+<scratch settings.json>` at several sizes, then the session's own transcript
+(`~/.claude/projects/<encoded-cwd>/<session_id>.jsonl`) was read back for the
+`hook_success` attachment's `content` field — the actual text that reached
+context, not just an exit code. Binary search over that field's length found
+the cutoff is EXACT: content of length 10,000 reaches context byte-for-byte
+(`content` field length == 10000); content of length 10,001 is replaced with
+a `<persisted-output>` pointer + a ~2,048-byte ("first 2KB") preview, e.g.
+"Output too large (11.7KB). Full output saved to: .../tool-results/
+hook-<id>-stdout.txt\n\nPreview (first 2KB): ...". This confirms, with a
+first-party measurement this build captured directly, the figure the
+previous revision could only cite from secondary sources (GitHub issues
+anthropics/claude-code#44086, #94358, #70460) — 10,000 chars, not "~10,000".
+It also confirms the same shape the operator had already observed by hand
+(16.3 KB replaced by a ~2 KB preview, ateles#1254) is this exact mechanism,
+not a different one at a different size.
+
+The cap applies PER HOOK INVOCATION, not pooled across every SessionStart
+hook firing in the same lifecycle event: one measurement run captured BOTH
+`neotoma_session_start_instructions.sh` (6,433 chars) and the probe hook
+(8,000 chars) — 14,433 chars combined across two hook stdouts in one
+SessionStart event — with neither truncated, because each hook's stdout is
+captured into its own `hook_success` attachment and truncated (or not)
+independently. So this hook's budget does not need to be sized DOWN to make
+room for its co-tenants' output; 9,800 leaves ~140 chars of margin below the
+hook's own 10,000-char cap, covering the ~62-byte "# Agent policy rule
+index..." header this hook prints ahead of `render_index_text()`'s own
+output plus the two trailing newlines from the two `print()` calls, with a
+small buffer against measurement variance. (The other SessionStart hooks
+sharing this channel — `ateles-session-start.sh` at 16,807 chars,
+`session_start.py` at 1,756, `reinject_working_method.py` at 1,669 on
+compact, `neotoma_session_start_instructions.sh` at 6,455 — are each judged
+against this SAME per-hook cap independently; `ateles-session-start.sh`
+already exceeds it on its own, which is a pre-existing condition of that
+hook, not something this budget change causes or can fix.)
 
 Never follows a redirect: the renderer's transport refuses any 3xx, so the
 bearer token is only ever sent to the configured Neotoma host (a refused
@@ -85,7 +109,7 @@ _HOOK_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _HOOK_DIR.parent.parent
 _LIB_DIR = _REPO_ROOT / "lib"
 
-BUDGET_CHARS = 8000
+BUDGET_CHARS = 9800
 
 
 def _log(msg: str) -> None:

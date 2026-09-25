@@ -115,12 +115,18 @@ class TestTieredRendering:
         assert "<!-- tier: A -->" in text
         assert "Verify before merging" in text  # tier A keeps the imperative (from title)
 
-    def test_51_rules_at_realistic_lengths_selects_tier_b_and_fits(self):
+    def test_51_rules_at_realistic_lengths_selects_tier_a2_and_fits(self):
         # Mirrors the coordinator's live measurement: 51 active rules (2
-        # always, 49 conditional), realistic rule/applies_when lengths.
-        # A trigger-only (tier B) render of a corpus this size is ~4,895
-        # chars per that measurement — well within 8,000 — while tier A
-        # (imperative kept) is expected to overflow it.
+        # always, 49 conditional, all `scope="global"` via `_row`'s
+        # default — i.e. every conditional row is "both-audience" per
+        # `agent_loader.POLICY_SCOPES_REACHING_EVERY_AGENT`), realistic
+        # rule/applies_when lengths. Tier A (full imperative kept) is
+        # expected to overflow 8,000 chars; tier A2 (ateles#1254 follow-up)
+        # compacts every row here, since all 49 are both-audience, and
+        # fits comfortably — so tier B (imperative dropped entirely) is
+        # never reached. Before tier A2 existed this corpus degraded all
+        # the way to tier B; the audience split recovers a compact summary
+        # tier A2 renders that tier B does not.
         rows = [
             _row(
                 "ent_always1",
@@ -159,9 +165,13 @@ class TestTieredRendering:
         skills = renderer.render_skills(rows)
         text = renderer.render_index_text(skills, budget_chars=8000)
         assert len(text) <= 8000
-        assert "<!-- tier: B -->" in text
-        # Tier B keeps the trigger and id but drops the imperative (title).
-        assert "Check the existing tasks" not in text
+        assert "<!-- tier: A2 -->" in text
+        # Tier A2 compacts the (both-audience) summary at a word boundary,
+        # so the full 121-char title never appears verbatim, but a
+        # truncated, still-readable prefix of it does — and the trigger and
+        # id survive for every row.
+        assert "Check the existing tasks" in text  # prefix survives truncation
+        assert "Check the existing tasks, issues, and PRs before starting new work so the swarm neither duplicates work nor re-decides a settled question." not in text
         assert "opening a pull request" in text
         assert all(f"ent_cond{i:03d}" in text for i in range(49))
 
@@ -242,6 +252,115 @@ class TestTieredRendering:
         skills = renderer.render_skills(rows)
         with pytest.raises(renderer.PolicyIndexError):
             renderer.render_index_text(skills, budget_chars=20)
+
+
+# ---------------------------------------------------------------------------
+# 2b. Audience split (tier A2) — ateles#1254 follow-up,
+#     task ent_3b6b010658ce88f6be9e19ac. Only engaged when tier A overflows.
+# ---------------------------------------------------------------------------
+class TestAudienceSplitTierA2:
+    def test_both_audience_row_is_compacted_session_only_row_stays_full(self):
+        """A `scope="global"` row (both-audience) is compacted at tier A2;
+        a `scope="agent"` row bound to the session's own principal (session-
+        only) keeps its full tier-A line. Corpus is padded past the tier-A
+        budget with filler both-audience rows so tier A2 actually engages —
+        this must fail if `_conditional_line_audience_aware` stopped
+        branching on scope (e.g. reverted to always call
+        `_conditional_line_full`), since then the both-audience title would
+        appear verbatim rather than truncated.
+        """
+        principal = "ateles@ateles-swarm"
+        # Long enough to exceed the A2 compact cap (80 chars) but under the
+        # title sanitizer's own cap (`_IMPERATIVE_MAX` = 120), so the string
+        # this test asserts on is exactly what `to_skill` places in
+        # `description` — not itself pre-truncated by sanitization before
+        # tier A2's own truncation gets a chance to run.
+        long_title = (
+            "This imperative goes well past eighty characters so the "
+            "word-boundary truncation at tier A2 has real work to do."
+        )
+        assert 80 < len(long_title) < 120  # guards the premise above
+        rows = [
+            _row("ent_always1", title="Always rule.", applies_when="always"),
+            _row(
+                "ent_session_only",
+                title=long_title,
+                applies_when="a session-only trigger",
+                scope="agent",
+                agent_sub=principal,
+            ),
+        ] + [
+            _row(
+                f"ent_both{i:03d}",
+                title=long_title,
+                applies_when=f"a both-audience trigger {i}",
+                scope="global",
+            )
+            for i in range(55)
+        ]
+        skills = renderer.render_skills(rows, principal=principal)
+        text = renderer.render_index_text(skills, budget_chars=8000)
+        assert "<!-- tier: A2 -->" in text
+        # Session-only row: full line, long_title present verbatim.
+        assert long_title in text  # at least once — from ent_session_only
+        # But NOT 56 times — the 55 both-audience rows must be truncated,
+        # not rendered in full (a weak assertion would pass even if the
+        # split didn't work, since ent_session_only alone puts it in text).
+        assert text.count(long_title) == 1
+        assert "ent_session_only" in text
+        assert all(f"ent_both{i:03d}" in text for i in range(55))
+        assert all(
+            f"a both-audience trigger {i}" in text for i in range(55)
+        )
+
+    def test_all_both_audience_falls_through_to_tier_b_when_a2_also_overflows(self):
+        """When even the audience-compacted form doesn't fit (a corpus with
+        no session-only rows to spare, all both-audience, still too big at
+        A2), rendering degrades on to tier B — A2 is a real intermediate
+        step, not a silent alias for A or B."""
+        rows = [_row("ent_always1", title="Always rule.", applies_when="always")]
+        long_title = "x" * 200  # long enough that even compacted lines overflow a tiny budget
+        rows += [
+            _row(f"ent_c{i:03d}", title=long_title, applies_when=f"trigger {i}", scope="global")
+            for i in range(40)
+        ]
+        skills = renderer.render_skills(rows)
+        # A budget too small for A2's compacted lines (80-char cap each) but
+        # big enough for B's much shorter trigger+id-only lines.
+        text = renderer.render_index_text(skills, budget_chars=1600)
+        assert "<!-- tier: B -->" in text
+        assert all(f"ent_c{i:03d}" in text for i in range(40))
+
+    def test_word_boundary_truncation_never_cuts_mid_word(self):
+        long_title = (
+            "Supercalifragilisticexpialidocious words never get cut requires "
+            "a boundary-respecting truncation function to prove it here today"
+        )
+        truncated = renderer._truncate_at_word_boundary(long_title, 40)
+        assert len(truncated) <= 40
+        assert truncated.endswith("…")
+        # Every word in the truncated text (minus the ellipsis) is a whole
+        # word from the source — none is a prefix fragment of a longer word.
+        words = truncated[:-1].strip().split(" ")
+        source_words = long_title.split(" ")
+        assert all(w in source_words for w in words if w)
+
+    def test_word_boundary_truncation_no_ellipsis_when_it_already_fits(self):
+        short = "Fits already."
+        assert renderer._truncate_at_word_boundary(short, 80) == short
+
+    def test_is_both_audience_matches_agent_loader_constant_exactly(self):
+        """`_is_both_audience` must read the SAME set `agent_loader` already
+        exports, not a re-typed literal — this fails if the two constants
+        are ever edited independently (CLAUDE.md: "extend the mechanism
+        that already generalizes")."""
+        for scope in renderer.POLICY_SCOPES_REACHING_EVERY_AGENT:
+            s = renderer.to_skill(_row("ent_x", scope=scope, applies_when="x"))
+            assert renderer._is_both_audience(s) is True
+        s_agent = renderer.to_skill(
+            _row("ent_y", scope="agent", agent_sub="ateles@ateles-swarm", applies_when="y")
+        )
+        assert renderer._is_both_audience(s_agent) is False
 
 
 # ---------------------------------------------------------------------------
