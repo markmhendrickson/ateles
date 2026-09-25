@@ -210,11 +210,17 @@ def render_server_instructions(principal: str = "") -> str:
     pointer sentence itself is what tells the session where the real rules
     live, since the corpus is no longer rendered inline (ateles#1243).
 
-    This never emits the resolved `agent_policy` rule TEXT into the field —
-    only whether the resolve succeeded gates which fallback is served. That
-    is deliberate: the whole point of this fix is that the corpus does not
-    fit the channel, so nothing here should re-introduce a path where it
-    could grow past the budget again.
+    The resolve below is a reachability probe ONLY, kept as a monitoring
+    signal: its result — success, no rows, or exception — never affects the
+    string this function returns. Both the success path and the `except`
+    path fall through to the same `SERVER_INSTRUCTIONS + RULE_INDEX_POINTER`
+    (or the budget fallback). Nothing here checks that the resolved record is
+    bound to this principal, or even that it returned any rows — only that
+    the call did not raise, which is logged on failure and otherwise
+    discarded. That is deliberate: the whole point of this fix is that the
+    corpus does not fit the channel, so nothing here should re-introduce a
+    path where its TEXT could reach the instructions field and grow past the
+    budget again.
     """
     sub = principal or SESSION_PRINCIPAL
     try:
@@ -222,8 +228,10 @@ def render_server_instructions(principal: str = "") -> str:
             sys.path.insert(0, str(_REPO_ROOT))
         from lib.daemon_runtime.agent_loader import AgentLoader
 
-        # Resolved only to confirm the record is reachable and bound — never
-        # forwarded into the instructions field. See docstring.
+        # Reachability probe only — kept as a monitoring signal (logged on
+        # failure below). Its return value is intentionally discarded and
+        # never gates or feeds the served string; do not delete this as
+        # "dead code" without also removing the log line it feeds.
         AgentLoader(sub.split("@")[0]).render_policy_prompt()
     except Exception as exc:  # noqa: BLE001 — never block the server on this
         log.error(
