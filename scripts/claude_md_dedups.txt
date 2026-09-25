@@ -25,3 +25,12 @@ Proceed on your recommendation instead of stopping to ask. => Proceed with your 
 # preference for a reopen over a gate waive. Main's "not mistaken for
 # flapping" clause is present in both.
 Re-request review yourself when monitoring shows it is warranted. => Re-request review yourself whenever monitoring shows it is warranted — do not wait to be asked.
+
+# Operator ruling, 2026-09-25 — hosted-instance deploys (own and client) move
+# from Mark's absolutely to the swarm's, run exactly from the instance's
+# deployment_configuration entity with an operator veto retained; credential
+# rotation and release approval stay Mark's. The old lead named two classes
+# that were both operator-only; the surviving lead narrows to the one class
+# (credential rotation) that is still operator-only, and the deploy content
+# moves to a new clause in the same bullet rather than disappearing.
+Merge stays gated, and two classes stay Mark's absolutely. => Merge stays gated, and credential rotation stays Mark's absolutely.
