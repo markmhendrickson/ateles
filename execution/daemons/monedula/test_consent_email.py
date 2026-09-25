@@ -286,7 +286,7 @@ def test_body_lists_all_items_with_runtime_labels_and_markers():
     assert "Studio Example" in body and "Yoga Studio" in body
     assert subject_marker("AAAA1111") in body
     assert subject_marker("BBBB2222") in body
-    assert "MUST include" in body or "every line MUST" in body
+    assert "keep the code in brackets" in body
     assert "only that match" in body
 
 
@@ -1417,3 +1417,34 @@ def test_needs_swarm_mailbox_hint_names_the_missing_variable(monkeypatch):
     assert "ATELES_SWARM_GWS_CONFIG_DIR" in hint
     assert "ATELES_SWARM_EMAIL" not in hint
     assert "payments held" in hint
+
+
+# ── ux review (PR #1202 @ b20b4e3b): per-item verbs in the multi-item request ─
+
+
+def test_multi_item_request_gives_each_item_its_accepted_form():
+    """Mixed set (calendar + one-off): each item shows exactly its own form,
+    identical to accepted_reply_form (so request and correction cannot drift),
+    and a calendar item is never offered an APPROVE form."""
+    cal = _Handler("therapy", label="Studio Example", amount=60, calendar=True)
+    one = _Handler("invoice", label="Invoice Example", amount=25, calendar=False)
+    items = consent_email.build_pending_items(
+        [(cal, [{}]), (one, [{}])], "2026-09-22"
+    )
+    by_name = {i.handler_name: i for i in items}
+    cal_item, one_item = by_name["therapy"], by_name["invoice"]
+    cal_marker = subject_marker(cal_item.token)
+    one_marker = subject_marker(one_item.token)
+
+    _subj, body = consent_email.build_request_body(items, superseded=False)
+
+    cal_form = consent_email.accepted_reply_form(cal_item)
+    one_form = consent_email.accepted_reply_form(one_item)
+    assert cal_form == f"ATTENDED {cal_marker}   or   SKIP {cal_marker}"
+    assert one_form == f"APPROVE {one_marker}   or   SKIP {one_marker}"
+    lines = body.splitlines()
+    assert lines[lines.index("Studio Example (EUR 60):") + 1].strip() == cal_form
+    assert lines[lines.index("Invoice Example (EUR 25):") + 1].strip() == one_form
+    assert f"APPROVE {cal_marker}" not in body
+    assert f"ATTENDED {one_marker}" not in body
+    assert "calendar need ATTENDED" in body and "one-off payments need APPROVE" in body

@@ -309,9 +309,23 @@ def build_request_body(
     lines.append("")
     multi = len(items) > 1
     if multi:
+        open_items = [
+            i for i in items if i.obligation not in settled | unknown
+        ]
         lines.append(
-            "Multi-item replies: every line MUST include its marker, e.g. "
-            "ATTENDED [APPROVE-…] / APPROVE [APPROVE-…] / SKIP [APPROVE-…]."
+            "Reply with one line per payment, copied exactly (keep the code in "
+            "brackets):"
+        )
+        lines.append("")
+        # Same forms as the correction mail (``accepted_reply_form``), so the
+        # request and the correction can never disagree.
+        for item in open_items:
+            lines.append(f"{item.label} ({CURRENCY} {item.amount_eur}):")
+            lines.append(f"  {accepted_reply_form(item)}")
+        lines.append("")
+        lines.append(
+            "Sessions from your calendar need ATTENDED; one-off payments need "
+            "APPROVE. APPROVE or YES will not approve a calendar session."
         )
         lines.append(
             "Each marked line authorizes or skips only that match; other matches "
