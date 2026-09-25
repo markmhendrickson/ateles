@@ -13,7 +13,7 @@
 Each session maintains the Neotoma `plan` entity that matches **its own workstream** — never a fixed, hardcoded plan. The swarm-architecture plan `ent_99ace4dd6673aa36ed08b1fe` ("Ateles Agent Swarm Architecture") is the plan for swarm-architecture work **only**. Unrelated workstreams (tax prep, Neotoma release engineering, website, cloud hosting, etc.) each have their own plan and MUST NOT write into the swarm plan. Writing one workstream's `decisions`/`todos` into another's plan is the collision that corrupted this plan in June 2026.
 
 **Select the bound plan once per session, as soon as the workstream is clear:**
-1. Resolve the matching plan: retrieve entities against the operator's prod Neotoma instance (whichever connected Neotoma server targets it), with `entity_type: plan` and a `search` for the workstream; pick the closest match.
+1. Resolve the matching plan: retrieve entities against the operator's prod Neotoma instance (whichever connected Neotoma server targets it), with `entity_type: plan` and a `search` for the workstream; pick the closest match. If the target instance can't be established unambiguously — no connected server clearly targets the operator's prod instance, or several are connected and the target is ambiguous — stop and ask rather than write.
 2. If no existing plan fits, create one (`/update-plan` skill) and bind to it.
 3. Maintain only that bound plan for the rest of the session.
 
@@ -29,7 +29,7 @@ Each session maintains the Neotoma `plan` entity that matches **its own workstre
 
 Do not wait until end of session. Apply corrections in the same turn as the work, after the work completes.
 
-Use the `correct` operation against the operator's prod Neotoma instance (whichever connected Neotoma server targets it), with idempotency keys in the form `update-plan-<field>-<YYYY-MM-DD>`. Use the operator's prod Neotoma instance always, never a dev instance.
+Use the `correct` operation against the operator's prod Neotoma instance (whichever connected Neotoma server targets it), with idempotency keys in the form `update-plan-<field>-<YYYY-MM-DD>`. Use the operator's prod Neotoma instance always, never a dev instance. If the target instance can't be established unambiguously — no connected server clearly targets the operator's prod instance, or several are connected and the target is ambiguous — stop and ask rather than write.
 
 For full step-by-step guidance: `/update-plan` and `/update-tasks` skills.
 
