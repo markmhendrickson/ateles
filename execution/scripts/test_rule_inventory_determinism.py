@@ -544,6 +544,36 @@ class CommittedInformationalBlockTest(unittest.TestCase):
         )
         self.assertNotEqual(self.check(tampered, stores), 0)
 
+    def test_a_unicode_digit_date_is_compared(self) -> None:
+        # \d is Unicode-aware without re.ASCII, so a shape-valid date built
+        # from non-ASCII digits (here, fullwidth) would otherwise pass the
+        # row mask uncompared -- a channel outside the ASCII vocabulary the
+        # mask is meant to accept (PR #1279, security round 2).
+        committed, stores = self.committed_and_stores()
+        row = f"| Codex | — | {self.DAY} | file modification time |"
+        self.assertIn(row, committed)
+        unicode_day = self.DAY.translate(
+            {ord(c): chr(ord(c) + 0xFF10 - ord("0")) for c in "0123456789"}
+        )
+        self.assertNotEqual(unicode_day, self.DAY)
+        tampered = committed.replace(
+            row, f"| Codex | — | {unicode_day} | file modification time |"
+        )
+        self.assertEqual(self.check(tampered, stores), 1)
+
+    def test_an_impossible_date_is_compared(self) -> None:
+        # The row grammar only checks the \d{4}-\d{2}-\d{2} SHAPE, so a
+        # shape-valid but impossible date must still be rejected by
+        # date.fromisoformat and left in the comparison rather than masked
+        # (PR #1279, security round 2).
+        committed, stores = self.committed_and_stores()
+        row = f"| Codex | — | {self.DAY} | file modification time |"
+        self.assertIn(row, committed)
+        tampered = committed.replace(
+            row, "| Codex | — | 9999-99-99 | file modification time |"
+        )
+        self.assertEqual(self.check(tampered, stores), 1)
+
     def test_value_cells_alone_may_differ(self) -> None:
         committed, _ = self.committed_and_stores()
         # A shallow CI checkout: no git history, so repository dates are

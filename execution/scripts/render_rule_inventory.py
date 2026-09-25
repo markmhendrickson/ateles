@@ -1174,13 +1174,14 @@ def render_rulings_section() -> str:
     return "\n".join(lines)
 
 
+_MEASURED_DATE = re.compile(
+    r"\*\*Measured:\*\* \d{4}-\d{2}-\d{2}", re.ASCII
+)
+
+
 def strip_volatile_measurement_date(text: str) -> str:
     """Remove only the run date before comparing generated inventory output."""
-    return re.sub(
-        r"\*\*Measured:\*\* \d{4}-\d{2}-\d{2}",
-        "**Measured:**",
-        text,
-    )
+    return _MEASURED_DATE.sub("**Measured:**", text)
 
 
 # Host-dependent measurements are rendered between these markers (module
@@ -1204,15 +1205,21 @@ DATE_PLACEHOLDER = "<date>"
 DATE_SOURCE_PLACEHOLDER = "<date source>"
 COUNT_PLACEHOLDER = "<count>"
 _INFORMATIONAL_COUNT = r"\d{1,6}"
+# re.ASCII: \d must match only ASCII 0-9. Without it, \d is Unicode-aware and
+# accepts Arabic-Indic, fullwidth and mathematical-bold digits, which would
+# let a non-ASCII-digit value ride through the mask uncompared (PR #1279,
+# security round 2).
 _INFORMATIONAL_ROW = re.compile(
     r"\| (?P<store>[^|\n]+) \| (?P<populated>" + _INFORMATIONAL_COUNT + r"|—) \| "
-    r"(?P<date>\d{4}-\d{2}-\d{2}|—) \| (?P<source>[a-z ]+) \|"
+    r"(?P<date>\d{4}-\d{2}-\d{2}|—) \| (?P<source>[a-z ]+) \|",
+    re.ASCII,
 )
 _COPY_MEASUREMENT = re.compile(
     r"\*\*" + _INFORMATIONAL_COUNT + r"( copies of `ateles/CLAUDE\.md` in )"
     + _INFORMATIONAL_COUNT + r"( distinct versions\*\*, and \*\*)"
     + _INFORMATIONAL_COUNT + r"( copies of `neotoma/AGENTS\.md` in )"
-    + _INFORMATIONAL_COUNT + r"( distinct versions\*\*\.)"
+    + _INFORMATIONAL_COUNT + r"( distinct versions\*\*\.)",
+    re.ASCII,
 )
 
 # Stores whose populated count follows the host's worktree set, not the rules.
@@ -1221,10 +1228,30 @@ HOST_DEPENDENT_STORES = frozenset(
 )
 
 
+def _is_calendar_date_or_dash(cell: str) -> bool:
+    """True for "—" or a cell `date.fromisoformat` accepts as a real date.
+
+    The row regex only checks the `\\d{4}-\\d{2}-\\d{2}` SHAPE, so a
+    shape-valid but impossible date (e.g. 9999-99-99) would otherwise be
+    masked and never compared (PR #1279, security round 2).
+    """
+    if cell == "—":
+        return True
+    try:
+        date.fromisoformat(cell)
+        return True
+    except ValueError:
+        return False
+
+
 def _mask_informational_line(line: str) -> str:
     """Mask the value cells of one informational line; leave all else verbatim."""
     row = _INFORMATIONAL_ROW.fullmatch(line)
-    if row and row["source"] in PUBLIC_DATE_SOURCES | {"unknown"}:
+    if (
+        row
+        and row["source"] in PUBLIC_DATE_SOURCES | {"unknown"}
+        and _is_calendar_date_or_dash(row["date"])
+    ):
         # A dash in the populated column marks a row whose count is compared
         # in the stores table; only the checkout-copy rows carry a number, and
         # which rows those are is itself compared.
