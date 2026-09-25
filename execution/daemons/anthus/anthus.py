@@ -220,10 +220,11 @@ async def _orchestrate_workflow_for(event) -> None:
 
     comments = await _fetch_comments(snap)
 
-    # Autonomous generalization (ateles agent-operator learning): scan this
-    # work entity's comments for strategy_drift_signal lines, cluster them, and
-    # let the generalizer auto-apply agent-local policies (or open operator-
-    # gated proposals for cross-cutting themes). Fully reversible; best-effort.
+    # Generalization (ateles agent-operator learning): scan this work entity's
+    # comments for strategy_drift_signal lines, cluster them, and let the
+    # generalizer PROPOSE agent-local policies (or agent_definition revisions
+    # for cross-cutting themes). It never writes a live agent_policy row
+    # (ateles#1270); a proposal waits for approval. Best-effort.
     await _harvest_drift_signals(comments)
 
     existing = _gate_states.get(event.entity_id, {})

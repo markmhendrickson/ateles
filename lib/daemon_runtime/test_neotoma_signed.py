@@ -142,5 +142,55 @@ class NeotomaSignedTest(unittest.TestCase):
         self.assertNotEqual(seen_env["NEOTOMA_AAUTH_SUB"], "apis@ateles-swarm")
 
 
+class CheckObservationAttributionTest(unittest.TestCase):
+    """PR #1274 round-3 (Falco): this check compares the key thumbprint Neotoma
+    records for the observation, not the agent_sub label alone. A verified signature
+    actually proves the KEY, which Neotoma records as provenance.agent_thumbprint —
+    the value that must be pinned alongside agent_sub, not agent_sub alone."""
+
+    SUB = "anthus@ateles-swarm"
+    TIER = "software"
+    TP = "expected-thumbprint-abc123"
+
+    def _obs(self, obs_id="obs_1", sub=SUB, tier=TIER, thumbprint="__unset__"):
+        prov = {"agent_sub": sub, "attribution_tier": tier}
+        if thumbprint != "__unset__":
+            prov["agent_thumbprint"] = thumbprint
+        return {"id": obs_id, "provenance": prov}
+
+    def test_name_matches_but_thumbprint_does_not_is_not_accepted(self):
+        obs = self._obs(thumbprint="a-different-key-thumbprint")
+        check = ns.check_observation_attribution([obs], "obs_1", self.SUB, self.TP)
+        self.assertFalse(check.ok)
+        self.assertIn("agent_thumbprint", check.reason)
+
+    def test_both_sub_and_thumbprint_match_is_accepted(self):
+        obs = self._obs(thumbprint=self.TP)
+        check = ns.check_observation_attribution([obs], "obs_1", self.SUB, self.TP)
+        self.assertTrue(check.ok, check.reason)
+        self.assertEqual(check.agent_thumbprint, self.TP)
+
+    def test_thumbprint_missing_is_not_accepted(self):
+        obs = self._obs(thumbprint="__unset__")
+        check = ns.check_observation_attribution([obs], "obs_1", self.SUB, self.TP)
+        self.assertFalse(check.ok)
+        self.assertIn("agent_thumbprint", check.reason)
+
+    def test_thumbprint_empty_string_is_not_accepted(self):
+        obs = self._obs(thumbprint="")
+        check = ns.check_observation_attribution([obs], "obs_1", self.SUB, self.TP)
+        self.assertFalse(check.ok)
+        self.assertIn("agent_thumbprint", check.reason)
+
+    def test_no_expected_thumbprint_is_not_accepted(self):
+        """PR #1274 round-4 (Falco non-blocking note 1): the sub-only fallback was reachable
+        because expected_thumbprint defaulted to None; it is now a required argument, so
+        passing None must fail rather than silently accept a sub-only match."""
+        obs = self._obs(thumbprint="whatever-or-nothing")
+        check = ns.check_observation_attribution([obs], "obs_1", self.SUB, None)
+        self.assertFalse(check.ok)
+        self.assertIn("agent_thumbprint", check.reason)
+
+
 if __name__ == "__main__":
     unittest.main()
