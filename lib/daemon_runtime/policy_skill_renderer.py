@@ -37,25 +37,40 @@ Operator ruling: size must DEGRADE, never fail open. Fail-open is reserved
 for Neotoma being unreachable or rendering itself raising — never merely for
 being over budget, since a session with zero rules and a session with 50
 rules it never saw are different failures and must not read the same.
-`render_index_text` tries three tiers in order and returns whichever first
-fits, tagging the output with a trailing `<!-- tier: A|B|C -->` comment line
-so a session (and a test) can see which one ran without re-deriving it:
+`render_index_text` tries four tiers in order and returns whichever first
+fits, tagging the output with a trailing `<!-- tier: A|A2|B|C -->` comment
+line so a session (and a test) can see which one ran without re-deriving it:
 
-  Tier A — preamble WITH a short imperative (there are only ever a
-           handful of always-applies rules), conditional lines as
-           `- When <applies_when>: <imperative> [<entity_id>]`.
-  Tier B — same preamble, conditional lines DROP the imperative:
-           `- When <applies_when>: [<entity_id>]`. The trigger IS the
-           recognition key and the full rule is fetched by id — the
-           per-rule imperative was always optional, per the ruled design.
-  Tier C — only reached if B still doesn't fit (a much larger future
-           corpus). Preamble plus as many WHOLE conditional lines (tier-B
-           shape) as fit, mandatory rules first (`rule_kind == "mandatory"`
-           before `advisory`), then one line stating how many rules were
-           omitted and how to query Neotoma for the rest. Never cuts a
-           line mid-way. Logs a WARNING — dropping rules from the index is
-           real information loss, and silence about it is exactly the
-           failure this file exists to avoid.
+  Tier A  — preamble WITH a short imperative (there are only ever a
+            handful of always-applies rules), conditional lines as
+            `- When <applies_when>: <imperative> [<entity_id>]`.
+  Tier A2 — audience split (ateles#1254 follow-up, task
+            ent_3b6b010658ce88f6be9e19ac). Only reached when tier A
+            overflows. Same preamble. A conditional row scoped to exactly
+            one agent (`scope == "agent"` — by construction the session's
+            own principal, since `_session_scope_ok` already filtered out
+            every other agent's row) keeps its tier-A full line: there is
+            one audience reading it, so compacting buys nothing. A row
+            scoped `global`/`swarm` (`agent_loader.
+            POLICY_SCOPES_REACHING_EVERY_AGENT` — reaches every dispatched
+            agent AND every session) gets a compact line instead: trigger
+            + summary truncated at a word boundary (80 chars) + id. This
+            keeps full detail for the audience that is ONLY this session,
+            and spends the budget cut on rules an agent can look up from
+            its own daemon-side context instead.
+  Tier B  — same preamble, conditional lines DROP the imperative/summary
+            entirely, regardless of scope: `- When <applies_when>:
+            [<entity_id>]`. The trigger IS the recognition key and the
+            full rule is fetched by id — the per-rule imperative was
+            always optional, per the ruled design.
+  Tier C  — only reached if B still doesn't fit (a much larger future
+            corpus). Preamble plus as many WHOLE conditional lines (tier-B
+            shape) as fit, mandatory rules first (`rule_kind ==
+            "mandatory"` before `advisory`), then one line stating how
+            many rules were omitted and how to query Neotoma for the
+            rest. Never cuts a line mid-way. Logs a WARNING — dropping
+            rules from the index is real information loss, and silence
+            about it is exactly the failure this file exists to avoid.
 
 Scope filter: `policy_binds_agent` (`lib/daemon_runtime/agent_loader.py`) is
 imported, never re-implemented — CLAUDE.md's "extend the mechanism that
@@ -109,6 +124,7 @@ try:  # package import (normal runtime) with script-import fallback
     from .agent_loader import (  # type: ignore
         POLICY_QUERY_BODY,
         POLICY_SCOPES,
+        POLICY_SCOPES_REACHING_EVERY_AGENT,
         policy_binds_agent,
         unwrap_policy_entities,
     )
@@ -116,6 +132,7 @@ except ImportError:  # pragma: no cover
     from agent_loader import (  # type: ignore
         POLICY_QUERY_BODY,
         POLICY_SCOPES,
+        POLICY_SCOPES_REACHING_EVERY_AGENT,
         policy_binds_agent,
         unwrap_policy_entities,
     )
@@ -544,6 +561,71 @@ def _conditional_line_full(s: PolicySkill) -> str:
     return f"- {s.description} [{s.entity_id}]"
 
 
+# --- Audience split (ateles#1254 follow-up, task ent_3b6b010658ce88f6be9e19ac) ---
+#
+# "Session-only" vs. "reaches both sessions and agents" maps onto the SAME
+# vocabulary `_session_scope_ok` already reads, rather than a new concept:
+#   - `scope in POLICY_SCOPES_REACHING_EVERY_AGENT` ({"global", "swarm"}) —
+#     the row reaches every dispatched agent AND every interactive session.
+#     Both audiences. Compact line.
+#   - `scope == "agent"` — the row binds exactly the one agent named by
+#     `agent_sub` (which, by the time it is in `skills` at all, is this
+#     session's own principal — `_session_scope_ok` already filtered out
+#     every other agent's row). Session-only in the sense that matters here:
+#     it does not fan out to the rest of the swarm. Full line.
+# A row with neither shape never reaches `skills` (`_session_scope_ok` fails
+# closed on an unrecognized/absent `scope`), so this split has no third case
+# to default — it only ever sees the two scopes `POLICY_SCOPES` admits.
+_COMPACT_SUMMARY_MAX = 80
+
+
+def _truncate_at_word_boundary(text: str, max_len: int) -> str:
+    """Cut `text` to at most `max_len` chars, never mid-word. If the whole
+    string already fits, return it unchanged (no ellipsis). Otherwise cut at
+    the last space at or before `max_len - 1` (room for the ellipsis) and
+    append "…"; if there is no space in that span (one very long word), a
+    hard character cut is the only option left and gets the ellipsis too —
+    still capped at `max_len`, just not word-clean.
+    """
+    if len(text) <= max_len:
+        return text
+    truncated = text[: max_len - 1]
+    boundary = truncated.rfind(" ")
+    if boundary > 0:
+        truncated = truncated[:boundary]
+    return truncated.rstrip() + "…"
+
+
+def _is_both_audience(s: PolicySkill) -> bool:
+    """True when the row's scope reaches every agent AND every session —
+    the swarm-wide scopes `agent_loader.POLICY_SCOPES_REACHING_EVERY_AGENT`
+    already names, read here rather than re-derived (CLAUDE.md: "extend the
+    mechanism that already generalizes; do not build a parallel one")."""
+    return s.scope.strip().lower() in POLICY_SCOPES_REACHING_EVERY_AGENT
+
+
+def _conditional_line_audience_aware(s: PolicySkill) -> str:
+    """Tier A2: session-only rows (`scope == "agent"`) get the SAME full
+    line as tier A (trigger + imperative + id) — there is exactly one
+    session reading them, so compacting buys nothing. Both-audience rows
+    (`scope` in {"global", "swarm"}) get a compact line: trigger + summary
+    truncated at a word boundary + id, dropping the "When "/"" framing
+    tier A's `description` carries so the truncation budget goes to content.
+    """
+    if not _is_both_audience(s):
+        return _conditional_line_full(s)
+    trigger = s.applies_when if s.applies_when else "(trigger not recorded)"
+    summary = s.description
+    # `description` already carries "When <trigger>: <imperative>" (or just
+    # the imperative shape) — strip the redundant trigger restatement so the
+    # compact form is `trigger | truncated-summary`, not a doubled trigger.
+    prefix = f"When {trigger}: "
+    if summary.startswith(prefix):
+        summary = summary[len(prefix) :]
+    summary = _truncate_at_word_boundary(summary, _COMPACT_SUMMARY_MAX)
+    return f"- When {trigger}: {summary} [{s.entity_id}]"
+
+
 def _conditional_line_trigger_only(s: PolicySkill) -> str:
     """Tier B/C: trigger + id only — the imperative is dropped. The trigger
     IS the recognition key and the full rule is fetched by id, so the
@@ -568,21 +650,33 @@ def _assemble(
 
 
 def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
-    """The plain-text session index, degrading through three tiers rather
+    """The plain-text session index, degrading through four tiers rather
     than failing open on size (operator ruling, ateles#1261 follow-up: size
     must DEGRADE, never fail open — fail-open is reserved for Neotoma being
     unreachable or rendering itself raising, never merely for being over
     budget).
 
-    Tier A: full conditional lines (trigger + imperative + id).
-    Tier B: trigger + id only, same preamble.
-    Tier C: as many WHOLE tier-B lines as fit — mandatory rules first — plus
-            one line naming how many were omitted. Never cuts a line
-            mid-way; only DROPS whole lines, and only ever at tier C.
+    Tier A:  full conditional lines (trigger + imperative + id) for EVERY
+             row, regardless of scope.
+    Tier A2: audience split (ateles#1254 follow-up). Same preamble; a
+             session-only row (`scope == "agent"`, bound to exactly this
+             session's principal) keeps the tier-A full line, since there is
+             only one audience reading it — compacting it buys nothing. A
+             both-audience row (`scope` in {"global", "swarm"} — reaches
+             every dispatched agent AND every session,
+             `agent_loader.POLICY_SCOPES_REACHING_EVERY_AGENT`) gets a
+             compact line instead: trigger + summary truncated at a word
+             boundary + id. Only reached when tier A overflows the budget;
+             a corpus that already fits tier A never pays this cost.
+    Tier B:  trigger + id only for every row, same preamble — the
+             imperative/summary is dropped entirely regardless of scope.
+    Tier C:  as many WHOLE tier-B lines as fit — mandatory rules first —
+             plus one line naming how many were omitted. Never cuts a line
+             mid-way; only DROPS whole lines, and only ever at tier C.
 
-    The chosen tier is tagged in a trailing `<!-- tier: A|B|C -->` comment so
-    a session or a test can see which one ran. Always returns a string that
-    fits `budget_chars` — the empty-corpus case (no preamble, no
+    The chosen tier is tagged in a trailing `<!-- tier: A|A2|B|C -->` comment
+    so a session or a test can see which one ran. Always returns a string
+    that fits `budget_chars` — the empty-corpus case (no preamble, no
     conditional) trivially fits at tier A and is not a special case here.
     """
     preamble = [s for s in skills if s.is_preamble]
@@ -593,16 +687,33 @@ def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
     if len(tier_a) <= budget_chars:
         return tier_a
 
+    # --- Tier A2: audience split — compact the both-audience rows only ---
+    tier_a2 = _assemble(
+        preamble, [_conditional_line_audience_aware(s) for s in conditional], "A2"
+    )
+    if len(tier_a2) <= budget_chars:
+        both_audience_count = sum(1 for s in conditional if _is_both_audience(s))
+        log.warning(
+            "agent_policy index: tier A (%d chars) exceeded the %d-char "
+            "budget; degraded to tier A2 (%d chars, %d of %d conditional "
+            "rules compacted — both-audience scope, session-only rows kept "
+            "full).",
+            len(tier_a), budget_chars, len(tier_a2), both_audience_count,
+            len(conditional),
+        )
+        return tier_a2
+
     # --- Tier B ---
     tier_b = _assemble(
         preamble, [_conditional_line_trigger_only(s) for s in conditional], "B"
     )
     if len(tier_b) <= budget_chars:
         log.warning(
-            "agent_policy index: tier A (%d chars) exceeded the %d-char "
-            "budget; degraded to tier B (%d chars, %d conditional rules, "
-            "imperative dropped, trigger + id kept).",
-            len(tier_a), budget_chars, len(tier_b), len(conditional),
+            "agent_policy index: tier A (%d chars) and tier A2 (%d chars) "
+            "both exceeded the %d-char budget; degraded to tier B (%d "
+            "chars, %d conditional rules, imperative dropped, trigger + id "
+            "kept).",
+            len(tier_a), len(tier_a2), budget_chars, len(tier_b), len(conditional),
         )
         return tier_b
 
