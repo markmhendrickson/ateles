@@ -182,12 +182,14 @@ class CheckObservationAttributionTest(unittest.TestCase):
         self.assertFalse(check.ok)
         self.assertIn("agent_thumbprint", check.reason)
 
-    def test_no_expected_thumbprint_falls_back_to_sub_only(self):
-        """The sub-only path is kept for callers that predate a resolvable key; it must
-        not silently start requiring a thumbprint no caller asked for."""
+    def test_no_expected_thumbprint_is_not_accepted(self):
+        """PR #1274 round-4 (Falco non-blocking note 1): the sub-only fallback was reachable
+        because expected_thumbprint defaulted to None; it is now a required argument, so
+        passing None must fail rather than silently accept a sub-only match."""
         obs = self._obs(thumbprint="whatever-or-nothing")
         check = ns.check_observation_attribution([obs], "obs_1", self.SUB, None)
-        self.assertTrue(check.ok, check.reason)
+        self.assertFalse(check.ok)
+        self.assertIn("agent_thumbprint", check.reason)
 
 
 if __name__ == "__main__":

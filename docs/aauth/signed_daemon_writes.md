@@ -51,8 +51,9 @@ a hand edit there can be overwritten; change the snapshot instead.
 1. **Key.** `<agent>.jwk.json` exists in the agent keys directory in the
    canonical format ([keys](keys.md)): EC P-256, `sub: <agent>@ateles-swarm`,
    a `kid`. Check field names only; never print the file.
-2. **Grant.** The daemon's `agent_grant` (matched on its `sub` and issuer) must
-   allow every operation and type the daemon writes. For Anthus:
+2. **Grant.** The daemon's `agent_grant` (today, admits on its `sub` and
+   issuer alone) must allow every operation and type the daemon writes. For
+   Anthus:
    - `store_structured` on `daemon_report`, `strategy_revision_proposal` and
      `strategy_drift_signal`;
    - `correct` on `strategy_revision_proposal` (the generalizer adds new
@@ -60,14 +61,22 @@ a hand edit there can be overwritten; change the snapshot instead.
    - **never** `agent_policy`: the generalizer only proposes rules, and a
      signed write to `agent_policy` must stay refused.
    - **When widening this (or any) grant, pin `match_thumbprint` to the
-     agent's own key**, not `sub` alone. `sub` is a label the agent's own
-     token claims and Neotoma does not verify it against any key; a grant
-     matched only on `sub`/issuer would admit a signature from a different
-     key that happened to carry the same label. `match_thumbprint` is the
-     RFC 7638 thumbprint of the agent's public key — the same value the
-     approval-rule signer check pins (see `docs/data_types.md`'s
-     `strategy_revision_proposal` section, and Falco's PR #1274 round-3
-     finding).
+     agent's own key**, not `sub` alone — this is where widening belongs in
+     the switch-on order below, ahead of `shadow`. `sub` is a label the
+     agent's own token claims and Neotoma does not verify it against any
+     key. `match_thumbprint` is the RFC 7638 thumbprint of the agent's
+     public key — the same value the approval-rule signer check pins (see
+     `docs/data_types.md`'s `strategy_revision_proposal` section, and
+     Falco's PR #1274 round-3 finding). **Before neotoma#2506 is deployed,
+     pinning `match_thumbprint` does not yet change admission**: `scanForGrant`
+     admits on `sub`/issuer alone, so a grant matched only on those two would
+     admit a signature from a different key that happened to carry the same
+     label whether or not `match_thumbprint` is pinned. Once #2506 lands,
+     admission checks `match_thumbprint` too, so a grant pinned now is ready
+     the moment admission starts enforcing it — and the client-side signer
+     check below (`confirm_attribution` / the approval rule) already pins the
+     key regardless of grant admission, so #1274 is correct on both sides of
+     that deploy (Falco, PR #1274 round 4).
 
    Probe before switching: a signed dry-run store (`commit: false`, nothing
    persisted) through the client for each type. An admitted type answers
@@ -111,6 +120,16 @@ Expect `{"agent_sub": "anthus@ateles-swarm", "attribution_tier": "software",
 "agent_thumbprint": "<Anthus's own key thumbprint>"}`. A `null` sub, an
 unsigned tier, or a thumbprint that does not match Anthus's key file means
 the write did not verifiably come from Anthus's own key.
+
+To get Anthus's own thumbprint to compare against, print it from the key
+file — a thumbprint is a hash of the public key, safe to display, and this
+reads the key file without printing it:
+
+```sh
+python3 -c "from lib.daemon_runtime.neotoma_signed import NeotomaWriter; print(NeotomaWriter('anthus').thumbprint)"
+```
+
+Run from the repo root.
 
 ## Rolling back
 

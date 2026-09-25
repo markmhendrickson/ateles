@@ -600,14 +600,13 @@ def check_observation_attribution(
     observations: Iterable[Mapping[str, Any]],
     observation_id: str,
     expected_sub: str,
-    expected_thumbprint: "str | None" = None,
+    expected_thumbprint: str,
 ) -> AttributionCheck:
     """Find ``observation_id`` among ``observations`` and check who the server recorded.
 
     Passes only when the observation is present, its ``provenance.agent_sub``
     equals ``expected_sub``, its tier is one only a verified signature gets,
-    AND — when ``expected_thumbprint`` is given — its
-    ``provenance.agent_thumbprint`` equals ``expected_thumbprint``.
+    AND its ``provenance.agent_thumbprint`` equals ``expected_thumbprint``.
 
     ``agent_sub`` is a label the caller's own token claims; Neotoma does not
     verify it against any key (Falco, PR #1274 round 3). What a verified
@@ -616,10 +615,12 @@ def check_observation_attribution(
     JWK the signature verified against, the same value an ``agent_grant``'s
     ``match_thumbprint`` pins. Checking ``agent_sub`` alone lets any signer
     whose token carries the same ``sub`` label pass as the expected agent.
-    Callers that can supply the expected signer's own thumbprint (every
-    caller in this codebase can — it is the writer's own key) MUST pass it;
-    the sub-only path (``expected_thumbprint=None``) exists only for callers
-    that predate a key being resolvable and must not gain new callers.
+    ``expected_thumbprint`` is therefore a required argument, not optional:
+    every caller in this codebase can supply the expected signer's own
+    thumbprint (it is the writer's own key), and a caller that cannot must
+    not silently fall back to a sub-only check that a different key's token
+    would pass (Falco, PR #1274 round 4 non-blocking note 1 — the defaulted
+    parameter was reachable by a future caller that never supplied it).
     """
     for obs in observations:
         if str(obs.get("id") or "") != observation_id:
@@ -640,19 +641,18 @@ def check_observation_attribution(
                 False, f"observation tier {tier!r} is not a verified-signature tier",
                 observation_id, sub, tier, thumbprint,
             )
-        if expected_thumbprint is not None:
-            if not thumbprint:
-                return AttributionCheck(
-                    False, "observation carries no agent_thumbprint",
-                    observation_id, sub, tier, thumbprint,
-                )
-            if thumbprint != expected_thumbprint:
-                return AttributionCheck(
-                    False,
-                    f"observation carries agent_thumbprint {thumbprint!r}, "
-                    f"expected {expected_thumbprint!r}",
-                    observation_id, sub, tier, thumbprint,
-                )
+        if not thumbprint:
+            return AttributionCheck(
+                False, "observation carries no agent_thumbprint",
+                observation_id, sub, tier, thumbprint,
+            )
+        if thumbprint != expected_thumbprint:
+            return AttributionCheck(
+                False,
+                f"observation carries agent_thumbprint {thumbprint!r}, "
+                f"expected {expected_thumbprint!r}",
+                observation_id, sub, tier, thumbprint,
+            )
         return AttributionCheck(True, "signed as expected", observation_id, sub, tier, thumbprint)
     return AttributionCheck(False, "observation not found on read-back", observation_id)
 

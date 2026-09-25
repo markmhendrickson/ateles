@@ -697,19 +697,23 @@ async def create_policy_proposal(cluster: DriftCluster, bearer: str) -> str | No
     With Anthus's switch `shadow` or `on`, evidence is added only to an open
     proposal whose defining fields (`proposed_change`, `target_entity_type`,
     `target_entity_id`) were set, in every observation that set them, by
-    `anthus@ateles-swarm` at a verified-signature tier
-    (:func:`proposal_signed_by_proposer`). A same-rule proposal someone wrote
-    with the bearer is passed over and a signed one is opened beside it, so a
-    planted proposal can neither borrow Anthus's signature nor suppress the
-    genuine one. If the signer cannot be read, nothing is opened this tick.
+    `anthus@ateles-swarm`'s own key (not merely its claimed `sub`) at a
+    verified-signature tier (:func:`proposal_signed_by_proposer`). A same-rule
+    proposal someone wrote with the bearer is passed over and a signed one is
+    opened beside it, so a planted proposal can neither borrow Anthus's
+    signature nor suppress the genuine one. If the signer cannot be read,
+    nothing is opened this tick.
 
     Approval, when built, must apply the same per-field check to the stored
     record, not trust the `proposing_agent_sub` field, which is self-reported
     and writable by any bearer holder, nor accept some other signed
     observation on the entity (such as a signed evidence correction). A
-    proposal whose defining fields are not all signed by the proposer is
-    refused. The approver applies only `proposed_change`, and approves its
-    digest.
+    proposal's defining fields must carry both `provenance.agent_sub` equal
+    to the proposer's swarm identity AND `provenance.agent_thumbprint` equal
+    to the RFC 7638 thumbprint of the proposer's own key — see the module
+    docstring above for why `agent_sub` alone is not enough. A proposal whose
+    defining fields are not all signed by the proposer's key is refused. The
+    approver applies only `proposed_change`, and approves its digest.
     """
     fields = proposed_policy_fields(cluster)
     change = {"op": "create", "entity_type": "agent_policy", "fields": fields}

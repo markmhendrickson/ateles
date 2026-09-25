@@ -493,6 +493,22 @@ def test_proposal_signed_by_proposer_returns_false_for_an_empty_entity_id():
     assert asyncio.run(gz.proposal_signed_by_proposer("", "tok")) is False
 
 
+def test_proposal_signed_by_proposer_returns_none_with_no_usable_key(monkeypatch, tmp_path):
+    """No usable AAuth key (`_writer(bearer).thumbprint` raising `AAuthSigningError`) must
+    return None — nothing opened this tick — not fall through to a sub-only check. This
+    exercises the `except AAuthSigningError` branch directly, ahead of any HTTP read: an
+    empty keys dir means `agent_identity` finds no `anthus.jwk.json` and `_load_signer`
+    raises before `proposal_signed_by_proposer` ever calls `observations/query`."""
+    monkeypatch.setattr(ns, "AAUTH_KEYS_DIR", str(tmp_path))
+    monkeypatch.setenv("ATELES_SIGNED_WRITES_ANTHUS", "on")
+
+    async def fail_if_called(path, body, bearer):
+        raise AssertionError(f"observations/query must not be reached: {path}")
+
+    monkeypatch.setattr(gz, "_post", fail_if_called)
+    assert asyncio.run(gz.proposal_signed_by_proposer("some-entity-id", "tok")) is None
+
+
 def test_unreadable_signer_opens_nothing(neotoma, monkeypatch, tmp_path):
     _anthus_key(tmp_path, monkeypatch)
     monkeypatch.setenv("ATELES_SIGNED_WRITES_ANTHUS", "on")
