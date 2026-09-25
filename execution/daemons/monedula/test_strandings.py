@@ -34,6 +34,7 @@ from strandings import (
     build_escalation_entity,
     escalate,
     select_new_strandings,
+    stranded_fingerprint,
 )
 
 HOSTED = "https://neotoma.example.invalid"
@@ -450,3 +451,93 @@ def test_run_with_no_strandings_is_clean(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "handlers", fake)
 
     assert monedula.main() is True
+
+
+# ── Notifier stranded-set dedupe (ateles#1178) ────────────────────────────────
+
+
+def test_stranded_notify_passes_stable_dedupe_key(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "strandings._post_escalation", lambda *a, **k: True
+    )
+    notes = []
+
+    def notify(msg, priority="info", **kwargs):
+        notes.append((msg, priority, kwargs))
+
+    s = _s()
+    escalate([s], notify=notify, state_file=tmp_path / "s.json", now=1000.0)
+    assert len(notes) == 1
+    msg, priority, kwargs = notes[0]
+    fp = stranded_fingerprint([s])
+    assert kwargs.get("dedupe_key") == f"monedula:stranded:{fp}"
+    assert kwargs.get("email_eligible") is True
+    assert "payment_profiles_stranded" in msg
+    assert s.label in msg
+
+
+def test_unchanged_stranded_set_does_not_renotify_every_tick(monkeypatch, tmp_path):
+    """Notifier key is stable; fresh Neotoma escalations still use 24h file suppress.
+
+    Second escalate with same set within 24h has fresh=[] so notify is not
+    called again from escalate — and the key file preserves the fingerprint.
+    """
+    monkeypatch.setattr("strandings._post_escalation", lambda *a, **k: True)
+    notes = []
+    cleared = []
+
+    def notify(msg, priority="info", **kwargs):
+        notes.append((msg, priority, kwargs))
+
+    def clear_dedupe(key):
+        cleared.append(key)
+
+    s = _s()
+    state = tmp_path / "s.json"
+    escalate(
+        [s],
+        notify=notify,
+        state_file=state,
+        now=1000.0,
+        clear_dedupe=clear_dedupe,
+    )
+    escalate(
+        [s],
+        notify=notify,
+        state_file=state,
+        now=1000.0 + 900,
+        clear_dedupe=clear_dedupe,
+    )
+    assert len(notes) == 1, "unchanged set must not re-notify within 24h window"
+    # Change the set → prior key cleared, new notify once.
+    s2 = _s(entity_id="ent_other", label="Other", reason=REASON_BAD_AMOUNT)
+    escalate(
+        [s, s2],
+        notify=notify,
+        state_file=state,
+        now=1000.0 + 1800,
+        clear_dedupe=clear_dedupe,
+    )
+    assert len(notes) == 2
+    assert cleared, "prior stranded key must be cleared on set change"
+
+
+def test_empty_strandings_clears_prior_stranded_dedupe(monkeypatch, tmp_path):
+    monkeypatch.setattr("strandings._post_escalation", lambda *a, **k: True)
+    cleared = []
+    state = tmp_path / "s.json"
+    escalate(
+        [_s()],
+        notify=lambda *a, **k: None,
+        state_file=state,
+        now=1000.0,
+        clear_dedupe=lambda k: cleared.append(k),
+    )
+    escalate(
+        [],
+        notify=lambda *a, **k: None,
+        state_file=state,
+        now=2000.0,
+        clear_dedupe=lambda k: cleared.append(k),
+    )
+    assert cleared, "empty strandings must clear prior Notifier dedupe key"

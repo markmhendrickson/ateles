@@ -22,6 +22,9 @@ Environment variables:
   TELEGRAM_CHAT_ID          Telegram chat ID
   TELEGRAM_TOPIC_ANTHUS     Telegram topic ID for Anthus notifications (optional)
   ANTHUS_AGENT_DEFINITION_ID  Neotoma entity ID for Anthus's agent_definition (optional)
+  ATELES_SWARM_REQUIRE_LABEL  Label gate (bootstrap mode / canary lane). When set,
+                            issue/PR orchestration runs only for items carrying
+                            this label (same gate as Apis; lib/daemon_runtime/label_gate)
 """
 
 from __future__ import annotations
@@ -44,6 +47,7 @@ from lib.daemon_runtime import (  # noqa: E402
     SSEClient,
     hydrate_snapshot,
 )
+from lib.daemon_runtime import label_gate  # noqa: E402
 from lib.notify import Notifier, Priority  # noqa: E402
 from lib.activity import ActivityLogger  # noqa: E402
 
@@ -141,6 +145,14 @@ async def _orchestrate_workflow_for(event) -> None:
     project = _project_from_repo(snap.get("repository") or snap.get("repo") or "")
     if not project:
         log.debug(f"[{DAEMON_NAME}] no project derivable from event {event.entity_id}")
+        return
+
+    # Label gate (ateles#1269, Falco round 3): Anthus is an automatic entry
+    # into issue/PR work independent of Apis, so it honours the same
+    # ATELES_SWARM_REQUIRE_LABEL. Checked before workflow selection — whose
+    # `feature` fallback would otherwise dispatch any unlabelled item — and
+    # before comment reads, drift harvesting and every gate dispatch below.
+    if not await _label_gate_allows(event, snap):
         return
 
     workflows = await fetch_workflow_definitions(project)
@@ -317,6 +329,153 @@ async def _orchestrate_workflow_for(event) -> None:
             priority=Priority.INFO,
             handler=DAEMON_NAME,
         )
+
+
+# ── Label gate (bootstrap mode / canary lane) ────────────────────────────────
+# Work entities whose skip has already been logged at WARNING. Anthus sees the
+# same issue/PR again on every entity update, so later skips log at DEBUG.
+_label_gate_warned: set[str] = set()
+
+
+def _label_gate_log(entity_id: str, message: str) -> None:
+    """WARNING once per work entity per process, DEBUG after that."""
+    if entity_id in _label_gate_warned:
+        log.debug(message)
+        return
+    _label_gate_warned.add(entity_id)
+    log.warning(message + " (logged once per process; later events at DEBUG)")
+
+
+async def _fetch_github_labels_and_body(
+    kind: str, repo: str, number: int
+) -> dict | None:
+    """Read an issue's or PR's live labels and body from GitHub via `gh`.
+
+    Returns ``{"labels": [...names], "body": str}``, or None on ANY failure —
+    the caller treats None as "label not confirmed" and denies.
+    """
+    import json as _json
+    import subprocess as _sp
+
+    sub = "pr" if kind == "pr" else "issue"
+    try:
+        out = await asyncio.to_thread(
+            _sp.run,
+            [
+                "gh",
+                sub,
+                "view",
+                str(number),
+                "--repo",
+                str(repo),
+                "--json",
+                "labels,body",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
+        )
+        data = _json.loads(out.stdout)
+    except Exception as exc:  # noqa: BLE001 — fail closed, never crash dispatch
+        log.warning(
+            f"[{DAEMON_NAME}] label gate: could not read {sub} {repo}#{number} "
+            f"from GitHub: {exc}"
+        )
+        return None
+    if not isinstance(data, dict):
+        return None
+    body = data.get("body")
+    return {
+        "labels": label_gate.label_names(data),
+        "body": body if isinstance(body, str) else "",
+    }
+
+
+async def _label_gate_allows(event, snap: dict) -> bool:
+    """Decide whether Anthus may orchestrate `event`'s issue/PR at all.
+
+    Same gate, same env var and same match rule as Apis
+    (`lib/daemon_runtime/label_gate`): with ATELES_SWARM_REQUIRE_LABEL unset
+    this returns True and changes nothing. With it set:
+
+    * an **issue** passes only when its Neotoma snapshot's ``labels`` carries
+      the label. Synced `issue` entities store ``labels`` as a list of names.
+    * a **pull_request** passes when the label is on its snapshot, OR on the
+      PR on GitHub, OR on its same-repo parent issue named in the PR body
+      (`Closes #N`, `Part of #N`, `Refs #N`, ...) — the Apis inheritance rule.
+      Neotoma `pull_request` entities carry no ``labels`` today, so the PR's
+      labels and body are read live from GitHub.
+
+    Anything that cannot be read — no labels field, unparseable labels, no PR
+    number, a failed GitHub read — counts as NOT labelled, and the item is
+    skipped. The gate fails closed.
+    """
+    required = label_gate.required_label()
+    if not required:
+        return True
+
+    entity_id = event.entity_id
+    repo = str(snap.get("repository") or snap.get("repo") or "")
+    number = (
+        snap.get("github_number")
+        or snap.get("number")
+        or snap.get("pr_number")
+        or snap.get("issue_number")
+    )
+    ref = f"{repo}#{number}" if number else entity_id
+
+    if label_gate.carries_label(
+        required, label_gate.snapshot_label_names(snap.get("labels"))
+    ):
+        return True
+
+    if event.entity_type == "pull_request":
+        if not repo or not str(number or "").isdigit():
+            _label_gate_log(
+                entity_id,
+                f"[{DAEMON_NAME}] label gate active (required={required!r}) — "
+                f"skipping pull_request {entity_id}: no repository/PR number on "
+                "the snapshot, so its labels cannot be confirmed (failing closed)",
+            )
+            return False
+        live = await _fetch_github_labels_and_body("pr", repo, int(number))
+        if live is None:
+            _label_gate_log(
+                entity_id,
+                f"[{DAEMON_NAME}] label gate active (required={required!r}) — "
+                f"skipping PR {ref} ({entity_id}): could not read its labels "
+                "from GitHub (failing closed)",
+            )
+            return False
+        if label_gate.carries_label(required, live["labels"]):
+            return True
+        body = live["body"] or str(snap.get("body") or "")
+        parent = label_gate.parent_issue_number(body, repo)
+        if parent is not None:
+            parent_live = await _fetch_github_labels_and_body("issue", repo, parent)
+            if parent_live is None:
+                _label_gate_log(
+                    entity_id,
+                    f"[{DAEMON_NAME}] label gate active (required={required!r}) — "
+                    f"skipping PR {ref} ({entity_id}): could not read parent "
+                    f"issue #{parent} labels (failing closed)",
+                )
+                return False
+            if label_gate.carries_label(required, parent_live["labels"]):
+                return True
+
+    _label_gate_log(
+        entity_id,
+        f"[{DAEMON_NAME}] label gate active (required={required!r}) — skipping "
+        f"{event.entity_type} {ref} ({entity_id}): label not present on "
+        + (
+            "the PR or its linked parent issue"
+            if event.entity_type == "pull_request"
+            else "the issue"
+        ),
+    )
+    return False
 
 
 # Agents that need write access to the local filesystem or to call MCP servers

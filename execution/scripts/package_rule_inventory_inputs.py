@@ -6,6 +6,19 @@ branch on a hosted runner. It never executes a file from the candidate checkout:
 the candidate contributes only the fixed repository inputs enumerated here.
 The privileged runner validates the resulting manifest before the trusted
 renderer reads the tree as data.
+
+Last-modified dates are recorded here, as data
+----------------------------------------------
+The packaged copies are freshly written, so their filesystem mtime is always
+the day of the run -- a "last modified" taken from them measured the packager,
+not the corpus. The packager therefore records each file's last git commit
+date (committer time, as a UTC calendar date) in the manifest, read from the
+candidate checkout's history. The date is informational: the renderer shows
+it, and `render_rule_inventory.py --check` excludes it from the equality
+comparison (see that script's docstring). A checkout the instrument cannot
+date -- not a git work tree, not the tree's top level, or a shallow clone,
+whose single grafted commit would claim to have touched every file -- records
+`null` rather than a wrong date.
 """
 
 from __future__ import annotations
@@ -13,10 +26,18 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import re
+import subprocess
 import sys
+from collections.abc import Iterable
+from datetime import date, datetime, timezone
 from pathlib import Path, PurePosixPath
 
 MANIFEST = ".canonical-rule-inventory-inputs.json"
+MANIFEST_SCHEMA = 2
+RECORD_KEYS = frozenset({"path", "sha256", "size", "last_commit_date"})
+ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 EXACT_INPUTS = frozenset(
     {
         "CLAUDE.md",
@@ -115,6 +136,109 @@ def _read_regular_file(root: Path, path: Path) -> tuple[str, bytes]:
     return relative, data
 
 
+def _is_iso_date(value: object) -> bool:
+    if not isinstance(value, str) or not ISO_DATE.fullmatch(value):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def git_last_commit_dates(
+    source: Path, relatives: Iterable[str]
+) -> dict[str, str | None]:
+    """Return each file's last git commit date (UTC, ISO) or None.
+
+    One `git log` pass over the declared paths. `None` wherever the history
+    cannot answer: the source is not the top level of a git work tree, the
+    clone is shallow (its grafted root would date every file to the head
+    commit), or the file has no commit. Never raises: a date is informational,
+    and an unanswerable date is reported as absent rather than guessed.
+    """
+    dates: dict[str, str | None] = dict.fromkeys(sorted(set(relatives)))
+    if not dates:
+        return dates
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "--literal-pathspecs", "-C", str(source), *args],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+            check=False,
+        )
+
+    try:
+        identity = git("rev-parse", "--show-toplevel", "--is-shallow-repository")
+        lines = identity.stdout.splitlines()
+        if (
+            identity.returncode != 0
+            or len(lines) != 2
+            or Path(lines[0]).resolve() != source.resolve()
+            or lines[1].strip() != "false"
+        ):
+            return dates
+        log = git(
+            "-c",
+            "core.quotePath=false",
+            "log",
+            "--no-renames",
+            "--format=%x00%ct",
+            "--name-only",
+            "--",
+            *dates,
+        )
+        if log.returncode != 0:
+            return dates
+    except (OSError, subprocess.SubprocessError):
+        return dates
+    latest: dict[str, int] = {}
+    stamp: int | None = None
+    for line in log.stdout.splitlines():
+        if line.startswith("\x00"):
+            try:
+                stamp = int(line[1:])
+            except ValueError:
+                stamp = None
+            continue
+        if stamp is not None and line in dates:
+            latest[line] = max(latest.get(line, stamp), stamp)
+    for relative, seconds in latest.items():
+        dates[relative] = (
+            datetime.fromtimestamp(seconds, tz=timezone.utc).date().isoformat()
+        )
+    return dates
+
+
+def recorded_commit_dates(root: Path) -> dict[str, str]:
+    """Read the commit dates a packaged tree's manifest recorded.
+
+    Lenient by design: the privileged gate has already validated the manifest
+    with `validate_inputs`, and a date is informational, so anything unreadable
+    here yields no date rather than an error.
+    """
+    try:
+        manifest = json.loads((root / MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(manifest, dict) or manifest.get("schema") != MANIFEST_SCHEMA:
+        return {}
+    records = manifest.get("files")
+    if not isinstance(records, list):
+        return {}
+    return {
+        record["path"]: record["last_commit_date"]
+        for record in records
+        if isinstance(record, dict)
+        and isinstance(record.get("path"), str)
+        and _is_iso_date(record.get("last_commit_date"))
+    }
+
+
 def package_inputs(source: Path, destination: Path) -> None:
     if not source.is_absolute() or not source.is_dir():
         raise InputBoundaryError("invalid_root")
@@ -148,7 +272,12 @@ def package_inputs(source: Path, destination: Path) -> None:
         )
     if not EXACT_INPUTS.issubset({record["path"] for record in records}):
         raise InputBoundaryError("missing_exact_inputs")
-    manifest = {"schema": 1, "files": records}
+    commit_dates = git_last_commit_dates(
+        source, (str(record["path"]) for record in records)
+    )
+    for record in records:
+        record["last_commit_date"] = commit_dates.get(str(record["path"]))
+    manifest = {"schema": MANIFEST_SCHEMA, "files": records}
     try:
         (destination / MANIFEST).write_text(
             json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
@@ -176,7 +305,7 @@ def validate_inputs(root: Path) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise InputBoundaryError("malformed_manifest") from exc
-    if not isinstance(manifest, dict) or manifest.get("schema") != 1:
+    if not isinstance(manifest, dict) or manifest.get("schema") != MANIFEST_SCHEMA:
         raise InputBoundaryError("malformed_manifest")
     records = manifest.get("files")
     if not isinstance(records, list) or len(records) > MAX_FILES:
@@ -185,7 +314,10 @@ def validate_inputs(root: Path) -> None:
     expected: set[str] = set()
     total = 0
     for record in records:
-        if not isinstance(record, dict) or set(record) != {"path", "sha256", "size"}:
+        if not isinstance(record, dict) or set(record) != RECORD_KEYS:
+            raise InputBoundaryError("malformed_manifest")
+        commit_date = record["last_commit_date"]
+        if commit_date is not None and not _is_iso_date(commit_date):
             raise InputBoundaryError("malformed_manifest")
         relative = record["path"]
         digest = record["sha256"]

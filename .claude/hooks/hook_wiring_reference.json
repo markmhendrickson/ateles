@@ -38,6 +38,11 @@
     ],
     [
       "SessionStart",
+      "session_rule_index.py",
+      "startup|resume|clear|compact"
+    ],
+    [
+      "SessionStart",
       "session_start.py",
       "startup|resume|clear|compact"
     ],

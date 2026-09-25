@@ -1193,7 +1193,11 @@ class TestToolSchemas(unittest.TestCase):
     # Read-only swarm observability. resolve_checkpoint stays the ONLY mutating
     # tool: see the self-certification boundary note in server.py — a session
     # must not be able to advance its own gate.
-    OBSERVABILITY_TOOLS = {"get_gate_status", "list_pipeline_queue", "get_dispatch_health"}
+    OBSERVABILITY_TOOLS = {
+        "get_gate_status", "list_pipeline_queue", "get_dispatch_health",
+        # ateles#1275 slice 1: per-task timeline and change feed, read-only.
+        "get_task_timeline", "watch_swarm",
+    }
 
     def test_tools_defined(self):
         self.assertEqual(len(srv.TOOLS), len(self.ACTION_TOOLS | self.OBSERVABILITY_TOOLS))
@@ -1212,7 +1216,10 @@ class TestToolSchemas(unittest.TestCase):
         for name in self.OBSERVABILITY_TOOLS:
             fn = srv.TOOL_HANDLERS[name]
             chain = inspect.getsource(fn)
-            for impl in ("_get_gate_status", "_list_pipeline_queue", "_get_dispatch_health"):
+            for impl in (
+                "_get_gate_status", "_list_pipeline_queue", "_get_dispatch_health",
+                "_get_task_timeline", "_watch_swarm", "_watch_poll", "_watch_baseline",
+            ):
                 if impl in chain:
                     chain += inspect.getsource(getattr(srv, impl))
             self.assertNotIn("_correct(", chain, f"{name} must not write to Neotoma")
@@ -1534,3 +1541,33 @@ class TestInstructionsBudgetRedGreen:
             "failure mode ateles#1243 measured on main (17,996 chars against "
             "a ~2,048-char shared client cap)"
         )
+
+
+# ── get_dispatch_health: label gate surfacing ───────────────────────────────
+#
+# ATELES_SWARM_REQUIRE_LABEL (bootstrap mode / canary lane, swarm_dispatch.py)
+# must be surfaced here so "nothing is being reviewed" reads as the label gate
+# working as designed rather than as a broken dispatcher.
+
+
+class TestDispatchHealthLabelGate:
+    def test_unset_reports_gate_inactive(self, monkeypatch):
+        monkeypatch.delenv("ATELES_SWARM_REQUIRE_LABEL", raising=False)
+        result = srv._get_dispatch_health()
+        assert result["label_gate_active"] is False
+        assert result["label_gate_label"] is None
+
+    def test_set_reports_gate_active_with_label(self, monkeypatch):
+        monkeypatch.setenv("ATELES_SWARM_REQUIRE_LABEL", "swarm-canary")
+        result = srv._get_dispatch_health()
+        assert result["label_gate_active"] is True
+        assert result["label_gate_label"] == "swarm-canary"
+        assert "swarm-canary" in result["interpretation"]
+
+    def test_set_empty_string_reports_gate_inactive(self, monkeypatch):
+        # Whitespace-only / empty-string env values must not read as "active
+        # with an empty label" — same treatment as fully unset.
+        monkeypatch.setenv("ATELES_SWARM_REQUIRE_LABEL", "   ")
+        result = srv._get_dispatch_health()
+        assert result["label_gate_active"] is False
+        assert result["label_gate_label"] is None

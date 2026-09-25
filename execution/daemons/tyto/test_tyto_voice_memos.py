@@ -1081,3 +1081,185 @@ def test_memo_must_stop_growing_before_transcription(tmp_path):
 
     # Once the complete signature is unchanged, the memo is eligible.
     assert [call[0] for call in _poll(watcher)] == [memo]
+
+
+# ── Per-recording attempt cap (2026-09-25) ───────────────────────────────────
+#
+# ateles#1084 stopped retries only for failures it could name as permanent.
+# Everything else was transient and retried every five minutes without limit,
+# so a failure nobody classified (a read-back mismatch, then
+# ERR_IDEMPOTENCY_MISMATCH) looped for a week across 128 memos and grew the
+# error log to ~575 MB. The attempt cap bounds the failure nobody anticipated.
+
+
+def _memo_watcher(memo_dir: Path, state_path: Path | None, **kwargs) -> tyto.RecordingWatcher:
+    return _make_watcher(
+        memo_dir,
+        capture_method="voice_memo",
+        paired=False,
+        extensions={".m4a"},
+        max_age_secs=3600,
+        seed_existing=True,
+        retry_state_path=state_path,
+        retry_secs=0,
+        **kwargs,
+    )
+
+
+def _always_transient(calls):
+    async def _fail(remote_path, mic_path):
+        calls.append(remote_path)
+        return "transient", None
+
+    return _fail
+
+
+def _permanent_messages(watcher) -> list[str]:
+    return [
+        call.args[0]
+        for call in watcher._notifier.send.call_args_list
+        if "permanently failed" in call.args[0]
+    ]
+
+
+def test_unclassified_failure_stops_at_the_attempt_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(tyto, "RETRY_MAX_ATTEMPTS", 3, raising=False)
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    state_path = tmp_path / "retry.json"
+    watcher = _memo_watcher(memo_dir, state_path)
+    memo = _write(memo_dir, "20260919 183801-CAP00001.m4a", age_secs=FRESH)
+    _settled(watcher)
+    calls: list[Path] = []
+
+    with patch.object(watcher, "_handle_recording", side_effect=_always_transient(calls)):
+        for _ in range(8):
+            asyncio.run(watcher.poll_once())
+
+    assert calls == [memo, memo, memo]
+    assert memo in watcher._hard_failed
+    assert watcher._hard_failed[memo]["error_code"].startswith("ERR_RETRY_LIMIT_EXCEEDED")
+    assert memo not in watcher._pending_retries
+    journal = json.loads(state_path.read_text())
+    assert journal["pending"] == []
+    assert journal["hard_failed"][0]["error_code"].startswith("ERR_RETRY_LIMIT_EXCEEDED")
+    assert len(_permanent_messages(watcher)) == 1
+
+
+def test_attempt_count_survives_a_restart(tmp_path, monkeypatch):
+    """A restart must not hand every failing memo a fresh set of attempts."""
+    monkeypatch.setattr(tyto, "RETRY_MAX_ATTEMPTS", 3, raising=False)
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    state_path = tmp_path / "retry.json"
+    first = _memo_watcher(memo_dir, state_path)
+    memo = _write(memo_dir, "20260919 183801-CAP00002.m4a", age_secs=FRESH)
+    _settled(first)
+    calls: list[Path] = []
+    with patch.object(first, "_handle_recording", side_effect=_always_transient(calls)):
+        asyncio.run(first.poll_once())
+        asyncio.run(first.poll_once())
+    assert json.loads(state_path.read_text())["pending"][0]["attempts"] == 2
+
+    restarted = _memo_watcher(memo_dir, state_path)
+    _settled(restarted)
+    with patch.object(restarted, "_handle_recording", side_effect=_always_transient(calls)):
+        for _ in range(4):
+            asyncio.run(restarted.poll_once())
+
+    assert calls == [memo, memo, memo]
+    assert memo in restarted._hard_failed
+
+
+def test_journal_entry_without_attempts_loads_as_zero(tmp_path):
+    """Journals written before the cap carry no attempts field."""
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    memo = _write(memo_dir, "20260919 183801-CAP00003.m4a", age_secs=FRESH)
+    state_path = tmp_path / "retry.json"
+    state_path.write_text(json.dumps({
+        "version": 2,
+        "pending": [{"path": str(memo), "retry_after": 0}],
+        "hard_failed": [],
+    }))
+    watcher = _memo_watcher(memo_dir, state_path)
+    assert watcher._retry_state_available is True
+    assert memo in watcher._pending_retries
+    assert watcher._attempts.get(memo, 0) == 0
+
+
+def test_success_clears_the_attempt_count(tmp_path, monkeypatch):
+    monkeypatch.setattr(tyto, "RETRY_MAX_ATTEMPTS", 3, raising=False)
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    state_path = tmp_path / "retry.json"
+    watcher = _memo_watcher(memo_dir, state_path)
+    memo = _write(memo_dir, "20260919 183801-CAP00004.m4a", age_secs=FRESH)
+    _settled(watcher)
+    outcomes = iter((("transient", None), ("transient", None), ("success", None)))
+
+    async def _record(_remote_path, _mic_path):
+        return next(outcomes)
+
+    with patch.object(watcher, "_handle_recording", side_effect=_record):
+        for _ in range(3):
+            asyncio.run(watcher.poll_once())
+
+    assert memo in watcher._transcribed
+    assert memo not in watcher._hard_failed
+    assert watcher._attempts == {}
+
+
+def test_retry_delay_doubles_and_is_capped(tmp_path):
+    watcher = _make_watcher(tmp_path, retry_secs=300, max_retry_delay_secs=1000)
+    assert [watcher._retry_delay(n) for n in (1, 2, 3, 4)] == [300, 600, 1000, 1000]
+
+
+def test_meeting_watcher_without_a_journal_is_also_capped(tmp_path, monkeypatch):
+    """The meeting watchers have no journal and retried an unreadable
+    recording every five minutes for the life of the process."""
+    monkeypatch.setattr(tyto, "RETRY_MAX_ATTEMPTS", 2, raising=False)
+    watcher = _make_watcher(tmp_path, retry_secs=0)
+    remote = _write(tmp_path, "20260529 0410 system.mp4", age_secs=FRESH)
+    _settled(watcher)
+    calls: list[Path] = []
+    with patch.object(watcher, "_handle_recording", side_effect=_always_transient(calls)):
+        for _ in range(5):
+            asyncio.run(watcher.poll_once())
+
+    assert calls == [remote, remote]
+    assert remote in watcher._hard_failed
+    assert len(_permanent_messages(watcher)) == 1
+
+
+def test_idempotency_mismatch_is_classified_permanent():
+    """transcribe_audio.py raises this only after failing to resolve the prior
+    write; the same key and payload are rejected identically every time."""
+    exc = RuntimeError(
+        "Neotoma store failed: ERR_IDEMPOTENCY_MISMATCH and no stored "
+        "transcription matches this audio"
+    )
+    assert tyto._classify_store_error(exc) == "ERR_IDEMPOTENCY_MISMATCH"
+
+
+def test_error_code_past_the_stderr_cut_is_still_classified(tmp_path):
+    """The alert excerpt is cut at 300 characters; a sidecar line plus a JSON
+    envelope can push the error code past it, and a code that is cut off
+    cannot be classified as permanent."""
+    memo = _write(tmp_path, "20260919 183801-CAP00005.m4a", age_secs=FRESH)
+    watcher = _make_watcher(tmp_path, capture_method="voice_memo", paired=False)
+    failed = MagicMock(
+        returncode=1,
+        stdout="TRANSCRIPTION_BACKEND_SELECTED=local\n",
+        stderr=(
+            "Wrote transcript sidecar: " + "x" * 320 + ".transcript.txt\n"
+            "Error transcribing audio: Neotoma store failed: ERR_IDEMPOTENCY_MISMATCH "
+            "and no stored transcription matches this audio"
+        ),
+    )
+
+    with patch.object(tyto.subprocess, "run", return_value=failed):
+        outcome, error_code = asyncio.run(watcher._handle_recording(memo, None))
+
+    assert outcome == "permanent"
+    assert error_code == "ERR_IDEMPOTENCY_MISMATCH"

@@ -94,6 +94,15 @@ class WiseTransferHandler(PaymentHandler):
             f"  Event: {summary}"
         )
 
+    def payee_identity(self) -> str | None:
+        """The payee ``execute`` would pay, resolved the same way, for binding
+        consent to it. Hashed by the caller; never logged. None when the payee
+        cannot be resolved (``execute`` would then return manual_required)."""
+        contact = _load_contact(self.profile)
+        if not contact or not contact.get("iban"):
+            return None
+        return f"wise|{contact.get('name', '')}|{contact.get('iban', '')}"
+
     def execute(self, match: dict) -> dict[str, Any]:
         """Execute Wise transfer. Returns result dict with status and details."""
         log.info(f"[{self.name}] Executing Wise payment...")
