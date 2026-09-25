@@ -17,7 +17,12 @@ The approval this tool submits is a binding control only because it can be
 produced ONLY from a lens verdict comment marked for the PR's CURRENT head
 (`compose_lens_review_marker`) — a verdict comment left on an old head, a
 missing lens, a `[BLOCKING]` finding, or a red required check each refuse
-outright rather than approving with a caveat.
+outright rather than approving with a caveat. The required-lens FLOOR is
+likewise derived, not typed by the caller (round-1 pm/arch/security review on
+PR #1266): `derive_required_lenses` calls `review_panel.select_panel` — the
+same function `swarm_dispatch.py`'s dispatcher calls to assemble a PR's
+review panel — against THIS PR's changed files and linked issue, so the tool
+can never silently require less than the pipeline itself would review with.
 
 Reuse, not rebuild:
   - Lens verdict parsing: `swarm_dispatch.lens_own_verdict` /
@@ -29,14 +34,30 @@ Reuse, not rebuild:
     installation-token exchange `_emit_formal_review` already uses to submit
     binding reviews as `ateles-agents[bot]` (PR #1239: key read from
     ATELES_REVIEWER_APP_PRIVATE_KEY or ATELES_REVIEWER_APP_PRIVATE_KEY_PATH).
+  - Required-lens selection: `review_panel.select_panel` / `LENSES` — the
+    same panel-assembly logic (`diff_patterns` on changed files,
+    `issue_patterns` + pre-registered `review_expectation` comments on the
+    linked issue, `always`-on lenses) the dispatcher uses, imported and
+    called, not copied.
+  - Pre-submit re-verification + readback: mirrors
+    `swarm_dispatch._emit_formal_review`'s binding-review contract exactly —
+    re-fetch the PR immediately before posting and refuse unless it is still
+    OPEN, unmerged, and at the verified head; pin `commit_id` to that head;
+    refuse a self-approval; and after posting, read the created review back
+    and confirm id/commit/state/author before treating it as landed (round-1
+    Falco finding on PR #1266: this tool's own POST response was previously
+    trusted as proof, with no independent read-back — exactly the failure
+    shape `docs/foundation/principles.md#1` names).
 
 Usage:
     python3 execution/scripts/approve_pr_as_app.py --repo <owner/name> --pr <n> \\
-        [--lenses pm,arch,qa,security] [--apply]
+        [--lenses pm,security] [--apply]
 
-Without --apply this is always a dry run: it prints the per-lens table and
-the check-run table and does nothing else, whether every gate passes or not.
-With --apply, and ONLY if every lens and every required check passes, it
+`--lenses` ADDS to the derived floor; it can never remove a lens the panel
+logic would itself require for this diff/issue. Without --apply this is
+always a dry run: it prints the derived-lens rationale, the per-lens table,
+and the check-run table, and does nothing else, whether every gate passes or
+not. With --apply, and ONLY if every lens and every required check passes, it
 submits a formal APPROVE review as the App. On any failure it exits non-zero
 and submits nothing.
 
@@ -54,6 +75,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -65,9 +87,13 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 
 import httpx  # noqa: E402
 
+from review_panel import Lens, select_panel  # noqa: E402
 from swarm_dispatch import (  # noqa: E402
+    EXPECTATION_MARKER,
+    SwarmDispatcher,
     _mint_reviewer_app_installation_token,
     _normalise_full_sha,
+    _normalise_github_review_id,
     _reviewer_app_private_key_pem,
     compose_lens_review_marker,
     lens_own_verdict,
@@ -91,11 +117,15 @@ LENS_AGENTS: dict[str, str] = {
     "content": "corvus",
 }
 
-DEFAULT_LENSES: tuple[str, ...] = ("pm", "arch", "qa", "security")
-
 _FAILING_CHECK_CONCLUSIONS = ("failure", "timed_out", "cancelled", "action_required")
 
 GITHUB_API = "https://api.github.com"
+
+_EXPECTATION_MARKER_RE = re.compile(
+    rf"\*\*{EXPECTATION_MARKER} \((?P<lens>[\w-]+)\)\*\* — what "
+    r"(?P<agent>\w+) will verify",
+    re.I,
+)
 
 
 def _github_headers() -> dict[str, str]:
@@ -175,6 +205,130 @@ def _latest_matching_comment(
         if marker in (c.get("body") or ""):
             return c
     return None
+
+
+class RequiredLens:
+    """One lens in the derived floor, with why it is required."""
+
+    def __init__(self, lens: str, reason: str) -> None:
+        self.lens = lens
+        self.reason = reason
+
+
+async def _changed_files(client: httpx.AsyncClient, repo: str, pr: int) -> list[str]:
+    """Filenames touched by the PR — same endpoint `swarm_dispatch._changed_files` reads."""
+    out: list[str] = []
+    page = 1
+    while True:
+        resp = await client.get(
+            f"{GITHUB_API}/repos/{repo}/pulls/{pr}/files",
+            headers=_github_headers(),
+            params={"per_page": 100, "page": page},
+        )
+        resp.raise_for_status()
+        rows = resp.json() or []
+        out.extend(f.get("filename", "") for f in rows)
+        if len(rows) < 100:
+            break
+        page += 1
+    return out
+
+
+async def _preregistered_gate_contributors(
+    client: httpx.AsyncClient, repo: str, issue_number: int
+) -> set[str]:
+    """Agents that pre-registered a review_expectation on the parent issue.
+
+    Same marker and same regex `swarm_dispatch._preregistered_expectations`
+    reads (`EXPECTATION_MARKER`, imported, not retyped) — reproduced here
+    rather than calling the dispatcher method directly because that method is
+    an instance method requiring a live `SwarmDispatcher` (Notifier, gws
+    config, …) this standalone tool has no reason to construct.
+    """
+    out: set[str] = set()
+    page = 1
+    while True:
+        resp = await client.get(
+            f"{GITHUB_API}/repos/{repo}/issues/{issue_number}/comments",
+            headers=_github_headers(),
+            params={"per_page": 100, "page": page},
+        )
+        resp.raise_for_status()
+        rows = resp.json() or []
+        for c in rows:
+            m = _EXPECTATION_MARKER_RE.search(c.get("body") or "")
+            if m:
+                out.add(m.group("agent").lower())
+        if len(rows) < 100:
+            break
+        page += 1
+    return out
+
+
+def _why_lens_selected(lens: Lens, *, changed_files: list[str], gate_contributors: set[str]) -> str:
+    """Human-readable reason `select_panel` would have included *lens*.
+
+    Descriptive only — `select_panel` itself already decided inclusion; this
+    just explains which of its OR'd conditions fired, for the dry-run table.
+    """
+    if lens.always:
+        return "always-on lens"
+    if lens.agent in gate_contributors:
+        return f"{lens.agent} pre-registered a review_expectation on the linked issue"
+    matched_patterns = [
+        pattern
+        for pattern in lens.diff_patterns
+        for path in changed_files
+        if re.search(pattern, path)
+    ]
+    if matched_patterns:
+        return f"diff matches {matched_patterns[0]!r}"
+    if lens.gate:
+        return f"owns a gate still pending on the linked issue ({lens.gate})"
+    return "selected by the panel (reason not otherwise categorized)"
+
+
+async def derive_required_lenses(
+    client: httpx.AsyncClient, *, repo: str, pr: int, pr_body: str
+) -> list[RequiredLens]:
+    """The required-lens FLOOR for this PR: `review_panel.select_panel`'s own
+    panel-assembly logic, applied to this PR's changed files and linked
+    issue — never a hand-typed default.
+
+    This is the same function `swarm_dispatch.py`'s dispatcher calls
+    (`select_panel(gate_contributors=..., changed_files=..., ...)`) to
+    assemble a PR's review panel, imported and called here rather than
+    reimplemented, so this tool's idea of "required" cannot silently diverge
+    from the pipeline's (round-1 pm/arch finding on PR #1266: the previous
+    `DEFAULT_LENSES` was a hand-typed tuple that already disagreed with
+    `PRE_IMPL_GATES` on `ux`). `max_panel` is left at `select_panel`'s
+    pipeline default (`APIS_PANEL_MAX`, else 6) rather than uncapped: a floor
+    this tool cannot shrink below the panel the pipeline itself would have
+    capped at is still a legitimate floor — capping is the pipeline's own
+    scarce-attention policy, not a hole in the gate.
+    """
+    changed_files = await _changed_files(client, repo, pr)
+    parent_issue = SwarmDispatcher._parent_issue_number(pr_body, repo)
+
+    gate_contributors: set[str] = set()
+    if parent_issue is not None:
+        gate_contributors = await _preregistered_gate_contributors(client, repo, parent_issue)
+
+    panel_max = int(os.environ.get("APIS_PANEL_MAX", "6"))
+    panel = select_panel(
+        gate_contributors=gate_contributors,
+        changed_files=changed_files,
+        max_panel=panel_max,
+    )
+    return [
+        RequiredLens(
+            lens.lens,
+            _why_lens_selected(
+                lens, changed_files=changed_files, gate_contributors=gate_contributors
+            ),
+        )
+        for lens in panel
+    ]
 
 
 async def evaluate_lens(
@@ -301,10 +455,29 @@ async def submit_app_approval(
 ) -> dict:
     """Mint an App installation token and submit a formal APPROVE review.
 
-    Reuses `swarm_dispatch._mint_reviewer_app_installation_token` — the same
-    JWT-then-installation-token exchange `_emit_formal_review` uses for
-    binding reviews. Raises on any failure; the caller treats a raised
-    exception as "submitted nothing" per the --apply contract.
+    Mirrors `swarm_dispatch._emit_formal_review`'s binding-review contract
+    (round-1 Falco finding on PR #1266: this function previously trusted a
+    single early head fetch and the POST's own response body as proof of
+    success, with no re-verification and no read-back — exactly the TOCTOU
+    gap `_emit_formal_review` already closes for the dispatcher's own binding
+    reviews). Every step below has a namesake in that function:
+
+      1. re-fetch the PR immediately before posting; refuse unless it is
+         still OPEN, not merged, and its head still equals *head_sha* —
+         closes the window between the caller's earlier verification (lens
+         comments, checks) and this POST, which is unbounded I/O away;
+      2. pin `commit_id` to *head_sha* in the review POST (unchanged — this
+         was already correct);
+      3. refuse a self-approval: the App must not be approving a PR it
+         authored;
+      4. after posting, READ THE REVIEW BACK by id and confirm
+         `commit_id == head_sha`, `state == "APPROVED"`, and the reviewer is
+         the App's own bot identity and not the PR author — only that
+         readback, never the POST response alone, is treated as proof the
+         approval landed as intended.
+
+    Raises on any failure; the caller treats a raised exception as
+    "submitted nothing" per the --apply contract.
     """
     app_id = (os.environ.get("ATELES_REVIEWER_APP_ID") or "").strip()
     if not app_id or not _reviewer_app_private_key_pem():
@@ -319,6 +492,37 @@ async def submit_app_approval(
             "could not mint a reviewer App installation token — verify the "
             "App's private key is valid PEM and the App is installed on this repo"
         )
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+    }
+
+    # 1. Re-verify immediately before submitting: still open, unmerged, and
+    # at the verified head. A push landing during the earlier lens/check
+    # evaluation (multiple paginated GitHub calls, unbounded network time)
+    # must not be approved silently for a head the panel no longer covers.
+    pr_resp = await client.get(f"{GITHUB_API}/repos/{repo}/pulls/{pr}", headers=headers)
+    if pr_resp.status_code >= 400:
+        raise RuntimeError(
+            f"pre-submit PR re-fetch failed: HTTP {pr_resp.status_code} — refusing to approve"
+        )
+    pr_data = pr_resp.json() or {}
+    pr_state = str(pr_data.get("state") or "").lower()
+    if pr_state != "open" or pr_data.get("merged_at"):
+        raise RuntimeError(
+            f"PR is no longer open (state={pr_state!r}, merged_at={pr_data.get('merged_at')!r}) "
+            "— refusing to approve a closed/merged PR"
+        )
+    live_head = _normalise_full_sha(str((pr_data.get("head") or {}).get("sha") or ""))
+    if live_head != head_sha:
+        raise RuntimeError(
+            f"head moved between verification and submission (verified={head_sha}, "
+            f"live={live_head or 'unreadable'}) — refusing to approve a head the panel "
+            "did not clear"
+        )
+    pr_author = str((pr_data.get("user") or {}).get("login") or "")
+    if not pr_author:
+        raise RuntimeError("could not resolve PR author from the pre-submit re-fetch — refusing")
 
     body_lines = [
         "Approved by the swarm App — every required review lens cleared the "
@@ -333,22 +537,79 @@ async def submit_app_approval(
     body_lines.append(f"head_sha={head_sha}")
     body = "\n".join(body_lines)
 
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {token}",
-    }
+    url = f"{GITHUB_API}/repos/{repo}/pulls/{pr}/reviews"
+    # 2. commit_id pinned to the verified (and just re-confirmed) head.
     resp = await client.post(
-        f"{GITHUB_API}/repos/{repo}/pulls/{pr}/reviews",
+        url,
         json={"event": "APPROVE", "body": body[:65000], "commit_id": head_sha},
         headers=headers,
     )
+    # 3. Self-approval refusal: GitHub's own 422 for "can not approve your
+    # own pull request" is the authoritative signal (mirrors
+    # `_emit_formal_review`'s same-login handling) — there is no reliable
+    # pre-check for an App-token principal, since Apps cannot call
+    # `GET /user` to learn their own login ahead of time.
+    if resp.status_code == 422:
+        lower = (resp.text or "").casefold()
+        if "own pull request" in lower or "your own pull" in lower:
+            raise RuntimeError(
+                f"refusing: the App would be approving a PR it authored (author={pr_author})"
+            )
     if resp.status_code >= 400:
-        raise RuntimeError(f"review submission failed: HTTP {resp.status_code}: {(resp.text or '')[:240]}")
-    return resp.json() or {}
+        raise RuntimeError(
+            f"review submission failed: HTTP {resp.status_code}: {(resp.text or '')[:240]}"
+        )
+    posted = resp.json() or {}
+    review_id = _normalise_github_review_id(posted.get("id"))
+    if not review_id:
+        raise RuntimeError("review submission returned no usable review id — cannot read back")
+
+    # 4. Read the created review back. The POST's own response body is NOT
+    # treated as proof — only this independent GET is.
+    readback_resp = await client.get(f"{url}/{review_id}", headers=headers)
+    if readback_resp.status_code >= 400:
+        raise RuntimeError(
+            f"review read-back failed: HTTP {readback_resp.status_code} — approval NOT "
+            "confirmed landed"
+        )
+    readback = readback_resp.json() or {}
+    actual_review_id = _normalise_github_review_id(readback.get("id"))
+    user = readback.get("user") or {}
+    actual_login = str(user.get("login") or "")
+    user_type = str(user.get("type") or "")
+    actual_commit = _normalise_full_sha(str(readback.get("commit_id") or ""))
+    actual_state = str(readback.get("state") or "").upper()
+
+    readback_ok = (
+        actual_review_id == review_id
+        and actual_commit == head_sha
+        and actual_state == "APPROVED"
+        and bool(actual_login)
+        and actual_login.casefold() != pr_author.casefold()
+        and user_type.casefold() == "bot"
+    )
+    if not readback_ok:
+        raise RuntimeError(
+            "review read-back did not match expected state — approval NOT confirmed landed "
+            f"(expected_head={head_sha} expected_state=APPROVED, "
+            f"got commit={actual_commit or 'unreadable'} state={actual_state or 'unreadable'} "
+            f"login={actual_login or 'unreadable'} user_type={user_type or 'unreadable'})"
+        )
+
+    return readback
+
+
+def _print_derived_lenses(required: list[RequiredLens], extra: list[str]) -> None:
+    print()
+    print("required lenses (derived from review_panel.select_panel for this diff/issue):")
+    for r in required:
+        print(f"  - {r.lens}: {r.reason}")
+    if extra:
+        print(f"added by --lenses (on top of the derived floor): {', '.join(extra)}")
+    print()
 
 
 def _print_table(lens_outcomes: list[LensOutcome], check_outcomes: list[CheckOutcome]) -> None:
-    print()
     print(f"{'lens':<10} {'verdict':<14} {'head match':<11} {'pass/fail':<10} reason")
     print("-" * 80)
     for o in lens_outcomes:
@@ -368,13 +629,35 @@ def _print_table(lens_outcomes: list[LensOutcome], check_outcomes: list[CheckOut
     print()
 
 
-async def run(repo: str, pr: int, lenses: list[str], *, apply: bool) -> int:
+async def resolve_lenses(
+    client: httpx.AsyncClient, *, repo: str, pr: int, pr_body: str, extra_lenses: list[str]
+) -> tuple[list[str], list[RequiredLens]]:
+    """The lens set the tool will require: the derived floor plus `--lenses`
+    additions. `--lenses` can only ADD — it is unioned onto the derived
+    floor, never used to shrink it, so a caller can never accidentally (or
+    deliberately) drop a lens `review_panel.select_panel` itself would
+    require for this diff/issue."""
+    required = await derive_required_lenses(client, repo=repo, pr=pr, pr_body=pr_body)
+    floor = [r.lens for r in required]
+    added = [lens for lens in extra_lenses if lens not in floor]
+    return floor + added, required
+
+
+async def run(repo: str, pr: int, extra_lenses: list[str], *, apply: bool) -> int:
     async with httpx.AsyncClient(timeout=30) as client:
         pr_data = await _fetch_pr(client, repo, pr)
         head_sha = _normalise_full_sha(str((pr_data.get("head") or {}).get("sha") or ""))
         if not head_sha:
             print(f"refusing: could not resolve a full 40-char head SHA for {repo}#{pr}")
             return 1
+        pr_body = pr_data.get("body") or ""
+
+        lenses, required = await resolve_lenses(
+            client, repo=repo, pr=pr, pr_body=pr_body, extra_lenses=extra_lenses
+        )
+        floor_names = {r.lens for r in required}
+        added = [lens for lens in lenses if lens not in floor_names]
+        _print_derived_lenses(required, added)
 
         comments = await _fetch_issue_comments(client, repo, pr)
 
@@ -425,15 +708,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Approve a PR as the swarm's GitHub App, only when every required "
-            "review lens has cleared the PR's current head."
+            "review lens has cleared the PR's current head. The required-lens "
+            "floor is derived from review_panel.select_panel for this PR's "
+            "diff and linked issue; --lenses can only ADD to that floor."
         )
     )
     parser.add_argument("--repo", required=True, help="owner/name")
     parser.add_argument("--pr", required=True, type=int)
     parser.add_argument(
         "--lenses",
-        default=",".join(DEFAULT_LENSES),
-        help=f"comma-separated required lenses (default: {','.join(DEFAULT_LENSES)})",
+        default="",
+        help=(
+            "comma-separated lenses to ADD on top of the derived floor "
+            "(never removes a lens the panel logic requires for this PR)"
+        ),
     )
     parser.add_argument(
         "--apply",
@@ -442,12 +730,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    lenses = [x.strip() for x in args.lenses.split(",") if x.strip()]
-    if not lenses:
-        print("refusing: --lenses resolved to an empty list")
-        return 1
+    extra_lenses = [x.strip() for x in args.lenses.split(",") if x.strip()]
 
-    return asyncio.run(run(args.repo, args.pr, lenses, apply=args.apply))
+    return asyncio.run(run(args.repo, args.pr, extra_lenses, apply=args.apply))
 
 
 if __name__ == "__main__":
