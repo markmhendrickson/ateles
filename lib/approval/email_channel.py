@@ -7,10 +7,22 @@ Every function is FAIL-OPEN: a missing gws CLI, unset env, non-zero exit, or a
 transport error logs a warning and returns a benign empty/false value. None of
 them raise into the caller's daemon loop.
 
+MAILBOX: every gws call here runs as the swarm's OWN mailbox — the subprocess
+gets ``GOOGLE_WORKSPACE_CLI_CONFIG_DIR=$ATELES_SWARM_GWS_CONFIG_DIR`` in its
+env only (the calling process's env is never mutated, so e.g. Monedula's
+calendar read keeps the operator's default config). When the swarm mailbox is
+not configured no gws call is made at all: consent never falls back to the
+operator's mailbox (ateles#1221).
+
 Env contract:
   ATELES_NOTIFY_EMAIL  "1" arms the channel; anything else → every call no-ops
   OPERATOR_EMAIL       request recipient AND the verified reply --to
-  ATELES_SWARM_EMAIL   optional From: (the swarm's own address)
+  ATELES_SWARM_EMAIL   the swarm mailbox's address: From: of every request
+  ATELES_SWARM_GWS_CONFIG_DIR  gws config dir signed in as the swarm mailbox;
+                       every gws call here runs with it (see MAILBOX above)
+  ATELES_MAIL_AUTHSERV_ID  authserv-id of the receiving server whose
+                       Authentication-Results are trusted (default
+                       ``mx.google.com``)
 """
 
 from __future__ import annotations
@@ -21,11 +33,33 @@ import os
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from email.utils import parseaddr
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 log = logging.getLogger("ateles.approval.email")
+
+
+@dataclass(frozen=True)
+class ReadRepliesOutcome:
+    """Statusful result of an inbox reply sweep.
+
+    Distinguishes three states that the fail-open ``read_replies`` list cannot:
+      - ``ok``              — transport succeeded; ``texts`` may be empty (no reply yet)
+      - ``transport_error`` — ANY gws fetch in the sweep failed (triage, auth
+                              metadata, or body); ``texts`` is always ``[]``,
+                              never a partial set
+      - ``disabled``        — ``ATELES_NOTIFY_EMAIL`` is not armed
+
+    Payment-consent callers MUST use this form and treat non-``ok`` as blocked
+    (fail-closed approve). Non-payment callers may keep using ``read_replies``,
+    which remains fail-open (returns ``[]`` on transport error / disabled).
+    """
+
+    kind: Literal["ok", "transport_error", "disabled"]
+    texts: list[str]
+    detail: str = ""
 
 
 def _strip_html(html: str) -> str:
@@ -69,6 +103,89 @@ def _swarm_from() -> str:
     return os.environ.get("ATELES_SWARM_EMAIL", "").strip()
 
 
+_GWS_CONFIG_ENV = "GOOGLE_WORKSPACE_CLI_CONFIG_DIR"
+
+
+def _swarm_config_dir() -> str:
+    return os.path.expanduser(
+        os.environ.get("ATELES_SWARM_GWS_CONFIG_DIR", "").strip()
+    )
+
+
+def swarm_mailbox_problems() -> list[str]:
+    """What is missing for a separate swarm mailbox, one entry per variable.
+
+    Empty list ⇔ ``swarm_mailbox_configured()``. Each entry names the exact
+    env var and what is wrong with it, so an operator who fixed one sees the
+    other rather than the same generic text. Never contains a value.
+    """
+    problems: list[str] = []
+    raw_swarm = _swarm_from()
+    swarm = _parse_address(raw_swarm)
+    operator = _parse_address(operator_email())
+    if not raw_swarm:
+        problems.append("ATELES_SWARM_EMAIL is not set (the swarm mailbox's address)")
+    elif not swarm:
+        problems.append("ATELES_SWARM_EMAIL is not a valid email address")
+    elif operator and swarm == operator:
+        problems.append(
+            "ATELES_SWARM_EMAIL is the operator's own address; it must be the "
+            "swarm's separate mailbox"
+        )
+    if not operator:
+        problems.append("OPERATOR_EMAIL is not set or not a valid email address")
+    cfg = _swarm_config_dir()
+    if not cfg:
+        problems.append(
+            "ATELES_SWARM_GWS_CONFIG_DIR is not set (the gws config directory "
+            "signed in as the swarm mailbox)"
+        )
+    elif not os.path.isdir(cfg):
+        problems.append(
+            "ATELES_SWARM_GWS_CONFIG_DIR does not point to an existing directory"
+        )
+    return problems
+
+
+def _gws_env() -> dict[str, str] | None:
+    """Subprocess env for a gws call as the swarm mailbox, or None (no call).
+
+    A copy of the process env with the gws config dir pointed at the swarm
+    mailbox. The process's own env is untouched. None when the swarm mailbox
+    is not configured — callers then make NO gws call, so nothing ever runs
+    against the operator's default mailbox.
+    """
+    if not swarm_mailbox_configured():
+        log.warning(
+            "approval: swarm mailbox not configured — no gws call made "
+            "(consent never uses the operator's mailbox)"
+        )
+        return None
+    env = dict(os.environ)
+    env[_GWS_CONFIG_ENV] = _swarm_config_dir()
+    return env
+
+
+def swarm_mailbox_configured() -> bool:
+    """True only when a SEPARATE swarm mailbox is configured (ateles#1221).
+
+    Reply authentication (``sender_domain_authenticated``) needs the evidence
+    Gmail's receiving server stamps on mail that arrives from another mailbox.
+    When the request is sent from, and replies are read in, the operator's own
+    mailbox, the operator's replies are self-sent and carry no such evidence,
+    so every genuine approval is held. Consent callers that depend on an
+    authenticated reply MUST check this and surface a blocker instead of
+    sending a request that cannot be answered.
+
+    FAIL CLOSED. Requires all of:
+      - ``ATELES_SWARM_EMAIL`` parses as an address
+      - it differs from ``OPERATOR_EMAIL`` (same address = same mailbox)
+      - ``ATELES_SWARM_GWS_CONFIG_DIR`` names an existing directory (the
+        swarm mailbox's own gws credentials)
+    """
+    return not swarm_mailbox_problems()
+
+
 def _gws() -> str | None:
     return shutil.which("gws")
 
@@ -82,9 +199,12 @@ def gws_json(args: list[str], timeout: int = 45) -> Any:
     gws = _gws()
     if not gws:
         return None
+    env = _gws_env()
+    if env is None:
+        return None
     try:
         r = subprocess.run([gws, *args], capture_output=True, text=True,
-                           timeout=timeout, env=os.environ)
+                           timeout=timeout, env=env)
         if r.returncode != 0:
             log.warning(f"gws {args[:2]} failed: {(r.stderr or '').strip()[:160]}")
             return None
@@ -110,14 +230,16 @@ def send_request(subject: str, body: str, to: str | None = None) -> bool:
     gws = _gws()
     if not gws or not recipient:
         return False
+    env = _gws_env()
+    if env is None:
+        return False
+    # From the swarm mailbox To the operator: the reply then arrives in the
+    # swarm mailbox as genuinely inbound mail the receiving server authenticates.
     cmd = [gws, "gmail", "+send", "--to", recipient,
-           "--subject", subject, "--body", body]
-    swarm = _swarm_from()
-    if swarm:
-        cmd += ["--from", swarm]
+           "--subject", subject, "--body", body, "--from", _swarm_from()]
     try:
         r = subprocess.run(cmd, timeout=60, capture_output=True, text=True,
-                           env=os.environ)
+                           env=env)
         if r.returncode != 0:
             log.warning(f"approval email send failed (rc={r.returncode}): "
                         f"{(r.stderr or '').strip()[:160]}")
@@ -167,15 +289,11 @@ def sender_is_operator(from_header: str) -> bool:
     domain (`op@example.com.evil.example`) nor an address hidden in a display
     name can satisfy it.
 
-    NOTE ON STRENGTH: this is a header check. A From: header is forgeable in
-    general; what makes it meaningful here is that these messages have already
-    been accepted and classified into the operator's OWN mailbox by Gmail, whose
-    SPF/DKIM/DMARC evaluation a spoofed sender has to survive first. So this
-    closes "anyone who holds the token can approve" — it does not by itself
-    defeat an attacker who can forge mail that passes the operator's domain
-    authentication. Defence in depth (a shared secret in the BODY, or a channel
-    that authenticates the principal directly) is the stronger form and is
-    deliberately left as follow-up rather than bundled into a security fix.
+    NOTE ON STRENGTH: this is the ADDRESS-BINDING half of sender identity
+    only. A From header is sender-chosen text, so a match here is necessary
+    but never sufficient: ``read_replies_with_status`` additionally requires
+    ``sender_domain_authenticated`` (Gmail's own recorded DMARC/aligned-DKIM
+    pass for the operator's domain) before a reply's verdict counts.
     """
     operator = _parse_address(operator_email())
     if not operator:
@@ -188,32 +306,196 @@ def sender_is_operator(from_header: str) -> bool:
     return sender == operator
 
 
-def read_replies(
+# The only receiving server whose authentication verdict we accept: by default
+# Gmail's own inbound MTA, which stamps this authserv-id on mail it receives
+# for the mailbox. Config, not code, so a move off Gmail is an env change.
+DEFAULT_AUTHSERV_ID = "mx.google.com"
+
+
+def trusted_authserv_id() -> str:
+    """``ATELES_MAIL_AUTHSERV_ID`` (lowercased), or the Gmail default."""
+    value = os.environ.get("ATELES_MAIL_AUTHSERV_ID", "").strip().lower()
+    return value or DEFAULT_AUTHSERV_ID
+
+
+def _strip_comments(value: str) -> str:
+    """Remove RFC 5322 parenthesised comments (nesting-aware).
+
+    Comments in Authentication-Results are free text; nothing inside one may
+    count as a result. An unbalanced comment leaves the value unparseable,
+    which the caller treats as not authenticated.
+    """
+    out: list[str] = []
+    depth = 0
+    for ch in value:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                return ""
+            depth -= 1
+        elif depth == 0:
+            out.append(ch)
+    return "" if depth else "".join(out)
+
+
+def _auth_result_authorizes(header_value: str, domain: str) -> bool:
+    """True only when ONE Authentication-Results value, stamped by Google's
+    receiving server, records that ``domain`` authorized the message.
+
+    Accepted evidence (either suffices):
+      - ``dmarc=pass`` with ``header.from=<domain>``
+      - ``dkim=pass`` with ``header.d=<domain>`` or ``header.i=...@<domain>``
+        (exact domain — strict alignment with the From domain)
+
+    Everything else — another authserv-id, failing or absent results, a pass
+    for another domain, text only inside a comment, or a value that does not
+    parse — is False.
+    """
+    if not header_value or not domain:
+        return False
+    value = _strip_comments(" ".join(header_value.split()))
+    if not value:
+        return False
+    parts = [p.strip() for p in value.split(";")]
+    # First element is the authserv-id, optionally followed by a version.
+    authserv = (parts[0].split() or [""])[0].lower()
+    expected = trusted_authserv_id()
+    if authserv != expected:
+        log.warning(
+            f"approval: Authentication-Results stamped by {authserv[:80]!r}, "
+            f"expected {expected!r} (ATELES_MAIL_AUTHSERV_ID) — not trusted"
+        )
+        return False
+    for resinfo in parts[1:]:
+        tokens = resinfo.split()
+        if not tokens or "=" not in tokens[0]:
+            continue
+        method, _, result = tokens[0].lower().partition("=")
+        if result != "pass":
+            continue
+        props: dict[str, str] = {}
+        for tok in tokens[1:]:
+            k, sep, v = tok.partition("=")
+            if sep:
+                props.setdefault(k.lower(), v.strip().strip('"').lower())
+        if method == "dmarc" and props.get("header.from") == domain:
+            return True
+        if method == "dkim":
+            if props.get("header.d") == domain:
+                return True
+            ident = props.get("header.i", "")
+            if "@" in ident and ident.rpartition("@")[2] == domain:
+                return True
+    return False
+
+
+def _fetch_auth_results(message_id: str) -> list[str] | None:
+    """Read a message's Authentication-Results header values, in header order.
+
+    Returns None when the metadata could not be read (transport failure or an
+    unexpected response shape) — the caller treats that as a failed read, not
+    as "unauthenticated". Returns [] when the message was read and carries no
+    Authentication-Results header.
+    """
+    params = json.dumps({
+        "userId": "me",
+        "id": message_id,
+        "format": "metadata",
+        "metadataHeaders": ["Authentication-Results"],
+    })
+    data = gws_json(["gmail", "users", "messages", "get", "--params", params],
+                    timeout=30)
+    if not isinstance(data, dict):
+        return None
+    payload = data.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    headers = payload.get("headers")
+    if headers is None:
+        headers = []
+    if not isinstance(headers, list):
+        return None
+    values: list[str] = []
+    for h in headers:
+        if not isinstance(h, dict):
+            return None
+        if str(h.get("name") or "").strip().lower() == "authentication-results":
+            values.append(str(h.get("value") or ""))
+    return values
+
+
+def sender_domain_authenticated(auth_results: list[str]) -> bool:
+    """True only when the TOPMOST Authentication-Results header was stamped by
+    Google's receiving server and records the operator's domain authorizing the
+    message (DMARC pass, or DKIM pass aligned with the operator's domain).
+
+    FAIL CLOSED: no header, a failing result, a non-Google or unparseable top
+    header, or an unset/unparseable OPERATOR_EMAIL all return False. Only the
+    topmost header is considered because the receiving server prepends its own;
+    a lower header carrying the same authserv-id did not come from this receipt.
+    """
+    operator = _parse_address(operator_email())
+    if not operator:
+        return False
+    domain = operator.rpartition("@")[2]
+    if not auth_results:
+        return False
+    return _auth_result_authorizes(auth_results[0], domain)
+
+
+def read_replies_with_status(
     tokens: list[str],
     max_msgs: int = 40,
     on_reply_message: Callable[[str, str], None] | None = None,
-) -> list[str]:
-    """Return the full text (subject + body) of recent replies carrying any token.
+    on_sender_rejected: Callable[[], None] | None = None,
+    on_unauthenticated_operator_reply: Callable[[], None] | None = None,
+) -> ReadRepliesOutcome:
+    """Statusful inbox sweep — distinguish empty-ok from transport failure.
 
-    `gws gmail +triage` returns only headers (date/from/id/subject) — NOT the
-    body — so a verdict is invisible there. We triage to find candidate message
-    ids whose subject carries a token, then `+read --id` each to pull the body.
+    Same triage/+read flow as ``read_replies``, but returns ``ReadRepliesOutcome``
+    so payment-consent callers can fail-closed on transport error without
+    conflating it with "no reply yet".
 
-    Only messages whose subject starts with "RE:" are considered — the operator's
-    reply can carry a verdict; our own outbound request cannot.
+    ``on_sender_rejected`` (optional) fires when a candidate reply fails
+    ``sender_is_operator`` — no address argument (PII-safe for Monedula logs).
 
-    `on_reply_message(token, message_id)` is invoked for each matched reply, so
-    the caller can persist which message to reply to (for in-thread confirmation).
-    Fail-open: returns [] on any failure.
+    ``on_unauthenticated_operator_reply`` (optional) fires when a reply's
+    From: address IS the operator's but ``sender_domain_authenticated`` does
+    not pass — a reply that may be genuine but cannot be proven, which is a
+    different condition from a non-operator sender and needs a different
+    operator-facing message. The reply is still ignored. When this callback
+    is not given, ``on_sender_rejected`` fires instead (prior behaviour).
     """
-    if not tokens or not email_enabled():
-        return []
+    if not email_enabled():
+        return ReadRepliesOutcome(kind="disabled", texts=[], detail="ATELES_NOTIFY_EMAIL")
+    if not tokens:
+        return ReadRepliesOutcome(kind="ok", texts=[], detail="")
+    if not _gws():
+        return ReadRepliesOutcome(
+            kind="transport_error", texts=[], detail="gws_cli_missing"
+        )
+    if not swarm_mailbox_configured():
+        # Replies are read only from the swarm mailbox, never from the
+        # operator's (ateles#1221). Unconfigured is a failed read, not "none".
+        return ReadRepliesOutcome(
+            kind="transport_error", texts=[], detail="swarm_mailbox_unconfigured"
+        )
+
     texts: list[str] = []
     seen_ids: set[str] = set()
+    saw_transport_error = False
+    transport_detail = ""
 
     for token in tokens:
         data = gws_json(["gmail", "+triage", "--format", "json", "--max",
                          str(max_msgs), "--query", f"newer_than:3d {token}"])
+        if data is None:
+            # gws_json fail-opens to None on any transport/parse failure.
+            # For statusful callers that is distinct from "zero matching msgs".
+            saw_transport_error = True
+            transport_detail = "gws_triage_failed"
+            continue
         msgs: list[dict] = []
         if isinstance(data, dict):
             msgs = data.get("messages") or data.get("results") or []
@@ -234,12 +516,44 @@ def read_replies(
             sender = str(m.get("from") or m.get("sender") or m.get("From") or "")
             if not sender_is_operator(sender):
                 log.warning(
-                    f"approval: ignoring reply {mid} — sender is not the "
-                    "operator (token present but unverified sender)")
+                    "approval: ignoring reply — sender is not the "
+                    "operator (token present but unverified sender)"
+                )
+                if on_sender_rejected is not None:
+                    try:
+                        on_sender_rejected()
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(f"on_sender_rejected callback failed: {exc}")
+                continue
+            # The From address is text the sender chose. Require Gmail's own
+            # record that the operator's domain authorized this message before
+            # its body is read or its verdict counted. Unreadable metadata is a
+            # failed read (the whole sweep fails below); readable but absent or
+            # failing authentication is not the operator.
+            auth_results = _fetch_auth_results(mid)
+            if auth_results is None:
+                saw_transport_error = True
+                transport_detail = "gws_auth_metadata_failed"
+                continue
+            if not sender_domain_authenticated(auth_results):
+                log.warning(
+                    "approval: ignoring reply — sender domain authentication "
+                    "absent or not a pass (address matched, identity unknown)"
+                )
+                cb = on_unauthenticated_operator_reply or on_sender_rejected
+                if cb is not None:
+                    try:
+                        cb()
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(f"reply-rejected callback failed: {exc}")
                 continue
             seen_ids.add(mid)
             body_data = gws_json(["gmail", "+read", "--id", mid, "--headers",
                                   "--format", "json"], timeout=30)
+            if body_data is None:
+                saw_transport_error = True
+                transport_detail = "gws_read_failed"
+                continue
             body = ""
             if isinstance(body_data, dict):
                 # Prefer plaintext (where the operator's verdict + the quoted
@@ -269,7 +583,34 @@ def read_replies(
                 except Exception as exc:  # noqa: BLE001
                     log.warning(f"on_reply_message callback failed: {exc}")
             texts.append(f"{subject}\n{body}")
-    return texts
+
+    # Any fetch failure within the sweep fails the WHOLE read: a verdict set
+    # built from only the messages that loaded is incomplete, and acting on it
+    # could honour one reply while missing a later one that changes it.
+    if saw_transport_error:
+        return ReadRepliesOutcome(
+            kind="transport_error", texts=[], detail=transport_detail or "gws_failed"
+        )
+    return ReadRepliesOutcome(kind="ok", texts=texts, detail="")
+
+
+def read_replies(
+    tokens: list[str],
+    max_msgs: int = 40,
+    on_reply_message: Callable[[str, str], None] | None = None,
+) -> list[str]:
+    """Return the full text (subject + body) of recent replies carrying any token.
+
+    Thin fail-open wrapper over ``read_replies_with_status``: returns ``.texts``
+    on ``ok``, else ``[]``. Prefer ``read_replies_with_status`` when the caller
+    must distinguish transport failure from an empty inbox (payment consent).
+    """
+    outcome = read_replies_with_status(
+        tokens, max_msgs=max_msgs, on_reply_message=on_reply_message
+    )
+    if outcome.kind == "ok":
+        return outcome.texts
+    return []
 
 
 def reply_in_thread(message_id: str, body: str,
@@ -294,12 +635,13 @@ def reply_in_thread(message_id: str, body: str,
     if not gws or not message_id or not recipient:
         return False
 
+    env = _gws_env()
+    if env is None:
+        return False
+
     base = Path(cwd) if cwd else Path.cwd()
     cmd = [gws, "gmail", "+reply", "--message-id", message_id,
-           "--body", body, "--to", recipient]
-    swarm = _swarm_from()
-    if swarm:
-        cmd += ["--from", swarm]
+           "--body", body, "--to", recipient, "--from", _swarm_from()]
 
     staged: list[Path] = []
     stage_dir = base / ".approval_attach_tmp"
@@ -317,7 +659,7 @@ def reply_in_thread(message_id: str, body: str,
 
     try:
         r = subprocess.run(cmd, timeout=60, capture_output=True, text=True,
-                           cwd=str(base), env=os.environ)
+                           cwd=str(base), env=env)
         if r.returncode != 0:
             log.warning(f"+reply failed (rc={r.returncode}): "
                         f"{(r.stderr or '').strip()[:160]}")

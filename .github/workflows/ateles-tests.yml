@@ -19,6 +19,12 @@ on:
       - "execution/daemons/phoenicurus-release/**"
       - "execution/daemons/monedula/**"
       - "execution/daemons/anthus/**"
+      # Formica and neotoma-agent are gated by ATELES_SWARM_REQUIRE_LABEL; their
+      # tests live in execution/daemons/test_triage_lane_label_gate.py (shared
+      # step below) and the Apis entry-path scan, so edits to either daemon must
+      # trigger this lane.
+      - "execution/daemons/formica/**"
+      - "execution/daemons/neotoma-agent/**"
       - "execution/daemons/piculet/**"
       - "execution/daemons/sylvia/**"
       - "execution/daemons/tyto/**"

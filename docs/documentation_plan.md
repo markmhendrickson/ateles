@@ -101,11 +101,12 @@ docs from this sediment.
 Architecture/operating docs that match the audited reality:
 
 `architecture.md`, `taxonomy.md`, `phases.md`, `data_types.md`, `neotoma_vs_alternatives.md`,
-`foundation/*` (26 authored documents: a 3-document always-read kernel; 14 path-keyed documents, five of
+`foundation/*` (27 authored documents: a 3-document always-read kernel; 14 path-keyed documents, five of
 them one per external system — `github.md`, `gmail.md`, `calendar.md`, `telegram.md`, `payments.md`, one
 the acceptance suite's design, `conformance_suite.md`, one the layered planning records above a task,
-`planning_model.md`, and one the tenancy boundary, `multi_tenant.md`; and 9
-companions — `charter.md`, the purpose the corpus serves; `scenarios.md`, `workflows.md`,
+`planning_model.md`, and one the tenancy boundary, `multi_tenant.md`; and 10
+companions — `charter.md`, the purpose the corpus serves; `harness_carriers.md`, which carrier delivers
+which payload into each harness; `scenarios.md`, `workflows.md`,
 `migration.md`, `revisions.md`, `decision_state.md`, the register projected onto ruled/merged/implemented,
 `foundation/status.md`, the dated implementation-gap measurement, `foundation/skill_inventory.md`, the
 dated skill-corpus measurement (stage 0 for the skills migration), and `foundation/rule_inventory.md`,

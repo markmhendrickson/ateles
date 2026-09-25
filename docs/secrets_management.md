@@ -154,6 +154,31 @@ No 1Password in CI at all.
   bootstrap (step above) on each box. To revoke a machine, rotate the age key so
   its old `keys.txt` can no longer decrypt new snapshots.
 
+## Agent signing keys (encrypted backup)
+
+Each swarm agent signs its Neotoma requests with its own AAuth key,
+`ateles-private/keys/<agent>.jwk.json`. Those plaintext files are gitignored and
+exist only on the machine that runs the daemons, and `agent_grant` entities pin
+each key's thumbprint, so losing a file means minting a new key and re-pinning
+the grant. The backup is an age-encrypted copy of every `keys/*.json` file,
+committed to `ateles-private/keys/encrypted/<stem>.sops.json` with the same age
+recipient as the secrets snapshots (the `keys/encrypted/` rule in
+`ateles-private/.sops.yaml`). Files are encrypted in sops binary mode, so a
+restore reproduces the original bytes exactly.
+
+```bash
+python execution/scripts/secrets_keys.py backup     # after minting or rotating a key
+python execution/scripts/secrets_keys.py verify     # decrypt in memory, compare SHA-256
+python execution/scripts/secrets_keys.py restore    # on a new machine (0600, no overwrite)
+python execution/scripts/secrets_keys.py prune      # drop copies of keys removed from disk
+cd ~/repos/ateles-private && git add keys/encrypted && git commit -m "chore(keys): back up <agent> key"
+```
+
+`backup` leaves an encrypted copy alone when it still decrypts to the current
+bytes, so committed ciphertext only changes when a key does. `restore --force`
+overwrites an existing plaintext file. Like the snapshots, decryption needs only
+the machine-local age key; no script here prints key material.
+
 ## Security properties
 
 - Secret values never live in git in plaintext, never printed by these scripts.
