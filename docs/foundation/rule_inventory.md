@@ -15,7 +15,9 @@ Stage 0 of the rule migration, in the sense `migration.md` already gives the wor
 
 **It is perishable.** Re-run it; never edit it to keep up. A figure here without an instrument is a defect in the generator.
 
-**What `--check` compares, and what it only reports.** The check compares every rule, statement count and cluster, every store's identity and populated count (the checkout copies' excepted), and the headline figures — values that change only when the rule estate does. Two kinds of value are rendered but NOT compared, inside blocks marked *informational*: **last-modified dates**, and the **checkout-copy counts** (copies of an instruction file across this host's checkouts). A date moves without any rule changing — a filesystem touch, a checkout, an entity correction, a squash merge rewriting a commit date — and the copy counts follow the host's current worktree set, which changes minute to minute. Repository files are dated by their last git commit, never by filesystem modification time. The run date on the line above is likewise excluded.
+**What `--check` compares, and what it only reports.** The check compares every rule, statement count and cluster, every store's identity and populated count (the checkout copies' excepted), and the headline figures — values that change only when the rule estate does. Two kinds of value are rendered but NOT compared, inside blocks marked *informational*: **last-modified dates** with the source of each, and the **checkout-copy counts** (copies of an instruction file across this host's checkouts). A date moves without any rule changing — a filesystem touch, a checkout, an entity correction, a squash merge rewriting a commit date — and the copy counts follow the host's current worktree set, which changes minute to minute. Only those value cells are exempt: the store names, the number of rows and the prose inside an informational block are compared like the rest of this file, and the committed file is screened for personal data as well as the fresh measurement. The run date on the line above is likewise excluded.
+
+**Where each date comes from** — the *Date from* column of the informational table in *The stores* states it per store. This repository's files (`CLAUDE.md`, `.claude/skills`, `.claude/hooks`) are dated by their last git commit, never by filesystem modification time. The foundation reference repo is dated by its last git commit where its history is readable, entity stores by their last observation, and every other file store — `neotoma/AGENTS.md` and the canonical repository instruction roots among them — by file modification time. On a shallow checkout, which is what CI's default depth-1 clone is, this repository has no history to read, so its files' dates render as — rather than as the day of the run.
 
 ## The headline: duplication factor
 
@@ -49,7 +51,7 @@ This revision applies the merge test — two statements are the same rule only i
 
 `populated` is what the store holds; `reachable` is whether it gets to an agent. They are different questions, and ateles#1118 is why the column exists: `agent_policy` is fully populated and delivers nothing, because `agent_loader.py` filters on `agent_sub`, which is empty in every row.
 
-A `host-dependent` count follows this host's current worktree set and is reported in the informational block below rather than compared.
+A `host-dependent` count follows this host's current worktree set and is reported in the informational block below rather than compared. What counts as one of the *canonical repository instruction roots*, and why that store reads UNREAD when its configuration strays from the definition, is defined under [Method, so a re-run means something](#method-so-a-re-run-means-something) at the end of this file.
 
 | Store | Location | Populated | Statements | Reachable |
 |---|---|---|---|---|
@@ -91,8 +93,8 @@ A `host-dependent` count follows this host's current worktree set and is reporte
 | task_policy entities | — | 2026-09-09 | last observation |
 | Claude Code user rules | — | 2026-07-16 | file modification time |
 | Cursor | — | 2026-09-23 | file modification time |
-| ateles/CLAUDE.md checkout copies | 164 | 2026-09-25 | file modification time |
-| neotoma/AGENTS.md checkout copies | 172 | 2026-09-25 | file modification time |
+| ateles/CLAUDE.md checkout copies | 169 | 2026-09-25 | file modification time |
+| neotoma/AGENTS.md checkout copies | 175 | 2026-09-25 | file modification time |
 | OpenClaw | — | — | file modification time |
 
 <!-- /informational -->
@@ -1169,7 +1171,7 @@ That prose inventory is the input to this one, not a thing it discards: each of 
 
 <!-- informational: host-dependent, excluded from the equality check -->
 
-**164 copies of `ateles/CLAUDE.md` in 25 distinct versions**, and **172 copies of `neotoma/AGENTS.md` in 4 distinct versions**.
+**169 copies of `ateles/CLAUDE.md` in 25 distinct versions**, and **175 copies of `neotoma/AGENTS.md` in 4 distinct versions**.
 
 <!-- /informational -->
 
@@ -1220,5 +1222,5 @@ So a rule's reach is not whether it is in `CLAUDE.md` but which copy of `CLAUDE.
 - **Divergence** is judged on whether statements bind the same way, not on wording.
 - **Target homes** come from the authority table in `conformance.md` and from nowhere else.
 - **Canonical repository instruction roots** are every primary git clone directly under `~/repos` on the canonical measurement host, excluding `ateles`, `neotoma` and `foundation`, which each have a dedicated store above. Linked worktrees are never roots — they are the checkout copies — and neither are symlinks. The list is runner configuration (`RULE_INVENTORY_CANONICAL_REPOSITORY_ROOTS`) and is never committed; this file carries only the aggregate. A root outside the definition makes the store UNREAD rather than a different count.
-- **Compared versus informational.** `--check` compares everything except the run date and the blocks marked informational (dates and checkout-copy counts), for the reasons given at the top of this file.
+- **Compared versus informational.** `--check` compares everything except the run date and the value cells of the blocks marked informational (dates, date sources and checkout-copy counts), for the reasons given at the top of this file. The rest of each block is compared, and the committed file is screened as well as the measurement.
 - Read-only against Neotoma **prod**. Nothing is written to the record.

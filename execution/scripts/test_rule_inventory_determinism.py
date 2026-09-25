@@ -361,6 +361,9 @@ class ComparedSectionTest(unittest.TestCase):
         return renderer.render(clusters, stores, unclassified, [statement])
 
     def check(self, committed: str, measured_stores) -> int:
+        return self.check_with_stderr(committed, measured_stores)[0]
+
+    def check_with_stderr(self, committed: str, measured_stores) -> tuple[int, str]:
         statement = renderer.Statement(
             "ateles/CLAUDE.md", "CLAUDE.md", "L1", "Never use git stash."
         )
@@ -377,6 +380,7 @@ class ComparedSectionTest(unittest.TestCase):
                 "--check",
                 "--require-complete-measurement",
             ]
+            stderr = io.StringIO()
             with (
                 mock.patch.object(
                     renderer, "read_entities", return_value=([statement], [])
@@ -386,9 +390,9 @@ class ComparedSectionTest(unittest.TestCase):
                 ),
                 mock.patch.object(sys, "argv", argv),
                 contextlib.redirect_stdout(io.StringIO()),
-                contextlib.redirect_stderr(io.StringIO()),
+                contextlib.redirect_stderr(stderr),
             ):
-                return renderer.main()
+                return renderer.main(), stderr.getvalue()
 
     def test_host_dependent_counts_and_dates_are_not_compared(self) -> None:
         committed = self.rendered(
@@ -436,6 +440,118 @@ class ComparedSectionTest(unittest.TestCase):
         )
         self.assertNotEqual(renderer.comparable_text(committed), renderer.comparable_text(hidden))
         self.assertEqual(self.check(hidden, stores), 1)
+
+
+class CommittedInformationalBlockTest(unittest.TestCase):
+    """Only the VALUE cells of an informational block are exempt (PR #1279 review).
+
+    Masking a block wholesale let a committed file carry arbitrary text inside
+    one -- unscreened and uncompared -- and still match. Everything in a block
+    except its host-dependent values must equal the measurement, and the
+    committed file is screened as well as the fresh render.
+    """
+
+    DAY = "2026-09-23"
+
+    # The same synthetic render and check as ComparedSectionTest, without
+    # inheriting (and so re-running) its tests.
+    stores = ComparedSectionTest.stores
+    rendered = ComparedSectionTest.rendered
+    check = ComparedSectionTest.check
+    check_with_stderr = ComparedSectionTest.check_with_stderr
+
+    def committed_and_stores(self):
+        stores = self.stores(copies=145, versions=23, day=self.DAY, codex_statements=7)
+        return self.rendered(stores), stores
+
+    @staticmethod
+    def insert_after(text: str, anchor: str, line: str) -> str:
+        start = text.index(renderer.INFORMATIONAL_START)
+        at = text.index(anchor, start) + len(anchor)
+        at = text.index("\n", at) + 1
+        return text[:at] + line + "\n" + text[at:]
+
+    def test_the_unmodified_committed_render_matches(self) -> None:
+        committed, stores = self.committed_and_stores()
+        self.assertEqual(self.check(committed, stores), 0)
+
+    def test_a_row_added_to_the_dates_table_fails(self) -> None:
+        committed, stores = self.committed_and_stores()
+        # Well-formed by the table's own grammar, so only the row count and
+        # store names being compared can catch it.
+        tampered = self.insert_after(
+            committed, "|---|---|---|---|", f"| Codex | — | {self.DAY} | git commit |"
+        )
+        self.assertEqual(self.check(tampered, stores), 1)
+
+    def test_prose_or_a_rule_heading_added_to_a_block_fails(self) -> None:
+        committed, stores = self.committed_and_stores()
+        for label, line in {
+            "fabricated rule heading": "### R-deadbe: never merge on a Friday",
+            "a private path and an id": "Source: ~/repos/private-client/notes.md, ent_c0ffee5eedbeef",
+        }.items():
+            with self.subTest(label=label):
+                tampered = self.insert_after(
+                    committed, "**Informational, not compared", line
+                )
+                self.assertEqual(self.check(tampered, stores), 1)
+
+    def test_a_line_added_to_the_copy_measurement_block_fails(self) -> None:
+        committed, stores = self.committed_and_stores()
+        second = committed.index(
+            renderer.INFORMATIONAL_START,
+            committed.index(renderer.INFORMATIONAL_END) + 1,
+        )
+        at = committed.index("\n", second) + 1
+        tampered = committed[:at] + "Also measured: 3 copies elsewhere.\n" + committed[at:]
+        self.assertEqual(self.check(tampered, stores), 1)
+
+    def test_a_value_cell_outside_its_vocabulary_is_compared(self) -> None:
+        committed, stores = self.committed_and_stores()
+        row = f"| Codex | — | {self.DAY} | file modification time |"
+        self.assertIn(row, committed)
+        for label, replacement in {
+            "date source": f"| Codex | — | {self.DAY} | copied from a private note |",
+            "date cell": "| Codex | — | last Tuesday | file modification time |",
+            "count cell on a compared row": f"| Codex | 4 | {self.DAY} | file modification time |",
+        }.items():
+            with self.subTest(label=label):
+                tampered = committed.replace(row, replacement)
+                self.assertEqual(self.check(tampered, stores), 1)
+
+    def test_pii_shaped_text_in_a_committed_block_fails_the_screen(self) -> None:
+        committed, stores = self.committed_and_stores()
+        tampered = self.insert_after(
+            committed,
+            "**Informational, not compared",
+            "Contact someone@private-mail.net or +34 612 345 678.",
+        )
+        result, stderr = self.check_with_stderr(tampered, stores)
+        self.assertEqual(result, 2)
+        self.assertIn("COMMITTED INVENTORY SCREEN FAILED", stderr)
+
+    def test_pii_shaped_value_in_a_masked_cell_fails(self) -> None:
+        committed, stores = self.committed_and_stores()
+        # A phone number in the one cell whose integer is host-dependent: the
+        # mask must not accept it as a count, and the screen must see it.
+        row = next(
+            line
+            for line in committed.splitlines()
+            if line.startswith("| ateles/CLAUDE.md checkout copies | 145 |")
+        )
+        tampered = committed.replace(
+            row, row.replace("| 145 |", "| 612345678901 |")
+        )
+        self.assertNotEqual(self.check(tampered, stores), 0)
+
+    def test_value_cells_alone_may_differ(self) -> None:
+        committed, _ = self.committed_and_stores()
+        # A shallow CI checkout: no git history, so repository dates are
+        # absent (rendered as a dash), on another host with other counts.
+        shallow = self.stores(copies=9, versions=2, day="", codex_statements=7)
+        for store in shallow:
+            store.date_source = "git commit"
+        self.assertEqual(self.check(committed, shallow), 0)
 
 
 class CanonicalRootsRuleTest(unittest.TestCase):

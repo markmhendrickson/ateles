@@ -74,14 +74,23 @@ The merge gate compares the committed file against a fresh measurement, so
 everything in the compared text must be a function of the rule estate itself
 -- a value that moves while no rule changed makes the gate unsatisfiable. Two
 kinds of value do move that way, and both are rendered inside blocks marked
-`<!-- informational: ... -->` and `<!-- /informational -->`, which
-`comparable_text()` replaces with a fixed placeholder before comparing:
+`<!-- informational: ... -->` and `<!-- /informational -->`. `comparable_text()`
+replaces only their VALUE CELLS with placeholders before comparing -- a date
+or a dash, a date source from the public vocabulary, a count of at most six
+digits. The markers, the store names, the row count and the prose inside a
+block are compared like the rest of the file, and a cell outside its shape is
+left verbatim, so it is compared too. The committed file is also run through
+`screen_for_pii`, not only the fresh render: its masked cells are the only
+bytes the equality check does not prove equal to a screened measurement.
 
 1. LAST-MODIFIED DATES, for every store. Files that come from this repository
    (`CLAUDE.md`, `.claude/skills`, `.claude/hooks`) are dated by their last git
    commit, which the packager records in the manifest as data -- never by
    filesystem mtime, which on a packaged copy is always the day of the run.
-   Every other store is dated by mtime or by an entity's last observation. No
+   A shallow clone (CI's default depth-1 checkout) has no history to date
+   them from, so they are recorded as absent and render as a dash. Every
+   other store is dated by mtime or by an entity's last observation, except
+   the foundation reference repo, dated by its last commit where readable. No
    date is compared: an mtime or an observation moves without any rule text
    changing (a checkout, a touch, a correction to a status field), and even a
    git date is rewritten when a pull request is squash-merged, so a date
@@ -1174,17 +1183,36 @@ def strip_volatile_measurement_date(text: str) -> str:
     )
 
 
-# Host-dependent measurements are rendered between these markers and never
-# compared (module docstring, "What `--check` compares"). The block is replaced
-# by a fixed placeholder rather than deleted, so its position is still part of
-# the comparison and compared content cannot be moved into one unnoticed: the
-# measured side always renders its compared content outside the blocks.
+# Host-dependent measurements are rendered between these markers (module
+# docstring, "What `--check` compares"). Only their VALUE CELLS are exempt from
+# the comparison; the markers, every line between them, the store names, the
+# row count and the prose are compared like the rest of the file. Masking the
+# whole block would exempt authored text inside it from both the equality
+# check and the public-output screen (PR #1279, security review).
 INFORMATIONAL_START = "<!-- informational: host-dependent, excluded from the equality check -->"
 INFORMATIONAL_END = "<!-- /informational -->"
-INFORMATIONAL_PLACEHOLDER = "<!-- informational block -->"
 _INFORMATIONAL_BLOCK = re.compile(
     re.escape(INFORMATIONAL_START) + r".*?" + re.escape(INFORMATIONAL_END),
     re.S,
+)
+
+# The value cells, and nothing else. Each is a closed shape: an ISO date or a
+# dash, a date source from the public vocabulary, and a count short enough
+# that no phone number, account number or amount can pass as one. A cell
+# outside its shape is left verbatim, so it is compared -- and fails.
+DATE_PLACEHOLDER = "<date>"
+DATE_SOURCE_PLACEHOLDER = "<date source>"
+COUNT_PLACEHOLDER = "<count>"
+_INFORMATIONAL_COUNT = r"\d{1,6}"
+_INFORMATIONAL_ROW = re.compile(
+    r"\| (?P<store>[^|\n]+) \| (?P<populated>" + _INFORMATIONAL_COUNT + r"|—) \| "
+    r"(?P<date>\d{4}-\d{2}-\d{2}|—) \| (?P<source>[a-z ]+) \|"
+)
+_COPY_MEASUREMENT = re.compile(
+    r"\*\*" + _INFORMATIONAL_COUNT + r"( copies of `ateles/CLAUDE\.md` in )"
+    + _INFORMATIONAL_COUNT + r"( distinct versions\*\*, and \*\*)"
+    + _INFORMATIONAL_COUNT + r"( copies of `neotoma/AGENTS\.md` in )"
+    + _INFORMATIONAL_COUNT + r"( distinct versions\*\*\.)"
 )
 
 # Stores whose populated count follows the host's worktree set, not the rules.
@@ -1193,10 +1221,41 @@ HOST_DEPENDENT_STORES = frozenset(
 )
 
 
+def _mask_informational_line(line: str) -> str:
+    """Mask the value cells of one informational line; leave all else verbatim."""
+    row = _INFORMATIONAL_ROW.fullmatch(line)
+    if row and row["source"] in PUBLIC_DATE_SOURCES | {"unknown"}:
+        # A dash in the populated column marks a row whose count is compared
+        # in the stores table; only the checkout-copy rows carry a number, and
+        # which rows those are is itself compared.
+        populated = "—" if row["populated"] == "—" else COUNT_PLACEHOLDER
+        return (
+            f"| {row['store']} | {populated} | {DATE_PLACEHOLDER} | "
+            f"{DATE_SOURCE_PLACEHOLDER} |"
+        )
+    copies = _COPY_MEASUREMENT.fullmatch(line)
+    if copies:
+        c = COUNT_PLACEHOLDER
+        return (
+            f"**{c}{copies[1]}{c}{copies[2]}{c}{copies[3]}{c}{copies[4]}"
+        )
+    return line
+
+
+def _mask_informational_block(match: re.Match) -> str:
+    return "\n".join(
+        _mask_informational_line(line) for line in match.group(0).split("\n")
+    )
+
+
 def comparable_text(text: str) -> str:
-    """Return the part of a rendered inventory that `--check` compares."""
+    """Return the rendered inventory as `--check` compares it.
+
+    The run date and the value cells of each informational block are
+    replaced by placeholders; every other byte is compared.
+    """
     return _INFORMATIONAL_BLOCK.sub(
-        INFORMATIONAL_PLACEHOLDER, strip_volatile_measurement_date(text)
+        _mask_informational_block, strip_volatile_measurement_date(text)
     )
 
 
@@ -2355,14 +2414,30 @@ def render(
         "headline figures — values that change only when the rule estate does. "
         "Two kinds of value are rendered but NOT "
         "compared, inside blocks marked *informational*: **last-modified "
-        "dates**, and the **checkout-copy counts** (copies of an instruction "
-        "file across this host's checkouts). A date moves without any rule "
-        "changing — a filesystem touch, a checkout, an entity correction, a "
-        "squash merge rewriting a commit date — and the copy counts follow the "
-        "host's current worktree set, which changes minute to minute. "
-        "Repository files are dated by their last git commit, never by "
-        "filesystem modification time. The run date on the line above is "
-        "likewise excluded."
+        "dates** with the source of each, and the **checkout-copy counts** "
+        "(copies of an instruction file across this host's checkouts). A date "
+        "moves without any rule changing — a filesystem touch, a checkout, an "
+        "entity correction, a squash merge rewriting a commit date — and the "
+        "copy counts follow the host's current worktree set, which changes "
+        "minute to minute. Only those value cells are exempt: the store names, "
+        "the number of rows and the prose inside an informational block are "
+        "compared like the rest of this file, and the committed file is "
+        "screened for personal data as well as the fresh measurement. The run "
+        "date on the line above is likewise excluded."
+    )
+    A("")
+    A(
+        "**Where each date comes from** — the *Date from* column of the "
+        "informational table in *The stores* states it per store. This "
+        "repository's files (`CLAUDE.md`, `.claude/skills`, `.claude/hooks`) "
+        "are dated by their last git commit, never by filesystem modification "
+        "time. The foundation reference repo is dated by its last git commit "
+        "where its history is readable, entity stores by their last "
+        "observation, and every other file store — `neotoma/AGENTS.md` and "
+        "the canonical repository instruction roots among them — by file "
+        "modification time. On a shallow checkout, which is what CI's default "
+        "depth-1 clone is, this repository has no history to read, so its "
+        "files' dates render as — rather than as the day of the run."
     )
     A("")
 
@@ -2463,7 +2538,12 @@ def render(
         A("")
     A(
         "A `host-dependent` count follows this host's current worktree set and "
-        "is reported in the informational block below rather than compared."
+        "is reported in the informational block below rather than compared. "
+        "What counts as one of the *canonical repository instruction roots*, "
+        "and why that store reads UNREAD when its configuration strays from "
+        "the definition, is defined under "
+        "[Method, so a re-run means something]"
+        "(#method-so-a-re-run-means-something) at the end of this file."
     )
     A("")
     A("| Store | Location | Populated | Statements | Reachable |")
@@ -2891,8 +2971,11 @@ def render(
     )
     A(
         "- **Compared versus informational.** `--check` compares everything "
-        "except the run date and the blocks marked informational (dates and "
-        "checkout-copy counts), for the reasons given at the top of this file."
+        "except the run date and the value cells of the blocks marked "
+        "informational (dates, date sources and checkout-copy counts), for "
+        "the reasons given at the top of this file. The rest of each block is "
+        "compared, and the committed file is screened as well as the "
+        "measurement."
     )
     A("- Read-only against Neotoma **prod**. Nothing is written to the record.")
     return _canonical_generated_text("\n".join(L))
@@ -3073,8 +3156,20 @@ def main() -> int:
             print("candidate rule inventory is absent", file=sys.stderr)
             return 1
         cur = expected_output.read_text()
-        # The run date, last-modified dates and host-dependent copy counts
-        # change without any rule changing; they are not corpus drift.
+        # The committed file is public output too. Its masked value cells are
+        # the only bytes not proven equal to the screened render above, so it
+        # is screened in its own right before anything is compared.
+        committed_clean, committed_reasons = screen_for_pii(cur)
+        if not committed_clean:
+            print(
+                "COMMITTED INVENTORY SCREEN FAILED: "
+                + ", ".join(committed_reasons),
+                file=sys.stderr,
+            )
+            return 2
+        # The run date, last-modified dates, date sources and host-dependent
+        # copy counts change without any rule changing; they are not corpus
+        # drift. Only those cells are masked -- see comparable_text().
         if comparable_text(cur) != comparable_text(out):
             print(
                 "rule inventory is stale — re-run "
