@@ -148,12 +148,12 @@ Without `link`, the workflow that follows opens a second issue for work that has
 two batches carry the same change to two pull requests. Without `prioritize`, the claim order is the creation
 order. Without `route`, a task reaches a workflow by whichever engine noticed it first.
 
-**`route` names a declaration that fits the task, or opens the authoring of one for it; it never holds the
-task for similar tasks to appear** (decision 116). Where a declaration in force for the task's declaration
-scope fits, the verdict names it, and the task proceeds as a batch of one if nothing else is carried with it.
-Where none fits, the step creates the task whose work is a new declaration for this task's class of work,
-records a dependency on it, and signs the verdict naming the new workflow once that declaration has cleared
-the gate that governs a new declaration. The rules are
+**`route` names a declaration that fits the task, holds it on one amendment where a declaration nearly
+fits, or opens the authoring of one for it; it never holds the task for similar tasks to appear** (decision
+116). Where a declaration in force for the task's declaration scope fits, the verdict names it, and the task
+proceeds as a batch of one if nothing else is carried with it. Where one nearly fits, or none fits, the step
+creates the task whose work is the amendment or the new declaration, records a dependency on it, and signs
+the verdict naming the amended or new workflow once that declaration has been approved. The rules are
 `#a-workflow-is-created-for-the-task-no-declaration-fits-and-improved-by-every-task-it-carries`; the rendered
 table above is unchanged, because the successor the verdict names is still one declared workflow.
 
@@ -1013,18 +1013,27 @@ disclosed as a limitation because it is one: nothing above closes the recursion,
 
 **The rules in this section.**
 
-- `route` names a declaration that fits, or opens the authoring of one for this task; the task is never held for similar tasks.
-- The task waits only on the authoring of its own workflow, as a dependency its intake batch records.
-- A run, or a step's verdict, may propose an amendment to the declaration it ran under; the proposal travels as a standing finding and is approved at the action gate, never by the batch that proposed it.
-- A workflow created for one task is named for its class of work, deduplicated against the declarations in force, and stays declared whether or not a second task uses it.
-- Nothing retires a declaration but a governance write through a task.
+- `route` names a declaration that fits, holds the task on one amendment where a declaration nearly fits, or opens the authoring of a new one; the task is never held for similar tasks.
+- A task waits only on the one amendment or the one authoring its own routing needs, as a dependency its intake batch records, bounded by `route`'s `hold_bound`.
+- A new or amended declaration whose steps are all low-blast is approved by the swarm, the approver distinct from the proposer; one that adds a consent point, an `operator_only` action, or a high-blast action is approved by the operator.
+- A run, or a step's verdict, may propose an amendment to the declaration it ran under — as a standing finding where it names a defect, as an improvement proposal where it names none — and the proposing batch never approves it.
+- The task that authors a new declaration goes through the planning workflow once that workflow's draft declaration is active, and through operator-only until then.
+- A created workflow is named for its class of work, deduplicated against the declarations in force, and stays declared whether or not a second task uses it.
+- Nothing retires a declaration automatically; a declaration is retired only when someone raises a retirement task.
+- A created workflow becomes core by the operator's decision, proposed once it has carried five or more tasks.
 
 **Ruled (decision 116, 2026-09-25, the operator's).** Registered in
 `conformance.md#the-register-of-open-design-decisions`. The ruling, verbatim: "Workflows are most powerful
 when dynamic. Every task is executed by a workflow as soon as possible, never held until similar tasks
 appear. When no workflow fits, one is created for that task; when one fits, each new task's context is used
 to improve it as a class. Improving existing workflows is as important as creating new ones." Source: master
-plan `ent_81aadb43caf2fa493361e8ed`, decision `workflows_are_dynamic_created_and_improved_per_task`.
+plan `ent_81aadb43caf2fa493361e8ed`, decision `workflows_are_dynamic_created_and_improved_per_task`. The
+operator ruled the questions the first writing left open the same day: who approves a new or amended
+declaration (`workflow_declaration_approval_by_blast_tier`), what a near fit does
+(`near_fit_task_amends_workflow_first`), and that no declaration retires automatically
+(`workflows_never_retire_automatically`); three defaults were taken without objection — the workflow that
+carries an authoring task, the term for an improvement that names no defect, and when a created workflow
+becomes core (`workflow_decision_116_defaults`).
 
 **What this changes, and what it leaves alone.** Before this ruling, a task no declaration fitted had two
 exits at `route`: none, which ends its chain with the work undone, or operator-only, which hands the operator
@@ -1037,76 +1046,110 @@ write at the action gate, is already the design
 (`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`), and that a
 standing finding obliges a change to the workflow that produced it is decision 17
 (`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
-What the ruling adds is where those paths are taken — at `route`, for every task no declaration fits, and at
-every run, for every declaration a task was carried by — and that improving a declaration ranks with
-creating one. The governance posture is unchanged: every write below is a write to a `workflow` declaration,
-reserved to the operator until the operator grants the class (decision 18), and this ruling grants nothing.
+What the ruling adds is where those paths are taken — at `route`, for every task no declaration fits or
+nearly fits, and at every run, for every declaration a task was carried by — that improving a declaration
+ranks with creating one, and who approves each write. The need is measured, not hypothetical: a survey of
+the procedures the operator runs by hand found most candidate workflows to be core workflows with no
+declaration in force or extensions of declared ones, not new types (analysis `ent_38cc677d0754cae42843838e`,
+2026-09-25), which is the near-fit and amendment case this section rules on.
 
-### What `route` does when no declaration fits
+### What `route` does: fit, near fit, or none
 
 **Fit is judged at `route` and recorded on its verdict.** A declaration fits a task when the task meets its
 entry condition and its steps can close on what the task asks for; the judgement is the `route`
-step owner's, made on the properties intake fixed, and the verdict names the declarations it considered and why
-the one it names fits, or why none did. That no declaration fitted is not a reason to close naming none, and
-not a reason to name operator-only for work the swarm could carry once a declaration exists: those are the
-two exits this ruling removes.
+step owner's, made on the properties intake fixed, and the verdict names the declarations it considered and
+why the one it names fits, nearly fits, or why none did. That no declaration fitted is not a reason to close
+naming none, and not a reason to name operator-only for work the swarm could carry once a declaration
+exists: those are the two exits this ruling removes.
+
+**Where a declaration nearly fits, the task waits for its amendment and then runs on the improved
+workflow.** `route` creates the task whose work is the amendment — the step, read, condition, or successor
+the declaration lacks for this task's class of work — and the intake batch records a dependency on it
+(`work_model.md#a-batch-may-depend-on-a-task-it-created`, decision 14). When the amendment is approved and
+read back, the dependency ends and `route` signs naming the amended declaration, so the task is the first
+batch of its class to run on it. A near fit is not run as-is with the amendment proposed afterwards, and it
+is not answered with a second declaration beside the first, which is the near-duplicate the comparison below
+exists to prevent.
 
 **Where none fits, `route` opens the authoring of one for this task.** The step creates a task whose work is
 a new declaration: the workflow type, its steps with their `owner_role` and closing conditions, its
 successors and whether it permits none, and the purpose and entry condition in the shape
 `#how-to-read-a-workflow-section` gives a core workflow. That task refers to the task being routed as the
-case the declaration is written from, enters its own intake like every task, and goes through a workflow
-like every change to the swarm. The intake batch records a dependency on it
-(`work_model.md#a-batch-may-depend-on-a-task-it-created`, decision 14): `route`'s verdict would be false
-without it, since it would name a workflow that does not exist, which is the case decision 14 admits and the
-case decision 17 declines for an institutionalization task, whose raising batch is not waiting on it to
-exist. The hold is bounded by `route`'s declared `hold_bound`, and reaching the bound escalates as
+case the declaration is written from, enters its own intake like every task, and the intake batch records a
+dependency on it as for a near fit.
+
+**Both holds are the task's own, and neither is a wait for other tasks.** The ruling forbids holding a task
+until similar tasks appear. A near-fit or authoring hold is not that: it waits on one amendment or one
+declaration, created for this task by this task's own `route` step, and on nothing another task does. It is
+decision 14's case — `route`'s verdict would be false without it, since it would name a declaration that does
+not exist or does not yet carry the task — and not decision 17's, whose raising batch is not waiting on the
+change to exist. It is bounded by `route`'s declared `hold_bound`, and reaching the bound escalates as
 `rounds_exhausted`, as any hold does.
 
-**The task proceeds as soon as its declaration clears the gate that governs a new declaration.** That gate is
-the action gate on the `workflow` class
-(`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`), and, above
-the tier the instance names, the proving decision 100 requires before a declaration binds production work
-(`work_model.md#whether-a-newly-declared-workflow-is-proven-before-it-binds-production-work`). When the
-declaration lands and is read back, the dependency ends, `route` signs naming it, and the task's batch opens
-under it. Nothing between those points waits for another task: not for a second task of the kind, not for a
-batch to fill, and not for a sweep to find it, which is the grouping by predicate batch formation already
-forbids (`work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow`).
+**The task proceeds as soon as the declaration clears its approval.** The approval is the action gate on the
+declaration write, under the blast-tier approval below, and, above the tier the instance names, the proving decision 100
+requires before a declaration binds production work
+(`work_model.md#whether-a-newly-declared-workflow-is-proven-before-it-binds-production-work`). Nothing
+between those points waits for another task: not for a second task of the kind, not for a batch to fill, and
+not for a sweep to find it, which is the grouping by predicate batch formation already forbids
+(`work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow`).
+
+### Who approves a new or amended declaration
+
+**The swarm approves a declaration whose steps are all low-blast; the operator approves one that adds a
+consent point, an `operator_only` action, or a high-blast action.** The line is the blast tier of the action
+classes the declaration's steps take, resolved under the instance's `action_policy` as the gate resolves any
+class (`gates_and_workflows.md#confidence-and-three-blast-tiers`): a declaration every one of whose classes
+the policy places low is the swarm's to approve, and one that introduces a `consent` step, an
+`operator_only` action, or a class the policy places high is the operator's. A class the policy lists in
+neither set resolves to `NEVER` and is the operator's, as everywhere. An amendment is judged by what it adds:
+an amendment that adds none of the three is the swarm's, whatever the declaration already held.
+
+**The swarm's approval is never the proposer's.** The principal that approves a declaration or an amendment
+is distinct from the one that proposed it — the author of the authoring task's declaration, or the step owner
+whose verdict proposed the amendment — which is the separation of duties the authority model already names
+(`authority_model.md#structural-checks-quorum-and-separation-of-duties`) and the rule that no principal signs
+for another (`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`).
+
+**What this does to decision 18.** Decision 18 reserves each governance class to the operator until the
+operator writes a policy value for it, and a grant is made class by class. This ruling is such a grant, and
+it is narrower than the `workflow` class: the class is split by blast tier. A write to a `workflow`
+declaration carries, as its class, the highest tier among the action classes its steps take or, for an
+amendment, among those it adds — so that the low-tier declaration write is a class the operator has granted
+the swarm and the high-tier and `NEVER` writes stay reserved. The reservation is unchanged for every other
+governance class, and the operator reserves the low tier again by removing the grant.
 
 ### A run may propose an amendment to its own declaration
 
 **Every batch is evidence about the declaration it ran under, and a step owner may record it as such.** A
-step's verdict, or the closing verdict, may carry a finding that the task's context shows the declaration
+step's verdict, or the closing verdict, may carry a proposal that the task's context shows the declaration
 could serve its class better — a read the step needed and the declaration did not name, an `applies_when`
 that seated a step the change did not warrant, a step the work needed and the declaration lacked, a closing
-condition this task showed too weak. The finding is judged on the standing axis like any other and scoped
-narrowest-first to the step or the workflow; the correction this batch's work owes is made in the batch, and
-the change to the declaration is owed besides.
+condition this task showed too weak. Where the proposal names a defect, it is a [finding](vocabulary.md#finding),
+judged on the standing axis like any other and scoped narrowest-first to the step or the workflow; the
+correction this batch's work owes is made in the batch, and the change to the declaration is owed besides.
+Where it names no defect — the declaration did what it says, and could say more — it is an
+[improvement proposal](vocabulary.md#improvement-proposal), a term distinct from finding, so that a finding
+keeps meaning a defect or an objection and carries severity, and a proposal to improve carries none.
 
-**It reaches the declaration through the learning loop, decision 17, and through nothing shorter.** A
-standing finding scoped to the step or the workflow produces an institutionalization task that `REFERS_TO`
-it; the task enters intake and goes through a workflow; the amendment is a governance write to the
-`workflow` declaration, taken as an action at the gate. The batch that recorded the finding does not wait
-for the amendment, which changes how the next batch of the kind runs and cannot reach this one. A finding
-whose scope the step owner cannot decide goes to the operator as `undetermined_scope`.
-
-**Who approves it is the gate's answer, and the proposer never supplies it.** The write is approved where
-the action gate permits the `workflow` class: under decision 18, the operator, until the operator writes a
-policy value for the class, and thereafter as the value says. No principal signs for another, so the batch
-whose run proposed the amendment does not also supply the verdict that accepts it
-(`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`). Improving a
-declaration is weighted as the ruling weights it: nothing here ranks the task that amends a declaration below
-the task that authors a new one by kind, and each is prioritized from the `priority_rubric` at its own
-intake.
+**Both reach the declaration through the learning loop, decision 17, and through nothing shorter.** Each
+produces a task that `REFERS_TO` what proposed it; the task enters intake and goes through a workflow; the
+amendment is a governance write to the `workflow` declaration, taken as an action at the gate and approved
+under the blast-tier approval above. The batch that proposed it does not wait, since the amendment changes how the next
+batch of the kind runs and cannot reach this one — unlike a near fit at `route`, where the amendment is made
+for the task before it runs. A finding whose scope the step owner cannot decide goes to the operator as
+`undetermined_scope`. Improving a declaration is weighted as the ruling weights it: nothing here ranks the
+task that amends a declaration below the task that authors a new one by kind, and each is prioritized from
+the `priority_rubric` at its own intake.
 
 ### A workflow created for one task
 
-**It passes the same gate as any declaration, and this ruling does not choose a different one.** A
-declaration written for one task is a write to the `workflow` class, reserved to the operator by default
-(decision 18). Whether the swarm may clear a declaration whose steps take only action classes the policy
-already places low, while one that introduces a consent step or a high-blast or `NEVER` class goes to the
-operator, is a policy the operator would grant rather than a rule this document can state; it is registered
-as open under decision 116.
+**The task that authors it goes through the planning workflow, and through operator-only until that
+workflow can carry it.** Authoring a declaration is survey, judgement, and a write through the gate, the
+shape `#planning` already has; once the planning workflow's draft declaration is active, an authoring task
+is routed to it. Until then, the authoring task is routed to operator-only (`#operator-only`), which is also
+where the first declaration for a declaration scope comes from, as an operator act
+(`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`).
 
 **It is named for its class of work, and deduplicated before it is written.** The workflow type names what
 the task is an instance of, never the task, so that the next task of the kind can be judged to fit it; a
@@ -1114,23 +1157,26 @@ name that coincides with a declared workflow type, a step name, or a defined ter
 under invariant 12's no-overlap half
 (`principles.md#12-as-few-terms-as-the-design-needs-and-no-fewer-no-term-overlaps-another`). Before a new
 declaration is written, the authoring compares it against the declarations in force for the scope: where
-one would admit the task on its entry condition, the case is fit, not creation, and `route` names that one;
-where one nearly fits, the choice between amending it and declaring beside it is not settled here and is
-registered as open under decision 116.
+one would admit the task on its entry condition, the case is fit, not creation, and where one nearly fits,
+the case is an amendment to it, as above.
 
 **Its purpose is stated where it is authored.** A created workflow has no section in this document. Its
 purpose, entry condition, and the reason for each step are stated by the batch that authored it and
 reviewed with its declaration, so the rule that a step whose reason cannot be given is a step to question
 holds for it as for a core workflow.
 
-**It stays declared whether or not a second task ever uses it.** A declaration that has carried one task is
-not a defect and not a candidate for removal on that ground: it is reviewable on the record like any other,
-and the next task of its class fits it. Nothing retires it automatically, since a declaration that lapsed by
-a timer would be state a process has to keep true (principle 11). Retirement is a governance write, made
-through a task like every change to the swarm, and its condition is that the declaration has not carried a
-task within an interval the instance declares **and** another declaration in force admits every task it
-admitted; an unused declaration that nothing supersedes stays. Which interval, and what raises the
-retirement task, are registered as open under decision 116.
+**It stays declared whether or not a second task ever uses it, and nothing retires it automatically.** A
+declaration that has carried one task is not a defect and not a candidate for removal on that ground: it is
+reviewable on the record like any other, and the next task of its class fits it. No interval, count, or
+sweep proposes retiring an unused declaration. A declaration is retired only when someone raises a
+retirement task, which is a change to the swarm like any other: it enters intake, goes through a workflow,
+and its write is a governance write approved under the blast-tier approval above.
+
+**It becomes core by the operator's decision, proposed once it has carried five or more tasks.** The count
+is a derived read over the batches that ran under the declaration, never a counter kept on it (principle
+11). When it reaches five, the proposal that the workflow become core is carried to the operator as a task;
+the operator decides, and a workflow made core gains a section in this document through a PR like any change
+to the foundation (`conformance.md#amending-a-foundation-document`).
 
 ## Whether a stage names anything a step does not
 

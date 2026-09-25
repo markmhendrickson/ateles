@@ -667,7 +667,7 @@ evidence are the fields the rules bind on (`data_model.md#concepts`).
 **Not for:** a finding as the thing that closes a step (the [verdict](#verdict) closes it); a comment on
 an [artifact](#artifact) as a finding (a remark carries no severity and reaches no step); a blocking
 finding that names no executed check; a standing finding discharged by correcting only the work it was
-filed against.
+filed against; a proposal that names no defect (that is an [improvement proposal](#improvement-proposal)).
 
 ### finding scope
 **Definition:** which of a defect's four possible reaches a [finding](#finding) names — narrowest first, the
@@ -1080,6 +1080,29 @@ A task with no intake [batch](#batch) is unrouted by that fact; no unrouted stat
 **Never:** "undispatched".
 **Not for:** "triage" for the whole workflow (its first stage); unrouted as a stored status; routing by
 a router (the `route` step is a verdict by a step owner).
+
+### improvement proposal
+**Definition:** the record, made by a [step owner](#step-owner) on a [verdict](#verdict), that the
+context of the [task](#task) the [batch](#batch) carried shows the [workflow](#workflow) declaration it ran
+under could serve its class better, where nothing the declaration did was a defect.
+The rule that turns on it: like a standing [finding](#finding), it produces a task that `REFERS_TO` it, and
+that task's work is an amendment to the declaration, a [governance write](#governance-write) approved at the [action gate](#action-gate) — by the
+swarm where the amendment adds only low-blast [steps](#step), by the [operator](#operator) where it adds a consent point, an
+`operator_only` [action](#action), or a high-blast action — and never by the batch that proposed it (decision 116).
+Unlike a finding it carries no severity, blocks nothing, and has no one-off form: it is about the declaration,
+never about the batch's work. Swap test against [finding](#finding): "the step owner recorded a finding" asserts
+that something was wrong and binds the [conclusion](#conclusion); "the step owner recorded an improvement
+proposal" asserts that nothing was wrong and binds nothing in this batch — the two sentences differ in what the
+verdict may conclude, so the terms do not overlap. Swap test against [proposal](#proposal): "the [principal](#principal) made
+a proposal" asks that an initiative be accepted, under proposal rights a grant carries; "the step owner recorded
+an improvement proposal" asks nothing of the initiative class and is made by any step owner on its own verdict,
+so the second sentence cannot be read as the first. The name is the operator's (decision 116), and the word it
+shares with [proposal](#proposal) is not a [claim](#claim) that it is one.
+**See:** [`workflows.md#a-workflow-is-created-for-the-task-no-declaration-fits-and-improved-by-every-task-it-carries`](workflows.md#a-workflow-is-created-for-the-task-no-declaration-fits-and-improved-by-every-task-it-carries).
+**Never:** —
+**Not for:** a [finding](#finding) for a proposal that names no defect (a finding is a defect or an objection);
+an improvement proposal for a defect (that is a standing finding, with its severity); an improvement proposal
+as a [proposal](#proposal) in the initiative sense (it needs no proposal right).
 
 ## Adapters (`adapters.md`)
 
