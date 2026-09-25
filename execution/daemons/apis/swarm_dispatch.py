@@ -904,6 +904,35 @@ _PLAIN_LINE_BREAKS = frozenset({"\n", "\r\n", "\r"})
 _LEADING_REVIEW_MARKER_RE = re.compile(
     r"^<!--\s*review:[a-z0-9_-]+\s+commit=[0-9a-f]{7,40}\s*-->$", re.I
 )
+# ateles#1247: a harness's own reply can prepend an acknowledgment line the
+# lens never wrote and the posted comment never carries — e.g. the harness
+# echoing "Posted: https://github.com/.../issuecomment-…" or "Posted. Reply
+# below, reproducing the exact same content…" ahead of the marker/header the
+# lens actually composed (confirmed on PR #1149's `pm`/`ux` rounds: the posted
+# GitHub comment was the exact documented contract shape, but the harness
+# stdout the dispatcher parsed carried one extra line first). This is
+# deliberately NOT a blanket "skip any first line" — see `_skip_leading_ack_
+# line`. Also deliberately narrow in ITS OWN match: this pattern matches the
+# WHOLE candidate line (`\Z`-anchored at the end, `^` at the start), not a
+# `Posted`-prefix on arbitrary prose. A genuine lens review is never, in
+# full, a bare "Posted" sentence — only a harness-added acknowledgment is.
+# Bounding to the two shapes actually observed (a GitHub PR-comment URL, or
+# the fixed "Reply below…" sentence) is deliberately tighter than a prefix
+# match: a differently-worded future harness echo needs its own alternative
+# added here rather than matching by accident, and — the property that
+# matters for fail-closed — a LENS'S OWN first line of prose that happens to
+# start with the word "Posted" and continues into its own analysis can never
+# satisfy `\Z` and so is never treated as an ack line (an earlier, looser
+# `^Posted\b` PREFIX version of this pattern was confirmed, during this
+# fix's own review, to false-clear exactly that case, since nothing then
+# distinguished the lens's own sentence from a harness-injected one — see
+# `test_a_lenses_own_prose_that_happens_to_start_with_posted_still_rejects`).
+_POSTED_ACK_LINE_RE = re.compile(
+    r"^Posted:\s*https://github\.com/\S+?issuecomment-\d+\s*\Z"
+    r"|^Posted\.\s+Reply below,\s+reproducing the exact same content"
+    r"\s+as returned per the gate-verdict contract\.\s*\Z",
+    re.I,
+)
 # Decoration a copied verdict can sit behind on its line: whitespace, `>`
 # quote markers, table pipes, HTML tags. Stripped only for the second-verdict
 # veto, never to find the verdict itself.
@@ -930,6 +959,62 @@ def _starts_a_markdown_line(line: str) -> bool:
     most three plain spaces and no tab."""
     lead = line[: len(line) - len(line.lstrip())]
     return len(lead) <= 3 and lead == " " * len(lead)
+
+
+def _is_marker_or_header(stripped_line: str) -> bool:
+    """True when *stripped_line* (already `.strip()`-ed) is the leading
+    review marker or a well-formed attribution header, for ANY lens.
+
+    Shared by `_skip_leading_ack_line` and its two callers so the marker/
+    header test is written once: `lens_own_verdict` and
+    `describe_gate_verdict_position` still do their own `lens_agent`-scoped
+    match afterwards (this only answers "is a header shape present here",
+    not "is it THIS lens's header").
+    """
+    return bool(
+        _LEADING_REVIEW_MARKER_RE.match(stripped_line)
+        or _OWN_HEADER_RE.match(_normalize_for_blocking_scan(stripped_line).strip())
+    )
+
+
+def _skip_leading_ack_line(
+    lines: list[tuple[str, str]],
+    count: int,
+    marker_at: int,
+    next_non_blank,
+) -> int:
+    """Past a harness "Posted: …"-shaped line ONLY when doing so reveals the
+    real marker/header the lens composed — never as a blanket skip.
+
+    ateles#1247. `marker_at` is the position `lens_own_verdict` /
+    `describe_gate_verdict_position` would otherwise treat as the header (or
+    the marker, if one is already recognised there). This looks ONE position
+    further only when ALL of these hold: the line at `marker_at` reads as an
+    acknowledgment (`_POSTED_ACK_LINE_RE`, not itself a marker or a header),
+    and the very next non-blank line IS a marker or a valid header. That
+    second condition is what keeps this from broadening acceptance generally:
+    a reply that is genuinely prose with no header anywhere still returns
+    `marker_at` unchanged, and every existing rejection path (no header
+    anywhere, second header, second verdict line, code-indented, non-newline
+    break) still runs against whatever position this returns.
+
+    `next_non_blank` is the caller's own blank-line-skip closure, passed in
+    rather than reimplemented here, so the two can never silently diverge on
+    what counts as blank.
+    """
+    if marker_at >= count:
+        return marker_at
+    candidate = lines[marker_at][0].strip()
+    if not candidate or _is_marker_or_header(candidate):
+        return marker_at
+    if not _POSTED_ACK_LINE_RE.match(candidate):
+        return marker_at
+    nxt = next_non_blank(marker_at + 1)
+    if nxt >= count:
+        return marker_at
+    if _is_marker_or_header(lines[nxt][0].strip()):
+        return nxt
+    return marker_at
 
 
 def lens_own_verdict(stdout: str | None, *, lens_agent: str) -> str | None:
@@ -978,6 +1063,7 @@ def lens_own_verdict(stdout: str | None, *, lens_agent: str) -> str | None:
         return i
 
     header_at = next_non_blank(0)
+    header_at = _skip_leading_ack_line(lines, count, header_at, next_non_blank)
     if header_at < count and _LEADING_REVIEW_MARKER_RE.match(lines[header_at][0].strip()):
         header_at = next_non_blank(header_at + 1)
     verdict_at = next_non_blank(header_at + 1)
@@ -1104,7 +1190,8 @@ def describe_gate_verdict_position(stdout: str | None, *, lens_agent: str) -> st
         return i
 
     header_at = next_non_blank(0)
-    if _LEADING_REVIEW_MARKER_RE.match(lines[header_at][0].strip()):
+    header_at = _skip_leading_ack_line(lines, count, header_at, next_non_blank)
+    if header_at < count and _LEADING_REVIEW_MARKER_RE.match(lines[header_at][0].strip()):
         header_at = next_non_blank(header_at + 1)
     if header_at >= count:
         return "nothing follows the review marker"
