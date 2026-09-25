@@ -1193,7 +1193,11 @@ class TestToolSchemas(unittest.TestCase):
     # Read-only swarm observability. resolve_checkpoint stays the ONLY mutating
     # tool: see the self-certification boundary note in server.py — a session
     # must not be able to advance its own gate.
-    OBSERVABILITY_TOOLS = {"get_gate_status", "list_pipeline_queue", "get_dispatch_health"}
+    OBSERVABILITY_TOOLS = {
+        "get_gate_status", "list_pipeline_queue", "get_dispatch_health",
+        # ateles#1275 slice 1: per-task timeline and change feed, read-only.
+        "get_task_timeline", "watch_swarm",
+    }
 
     def test_tools_defined(self):
         self.assertEqual(len(srv.TOOLS), len(self.ACTION_TOOLS | self.OBSERVABILITY_TOOLS))
@@ -1212,7 +1216,10 @@ class TestToolSchemas(unittest.TestCase):
         for name in self.OBSERVABILITY_TOOLS:
             fn = srv.TOOL_HANDLERS[name]
             chain = inspect.getsource(fn)
-            for impl in ("_get_gate_status", "_list_pipeline_queue", "_get_dispatch_health"):
+            for impl in (
+                "_get_gate_status", "_list_pipeline_queue", "_get_dispatch_health",
+                "_get_task_timeline", "_watch_swarm", "_watch_poll", "_watch_baseline",
+            ):
                 if impl in chain:
                     chain += inspect.getsource(getattr(srv, impl))
             self.assertNotIn("_correct(", chain, f"{name} must not write to Neotoma")
@@ -1403,154 +1410,164 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class TestInstructionsCarryLiveRules:
-    """Foundation phase E2, task 3 — the SESSION transport.
+class TestInstructionsStayWithinTheSharedClientBudget:
+    """Foundation phase E2, task 3 — the SESSION transport. CORRECTED
+    2026-09-25 (ateles#1243, ateles#1254).
 
-    The exit gate requires a rule written to `agent_policy` to be observed in
-    an agent's resolved context on BOTH transports. Dispatch is
-    `AgentLoader.render_policy_prompt` (ateles#1118). This is the session side:
-    the MCP `instructions` block, which is re-attached at every compaction
-    from the live connection.
+    PR #1184 made this render the full `agent_policy` corpus into the MCP
+    `instructions` field. Measured evidence (ateles#1243) showed that field is
+    capped at roughly 2,048 characters ACROSS ALL CONNECTED SERVERS COMBINED,
+    truncated SILENTLY by the client — and the rendered corpus on `main`
+    measured 17,996 characters, about 9x the shared budget. So the corpus
+    never reached a session; whatever survived truncation did.
 
-    RED before this change: `instructions` was a hardcoded five-rule literal
-    that never read `agent_policy`, so nothing written to the record reached a
-    session — the nonce below could not appear at any value.
+    RED against that `main` behaviour (reproduced below in
+    `TestInstructionsBudgetRedGreen`): forwarding a ~60-rule mock corpus
+    (~300 chars/rule) into the field produced ~15,000+ characters, far over
+    any reasonable per-server share of the 2,048 cap.
+
+    GREEN, this fix: the field carries only the fixed static rules plus one
+    short pointer sentence to Neotoma's `agent_policy` records. The corpus
+    text itself is never forwarded, so its size cannot affect this field's
+    size at all — nothing here should reopen a path where it could.
     """
 
-    NONCE = "NONCE-e2-session-transport-7f3a91"
-
-    def _patch_loader(self, monkeypatch, block):
+    def _patch_loader(self, monkeypatch, block=None, raises: Exception | None = None):
         import lib.daemon_runtime.agent_loader as al
 
-        monkeypatch.setattr(
-            al.AgentLoader, "render_policy_prompt", lambda self: block
-        )
+        if raises is not None:
+            def boom(self):
+                raise raises
+            monkeypatch.setattr(al.AgentLoader, "render_policy_prompt", boom)
+        else:
+            monkeypatch.setattr(
+                al.AgentLoader, "render_policy_prompt", lambda self: block or ""
+            )
 
-    def test_nonce_written_to_the_record_reaches_the_instructions_block(
-        self, monkeypatch
-    ):
+    def test_rule_text_on_the_record_is_never_forwarded_verbatim(self, monkeypatch):
+        # The defect this fix closes: rule TEXT reaching the field at all,
+        # regardless of size. A nonce standing in for a live rule must NOT
+        # appear in the rendered output — only the pointer sentence should.
+        nonce = "NONCE-e2-session-transport-7f3a91"
         self._patch_loader(
-            monkeypatch, f"\n\n## Active agent policies (apply these)\n- (mandatory, active) {self.NONCE}"
+            monkeypatch, f"\n\n## Active agent policies (apply these)\n- (mandatory, active) {nonce}"
         )
         out = srv.render_server_instructions("ateles@ateles-swarm")
-        assert self.NONCE in out, "a rule on the record did not reach the session"
+        assert nonce not in out, "rule text reached the instructions field — this is the defect being fixed"
+        assert "agent_policy" in out, "the pointer sentence to Neotoma must still be present"
 
-    def test_static_operating_rules_survive_alongside_the_live_rules(
-        self, monkeypatch
-    ):
-        # The static block tells a session how to USE this server; losing it
-        # to make room for live rules would trade one delivery failure for
-        # another.
-        self._patch_loader(monkeypatch, "\n\n## Active agent policies\n- (mandatory, active) x")
+    def test_static_operating_rules_are_present(self, monkeypatch):
+        self._patch_loader(monkeypatch, "")
         out = srv.render_server_instructions("ateles@ateles-swarm")
         assert "Dispatch, don't do inline" in out
         assert "Checkpoint protocol" in out
 
-    def test_an_unreachable_record_still_serves_the_static_rules(
+    def test_pointer_names_neotoma_and_applies_when(self, monkeypatch):
+        self._patch_loader(monkeypatch, "")
+        out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert "Neotoma" in out
+        assert "agent_policy" in out
+        assert "applies_when" in out
+
+    def test_output_always_fits_the_configured_budget(self, monkeypatch):
+        self._patch_loader(monkeypatch, "")
+        out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert len(out) <= srv.INSTRUCTIONS_BUDGET_CHARS
+
+    def test_an_unreachable_record_still_serves_static_rules_and_pointer(
         self, monkeypatch
     ):
-        import lib.daemon_runtime.agent_loader as al
-
-        def boom(self):
-            raise RuntimeError("neotoma unreachable")
-
-        monkeypatch.setattr(al.AgentLoader, "render_policy_prompt", boom)
+        self._patch_loader(monkeypatch, raises=RuntimeError("neotoma unreachable"))
         out = srv.render_server_instructions("ateles@ateles-swarm")
         assert "Dispatch, don't do inline" in out
-        assert out == srv.SERVER_INSTRUCTIONS
+        assert "agent_policy" in out
 
     def test_an_unreachable_record_is_logged_not_silent(self, monkeypatch, caplog):
-        import lib.daemon_runtime.agent_loader as al
-
-        def boom(self):
-            raise RuntimeError("neotoma unreachable")
-
-        monkeypatch.setattr(al.AgentLoader, "render_policy_prompt", boom)
+        self._patch_loader(monkeypatch, raises=RuntimeError("neotoma unreachable"))
         with caplog.at_level("ERROR"):
             srv.render_server_instructions("ateles@ateles-swarm")
         assert any("could not resolve agent_policy" in r.message for r in caplog.records)
 
-    def test_no_bound_rows_is_a_warning_not_a_silent_pass(self, monkeypatch, caplog):
+    def test_huge_corpus_from_the_record_does_not_grow_the_output(self, monkeypatch):
+        # 60 rules of ~300 chars — the shape ateles#1243 measured (median 221,
+        # longest 1,166 chars) — must not move the rendered size at all, since
+        # the corpus text is no longer forwarded.
+        huge = "\n\n## Active agent policies (apply these)\n" + "\n".join(
+            f"- (advisory, active) Rule {i} " + ("x" * 280) for i in range(60)
+        )
+        self._patch_loader(monkeypatch, huge)
+        out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert len(out) <= srv.INSTRUCTIONS_BUDGET_CHARS
+
+    def test_a_budget_overflow_falls_back_to_static_rules_and_logs_a_warning(
+        self, monkeypatch, caplog
+    ):
+        # Simulate a future edit pushing the fixed text itself over budget —
+        # the guard must fail loudly to the static rules, never truncate
+        # mid-rule the way ateles#1243 documented the client doing.
+        monkeypatch.setattr(srv, "RULE_INDEX_POINTER", "x" * (srv.INSTRUCTIONS_BUDGET_CHARS + 1))
         self._patch_loader(monkeypatch, "")
         with caplog.at_level("WARNING"):
             out = srv.render_server_instructions("ateles@ateles-swarm")
         assert out == srv.SERVER_INSTRUCTIONS
-        assert any("no agent_policy rows bind" in r.message for r in caplog.records)
+        assert any("exceed the" in r.message for r in caplog.records)
 
 
-class TestSessionPathExercisesTheRealResolve:
-    """Loxia on #1184: every other server test patches `render_policy_prompt`
-    wholesale, so the REAL resolve — and the `agent_sub` the session path
-    derives — was never exercised. A `scope: agent` row would silently miss
-    if the loader compared against the bare name rather than the full
-    principal, and no test would notice.
+class TestInstructionsBudgetRedGreen:
+    """Standalone reproduction of the red/green pair for this fix, isolated
+    from the class above so it can be pointed at pre-fix code by hand (revert
+    `render_server_instructions` to forward `block` and this goes red).
 
-    These patch only the HTTP layer, so the loader's own scoping runs.
+    Mocks a corpus of ~60 rules at ~300 chars each — the shape measured on
+    `main` in ateles#1243 (53 rules, 17,996 chars total, median 221 chars,
+    longest 1,166) — and asserts the rendered `instructions` field stays
+    within the shared client budget regardless.
     """
 
-    def _rows(self, *snaps):
-        return {"entities": [{"snapshot": s} for s in snaps]}
-
-    def _patch_http(self, monkeypatch, payload):
+    def test_mock_60_rule_corpus_stays_within_budget(self, monkeypatch):
         import lib.daemon_runtime.agent_loader as al
 
-        class _R:
-            status_code = 200
-
-            def raise_for_status(self):
-                pass
-
-            def json(self):
-                return payload
-
-        monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
-        monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: False)
-        monkeypatch.setattr(al.httpx, "post", lambda url, **kw: _R())
-
-    def test_agent_scoped_row_for_this_principal_reaches_the_block(
-        self, monkeypatch
-    ):
-        # THE case Loxia flagged: `scope: agent` binds by the FULL sub. If the
-        # session path passed the bare name through, this row would miss.
-        self._patch_http(
-            monkeypatch,
-            self._rows(
-                {
-                    "scope": "agent",
-                    "agent_sub": "ateles@ateles-swarm",
-                    "status": "active",
-                    "rule": "AGENT-SCOPED-NONCE-4c1d",
-                }
-            ),
+        mock_corpus = "\n\n## Active agent policies (apply these)\n" + "\n".join(
+            f"- (advisory, active) Rule {i}: " + ("padding text " * 20)
+            for i in range(60)
         )
-        out = srv.render_server_instructions("ateles@ateles-swarm")
-        assert "AGENT-SCOPED-NONCE-4c1d" in out
+        assert len(mock_corpus) > 10_000, "mock corpus should reproduce the real overflow shape"
 
-    def test_another_agents_scoped_row_does_not_reach_this_session(
-        self, monkeypatch
-    ):
-        self._patch_http(
-            monkeypatch,
-            self._rows(
-                {
-                    "scope": "agent",
-                    "agent_sub": "pavo@ateles-swarm",
-                    "status": "active",
-                    "rule": "PAVO-ONLY-NONCE",
-                }
-            ),
-        )
+        monkeypatch.setattr(al.AgentLoader, "render_policy_prompt", lambda self: mock_corpus)
         out = srv.render_server_instructions("ateles@ateles-swarm")
-        assert "PAVO-ONLY-NONCE" not in out
+        assert len(out) <= srv.INSTRUCTIONS_BUDGET_CHARS, (
+            f"rendered instructions ({len(out)} chars) exceed the "
+            f"{srv.INSTRUCTIONS_BUDGET_CHARS}-char budget — this is the exact "
+            "failure mode ateles#1243 measured on main (17,996 chars against "
+            "a ~2,048-char shared client cap)"
+        )
 
-    def test_global_row_reaches_the_block_through_the_real_resolve(
-        self, monkeypatch
-    ):
-        self._patch_http(
-            monkeypatch,
-            self._rows(
-                {"scope": "global", "status": "active", "rule": "GLOBAL-NONCE-9b2e"}
-            ),
-        )
-        out = srv.render_server_instructions("ateles@ateles-swarm")
-        assert "GLOBAL-NONCE-9b2e" in out
+
+# ── get_dispatch_health: label gate surfacing ───────────────────────────────
+#
+# ATELES_SWARM_REQUIRE_LABEL (bootstrap mode / canary lane, swarm_dispatch.py)
+# must be surfaced here so "nothing is being reviewed" reads as the label gate
+# working as designed rather than as a broken dispatcher.
+
+
+class TestDispatchHealthLabelGate:
+    def test_unset_reports_gate_inactive(self, monkeypatch):
+        monkeypatch.delenv("ATELES_SWARM_REQUIRE_LABEL", raising=False)
+        result = srv._get_dispatch_health()
+        assert result["label_gate_active"] is False
+        assert result["label_gate_label"] is None
+
+    def test_set_reports_gate_active_with_label(self, monkeypatch):
+        monkeypatch.setenv("ATELES_SWARM_REQUIRE_LABEL", "swarm-canary")
+        result = srv._get_dispatch_health()
+        assert result["label_gate_active"] is True
+        assert result["label_gate_label"] == "swarm-canary"
+        assert "swarm-canary" in result["interpretation"]
+
+    def test_set_empty_string_reports_gate_inactive(self, monkeypatch):
+        # Whitespace-only / empty-string env values must not read as "active
+        # with an empty label" — same treatment as fully unset.
+        monkeypatch.setenv("ATELES_SWARM_REQUIRE_LABEL", "   ")
+        result = srv._get_dispatch_health()
+        assert result["label_gate_active"] is False
+        assert result["label_gate_label"] is None

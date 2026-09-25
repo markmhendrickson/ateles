@@ -1,0 +1,1157 @@
+{
+ "_about": "Recorded 2026-09-25 from hosted Neotoma (read-only) for ateles#1275: task ent_18cb45736689441229b2b7f4, the task the design reconstructed end to end. Task and checkpoint observations and the two runner events are real, with long text clipped and provenance reduced to client_name. harness_event rows marked synthetic stand in for the unrelated traffic sharing those entities.",
+ "task_id": "ent_18cb45736689441229b2b7f4",
+ "entities": {
+  "ent_18cb45736689441229b2b7f4": {
+   "entity_id": "ent_18cb45736689441229b2b7f4",
+   "entity_type": "task",
+   "canonical_name": "task:Complete the Ateles and Neotoma brand workflows with no missing or stale review deliverables",
+   "snapshot": {
+    "title": "Complete the Ateles and Neotoma brand workflows with no missing or stale review deliverables",
+    "status": "failed",
+    "blocked_reason": "timed out after 1800s",
+    "priority": "high",
+    "domain": "design",
+    "area": "brand-system",
+    "repository": "markmhendrickson/ateles"
+   },
+   "observation_count": 10,
+   "last_observation_at": "2026-09-22T19:52:49.449Z",
+   "created_at": "2026-09-22T17:35:05.831Z"
+  },
+  "ent_95d94353e7e8a5ec06c28334": {
+   "entity_id": "ent_95d94353e7e8a5ec06c28334",
+   "entity_type": "checkpoint_brief",
+   "canonical_name": "checkpoint_brief:PLAN checkpoint: Complete the Ateles and Neotoma brand workflows with no missing or stale review deliverables",
+   "snapshot": {
+    "resolved_dispatched": true,
+    "status": "approved",
+    "checkpoint_name": "PLAN",
+    "blocking": true,
+    "task_entity_id": "ent_18cb45736689441229b2b7f4",
+    "title": "PLAN checkpoint: Complete the Ateles and Neotoma brand workflows with no missing or stale review deliverables",
+    "confidence": 0.76,
+    "confidence_threshold": 0.85,
+    "blast_radius": "high",
+    "gate_action": "checkpoint_plan_approval_with_alternatives",
+    "reason": "not scored by a producer (score is a mechanical estimate) and high blast radius — propose alternatives",
+    "handler": "apis"
+   },
+   "observation_count": 4,
+   "last_observation_at": "2026-09-22T19:22:39.713Z",
+   "created_at": "2026-09-22T17:35:13.490Z"
+  }
+ },
+ "observations": [
+  {
+   "id": "3d09a354-0108-2d7e-1f05-767ed56064e1",
+   "entity_id": "ent_18cb45736689441229b2b7f4",
+   "entity_type": "task",
+   "observed_at": "2026-09-22T19:52:49.449Z",
+   "fields": {
+    "blocked_reason": "timed out after 1800s"
+   },
+   "idempotency_key": "taskreason-apis-ent_18cb45736689441229b2b7f4-failed-approved"
+  },
+  {
+   "id": "80077767-437f-8eee-daa8-5d3a023f21a2",
+   "entity_id": "ent_18cb45736689441229b2b7f4",
+   "entity_type": "task",
+   "observed_at": "2026-09-22T19:52:48.635Z",
+   "fields": {
+    "status": "failed"
+   },
+   "idempotency_key": "taskstatus-apis-ent_18cb45736689441229b2b7f4-failed-approved"
+  },
+  {
+   "id": "389d5457-21d0-8792-b2ac-da7a9b833a2a",
+   "entity_id": "ent_18cb45736689441229b2b7f4",
+   "entity_type": "task",
+   "observed_at": "2026-09-22T19:22:42.528Z",
+   "fields": {
+    "status": "executing"
+   },
+   "idempotency_key": "taskstatus-apis-ent_18cb45736689441229b2b7f4-executing-approved"
+  },
+  {
+   "id": "fa4cc060-b2e3-e4ae-d13d-67758cc32a7d",
+   "entity_id": "ent_18cb45736689441229b2b7f4",
+   "entity_type": "task",
+   "observed_at": "2026-09-22T19:22:41.738Z",
+   "fields": {
+    "status": "routed"
+   },
+   "idempotency_key": "taskstatus-apis-ent_18cb45736689441229b2b7f4-routed-approved"
+  },
+  {
+   "id": "ba8830c2-856e-6dbd-ee61-e1c366ab4835",
+   "entity_id": "ent_18cb45736689441229b2b7f4",
+   "entity_type": "task",
+   "observed_at": "2026-09-22T17:35:31.178Z",
+   "fields": {
+    "status": "ready"
+   },
+   "idempotency_key": "brand-completeness-task-ready-20260922",
+   "provenance": {
+    "client_name": "neotoma-session-recovery"
+   }
+  },
+  {
+   "id": "ab6cb3ba-8134-d0c2-0e63-aa81aad5c2f3",
+   "entity_id": "ent_18cb45736689441229b2b7f4",
+   "entity_type": "task",
+   "observed_at": "2026-09-22T17:35:29.975Z",
+   "fields": {
+    "blocked_reason": "Cleared 2026-09-22 by the operator's explicit instruction to update both brand pages generally and execute the workflow…"
+   },
+   "idempotency_key": "brand-completeness-task-clear-operator-authorization-20260922",
+   "provenance": {
+    "client_name": "neotoma-session-recovery"
+   }
+  },
+  {
+   "id": "fabc917b-4d9c-ec1d-4625-4890557122b7",
+   "entity_id": "ent_18cb45736689441229b2b7f4",
+   "entity_type": "task",
+   "observed_at": "2026-09-22T17:35:15.570Z",
+   "fields": {
+    "blocked_reason": "not scored by a producer (score is a mechanical estimate) and high blast radius — propose alternatives"
+   },
+   "idempotency_key": "taskreason-apis-ent_18cb45736689441229b2b7f4-awaiting_approval-created"
+  },
+  {
+   "id": "961fc6b3-5b02-8cdb-d42a-7274c3ea9098",
+   "entity_id": "ent_18cb45736689441229b2b7f4",
+   "entity_type": "task",
+   "observed_at": "2026-09-22T17:35:14.689Z",
+   "fields": {
+    "status": "awaiting_approval"
+   },
+   "idempotency_key": "taskstatus-apis-ent_18cb45736689441229b2b7f4-awaiting_approval-created"
+  },
+  {
+   "id": "4600a53e-a312-e27d-5093-bd920b2de696",
+   "entity_id": "ent_18cb45736689441229b2b7f4",
+   "entity_type": "task",
+   "observed_at": "2026-09-22T17:35:12.039Z",
+   "fields": {
+    "status": "routed"
+   },
+   "idempotency_key": "taskstatus-apis-ent_18cb45736689441229b2b7f4-routed-created"
+  },
+  {
+   "id": "ccf7b31c-e432-12cd-47fd-ec9c07f57cee",
+   "entity_id": "ent_18cb45736689441229b2b7f4",
+   "entity_type": "task",
+   "observed_at": "2026-09-22T17:35:05.834Z",
+   "fields": {
+    "title": "Complete the Ateles and Neotoma brand workflows with no missing or stale review deliverables",
+    "description": "Audit the canonical Ateles and Neotoma brand systems, generated mirrors, neutral /brand/ pages, and reusable define-bra…",
+    "status": "ready",
+    "priority": "high"
+   },
+   "idempotency_key": "complete-brand-workflow-assets-content-20260922-v1",
+   "provenance": {
+    "client_name": "neotoma-session-recovery"
+   }
+  },
+  {
+   "id": "d2d49331-4d77-5bb4-f066-c10be027e2e9",
+   "entity_id": "ent_95d94353e7e8a5ec06c28334",
+   "entity_type": "checkpoint_brief",
+   "observed_at": "2026-09-22T19:22:39.713Z",
+   "fields": {
+    "resolved_dispatched": true
+   },
+   "idempotency_key": "checkpoint-dispatched-apis-ent_95d94353e7e8a5ec06c28334"
+  },
+  {
+   "id": "f03e0078-233a-1582-a70a-fede84ca658e",
+   "entity_id": "ent_95d94353e7e8a5ec06c28334",
+   "entity_type": "checkpoint_brief",
+   "observed_at": "2026-09-22T19:17:52.200Z",
+   "fields": {
+    "status": "approved"
+   },
+   "idempotency_key": "replay-approved-brand-completeness-1790104670073",
+   "provenance": {
+    "client_name": "neotoma-session-recovery"
+   }
+  },
+  {
+   "id": "1a11754c-084b-c07a-64ba-3dee612690fb",
+   "entity_id": "ent_95d94353e7e8a5ec06c28334",
+   "entity_type": "checkpoint_brief",
+   "observed_at": "2026-09-22T17:42:23.826Z",
+   "fields": {
+    "status": "approved"
+   },
+   "idempotency_key": "approve-brand-completeness-1790098942117",
+   "provenance": {
+    "client_name": "neotoma-session-recovery"
+   }
+  },
+  {
+   "id": "8767c5f1-1273-4980-6bf4-4e9d155353bd",
+   "entity_id": "ent_95d94353e7e8a5ec06c28334",
+   "entity_type": "checkpoint_brief",
+   "observed_at": "2026-09-22T17:35:13.499Z",
+   "fields": {
+    "checkpoint_name": "PLAN",
+    "blocking": true,
+    "task_entity_id": "ent_18cb45736689441229b2b7f4",
+    "title": "PLAN checkpoint: Complete the Ateles and Neotoma brand workflows with no missing or stale review deliverables",
+    "confidence": 0.76,
+    "confidence_threshold": 0.85,
+    "blast_radius": "high",
+    "gate_action": "checkpoint_plan_approval_with_alternatives",
+    "reason": "not scored by a producer (score is a mechanical estimate) and high blast radius — propose alternatives",
+    "status": "awaiting_operator",
+    "handler": "apis"
+   },
+   "idempotency_key": null
+  },
+  {
+   "id": "aeda068b-b1f4-9041-5ad8-a5a62ce0236e",
+   "entity_id": "ent_7ec2df67ca3af97138398109",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-22T19:52:47.547Z",
+   "fields": {
+    "event_type": "subprocess",
+    "event_at": "2026-09-22T19:52:47.050676+00:00",
+    "tool_name": "codex:corvus",
+    "agent_sub": "corvus@ateles-swarm",
+    "success": "false",
+    "task_entity_id": "ent_18cb45736689441229b2b7f4",
+    "output_summary": "timeout after 1800s",
+    "duration_ms": 1800045,
+    "provider": "codex",
+    "model_source": "default"
+   },
+   "idempotency_key": null
+  },
+  {
+   "id": "6f1991b5-56e9-a4a7-7eee-a22b7ab599b2",
+   "entity_id": "ent_7ec2df67ca3af97138398109",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-22T19:22:46.384Z",
+   "fields": {
+    "event_type": "subprocess",
+    "event_at": "2026-09-22T19:22:45.901653+00:00",
+    "tool_name": "codex:corvus",
+    "agent_sub": "corvus@ateles-swarm",
+    "success": "partial",
+    "task_entity_id": "ent_18cb45736689441229b2b7f4",
+    "input_summary": "Invoke the corvus agent per the supplied system and skill instructions.\n\nTask ent_18cb45736689441229b2b7f4 (trigger=app…"
+   },
+   "idempotency_key": null
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000001",
+   "entity_id": "ent_synthetic_cicada00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-22T16:10:00.000Z",
+   "fields": {
+    "event_type": "subprocess",
+    "tool_name": "claude:cicada",
+    "agent_sub": "cicada@ateles-swarm",
+    "success": "partial",
+    "task_entity_id": "ent_aaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000002",
+   "entity_id": "ent_synthetic_cicada00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-22T18:00:00.000Z",
+   "fields": {
+    "event_type": "subprocess",
+    "tool_name": "claude:cicada",
+    "agent_sub": "cicada@ateles-swarm",
+    "success": "true",
+    "task_entity_id": "ent_aaaaaaaaaaaaaaaaaaaaaaaa",
+    "output_summary": "ok",
+    "duration_ms": 120000
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000003",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-22T18:30:00.000Z",
+   "fields": {
+    "event_type": "github.pr_review",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#1",
+    "summary": "synthetic review event"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000004",
+   "entity_id": "ent_7ec2df67ca3af97138398109",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-22T19:00:00.000Z",
+   "fields": {
+    "event_type": "subprocess",
+    "tool_name": "codex:corvus",
+    "agent_sub": "corvus@ateles-swarm",
+    "success": "partial",
+    "task_entity_id": ""
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000005",
+   "entity_id": "ent_7ec2df67ca3af97138398109",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-22T19:40:00.000Z",
+   "fields": {
+    "event_type": "subprocess",
+    "tool_name": "codex:corvus",
+    "agent_sub": "corvus@ateles-swarm",
+    "success": "false",
+    "task_entity_id": "",
+    "output_summary": "exit 1"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000100",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T00:00:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000101",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T00:15:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000102",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T00:30:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000103",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T00:45:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000104",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T01:00:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000105",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T01:15:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000106",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T01:30:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000107",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T01:45:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000108",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T02:00:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000109",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T02:15:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000110",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T02:30:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000111",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T02:45:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000112",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T03:00:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000113",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T03:15:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000114",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T03:30:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000115",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T03:45:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000116",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T04:00:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000117",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T04:15:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000118",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T04:30:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000119",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T04:45:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000120",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T05:00:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000121",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T05:15:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000122",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T05:30:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000123",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T05:45:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000124",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T06:00:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000125",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T06:15:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000126",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T06:30:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000127",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T06:45:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000128",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T07:00:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000129",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T07:15:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000130",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T07:30:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000131",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T07:45:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000132",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T08:00:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000133",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T08:15:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000134",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T08:30:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000135",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T08:45:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000136",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T09:00:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000137",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T09:15:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000138",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T09:30:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000139",
+   "entity_id": "ent_synthetic_github00000000",
+   "entity_type": "harness_event",
+   "observed_at": "2026-09-23T09:45:00.000Z",
+   "fields": {
+    "event_type": "github.push_main",
+    "handler": "apis",
+    "subject_ref": "markmhendrickson/ateles#0",
+    "summary": "synthetic push"
+   },
+   "idempotency_key": null,
+   "synthetic": true
+  }
+ ],
+ "relationships": {
+  "ent_18cb45736689441229b2b7f4": [
+   {
+    "relationship_type": "PART_OF",
+    "source_entity_id": "ent_18cb45736689441229b2b7f4",
+    "target_entity_id": "ent_98ef9d45f8a6896fed408f8f",
+    "source_entity_type": null,
+    "target_entity_type": "plan"
+   },
+   {
+    "relationship_type": "REFERS_TO",
+    "source_entity_id": "ent_18cb45736689441229b2b7f4",
+    "target_entity_id": "ent_8c834a37087f9471fd8b0c05",
+    "source_entity_type": null,
+    "target_entity_type": "task"
+   },
+   {
+    "relationship_type": "REFERS_TO",
+    "source_entity_id": "ent_18cb45736689441229b2b7f4",
+    "target_entity_id": "ent_94218851b815696f6cea86dc",
+    "source_entity_type": null,
+    "target_entity_type": "skill"
+   },
+   {
+    "relationship_type": "REFERS_TO",
+    "source_entity_id": "ent_18cb45736689441229b2b7f4",
+    "target_entity_id": "ent_73da44b2d434cbafe5d8ecb9",
+    "source_entity_type": null,
+    "target_entity_type": "specification"
+   },
+   {
+    "relationship_type": "DEPENDS_ON",
+    "source_entity_id": "ent_18cb45736689441229b2b7f4",
+    "target_entity_id": "ent_427b054ba67cb865524c2c11",
+    "source_entity_type": null,
+    "target_entity_type": "task"
+   },
+   {
+    "relationship_type": "REFERS_TO",
+    "source_entity_id": "ent_18cb45736689441229b2b7f4",
+    "target_entity_id": "ent_bada69d5cbb1f27bf82bb86b",
+    "source_entity_type": null,
+    "target_entity_type": "brand_guideline"
+   },
+   {
+    "relationship_type": "REFERS_TO",
+    "source_entity_id": "ent_18cb45736689441229b2b7f4",
+    "target_entity_id": "ent_c5f3ebd1800a887a3b405e53",
+    "source_entity_type": null,
+    "target_entity_type": "brand_guideline"
+   },
+   {
+    "relationship_type": "REFERS_TO",
+    "source_entity_id": "ent_95d94353e7e8a5ec06c28334",
+    "target_entity_id": "ent_18cb45736689441229b2b7f4",
+    "source_entity_type": "checkpoint_brief",
+    "target_entity_type": null
+   },
+   {
+    "relationship_type": "REFERS_TO",
+    "source_entity_id": "ent_0828eab4a5883aa7e1361f3a",
+    "target_entity_id": "ent_18cb45736689441229b2b7f4",
+    "source_entity_type": "task",
+    "target_entity_type": null
+   },
+   {
+    "relationship_type": "REFERS_TO",
+    "source_entity_id": "ent_d75add779571bc2678293fb2",
+    "target_entity_id": "ent_18cb45736689441229b2b7f4",
+    "source_entity_type": "task",
+    "target_entity_type": null
+   },
+   {
+    "relationship_type": "REFERS_TO",
+    "source_entity_id": "ent_1b8ea496d427398f90f0a73f",
+    "target_entity_id": "ent_18cb45736689441229b2b7f4",
+    "source_entity_type": "task",
+    "target_entity_type": null
+   },
+   {
+    "relationship_type": "REFERS_TO",
+    "source_entity_id": "ent_ed47838cfec0b43d8bc5f7ac",
+    "target_entity_id": "ent_18cb45736689441229b2b7f4",
+    "source_entity_type": "task",
+    "target_entity_type": null
+   }
+  ]
+ },
+ "related_entities": {
+  "ent_18cb45736689441229b2b7f4": {
+   "ent_bada69d5cbb1f27bf82bb86b": {
+    "entity_id": "ent_bada69d5cbb1f27bf82bb86b",
+    "entity_type": "brand_guideline",
+    "canonical_name": "Ateles canonical brand system",
+    "snapshot": {
+     "status": "provisional"
+    }
+   },
+   "ent_c5f3ebd1800a887a3b405e53": {
+    "entity_id": "ent_c5f3ebd1800a887a3b405e53",
+    "entity_type": "brand_guideline",
+    "canonical_name": "Neotoma canonical brand system",
+    "snapshot": {
+     "status": "provisional"
+    }
+   },
+   "ent_95d94353e7e8a5ec06c28334": {
+    "entity_id": "ent_95d94353e7e8a5ec06c28334",
+    "entity_type": "checkpoint_brief",
+    "canonical_name": "PLAN checkpoint: Complete the Ateles and Neotoma brand workflows with no missing or stale review deliverables",
+    "snapshot": {
+     "status": "approved"
+    }
+   },
+   "ent_98ef9d45f8a6896fed408f8f": {
+    "entity_id": "ent_98ef9d45f8a6896fed408f8f",
+    "entity_type": "plan",
+    "canonical_name": "Neotoma & Ateles product strategy — multi-operator + governed open work",
+    "snapshot": {
+     "status": "in_progress"
+    }
+   },
+   "ent_94218851b815696f6cea86dc": {
+    "entity_id": "ent_94218851b815696f6cea86dc",
+    "entity_type": "skill",
+    "canonical_name": "define-brand-system",
+    "snapshot": {
+     "status": null
+    }
+   },
+   "ent_73da44b2d434cbafe5d8ecb9": {
+    "entity_id": "ent_73da44b2d434cbafe5d8ecb9",
+    "entity_type": "specification",
+    "canonical_name": "Reusable product brand-system schema v1.1",
+    "snapshot": {
+     "status": "active"
+    }
+   },
+   "ent_0828eab4a5883aa7e1361f3a": {
+    "entity_id": "ent_0828eab4a5883aa7e1361f3a",
+    "entity_type": "task",
+    "canonical_name": "Make brand-workflow completion fail on missing review deliverables",
+    "snapshot": {
+     "status": "done"
+    }
+   },
+   "ent_1b8ea496d427398f90f0a73f": {
+    "entity_id": "ent_1b8ea496d427398f90f0a73f",
+    "entity_type": "task",
+    "canonical_name": "Populate both neutral brand-review pages with complete current content and non-cinematic assets",
+    "snapshot": {
+     "status": "awaiting_approval"
+    }
+   },
+   "ent_427b054ba67cb865524c2c11": {
+    "entity_id": "ent_427b054ba67cb865524c2c11",
+    "entity_type": "task",
+    "canonical_name": "Produce provisional Ateles swarm and Neotoma record-graph mark systems",
+    "snapshot": {
+     "status": "done"
+    }
+   },
+   "ent_8c834a37087f9471fd8b0c05": {
+    "entity_id": "ent_8c834a37087f9471fd8b0c05",
+    "entity_type": "task",
+    "canonical_name": "Regenerate Ateles and Neotoma brand systems through the full upstream category-to-aesthetic chain",
+    "snapshot": {
+     "status": "in_progress"
+    }
+   },
+   "ent_d75add779571bc2678293fb2": {
+    "entity_id": "ent_d75add779571bc2678293fb2",
+    "entity_type": "task",
+    "canonical_name": "Implement provisional Ateles swarm and Neotoma record-graph SVG mark families",
+    "snapshot": {
+     "status": "superseded"
+    }
+   },
+   "ent_ed47838cfec0b43d8bc5f7ac": {
+    "entity_id": "ent_ed47838cfec0b43d8bc5f7ac",
+    "entity_type": "task",
+    "canonical_name": "Verify the complete Ateles and Neotoma brand systems and neutral review pages",
+    "snapshot": {
+     "status": "awaiting_approval"
+    }
+   }
+  }
+ },
+ "expected_timeline": [
+  [
+   "2026-09-22T17:35:05.834Z",
+   "created",
+   "ready"
+  ],
+  [
+   "2026-09-22T17:35:12.039Z",
+   "status",
+   "routed"
+  ],
+  [
+   "2026-09-22T17:35:13.499Z",
+   "checkpoint_raised",
+   null
+  ],
+  [
+   "2026-09-22T17:35:14.689Z",
+   "status",
+   "awaiting_approval"
+  ],
+  [
+   "2026-09-22T17:35:15.570Z",
+   "reason",
+   null
+  ],
+  [
+   "2026-09-22T17:35:29.975Z",
+   "reason",
+   null
+  ],
+  [
+   "2026-09-22T17:35:31.178Z",
+   "status",
+   "ready"
+  ],
+  [
+   "2026-09-22T17:42:23.826Z",
+   "checkpoint_resolved",
+   "approved"
+  ],
+  [
+   "2026-09-22T19:17:52.200Z",
+   "checkpoint_resolved",
+   "approved"
+  ],
+  [
+   "2026-09-22T19:22:39.713Z",
+   "checkpoint_released",
+   "resolved_dispatched"
+  ],
+  [
+   "2026-09-22T19:22:41.738Z",
+   "status",
+   "routed"
+  ],
+  [
+   "2026-09-22T19:22:42.528Z",
+   "status",
+   "executing"
+  ],
+  [
+   "2026-09-22T19:22:45.901Z",
+   "runner_started",
+   "codex:corvus"
+  ],
+  [
+   "2026-09-22T19:52:47.050Z",
+   "runner_ended",
+   "timeout after 1800s"
+  ],
+  [
+   "2026-09-22T19:52:48.635Z",
+   "status",
+   "failed"
+  ],
+  [
+   "2026-09-22T19:52:49.449Z",
+   "reason",
+   "timed out after 1800s"
+  ]
+ ]
+}

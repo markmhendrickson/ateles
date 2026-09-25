@@ -513,6 +513,85 @@ def make_source(root: Path) -> None:
     hook.write_text("hook data\n", encoding="utf-8")
 
 
+class WorkflowTriggerCoversPackagerInputsTest(unittest.TestCase):
+    """B6: the workflow's `paths` trigger must cover every input the packager reads.
+
+    `pull_request_target` only runs the workflow at all when the PR touches one
+    of the listed `paths` -- a file the packager reads (`package_rule_inventory_
+    inputs.EXACT_INPUTS`, plus the two glob-matched stores) but the trigger
+    omits means a PR that changes ONLY that file never runs the canonical
+    measurement at all, silently. `CLAUDE.md` was exactly this gap: declared in
+    `EXACT_INPUTS` and packaged into every candidate-inputs tree, but absent
+    from `paths` -- a CLAUDE.md-only PR would package a stale copy of it
+    forever and the check would still report green. This test derives the
+    expected coverage from the packager's OWN input list rather than a second
+    hardcoded copy, so it fails the moment the two drift again in either
+    direction. The workflow is `pull_request_target`, so this trigger change
+    takes effect on runs against commits that land AFTER this PR merges to the
+    default branch, not on this PR's own run.
+    """
+
+    def _trigger_paths(self) -> list[str]:
+        doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        # PyYAML parses the bare `on:` mapping key as the boolean True in some
+        # configurations; read defensively so this test does not itself depend
+        # on which parse is in effect.
+        on_block = doc.get("on", doc.get(True))
+        return on_block["pull_request_target"]["paths"]
+
+    @staticmethod
+    def _covered(relative: str, trigger_paths: list[str]) -> bool:
+        """True when a GitHub Actions `paths` glob matches `relative`.
+
+        A literal entry (`"CLAUDE.md"`) matches only itself; `**` matches any
+        number of path segments (`docs/foundation/**` covers
+        `docs/foundation/rule_inventory.md`); a single `*` matches within one
+        segment, mirroring `.claude/hooks/*.py`. `fnmatchcase` alone treats `*`
+        as crossing `/`, which would make a narrower glob wrongly look like it
+        covers a deeper path it does not -- so `**` is translated first, to its
+        own placeholder, and a bare `*` is then confined to one segment.
+        """
+        import fnmatch
+
+        for pattern in trigger_paths:
+            translated = pattern.replace("**", "\0DEEP\0")
+            translated = translated.replace("*", "[^/]*")
+            translated = translated.replace("\0DEEP\0", "*")
+            if fnmatch.fnmatchcase(relative, translated):
+                return True
+        return False
+
+    def test_every_exact_input_is_covered_by_a_trigger_path(self) -> None:
+        trigger_paths = self._trigger_paths()
+        exact_paths = sorted(inputs.EXACT_INPUTS)
+        self.assertTrue(exact_paths, "EXACT_INPUTS must not be empty")
+        for relative in exact_paths:
+            with self.subTest(exact_input=relative):
+                self.assertTrue(
+                    self._covered(relative, trigger_paths),
+                    f"{relative} is read by the packager (EXACT_INPUTS) but "
+                    "no glob in the workflow's pull_request_target paths "
+                    "covers it -- a PR touching only this file would never "
+                    "trigger the canonical measurement",
+                )
+
+    def test_glob_matched_stores_are_covered(self) -> None:
+        # The packager also reads `.claude/skills/*/SKILL.md` and
+        # `.claude/hooks/*.py` (package_rule_inventory_inputs._candidate_paths),
+        # which are not in EXACT_INPUTS because they are glob-matched rather
+        # than fixed paths. Verified independently of EXACT_INPUTS coverage
+        # above, against the literal glob patterns the trigger declares.
+        trigger_paths = self._trigger_paths()
+        self.assertIn(".claude/skills/**/SKILL.md", trigger_paths)
+        self.assertIn(".claude/hooks/*.py", trigger_paths)
+
+    def test_claude_md_specifically_is_covered(self) -> None:
+        # The concrete regression this test exists to catch, named directly so
+        # a future refactor of the coverage loop above cannot silently drop it.
+        self.assertIn("CLAUDE.md", inputs.EXACT_INPUTS)
+        self.assertIn("CLAUDE.md", self._trigger_paths())
+
+
 class WorkflowBoundaryTest(unittest.TestCase):
     def test_real_workflow_has_trusted_code_candidate_data_boundary(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")

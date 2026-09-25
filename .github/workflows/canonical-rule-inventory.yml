@@ -19,6 +19,7 @@ on:
   pull_request_target:
     types: [opened, reopened, synchronize]
     paths:
+      - "CLAUDE.md"
       - "docs/foundation/**"
       - "lib/daemon_runtime/agent_loader.py"
       - ".claude/skills/**/SKILL.md"

@@ -11,7 +11,7 @@ life end to end, with the governance substrate (identity, capability, gating, au
 against the vision.
 
 Ateles is a design and a working example of it. The design is
-[`docs/foundation/`](docs/foundation/): twenty-six documents — twenty-two stating how work is created,
+[`docs/foundation/`](docs/foundation/): twenty-seven documents — twenty-three stating how work is created,
 taken, executed, and approved, and what the swarm does when it cannot reach its own record, plus
 [Revisions](docs/foundation/revisions.md), [Decision state](docs/foundation/decision_state.md),
 [Skill inventory](docs/foundation/skill_inventory.md), and the
@@ -711,6 +711,7 @@ Full documentation lives in `docs/` — index at [docs/README.md](docs/README.md
 [Conformance suite](docs/foundation/conformance_suite.md) ·
 [Scenarios](docs/foundation/scenarios.md) · [Workflows](docs/foundation/workflows.md) ·
 [Migration](docs/foundation/migration.md) · [Multi-tenant](docs/foundation/multi_tenant.md) ·
+[Harness carriers](docs/foundation/harness_carriers.md) ·
 [Revisions](docs/foundation/revisions.md) ·
 [Decision state](docs/foundation/decision_state.md) ·
 [Status](docs/foundation/status.md) ·
