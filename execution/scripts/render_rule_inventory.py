@@ -68,6 +68,60 @@ which is empty in all 25 rows, so every agent loads zero policies. A store can
 be fully populated and deliver nothing. Each store therefore carries a
 `reachable` verdict distinct from its populated count.
 
+What `--check` compares, and what it only reports
+--------------------------------------------------
+The merge gate compares the committed file against a fresh measurement, so
+everything in the compared text must be a function of the rule estate itself
+-- a value that moves while no rule changed makes the gate unsatisfiable. Two
+kinds of value do move that way, and both are rendered inside blocks marked
+`<!-- informational: ... -->` and `<!-- /informational -->`, which
+`comparable_text()` replaces with a fixed placeholder before comparing:
+
+1. LAST-MODIFIED DATES, for every store. Files that come from this repository
+   (`CLAUDE.md`, `.claude/skills`, `.claude/hooks`) are dated by their last git
+   commit, which the packager records in the manifest as data -- never by
+   filesystem mtime, which on a packaged copy is always the day of the run.
+   Every other store is dated by mtime or by an entity's last observation. No
+   date is compared: an mtime or an observation moves without any rule text
+   changing (a checkout, a touch, a correction to a status field), and even a
+   git date is rewritten when a pull request is squash-merged, so a date
+   recorded at a PR's head stops matching main the day it lands later. A rule
+   edit is still caught -- by the statement and cluster counts it changes.
+2. THE CHECKOUT-COPY COUNTS (how many copies of `ateles/CLAUDE.md` and
+   `neotoma/AGENTS.md` sit under `~/repos`, and in how many versions). They
+   follow the host's current worktree set, which the swarm changes minute to
+   minute. They are excluded rather than redefined as "primary clones only":
+   what this store measures IS the drift across linked worktrees
+   (`principles.md#1`, ateles#973), so a primary-clones-only count would keep
+   the check green by no longer measuring the thing. Excluding them removes no
+   rule from the comparison -- the copies carry zero statements, since each
+   rule is counted once at its canonical file -- and the store rows themselves
+   (name, location, statements, reachability) stay compared.
+
+Everything else is compared: every rule, every statement count, every store's
+identity and populated count, the clusters, and the headline figures, which
+are all functions of the rule text.
+
+Canonical repository instruction roots -- the definition
+--------------------------------------------------------
+The canonical measurement runner supplies, in
+`RULE_INVENTORY_CANONICAL_REPOSITORY_ROOTS` (os.pathsep-separated), the other
+repository clones whose root instruction files (`CLAUDE.md`, `AGENTS.md`,
+`.cursorrules`) belong to the rule estate. The set is: **every primary git
+clone directly under `~/repos` on the canonical measurement host, excluding
+`ateles`, `neotoma` and `foundation`** -- those three already have a dedicated
+store (the candidate's own `CLAUDE.md`, `neotoma/AGENTS.md`, the foundation
+reference repo), so listing them would count their rules twice. Primary clones
+only: a linked worktree is a version-drift copy, measured by the checkout-copy
+store, not independent rule authorship. No symlinks. A clone with no
+instruction file today is still listed, so a file it gains later is measured
+with no reconfiguration. The list itself is runner configuration and is never
+committed: repository names and local paths are private, and the public
+output carries only the aggregate. `read_canonical_repository_instruction_roots`
+enforces the shape of the rule -- directly under `~/repos`, not one of the
+three excluded names, not a symlink, a primary clone -- and any violation
+makes the whole store UNREAD (exit 3), never a silently different count.
+
 Read-only. Neotoma PROD, never the dev instance. Writes one repo file.
 
 Usage:
@@ -92,6 +146,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+
+import package_rule_inventory_inputs as candidate_inputs
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = REPO_ROOT / "docs" / "foundation" / "rule_inventory.md"
@@ -127,7 +183,13 @@ RULE_ENTITY_TYPES = ("standing_rule", "agent_policy", "task_policy")
 # that belong to the rule estate. Keeping this list in runner configuration
 # avoids publishing repository names or local paths while making missing
 # configuration a blocking, unread measurement rather than an empty one.
+# The rule for what belongs in it is in the module docstring ("Canonical
+# repository instruction roots -- the definition").
 CANONICAL_REPOSITORY_ROOTS_ENV = "RULE_INVENTORY_CANONICAL_REPOSITORY_ROOTS"
+
+# Repositories under ~/repos that already have a dedicated store, and so are
+# never canonical roots: listing one would count its rules twice.
+DEDICATED_STORE_REPOSITORIES = frozenset({"ateles", "neotoma", "foundation"})
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +341,8 @@ class Store:
     # path, name, or other identifier embedded in an internal note.
     distinct_versions: int | None = None
     rule_bearing_files: int | None = None
+    # Where `last_modified` came from; one of PUBLIC_DATE_SOURCES.
+    date_source: str = "file modification time"
 
 
 # Thresholds for the NEEDS-SPLIT probe.
@@ -1110,6 +1174,60 @@ def strip_volatile_measurement_date(text: str) -> str:
     )
 
 
+# Host-dependent measurements are rendered between these markers and never
+# compared (module docstring, "What `--check` compares"). The block is replaced
+# by a fixed placeholder rather than deleted, so its position is still part of
+# the comparison and compared content cannot be moved into one unnoticed: the
+# measured side always renders its compared content outside the blocks.
+INFORMATIONAL_START = "<!-- informational: host-dependent, excluded from the equality check -->"
+INFORMATIONAL_END = "<!-- /informational -->"
+INFORMATIONAL_PLACEHOLDER = "<!-- informational block -->"
+_INFORMATIONAL_BLOCK = re.compile(
+    re.escape(INFORMATIONAL_START) + r".*?" + re.escape(INFORMATIONAL_END),
+    re.S,
+)
+
+# Stores whose populated count follows the host's worktree set, not the rules.
+HOST_DEPENDENT_STORES = frozenset(
+    {"ateles/CLAUDE.md checkout copies", "neotoma/AGENTS.md checkout copies"}
+)
+
+
+def comparable_text(text: str) -> str:
+    """Return the part of a rendered inventory that `--check` compares."""
+    return _INFORMATIONAL_BLOCK.sub(
+        INFORMATIONAL_PLACEHOLDER, strip_volatile_measurement_date(text)
+    )
+
+
+def repository_file_dates(repository_input_root: Path) -> dict[str, str]:
+    """Last git commit date for each repository-sourced rule file.
+
+    A packaged candidate tree carries the dates in its manifest, recorded by
+    the packager from the candidate's history; its files' mtimes are the run's
+    own. A checkout (local write mode) is dated from its own git history.
+    Missing dates are absent, never replaced by an mtime.
+    """
+    if (repository_input_root / candidate_inputs.MANIFEST).is_file():
+        return candidate_inputs.recorded_commit_dates(repository_input_root)
+    try:
+        paths = candidate_inputs._candidate_paths(repository_input_root)
+    except candidate_inputs.InputBoundaryError:
+        return {}
+    relatives = [
+        path.relative_to(repository_input_root).as_posix()
+        for path in paths
+        if path.is_file()
+    ]
+    return {
+        relative: value
+        for relative, value in candidate_inputs.git_last_commit_dates(
+            repository_input_root, relatives
+        ).items()
+        if value
+    }
+
+
 # ---------------------------------------------------------------------------
 # Readers
 # ---------------------------------------------------------------------------
@@ -1201,6 +1319,10 @@ PUBLIC_STATEMENT_LOCATIONS = {
     **{f"{entity_type} entities": "<entity>" for entity_type in RULE_ENTITY_TYPES},
 }
 
+PUBLIC_DATE_SOURCES = frozenset(
+    {"git commit", "file modification time", "last observation"}
+)
+
 PUBLIC_REACHABILITY = frozenset(
     {
         "yes",
@@ -1263,6 +1385,11 @@ def public_locator(locator: str) -> str:
 def public_last_modified(value: str) -> str:
     """Only an ISO calendar date is useful public inventory metadata."""
     return value if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value or "") else "—"
+
+
+def public_date_source(value: str) -> str:
+    """Project a date's provenance onto the generator-owned vocabulary."""
+    return value if value in PUBLIC_DATE_SOURCES else "unknown"
 
 
 def public_reachability(value: str) -> str:
@@ -1472,7 +1599,11 @@ def read_entities(
     stores: list[Store] = []
 
     for etype in RULE_ENTITY_TYPES:
-        store = Store(name=f"{etype} entities", location="Neotoma PROD")
+        store = Store(
+            name=f"{etype} entities",
+            location="Neotoma PROD",
+            date_source="last observation",
+        )
         payload = None
         cache_file = cache / f"{etype}.json" if cache else None
 
@@ -1656,6 +1787,7 @@ def extract_md_rules(
 
 def read_canonical_repository_instruction_roots(
     configured: str | None = None,
+    home: Path | None = None,
 ) -> tuple[list[Statement], Store]:
     """Measure runner-configured canonical repository instruction roots.
 
@@ -1663,8 +1795,12 @@ def read_canonical_repository_instruction_roots(
     aggregate store kind and generic locations only. A missing, malformed,
     absent, symlinked, or unreadable root makes the whole aggregate unread:
     partial success would silently drop a required repo and turn a lower bound
-    into a completeness claim.
+    into a completeness claim. So does a root outside the definition in the
+    module docstring -- not directly under ``~/repos``, or one of the
+    repositories that already has a dedicated store -- since either would
+    change the measurement while reading as a complete one.
     """
+    repos_dir = (home if home is not None else Path.home()) / "repos"
     store = Store(
         name="Canonical repository instruction roots",
         location="",
@@ -1701,6 +1837,15 @@ def read_canonical_repository_instruction_roots(
             if root.is_symlink() or not root.is_dir():
                 raise FileNotFoundError(
                     f"canonical repository root is unavailable: {root}"
+                )
+            if root.resolve().parent != repos_dir.resolve():
+                raise ValueError(
+                    f"canonical repository root is not directly under ~/repos: {root}"
+                )
+            if root.name in DEDICATED_STORE_REPOSITORIES:
+                raise ValueError(
+                    "canonical repository root already has a dedicated store: "
+                    f"{root}"
                 )
             git_dir = root / ".git"
             if git_dir.is_symlink() or not git_dir.is_dir():
@@ -1786,8 +1931,26 @@ def read_file_stores(
 ) -> tuple[list[Statement], list[Store]]:
     statements: list[Statement] = []
     stores: list[Store] = []
+    # Repository-sourced files are dated by git, never by mtime: in a packaged
+    # candidate tree every mtime is the day of the run.
+    commit_dates = repository_file_dates(repository_input_root)
 
-    def add_store(name, loc, files, note="", reachable="yes", reach_note=""):
+    def commit_date(path: Path) -> str:
+        try:
+            relative = path.relative_to(repository_input_root).as_posix()
+        except ValueError:
+            return ""
+        return commit_dates.get(relative, "")
+
+    def add_store(
+        name,
+        loc,
+        files,
+        note="",
+        reachable="yes",
+        reach_note="",
+        from_repository=False,
+    ):
         st = Store(
             name=name,
             location=loc,
@@ -1796,9 +1959,12 @@ def read_file_stores(
             reachable=reachable,
             reach_note=reach_note,
         )
+        date_of = commit_date if from_repository else _mtime
+        if from_repository:
+            st.date_source = "git commit"
         lm = ""
         for f in files:
-            lm = max(lm, _mtime(f))
+            lm = max(lm, date_of(f))
         st.last_modified = lm
         stores.append(st)
         return st
@@ -1811,6 +1977,7 @@ def read_file_stores(
             str(ateles_md),
             [ateles_md],
             reach_note="re-injected from disk at every compaction",
+            from_repository=True,
         )
         s = extract_md_rules(ateles_md, st.name)
         statements += s
@@ -1830,7 +1997,7 @@ def read_file_stores(
     # measurement runner. It intentionally excludes worktrees: those are
     # version-drift copies measured below, not independent rule authorship.
     repository_statements, repository_store = (
-        read_canonical_repository_instruction_roots()
+        read_canonical_repository_instruction_roots(home=home)
     )
     statements += repository_statements
     stores.append(repository_store)
@@ -1976,9 +2143,9 @@ def read_file_stores(
     st.statements = len(s)
 
     # -- skills, three roots -------------------------------------------------
-    for label, root in (
-        ("Skills (ateles repo)", repository_input_root / ".claude" / "skills"),
-        ("Skills (user root)", home / ".claude" / "skills"),
+    for label, root, from_repository in (
+        ("Skills (ateles repo)", repository_input_root / ".claude" / "skills", True),
+        ("Skills (user root)", home / ".claude" / "skills", False),
     ):
         files = sorted(root.glob("*/SKILL.md")) if root.is_dir() else []
         if not files:
@@ -1996,6 +2163,7 @@ def read_file_stores(
             str(root),
             files,
             note=f"{len(withrules)} of {len(files)} contain rule language",
+            from_repository=from_repository,
         )
         st.rule_bearing_files = len(withrules)
         s = []
@@ -2023,7 +2191,10 @@ def read_file_stores(
                 "runtime"
             ),
         )
-        st.last_modified = _git_last_commit(fr) or st.last_modified
+        foundation_commit = _git_last_commit(fr)
+        if foundation_commit:
+            st.last_modified = foundation_commit
+            st.date_source = "git commit"
         s = []
         for f in files:
             s += extract_md_rules(f, st.name)
@@ -2040,6 +2211,7 @@ def read_file_stores(
             note="rules stated as enforcement code, not prose",
             reachable="yes",
             reach_note="binds only where settings.json wires it",
+            from_repository=True,
         )
         s = []
         for f in hooks:
@@ -2057,7 +2229,7 @@ def read_file_stores(
                             str(f),
                             "docstring",
                             t[:600],
-                            last_modified=_mtime(f),
+                            last_modified=commit_date(f),
                         )
                     )
         statements += s
@@ -2176,6 +2348,23 @@ def render(
         "without an instrument is a defect in the generator."
     )
     A("")
+    A(
+        "**What `--check` compares, and what it only reports.** The check "
+        "compares every rule, statement count and cluster, every store's "
+        "identity and populated count (the checkout copies' excepted), and the "
+        "headline figures — values that change only when the rule estate does. "
+        "Two kinds of value are rendered but NOT "
+        "compared, inside blocks marked *informational*: **last-modified "
+        "dates**, and the **checkout-copy counts** (copies of an instruction "
+        "file across this host's checkouts). A date moves without any rule "
+        "changing — a filesystem touch, a checkout, an entity correction, a "
+        "squash merge rewriting a commit date — and the copy counts follow the "
+        "host's current worktree set, which changes minute to minute. "
+        "Repository files are dated by their last git commit, never by "
+        "filesystem modification time. The run date on the line above is "
+        "likewise excluded."
+    )
+    A("")
 
     A("## The headline: duplication factor")
     A("")
@@ -2272,19 +2461,49 @@ def render(
             "therefore lower bounds. Re-run where the reader has credentials."
         )
         A("")
-    A("| Store | Location | Populated | Statements | Last modified | Reachable |")
-    A("|---|---|---|---|---|---|")
-    for st in sorted(stores, key=lambda s: -s.statements):
+    A(
+        "A `host-dependent` count follows this host's current worktree set and "
+        "is reported in the informational block below rather than compared."
+    )
+    A("")
+    A("| Store | Location | Populated | Statements | Reachable |")
+    A("|---|---|---|---|---|")
+    ordered_stores = sorted(stores, key=lambda s: -s.statements)
+    for st in ordered_stores:
         name = public_store_name(st.name)
         loc = public_store_location(st.name, st.location)
         if not st.read_ok:
-            A(f"| {name} | `{loc}` | — | — | — | **UNREAD** |")
+            A(f"| {name} | `{loc}` | — | — | **UNREAD** |")
             continue
+        populated = (
+            "host-dependent" if st.name in HOST_DEPENDENT_STORES else st.populated
+        )
         A(
-            f"| {name} | `{loc}` | {st.populated} | {st.statements} | "
-            f"{public_last_modified(st.last_modified)} | "
+            f"| {name} | `{loc}` | {populated} | {st.statements} | "
             f"{public_reachability(st.reachable)} |"
         )
+    A("")
+    A(INFORMATIONAL_START)
+    A("")
+    A(
+        "**Informational, not compared by `--check`.** Last-modified dates, "
+        "with where each date comes from, and the host-dependent populated "
+        "counts."
+    )
+    A("")
+    A("| Store | Populated on this host | Last modified | Date from |")
+    A("|---|---|---|---|")
+    for st in ordered_stores:
+        if not st.read_ok:
+            continue
+        populated = st.populated if st.name in HOST_DEPENDENT_STORES else "—"
+        A(
+            f"| {public_store_name(st.name)} | {populated} | "
+            f"{public_last_modified(st.last_modified)} | "
+            f"{public_date_source(st.date_source)} |"
+        )
+    A("")
+    A(INFORMATIONAL_END)
     A("")
 
     A("## NEEDS-SPLIT: clusters that are still topical buckets")
@@ -2599,9 +2818,16 @@ def render(
     A(
         "`CLAUDE.md` is re-injected from disk at every compaction, which is what "
         "makes it the home for standing instructions. The disk it is read from is "
-        "the one in the session's own checkout. Measured on this machine: "
-        f"{copy_measurement}"
+        "the one in the session's own checkout. Measured on this machine at "
+        "measurement time — a count that follows the host's worktree set, so it "
+        "is reported, not compared:"
     )
+    A("")
+    A(INFORMATIONAL_START)
+    A("")
+    A(copy_measurement)
+    A("")
+    A(INFORMATIONAL_END)
     A("")
     A(
         "So a rule's reach is not whether it is in `CLAUDE.md` but which copy of "
@@ -2652,6 +2878,21 @@ def render(
     A(
         "- **Target homes** come from the authority table in `conformance.md` and "
         "from nowhere else."
+    )
+    A(
+        "- **Canonical repository instruction roots** are every primary git "
+        "clone directly under `~/repos` on the canonical measurement host, "
+        "excluding `ateles`, `neotoma` and `foundation`, which each have a "
+        "dedicated store above. Linked worktrees are never roots — they are "
+        "the checkout copies — and neither are symlinks. The list is runner "
+        "configuration (`RULE_INVENTORY_CANONICAL_REPOSITORY_ROOTS`) and is "
+        "never committed; this file carries only the aggregate. A root outside "
+        "the definition makes the store UNREAD rather than a different count."
+    )
+    A(
+        "- **Compared versus informational.** `--check` compares everything "
+        "except the run date and the blocks marked informational (dates and "
+        "checkout-copy counts), for the reasons given at the top of this file."
     )
     A("- Read-only against Neotoma **prod**. Nothing is written to the record.")
     return _canonical_generated_text("\n".join(L))
@@ -2832,8 +3073,9 @@ def main() -> int:
             print("candidate rule inventory is absent", file=sys.stderr)
             return 1
         cur = expected_output.read_text()
-        # The measurement date changes every run and is not corpus drift.
-        if strip_volatile_measurement_date(cur) != strip_volatile_measurement_date(out):
+        # The run date, last-modified dates and host-dependent copy counts
+        # change without any rule changing; they are not corpus drift.
+        if comparable_text(cur) != comparable_text(out):
             print(
                 "rule inventory is stale — re-run "
                 "execution/scripts/render_rule_inventory.py",
