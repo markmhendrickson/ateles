@@ -339,15 +339,40 @@ class TestLiveRepo(unittest.TestCase):
             self.skipTest("origin/main not fetched in this checkout")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
-    def test_both_conflict_markers_present(self) -> None:
+    def test_both_rule_pairs_resolved_and_still_distinct(self) -> None:
+        """The two ateles#973 pairs were resolved by the operator on 2026-09-15.
+
+        This replaces the earlier assertion that both carried an unresolved
+        marker. The property worth guarding did not go away with the ruling:
+        a resolution must not silently collapse either pair into one rule.
+        """
         claude_md = (SCRIPT.resolve().parents[1] / "CLAUDE.md").read_text(
             encoding="utf-8"
         )
         self.assertEqual(
             claude_md.count("CONFLICT: unresolved, see ateles#973"),
-            2,
-            "both deliberately-unresolved rule pairs must carry a marker",
+            0,
+            "both pairs were ruled on; no unresolved marker should remain",
         )
+        self.assertEqual(
+            claude_md.count("RESOLVED 2026-09-15 by the operator (ateles#973)"),
+            2,
+            "each resolved pair must record the ruling that settled it",
+        )
+        # Pair B was ruled "keep both": all four leads must survive, because
+        # verify_claude_md_merge.py keys on them and treats the dispatch pair
+        # as two distinct rules.
+        for lead in (
+            "**Dispatch, don't work inline.**",
+            "**Dispatch, don't drift inline.**",
+            "**Comment `/confirm-gates-clear` yourself",
+            "**Prefer a genuine re-review over waiving a gate.**",
+        ):
+            self.assertIn(
+                lead,
+                claude_md,
+                f"resolution must not drop the rule lead {lead!r}",
+            )
 
 
 if __name__ == "__main__":
