@@ -1024,7 +1024,7 @@ disclosed as a limitation because it is one: nothing above closes the recursion,
 - A run, or a step's verdict, may propose an amendment to the declaration it ran under — as a standing finding where it names a defect, as an improvement proposal where it names none, an entity of its own linked to the run that raised it — and the proposing batch never approves it.
 - The task that authors a new declaration is `PART_OF` the originating task's plan and goes through the planning workflow once that workflow's draft declaration is active, whose `amend` step carries the declaration write; it goes through operator-only until then.
 - A created workflow is named for its class of work, deduplicated against the declarations in force, and stays declared whether or not a second task uses it.
-- Nothing retires a declaration automatically; a declaration is retired only when someone raises a retirement task.
+- Nothing retires a declaration automatically; a declaration is retired only when someone raises a retirement task, and retiring one that holds a consent point or a review step is the operator's.
 - A created workflow becomes core by the operator's decision, proposed once planning's `survey` counts five or more tasks it has carried.
 
 **Ruled (decision 116, 2026-09-25, the operator's).** Registered in
@@ -1042,7 +1042,11 @@ becomes core (`workflow_decision_116_defaults`). The four questions that left op
 day: that removing or weakening a protection goes to the operator
 (`workflow_protection_removals_need_operator`, the operator's ruling), and, as defaults taken without
 objection, where an authoring task sits in the planning hierarchy, what record an improvement proposal is,
-and which step counts toward a workflow becoming core (`workflow_decision_116_defaults_2`).
+and which step counts toward a workflow becoming core (`workflow_decision_116_defaults_2`). The last two
+questions were closed the same day as defaults applied by consistency with those rulings, each citing the
+ruling it follows from: an originating task under no plan (below, from `workflow_decision_116_defaults_2`
+and `workflow_decision_116_defaults`), and a retirement that removes a protection (below, from
+`workflow_protection_removals_need_operator`).
 
 **What this changes, and what it leaves alone.** Before this ruling, a task no declaration fitted had two
 exits at `route`: none, which ends its chain with the work undone, or operator-only, which hands the operator
@@ -1181,6 +1185,15 @@ operator-only (`#operator-only`), which is also where the first declaration for 
 from, as an operator act
 (`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`).
 
+**An originating task is placed under a plan before `route` can open authoring, and where no plan fits,
+authoring goes operator-only.** A default applied by consistency (2026-09-25), following from
+`workflow_decision_116_defaults_2` — the authoring task is `PART_OF` the originating task's plan — and from
+`workflow_decision_116_defaults`, which already names operator-only as the route for authoring the planning
+workflow cannot carry. Intake's `classify` is the step that already writes a task's `PART_OF` (`#intake`),
+so it is where a task whose ascent would otherwise be empty is placed under a plan, before `route` judges
+fit. Where no plan fits it, the authoring task has no plan to be `PART_OF` and cannot meet the
+planning workflow's entry condition, so it goes to operator-only — the existing fallback, not a new path.
+
 **It is named for its class of work, and deduplicated before it is written.** The workflow type names what
 the task is an instance of, never the task, so that the next task of the kind can be judged to fit it; a
 name that coincides with a declared workflow type, a step name, or a defined term in the scope is refused
@@ -1200,7 +1213,11 @@ declaration that has carried one task is not a defect and not a candidate for re
 reviewable on the record like any other, and the next task of its class fits it. No interval, count, or
 sweep proposes retiring an unused declaration. A declaration is retired only when someone raises a
 retirement task, which is a change to the swarm like any other: it enters intake, goes through a workflow,
-and its write is a governance write approved under the blast-tier approval above.
+and its write is a governance write approved under the blast-tier approval above. **Retiring a declaration
+that holds a consent point or a review step is the operator's**, a default applied by consistency
+(2026-09-25) with `workflow_protection_removals_need_operator`: retirement removes every protection the
+declaration held, and a removed protection is the operator's to approve, fail-closed, whatever the tier of
+the steps that go with it.
 
 **It becomes core by the operator's decision, proposed once it has carried five or more tasks, and the
 planning workflow's `survey` step is what counts.** The `survey` of the planning record its authoring task

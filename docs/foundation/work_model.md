@@ -726,7 +726,9 @@ whose work is a new declaration. Either way the intake batch records a dependenc
 would be false without it. The hold waits on one change made for this task and on nothing another task does,
 so it is not the wait for similar tasks the ruling forbids. The change is a change to the swarm and is
 executed as one (`#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`): it enters its
-own intake, sits `PART_OF` the originating task's plan, goes through a workflow — the planning workflow once
+own intake, sits `PART_OF` the originating task's plan — intake's `classify` places the originating task
+under a plan before `route` can open authoring, and where no plan fits, authoring goes operator-only — goes
+through a workflow — the planning workflow once
 that workflow's draft declaration is active, whose `amend` step carries the declaration write, and
 operator-only until then — and its declaration write is a governance write the action gate evaluates. The
 swarm approves it where every step it adds is low-blast, with an approver distinct from the proposer, and the
