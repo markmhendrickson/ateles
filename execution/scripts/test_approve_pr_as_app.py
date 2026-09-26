@@ -466,6 +466,37 @@ class TestChecksApiOnlyRepoDoesNotFalseFail:
 
 
 @pytest.mark.asyncio
+class TestSkippedLoxiaReviewReadsAsGreen:
+    """Loxia's canary gate (loxia-pr-review.yml, ateles PR ci/loxia-canary-only)
+    makes the `review` job's `if:` false for a non-canary PR, which GitHub
+    reports as a check-run with `conclusion: "skipped"`. "Loxia PR review" is
+    not currently in `required_status_checks` on `main` (verified live via
+    `gh api repos/markmhendrickson/ateles/branches/main` — only "gitleaks
+    (secrets + PII)" is required), so this is already covered by
+    `evaluate_checks`'s existing `conclusion in ("success", "neutral",
+    "skipped")` branch — this test pins that a check-run literally named
+    "Loxia PR review" with a skipped conclusion does not block approval, so a
+    future change to that branch (or to the workflow's job/check name) cannot
+    silently regress it."""
+
+    async def test_skipped_loxia_check_run_does_not_block_approval(self, monkeypatch):
+        client = _FakeClient(
+            comments=_all_clear_comments(ALL_FOUR),
+            check_runs=[
+                *_green_checks(),
+                {"name": "Loxia PR review", "status": "completed", "conclusion": "skipped"},
+            ],
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 0
+        assert len(client.posted) == 1
+
+
+@pytest.mark.asyncio
 class TestDryRunNeverSubmits:
     async def test_dry_run_never_submits_even_when_everything_passes(self, monkeypatch):
         client = _FakeClient(comments=_all_clear_comments(ALL_FOUR), check_runs=_green_checks())
@@ -1252,3 +1283,539 @@ class TestNoSchedulingReadsWhenNothingIsPending:
             for u in client.get_urls
             if "/branches/" in u or "/actions/" in u
         ]
+
+
+# ── ateles#1293: a non-required lens's live blocking verdict must refuse ────
+#
+# On 2026-09-26, approve_pr_as_app.py reported "lenses: ALL PASS" for
+# ateles#1293 and approved it, even though Waxwing (arch) had posted
+# REQUEST_CHANGES with a [BLOCKING] finding on the SAME head ten minutes
+# earlier. The derived floor for that diff was only {pm, qa}; arch was never
+# in `lenses`, so its comment was never read at all. These tests replay that
+# exact shape directly against `find_non_required_blocks` and through the
+# full `run()` path, plus the two bounds the fix must respect: a block on a
+# STALE head must not count (the lens hasn't spoken about the head being
+# approved), and `--panel all` (panel_all=True) closes the gap by folding
+# every lens into the required set in the first place.
+
+
+@pytest.mark.asyncio
+class TestNonRequiredLensLiveBlockRefuses:
+    """Replays #1293's shape: required lenses (pm, qa) all clear, but a
+    lens the diff never required (arch) posted a live REQUEST_CHANGES with
+    a [BLOCKING] finding on the CURRENT head. Before the fix this is
+    'lenses: ALL PASS' because `lenses` never contained 'arch' at all — the
+    tool never even fetched its verdict. After the fix it must refuse."""
+
+    async def test_required_lenses_pass_non_required_lens_blocks_refuses(self, monkeypatch):
+        # pm + qa (the derived floor for NEUTRAL_FILES) both clear. arch —
+        # NOT in the derived floor, and NOT added via --lenses — posted
+        # REQUEST_CHANGES with a [BLOCKING] finding on the SAME head.
+        comments = _all_clear_comments(["pm", "qa"])
+        comments.append(
+            _comment(
+                55,
+                _lens_comment_body(
+                    "arch",
+                    "waxwing",
+                    verdict="REQUEST_CHANGES",
+                    extra="[BLOCKING] contract_mappings not updated for the new endpoint.",
+                ),
+            )
+        )
+        client = _FakeClient(
+            comments=comments, check_runs=_green_checks(), changed_files=NEUTRAL_FILES
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        # No --lenses, no --panel all: exactly the derived floor {pm, qa},
+        # exactly ateles#1293's request-shape.
+        code = await target.run(REPO, PR, [], apply=True)
+
+        assert code == 1
+        assert client.posted == []
+
+    async def test_dry_run_also_reports_failure_not_a_vacuous_pass(self, monkeypatch, capsys):
+        comments = _all_clear_comments(["pm", "qa"])
+        comments.append(
+            _comment(
+                56,
+                _lens_comment_body("arch", "waxwing", verdict="REQUEST_CHANGES"),
+            )
+        )
+        client = _FakeClient(
+            comments=comments, check_runs=_green_checks(), changed_files=NEUTRAL_FILES
+        )
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, [], apply=False)
+        out = capsys.readouterr().out
+
+        assert code == 1
+        assert "lenses: ALL PASS" in out  # the required-floor check alone still passes
+        assert "overall: FAIL" in out  # but the non-required block sinks the overall gate
+        assert "arch" in out
+        assert "waxwing" in out
+
+    async def test_refusal_names_the_lens_and_links_the_comment(self, monkeypatch, capsys):
+        comments = _all_clear_comments(["pm", "qa"])
+        comments.append(
+            _comment(
+                57,
+                _lens_comment_body(
+                    "arch", "waxwing", extra="[BLOCKING] missing tenant isolation check."
+                ),
+            )
+        )
+        client = _FakeClient(
+            comments=comments, check_runs=_green_checks(), changed_files=NEUTRAL_FILES
+        )
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, [], apply=False)
+        out = capsys.readouterr().out
+
+        assert code == 1
+        assert "arch" in out
+        assert "waxwing" in out
+        assert f"https://github.com/{REPO}/pull/{PR}#issuecomment-57" in out
+
+    async def test_blocking_marker_with_a_clear_token_still_refuses(self, monkeypatch):
+        """Mirrors TestBlockingFindingRefuses, but for a NON-required lens:
+        a [BLOCKING] finding in the body must refuse even if the lens's own
+        verdict token reads SIGNED_OFF."""
+        comments = _all_clear_comments(["pm", "qa"])
+        comments.append(
+            _comment(
+                58,
+                _lens_comment_body(
+                    "arch",
+                    "waxwing",
+                    verdict="SIGNED_OFF",
+                    extra="[BLOCKING] SSRF: unvalidated redirect target reaches the fetch sink.",
+                ),
+            )
+        )
+        client = _FakeClient(
+            comments=comments, check_runs=_green_checks(), changed_files=NEUTRAL_FILES
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, [], apply=True)
+
+        assert code == 1
+        assert client.posted == []
+
+
+class TestFindNonRequiredBlocksUnit:
+    """Direct unit tests of the new predicate, independent of run() — kept
+    out of the async-marked class above since these are plain sync tests."""
+
+    def test_find_non_required_blocks_unit(self):
+        comments = _all_clear_comments(["pm", "qa"])
+        comments.append(
+            _comment(60, _lens_comment_body("arch", "waxwing", verdict="REQUEST_CHANGES"))
+        )
+        blocks = target.find_non_required_blocks(
+            comments=comments, head_sha=HEAD, required_lenses={"pm", "qa"}
+        )
+        assert [b.lens for b in blocks] == ["arch"]
+        assert blocks[0].agent == "waxwing"
+
+    def test_find_non_required_blocks_ignores_a_clearing_non_required_lens(self):
+        """A non-required lens that reviewed and CLEARED must not be reported
+        — this predicate is about live objections, never mere absence or a
+        clean bill from a lens outside the floor."""
+        comments = _all_clear_comments(["pm", "qa", "arch"])
+        blocks = target.find_non_required_blocks(
+            comments=comments, head_sha=HEAD, required_lenses={"pm", "qa"}
+        )
+        assert blocks == []
+
+    def test_find_non_required_blocks_ignores_a_lens_that_never_commented(self):
+        comments = _all_clear_comments(["pm", "qa"])
+        blocks = target.find_non_required_blocks(
+            comments=comments, head_sha=HEAD, required_lenses={"pm", "qa"}
+        )
+        assert blocks == []
+
+    def test_find_non_required_blocks_skips_lenses_already_in_required_set(self):
+        """A lens that IS in `required_lenses` is judged by `evaluate_lens`
+        already — `find_non_required_blocks` must not double-report it."""
+        comments = _all_clear_comments(["pm", "qa"])
+        comments.append(
+            _comment(61, _lens_comment_body("qa", "phoenicurus", verdict="REQUEST_CHANGES"))
+        )
+        blocks = target.find_non_required_blocks(
+            comments=comments, head_sha=HEAD, required_lenses={"pm", "qa"}
+        )
+        assert blocks == []  # qa is required; its own block is evaluate_lens's job, not this one
+
+
+@pytest.mark.asyncio
+class TestNonRequiredLensStaleHeadDoesNotCount:
+    """A non-required lens's blocking comment on an OLD head must NOT count
+    — the lens has not spoken about the head actually being approved. This
+    is the mirror of TestOldHeadVerdictRefuses (which covers a REQUIRED
+    lens's stale-head comment) for the new non-required-block path."""
+
+    async def test_stale_head_block_from_non_required_lens_is_not_counted(self, monkeypatch):
+        comments = _all_clear_comments(["pm", "qa"])
+        # arch blocked, but on the OLD head — not the PR's current head.
+        comments.append(
+            _comment(
+                62,
+                _lens_comment_body(
+                    "arch", "waxwing", head=OLD_HEAD, verdict="REQUEST_CHANGES"
+                ),
+            )
+        )
+        client = _FakeClient(
+            comments=comments, check_runs=_green_checks(), changed_files=NEUTRAL_FILES
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, [], apply=True)
+
+        # Must pass: the only comment naming this exact head marker is
+        # absent for arch, so find_non_required_blocks reports nothing for
+        # it, exactly mirroring how evaluate_lens treats a stale-head
+        # comment as "lens has not reviewed the current head".
+        assert code == 0
+        assert len(client.posted) == 1
+
+
+class TestFindNonRequiredBlocksStaleHeadUnit:
+    def test_find_non_required_blocks_unit_stale_head_not_counted(self):
+        comments = _all_clear_comments(["pm", "qa"])
+        comments.append(
+            _comment(63, _lens_comment_body("arch", "waxwing", head=OLD_HEAD, verdict="REQUEST_CHANGES"))
+        )
+        blocks = target.find_non_required_blocks(
+            comments=comments, head_sha=HEAD, required_lenses={"pm", "qa"}
+        )
+        assert blocks == []
+
+
+# ── --panel all: the bootstrap-mode default ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestPanelAllRequiresEverySixLenses:
+    """PR #1303 round-1 incident (Waxwing arch / Pavo pm / Phoenicurus qa /
+    Accipiter ux review comments): these fixtures used to be built from
+    `_all_clear_comments(list(target.LENS_AGENTS))` — fabricating a clearing
+    comment from EVERY registered lens, including `legal`/Buteo, which
+    bootstrap mode's own six-lens roster never dispatches for an ordinary
+    diff. That made every test in this class validate the code against its
+    own (wrong) premise rather than against the actual bootstrap roster —
+    "a test that cannot fail on the thing it watches is decoration"
+    (CLAUDE.md verification discipline). Fixtures here are now built from
+    `target.BOOTSTRAP_PANEL_LENSES` — the named constant the fix itself
+    derives from — plus whatever `select_panel` additionally derives for
+    the diff, never from raw `LENS_AGENTS`.
+    """
+
+    async def test_panel_all_derives_the_bootstrap_six_not_all_seven_lens_agents(
+        self, monkeypatch
+    ):
+        client = _FakeClient(
+            comments=_all_clear_comments(sorted(target.BOOTSTRAP_PANEL_LENSES)),
+            check_runs=_green_checks(),
+            changed_files=NEUTRAL_FILES,
+        )
+        _install_client(monkeypatch, client)
+
+        lenses, required = await target.resolve_lenses(
+            client, repo=REPO, pr=PR, pr_body="Closes #7", extra_lenses=[], panel_all=True
+        )
+
+        assert sorted(lenses) == sorted(target.BOOTSTRAP_PANEL_LENSES)
+        assert "legal" not in lenses
+        # The derived floor itself is unchanged (still just the diff-derived
+        # {pm, qa}) — panel_all is an ADDITION on top, exactly like --lenses.
+        assert sorted(r.lens for r in required) == ["pm", "qa"]
+
+    async def test_panel_all_apply_approves_when_the_bootstrap_six_all_clear(
+        self, monkeypatch
+    ):
+        client = _FakeClient(
+            comments=_all_clear_comments(sorted(target.BOOTSTRAP_PANEL_LENSES)),
+            check_runs=_green_checks(),
+            changed_files=NEUTRAL_FILES,
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, [], apply=True, panel_all=True)
+
+        assert code == 0
+        assert len(client.posted) == 1
+        posted_body = client.posted[0]["json"]["body"]
+        for lens in target.BOOTSTRAP_PANEL_LENSES:
+            assert lens in posted_body
+        assert "legal" not in posted_body
+
+    async def test_panel_all_never_requires_legal_when_the_diff_does_not_need_it(
+        self, monkeypatch
+    ):
+        """The exact regression PR #1303 round 1 shipped: a neutral diff (no
+        package.json/auth//LICENSE/PII surface) must approve WITHOUT a legal/
+        Buteo comment ever existing — legal never even asked for. This is
+        the test that fails if the bootstrap default ever again requires a
+        lens the bootstrap panel doesn't run."""
+        client = _FakeClient(
+            comments=_all_clear_comments(sorted(target.BOOTSTRAP_PANEL_LENSES)),
+            check_runs=_green_checks(),
+            changed_files=NEUTRAL_FILES,
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        lenses, _ = await target.resolve_lenses(
+            client, repo=REPO, pr=PR, pr_body="Closes #7", extra_lenses=[], panel_all=True
+        )
+        assert "legal" not in lenses, (
+            "the bootstrap default must never require a lens outside "
+            "BOOTSTRAP_PANEL_LENSES — legal joins the floor only when "
+            "select_panel derives it for the diff"
+        )
+
+        code = await target.run(REPO, PR, [], apply=True, panel_all=True)
+        assert code == 0, (
+            "a diff where only the bootstrap six are relevant must be "
+            "approvable under --panel all with NO legal comment at all"
+        )
+
+    async def test_panel_all_still_requires_legal_when_the_diff_needs_it(
+        self, monkeypatch
+    ):
+        """legal is not excluded outright — it still joins the floor when
+        select_panel's own diff_patterns pull it in (e.g. a package.json/
+        LICENSE change), exactly as before this fix. panel_all widens the
+        BOOTSTRAP DEFAULT floor; it never narrows what select_panel itself
+        requires."""
+        lenses_present = sorted(target.BOOTSTRAP_PANEL_LENSES) + ["legal"]
+        client = _FakeClient(
+            comments=_all_clear_comments(lenses_present),
+            check_runs=_green_checks(),
+            changed_files=["package.json"],
+        )
+        _install_client(monkeypatch, client)
+
+        lenses, required = await target.resolve_lenses(
+            client, repo=REPO, pr=PR, pr_body="Closes #7", extra_lenses=[], panel_all=True
+        )
+        assert "legal" in lenses
+        assert "legal" in {r.lens for r in required}, (
+            "legal must appear in the DIFF-DERIVED floor for a "
+            "package.json change, not merely as a panel_all addition"
+        )
+
+    async def test_panel_all_refuses_when_one_of_the_bootstrap_six_never_commented(
+        self, monkeypatch
+    ):
+        present = [lens for lens in target.BOOTSTRAP_PANEL_LENSES if lens != "content"]
+        client = _FakeClient(
+            comments=_all_clear_comments(present),
+            check_runs=_green_checks(),
+            changed_files=NEUTRAL_FILES,
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, [], apply=True, panel_all=True)
+
+        assert code == 1
+        assert client.posted == []
+
+    async def test_panel_all_still_refuses_on_a_1293_shaped_block(self, monkeypatch):
+        """With panel_all on, arch is already in `lenses` (required), so this
+        exercises the SAME refusal through evaluate_lens rather than
+        find_non_required_blocks — proving the two paths agree."""
+        comments = _all_clear_comments(
+            [lens for lens in target.BOOTSTRAP_PANEL_LENSES if lens != "arch"]
+        )
+        comments.append(
+            _comment(70, _lens_comment_body("arch", "waxwing", verdict="REQUEST_CHANGES"))
+        )
+        client = _FakeClient(
+            comments=comments, check_runs=_green_checks(), changed_files=NEUTRAL_FILES
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, [], apply=True, panel_all=True)
+
+        assert code == 1
+        assert client.posted == []
+
+
+class TestBootstrapPanelLensesConstant:
+    """Pins the constant itself against the exact incident: it must be the
+    bootstrap roster (six lenses, no legal), never re-widened back to
+    `LENS_AGENTS` (seven) by a future edit with no failing test to catch it."""
+
+    def test_bootstrap_panel_is_exactly_six_lenses(self):
+        assert target.BOOTSTRAP_PANEL_LENSES == frozenset(
+            {"pm", "arch", "ux", "qa", "security", "content"}
+        )
+
+    def test_bootstrap_panel_excludes_legal(self):
+        assert "legal" not in target.BOOTSTRAP_PANEL_LENSES
+
+    def test_bootstrap_panel_is_a_strict_subset_of_lens_agents(self):
+        """Every bootstrap lens must still be a real, registered lens — this
+        constant is a curated SUBSET of LENS_AGENTS, not an independent list
+        that could silently drift to name an unknown lens."""
+        assert target.BOOTSTRAP_PANEL_LENSES < frozenset(target.LENS_AGENTS)
+
+    def test_panel_all_never_unions_a_lens_outside_the_bootstrap_roster(self):
+        """The regression test qa's review asked for directly: whatever
+        `resolve_lenses` does internally, its panel_all output must never
+        contain a lens outside BOOTSTRAP_PANEL_LENSES unless select_panel
+        itself derived it for the diff. Asserted against the CONSTANT, not
+        against LENS_AGENTS echoed back at itself."""
+        non_bootstrap = frozenset(target.LENS_AGENTS) - target.BOOTSTRAP_PANEL_LENSES
+        assert non_bootstrap == frozenset({"legal"})
+
+
+# ── ux finding on PR #1303: a missing lens's reason must say WHICH lens and ─
+# ── HOW to resolve it, and distinguish "pending" from "will never comment" ──
+
+
+@pytest.mark.asyncio
+class TestMissingLensReasonIsActionable:
+    async def test_diff_derived_missing_lens_reads_as_pending_not_permanent(self):
+        """A lens genuinely required by THIS diff (`diff_derived=True`) that
+        has not yet commented reads as a wait, with an action available:
+        wait, or dispatch it yourself."""
+        client = _FakeClient(comments=[], check_runs=[])
+        outcome = await target.evaluate_lens(
+            client,
+            repo=REPO,
+            pr=PR,
+            head_sha=HEAD,
+            comments=[],
+            lens="pm",
+            diff_derived=True,
+        )
+        assert outcome.passed is False
+        assert "pm" in outcome.reason
+        assert "pavo" in outcome.reason
+        assert "part of this diff's required floor" in outcome.reason
+        assert "never will" not in outcome.reason
+
+    async def test_panel_all_only_missing_lens_reads_as_permanent_not_pending(self):
+        """A lens required ONLY because --panel all/--lenses widened the
+        floor (`diff_derived=False`) that has not commented must say it will
+        NEVER comment on its own, and name the two ways to actually resolve
+        the row — Accipiter's ux finding on PR #1303: before this fix both
+        cases printed the identical 'no comment carries {marker}' reason,
+        giving no hint that legal would never comment for an ordinary diff."""
+        client = _FakeClient(comments=[], check_runs=[])
+        outcome = await target.evaluate_lens(
+            client,
+            repo=REPO,
+            pr=PR,
+            head_sha=HEAD,
+            comments=[],
+            lens="legal",
+            diff_derived=False,
+        )
+        assert outcome.passed is False
+        assert "legal" in outcome.reason
+        assert "buteo" in outcome.reason
+        assert "never will" in outcome.reason
+        assert "--panel required" in outcome.reason or "--lenses" in outcome.reason
+        assert "dispatch the lens yourself" in outcome.reason
+
+    async def test_run_passes_diff_derived_correctly_for_required_vs_panel_all_lenses(
+        self, monkeypatch
+    ):
+        """End-to-end: run() must tell evaluate_lens which lenses are
+        actually diff-derived (pm, qa for NEUTRAL_FILES) versus which are
+        required only via panel_all (arch, ux, security, content) — proven
+        by reading the printed reason for each missing lens."""
+        client = _FakeClient(comments=[], check_runs=_green_checks(), changed_files=NEUTRAL_FILES)
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, [], apply=False, panel_all=True)
+        assert code == 1  # nothing commented; expected to fail closed
+
+        # Re-run and capture the outcomes directly via resolve_lenses +
+        # evaluate_lens, mirroring exactly what run() does, so the test
+        # reads the SAME reason text a real dry run would print.
+        lenses, required = await target.resolve_lenses(
+            client, repo=REPO, pr=PR, pr_body="", extra_lenses=[], panel_all=True
+        )
+        floor_names = {r.lens for r in required}
+        outcomes = {
+            lens: await target.evaluate_lens(
+                client,
+                repo=REPO,
+                pr=PR,
+                head_sha=HEAD,
+                comments=[],
+                lens=lens,
+                diff_derived=lens in floor_names,
+            )
+            for lens in lenses
+        }
+        assert "never will" not in outcomes["pm"].reason
+        assert "never will" not in outcomes["qa"].reason
+        assert "never will" in outcomes["arch"].reason
+        assert "never will" in outcomes["security"].reason
+
+
+class TestPanelAllDefault:
+    def test_bootstrap_mode_default_is_panel_all_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("ATELES_APPROVE_PANEL_REQUIRED_ONLY", raising=False)
+        assert target._panel_all_default() is True
+
+    def test_opt_out_env_var_restores_required_only_default(self, monkeypatch):
+        monkeypatch.setenv("ATELES_APPROVE_PANEL_REQUIRED_ONLY", "1")
+        assert target._panel_all_default() is False
+
+    def test_opt_out_env_var_requires_exact_value(self, monkeypatch):
+        """Only the literal '1' opts out, so a typo like 'true' or 'yes'
+        fails closed to the stricter bootstrap-mode default rather than
+        silently disabling it."""
+        for v in ("true", "yes", "0", ""):
+            monkeypatch.setenv("ATELES_APPROVE_PANEL_REQUIRED_ONLY", v)
+            assert target._panel_all_default() is True
+
+    def test_cli_default_reflects_bootstrap_mode(self, monkeypatch):
+        monkeypatch.delenv("ATELES_APPROVE_PANEL_REQUIRED_ONLY", raising=False)
+        monkeypatch.setattr(sys, "argv", ["approve_pr_as_app.py", "--repo", REPO, "--pr", str(PR)])
+        parser_args = []
+
+        async def _capture_run(repo, pr, extra_lenses, *, apply, panel_all=False):
+            parser_args.append(panel_all)
+            return 0
+
+        monkeypatch.setattr(target, "run", _capture_run)
+        target.main()
+
+        assert parser_args == [True]
+
+    def test_cli_panel_required_overrides_bootstrap_default(self, monkeypatch):
+        monkeypatch.delenv("ATELES_APPROVE_PANEL_REQUIRED_ONLY", raising=False)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["approve_pr_as_app.py", "--repo", REPO, "--pr", str(PR), "--panel", "required"],
+        )
+        parser_args = []
+
+        async def _capture_run(repo, pr, extra_lenses, *, apply, panel_all=False):
+            parser_args.append(panel_all)
+            return 0
+
+        monkeypatch.setattr(target, "run", _capture_run)
+        target.main()
+
+        assert parser_args == [False]

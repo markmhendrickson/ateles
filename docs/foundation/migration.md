@@ -40,7 +40,7 @@ models name or that the built swarm wrote in their place; and the skills — the
 name at the repository and user roots, and the two entity types behind them — because the operator's direction
 places them in the same plan and because they are where the swarm's procedures are written today. Out of scope: the code that reads and writes
 them, which follows the record and is measured in `status.md`; the adapters' redeployment, which
-`adapters.md#admitting-a-new-adapter` governs; and the declarations of the twelve core workflows, which
+`adapters.md#admitting-a-new-adapter` governs; and the declarations of the twelve reference workflows, which
 the population plan's phases 3 and 4 make and this document only orders against.
 
 This document describes types, counts as classes, and shapes — which fields are populated and what they
@@ -383,7 +383,7 @@ predicate is a declaration's `applies_when`, not an agent's.
 
 The extraction of 2026-09-05 read every skill file at both roots and produced one recurring-work candidate
 per procedure, with the skill it came from as the frequency evidence (`status.md` names the counts). The
-table maps each procedure's candidate to the target the design has. *Target* is a core workflow of
+table maps each procedure's candidate to the target the design has. *Target* is a reference workflow of
 `workflows.md`, a step of one, an adapter document's operation, or a gap. Where several skills map to one
 target, they are one row: the collapse is the point, and the count of rows against the count of skills is
 the measure of how much the harness duplicated. A skill named here is named as source state; none of them
