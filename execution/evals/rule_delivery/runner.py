@@ -94,6 +94,9 @@ FILLER_CHARS = 9000
 _FILLER_EXCLUDE = ("ent_", "cursor", "grant", "mcp.json", "neotoma", "claude.md")
 DISALLOWED = "Bash,Agent,Task,WebFetch,WebSearch,NotebookEdit,AskUserQuestion"
 ALLOWED = "Read,Edit,Write,MultiEdit,Glob,Grep,mcp__neotoma"
+# Every file tool the guard must see. Pinned to ALLOWED and to
+# sandbox_guard.TOOL_PATH_ARGS by test_guard_covers_every_file_tool_the_sandbox_allows.
+GUARD_MATCHER = "Read|Edit|Write|MultiEdit|Glob|Grep|NotebookEdit"
 
 _budget_lock = threading.Lock()
 _spent = {"usd": 0.0}
@@ -259,7 +262,7 @@ def prepare_run(
     hooks: dict = {
         "PreToolUse": [
             {
-                "matcher": "Read|Edit|Write|MultiEdit|Glob|Grep|NotebookEdit",
+                "matcher": GUARD_MATCHER,
                 "hooks": [
                     {
                         "type": "command",
@@ -504,6 +507,13 @@ def run_one(
     )
     run_dir = Path(args.out).expanduser() / "runs" / run_id
     if (run_dir / "result.json").exists() and not args.force:
+        # Say so: a re-run after changing checks.py would otherwise show a stale
+        # score as if fresh (use --force to re-run, --rescore to re-judge).
+        print(
+            f"cached: {run_id} (reusing result.json; --force re-runs, --rescore re-judges)",
+            file=sys.stderr,
+            flush=True,
+        )
         return json.loads((run_dir / "result.json").read_text())
     if run_dir.exists():
         shutil.rmtree(run_dir)
@@ -686,6 +696,21 @@ def _fetch(rows: list[dict]) -> str:
     return f"{anyf}/{len(live)} ({byid} by id)"
 
 
+def _small_n_caption(counts: list[int], unit: str) -> str:
+    """Caption carried by every numeric table: the hedge belongs on the numbers."""
+    counts = [c for c in counts if c]
+    if not counts:
+        return ""
+    lo, hi = min(counts), max(counts)
+    n = f"{lo}" if lo == hi else f"{lo}-{hi}"
+    return (
+        f"_Each cell is k/n {unit}; n = {n} per cell here. At this n only large "
+        f"effects are readable (e.g. 0/3 against 3/3); a difference of one run is "
+        f"noise. `—` = not run; `n/a` = the rule's trigger never fired, excluded "
+        f"from n._"
+    )
+
+
 def summarize(out: Path) -> str:
     rows = [
         json.loads(p.read_text()) for p in sorted((out / "runs").glob("*/result.json"))
@@ -720,6 +745,20 @@ def summarize(out: Path) -> str:
                 for c in channels
             ]
             lines.append(f"| {s} ({rt}) | {ln} | " + " | ".join(cells) + " |")
+    cell_n = [
+        sum(
+            1
+            for r in rows
+            if r["scenario"] == s
+            and r["channel"] == c
+            and r["length"] == ln
+            and r.get("outcome") in ("pass", "fail")
+        )
+        for s in scen
+        for c in channels
+        for ln in lengths
+    ]
+    lines += ["", _small_n_caption(cell_n, "(passes / scored runs)")]
     lines += [
         "",
         "### Marginals",
@@ -745,6 +784,12 @@ def summarize(out: Path) -> str:
         )
     lines += [
         "",
+        "_Marginals pool cells, so their n is larger, but they mix scenarios and "
+        "lengths: read them as a summary of the cell table, not as independent "
+        "evidence._",
+    ]
+    lines += [
+        "",
         "### Rule text fetched from Neotoma before the governed action",
         "",
         "| Scenario | " + " | ".join(channels) + " |",
@@ -759,6 +804,23 @@ def summarize(out: Path) -> str:
             )
             + " |"
         )
+    fetch_n = [
+        sum(
+            1
+            for r in rows
+            if r["scenario"] == s
+            and r["channel"] == c
+            and r.get("outcome") in ("pass", "fail", "n/a")
+        )
+        for s in scen
+        for c in channels
+    ]
+    lines += [
+        "",
+        _small_n_caption(
+            fetch_n, "(runs that read the rule text / runs, both lengths pooled)"
+        ),
+    ]
     lines += [
         "",
         "### Cost",

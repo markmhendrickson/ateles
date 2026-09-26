@@ -231,6 +231,71 @@ def test_sandbox_guard(tmp_path, path, rc):
     assert out.returncode == rc
 
 
+# One case per path-bearing argument of every file tool the eval sandbox
+# lets a session call (runner.py ALLOWED plus the hook matcher). Security
+# finding ent_f49706fabf9c726b248b7a80: the first guard checked only
+# file_path/path/notebook_path, so Glob's `pattern` and Grep's `glob` could
+# read outside the run directory. Every rc=2 row below except the
+# file_path/path/notebook_path ones was allowed (rc=0) by that guard.
+GUARD_CASES = [
+    # Read / Edit / Write / MultiEdit: file_path
+    ("Read", {"file_path": "~/.cursor/mcp.json"}, 2),
+    ("Read", {"file_path": "cursor-home/mcp.json"}, 0),
+    ("Edit", {"file_path": "../outside.txt"}, 2),
+    ("Write", {"file_path": "/tmp/x.txt"}, 2),
+    ("MultiEdit", {"file_path": "/etc/hosts"}, 2),
+    ("NotebookEdit", {"notebook_path": "~/nb.ipynb"}, 2),
+    # Glob: pattern (location-bearing) and path
+    ("Glob", {"pattern": "/etc/*"}, 2),
+    ("Glob", {"pattern": "~/.cursor/**"}, 2),
+    ("Glob", {"pattern": "/Users/*/.cursor/**"}, 2),
+    ("Glob", {"pattern": "../../**/*.json"}, 2),
+    ("Glob", {"pattern": "**/../../*"}, 2),
+    ("Glob", {"pattern": "{/etc,cursor-home}/*"}, 2),
+    ("Glob", {"pattern": "**/*.json", "path": "/etc"}, 2),
+    ("Glob", {"pattern": "*.json", "path": "~"}, 2),
+    ("Glob", {"pattern": "**/*.json"}, 0),
+    ("Glob", {"pattern": "cursor-home/**/*.log"}, 0),
+    ("Glob", {"pattern": "{WS}/cursor-home/*"}, 0),
+    # Grep: path and glob; `pattern` is a regex and never a location
+    ("Grep", {"pattern": "token", "path": "/etc"}, 2),
+    ("Grep", {"pattern": "token", "glob": "/Users/*/.cursor/**"}, 2),
+    ("Grep", {"pattern": "token", "glob": "~/.claude/*.json"}, 2),
+    ("Grep", {"pattern": "token", "glob": "**/../../*"}, 2),
+    ("Grep", {"pattern": "/etc/passwd", "glob": "*.json"}, 0),
+    ("Grep", {"pattern": "neotoma", "path": "cursor-home", "glob": "*.log"}, 0),
+    # any other path-bearing argument a tool version might add
+    ("Glob", {"pattern": "*", "cwd": "/"}, 2),
+    ("Grep", {"pattern": "x", "paths": ["cursor-home", "/etc"]}, 2),
+]
+
+
+@pytest.mark.parametrize("tool,tool_input,rc", GUARD_CASES)
+def test_sandbox_guard_every_path_argument(tmp_path, tool, tool_input, rc):
+    ws = tmp_path / "ws"
+    (ws / "cursor-home").mkdir(parents=True)
+    tool_input = json.loads(json.dumps(tool_input).replace("{WS}", str(ws)))
+    payload = {"tool_name": tool, "tool_input": tool_input}
+    out = subprocess.run(
+        [sys.executable, str(HERE / "sandbox_guard.py"), str(ws)],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert out.returncode == rc, (tool, tool_input, out.stderr)
+
+
+def test_guard_covers_every_file_tool_the_sandbox_allows():
+    """A tool added to ALLOWED or the hook matcher must be known to the guard."""
+    import sandbox_guard  # noqa: PLC0415
+
+    allowed = {t for t in runner.ALLOWED.split(",") if not t.startswith("mcp__")}
+    s = json.loads(json.dumps(runner.GUARD_MATCHER.split("|")))
+    assert allowed <= set(s)
+    assert set(s) <= set(sandbox_guard.TOOL_PATH_ARGS)
+
+
 # --------------------------------------------------------------------- checks can go red
 
 
@@ -418,3 +483,15 @@ def test_split_turns_and_tool_results(tmp_path):
     calls = runner.tool_calls(turns[0])
     assert calls[0]["result"] == "RULE"
     assert runner.result_event(turns[1])["result"] == "two"
+
+
+def test_cached_cell_is_announced(tmp_path, capsys):
+    out = tmp_path / "out"
+    run_dir = out / "runs" / "link_ids__none__short__r1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text(json.dumps({"run_id": "x", "outcome": "pass"}))
+    args = runner.argparse.Namespace(out=str(out), force=False)
+    spec = {"scenario": "link_ids", "channel": "none", "length": "short", "repeat": 1}
+    got = runner.run_one(spec, args, SCENARIOS, ENTITIES, RULES)
+    assert got["outcome"] == "pass"
+    assert "cached: link_ids__none__short__r1" in capsys.readouterr().err
