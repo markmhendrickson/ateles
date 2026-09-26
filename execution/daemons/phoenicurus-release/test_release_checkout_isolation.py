@@ -26,8 +26,10 @@ Run: pytest execution/daemons/phoenicurus-release/test_release_checkout_isolatio
 
 from __future__ import annotations
 
+import importlib
 import plistlib
 import re
+import sys
 from pathlib import Path
 
 DAEMON_DIR = Path(__file__).resolve().parent
@@ -36,6 +38,16 @@ INSTALL_SH = DAEMON_DIR / "install.sh"
 
 SHARED_CLONE = "repos/neotoma"
 RELEASE_CHECKOUT = "neotoma-rc-src"
+
+
+def _reload_prepare():
+    """Re-import prepare.py so its module-level NEOTOMA_REPO_ROOT is
+    recomputed against whatever env/monkeypatch is active for this test."""
+    if str(DAEMON_DIR) not in sys.path:
+        sys.path.insert(0, str(DAEMON_DIR))
+    import prepare  # noqa: PLC0415
+
+    return importlib.reload(prepare)
 
 
 def test_plist_template_points_at_the_release_checkout():
@@ -102,3 +114,62 @@ def test_installer_warns_when_using_the_shared_clone():
     assert "shared clone" in src, (
         "no warning when the daemon is installed against the shared clone"
     )
+
+
+def test_prepare_default_prefers_release_checkout_when_present(monkeypatch, tmp_path):
+    """
+    prepare.py's OWN default — not just the plist and installer — must prefer
+    ~/neotoma-rc-src. The plist only governs the scheduled Mon-Thu run; the
+    merge-triggered path (swarm_dispatch._handle_push_main) spawns
+    `prepare.py --on-merge` inheriting the Apis daemon's environment, which has
+    no NEOTOMA_REPO_ROOT set at all. Without a correct default in prepare.py
+    itself, every merge-triggered run silently fell back to the shared clone —
+    observed as repeated "could not determine checkout state (no upstream
+    branch configured)" log lines against ~/repos/neotoma on every merge,
+    while the scheduled sweep (whose plist DOES set the var) was pointed
+    correctly the whole time.
+    """
+    monkeypatch.delenv("NEOTOMA_REPO_ROOT", raising=False)
+    fake_home = tmp_path
+    fake_rc_src = fake_home / "neotoma-rc-src"
+    fake_rc_src.mkdir()
+    (fake_rc_src / "package.json").write_text("{}")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    prepare = _reload_prepare()
+    try:
+        assert prepare.NEOTOMA_REPO_ROOT == fake_rc_src
+    finally:
+        # Leave the module in a state that reflects the real environment for
+        # any test that runs after this one in the same process.
+        _reload_prepare()
+
+
+def test_prepare_default_falls_back_to_shared_clone_when_rc_src_absent(
+    monkeypatch, tmp_path
+):
+    """A host without ~/neotoma-rc-src must still resolve to SOMETHING runnable."""
+    monkeypatch.delenv("NEOTOMA_REPO_ROOT", raising=False)
+    fake_home = tmp_path  # no neotoma-rc-src created under it
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    prepare = _reload_prepare()
+    try:
+        assert prepare.NEOTOMA_REPO_ROOT == fake_home / "repos" / "neotoma"
+    finally:
+        _reload_prepare()
+
+
+def test_prepare_default_respects_explicit_env_override(monkeypatch, tmp_path):
+    """An explicit NEOTOMA_REPO_ROOT (however set) must always win over both
+    defaults — this is what the phoenicurus-prepare plist itself relies on."""
+    explicit = tmp_path / "somewhere-else"
+    explicit.mkdir()
+    monkeypatch.setenv("NEOTOMA_REPO_ROOT", str(explicit))
+
+    prepare = _reload_prepare()
+    try:
+        assert prepare.NEOTOMA_REPO_ROOT == explicit
+    finally:
+        monkeypatch.delenv("NEOTOMA_REPO_ROOT", raising=False)
+        _reload_prepare()

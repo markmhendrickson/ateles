@@ -395,3 +395,165 @@ def test_stale_block_escalates_again_once_the_blocker_changes(ready_to_prepare, 
     prepare.run_prepare(dry_run=False, force=False, on_merge=True)
 
     assert len(notices) == 2, "a newly-stale, different blocking entity must escalate"
+
+
+def test_stale_block_re_escalates_once_cadence_elapses(ready_to_prepare, monkeypatch):
+    """
+    ateles#1291: before this fix, a stale block escalated exactly ONCE per
+    blocking entity, ever — then logged "already escalated — not
+    re-notifying" on every subsequent run FOREVER, even as days passed and
+    more commits piled up behind it. v0.23.1 blocked prep of 13 commits
+    (3 security fixes) for 9+ days this way, with a single silent-after-the-
+    first-page warning as the only trace.
+
+    Simulate the cadence window elapsing by backdating the escalation marker
+    itself, rather than sleeping — the marker's age is exactly what the
+    cadence check reads.
+    """
+    rows = [
+        _row(
+            "ent_still_stale",
+            "v0.20.0",
+            "prepared",
+            age_days=prepare.STALE_RELEASE_BLOCK_DAYS + 1,
+        )
+    ]
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_returning(rows))
+    notices: list[str] = []
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: notices.append(a[0] if a else ""))
+
+    prepare.run_prepare(dry_run=False, force=False, on_merge=True)
+    assert len(notices) == 1
+
+    # Still within the cadence window: no second page.
+    monkeypatch.setattr(prepare, "_head_sha", lambda: "c" * 40)
+    prepare.run_prepare(dry_run=False, force=False, on_merge=True)
+    assert len(notices) == 1, "must not re-notify before the cadence window elapses"
+
+    # Backdate the marker past STALE_RELEASE_REESCALATE_HOURS, simulating time
+    # having passed with the SAME blocker still stuck.
+    from datetime import datetime, timedelta, timezone
+
+    overdue_ts = (
+        datetime.now(timezone.utc)
+        - timedelta(hours=prepare.STALE_RELEASE_REESCALATE_HOURS + 1)
+    ).timestamp()
+    prepare.STALE_ESCALATION_FILE.write_text(f"ent_still_stale {overdue_ts}")
+
+    monkeypatch.setattr(prepare, "_head_sha", lambda: "d" * 40)
+    prepare.run_prepare(dry_run=False, force=False, on_merge=True)
+
+    assert len(notices) == 2, (
+        "a block still stuck past the re-escalation cadence must page again, "
+        "not go silent forever after the first notice"
+    )
+
+
+# ── npm auto-reconciliation ──────────────────────────────────────────────────
+
+
+def test_npm_reconcile_unblocks_prep_when_registry_already_shows_it_published(
+    ready_to_prepare, monkeypatch
+):
+    """
+    ateles#1291's actual incident: v0.23.1 published to npm at 13:41Z, but the
+    release_result's terminal status write never landed, leaving it stuck at
+    'publishing'. Every prepare run thereafter re-blocked on a fact the
+    registry already contradicted. Once npm confirms the version is live,
+    prep must go ahead on the SAME run rather than waiting for a human to
+    notice and correct the record by hand.
+    """
+    rows = [
+        _row(
+            "ent_v0231",
+            "v0.23.1",
+            "publishing",
+            age_days=prepare.STALE_RELEASE_BLOCK_DAYS + 6,
+        )
+    ]
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_returning(rows))
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: None)
+    monkeypatch.setattr(prepare, "_npm_registry_version", lambda package="neotoma": "0.23.1")
+
+    corrections: list[tuple] = []
+
+    class _FakeWriteResult:
+        status = 200
+
+    class _FakeWriter:
+        def __init__(self, _agent):
+            pass
+
+        def correct(self, entity_type, entity_id, field_name, value, *, idempotency_key):
+            corrections.append((entity_type, entity_id, field_name, value))
+            return _FakeWriteResult()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "neotoma_signed",
+        type(sys)("neotoma_signed"),
+    )
+    sys.modules["neotoma_signed"].NeotomaWriter = _FakeWriter
+
+    rc = prepare.run_prepare(dry_run=False, force=False, on_merge=True)
+
+    assert rc == 0
+    assert corrections == [("release_result", "ent_v0231", "status", "published")], (
+        "npm showing the version live must correct the stuck record to "
+        "published, signed via NeotomaWriter.correct, not left blocking"
+    )
+
+
+def test_npm_reconcile_does_not_fire_when_registry_disagrees(ready_to_prepare, monkeypatch):
+    """A publish genuinely still in flight (or stuck before npm) must NOT be
+    auto-corrected — only an npm registry match justifies overriding the
+    stored status."""
+    rows = [
+        _row(
+            "ent_v0231",
+            "v0.23.1",
+            "publishing",
+            age_days=prepare.STALE_RELEASE_BLOCK_DAYS + 6,
+        )
+    ]
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_returning(rows))
+    notices: list[str] = []
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: notices.append(a[0] if a else ""))
+    monkeypatch.setattr(prepare, "_npm_registry_version", lambda package="neotoma": "0.23.0")
+
+    rc = prepare.run_prepare(dry_run=False, force=False, on_merge=True)
+
+    assert rc == 0
+    assert ready_to_prepare == [], "must still block — npm does not confirm publication"
+    assert notices, "must still escalate normally when reconciliation does not apply"
+
+
+def test_npm_reconcile_scoped_to_publishing_status_only(ready_to_prepare, monkeypatch):
+    """
+    'prepared'/'pending_approval'/'approved' are stages BEFORE the
+    irreversible npm publish step. npm showing a matching version there would
+    mean something else entirely (e.g. a hand-run publish bypassing this
+    pipeline) — never auto-correct those; only 'publishing' is in scope.
+    """
+    rows = [
+        _row(
+            "ent_v0231",
+            "v0.23.1",
+            "approved",
+            age_days=prepare.STALE_RELEASE_BLOCK_DAYS + 1,
+        )
+    ]
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_returning(rows))
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: None)
+    npm_calls: list[str] = []
+    monkeypatch.setattr(
+        prepare,
+        "_npm_registry_version",
+        lambda package="neotoma": (npm_calls.append(package), "0.23.1")[1],
+    )
+
+    rc = prepare.run_prepare(dry_run=False, force=False, on_merge=True)
+
+    assert rc == 0
+    assert ready_to_prepare == [], "'approved' must still block, not auto-reconcile"
+    assert not npm_calls, "npm must not even be consulted for a non-'publishing' status"
