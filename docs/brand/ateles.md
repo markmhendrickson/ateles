@@ -6,8 +6,8 @@ status: provisional
 source_entity_id: ent_bada69d5cbb1f27bf82bb86b
 schema_entity_id: ent_73da44b2d434cbafe5d8ecb9
 observation_ids:
-  asset_inventory: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
-  completeness: 63417972-dbc2-ddab-63dd-1a3befdcc8cc
+  asset_inventory: 0a675575-ced4-593f-9b2b-1b6d303604f4
+  completeness: c9600b95-eede-6f40-96ea-8452ddf05844
   downstream_contracts: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
   name: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
   ownership: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
@@ -16,7 +16,7 @@ observation_ids:
   product: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
   production_specs: 50984e28-3dbf-5754-14db-553bd9f76b60
   provenance: b50ae57a-ef5a-946b-a7ce-4443080fae53
-  schema_version: unknown
+  schema_version: 157e9d12-463d-9ad3-3a86-788c7b47a825
   scope: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
   slug: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
   status: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
@@ -24,7 +24,7 @@ observation_ids:
   updated_at: 48f5b97b-6fe4-5f4d-0a28-a95305fc9c8e
   visibility: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
   visual_concepts: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
-  visual_styles: ec75f024-ef9b-a5ee-dae7-edf1c63c5a9e
+  visual_styles: 586155e7-4cad-d936-9183-b0850bf7abf1
   voice: cb8db405-e6e9-6ed8-e85a-79a784e0b02d
 ---
 
@@ -184,23 +184,23 @@ observation_ids:
 
 ## Logo system
 
-- **PROVISIONAL · primary mark — Abstract swarm mark:** Primary compact identity. (source: `execution/scripts/site_generator/templates/render.py#_brand_mark`; exports: not produced)
-- **PROVISIONAL · wordmark — Ateles wordmark:** Named identity. (source: `not produced`; exports: not produced)
-- **PROVISIONAL · lockup — Swarm + wordmark lockup:** Navigation identity; spacing measurement remains missing. (source: `not produced`; exports: not produced)
-- **PROVISIONAL · symbol only — Abstract swarm symbol:** Compact use after small-scale review. (source: `not produced`; exports: not produced)
-- **MISSING · horizontal — Horizontal lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
-- **MISSING · stacked — Stacked lockup:** Required before this placement is approved. (source: `not produced`; exports: not produced)
-- **MISSING · monochrome — Monochrome variant:** One-color reproduction. (source: `not produced`; exports: not produced)
-- **MISSING · reversed — Reversed variant:** Dark or photographic fields. (source: `not produced`; exports: not produced)
-- **PROVISIONAL · small scale — Small-scale variant:** Requires tested legibility threshold. (source: `not produced`; exports: not produced)
-- **MISSING · favicon — Favicon:** Required before this placement is approved. (source: `not produced`; exports: not produced)
-- **PROVISIONAL · application — Application mark:** Align current application mark with the edge-free swarm. (source: `not produced`; exports: not produced)
+- **PROVISIONAL · application — Historical application mark:** Preserved hub-and-satellites evidence; not the recommended public symbol. (source: `execution/scripts/site_generator/assets/ateles/marks/historical/hub-satellites.svg`; exports: SVG)
+- **PROVISIONAL · favicon — Favicon:** Browser and app icon. (source: `execution/scripts/site_generator/assets/ateles/marks/favicon.svg`; exports: SVG)
+- **PROVISIONAL · horizontal — Horizontal lockup:** Symbol left of wordmark. (source: `execution/scripts/site_generator/assets/ateles/marks/lockup-horizontal.svg`; exports: SVG)
+- **PROVISIONAL · lockup — Swarm + wordmark lockup:** Navigation identity with measured clear space. (source: `execution/scripts/site_generator/assets/ateles/marks/lockup-horizontal.svg`; exports: SVG)
+- **PROVISIONAL · monochrome — Monochrome variant:** One-color reproduction. (source: `execution/scripts/site_generator/assets/ateles/marks/monochrome.svg`; exports: SVG)
+- **PROVISIONAL · primary mark — Abstract swarm mark:** Primary compact identity. (source: `execution/scripts/site_generator/assets/ateles/marks/primary.svg`; exports: SVG)
+- **PROVISIONAL · reversed — Reversed variant:** Dark or photographic fields. (source: `execution/scripts/site_generator/assets/ateles/marks/reversed.svg`; exports: SVG)
+- **PROVISIONAL · small scale — Small-scale variant:** Tested at 16–32px. (source: `execution/scripts/site_generator/assets/ateles/marks/small-scale.svg`; exports: SVG)
+- **PROVISIONAL · stacked — Stacked lockup:** Symbol above wordmark. (source: `execution/scripts/site_generator/assets/ateles/marks/lockup-stacked.svg`; exports: SVG)
+- **PROVISIONAL · symbol only — Abstract swarm symbol:** Compact use after small-scale review. (source: `execution/scripts/site_generator/assets/ateles/marks/symbol.svg`; exports: SVG)
+- **PROVISIONAL · wordmark — Ateles wordmark:** Named identity. (source: `execution/scripts/site_generator/assets/ateles/marks/wordmark.svg`; exports: SVG)
 
-- **Clear space · MISSING:** Define and test an exclusion zone from final geometry; no product measurement is approved.
-- **Minimum size · MISSING:** Test final exports; no numerical threshold is approved.
+- **Clear space · PROVISIONAL:** Keep a clear exclusion zone of half the primary symbol height on all sides; no competing marks inside the zone.
+- **Minimum size · PROVISIONAL:** Do not reproduce the symbol below 16px digital or 8 mm print; use the wordmark alone when space is tighter.
 - **Backgrounds · PROVISIONAL:** Use calm warm-paper or deep-ink fields; avoid busy imagery.
 - **Colorways · PROVISIONAL:** Rust may coordinate; grant green is reserved for authorization state.
-- **Co-branding · MISSING:** Define peer-brand spacing, hierarchy, dividers and approval before use.
+- **Co-branding · PROVISIONAL:** Place the product lockup left of a 1.5px divider with 16px gaps; peer mark matches Ateles/Neotoma symbol height. Review asset: marks/cobrand.svg.
 
 ### Logo misuse
 
@@ -237,9 +237,19 @@ observation_ids:
 
 ## Asset inventory
 
-- **APPROVED · Public-site swarm mark** (symbol): Navigation and small identity placements — `execution/scripts/site_generator/templates/render.py`
-- **APPROVED · Lowercase Ateles wordmark** (wordmark): Application lockups and text-led identity — `apps/task-dashboard/src/Brand.tsx`
-- **PROVISIONAL · Core-and-satellites application symbol** (symbol): Legacy application mark pending alignment with edge-free differentiated swarm semantics — `apps/task-dashboard/src/Brand.tsx`
+- **PROVISIONAL · Abstract swarm mark** (symbol): Primary compact identity. — `execution/scripts/site_generator/assets/ateles/marks/primary.svg`
+- **PROVISIONAL · Abstract swarm symbol** (symbol): Compact use after small-scale review. — `execution/scripts/site_generator/assets/ateles/marks/symbol.svg`
+- **PROVISIONAL · Ateles wordmark** (wordmark): Named identity. — `execution/scripts/site_generator/assets/ateles/marks/wordmark.svg`
+- **PROVISIONAL · Swarm + wordmark lockup** (lockup): Navigation identity with measured clear space. — `execution/scripts/site_generator/assets/ateles/marks/lockup-horizontal.svg`
+- **PROVISIONAL · Horizontal lockup** (lockup): Symbol left of wordmark. — `execution/scripts/site_generator/assets/ateles/marks/lockup-horizontal.svg`
+- **PROVISIONAL · Stacked lockup** (lockup): Symbol above wordmark. — `execution/scripts/site_generator/assets/ateles/marks/lockup-stacked.svg`
+- **PROVISIONAL · Monochrome variant** (symbol): One-color reproduction. — `execution/scripts/site_generator/assets/ateles/marks/monochrome.svg`
+- **PROVISIONAL · Reversed variant** (symbol): Dark or photographic fields. — `execution/scripts/site_generator/assets/ateles/marks/reversed.svg`
+- **PROVISIONAL · Small-scale variant** (symbol): Tested at 16–32px. — `execution/scripts/site_generator/assets/ateles/marks/small-scale.svg`
+- **PROVISIONAL · Favicon** (symbol): Browser and app icon. — `execution/scripts/site_generator/assets/ateles/marks/favicon.svg`
+- **PROVISIONAL · Historical application mark** (symbol): Preserved hub-and-satellites evidence; not the recommended public symbol. — `execution/scripts/site_generator/assets/ateles/marks/historical/hub-satellites.svg`
+- **PROVISIONAL · Ateles co-branding review lockup** (lockup): Peer co-brand spacing review only. — `execution/scripts/site_generator/assets/ateles/marks/cobrand.svg`
+- **PROVISIONAL · Historical hub-and-satellites application symbol** (symbol): Historical evidence; conflicts with edge-free swarm direction. — `execution/scripts/site_generator/assets/ateles/marks/historical/hub-satellites.svg`
 - **PROVISIONAL · Connected-node concept film** (cinematic): Exploratory secondary evidence only; permanent paths read as a graph and exclude it from hero duty — `execution/scripts/site_generator/assets/ateles/hero-concept.webm`
 - **PROVISIONAL · Connected-node MP4 fallback** (cinematic): Fallback encode for exploratory film — `execution/scripts/site_generator/assets/ateles/hero-concept.mp4`
 - **PROVISIONAL · Connected-node poster** (poster): Static evidence for exploratory film — `execution/scripts/site_generator/assets/ateles/hero-concept.avif`
@@ -469,8 +479,6 @@ Overall: **PROVISIONAL**
 - Swarm-first cinematic hero and section master set
 - Application core-and-satellites mark alignment
 - Complete foundation-viewer asset production
-- Canonical clear-space and digital/print minimum-size measurements for final Ateles exports
-- Approved horizontal, stacked, monochrome, reversed, favicon and co-branding Ateles assets
 - Final type weight/style inventory and owner-approved research cadence
 - Operator approval or revision of the complete provisional brand system and its original aesthetic territory
 - Final contradiction audit against the section copy-to-visual production matrix

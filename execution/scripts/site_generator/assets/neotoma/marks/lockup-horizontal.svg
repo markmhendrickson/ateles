@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 64" role="img" aria-labelledby="t d" fill="none">
+  <title id="t">Neotoma horizontal lockup</title>
+  <desc id="d">Record-graph symbol beside the Neotoma wordmark.</desc>
+  
+  <g color="#1a1a1a">
+  <svg x="0" y="0" width="64" height="64" viewBox="0 0 64 64">
+  <!-- Prior version (ghost) of the entity node — version continuity -->
+  <circle cx="18" cy="20" r="7" fill="none" stroke="currentColor" stroke-width="1.4" opacity="0.35"/>
+  <!-- Durable relationships -->
+  <path d="M24 28 L30 36" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  <path d="M40 28 L34 36" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  <path d="M32 44 L32 50" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  <!-- Provenance tick from source -->
+  <path d="M46 52 L52 46" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.7"/>
+  <!-- Current typed records: entity (circle), observation (rounded rect), claim (diamond) -->
+  <circle cx="22" cy="24" r="7" fill="none" stroke="currentColor" stroke-width="2.2"/>
+  <rect x="34" y="16" width="14" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="2.2"/>
+  <path d="M32 36 L40 44 L32 52 L24 44 Z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
+  <!-- Source node -->
+  <rect x="44" y="48" width="10" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/>
+</svg>
+  <g transform="translate(80 8)">  <text x="0" y="32" font-family="Inter, system-ui, sans-serif" font-size="32" font-weight="500" letter-spacing="-0.5" fill="#2d3748">neotoma</text></g>
+  </g>
+</svg>

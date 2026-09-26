@@ -980,10 +980,33 @@ def _ateles_legacy_symbol() -> str:
     return f'<svg viewBox="0 0 24 24" role="img" aria-label="Provisional Ateles application symbol" style="width:86px;height:86px;fill:currentColor"><circle cx="12" cy="12" r="3.7"/>{circles}</svg>'
 
 
+def _asset_public_url(source_asset: object) -> str | None:
+    """Map a repo-local site-generator asset path to its /assets/ public URL."""
+    text = str(source_asset or "")
+    prefix = "execution/scripts/site_generator/assets/"
+    if text.startswith(prefix) and text.endswith((".svg", ".png", ".webp", ".avif")):
+        return "/assets/" + text[len(prefix) :]
+    return None
+
+
 def _logo_visual(product: str, key: str, item: dict) -> str:
     status = item.get("status")
-    if status == "missing" or not item.get("source_asset"):
+    source = item.get("source_asset")
+    if status == "missing" or not source:
         return '<div class="brand-logo-placeholder" data-logo-state="missing">Missing asset · no mark fabricated</div>'
+    public = _asset_public_url(source)
+    if public:
+        label = item.get("name") or key.replace("_", " ")
+        reversed_bg = (
+            ' style="background:#1a1a1a;color:#f4f4f2"'
+            if key == "reversed"
+            else ""
+        )
+        return (
+            f'<div class="logo-specimen" data-logo-state="{_esc(status)}"{reversed_bg}>'
+            f'<img src="{_esc(public)}" alt="{_esc(label)}"></div>'
+        )
+    # Legacy inline fallbacks retained only when source is not a file asset.
     if product == "ateles" and key == "primary_mark":
         return f'<div class="logo-specimen" data-logo-state="{_esc(status)}">{_brand_mark(product)}</div>'
     if product == "ateles" and key == "application":
@@ -1014,7 +1037,7 @@ def _logo_board(product: str, logo: dict) -> str:
         )
     return (
         '<div class="brand-review-board" id="logo-specimens"><header><p class="eyebrow">Visual review · identity</p>'
-        "<h2>Existing marks, with absence made visible.</h2><p>Only verified existing marks render. Required variants without an asset remain unmistakably missing.</p></header>"
+        "<h2>Provisional mark family for review.</h2><p>Provisional SVG variants render here. Historical marks stay labeled as archived specimens. Nothing is approved for public-route application until the operator rules.</p></header>"
         f'<div class="brand-grid">{"".join(cards)}{extra}</div></div>'
     )
 

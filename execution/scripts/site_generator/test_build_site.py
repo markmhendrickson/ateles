@@ -1298,21 +1298,91 @@ def test_brand_routes_share_neutral_chrome_and_scope_candidate_styles(tmp_path):
 
 
 @pytest.mark.parametrize("product", ("ateles", "neotoma"))
-def test_missing_logo_variants_are_placeholders_not_fabricated(tmp_path, product):
+def test_provisional_logo_family_renders_source_backed_assets(tmp_path, product):
     assert build_site.build(product, tmp_path) == []
     document = (tmp_path / product / "brand" / "index.html").read_text()
+    required = (
+        "primary_mark",
+        "wordmark",
+        "lockup",
+        "horizontal",
+        "stacked",
+        "monochrome",
+        "reversed",
+        "favicon",
+        "small_scale",
+        "symbol_only",
+    )
+    for key in required:
+        assert f'data-logo-variant="{key}"' in document
+        start = document.index(f'data-logo-variant="{key}"')
+        chunk = document[start : start + 500]
+        assert "<img " in chunk, f"{product}/{key} must render a source-backed image"
+        assert "brand-logo-placeholder" not in chunk
+    # Placeholders remain only for genuinely missing non-logo assets if present.
     placeholders = re.findall(
         r'<div class="brand-logo-placeholder" data-logo-state="missing">(.*?)</div>',
         document,
         re.DOTALL,
     )
-    assert placeholders
     assert all("<svg" not in value and "<img" not in value for value in placeholders)
+    assert f'src="/assets/{product}/marks/primary.svg"' in document
+    assert f'/assets/{product}/marks/' in document
+    # Historical evidence preserved
     if product == "ateles":
-        assert 'data-logo-variant="primary_mark"' in document
-        assert 'aria-label="Ateles swarm mark"' in document
+        assert "hub-satellites.svg" in document or "Existing application lockup" in document
     else:
-        assert 'src="/assets/neotoma/neotoma-wordmark.svg"' in document
+        assert "neotoma-wordmark.svg" in document or "historical/wordmark.svg" in document
+
+
+def test_ateles_and_neotoma_marks_anti_converge_and_obey_prohibitions():
+    ateles = (
+        build_site.REPO_ROOT
+        / "execution/scripts/site_generator/assets/ateles/marks/primary.svg"
+    ).read_text()
+    neotoma = (
+        build_site.REPO_ROOT
+        / "execution/scripts/site_generator/assets/neotoma/marks/primary.svg"
+    ).read_text()
+    assert ateles != neotoma
+    assert "<line" not in ateles
+    # Geometry: no hub-and-satellites ring (historical pattern uses r=3.7 core).
+    assert 'r="3.7"' not in ateles
+    assert "M24 28" in neotoma  # durable edge
+    assert 'opacity="0.35"' in neotoma  # prior-state continuity
+    # Strip titles/descriptions before checking for prohibited iconography words.
+    geometry = re.sub(r"<(title|desc)\b[^>]*>.*?</\1>", "", ateles + neotoma, flags=re.I | re.S)
+    for banned in ("hive", "insect", "brain", "cloud", "cylinder", "database"):
+        assert banned not in geometry.casefold()
+
+
+def test_mark_clear_space_and_minimum_size_are_geometry_derived():
+    for product in ("ateles", "neotoma"):
+        contract = json.loads(
+            (build_site.BRAND_SYSTEMS_DIR / f"{product}.json").read_text()
+        )
+        logo = contract["visual_styles"]["logo_system"]
+        assert logo["clear_space"]["status"] == "provisional"
+        assert logo["clear_space"]["measurement"]
+        assert "0.5" in logo["clear_space"]["measurement"]
+        assert logo["minimum_size"]["status"] == "provisional"
+        assert logo["minimum_size"]["digital"]
+        assert logo["minimum_size"]["print"]
+        assert logo["co_branding"]["status"] == "provisional"
+        for key in (
+            "primary_mark",
+            "wordmark",
+            "lockup",
+            "horizontal",
+            "stacked",
+            "monochrome",
+            "reversed",
+            "favicon",
+            "symbol_only",
+        ):
+            variant = logo["variants"][key]
+            assert variant["source_asset"]
+            assert (build_site.REPO_ROOT / variant["source_asset"]).is_file()
 
 
 def test_public_url_policy_rejects_active_and_encoded_traversal_urls():

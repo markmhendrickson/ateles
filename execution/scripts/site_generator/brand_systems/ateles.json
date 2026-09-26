@@ -1,7 +1,7 @@
 {
   "_observation_ids": {
-    "asset_inventory": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
-    "completeness": "63417972-dbc2-ddab-63dd-1a3befdcc8cc",
+    "asset_inventory": "0a675575-ced4-593f-9b2b-1b6d303604f4",
+    "completeness": "c9600b95-eede-6f40-96ea-8452ddf05844",
     "downstream_contracts": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
     "name": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
     "ownership": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
@@ -10,7 +10,7 @@
     "product": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
     "production_specs": "50984e28-3dbf-5754-14db-553bd9f76b60",
     "provenance": "b50ae57a-ef5a-946b-a7ce-4443080fae53",
-    "schema_version": "unknown",
+    "schema_version": "157e9d12-463d-9ad3-3a86-788c7b47a825",
     "scope": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
     "slug": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
     "status": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
@@ -18,46 +18,146 @@
     "updated_at": "48f5b97b-6fe4-5f4d-0a28-a95305fc9c8e",
     "visibility": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
     "visual_concepts": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d",
-    "visual_styles": "ec75f024-ef9b-a5ee-dae7-edf1c63c5a9e",
+    "visual_styles": "586155e7-4cad-d936-9183-b0850bf7abf1",
     "voice": "cb8db405-e6e9-6ed8-e85a-79a784e0b02d"
   },
   "_source": {
     "entity_id": "ent_bada69d5cbb1f27bf82bb86b",
     "entity_type": "brand_guideline",
-    "fetched_at": "2026-09-22T16:49:29+00:00",
+    "fetched_at": "2026-09-22T20:17:26+00:00",
     "product": "ateles",
     "schema_entity_id": "ent_73da44b2d434cbafe5d8ecb9"
   },
   "asset_inventory": [
     {
       "kind": "symbol",
-      "name": "Public-site swarm mark",
-      "preview": "mark",
-      "public_path": null,
-      "repository_path": "execution/scripts/site_generator/templates/render.py",
-      "source": "ent_9158c8b39e0f437fdb2a86de",
-      "status": "approved",
-      "use": "Navigation and small identity placements"
-    },
-    {
-      "kind": "wordmark",
-      "name": "Lowercase Ateles wordmark",
-      "preview": "none",
-      "public_path": "https://github.com/markmhendrickson/ateles/blob/main/apps/task-dashboard/src/Brand.tsx",
-      "repository_path": "apps/task-dashboard/src/Brand.tsx",
-      "source": "apps/task-dashboard",
-      "status": "approved",
-      "use": "Application lockups and text-led identity"
+      "name": "Abstract swarm mark",
+      "preview": "image",
+      "public_path": "/assets/ateles/marks/primary.svg",
+      "repository_path": "execution/scripts/site_generator/assets/ateles/marks/primary.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Primary compact identity."
     },
     {
       "kind": "symbol",
-      "name": "Core-and-satellites application symbol",
-      "preview": "none",
-      "public_path": "https://github.com/markmhendrickson/ateles/blob/main/apps/task-dashboard/src/Brand.tsx",
-      "repository_path": "apps/task-dashboard/src/Brand.tsx",
-      "source": "apps/task-dashboard",
+      "name": "Abstract swarm symbol",
+      "preview": "image",
+      "public_path": "/assets/ateles/marks/symbol.svg",
+      "repository_path": "execution/scripts/site_generator/assets/ateles/marks/symbol.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
       "status": "provisional",
-      "use": "Legacy application mark pending alignment with edge-free differentiated swarm semantics"
+      "use": "Compact use after small-scale review."
+    },
+    {
+      "kind": "wordmark",
+      "name": "Ateles wordmark",
+      "preview": "image",
+      "public_path": "/assets/ateles/marks/wordmark.svg",
+      "repository_path": "execution/scripts/site_generator/assets/ateles/marks/wordmark.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Named identity."
+    },
+    {
+      "kind": "lockup",
+      "name": "Swarm + wordmark lockup",
+      "preview": "image",
+      "public_path": "/assets/ateles/marks/lockup-horizontal.svg",
+      "repository_path": "execution/scripts/site_generator/assets/ateles/marks/lockup-horizontal.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Navigation identity with measured clear space."
+    },
+    {
+      "kind": "lockup",
+      "name": "Horizontal lockup",
+      "preview": "image",
+      "public_path": "/assets/ateles/marks/lockup-horizontal.svg",
+      "repository_path": "execution/scripts/site_generator/assets/ateles/marks/lockup-horizontal.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Symbol left of wordmark."
+    },
+    {
+      "kind": "lockup",
+      "name": "Stacked lockup",
+      "preview": "image",
+      "public_path": "/assets/ateles/marks/lockup-stacked.svg",
+      "repository_path": "execution/scripts/site_generator/assets/ateles/marks/lockup-stacked.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Symbol above wordmark."
+    },
+    {
+      "kind": "symbol",
+      "name": "Monochrome variant",
+      "preview": "image",
+      "public_path": "/assets/ateles/marks/monochrome.svg",
+      "repository_path": "execution/scripts/site_generator/assets/ateles/marks/monochrome.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "One-color reproduction."
+    },
+    {
+      "kind": "symbol",
+      "name": "Reversed variant",
+      "preview": "image",
+      "public_path": "/assets/ateles/marks/reversed.svg",
+      "repository_path": "execution/scripts/site_generator/assets/ateles/marks/reversed.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Dark or photographic fields."
+    },
+    {
+      "kind": "symbol",
+      "name": "Small-scale variant",
+      "preview": "image",
+      "public_path": "/assets/ateles/marks/small-scale.svg",
+      "repository_path": "execution/scripts/site_generator/assets/ateles/marks/small-scale.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Tested at 16\u201332px."
+    },
+    {
+      "kind": "symbol",
+      "name": "Favicon",
+      "preview": "image",
+      "public_path": "/assets/ateles/marks/favicon.svg",
+      "repository_path": "execution/scripts/site_generator/assets/ateles/marks/favicon.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Browser and app icon."
+    },
+    {
+      "kind": "symbol",
+      "name": "Historical application mark",
+      "preview": "image",
+      "public_path": "/assets/ateles/marks/historical/hub-satellites.svg",
+      "repository_path": "execution/scripts/site_generator/assets/ateles/marks/historical/hub-satellites.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Preserved hub-and-satellites evidence; not the recommended public symbol."
+    },
+    {
+      "kind": "lockup",
+      "name": "Ateles co-branding review lockup",
+      "preview": "image",
+      "public_path": "/assets/ateles/marks/cobrand.svg",
+      "repository_path": "execution/scripts/site_generator/assets/ateles/marks/cobrand.svg",
+      "source": "task:ent_d75add779571bc2678293fb2",
+      "status": "provisional",
+      "use": "Peer co-brand spacing review only."
+    },
+    {
+      "kind": "symbol",
+      "name": "Historical hub-and-satellites application symbol",
+      "preview": "image",
+      "public_path": "/assets/ateles/marks/historical/hub-satellites.svg",
+      "repository_path": "execution/scripts/site_generator/assets/ateles/marks/historical/hub-satellites.svg",
+      "source": "apps/task-dashboard/src/Brand.tsx",
+      "status": "provisional",
+      "use": "Historical evidence; conflicts with edge-free swarm direction."
     },
     {
       "kind": "cinematic",
@@ -175,8 +275,6 @@
       "Swarm-first cinematic hero and section master set",
       "Application core-and-satellites mark alignment",
       "Complete foundation-viewer asset production",
-      "Canonical clear-space and digital/print minimum-size measurements for final Ateles exports",
-      "Approved horizontal, stacked, monochrome, reversed, favicon and co-branding Ateles assets",
       "Final type weight/style inventory and owner-approved research cadence",
       "Operator approval or revision of the complete provisional brand system and its original aesthetic territory",
       "Final contradiction audit against the section copy-to-visual production matrix"
@@ -1048,24 +1146,26 @@
         "status": "provisional"
       },
       "clear_space": {
-        "guidance": "Define and test an exclusion zone from final geometry; no product measurement is approved.",
-        "measurement": null,
-        "status": "missing"
+        "guidance": "Keep a clear exclusion zone of half the primary symbol height on all sides; no competing marks inside the zone.",
+        "measurement": "0.5 \u00d7 primary-symbol height (8 units on the 64-unit artboard; 16px around a 32px render)",
+        "status": "provisional"
       },
       "co_branding": {
-        "guidance": "Define peer-brand spacing, hierarchy, dividers and approval before use.",
-        "status": "missing"
+        "guidance": "Place the product lockup left of a 1.5px divider with 16px gaps; peer mark matches Ateles/Neotoma symbol height. Review asset: marks/cobrand.svg.",
+        "status": "provisional"
       },
       "colorway_rules": {
         "guidance": "Rust may coordinate; grant green is reserved for authorization state.",
         "status": "provisional"
       },
-      "export_formats": [],
+      "export_formats": [
+        "SVG"
+      ],
       "minimum_size": {
-        "digital": null,
-        "guidance": "Test final exports; no numerical threshold is approved.",
-        "print": null,
-        "status": "missing"
+        "digital": "16px favicon / 24px UI symbol / 120px lockup width",
+        "guidance": "Do not reproduce the symbol below 16px digital or 8 mm print; use the wordmark alone when space is tighter.",
+        "print": "8 mm symbol height / 25 mm lockup width",
+        "status": "provisional"
       },
       "misuse_rules": [
         "Do not stretch, rotate, crop, mask, outline, shadow or redraw the mark.",
@@ -1073,52 +1173,65 @@
         "Never approve a variant without a traceable source asset and reviewed export."
       ],
       "source_formats": [
-        "inline SVG (provisional)"
+        "SVG"
       ],
       "variants": {
         "application": {
           "backgrounds": [],
-          "export_formats": [],
-          "name": "Application mark",
-          "source_asset": null,
-          "source_format": null,
+          "export_formats": [
+            "SVG"
+          ],
+          "name": "Historical application mark",
+          "source_asset": "execution/scripts/site_generator/assets/ateles/marks/historical/hub-satellites.svg",
+          "source_format": "SVG",
           "status": "provisional",
-          "use": "Align current application mark with the edge-free swarm."
+          "use": "Preserved hub-and-satellites evidence; not the recommended public symbol."
         },
         "favicon": {
           "backgrounds": [],
-          "export_formats": [],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Favicon",
-          "source_asset": null,
-          "source_format": null,
-          "status": "missing",
-          "use": "Required before this placement is approved."
+          "source_asset": "execution/scripts/site_generator/assets/ateles/marks/favicon.svg",
+          "source_format": "SVG",
+          "status": "provisional",
+          "use": "Browser and app icon."
         },
         "horizontal": {
           "backgrounds": [],
-          "export_formats": [],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Horizontal lockup",
-          "source_asset": null,
-          "source_format": null,
-          "status": "missing",
-          "use": "Required before this placement is approved."
+          "source_asset": "execution/scripts/site_generator/assets/ateles/marks/lockup-horizontal.svg",
+          "source_format": "SVG",
+          "status": "provisional",
+          "use": "Symbol left of wordmark."
         },
         "lockup": {
           "backgrounds": [],
-          "export_formats": [],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Swarm + wordmark lockup",
-          "source_asset": null,
-          "source_format": null,
+          "source_asset": "execution/scripts/site_generator/assets/ateles/marks/lockup-horizontal.svg",
+          "source_format": "SVG",
           "status": "provisional",
-          "use": "Navigation identity; spacing measurement remains missing."
+          "use": "Navigation identity with measured clear space."
         },
         "monochrome": {
-          "backgrounds": [],
-          "export_formats": [],
+          "backgrounds": [
+            "light neutral",
+            "dark neutral"
+          ],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Monochrome variant",
-          "source_asset": null,
-          "source_format": null,
-          "status": "missing",
+          "source_asset": "execution/scripts/site_generator/assets/ateles/marks/monochrome.svg",
+          "source_format": "SVG",
+          "status": "provisional",
           "use": "One-color reproduction."
         },
         "primary_mark": {
@@ -1126,46 +1239,59 @@
             "light neutral",
             "dark neutral"
           ],
-          "export_formats": [],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Abstract swarm mark",
-          "source_asset": "execution/scripts/site_generator/templates/render.py#_brand_mark",
-          "source_format": "inline SVG",
+          "source_asset": "execution/scripts/site_generator/assets/ateles/marks/primary.svg",
+          "source_format": "SVG",
           "status": "provisional",
           "use": "Primary compact identity."
         },
         "reversed": {
-          "backgrounds": [],
-          "export_formats": [],
+          "backgrounds": [
+            "light neutral",
+            "dark neutral"
+          ],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Reversed variant",
-          "source_asset": null,
-          "source_format": null,
-          "status": "missing",
+          "source_asset": "execution/scripts/site_generator/assets/ateles/marks/reversed.svg",
+          "source_format": "SVG",
+          "status": "provisional",
           "use": "Dark or photographic fields."
         },
         "small_scale": {
           "backgrounds": [],
-          "export_formats": [],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Small-scale variant",
-          "source_asset": null,
-          "source_format": null,
+          "source_asset": "execution/scripts/site_generator/assets/ateles/marks/small-scale.svg",
+          "source_format": "SVG",
           "status": "provisional",
-          "use": "Requires tested legibility threshold."
+          "use": "Tested at 16\u201332px."
         },
         "stacked": {
           "backgrounds": [],
-          "export_formats": [],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Stacked lockup",
-          "source_asset": null,
-          "source_format": null,
-          "status": "missing",
-          "use": "Required before this placement is approved."
+          "source_asset": "execution/scripts/site_generator/assets/ateles/marks/lockup-stacked.svg",
+          "source_format": "SVG",
+          "status": "provisional",
+          "use": "Symbol above wordmark."
         },
         "symbol_only": {
           "backgrounds": [],
-          "export_formats": [],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Abstract swarm symbol",
-          "source_asset": null,
-          "source_format": null,
+          "source_asset": "execution/scripts/site_generator/assets/ateles/marks/symbol.svg",
+          "source_format": "SVG",
           "status": "provisional",
           "use": "Compact use after small-scale review."
         },
@@ -1174,10 +1300,12 @@
             "light neutral",
             "dark neutral"
           ],
-          "export_formats": [],
+          "export_formats": [
+            "SVG"
+          ],
           "name": "Ateles wordmark",
-          "source_asset": null,
-          "source_format": null,
+          "source_asset": "execution/scripts/site_generator/assets/ateles/marks/wordmark.svg",
+          "source_format": "SVG",
           "status": "provisional",
           "use": "Named identity."
         }
