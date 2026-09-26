@@ -313,13 +313,7 @@ class LensOutcome:
 
 class CheckOutcome:
     def __init__(
-        self,
-        name: str,
-        state: str,
-        passed: bool,
-        *,
-        not_run: bool = False,
-        reason: str = "",
+        self, name: str, state: str, passed: bool, *, not_run: bool = False, reason: str = ""
     ) -> None:
         self.name = name
         self.state = state
@@ -331,16 +325,12 @@ class CheckOutcome:
 
 
 async def _fetch_pr(client: httpx.AsyncClient, repo: str, pr: int) -> dict:
-    resp = await client.get(
-        f"{GITHUB_API}/repos/{repo}/pulls/{pr}", headers=_github_headers(repo)
-    )
+    resp = await client.get(f"{GITHUB_API}/repos/{repo}/pulls/{pr}", headers=_github_headers(repo))
     resp.raise_for_status()
     return resp.json() or {}
 
 
-async def _fetch_issue_comments(
-    client: httpx.AsyncClient, repo: str, pr: int
-) -> list[dict]:
+async def _fetch_issue_comments(client: httpx.AsyncClient, repo: str, pr: int) -> list[dict]:
     """All issue-API comments on the PR (GitHub serves PR comments there)."""
     out: list[dict] = []
     page = 1
@@ -359,7 +349,9 @@ async def _fetch_issue_comments(
     return out
 
 
-def _latest_matching_comment(comments: list[dict], *, marker: str) -> dict | None:
+def _latest_matching_comment(
+    comments: list[dict], *, marker: str
+) -> dict | None:
     """The LATEST comment carrying *marker* verbatim in its body, or None.
 
     Latest, not first: a lens can post more than once for the same head (a
@@ -396,9 +388,7 @@ class NonRequiredBlock:
     object.
     """
 
-    def __init__(
-        self, lens: str, *, agent: str, verdict: str | None, comment_url: str
-    ) -> None:
+    def __init__(self, lens: str, *, agent: str, verdict: str | None, comment_url: str) -> None:
         self.lens = lens
         self.agent = agent
         self.verdict = verdict
@@ -455,9 +445,7 @@ async def _preregistered_gate_contributors(
     return out
 
 
-def _why_lens_selected(
-    lens: Lens, *, changed_files: list[str], gate_contributors: set[str]
-) -> str:
+def _why_lens_selected(lens: Lens, *, changed_files: list[str], gate_contributors: set[str]) -> str:
     """Human-readable reason `select_panel` would have included *lens*.
 
     Descriptive only — `select_panel` itself already decided inclusion; this
@@ -583,9 +571,7 @@ async def derive_required_lenses(
 
     gate_contributors: set[str] = set()
     if parent_issue is not None:
-        gate_contributors = await _preregistered_gate_contributors(
-            client, repo, parent_issue
-        )
+        gate_contributors = await _preregistered_gate_contributors(client, repo, parent_issue)
 
     panel = select_panel(
         gate_contributors=gate_contributors,
@@ -638,11 +624,7 @@ async def evaluate_lens(
     agent = LENS_AGENTS.get(lens, "")
     if not agent:
         return LensOutcome(
-            lens,
-            agent="",
-            head_matched=False,
-            verdict=None,
-            passed=False,
+            lens, agent="", head_matched=False, verdict=None, passed=False,
             reason=f"unknown lens (not in LENS_AGENTS: {sorted(LENS_AGENTS)})",
         )
 
@@ -667,11 +649,7 @@ async def evaluate_lens(
                 "(--panel required, or omit it from --lenses)."
             )
         return LensOutcome(
-            lens,
-            agent=agent,
-            head_matched=False,
-            verdict=None,
-            passed=False,
+            lens, agent=agent, head_matched=False, verdict=None, passed=False,
             reason=reason,
         )
 
@@ -685,9 +663,7 @@ async def evaluate_lens(
         elif verdict not in {"signed_off", "approve"}:
             reason = f"verdict is {verdict!r}, not a clearing verdict"
         else:
-            reason = (
-                "a blocking verdict token or a [BLOCKING] finding appears in the body"
-            )
+            reason = "a blocking verdict token or a [BLOCKING] finding appears in the body"
 
     return LensOutcome(
         lens,
@@ -855,8 +831,7 @@ async def _fetch_job_labels(
         return None
     try:
         resp = await client.get(
-            f"{GITHUB_API}/repos/{repo}/actions/jobs/{job_id}",
-            headers=_github_headers(repo),
+            f"{GITHUB_API}/repos/{repo}/actions/jobs/{job_id}", headers=_github_headers(repo)
         )
         if resp.status_code != 200:
             return None
@@ -865,10 +840,8 @@ async def _fetch_job_labels(
         if str(payload.get("status") or "") not in _UNSCHEDULED_STATUSES:
             return None
         labels = payload.get("labels")
-        if (
-            not isinstance(labels, list)
-            or not labels
-            or not all(isinstance(x, str) and x.strip() for x in labels)
+        if not isinstance(labels, list) or not labels or not all(
+            isinstance(x, str) and x.strip() for x in labels
         ):
             return None
         return [x.strip() for x in labels]
@@ -893,9 +866,7 @@ async def fetch_online_runner_label_sets(
             if resp.status_code != 200:
                 return None
             payload = resp.json()
-            if not isinstance(payload, dict) or not isinstance(
-                payload.get("runners"), list
-            ):
+            if not isinstance(payload, dict) or not isinstance(payload.get("runners"), list):
                 return None
             runners = payload["runners"]
             for runner in runners:
@@ -904,9 +875,7 @@ async def fetch_online_runner_label_sets(
                 if runner.get("status") != "online":
                     continue
                 names = [
-                    lbl.get("name")
-                    for lbl in (runner.get("labels") or [])
-                    if isinstance(lbl, dict)
+                    lbl.get("name") for lbl in (runner.get("labels") or []) if isinstance(lbl, dict)
                 ]
                 out.append(frozenset(n.casefold() for n in names if isinstance(n, str)))
             if len(runners) < 100:
@@ -941,9 +910,7 @@ class _SchedulingContext:
 
     async def online_runner_label_sets(self) -> list[frozenset[str]] | None:
         if self._runners is self._UNSET:
-            self._runners = await fetch_online_runner_label_sets(
-                self.client, repo=self.repo
-            )
+            self._runners = await fetch_online_runner_label_sets(self.client, repo=self.repo)
         return self._runners  # type: ignore[return-value]
 
 
@@ -1047,10 +1014,7 @@ async def evaluate_checks(
     runs = (checks_resp.json() or {}).get("check_runs", [])
 
     outcomes: list[CheckOutcome] = []
-    legacy_statuses_green = legacy_status_count == 0 or combined_state in (
-        "success",
-        "",
-    )
+    legacy_statuses_green = legacy_status_count == 0 or combined_state in ("success", "")
     all_green = legacy_statuses_green
     sched = _SchedulingContext(client, repo=repo, base_ref=base_ref)
     for run in runs:
@@ -1064,11 +1028,7 @@ async def evaluate_checks(
             if not_run_reason:
                 outcomes.append(
                     CheckOutcome(
-                        name,
-                        NOT_RUN_NO_RUNNER,
-                        True,
-                        not_run=True,
-                        reason=not_run_reason,
+                        name, NOT_RUN_NO_RUNNER, True, not_run=True, reason=not_run_reason
                     )
                 )
                 continue
@@ -1174,9 +1134,7 @@ async def submit_app_approval(
         )
     pr_author = str((pr_data.get("user") or {}).get("login") or "")
     if not pr_author:
-        raise RuntimeError(
-            "could not resolve PR author from the pre-submit re-fetch — refusing"
-        )
+        raise RuntimeError("could not resolve PR author from the pre-submit re-fetch — refusing")
 
     body_lines = [
         "Approved by the swarm App — every required review lens cleared the "
@@ -1191,9 +1149,7 @@ async def submit_app_approval(
     if not_run:
         body_lines.append("")
     for c in not_run:
-        body_lines.append(
-            f"- check `{c.name}` did not bind — {NOT_RUN_NO_RUNNER}: {c.reason}"
-        )
+        body_lines.append(f"- check `{c.name}` did not bind — {NOT_RUN_NO_RUNNER}: {c.reason}")
     body_lines.append("")
     body_lines.append(f"head_sha={head_sha}")
     body = "\n".join(body_lines)
@@ -1223,9 +1179,7 @@ async def submit_app_approval(
     posted = resp.json() or {}
     review_id = _normalise_github_review_id(posted.get("id"))
     if not review_id:
-        raise RuntimeError(
-            "review submission returned no usable review id — cannot read back"
-        )
+        raise RuntimeError("review submission returned no usable review id — cannot read back")
 
     # 4. Read the created review back. The POST's own response body is NOT
     # treated as proof — only this independent GET is.
@@ -1266,15 +1220,11 @@ def _print_derived_lenses(
     required: list[RequiredLens], extra: list[str], *, excluded: list[str] | None = None
 ) -> None:
     print()
-    print(
-        "required lenses (derived from review_panel.select_panel for this diff/issue):"
-    )
+    print("required lenses (derived from review_panel.select_panel for this diff/issue):")
     for r in required:
         print(f"  - {r.lens}: {r.reason}")
     if extra:
-        print(
-            f"added on top of the derived floor (--lenses and/or --panel all): {', '.join(extra)}"
-        )
+        print(f"added on top of the derived floor (--lenses and/or --panel all): {', '.join(extra)}")
     if excluded:
         print(
             "excluded from bootstrap mode outright (operator ruling 2026-09-26, "
@@ -1284,9 +1234,7 @@ def _print_derived_lenses(
     print()
 
 
-def _print_table(
-    lens_outcomes: list[LensOutcome], check_outcomes: list[CheckOutcome]
-) -> None:
+def _print_table(lens_outcomes: list[LensOutcome], check_outcomes: list[CheckOutcome]) -> None:
     print(f"{'lens':<10} {'verdict':<14} {'head match':<11} {'pass/fail':<10} reason")
     print("-" * 80)
     for o in lens_outcomes:
@@ -1371,9 +1319,7 @@ async def resolve_lenses(
     floor = [r.lens for r in required if r.lens not in excluded]
     all_lenses = sorted(BOOTSTRAP_PANEL_LENSES) if panel_all else []
     added = [
-        lens
-        for lens in (*extra_lenses, *all_lenses)
-        if lens not in floor and lens not in excluded
+        lens for lens in (*extra_lenses, *all_lenses) if lens not in floor and lens not in excluded
     ]
     # De-duplicate `added` while preserving first-seen order (extra_lenses
     # before the panel_all union), since `--lenses` and panel_all can name
@@ -1402,13 +1348,9 @@ async def run(
 ) -> int:
     async with httpx.AsyncClient(timeout=30) as client:
         pr_data = await _fetch_pr(client, repo, pr)
-        head_sha = _normalise_full_sha(
-            str((pr_data.get("head") or {}).get("sha") or "")
-        )
+        head_sha = _normalise_full_sha(str((pr_data.get("head") or {}).get("sha") or ""))
         if not head_sha:
-            print(
-                f"refusing: could not resolve a full 40-char head SHA for {repo}#{pr}"
-            )
+            print(f"refusing: could not resolve a full 40-char head SHA for {repo}#{pr}")
             return 1
         pr_body = pr_data.get("body") or ""
 
@@ -1484,9 +1426,7 @@ async def run(
         if non_required_blocks:
             print("non-required lenses with a LIVE BLOCKING verdict on this head:")
             for b in non_required_blocks:
-                print(
-                    f"  - {b.lens} ({b.agent}): {b.verdict or '[BLOCKING] finding'} — {b.comment_url}"
-                )
+                print(f"  - {b.lens} ({b.agent}): {b.verdict or '[BLOCKING] finding'} — {b.comment_url}")
             print()
 
         all_lenses_pass = all(o.passed for o in lens_outcomes)
@@ -1504,9 +1444,7 @@ async def run(
 
         if not apply:
             print()
-            print(
-                "dry run — no review submitted. Pass --apply to submit if the gate is clear."
-            )
+            print("dry run — no review submitted. Pass --apply to submit if the gate is clear.")
             return 0 if overall_pass else 1
 
         if not overall_pass:
@@ -1529,9 +1467,7 @@ async def run(
             return 1
 
         print()
-        print(
-            f"APPROVED as the App — review id={review.get('id')} state={review.get('state')}"
-        )
+        print(f"APPROVED as the App — review id={review.get('id')} state={review.get('state')}")
         return 0
 
 
