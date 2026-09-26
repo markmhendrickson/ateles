@@ -1,0 +1,107 @@
+{
+  "entity_type": "evaluation",
+  "schema_version": "1.0.0",
+  "schema_definition": {
+    "canonical_name_fields": [
+      "title"
+    ],
+    "description": "A performance evaluation of a named person, produced by the evaluate-person skill. Holds the structured findings behind a rendered_page: the expectation table, the verdicts and their counter-evidence, what the subject was owed back, the operator impressions tested, and the method record (sweep coverage, instrument anchors, attribution check). Stores judgements and citations by reference, never the corpus itself, and never an Art. 9 special category (RGPD Art. 6(1)(f) legitimate interest).",
+    "fields": {
+      "title": {
+        "type": "string",
+        "required": true,
+        "description": "Short name, e.g. 'Evaluation: <role> engagement, Jan-Sep 2026'"
+      },
+      "subject_entity_id": {
+        "type": "string",
+        "required": true,
+        "description": "entity_id of the subject's contact entity. The person is referenced, not copied."
+      },
+      "subject_role": {
+        "type": "string",
+        "description": "The role as it was described when the relationship was set up"
+      },
+      "window_from": {
+        "type": "string",
+        "description": "ISO date: start of the evaluation window"
+      },
+      "window_to": {
+        "type": "string",
+        "description": "ISO date: end of the evaluation window"
+      },
+      "requested_by": {
+        "type": "string",
+        "description": "Who asked for the evaluation"
+      },
+      "audience": {
+        "type": "string",
+        "required": true,
+        "description": "Who the page link is going to (SKILL.md 0.3). Guest-token scope is not enforced, so this is stated, not assumed."
+      },
+      "expectations": {
+        "type": "array",
+        "description": "The SKILL.md 1.3 table. Each row: id, expectation, class (explicit|implicit), source citation, in_force_from, in_force_to, superseded_by."
+      },
+      "findings": {
+        "type": "array",
+        "description": "One per expectation row. Each: expectation_id, verdict (met|partially met|not met|insufficient evidence), evidence[], counter_evidence[], confidence, counterpart_account."
+      },
+      "feedback_to_deliver": {
+        "type": "array",
+        "description": "What must actually be SAID to the subject (SKILL.md 5.1a). Each: id, substance (a neutral point the operator phrases themselves, never a scripted line), rests_on, expectation_id, finding_anchor, shortfall, actionable_by_subject, citations. A shortfall item's counterpart account is read from owed_to_subject by expectation_id, not duplicated here."
+      },
+      "discussion_topics": {
+        "type": "array",
+        "description": "Genuinely OPEN questions, never rendered as feedback (SKILL.md 5.1b). Each: id, question, kind (insufficient-evidence, two-readings, decision-owed-to-subject, scoring-disagreement), why_open, finding_anchor."
+      },
+      "interrogation_state": {
+        "type": "string",
+        "description": "not-yet-interrogated | interrogated. The state feedback_to_deliver and discussion_topics were rendered with (SKILL.md 5.1c). These are inferences on findings the step-6 loop may not have challenged, so the state is rendered visibly rather than the sections being omitted."
+      },
+      "owed_to_subject": {
+        "type": "array",
+        "description": "What the SUBJECT was owed in each window, by whom, and whether it arrived (SKILL.md 1.3 / 3.3). Each: expectation_id, item, owed_by, requested_on, delivered, blocking."
+      },
+      "operator_impressions": {
+        "type": "array",
+        "description": "The SKILL.md 1.4 register, recorded before the sweep. Each: belief (verbatim), status (untested|supported|contradicted|unsupported|unfalsifiable), citations[]."
+      },
+      "sweep_manifest": {
+        "type": "object",
+        "description": "Per-surface coverage from sweep_manifest.py: status, total_matched, total_read, excluded_by_filter."
+      },
+      "instrument_log": {
+        "type": "object",
+        "description": "Counts and their same-run anchors from instrument_log.py."
+      },
+      "attribution_check": {
+        "type": "object",
+        "description": "Per-citation re-derivation and the direction tripwire outcome from attribution_check.py."
+      },
+      "write_instance": {
+        "type": "string",
+        "description": "The write target as PROBED, not as named (SKILL.md 0.1). The observed origin or storage backend."
+      },
+      "open_ambiguities": {
+        "type": "array",
+        "description": "Citations that could not be resolved, each with the artifact that would settle it."
+      },
+      "revision_log": {
+        "type": "array",
+        "description": "The step-6 interrogation loop: each operator challenge and its recorded resolution."
+      },
+      "rendered_page_entity_id": {
+        "type": "string",
+        "description": "entity_id of the rendered_page this evaluation backs"
+      },
+      "status": {
+        "type": "string",
+        "description": "draft | under-interrogation | final"
+      },
+      "sensitive_scan": {
+        "type": "string",
+        "description": "Result of sensitive_scan.py on the finished body: 'clean', or the cleared false positives and why."
+      }
+    }
+  }
+}
