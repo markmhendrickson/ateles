@@ -199,6 +199,21 @@ else
     echo "  - Skipping tool_allowlist + agent-doc-mirror checks (NEOTOMA_BASE_URL unset)"
 fi
 
+# Agent-mirror PII gate: refuses operator/third-party specifics (a BTC
+# address, a payee/vendor name, an IBAN) in the PUBLIC agent-prompt mirrors
+# (.claude/skills/**/SKILL.md, docs/agents/*.md). BINDING, not `|| true` —
+# see docs/foundation/principles.md#1 and ateles PR #1092, which made the
+# sibling mirror-freshness check above binding for the same reason: a check
+# that cannot fail on the thing it watches is not a control. The structural
+# (BTC address) half of the check has no Neotoma dependency and always runs;
+# the semantic half (known contact/payment_profile values) fails CLOSED (not
+# skipped) when Neotoma is unreachable, deliberately departing from the
+# tool_allowlist/render_agent_docs skip-on-unreachable precedent above — see
+# the script's own docstring for why a content gate cannot skip the same way
+# a state-validation check can.
+echo "  - Checking public agent mirrors for operator/third-party PII..."
+python3 scripts/linters/check_agent_mirror_pii.py || ERRORS=$((ERRORS + 1))
+
 echo ""
 if [ $ERRORS -eq 0 ]; then
     echo "✅ All linters passed!"
