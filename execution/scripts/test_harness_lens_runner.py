@@ -3,9 +3,21 @@ of one PR head to a chosen harness provider (claude/codex/cursor), reusing
 dispatch_role.py / harness_router rather than paralleling them.
 
 No live codex/cursor-agent process is ever started here: every dispatch call
-site is monkeypatched at `dispatch_role.dispatch`, and every `gh`/`git`
-subprocess call is monkeypatched at `subprocess.run`. Per the task's own hard
-rule, this suite makes no model call.
+site (`dispatch_role.dispatch`) and every `gh` call (`gh_login`,
+`current_pr_head`, `post_verdict`) is monkeypatched individually. Per the
+task's own hard rule, this suite makes no model call.
+
+The GUARD tests below are deliberately the opposite of that: they do NOT
+monkeypatch `HarnessSandbox.build`, `sandbox-exec`, or the git shim. They run
+the REAL probe — a real `sandbox-exec` invocation against a real fixture file
+this suite creates, and a real `git stash push` against a real scratch repo
+this suite `git init`s — because a mocked-CLI test cannot prove a guard binds;
+only running the actual mechanism can. `sandbox-exec` and `git` are both
+expected to exist on the CI/dev host (macOS + git are the same baseline the
+rest of this repo assumes); a test that skips instead of asserting on a host
+without them would silently stop proving anything, so these assert outright
+and rely on the CI runner being macOS, matching every other sandbox-exec
+usage in this PR.
 """
 
 from __future__ import annotations
@@ -123,40 +135,253 @@ def test_run_one_refuses_before_any_worktree_when_headroom_zero(
     assert called is False
 
 
-# ── Guard configuration in the rendered command ----------------------------------
+# ── Guard configuration: REAL mechanism, REAL probe, no mocking -------------------
+#
+# Nothing in this section monkeypatches HarnessSandbox.build, sandbox-exec, git,
+# or subprocess.run. Every assertion here is against what the ACTUAL mechanism
+# actually did when run for real against a fixture this test created.
+
+import platform  # noqa: E402
+import shutil  # noqa: E402
+
+_HAS_SANDBOX_EXEC = shutil.which("sandbox-exec") is not None
+_IS_DARWIN = platform.system() == "Darwin"
 
 
 def test_sandbox_build_codex_uses_codex_home_isolation(tmp_path):
     sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
-    assert sandbox.env_extra == {"CODEX_HOME": str(sandbox.root)}
+    assert sandbox.env_extra["CODEX_HOME"] == str(sandbox.root)
     assert sandbox.root.is_dir()
-    assert any("git_stash_guard" in g for g in sandbox.unavailable_guards)
 
 
 def test_sandbox_build_cursor_uses_home_isolation(tmp_path):
     sandbox = hlr.HarnessSandbox.build("cursor", tmp_path)
-    assert sandbox.env_extra == {"HOME": str(sandbox.root)}
-    assert any("credential_read_guard" in g for g in sandbox.unavailable_guards)
+    assert sandbox.env_extra["HOME"] == str(sandbox.root)
 
 
 def test_sandbox_build_claude_has_no_override(tmp_path):
     sandbox = hlr.HarnessSandbox.build("claude", tmp_path)
     assert sandbox.env_extra == {}
+    assert sandbox.command_wrapper == []
     assert sandbox.unavailable_guards == ()
+    assert sandbox.fully_guarded is True
 
 
-def test_refuse_if_guard_required_blocks_codex_without_isolation():
-    reason = hlr.refuse_if_guard_required("codex", needs_full_guards=True)
+def test_sandbox_build_puts_a_shim_dir_first_on_path_for_codex(tmp_path):
+    sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
+    path_value = sandbox.env_extra["PATH"]
+    shim_git = Path(path_value.split(":")[0]) / "git"
+    assert shim_git.is_file()
+    assert shim_git.stat().st_mode & 0o111  # executable
+
+
+@pytest.mark.skipif(not shutil.which("git"), reason="git required for the real probe")
+def test_git_shim_really_refuses_a_real_stash_push_in_a_scratch_repo(tmp_path):
+    """The load-bearing test: builds the shim exactly as HarnessSandbox.build
+    does, then issues a REAL `git stash push` through it against a scratch
+    repo (never the shared clone), and asserts the real exit code — not a
+    description of what the shim is supposed to do.
+    """
+    sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
+    scratch_repo = tmp_path / "real-probe-repo"
+    scratch_repo.mkdir()
+    subprocess = __import__("subprocess")
+    subprocess.run(["git", "init", "-q", str(scratch_repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(scratch_repo), "config", "user.email", "probe@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(scratch_repo), "config", "user.name", "probe"], check=True
+    )
+    (scratch_repo / "f.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "-C", str(scratch_repo), "add", "-A"], check=True)
+    # A REAL commit first: without one, a genuinely unshimmed `git stash push`
+    # ALSO fails (with "You do not have the initial commit yet"), which would
+    # make this test pass for the wrong reason on a shim that refuses nothing.
+    subprocess.run(
+        ["git", "-C", str(scratch_repo), "commit", "-q", "-m", "probe"], check=True
+    )
+    (scratch_repo / "f.txt").write_text("changed", encoding="utf-8")
+
+    import os as _os
+
+    shim_dir = sandbox.env_extra["PATH"].split(":")[0]
+    env = {**_os.environ, "PATH": f"{shim_dir}:{_os.environ.get('PATH', '')}"}
+
+    push = subprocess.run(
+        ["git", "-C", str(scratch_repo), "stash", "push"],
+        capture_output=True, text=True, env=env,
+    )
+    assert push.returncode != 0, "the real shim let a real stash push through"
+    assert "refusing" in push.stderr.lower()
+
+    # The read-only carve-out must still work — this is the same repo, same
+    # shim, same PATH: if the shim denied stash outright rather than only
+    # its mutating forms, this would also fail.
+    listing = subprocess.run(
+        ["git", "-C", str(scratch_repo), "stash", "list"],
+        capture_output=True, text=True, env=env,
+    )
+    assert listing.returncode == 0, "the real shim also blocked the read-only carve-out"
+
+    # And a completely unrelated git command must still work through the shim.
+    status = subprocess.run(
+        ["git", "-C", str(scratch_repo), "status"],
+        capture_output=True, text=True, env=env,
+    )
+    assert status.returncode == 0
+
+
+@pytest.mark.skipif(not shutil.which("git"), reason="git required for the real probe")
+def test_sandbox_build_reports_git_stash_denied_true_from_the_real_probe(tmp_path):
+    sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
+    assert sandbox.git_stash_denied is True
+    assert not any("git_stash_guard" in g for g in sandbox.unavailable_guards)
+
+
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="sandbox-exec is macOS-only; on this host the guard correctly "
+    "reports unbound, covered by test_sandbox_probe_reports_unbound_without_sandbox_exec",
+)
+def test_sandbox_build_really_denies_reading_a_credential_fixture(tmp_path):
+    """The load-bearing test for the read guard: builds the REAL sandbox-exec
+    profile HarnessSandbox.build writes, then issues a REAL `cat` through it
+    against a FIXTURE file (never a real credential file) whose path matches
+    one of the deny globs, and asserts the real exit code.
+    """
+    sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
+    assert sandbox.credential_read_denied is True
+
+    # Prove it against a SEPARATE, freshly created fixture too, not just the
+    # one HarnessSandbox.build used internally for its own probe — this rules
+    # out the probe having been faked to always report True.
+    profile_path = sandbox.root / "profile.sb"
+    fixture_dir = tmp_path / "second-fixture" / ".config" / "neotoma"
+    fixture_dir.mkdir(parents=True)
+    fixture = fixture_dir / ".env"
+    fixture.write_text("SECOND_PROBE_NOT_REAL=1\n", encoding="utf-8")
+
+    import subprocess as _subprocess
+
+    result = _subprocess.run(
+        ["sandbox-exec", "-f", str(profile_path), "cat", str(fixture)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0, "the real sandbox-exec profile let a real read through"
+
+    # An unrelated file outside the deny globs must still be readable.
+    unrelated = tmp_path / "unrelated.txt"
+    unrelated.write_text("hi", encoding="utf-8")
+    ok = _subprocess.run(
+        ["sandbox-exec", "-f", str(profile_path), "cat", str(unrelated)],
+        capture_output=True, text=True,
+    )
+    assert ok.returncode == 0
+    assert ok.stdout.strip() == "hi"
+
+
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="sandbox-exec is macOS-only; see the read-guard test above for the "
+    "companion coverage of the unbound-on-other-platforms path",
+)
+def test_sandbox_build_really_denies_writing_to_user_config_fixture(tmp_path):
+    sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
+    assert sandbox.user_config_write_denied is True
+
+    profile_path = sandbox.root / "profile.sb"
+    fixture = tmp_path / "second-fixture-write" / ".claude" / "probe"
+
+    import subprocess as _subprocess
+
+    fixture.parent.mkdir(parents=True)
+    result = _subprocess.run(
+        ["sandbox-exec", "-f", str(profile_path), "touch", str(fixture)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0, "the real sandbox-exec profile let a real write through"
+    assert not fixture.exists()
+
+
+def test_sandbox_probe_reports_unbound_without_sandbox_exec(tmp_path, monkeypatch):
+    """The other side of the platform split: when sandbox-exec is genuinely
+    unavailable (this host, or a simulated absence), the probe must report
+    False — never assume True because the profile file was written.
+    """
+    real_which = shutil.which
+    monkeypatch.setattr(
+        hlr.shutil, "which",
+        lambda name: None if name == "sandbox-exec" else real_which(name),
+    )
+    sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
+    assert sandbox.credential_read_denied is False
+    assert sandbox.user_config_write_denied is False
+    assert sandbox.command_wrapper == []
+    assert sandbox.fully_guarded is False
+    assert any("credential_read_guard" in g for g in sandbox.unavailable_guards)
+    assert any("user_config_write_guard" in g for g in sandbox.unavailable_guards)
+
+
+def test_refuse_if_guard_required_allows_claude_always(tmp_path):
+    sandbox = hlr.HarnessSandbox.build("claude", tmp_path)
+    assert hlr.refuse_if_guard_required(sandbox) is None
+
+
+def test_refuse_if_guard_required_refuses_codex_when_sandbox_exec_is_unavailable(
+    tmp_path, monkeypatch
+):
+    """The exact defect PR #1308 shipped with: this must fire for real,
+    driven by the sandbox's own probed state, not a hardcoded constant.
+    """
+    real_which = shutil.which
+    monkeypatch.setattr(
+        hlr.shutil, "which",
+        lambda name: None if name == "sandbox-exec" else real_which(name),
+    )
+    sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
+    reason = hlr.refuse_if_guard_required(sandbox)
     assert reason is not None
-    assert "hook mechanism" in reason
+    assert "codex" in reason
+    assert "credential_read_denied=False" in reason
 
 
-def test_refuse_if_guard_required_allows_claude_always():
-    assert hlr.refuse_if_guard_required("claude", needs_full_guards=True) is None
+def test_refuse_if_guard_required_allows_codex_when_fully_probed_guarded(tmp_path):
+    """The mirror case: when every real probe passes, the run may proceed.
+    This is the ONLY test in the suite permitted to assert `is None` for a
+    non-claude provider, and it earns that by using the REAL sandbox built
+    with nothing faked."""
+    sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
+    if not sandbox.fully_guarded:
+        pytest.skip(
+            "this host cannot fully probe the guard mechanism "
+            f"(unavailable: {sandbox.unavailable_guards}) — covered instead by "
+            "test_sandbox_probe_reports_unbound_without_sandbox_exec and "
+            "test_refuse_if_guard_required_refuses_codex_when_sandbox_exec_is_unavailable"
+        )
+    assert hlr.refuse_if_guard_required(sandbox) is None
 
 
-def test_refuse_if_guard_required_allows_codex_when_sandboxed():
-    assert hlr.refuse_if_guard_required("codex", needs_full_guards=False) is None
+def test_refuse_if_guard_required_is_driven_by_fully_guarded_not_a_constant(tmp_path):
+    """Regression pin for the exact defect the review found: constructs two
+    sandboxes that differ ONLY in their probed fully_guarded state and asserts
+    refuse_if_guard_required's answer tracks that difference — proving the
+    function reads real state rather than always returning the same answer
+    regardless of what is passed in.
+    """
+    guarded = hlr.HarnessSandbox(
+        provider="codex", root=tmp_path, env_extra={}, command_wrapper=[],
+        credential_read_denied=True, user_config_write_denied=True,
+        git_stash_denied=True, unavailable_guards=(),
+    )
+    unguarded = hlr.HarnessSandbox(
+        provider="codex", root=tmp_path, env_extra={}, command_wrapper=[],
+        credential_read_denied=False, user_config_write_denied=True,
+        git_stash_denied=True, unavailable_guards=("credential_read_guard (…)",),
+    )
+    assert hlr.refuse_if_guard_required(guarded) is None
+    assert hlr.refuse_if_guard_required(unguarded) is not None
 
 
 # ── Dry run: no model call, exact command + prompt size --------------------------
@@ -201,10 +426,21 @@ def test_dry_run_makes_no_model_call_and_reports_command(
     assert report["dry_run"] is True
     assert report["no_model_call_made"] is True
     assert report["provider"] == "codex"
-    assert "codex" in report["example_command"][0]
+    assert "codex" in report["example_command"]
     assert "CODEX_HOME" in report["sandbox_env_extra"]
     assert report["prompt_chars"] > 0
     assert created["head"] == SAMPLE_HEAD
+    # command_wrapper is prepended to the example command too, so the dry run
+    # shows exactly what the real dispatch will run.
+    if report["command_wrapper"]:
+        assert report["example_command"][: len(report["command_wrapper"])] == (
+            report["command_wrapper"]
+        )
+        assert report["fully_guarded"] is True
+    else:
+        # This host lacks sandbox-exec (or it failed its own probe) — the
+        # dry run must say so rather than silently pretending it's guarded.
+        assert report["fully_guarded"] is False
 
 
 # ── Verdict validation uses the SAME reader Claude runs use -----------------------
@@ -306,14 +542,7 @@ def test_run_one_does_not_post_without_post_flag(
     monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
     monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
 
-    def _fake_run(cmd, **kwargs):
-        class _R:
-            stdout = json.dumps({"headRefOid": SAMPLE_HEAD})
-            stderr = ""
-            returncode = 0
-        return _R()
-
-    monkeypatch.setattr(hlr.subprocess, "run", _fake_run)
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **k: SAMPLE_HEAD)
 
     posted = False
 
@@ -359,14 +588,7 @@ def test_run_one_refuses_to_post_when_head_moved(
     monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
     monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
 
-    def _fake_run(cmd, **kwargs):
-        class _R:
-            stdout = json.dumps({"headRefOid": "b" * 40})  # moved!
-            stderr = ""
-            returncode = 0
-        return _R()
-
-    monkeypatch.setattr(hlr.subprocess, "run", _fake_run)
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **k: "b" * 40)  # moved!
 
     posted = False
     monkeypatch.setattr(hlr, "post_verdict", lambda **k: (_ for _ in ()).throw(
@@ -408,14 +630,7 @@ def test_run_one_refuses_to_post_under_wrong_gh_identity(
     monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
     monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
 
-    def _fake_run(cmd, **kwargs):
-        class _R:
-            stdout = json.dumps({"headRefOid": SAMPLE_HEAD})
-            stderr = ""
-            returncode = 0
-        return _R()
-
-    monkeypatch.setattr(hlr.subprocess, "run", _fake_run)
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **k: SAMPLE_HEAD)
     monkeypatch.setattr(hlr, "gh_login", lambda: "markmhendrickson")
 
     monkeypatch.setattr(hlr, "post_verdict", lambda **k: (_ for _ in ()).throw(
@@ -456,14 +671,7 @@ def test_run_one_posts_when_everything_checks_out(
     monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
     monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
 
-    def _fake_run(cmd, **kwargs):
-        class _R:
-            stdout = json.dumps({"headRefOid": SAMPLE_HEAD})
-            stderr = ""
-            returncode = 0
-        return _R()
-
-    monkeypatch.setattr(hlr.subprocess, "run", _fake_run)
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **k: SAMPLE_HEAD)
     monkeypatch.setattr(hlr, "gh_login", lambda: "ateles-agent")
     monkeypatch.setattr(
         hlr, "post_verdict", lambda **k: "https://github.com/o/r/pull/1#comment"
@@ -509,14 +717,7 @@ def test_compare_mode_never_posts_even_with_post_flag(
     monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
     monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
 
-    def _fake_run(cmd, **kwargs):
-        class _R:
-            stdout = json.dumps({"headRefOid": SAMPLE_HEAD})
-            stderr = ""
-            returncode = 0
-        return _R()
-
-    monkeypatch.setattr(hlr.subprocess, "run", _fake_run)
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **k: SAMPLE_HEAD)
     monkeypatch.setattr(hlr, "gh_login", lambda: "ateles-agent")
     monkeypatch.setattr(
         hlr, "post_verdict", lambda **k: seen_posts.append(k) or "url"
@@ -573,13 +774,33 @@ def test_main_requires_brief_flag():
         )
 
 
-# ── Worktree lifecycle: env_extra is threaded through dispatch_role.dispatch -----
+# ── Worktree lifecycle: guards reach the real dispatch boundary -----------------
 
 
 def test_run_one_passes_sandbox_env_extra_to_dispatch(
     monkeypatch, tmp_path, target, brief_file
 ):
     seen = {}
+
+    # This is a plumbing test, not another platform probe. Supply a sandbox
+    # whose guards are already proven so the test remains meaningful on Linux,
+    # where the separate integration tests correctly show sandbox-exec as
+    # unavailable and the real runner refuses before dispatch.
+    guarded = hlr.HarnessSandbox(
+        provider="codex",
+        root=tmp_path / "codex-home",
+        env_extra={"CODEX_HOME": str(tmp_path / "codex-home")},
+        command_wrapper=["sandbox-exec", "-f", str(tmp_path / "profile.sb")],
+        credential_read_denied=True,
+        user_config_write_denied=True,
+        git_stash_denied=True,
+        unavailable_guards=(),
+    )
+    monkeypatch.setattr(
+        hlr.HarnessSandbox,
+        "build",
+        classmethod(lambda cls, provider, tmp_root: guarded),
+    )
 
     async def _dispatch(role, task, **kwargs):
         seen.update(kwargs)
@@ -610,5 +831,7 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
     )
 
     assert "CODEX_HOME" in seen["env_extra"]
+    assert seen["command_wrapper"]
+    assert seen["command_wrapper"][0] == "sandbox-exec"
     assert seen["seated_reviewer"] is False
     assert seen["provider"] == "codex"

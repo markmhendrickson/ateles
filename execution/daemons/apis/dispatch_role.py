@@ -209,6 +209,7 @@ async def dispatch(
     task_entity_id: str = "",
     env_extra: dict[str, str] | None = None,
     seated_reviewer: bool = False,
+    command_wrapper: list[str] | None = None,
 ) -> SkillResult:
     """Dispatch one piece of work to a named role via the harness router.
 
@@ -236,6 +237,13 @@ async def dispatch(
     tools in the first place (this codebase injects ``--mcp-config`` only for
     ``provider == "claude"``) should leave this False rather than set it and
     then be silently rerouted to claude.
+
+    ``command_wrapper`` (ent_89a4d44b063cb0902106da49): forwarded verbatim to
+    ``run_skill`` -> ``_run_skill_once``, which prepends it to the provider's
+    OWN argv before the subprocess actually runs. This is how a caller makes
+    a guard (e.g. a macOS ``sandbox-exec`` profile denying reads of specific
+    credential paths) bind onto the real dispatched process rather than
+    merely describe an intended mitigation next to code that runs unwrapped.
     """
     return await run_skill(
         role,
@@ -247,6 +255,7 @@ async def dispatch(
         provider=provider,
         env_extra=env_extra,
         seated_reviewer=seated_reviewer,
+        command_wrapper=command_wrapper,
     )
 
 

@@ -72,10 +72,11 @@ from pathlib import Path
 path = Path.home() / ".config" / "ateles" / "harness-headroom.json"
 data = json.loads(path.read_text())
 
-# Restore ONLY the providers that actually reset. Leave claude's entry
-# untouched unless its own cooldown independently cleared.
+# This command is for the first Codex test. Restore ONLY Codex. Cursor remains
+# at 0.0 until its separate reset is confirmed (the bound task currently says
+# 2026-10-15, but re-check the account rather than trusting that estimate).
+# Leave Claude's entry untouched unless its own cooldown independently cleared.
 data["codex"] = 1.0
-data["cursor"] = 1.0
 
 path.write_text(json.dumps(data, indent=2) + "\n")
 print(path.read_text())
@@ -83,7 +84,9 @@ PY
 ```
 
 Or, by hand: open the file in an editor, replace `"codex": 0.0` with
-`"codex": 1.0` and `"cursor": 0.0` with `"cursor": 1.0`, save.
+`"codex": 1.0`, and save. Leave `"cursor": 0.0` unchanged until Cursor's
+own reset is confirmed. At that later point, repeat the same one-provider
+edit for Cursor only.
 
 Setting `1.0` (full headroom) rather than a partial estimate is deliberate: a
 weekly-limit reset genuinely restores full capacity, and there is no better

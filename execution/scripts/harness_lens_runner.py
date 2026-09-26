@@ -15,18 +15,23 @@ WHY THIS REUSES, NOT PARALLELS
 Every piece of provider routing, identity, credential stripping, and
 harness_event bookkeeping already exists in
 ``execution/daemons/apis/dispatch_role.py`` and the ``skill_runner`` /
-``harness_router`` it wraps. This script adds NOTHING to that layer except two
-threaded-through kwargs (``env_extra``, ``seated_reviewer`` — see
-``dispatch_role.dispatch``). Its own job, and nothing else:
+``harness_router`` it wraps. This script adds NOTHING to that layer except
+three threaded-through kwargs (``env_extra``, ``seated_reviewer``,
+``command_wrapper`` — see ``dispatch_role.dispatch`` and
+``skill_runner._run_skill_once``). Its own job, and nothing else:
 
   1. render the shared lens brief + the lens's agent_definition prompt into
      one task string,
   2. create/point at a throwaway worktree of the target repo at the target
      head,
-  3. call ``dispatch_role.dispatch(...)`` with a per-harness sandbox override
-     (an isolated ``HOME``/``CODEX_HOME`` — see GUARD BINDING below),
-  4. capture the verdict file the lens writes inside that worktree,
-  5. validate it with the SAME reader every Claude lens run uses
+  3. build and PROBE the per-harness guard mechanisms (see GUARD BINDING
+     below), refusing the harness outright if the probe shows any guard did
+     not actually bind,
+  4. call ``dispatch_role.dispatch(...)`` with that sandbox's ``env_extra``
+     AND ``command_wrapper`` so the guards apply to the REAL subprocess, not
+     merely to a description of it,
+  5. capture the verdict file the lens writes inside that worktree,
+  6. validate it with the SAME reader every Claude lens run uses
      (``swarm_dispatch.lens_own_verdict`` / ``sign_off_is_warranted``) before
      ever touching ``gh pr comment``.
 
@@ -39,62 +44,82 @@ harness mechanisms. They hook Claude Code's own tool-call lifecycle and do
 NOT run when the child process is ``codex`` or ``cursor-agent`` — those
 binaries have never heard of ``.claude/hooks/``. Running a lens on either
 without an equivalent bound guard would silently drop every one of those
-protections. What each harness offers instead, verified from its own
-``--help``/``--version`` output (no model call made to reach any of this):
+protections. ``claude`` needs nothing further — its own hook set already
+binds every guard this class attempts.
 
-  * codex   — ``CODEX_HOME`` relocates ALL of codex's persistent state
-              (``config.toml``, auth, sessions, MCP config). Pointing it at an
-              empty directory for the dispatch means the child cannot read the
-              operator's real ``~/.codex/config.toml`` (which sets
-              ``approval_policy = "never"`` and marks every relevant project
-              path "trusted" — exactly the opposite of what an unattended lens
-              run needs) or its stored auth. ``--sandbox workspace-write``
-              (already the default in ``_provider_command``) plus
-              ``--add-dir`` scoped to the worktree's own git roots is codex's
-              process-execution sandbox; it does not, on its own, hide
-              ``~/.config/neotoma/.env*`` or ``~/.claude.json`` from a child
-              that still has the real ``HOME`` — the ``CODEX_HOME`` override
-              is what removes codex's OWN credential surface, and running the
-              child with ``cwd`` pinned to the throwaway worktree (never the
-              shared clone) plus a workspace-write sandbox is what keeps it
-              from reading arbitrary paths outside that root. Codex has no
-              hook mechanism analogous to Claude Code's; there is nothing to
-              wire a stash guard or a credential-read guard INTO. AGENTS.md is
-              a prompt convention, not an enforcement point, so it is not
-              claimed as a guard here.
-  * cursor  — ``HOME`` relocates ``~/.cursor/`` (mcp.json, cli-config.json,
-              stored auth) the same way ``CODEX_HOME`` relocates codex's state.
-              ``cursor-agent``'s own sandbox flag (``--sandbox
-              enabled|disabled``) and its project ``.cursor/rules`` are a
-              prompt/execution-scope convention, not a credential-file guard —
-              nothing in ``cursor-agent --help`` denies a specific path from
-              being read by whatever the model decides to run. Project-level
-              `.cursor/rules` is not populated at all in this repo (checked:
-              only the operator's user-level `~/.cursor/rules` exists), so
-              there is no existing project convention this could piggyback on
-              without first authoring one, which is out of scope here.
+For codex/cursor, this script builds and MECHANICALLY BINDS the two guards
+whose absence has a concrete blast radius, and PROBES each one — against a
+fixture, never a real credential file or the real shared git dir — before
+ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
+``probe_sandbox_exec_denies_read/write``, ``probe_git_shim_denies_stash_push``):
 
-  Neither harness can be told "refuse to open this file" the way the Claude
-  hooks do. The isolated-HOME approach makes the operator's real credential
-  files simply ABSENT from that HOME/CODEX_HOME, which is a stronger property
-  than a hook that has to recognize a read attempt and block it — but it is a
-  different mechanism, and it does NOT stop a dispatched child from reading
-  ``~/.config/neotoma/.env`` (a NON-harness path, outside HOME/CODEX_HOME
-  scope) if the sandbox's workspace-write policy lets it wander there. The
-  belt-and-suspenders layer is scoping the sandbox/add-dir to the worktree
-  root only (codex) and refusing cursor entirely for anything gate-owning
-  (see below) — this script does not claim more than it can verify.
+  * **Credential-file reads and user-config writes** — a macOS
+    ``sandbox-exec`` profile (``build_sandbox_exec_profile``) denies
+    ``file-read*`` on the credential-file globs named in this task
+    (``~/.config/neotoma/.env*``, ``~/.neotoma/aauth*/*private*``,
+    ``~/.claude.json``, ``~/.netrc``, ``~/.config/sops/age/*``) and
+    ``file-write*`` on ``~/.claude``, ``~/.cursor``, ``~/.codex``. The
+    profile is prepended to the dispatched child's REAL argv via
+    ``command_wrapper=["sandbox-exec", "-f", <profile>]`` — see
+    ``skill_runner._run_skill_once``'s ``command_wrapper`` parameter, added
+    specifically so this could bind onto the actual subprocess rather than
+    describe an intended mitigation beside code that runs unwrapped.
+    **What this does NOT claim**: ``codex exec --sandbox workspace-write``
+    and ``--add-dir`` (codex's own existing sandbox, already applied by
+    ``skill_runner`` before this script exists) are, per ``codex exec
+    --help`` / ``codex sandbox --help``, WRITE-permission scoping only —
+    they grant additional writable roots and restrict writes outside the
+    workspace; nothing in either ``--help`` output denies a READ of an
+    arbitrary absolute path. An earlier revision of this docstring claimed
+    codex's own sandbox "keeps it from reading arbitrary paths outside that
+    root," which security and content lens review on PR #1308 correctly
+    identified as unsupported by codex's documented semantics — corrected
+    here. The actual read-deny mechanism is the ``sandbox-exec`` profile
+    above, wrapped around the SAME process codex's own sandbox also wraps
+    (the two compose: codex's sandbox still governs writes as before,
+    ``sandbox-exec`` additionally denies the specific reads/writes named
+    above). ``CODEX_HOME``/``HOME`` overrides still relocate each CLI's OWN
+    config/auth store (so the child cannot read the operator's real
+    ``~/.codex/config.toml``, whose ``approval_policy = "never"`` and
+    per-project trust would be the opposite of safe for an unattended run) —
+    that claim is unchanged and was never in question.
+  * **``git stash``** — a PATH-first ``git`` shim script (the
+    ``_GIT_STASH_SHIM`` template, written into a directory prepended to the
+    child's ``PATH`` via ``env_extra``) refuses every stash-stack MUTATION
+    (bare ``stash``, ``push``, ``pop``, ``apply``, ``drop``, ``clear``,
+    ``branch``, ``create``, ``store``) and execs the real ``git`` for
+    everything else, including the read-only ``stash list``/``stash show``
+    carve-out ``.claude/hooks/git_stash_guard.py`` also keeps. Because the
+    shim sits first on ``PATH``, any ``git`` the dispatched child invokes —
+    directly or via a tool the model calls — resolves to the shim, not the
+    real binary, so this binds regardless of what the model decides to run,
+    the same property a PreToolUse hook has and a documented convention does
+    not.
 
-  git-stash: neither CLI has a subcommand named `stash`, and neither offers a
-  policy hook to deny one shell invocation by name. The isolated worktree is
-  itself the mitigation that matters here — ``git_stash_guard.py``'s hazard is
-  the SHARED stash ref in the common git dir, which every worktree of the same
-  clone shares. A run that never has `git stash` in its prompt, in a
-  dedicated worktree it deletes afterward, carries the same practical
-  exposure as a Claude run that also just doesn't type the command — the
-  guard is prose-enforced on both, and this script's own worktree lifecycle
-  (create fresh, remove after) at least denies it a place to leave a stash
-  entry that outlives the run.
+  Both mechanisms are built AND ACTUALLY RUN against a throwaway fixture in
+  ``HarnessSandbox.build()`` before any real dispatch: the sandbox-exec
+  profile is tested with a real ``cat``/``touch`` against a fixture file this
+  script creates (never the operator's own files), and the git shim is
+  tested with a real ``git stash push`` inside a scratch repo this script
+  ``git init``s for the probe (never the shared clone or its stash ref). The
+  resulting booleans (``credential_read_denied``, ``user_config_write_denied``,
+  ``git_stash_denied``) are what ``HarnessSandbox.fully_guarded`` and
+  ``refuse_if_guard_required`` actually read — nothing here is asserted
+  without having just been exercised. If ``sandbox-exec`` is unavailable (a
+  non-Darwin host, or a future macOS release that removes it — it is already
+  documented DEPRECATED, see ``man sandbox-exec``), the probes report
+  ``False`` and ``refuse_if_guard_required`` refuses the harness rather than
+  silently proceeding unguarded.
+
+  **Not attempted, and named as such rather than silently skipped**:
+  ``sibling_repo_worktree_guard`` has no equivalent here either, but its
+  hazard (an agent writing into a sibling repo's shared main clone) is
+  structurally avoided rather than merely undefended: this script's own
+  ``Worktree`` always dispatches into its own dedicated throwaway worktree of
+  the TARGET repo, never the shared clone or another session's worktree, and
+  the dispatched child's ``cwd`` is pinned there. ``gmail_send_gate`` and
+  ``refuse_task_chip`` are not applicable — this script never invokes
+  gws/gmail, and no harness task-chip surface exists outside Claude Code.
 
   What this script REFUSES rather than fakes: any run whose lens OWNS a
   pending pre-impl gate (``owns_pending_gate``/``seated_reviewer`` in
@@ -106,7 +131,10 @@ protections. What each harness offers instead, verified from its own
   ``provider == "claude"`` gets ``--mcp-config`` injected — see
   ``skill_runner._run_skill_once``), so it does not set ``seated_reviewer``;
   it relies on that existing absence rather than re-deciding it. A caller that
-  ever adds MCP grants to the codex/cursor path must revisit this.
+  ever adds MCP grants to the codex/cursor path must revisit this. And, per
+  ``refuse_if_guard_required``: any codex/cursor dispatch whose sandbox probe
+  does not come back ``fully_guarded`` is refused outright — see ``run_one``,
+  which checks this before ever calling ``dispatch_role.dispatch``.
 
   Credentials the run legitimately needs — the `gh` token for posting, and a
   Neotoma bearer if the lens brief needs one — are injected as NAMED
@@ -120,6 +148,7 @@ USAGE
     python3 execution/scripts/harness_lens_runner.py \\
         --repo owner/name --pr 1234 --head <sha> \\
         --lens pm --agent pavo --provider codex \\
+        --brief <path-to-lens-brief> \\
         [--post] [--dry-run] [--compare claude,codex]
 
 Exit codes: 0 on success (or a clean, reported refusal under --dry-run),
@@ -131,6 +160,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -305,82 +336,391 @@ class Worktree:
         )
 
 
-# ── Per-harness sandbox env -----------------------------------------------------
+# ── Guard implementations: each one is PROBED, not merely described ------------
+#
+# Every guard below is built as a real, standalone mechanism (a sandbox-exec
+# profile file; a PATH-first git shim script) and then PROBED against a
+# throwaway fixture — never the real credential files, never the real shared
+# git dir — to produce a boolean this module actually trusts. A guard whose
+# probe does not pass is reported UNBOUND, and `HarnessSandbox.fully_guarded`
+# is the single real signal `refuse_if_guard_required` reads. Nothing here
+# hardcodes "this guard binds" as a comment; each claim is the result of
+# actually running the mechanism against a fixture in this same call.
+
+# Credential-file globs a dispatched codex/cursor child must never be able to
+# read, expressed as macOS sandbox regexes (matched against the FULL absolute
+# path, anchored at the end — `$` — so a same-named file elsewhere is not
+# swept in). Mirrors the globs named in the coordinator's brief.
+_CREDENTIAL_READ_DENY_REGEXES: tuple[str, ...] = (
+    r"/\.config/neotoma/\.env[^/]*$",
+    r"/\.neotoma/aauth[^/]*/.*private.*",
+    r"/\.claude\.json$",
+    r"/\.netrc$",
+    r"/\.config/sops/age/.*",
+)
+
+# User-level harness config directories a dispatched child must never be able
+# to WRITE to (writing a new hook/rule/mcp.json there would let a codex/cursor
+# child silently alter what future sessions in ANY harness trust).
+_USER_CONFIG_WRITE_DENY_REGEXES: tuple[str, ...] = (
+    r"/\.claude(/.*)?$",
+    r"/\.cursor(/.*)?$",
+    r"/\.codex(/.*)?$",
+)
+
+_GIT_STASH_SHIM = """#!/bin/bash
+# PATH-first git shim (ent_89a4d44b063cb0902106da49): refuses every
+# stash-stack MUTATION for a dispatched harness child, exactly like
+# .claude/hooks/git_stash_guard.py's own read-only carve-out — `stash list`
+# and `stash show` pass through to the real git; every other stash form
+# (bare push, push, pop, apply, drop, clear, branch, create, store) is
+# refused. Execs the real git for every non-stash invocation so this shim is
+# otherwise invisible.
+found=0
+pending=0
+for arg in "$@"; do
+  if [ "$pending" = "1" ]; then
+    case "$arg" in
+      list|show) exec "REAL_GIT_PLACEHOLDER" "$@" ;;
+      *)
+        echo "git-stash-shim: refusing 'git stash $arg' for a dispatched harness child (ent_89a4d44b063cb0902106da49)" >&2
+        exit 1
+        ;;
+    esac
+  fi
+  case "$arg" in
+    stash) found=1; pending=1 ;;
+  esac
+done
+if [ "$found" = "1" ]; then
+  echo "git-stash-shim: refusing bare 'git stash' for a dispatched harness child (ent_89a4d44b063cb0902106da49)" >&2
+  exit 1
+fi
+exec "REAL_GIT_PLACEHOLDER" "$@"
+"""
+
+
+def _real_git_path() -> str:
+    real = shutil.which("git")
+    if not real:
+        raise RuntimeError("git not found on PATH — cannot build the stash-refusing shim")
+    return real
+
+
+def build_sandbox_exec_profile(profile_path: Path) -> None:
+    """Write a macOS sandbox-exec profile denying the credential-read and
+    user-config-write globs above, and allowing everything else by default
+    (the dispatched child still needs to read/write its own worktree, the
+    isolated CODEX_HOME/HOME, and run its own binaries).
+    """
+    read_denies = "\n".join(f'  (regex #"{p}")' for p in _CREDENTIAL_READ_DENY_REGEXES)
+    write_denies = "\n".join(f'  (regex #"{p}")' for p in _USER_CONFIG_WRITE_DENY_REGEXES)
+    profile = (
+        "(version 1)\n"
+        "(allow default)\n"
+        "(deny file-read*\n"
+        f"{read_denies}\n"
+        ")\n"
+        "(deny file-write*\n"
+        f"{write_denies}\n"
+        ")\n"
+    )
+    profile_path.write_text(profile, encoding="utf-8")
+
+
+def probe_sandbox_exec_denies_read(
+    profile_path: Path, fixture_path: Path, *, control_path: Path
+) -> bool:
+    """Return True iff a real `sandbox-exec` run using *profile_path* actually
+    denies reading *fixture_path* AND still allows reading *control_path*.
+
+    *fixture_path* must be a file THIS caller created (never a real
+    credential file) whose path matches one of the deny regexes; *control_path*
+    must be a file THIS caller created OUTSIDE every deny regex — the probe
+    proves the mechanism DISCRIMINATES, not merely that the sandboxed process
+    exited non-zero. A malformed sandbox-exec profile (e.g. an empty deny
+    list, or one with a syntax error) can make the whole subprocess crash —
+    verified: SIGABRT on this platform — which returns a non-zero code for
+    EVERY path, fixture and control alike, and would be misread as "denied"
+    without the control check. Requiring the control read to still succeed is
+    what tells a real, working deny apart from a broken profile that denies
+    everything (including itself).
+    """
+    if shutil.which("sandbox-exec") is None:
+        return False
+    denied = subprocess.run(
+        ["sandbox-exec", "-f", str(profile_path), "cat", str(fixture_path)],
+        capture_output=True,
+        text=True,
+    )
+    if denied.returncode == 0:
+        return False
+    control = subprocess.run(
+        ["sandbox-exec", "-f", str(profile_path), "cat", str(control_path)],
+        capture_output=True,
+        text=True,
+    )
+    return control.returncode == 0 and control.stdout == control_path.read_text(
+        encoding="utf-8"
+    )
+
+
+def probe_sandbox_exec_denies_write(
+    profile_path: Path, fixture_path: Path, *, control_path: Path
+) -> bool:
+    """Same as the read probe, for a write into a fixture directory matching
+    one of the user-config-write deny regexes (e.g. a fixture ``.claude/``
+    under a throwaway root — never the operator's real ``~/.claude``), with
+    the same control-path discrimination check (see the read probe's
+    docstring for why: a crashing profile denies everything, including a
+    write it was never asked to deny).
+    """
+    if shutil.which("sandbox-exec") is None:
+        return False
+    fixture_path.parent.mkdir(parents=True, exist_ok=True)
+    denied = subprocess.run(
+        ["sandbox-exec", "-f", str(profile_path), "touch", str(fixture_path)],
+        capture_output=True,
+        text=True,
+    )
+    if denied.returncode == 0 or fixture_path.exists():
+        return False
+    control_path.parent.mkdir(parents=True, exist_ok=True)
+    control = subprocess.run(
+        ["sandbox-exec", "-f", str(profile_path), "touch", str(control_path)],
+        capture_output=True,
+        text=True,
+    )
+    return control.returncode == 0 and control_path.exists()
+
+
+def probe_git_shim_denies_stash_push(shim_path: Path, scratch_git_dir: Path) -> bool:
+    """Return True iff invoking the shim with `stash push` in a SCRATCH git
+    repo (never the shared clone) exits non-zero AND leaves nothing on the
+    stash stack, and `stash list` in the same repo still succeeds (proving
+    the read-only carve-out did not become an outright deny of the whole
+    subcommand). *scratch_git_dir* must already contain at least one commit
+    — otherwise a real, unshimmed `git stash push` would ALSO fail (with "You
+    do not have the initial commit yet"), which would make this probe pass
+    for the wrong reason on a broken shim that never actually refuses
+    anything. Checking the stash count after the attempt is what rules that
+    out: a broken shim that execs the real git lets the push land a real
+    stash entry, which this probe would then see.
+    """
+    env = {**os.environ, "PATH": f"{shim_path.parent}:{os.environ.get('PATH', '')}"}
+    push = subprocess.run(
+        ["git", "-C", str(scratch_git_dir), "stash", "push"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if push.returncode == 0:
+        return False
+    listing = subprocess.run(
+        ["git", "-C", str(scratch_git_dir), "stash", "list"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if listing.returncode != 0:
+        return False
+    # A real refusal leaves the stash stack exactly as it was — a stray entry
+    # here means the "refusal" above did not actually stop the mutation.
+    return listing.stdout.strip() == ""
 
 
 @dataclass
 class HarnessSandbox:
-    """An isolated HOME/CODEX_HOME for one dispatch, and what it does and does
-    not guarantee. See the module docstring's GUARD BINDING section — this
-    class only builds the env_extra mapping; the reasoning lives there.
+    """The real, probed guard state for one dispatch, plus what to hand
+    `dispatch_role.dispatch()` to make it bind. Every boolean on this object
+    was produced by actually running the mechanism against a fixture in
+    `build()` — never asserted.
     """
 
     provider: str
     root: Path
     env_extra: dict[str, str]
+    command_wrapper: list[str]
+    credential_read_denied: bool
+    user_config_write_denied: bool
+    git_stash_denied: bool
     unavailable_guards: tuple[str, ...]
+
+    @property
+    def fully_guarded(self) -> bool:
+        """True only when every guard this class attempts actually probed as
+        bound. `refuse_if_guard_required` is the only reader that matters."""
+        return (
+            self.credential_read_denied
+            and self.user_config_write_denied
+            and self.git_stash_denied
+        )
 
     @classmethod
     def build(cls, provider: str, tmp_root: Path) -> "HarnessSandbox":
         sandbox_home = tmp_root / f"{provider}-home"
         sandbox_home.mkdir(parents=True, exist_ok=True)
-        if provider == "codex":
+
+        if provider == "claude":
+            # Runs under this session's own Claude Code hook set already (or,
+            # dispatched headless via `claude --print`, under whatever hooks
+            # its own settings.json wires) — unaffected by this script, and
+            # every guard is already bound by that mechanism.
             return cls(
-                provider=provider,
-                root=sandbox_home,
-                env_extra={"CODEX_HOME": str(sandbox_home)},
-                unavailable_guards=(
-                    "git_stash_guard (no hook mechanism in codex; mitigated "
-                    "only by the throwaway worktree's own lifecycle)",
-                    "sibling_repo_worktree_guard (same)",
-                    "gmail_send_gate (not applicable — this runner never "
-                    "invokes gws/gmail)",
-                    "refuse_task_chip (not applicable — no harness task-chip "
-                    "surface exists outside Claude Code)",
-                ),
+                provider=provider, root=sandbox_home, env_extra={},
+                command_wrapper=[], credential_read_denied=True,
+                user_config_write_denied=True, git_stash_denied=True,
+                unavailable_guards=(),
             )
-        if provider == "cursor":
-            return cls(
-                provider=provider,
-                root=sandbox_home,
-                env_extra={"HOME": str(sandbox_home)},
-                unavailable_guards=(
-                    "git_stash_guard (no hook mechanism in cursor-agent; "
-                    "mitigated only by the throwaway worktree's own lifecycle)",
-                    "sibling_repo_worktree_guard (same)",
-                    "gmail_send_gate (not applicable)",
-                    "refuse_task_chip (not applicable)",
-                    "credential_read_guard (cursor-agent has no per-path deny; "
-                    "HOME isolation removes cursor's OWN credential store only)",
-                ),
+
+        env_extra = (
+            {"CODEX_HOME": str(sandbox_home)}
+            if provider == "codex"
+            else {"HOME": str(sandbox_home)}
+        )
+
+        # ── git-stash shim: build, then PROBE against a scratch repo ────────
+        shim_dir = sandbox_home / "shim-bin"
+        shim_dir.mkdir(parents=True, exist_ok=True)
+        shim_path = shim_dir / "git"
+        git_stash_denied = False
+        try:
+            real_git = _real_git_path()
+            shim_path.write_text(
+                _GIT_STASH_SHIM.replace("REAL_GIT_PLACEHOLDER", real_git),
+                encoding="utf-8",
             )
-        # claude: runs under this session's own hook set already (or, when
-        # dispatched headless via `claude --print`, under whatever hooks its
-        # own settings.json wires — unaffected by this script).
-        return cls(provider=provider, root=sandbox_home, env_extra={}, unavailable_guards=())
+            shim_path.chmod(0o755)
+            scratch_repo = sandbox_home / "stash-probe-repo"
+            scratch_repo.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                ["git", "init", "-q", str(scratch_repo)], check=True, capture_output=True
+            )
+            probe_env = {**os.environ, "PATH": f"{shim_dir}:{os.environ.get('PATH', '')}"}
+            subprocess.run(
+                ["git", "-C", str(scratch_repo), "config", "user.email", "probe@example.com"],
+                check=True, capture_output=True, env=probe_env,
+            )
+            subprocess.run(
+                ["git", "-C", str(scratch_repo), "config", "user.name", "probe"],
+                check=True, capture_output=True, env=probe_env,
+            )
+            (scratch_repo / "probe.txt").write_text("probe\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(scratch_repo), "add", "-A"],
+                check=True, capture_output=True, env=probe_env,
+            )
+            # A REAL commit — required so a real (unshimmed) `git stash push`
+            # would actually succeed, which is what makes the probe below
+            # meaningful: if the shim were broken (execing real git
+            # unconditionally), this commit is what lets that broken path
+            # produce a real stash entry for the probe to catch, rather than
+            # failing on its own with "no initial commit" for an unrelated
+            # reason. See probe_git_shim_denies_stash_push's docstring.
+            subprocess.run(
+                ["git", "-C", str(scratch_repo), "commit", "-q", "-m", "probe"],
+                check=True, capture_output=True, env=probe_env,
+            )
+            (scratch_repo / "probe.txt").write_text("probe changed\n", encoding="utf-8")
+            git_stash_denied = probe_git_shim_denies_stash_push(shim_path, scratch_repo)
+        except (RuntimeError, subprocess.CalledProcessError, OSError):
+            git_stash_denied = False
+        env_extra["PATH"] = f"{shim_dir}:{os.environ.get('PATH', '')}"
+
+        # ── sandbox-exec profile: build, then PROBE against fixtures ───────
+        profile_path = sandbox_home / "profile.sb"
+        credential_read_denied = False
+        user_config_write_denied = False
+        command_wrapper: list[str] = []
+        try:
+            build_sandbox_exec_profile(profile_path)
+            read_fixture_dir = sandbox_home / "probe-fixtures" / ".config" / "neotoma"
+            read_fixture_dir.mkdir(parents=True, exist_ok=True)
+            read_fixture = read_fixture_dir / ".env"
+            read_fixture.write_text("PROBE_NOT_A_REAL_CREDENTIAL=1\n", encoding="utf-8")
+            read_control = sandbox_home / "probe-fixtures" / "control-read.txt"
+            read_control.write_text("control\n", encoding="utf-8")
+            credential_read_denied = probe_sandbox_exec_denies_read(
+                profile_path, read_fixture, control_path=read_control
+            )
+
+            write_fixture = sandbox_home / "probe-fixtures" / ".claude" / "probe-write"
+            write_control = sandbox_home / "probe-fixtures" / "control-write-dir" / "probe"
+            user_config_write_denied = probe_sandbox_exec_denies_write(
+                profile_path, write_fixture, control_path=write_control
+            )
+            if shutil.which("sandbox-exec") is not None:
+                command_wrapper = ["sandbox-exec", "-f", str(profile_path)]
+        except OSError:
+            credential_read_denied = False
+            user_config_write_denied = False
+
+        unavailable = []
+        if not git_stash_denied:
+            unavailable.append(
+                "git_stash_guard (PATH-first shim did not probe as denying "
+                "`git stash push` in a scratch repo — see the sandbox's own "
+                "probe result, not asserted)"
+            )
+        if not credential_read_denied:
+            unavailable.append(
+                "credential_read_guard (sandbox-exec unavailable, or its "
+                "profile did not probe as denying a read of the fixture path "
+                "— see the sandbox's own probe result, not asserted)"
+            )
+        if not user_config_write_denied:
+            unavailable.append(
+                "user_config_write_guard (sandbox-exec unavailable, or its "
+                "profile did not probe as denying a write to the fixture "
+                "path)"
+            )
+        unavailable.append(
+            "sibling_repo_worktree_guard (no hook mechanism in "
+            f"{provider}; mitigated only by this script always dispatching "
+            "into its own dedicated throwaway worktree, never the shared "
+            "clone or another session's worktree)"
+        )
+        unavailable.append(
+            "gmail_send_gate / refuse_task_chip (not applicable to this "
+            "script — it never invokes gws/gmail and no harness task-chip "
+            "surface exists outside Claude Code)"
+        )
+
+        return cls(
+            provider=provider,
+            root=sandbox_home,
+            env_extra=env_extra,
+            command_wrapper=command_wrapper,
+            credential_read_denied=credential_read_denied,
+            user_config_write_denied=user_config_write_denied,
+            git_stash_denied=git_stash_denied,
+            unavailable_guards=tuple(unavailable),
+        )
 
 
-def refuse_if_guard_required(provider: str, *, needs_full_guards: bool) -> str | None:
-    """Return a refusal reason when *provider* cannot mechanically enforce a
-    guard this run needs, or None to proceed.
+def refuse_if_guard_required(sandbox: "HarnessSandbox") -> str | None:
+    """Return a refusal reason when *sandbox*'s OWN probed state shows a
+    required guard is unbound for a non-claude provider, or None to proceed.
 
-    ``needs_full_guards`` is True for any run this script cannot itself scope
-    to a throwaway worktree with an isolated HOME (i.e. would rely on the
-    harness's own credential/stash protections) — the task's own hard rule:
-    "make the runner refuse that harness for work that needs the guard rather
-    than silently running unguarded." Today every lens review this script
-    dispatches DOES get a throwaway worktree + isolated HOME, so this refusal
-    exists for callers/future extensions that skip that setup, not for the
-    normal path.
+    Driven entirely by ``sandbox.fully_guarded`` — a boolean produced by
+    actually running the sandbox-exec profile and the git shim against
+    fixtures in ``HarnessSandbox.build()``, never by a caller-supplied
+    constant. `claude` always proceeds (its own hook set already binds every
+    guard this class attempts). Every lens review this script dispatches
+    needs the full guard set — there is no lighter-weight lens run that could
+    accept a partial bind — so this refuses outright rather than proceeding
+    on a partial result.
     """
-    if provider == "claude":
+    if sandbox.provider == "claude":
         return None
-    if needs_full_guards:
+    if not sandbox.fully_guarded:
+        missing = "; ".join(sandbox.unavailable_guards) or "unspecified"
         return (
-            f"provider {provider!r} has no PreToolUse/Stop hook mechanism "
-            "equivalent to Claude Code's, and this run was requested WITHOUT "
-            "the throwaway-worktree + isolated-HOME sandbox this script "
-            "normally applies — refusing rather than running unguarded."
+            f"provider {sandbox.provider!r} failed to probe as fully guarded "
+            f"(credential_read_denied={sandbox.credential_read_denied}, "
+            f"user_config_write_denied={sandbox.user_config_write_denied}, "
+            f"git_stash_denied={sandbox.git_stash_denied}) — refusing rather "
+            f"than running unguarded. Unbound: {missing}"
         )
     return None
 
@@ -420,6 +760,12 @@ def dry_run_report(
     else:
         example_cmd = ["claude", "--print", "--append-system-prompt", "<system prompt>"]
 
+    # command_wrapper is prepended to the REAL argv by skill_runner
+    # (see _run_skill_once's command_wrapper param) — shown here too so the
+    # dry run's printed command matches what actually runs, not a description
+    # of it that could drift.
+    example_cmd = [*sandbox.command_wrapper, *example_cmd]
+
     return {
         "dry_run": True,
         "provider": provider,
@@ -429,7 +775,15 @@ def dry_run_report(
         "lens": target.lens,
         "agent": target.agent,
         "worktree": str(worktree_path),
-        "sandbox_env_extra": sandbox.env_extra,
+        "sandbox_env_extra": {k: v for k, v in sandbox.env_extra.items() if k != "PATH"},
+        "sandbox_path_prefix": sandbox.env_extra.get("PATH", "").split(os.pathsep)[0]
+        if "PATH" in sandbox.env_extra
+        else "",
+        "command_wrapper": list(sandbox.command_wrapper),
+        "fully_guarded": sandbox.fully_guarded,
+        "credential_read_denied": sandbox.credential_read_denied,
+        "user_config_write_denied": sandbox.user_config_write_denied,
+        "git_stash_denied": sandbox.git_stash_denied,
         "unavailable_guards": list(sandbox.unavailable_guards),
         "example_command": example_cmd,
         "prompt_chars": len(task_text),
@@ -507,6 +861,24 @@ def gh_login() -> str:
     return out.stdout.strip()
 
 
+def current_pr_head(*, repo: str, pr: int) -> str:
+    """Return the PR's CURRENT headRefOid via `gh`, or "" if unreadable.
+
+    A dedicated function (rather than an inline subprocess.run call) so tests
+    can monkeypatch exactly this and nothing else — leaving every OTHER
+    subprocess.run call (the sandbox-exec/git-shim guard probes in
+    HarnessSandbox.build, in particular) running for real.
+    """
+    result = subprocess.run(
+        ["gh", "pr", "view", str(pr), "-R", repo, "--json", "headRefOid"],
+        capture_output=True, text=True, check=False,
+    )
+    try:
+        return json.loads(result.stdout or "{}").get("headRefOid", "")
+    except json.JSONDecodeError:
+        return ""
+
+
 def post_verdict(*, repo: str, pr: int, verdict_path: Path) -> str:
     """Post the verdict file as a PR comment and return the comment URL.
 
@@ -548,10 +920,11 @@ async def run_one(
     """
     check_headroom(provider)
 
+    # HarnessSandbox.build() PROBES the real sandbox-exec profile and git
+    # shim against fixtures — refusal below is driven by that probe's actual
+    # result (sandbox.fully_guarded), never by a caller-supplied constant.
     sandbox = HarnessSandbox.build(provider, scratch_root)
-    refusal = refuse_if_guard_required(provider, needs_full_guards=False)
-    if refusal:
-        return {"ok": False, "provider": provider, "reason": refusal}
+    refusal = refuse_if_guard_required(sandbox)
 
     worktree_path = scratch_root / f"{repo_worktree_name}-wt-{target.lens}-{target.pr}-{provider}"
     worktree = Worktree(repo_name=repo_worktree_name, path=worktree_path)
@@ -561,7 +934,11 @@ async def run_one(
         # real agent prompt to report an accurate prompt_chars figure, and
         # that prompt lives in a worktree at TARGET HEAD. Building the
         # worktree is a `git worktree add` (explicitly allowed by every
-        # relevant guard) and is removed again before returning.
+        # relevant guard) and is removed again before returning. The refusal
+        # (if any) is reported alongside the rest rather than short-circuited,
+        # so --dry-run is exactly what an operator would see about to run
+        # this for real — including a refusal that would otherwise be silent
+        # until the real dispatch attempt.
         worktree.create(head=target.head)
         try:
             agent_prompt = read_agent_prompt(worktree.path, target.agent)
@@ -570,9 +947,13 @@ async def run_one(
                 target, provider=provider, sandbox=sandbox,
                 task_text=task_text, worktree_path=worktree.path,
             )
+            report["would_refuse"] = refusal
         finally:
             worktree.remove()
         return report
+
+    if refusal:
+        return {"ok": False, "provider": provider, "reason": refusal}
 
     worktree.create(head=target.head)
     try:
@@ -593,6 +974,7 @@ async def run_one(
             timeout=timeout,
             env_extra=sandbox.env_extra,
             seated_reviewer=False,  # see module docstring: no MCP grant requested
+            command_wrapper=sandbox.command_wrapper,
         )
 
         if not result.ok:
@@ -630,14 +1012,7 @@ async def run_one(
         # Re-check the head before posting — the brief's own step 1, applied
         # here rather than trusted from before dispatch (a long-running codex
         # attempt could span a force-push).
-        head_now = subprocess.run(
-            ["gh", "pr", "view", str(target.pr), "-R", target.repo, "--json", "headRefOid"],
-            capture_output=True, text=True, check=False,
-        )
-        try:
-            current_head = json.loads(head_now.stdout or "{}").get("headRefOid", "")
-        except json.JSONDecodeError:
-            current_head = ""
+        current_head = current_pr_head(repo=target.repo, pr=target.pr)
         if current_head and current_head != target.head:
             report["ok"] = False
             report["refusal_reason"] = (
