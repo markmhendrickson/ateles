@@ -78,9 +78,10 @@ stdio only (open item).
 
 No path. ChatGPT apps reach only a remote MCP endpoint, which Ateles does not serve (open item).
 
-### Codex — target rung: protocol, beside a generated local instruction file
+### Codex — target rung: bundle with a hook
 
-**What gets installed:** the Ateles MCP server. Add to the user's Codex configuration
+**What gets installed:** the Ateles MCP server and the repository-owned user-scope hook definition. Add the
+server to the user's Codex configuration
 (`~/.codex/config.toml`):
 
 ```toml
@@ -88,8 +89,31 @@ No path. ChatGPT apps reach only a remote MCP endpoint, which Ateles does not se
 command = "<ateles-checkout>/execution/mcp/ateles/run_ateles_mcp.sh"
 ```
 
-**Verify:** start Codex and list its MCP servers; the Ateles tools are available. **Missing:** the
-generated `AGENTS.md` that would carry the rule index and session-start context (open item).
+Install the hook definition from the checkout whose code Codex should run:
+
+```sh
+python3 <ateles-checkout>/execution/scripts/install_codex_hooks.py
+```
+
+The installer merges only the Ateles handlers into the user's existing `hooks.json`, resolves their scripts
+to that checkout, and leaves unrelated hooks intact. It copies no rule body: `SessionStart`,
+`SubagentStart`, and `UserPromptSubmit` render the canonical live `agent_policy` rows, while `PreToolUse`
+uses the shared Ateles guards. Codex requires a separate trust decision for non-managed hooks; open
+`/hooks`, review the Ateles definitions, and trust them.
+
+**Verify:** start a new Codex session and list its MCP servers; the Ateles tools are available. The hook
+panel shows the trusted Ateles entries, and session start reports `Loading live Ateles rules`. Then run:
+
+```sh
+python3 <ateles-checkout>/execution/scripts/install_codex_hooks.py --check
+python3 <ateles-checkout>/execution/scripts/test_codex_rule_hooks.py
+```
+
+The first command reports the installed entries current. The second executes the configured commands
+against a synthetic local rule corpus and checks both model-context renderers and blocking guard decisions;
+config presence alone is not treated as proof. The user-scope path is the measured path in Codex CLI
+0.153.4. A generated `AGENTS.md` remains a fallback for installations that have not trusted the hook, not a
+second policy source.
 
 ### Cursor — target rung: protocol, beside a generated rules file
 
@@ -127,7 +151,7 @@ Each is a path the design assigns and the repository does not yet provide. `foun
   Ateles checkout; today a manual edit of the user's settings, specified in the rule-index pull request.
 - **A remote transport for the Ateles MCP server.** Required before Claude web or ChatGPT can reach Ateles at
   all.
-- **Generated local instruction files** (`AGENTS.md` for Codex, a rules file for Cursor), rendered from the
-  record by the installer and never edited by hand.
+- **A generated Cursor rules file,** rendered from the record by the installer and never edited by hand.
+  Codex has a measured user-scope hook path; its local instruction file is only a pre-install fallback.
 - **A freshness check on the MCP server's checkout.** The launcher path is set on the host; nothing reports
   when the checkout it points at drifts from `main`.

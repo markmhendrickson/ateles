@@ -1,0 +1,76 @@
+{
+  "description": "Ateles live rule delivery and pre-action guards for Codex. Rule content remains canonical in Neotoma agent_policy; these hooks only render or enforce it.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/session_rule_index.py\"",
+            "timeout": 30,
+            "statusMessage": "Loading live Ateles rules",
+            "additionalContextLimit": 4000
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/session_rule_index.py\"",
+            "timeout": 30,
+            "statusMessage": "Loading live Ateles rules for subagent",
+            "additionalContextLimit": 4000
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/session_rule_delivery.py\"",
+            "timeout": 30,
+            "statusMessage": "Checking for updated Ateles rules",
+            "additionalContextLimit": 4000
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^(Bash|apply_patch)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/sibling_repo_worktree_guard.py\"",
+            "timeout": 30,
+            "statusMessage": "Checking repository isolation"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/gmail_send_gate.py\"",
+            "timeout": 30,
+            "statusMessage": "Checking outward-send approval"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/git_stash_guard.py\"",
+            "timeout": 30,
+            "statusMessage": "Protecting the shared stash stack"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/gh_identity_guard.py\"",
+            "timeout": 30,
+            "statusMessage": "Checking GitHub identity"
+          }
+        ]
+      }
+    ]
+  }
+}
