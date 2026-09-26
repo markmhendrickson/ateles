@@ -207,6 +207,8 @@ async def dispatch(
     cwd: str | None = None,
     timeout: int | None = None,
     task_entity_id: str = "",
+    env_extra: dict[str, str] | None = None,
+    seated_reviewer: bool = False,
 ) -> SkillResult:
     """Dispatch one piece of work to a named role via the harness router.
 
@@ -218,6 +220,22 @@ async def dispatch(
     subagent happens inside run_skill: identity, allowlist, provider routing,
     credential stripping, and the harness_event rows. This function's only job
     is to hand it a well-formed request.
+
+    ``env_extra`` (harness-lens-runner, ent_898998f41372ce24369fb365): merged
+    on top of the child's environment by ``_subscription_only_env`` inside
+    ``run_skill`` — the mechanism a caller uses to override ``HOME`` /
+    ``CODEX_HOME`` for an isolated, credential-blind sandbox on a non-Claude
+    provider. This process's own environment (and hence its Neotoma/gh
+    access) is untouched; only the dispatched CHILD sees the override.
+
+    ``seated_reviewer`` forwards to ``run_skill`` unchanged. It does NOT mean
+    "this is a lens run" in general — it means the run must be treated exactly
+    like a panel-seated reviewer with shared-bearer Neotoma MCP access, which
+    forces claude-only routing (see ``run_skill``'s docstring). A caller
+    dispatching a lens review to codex/cursor that never receives Neotoma MCP
+    tools in the first place (this codebase injects ``--mcp-config`` only for
+    ``provider == "claude"``) should leave this False rather than set it and
+    then be silently rerouted to claude.
     """
     return await run_skill(
         role,
@@ -227,6 +245,8 @@ async def dispatch(
         timeout=timeout,
         cwd=cwd,
         provider=provider,
+        env_extra=env_extra,
+        seated_reviewer=seated_reviewer,
     )
 
 
