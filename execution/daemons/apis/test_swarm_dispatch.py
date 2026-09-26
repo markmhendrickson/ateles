@@ -92,9 +92,17 @@ class _StubNotifier:
         self.priorities.append(priority)
         self.sent_full.append((message, priority))
         self.kwargs.append(kwargs)
+        return True
 
     def clear_dedupe(self, key):
         self.cleared.append(key)
+
+    def _is_duplicate(self, key):
+        # This stub never models dedupe state — every dedupe_key reads as
+        # never-before-seen, matching its existing "always delivers" stance.
+        # ateles#1250 checks this directly (not send()'s return value, which
+        # conflates dedupe suppression with transport delivery failure).
+        return False
 
 
 def _config(**overrides):
@@ -9520,6 +9528,474 @@ def test_provider_capacity_failure_auto_resumes_with_partial_panel_detail(monkey
     assert "resume automatically" in body.lower()
     assert "completed lens results preserved: pm" in body.lower()
     assert "missing lens results: security (provider exhaustion)" in body.lower()
+
+
+# ── panel-incomplete dedupe (ateles#1250) ────────────────────────────────────
+#
+# _handle_panel_session_limit's non-auto-resume branch used to re-send an
+# identical notifier.send() + GitHub comment on every dispatcher trigger
+# against an unchanged, still-failing panel — 23 byte-identical comments over
+# six days on one PR. These tests use a REAL Notifier (not _StubNotifier) so
+# the dedupe journal's suppress-on-repeat behaviour is actually exercised, per
+# the same pattern as test_route_findings_exhausted_dedup_suppresses_renotify.
+
+
+def _dedupe_dispatcher(tmp_path, github_token="x"):
+    """A SwarmDispatcher wired to a real Notifier with an isolated dedupe
+    journal and no silence window, plus a GitHub client double that counts
+    comment posts instead of making real HTTP calls."""
+    from lib.notify import Notifier
+
+    sent = []
+    notifier = Notifier(
+        rubric={"timezone": "Europe/Madrid", "silence_start": "", "silence_end": ""}
+    )
+    notifier._dedupe_path = tmp_path / "dedupe.json"
+    notifier._digest_path = tmp_path / "digest.json"
+    notifier._deliver = lambda m, **kw: (sent.append(m), True)[1]
+    d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token=github_token))
+    return d, notifier, sent
+
+
+def _capturing_github_client(comment_bodies):
+    class _CapturingClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url, **kwargs):
+            return _FakeListResp([])
+
+        async def post(self, url, **kwargs):
+            comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+            return _FakeResp(201)
+
+    return _CapturingClient
+
+
+def test_panel_incomplete_dedupe_suppresses_repeat_same_pr_head_lensset(
+    monkeypatch, tmp_path
+):
+    """T1: 3 identical (repo, number, head, lens-set) calls -> 1 notify, 1 comment.
+
+    Direct regression test for the 23x-repost defect (ateles#1085)."""
+    comment_bodies: list[str] = []
+    monkeypatch.setattr(httpx, "AsyncClient", _capturing_github_client(comment_bodies))
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+    d, notifier, sent = _dedupe_dispatcher(tmp_path)
+    trig = _trigger(number=1085, repository="owner/repo")
+    for _ in range(3):
+        asyncio.run(
+            d._handle_panel_session_limit(
+                trig, None, "panel", "", "",
+                reason="incomplete review panel",
+                failed_lenses=(("pm", "timeout"),),
+                head="a" * 40,
+            )
+        )
+    assert len(sent) == 1
+    assert len(comment_bodies) == 1
+
+
+def test_panel_incomplete_dedupe_new_head_renotifies(monkeypatch, tmp_path):
+    """T2: same PR/lens-set, new head -> 2 notifies, 2 comments (per-head axis)."""
+    comment_bodies: list[str] = []
+    monkeypatch.setattr(httpx, "AsyncClient", _capturing_github_client(comment_bodies))
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+    d, notifier, sent = _dedupe_dispatcher(tmp_path)
+    trig = _trigger(number=1085, repository="owner/repo")
+    for head in ("a" * 40, "b" * 40):
+        asyncio.run(
+            d._handle_panel_session_limit(
+                trig, None, "panel", "", "",
+                reason="incomplete review panel",
+                failed_lenses=(("pm", "timeout"),),
+                head=head,
+            )
+        )
+    assert len(sent) == 2
+    assert len(comment_bodies) == 2
+
+
+def test_panel_incomplete_dedupe_different_pr_not_suppressed(monkeypatch, tmp_path):
+    """T3: identical lens-set/head on a different PR number -> 2 notifies, 2
+    comments. Regression guard for the ateles#1216 global-key class of bug."""
+    comment_bodies: list[str] = []
+    monkeypatch.setattr(httpx, "AsyncClient", _capturing_github_client(comment_bodies))
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+    d, notifier, sent = _dedupe_dispatcher(tmp_path)
+    for number in (1085, 1086):
+        asyncio.run(
+            d._handle_panel_session_limit(
+                _trigger(number=number, repository="owner/repo"),
+                None, "panel", "", "",
+                reason="incomplete review panel",
+                failed_lenses=(("pm", "timeout"),),
+                head="a" * 40,
+            )
+        )
+    assert len(sent) == 2
+    assert len(comment_bodies) == 2
+
+
+def test_panel_incomplete_dedupe_lens_added_renotifies(monkeypatch, tmp_path):
+    """T4a: same PR/head, a lens joins the missing set -> 2 notifies, 2 comments."""
+    comment_bodies: list[str] = []
+    monkeypatch.setattr(httpx, "AsyncClient", _capturing_github_client(comment_bodies))
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+    d, notifier, sent = _dedupe_dispatcher(tmp_path)
+    trig = _trigger(number=1085, repository="owner/repo")
+    for failed in (
+        (("pm", "timeout"),),
+        (("pm", "timeout"), ("ux", "execution failure")),
+    ):
+        asyncio.run(
+            d._handle_panel_session_limit(
+                trig, None, "panel", "", "",
+                reason="incomplete review panel",
+                failed_lenses=failed,
+                head="a" * 40,
+            )
+        )
+    assert len(sent) == 2
+    assert len(comment_bodies) == 2
+
+
+def test_panel_incomplete_dedupe_failure_reason_change_renotifies(
+    monkeypatch, tmp_path
+):
+    """T4b: same PR/head, same lens membership, one lens's failure reason
+    changes -> 2 notifies, 2 comments. Distinct from T4a: exercises the
+    "paired with its own failure reason" requirement, not set membership."""
+    comment_bodies: list[str] = []
+    monkeypatch.setattr(httpx, "AsyncClient", _capturing_github_client(comment_bodies))
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+    d, notifier, sent = _dedupe_dispatcher(tmp_path)
+    trig = _trigger(number=1085, repository="owner/repo")
+    for failure_reason in ("timeout", "conflict"):
+        asyncio.run(
+            d._handle_panel_session_limit(
+                trig, None, "panel", "", "",
+                reason="incomplete review panel",
+                failed_lenses=(("pm", failure_reason),),
+                head="a" * 40,
+            )
+        )
+    assert len(sent) == 2
+    assert len(comment_bodies) == 2
+
+
+def test_panel_incomplete_dedupe_usage_limit_branch_unaffected(monkeypatch, tmp_path):
+    """T5: the usage-limit/provider-capacity branch keeps its own self-clearing
+    GitHub-marker mechanism, not the new dedupe_key, and needs no `head`."""
+    comment_bodies: list[str] = []
+    monkeypatch.setattr(httpx, "AsyncClient", _capturing_github_client(comment_bodies))
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+    d, notifier, sent = _dedupe_dispatcher(tmp_path)
+    trig = _trigger(number=1085, repository="owner/repo")
+    for _ in range(3):
+        asyncio.run(
+            d._handle_panel_session_limit(
+                trig, None, "vanellus",
+                "You've hit your session limit · resets 7:30pm", "",
+            )
+        )
+    # Auto-resume never sets dedupe_key and uses INFO priority, which the
+    # Notifier drops unconditionally (never delivered, never queued) — so
+    # `sent` staying empty here is the auto-resume branch's OWN existing
+    # behaviour, unrelated to ateles#1250's dedupe. What #1250 must not
+    # regress is the GitHub side: every trigger still posts (each post
+    # deletes the prior marker first) — 3 posts, not suppressed like the
+    # non-auto-resume branch's dedupe_key path would.
+    assert sent == []
+    assert len(comment_bodies) == 3
+    assert all(d._REVIEW_DEFERRED_RE.search(b) for b in comment_bodies)
+
+
+def test_panel_incomplete_dedupe_key_sort_is_order_independent(monkeypatch, tmp_path):
+    """T6: the same missing-lens set built in two different orders must
+    produce a byte-identical dedupe_key — an unsorted join would under-suppress
+    purely from iteration-order nondeterminism."""
+    comment_bodies: list[str] = []
+    monkeypatch.setattr(httpx, "AsyncClient", _capturing_github_client(comment_bodies))
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+    d, notifier, sent = _dedupe_dispatcher(tmp_path)
+    trig = _trigger(number=1085, repository="owner/repo")
+    asyncio.run(
+        d._handle_panel_session_limit(
+            trig, None, "panel", "", "",
+            reason="incomplete review panel",
+            failed_lenses=(("pm", "timeout"), ("ux", "execution failure")),
+            head="a" * 40,
+        )
+    )
+    asyncio.run(
+        d._handle_panel_session_limit(
+            trig, None, "panel", "", "",
+            reason="incomplete review panel",
+            failed_lenses=(("ux", "execution failure"), ("pm", "timeout")),
+            head="a" * 40,
+        )
+    )
+    assert len(sent) == 1
+    assert len(comment_bodies) == 1
+
+
+def test_panel_incomplete_dedupe_8_call_sites_thread_correct_head():
+    """T7: each of the 8 _handle_panel_session_limit call sites inside
+    _handle_pr passes the in-scope head variable (review_head / aggregation_head
+    / readiness_head), not a stale or wrong-scope one — table-driven over the 8
+    sites via AST, so a copy-paste error threading the wrong-scope variable at
+    one site is caught even though a functional drive-through of all 8 branches
+    (each gated behind a different combination of panel/verdict/CI state) would
+    be prohibitively brittle to construct.
+
+    Sites, in source order, and the head variable in scope at each:
+      1. review_head unresolved before the panel even runs -> explicit None,
+         so the function's own `head or t.head_sha` fallback applies.
+      2. failed_lenses incomplete panel -> review_head.
+      3. durable_review_state read-back failed -> review_head.
+      4. aggregation_head resolved but mismatches/misses review_head -> the
+         freshest of the two (aggregation_head, falling back to review_head).
+      5-7. session-limit / auth / no-verdict guards after Vanellus runs ->
+         aggregation_head (the head Vanellus was actually run against).
+      8. readiness_head re-read differs from aggregation_head just before
+         merge readiness -> readiness_head (the freshest re-read).
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    src = textwrap.dedent(inspect.getsource(SwarmDispatcher._handle_pr))
+    tree = ast.parse(src)
+
+    found = []
+
+    class _Visitor(ast.NodeVisitor):
+        def visit_Call(self, node):
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_handle_panel_session_limit"
+            ):
+                head_kwarg = next(
+                    (kw for kw in node.keywords if kw.arg == "head"), None
+                )
+                found.append((node.lineno, head_kwarg))
+            self.generic_visit(node)
+
+    _Visitor().visit(tree)
+
+    assert len(found) == 8, (
+        f"expected 8 _handle_panel_session_limit call sites, found {len(found)} "
+        "— a call site was added, removed, or renamed without updating this "
+        "table-driven wiring check"
+    )
+
+    def _expr(node):
+        return ast.dump(node.value) if node is not None else None
+
+    expected = [
+        "Constant(value=None)",
+        "Name(id='review_head', ctx=Load())",
+        "Name(id='review_head', ctx=Load())",
+        None,  # site 4: BoolOp(aggregation_head or review_head) — checked separately
+        "Name(id='aggregation_head', ctx=Load())",
+        "Name(id='aggregation_head', ctx=Load())",
+        "Name(id='aggregation_head', ctx=Load())",
+        "Name(id='readiness_head', ctx=Load())",
+    ]
+    for i, ((lineno, kwarg), want) in enumerate(zip(found, expected), start=1):
+        assert kwarg is not None, f"site {i} (line {lineno}): missing head= kwarg"
+        if want is None:
+            continue
+        assert _expr(kwarg) == want, (
+            f"site {i} (line {lineno}): expected head={want}, got {_expr(kwarg)}"
+        )
+
+    # Site 4 is the one call whose head expression is a fallback rather than a
+    # bare variable: it must reference BOTH aggregation_head and review_head
+    # (freshest-first), not a stale or wrong-scope name.
+    site4_kwarg = found[3][1]
+    site4_names = {
+        n.id for n in ast.walk(site4_kwarg.value) if isinstance(n, ast.Name)
+    }
+    assert site4_names == {"aggregation_head", "review_head"}, (
+        f"site 4 (line {found[3][0]}): expected head derived from "
+        f"aggregation_head/review_head, got names {site4_names}"
+    )
+
+
+def test_panel_incomplete_dedupe_unresolved_head_falls_back_to_trigger_sha(
+    monkeypatch, tmp_path
+):
+    """T8: head=None (the "head could not be verified" site) falls back to
+    t.head_sha inside the function, and that fallback path still dedupes on
+    repeat (T1 logic re-applied at the fallback site)."""
+    comment_bodies: list[str] = []
+    monkeypatch.setattr(httpx, "AsyncClient", _capturing_github_client(comment_bodies))
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+    d, notifier, sent = _dedupe_dispatcher(tmp_path)
+    trig_c = _trigger(number=1085, repository="owner/repo", head_sha="c" * 40)
+    for _ in range(2):
+        asyncio.run(
+            d._handle_panel_session_limit(
+                trig_c, None, "panel", "", "",
+                reason="PR head could not be verified before review",
+                head=None,
+            )
+        )
+    assert len(sent) == 1
+    assert len(comment_bodies) == 1
+
+    # A DIFFERENT t.head_sha on the same PR must NOT be suppressed by the
+    # first call's key — proves the fallback actually threads t.head_sha into
+    # the key rather than, say, a constant sentinel for "head=None".
+    trig_d = _trigger(number=1085, repository="owner/repo", head_sha="d" * 40)
+    asyncio.run(
+        d._handle_panel_session_limit(
+            trig_d, None, "panel", "", "",
+            reason="PR head could not be verified before review",
+            head=None,
+        )
+    )
+    assert len(sent) == 2
+    assert len(comment_bodies) == 2
+
+
+def test_panel_incomplete_dedupe_failure_reason_is_deterministic_per_lens():
+    """T9: closes the UX open question — the per-lens failure-reason strings
+    threaded into the dedupe key (`failed_lenses.append((lens.lens,
+    failure_class))` at swarm_dispatch.py:6117, where `failure_class =
+    review_failure_class(result)`) come from a fixed, deterministic
+    vocabulary, not a timestamp or raw stack trace/exception message that
+    could vary run-to-run for the identical underlying condition.
+
+    Static check (source-provably enum-backed, per the QA spec's allowance
+    that a type-check against the enum suffices in place of a dynamic
+    double-call): every `return` in review_failure_class is a bare string
+    literal, never an f-string or a variable carrying caller-supplied text.
+    Plus a same-input-same-output double-call as a dynamic cross-check.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from swarm_dispatch import review_failure_class
+
+    src = textwrap.dedent(inspect.getsource(review_failure_class))
+    tree = ast.parse(src)
+    returns = [
+        n for n in ast.walk(tree) if isinstance(n, ast.Return) and n.value is not None
+    ]
+    assert returns, "review_failure_class has no return statements to check"
+    for r in returns:
+        assert isinstance(r.value, ast.Constant) and isinstance(r.value.value, str), (
+            f"review_failure_class line {r.lineno}: return value is not a fixed "
+            "string literal — a non-literal return could carry run-specific "
+            "text (a timestamp, a raw exception message) into the dedupe key, "
+            "causing a real recurrence to silently fail to dedupe (or, worse, "
+            "an unstable string to coincidentally collide)"
+        )
+
+    # Dynamic cross-check: the same underlying condition must classify
+    # identically across repeated calls.
+    result_a = SkillResult("vanellus", False, 1, "", "usage limit exceeded")
+    result_b = SkillResult("vanellus", False, 1, "", "usage limit exceeded")
+    assert review_failure_class(result_a) == review_failure_class(result_b)
+
+
+def test_panel_incomplete_dedupe_no_split_state_on_comment_failure(
+    monkeypatch, tmp_path
+):
+    """T10: if the GitHub comment post raises AFTER the dedupe check passed,
+    the notifier has already delivered exactly once for that condition, and a
+    second call for the SAME condition must still be suppressed — no path
+    exists where the comment fires without the notifier having been let
+    through by the same dedupe decision."""
+
+    class _RaisingClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url, **kwargs):
+            return _FakeListResp([])
+
+        async def post(self, url, **kwargs):
+            raise RuntimeError("simulated GitHub outage")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _RaisingClient)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+    d, notifier, sent = _dedupe_dispatcher(tmp_path)
+    trig = _trigger(number=1085, repository="owner/repo")
+    for _ in range(2):
+        asyncio.run(
+            d._handle_panel_session_limit(
+                trig, None, "panel", "", "",
+                reason="incomplete review panel",
+                failed_lenses=(("pm", "timeout"),),
+                head="a" * 40,
+            )
+        )
+    # The comment post failing does not roll back the notifier dedupe mark —
+    # the first call's notifier.send() already delivered (True) before the
+    # comment attempt raised, so the SECOND call is still suppressed at the
+    # notifier stage and never even attempts a (second) failing comment post.
+    assert len(sent) == 1
+
+
+def test_panel_incomplete_transport_failure_does_not_suppress_the_comment(
+    monkeypatch, tmp_path
+):
+    """A NEW (never-before-seen) condition whose notifier transport fails
+    (Telegram/email/Apprise down) must still post the GitHub comment.
+
+    notifier.send()'s own return value conflates "suppressed as a duplicate"
+    with "attempted delivery and the transport failed" — both return False.
+    Gating the comment on that return value would silently drop the GitHub
+    comment on every transport hiccup too, even for a condition never
+    reported before, which is a worse regression than the 23x-repost bug
+    this PR fixes: the operator would get nothing on any channel, yet the
+    key would already be marked notified. The fix checks the dedupe journal
+    directly instead of trusting send()'s return value."""
+    comment_bodies: list[str] = []
+    monkeypatch.setattr(httpx, "AsyncClient", _capturing_github_client(comment_bodies))
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+
+    d, notifier, sent = _dedupe_dispatcher(tmp_path)
+    # Simulate every transport failing: _deliver() returns False even though
+    # this is the FIRST send for this dedupe_key (not a duplicate).
+    notifier._deliver = lambda m, **kw: False
+
+    trig = _trigger(number=1085, repository="owner/repo")
+    asyncio.run(
+        d._handle_panel_session_limit(
+            trig, None, "panel", "", "",
+            reason="incomplete review panel",
+            failed_lenses=(("pm", "timeout"),),
+            head="a" * 40,
+        )
+    )
+    assert len(comment_bodies) == 1
 
 
 def test_handle_pr_reports_successful_and_failed_lenses(monkeypatch):
