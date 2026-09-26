@@ -76,6 +76,7 @@ from lib.workflow_engine.record import (
     UNKNOWN,
     CheckpointRaised,
     NonProductionCheckpointWriter,
+    ProductionWriteRefused,
     RecordReader,
     StepDeclaration,
     Unknown,
@@ -213,8 +214,23 @@ def open_steps(
     `checkpoints` must be a `NonProductionCheckpointWriter` — the only
     write this function performs is routed through it, and its
     constructor already refused to exist if the wrapped writer is not
-    labelled non-production, so there is no path through this function
-    that reaches a production write.
+    labelled non-production.
+
+    That constructor check is NOT sufficient on its own (PR #1310 pm/qa
+    follow-up, 2026-09-26): `CheckpointWriter` and `NonProductionCheckpointWriter`
+    are both `typing.Protocol`s, so Python's structural typing means any
+    object exposing methods of the right shape — including a BARE
+    `FakeRecordClient` labelled `"production"`, never passed through the
+    wrapper's constructor at all — satisfies the `checkpoints` parameter's
+    type hint with zero runtime enforcement. A type hint is not a check;
+    only code that runs is. So this function itself verifies with
+    `isinstance(checkpoints, NonProductionCheckpointWriter)` as its very
+    first statement, before the declaration is even read, and refuses
+    with `ProductionWriteRefused` on anything that is not a genuine
+    instance constructed through that class's `__post_init__` (which is
+    where the label allow-list check actually runs). This closes the
+    exact bypass qa demonstrated: `open_steps(record, bare_prod, ...)`
+    with `bare_prod` an unwrapped `FakeRecordClient(instance_label="production")`.
 
     Repeated calls with the same `task_id`/`declaration_scope`/
     `workflow_type` (a poller re-checking a still-unreadable workflow) are
@@ -222,6 +238,16 @@ def open_steps(
     derives the same `idempotency_key`, and the writer returns the
     existing checkpoint rather than creating a second one.
     """
+    if not isinstance(checkpoints, NonProductionCheckpointWriter):
+        raise ProductionWriteRefused(
+            "open_steps() refuses to run: `checkpoints` must be an actual "
+            f"NonProductionCheckpointWriter instance, got "
+            f"{type(checkpoints).__name__}. A bare writer satisfies the "
+            "type hint structurally (Protocol) but has never had its "
+            "instance_label checked — wrap it: "
+            "NonProductionCheckpointWriter(writer, writer.instance_label)."
+        )
+
     declaration = read_workflow_declaration(record, declaration_scope, workflow_type)
 
     if declaration is UNKNOWN:

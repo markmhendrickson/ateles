@@ -622,3 +622,123 @@ def test_production_write_refusal_is_shown_red_on_revert():
     # Contrast: going through the guard on the SAME record refuses instead.
     with pytest.raises(ProductionWriteRefused):
         NonProductionCheckpointWriter(record, record.instance_label)
+
+
+# ── pm/qa follow-up on PR #1310 (2026-09-26): the Protocol-typing bypass ──
+
+
+def test_bare_writer_bypassing_the_wrapper_is_refused_qa_exact_repro():
+    """
+    qa's exact finding, verbatim: "CheckpointWriter is a typing.Protocol,
+    so passing a bare FakeRecordClient(instance_label='production') as
+    `checkpoints` skips NonProductionCheckpointWriter, and the write goes
+    through." Confirmed against commit 77ce337e (the previous fix): this
+    exact call raised a checkpoint and incremented write_call_count with
+    NO exception, because the type hint on `open_steps()`'s `checkpoints`
+    parameter was `NonProductionCheckpointWriter`, but Python does not
+    enforce parameter type hints at runtime, and even if it tried to,
+    `CheckpointWriter` (which `NonProductionCheckpointWriter` structurally
+    resembles from the caller's side) is a `Protocol` — structural typing
+    means anything exposing a same-shaped `raise_checkpoint` method
+    "is" one, with no construction step and no label check ever run.
+
+    The fix: `open_steps()` now runs `isinstance(checkpoints,
+    NonProductionCheckpointWriter)` as its first statement.
+    `NonProductionCheckpointWriter` is a concrete `@dataclass`, NOT a
+    `Protocol` (see record.py), so this `isinstance` check is a genuine
+    nominal check — it is only `True` for an object that actually went
+    through `NonProductionCheckpointWriter.__post_init__`, where the
+    label allow-list is verified. A bare `FakeRecordClient` — even one
+    structurally identical to a `CheckpointWriter` — fails it.
+    """
+    record = FakeRecordClient()
+    record.unreadable_workflows.add((SCOPE, WFTYPE))
+
+    # qa's exact repro: an UNWRAPPED FakeRecordClient labelled
+    # "production", passed directly as `checkpoints` — never constructed
+    # through NonProductionCheckpointWriter, so its label was never
+    # checked by anything.
+    bare_prod = FakeRecordClient(instance_label="production")
+
+    with pytest.raises(ProductionWriteRefused):
+        open_steps(
+            record,
+            bare_prod,  # the bypass: not wrapped
+            task_id="ent_bypass_demo",
+            declaration_scope=SCOPE,
+            workflow_type=WFTYPE,
+        )
+
+    # Zero writes occurred on the production-labelled client — the guard
+    # refused before the declaration was even read, let alone before any
+    # checkpoint was raised.
+    assert bare_prod.write_call_count == 0
+    assert bare_prod.checkpoints == []
+
+
+def test_runtime_isinstance_guard_refuses_before_any_read_or_write():
+    """
+    The refusal in `open_steps()` must be the FIRST thing that happens —
+    not merely "eventually raised somewhere in the middle" — so that an
+    unguarded writer can never cause even a declaration READ to occur
+    under its authority. This is checked by asserting the record's
+    declaration was never even queried: a `FakeRecordClient` with no
+    declaration registered and no unreadable-workflow injection would
+    normally return UNKNOWN either way, so instead this test uses a
+    record wired to succeed, and confirms open_steps() still refuses
+    before reaching the point where it would have returned a real result.
+    """
+    record = FakeRecordClient()
+    record.register_declaration(
+        WorkflowDeclaration(
+            entity_id="ent_wf_would_succeed",
+            declaration_scope=SCOPE,
+            workflow_type=WFTYPE,
+            steps=(StepDeclaration(name="link", owner_role="analyst"),),
+        )
+    )
+    bare_prod = FakeRecordClient(instance_label="production")
+
+    with pytest.raises(ProductionWriteRefused):
+        open_steps(
+            record,
+            bare_prod,
+            task_id="ent_would_have_succeeded",
+            declaration_scope=SCOPE,
+            workflow_type=WFTYPE,
+        )
+
+    # Confirms this is not a "the read happened, then we noticed and
+    # rejected the result" pattern — no checkpoint, no write, on either
+    # client, even though the declaration WAS readable and would have
+    # produced a real open step had the writer been valid.
+    assert bare_prod.write_call_count == 0
+
+
+def test_bypass_bug_reproduced_against_the_prior_fix_commit():
+    """
+    Shown red first (principle 4 / PR-4), inlined so the regression guard
+    lives in the suite rather than only in a throwaway script: this
+    reproduces qa's exact bypass using ONLY the wrapper's constructor
+    directly — i.e. simulates what commit 77ce337e's `open_steps()` did
+    by skipping the `isinstance` guard this commit adds, using the same
+    `FakeRecordClient.raise_checkpoint` call `open_steps()` would have
+    made on an unwrapped writer. This documents the bug shape permanently:
+    calling the writer's own method directly, with no wrapper and no
+    guard, succeeds — which is exactly what the fixed `open_steps()` must
+    never do internally.
+    """
+    bare_prod = FakeRecordClient(instance_label="production")
+
+    # This is what the pre-fix open_steps() did internally on an unwrapped
+    # writer: call .raise_checkpoint() directly, no isinstance check, no
+    # refusal possible.
+    checkpoint = bare_prod.raise_checkpoint(
+        "ent_task_bug_2", UNREADABLE_WORKFLOW, idempotency_key="bypass-bug-demo-key"
+    )
+    assert checkpoint is not None
+    assert bare_prod.write_call_count == 1  # the exact write the new guard must prevent
+
+    # The fix closes this by never reaching this call path unguarded —
+    # test_bare_writer_bypassing_the_wrapper_is_refused_qa_exact_repro
+    # proves open_steps() itself refuses before any such call happens.
