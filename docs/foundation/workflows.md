@@ -1,30 +1,37 @@
-# Workflows: the core workflows, each from its own purpose
+# Workflows: reference designs, each from its own purpose
 
 **Authored companion (not on the review reading list; whether it is keyed is the operator's budget
 decision, recorded in `status.md`):** binds via the `workflow` entity for each (declaration scope, type) and
 `execution/scripts/render_workflow_docs.py --check`; reviewers load the kernel and gates instead
-(`conformance.md`). **Kind:** foundation; states the design of each core workflow, why its steps exist,
+(`conformance.md`). **Kind:** foundation; states the design of each reference workflow, why its steps exist,
 and which successors its tasks may enter, and never the state of a checkout. **Derived from:** `work_model.md`, `gates_and_workflows.md`, the `workflow` declarations on the
 record for the built workflows (their step lists and fast paths, not their agent names), the agent
 policies governing outreach, payment, and people-data, `CLAUDE.md`'s people-data section, and PR #745
-operator review (2026-09-04), the operator's 2026-09-25 ruling on dynamic workflows (decision 116: a workflow created for the task no declaration fits, and improved by every task it carries), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Which workflows have a declaration on the record, and which are envisioned
+operator review (2026-09-04), the operator's 2026-09-25 ruling on dynamic workflows (decision 116: a workflow created for the task no declaration fits, and improved by every task it carries), the operator's 2026-09-26 ruling that the named workflows here are reference designs an instance may seed drafts from, none live by default, with intake alone core because every task enters through it, and that a workflow's status is draft, active, or retired with nothing above active, and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Which workflows have a declaration on the record, and which are envisioned
 only, is `status.md`.
 Amendment history: `revisions.md#workflowsmd`.
 ## Purpose
 
 Give the abstract model of `work_model.md` and `gates_and_workflows.md` concrete reference points, and
-ensure each core workflow is envisioned from its own purpose rather than from what happens to be built.
+ensure each reference workflow is envisioned from its own purpose rather than from what happens to be built.
 A reviewer reading a change to a step list, a fast path, or a successor checks it against the section
-here for that workflow; a core workflow with no section here has no stated purpose, and a step whose reason
+here for that workflow; a reference workflow with no section here has no stated purpose, and a step whose reason
 this document cannot give is a step to question. A workflow created for a task no declaration fits is not a
-core workflow and has no section here; where its purpose is stated is
+reference workflow and has no section here; where its purpose is stated is
 `#a-workflow-is-created-for-the-task-no-declaration-fits-and-improved-by-every-task-it-carries`.
 
 ## Scope
 
-Fourteen core workflows: intake, feature, bug, security, copy, social content, release, outreach, payment,
+Fourteen reference workflows: intake, feature, bug, security, copy, social content, release, outreach, payment,
 research and analysis, meeting processing, operator-only, planning, and postmortem, with session digestion
-beside them as the recovery path of the one execution mechanism that holds no lease. Beside the core
+beside them as the recovery path of the one execution mechanism that holds no lease. Each is a **generic
+design by purpose**, not a live workflow: an instance may seed a draft declaration from one, but none of
+the fourteen is live by default, and a section here binds no instance to run it. **Intake is the one
+exception, and the only core workflow** — every task enters through it, so an instance has no path to
+work at all without a live intake declaration; the operator's 2026-09-26 ruling withdraws any other
+workflow's earlier default liveness (payment, meeting processing, session digestion, and planning had been
+activated under a "core" label; that activation is withdrawn, and each now activates through the ordinary
+draft path once the engine cuts over, prioritised by measured usage, not by a label). Beside the reference
 workflows, a declaration scope holds whatever workflows were created for tasks none of its declarations fitted
 (decision 116, `#a-workflow-is-created-for-the-task-no-declaration-fits-and-improved-by-every-task-it-carries`);
 they are declarations like any other and have no section here. Each is a workflow type; a `workflow` entity
@@ -182,7 +189,7 @@ like any closed work
 **Typical action classes:** none. Every write intake makes is an internal operational write to the record,
 which is not an action (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`).
 
-**Successors:** any workflow declared for the task's declaration scope except intake — a core workflow in
+**Successors:** any workflow declared for the task's declaration scope except intake — a reference workflow in
 this document, or one created for a task under decision 116, including the one created for this task; or
 none; or operator-only, which is a workflow like the others and is named the same way. The set is read from
 the declarations in force when the verdict is written, so a new declaration needs no second write adding it
@@ -854,12 +861,12 @@ What the workflow never writes is stated once: a descendant's status, any derive
 statement, or anything on a record the task is not `PART_OF`
 (`planning_model.md#the-mechanism-against-cross-record-collision-is-the-subject`). A finding that a
 child record has no live `planning` task is remedied at `amend` by creating that child's first instance,
-which is what makes an unmaintained record a finding rather than a silence. Under decision 116 two more
-things run here: an authoring task for a created workflow is a planning task `PART_OF` its originating task's
+which is what makes an unmaintained record a finding rather than a silence. Under decision 116 one more
+thing runs here: an authoring task for a created workflow is a planning task `PART_OF` its originating task's
 plan, and `amend` may carry its `workflow` declaration write, a governance write approved by blast tier and
-not an `amend_<level>` action; and `survey` counts the tasks each workflow created under the record has
-carried, the read that raises the proposal to make one core at five
-(`#a-workflow-created-for-one-task`).
+not an `amend_<level>` action. `survey` no longer counts tasks toward a core proposal: the operator's
+2026-09-26 ruling withdraws the core-at-five promotion (`#a-workflow-created-for-one-task`); a workflow's
+usage is reported, never a promotion trigger.
 
 **Stages:** reading (`survey`); judgement (`judge`); writing (`amend`).
 
@@ -981,7 +988,7 @@ literally an `amend_<level>` action, because `docs/foundation/` is not a plannin
 class-is-the-levels`); no new workflow is declared to make it one. The analogy is in the shape — survey,
 judge, write-through-the-record's-primitives-only — not in a shared action class, and `postmortem` is left
 as the workflow that carries it, since decision 17 already routes an institutionalization task through
-intake and nothing about a proposed architecture change needs a fifteenth core workflow to say that again.
+intake and nothing about a proposed architecture change needs a fifteenth reference workflow to say that again.
 
 **Stages:** scoping (`pm`); investigation (`investigate`); review (`pr_review`); routing (`merge`).
 
@@ -1025,7 +1032,7 @@ disclosed as a limitation because it is one: nothing above closes the recursion,
 - The task that authors a new declaration is `PART_OF` the originating task's plan and goes through the planning workflow once that workflow's draft declaration is active, whose `amend` step carries the declaration write; it goes through operator-only until then.
 - A created workflow is named for its class of work, deduplicated against the declarations in force, and stays declared whether or not a second task uses it.
 - Nothing retires a declaration automatically; a declaration is retired only when someone raises a retirement task, and retiring one that holds a consent point or a review step is the operator's.
-- A created workflow becomes core by the operator's decision, proposed once planning's `survey` counts five or more tasks it has carried.
+- A workflow's status is draft, active, or retired, with nothing above active; no created workflow becomes "core," and a workflow's task count is reported as usage, never a promotion trigger (the operator's 2026-09-26 ruling, superseding default (g) below and the survey-driven proposal it fed).
 
 **Ruled (decision 116, 2026-09-25, the operator's).** Registered in
 `conformance.md#the-register-of-open-design-decisions`. The ruling, verbatim: "Workflows are most powerful
@@ -1048,6 +1055,20 @@ ruling it follows from: an originating task under no plan (below, from `workflow
 and `workflow_decision_116_defaults`), and a retirement that removes a protection (below, from
 `workflow_protection_removals_need_operator`).
 
+**Default (g) is superseded.** Default (g) — a created workflow becomes core by the operator's decision,
+proposed once planning's `survey` counts five or more tasks it has carried — and the matching sub-question
+in `workflow_decision_116_defaults_2` (which step counts toward a workflow becoming core) no longer hold.
+The operator's 2026-09-26 ruling (`no_workflow_status_above_active`, master plan
+`ent_81aadb43caf2fa493361e8ed`) states a workflow's status as draft, active, or retired, with nothing above
+active: there is no "core" promotion, and `survey`'s task count is reported as usage rather than read toward
+a proposal. A companion ruling the same day (`foundation_workflows_are_reference_designs_intake_is_core`)
+holds that the named workflows in this document are reference designs an instance may seed drafts from,
+none live by default, with intake alone core because every task enters through it — so "core" now names
+intake's unique role in the architecture, not a status a created workflow could ever reach. `survey`'s read
+is unaffected in kind, only in what it is for: it still names, on its verdict, the tasks each workflow
+created under the record has carried, but that read no longer feeds a proposal at `judge` or a task at
+`amend`.
+
 **What this changes, and what it leaves alone.** Before this ruling, a task no declaration fitted had two
 exits at `route`: none, which ends its chain with the work undone, or operator-only, which hands the operator
 work the swarm could have carried had a declaration existed. The second is a return with no missing
@@ -1062,7 +1083,7 @@ standing finding obliges a change to the workflow that produced it is decision 1
 What the ruling adds is where those paths are taken — at `route`, for every task no declaration fits or
 nearly fits, and at every run, for every declaration a task was carried by — that improving a declaration
 ranks with creating one, and who approves each write. The need is measured, not hypothetical: a survey of
-the procedures the operator runs by hand found most candidate workflows to be core workflows with no
+the procedures the operator runs by hand found most candidate workflows to be reference workflows with no
 declaration in force or extensions of declared ones, not new types (analysis `ent_38cc677d0754cae42843838e`,
 2026-09-25), which is the near-fit and amendment case this section rules on.
 
@@ -1087,7 +1108,7 @@ exists to prevent.
 **Where none fits, `route` opens the authoring of one for this task.** The step creates a task whose work is
 a new declaration: the workflow type, its steps with their `owner_role` and closing conditions, its
 successors and whether it permits none, and the purpose and entry condition in the shape
-`#how-to-read-a-workflow-section` gives a core workflow. That task refers to the task being routed as the
+`#how-to-read-a-workflow-section` gives a reference workflow. That task refers to the task being routed as the
 case the declaration is written from, enters its own intake like every task, and the intake batch records a
 dependency on it as for a near fit.
 
@@ -1206,7 +1227,7 @@ the case is an amendment to it, as above.
 **Its purpose is stated where it is authored.** A created workflow has no section in this document. Its
 purpose, entry condition, and the reason for each step are stated by the batch that authored it and
 reviewed with its declaration, so the rule that a step whose reason cannot be given is a step to question
-holds for it as for a core workflow.
+holds for it as for a reference workflow.
 
 **It stays declared whether or not a second task ever uses it, and nothing retires it automatically.** A
 declaration that has carried one task is not a defect and not a candidate for removal on that ground: it is
@@ -1219,14 +1240,17 @@ that holds a consent point or a review step is the operator's**, a default appli
 declaration held, and a removed protection is the operator's to approve, fail-closed, whatever the tier of
 the steps that go with it.
 
-**It becomes core by the operator's decision, proposed once it has carried five or more tasks, and the
-planning workflow's `survey` step is what counts.** The `survey` of the planning record its authoring task
-sat under reads, for each workflow created under that record, the tasks it has carried — a derived read over
-the batches that ran under the declaration, named on `survey`'s verdict with its other reads, never a counter
-kept on the declaration (principle 11). At five, the proposal is raised through planning's own steps, since
-`survey` writes nothing but what it read: `judge` records it, and `amend` creates the task that carries it to
-the operator. The operator decides, and a workflow made core gains a section in this document through a PR
-like any change to the foundation (`conformance.md#amending-a-foundation-document`).
+**Nothing promotes it above active.** A workflow's status is draft, active, or retired
+(`no_workflow_status_above_active`, the operator's 2026-09-26 ruling, master plan
+`ent_81aadb43caf2fa493361e8ed`), and there is no status above active for a created workflow to reach: it
+does not become "core," and no operator decision at a task-count threshold promotes it. This supersedes
+decision 116's default (g) — a created workflow became core by the operator's decision, proposed once
+planning's `survey` counted five or more tasks it had carried — and the matching planning-survey step that
+raised that proposal at five. The `survey` of the planning record its authoring task sat under still reads,
+for each workflow created under that record, the tasks it has carried — a derived read over the batches that
+ran under the declaration, named on `survey`'s verdict with its other reads, never a counter kept on the
+declaration (principle 11) — but that count is reported as usage and is not read toward any promotion
+proposal at `judge` or `amend`.
 
 ## Whether a stage names anything a step does not
 

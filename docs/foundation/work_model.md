@@ -31,7 +31,7 @@ written through the gate, and never keyed on the work model's own records.
 ## Scope
 
 The task path: a task claimed and executed by an agent. The other two execution mechanisms are named
-below; steps and gates are `gates_and_workflows.md`; core workflows (including intake) are `workflows.md`
+below; steps and gates are `gates_and_workflows.md`; reference workflows and intake, the one core workflow, are `workflows.md`
 (authored companion, not inlined into review prompts); authority is `authority_model.md`; terms are
 `vocabulary.md`; the record is `data_model.md`. Walkthroughs: `scenarios.md`.
 
