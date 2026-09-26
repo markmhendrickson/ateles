@@ -10,7 +10,9 @@
 
 ## Plan and task maintenance (automatic)
 
-Each session maintains the Neotoma `plan` entity that matches **its own workstream** — never a fixed, hardcoded plan. The swarm-architecture plan `ent_99ace4dd6673aa36ed08b1fe` ("Ateles Agent Swarm Architecture") is the plan for swarm-architecture work **only**. Unrelated workstreams (tax prep, Neotoma release engineering, website, cloud hosting, etc.) each have their own plan and MUST NOT write into the swarm plan. Writing one workstream's `decisions`/`todos` into another's plan is the collision that corrupted this plan in June 2026.
+Each session maintains the Neotoma `plan` entity that matches **its own workstream** — never a fixed, hardcoded plan. **There is no default plan, and no hook supplies one.** Unrelated workstreams (tax prep, Neotoma release engineering, website, cloud hosting, etc.) each have their own plan and MUST NOT write into another's. Writing one workstream's `decisions`/`todos` into another's plan is the collision that corrupted the swarm plan in June 2026.
+
+**Foundation work binds to `ent_81aadb43caf2fa493361e8ed`** (`plan:lay-the-foundation-master`) — the active project rolling out `docs/foundation/`, judged by whether the charter's five objectives hold of a running swarm. The swarm-architecture plan `ent_99ace4dd6673aa36ed08b1fe` is **superseded for new work** (2026-09-21): it stays readable and its decision keys stay citable — `principles.md` cites them by key as invariant sources — but it accepts no new todos, decisions, or tasks. Work already in flight under it finishes there. It was hardcoded as the session-start default until 2026-09-21, which bound every session to one workstream regardless of its actual work; that default is removed rather than repointed, because the failure was having a default at all.
 
 **Select the bound plan once per session, as soon as the workstream is clear:**
 1. Resolve the matching plan: retrieve entities against the operator's prod Neotoma instance (whichever connected Neotoma server targets it), with `entity_type: plan` and a `search` for the workstream; pick the closest match. If the target instance can't be established unambiguously — no connected server clearly targets the operator's prod instance, or several are connected and the target is ambiguous — stop and ask rather than write.
@@ -37,7 +39,7 @@ For full step-by-step guidance: `/update-plan` and `/update-tasks` skills.
 
 `.claude/settings.json` wires three Claude Code lifecycle hooks (in `.claude/hooks/`) that mechanically enforce the plan-and-task contract above. They implement layer 1 of `docs/session_integrity.md`:
 
-- **`session_start.py`** (SessionStart) — initializes per-session state, binds to the default plan (`ent_99ace4dd6673aa36ed08b1fe`), and injects a one-line reminder of the bind/turn/artifact contract. Always exits 0.
+- **`session_start.py`** (SessionStart) — initializes per-session state and injects a one-line reminder of the bind/turn/artifact contract. It binds **no** plan: `DEFAULT_PLAN_ID` is `None` and the reminder tells the session to resolve its own plan by workstream. Always exits 0.
 - **`user_prompt_submit.py`** (UserPromptSubmit) — lightweight per-turn counter. Exits 0.
 - **`stop_finalizer.py`** (Stop) — the enforcement gate. Scans the transcript; classifies the session as **exempt** (no domain writes — grace path), **integral** (domain writes + a plan link + stored turns), or **violated** (domain writes but no plan link or zero turns). Emits a `harness_event` audit row each time.
 
@@ -249,7 +251,8 @@ This is the EU counterpart to the recording-disclosure guardrail in the `record_
 
 | Entity | ID |
 |---|---|
-| Ateles Agent Swarm Architecture plan (swarm work only — not a catch-all) | `ent_99ace4dd6673aa36ed08b1fe` |
+| Lay the foundation: master plan (active project — foundation work binds here) | `ent_81aadb43caf2fa493361e8ed` |
+| Ateles Agent Swarm Architecture plan (**superseded for new work** 2026-09-21; readable, decision keys still cited by `principles.md`) | `ent_99ace4dd6673aa36ed08b1fe` |
 | priority_rubric | `ent_29ca079940c1e996a8c782f2` |
 | Apus webhook subscription | `ent_6ba1914462908f682f206b56` |
 | update-plan skill | `ent_5d7f84290f290383e53d1a42` |
