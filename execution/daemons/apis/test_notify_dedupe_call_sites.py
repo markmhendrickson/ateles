@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import httpx
+
 from lib.notify import Notifier
 from execution.daemons.apis import swarm_dispatch
 from execution.daemons.apis.swarm_dispatch import (
@@ -16,6 +18,8 @@ from execution.daemons.apis.test_swarm_dispatch import (
     SkillResult,
     _async_return,
     _config,
+    _FakeListResp,
+    _FakeResp,
     _issue_trigger,
     _trigger,
 )
@@ -823,3 +827,210 @@ def test_process_blocked_claim_false_still_sends_once(monkeypatch, tmp_path):
         )
     )
     assert len(sent) == 1
+
+
+# ── #5 panel-incomplete (ateles#1223): the 23-repeat "Review incomplete" ──
+# comment on PR #1085. Two things must both be true: the notifier.send()
+# repeat is suppressed (as every other key in this file), AND the GitHub
+# comment — a separate side effect not covered by send()'s own delivery —
+# is ALSO suppressed on the identical repeat. Neither alone fixes the
+# observed symptom (23 byte-identical PR comments): send()-only dedupe
+# would still let a fresh comment land every trigger.
+
+
+class _CapturingClient:
+    """Minimal httpx.AsyncClient stand-in: GET (list comments) returns the
+    comments POSTed so far (so _claim_escalation's marker-existence check
+    behaves like real GitHub across calls within a test), POST captures and
+    records the comment body."""
+
+    def __init__(self, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+    async def get(self, url, **kwargs):
+        return _FakeListResp(
+            [{"id": i, "body": b} for i, b in enumerate(_CapturingClient.posted)]
+        )
+
+    async def post(self, url, **kwargs):
+        _CapturingClient.posted.append(kwargs.get("json", {}).get("body", ""))
+        return _FakeResp(201)
+
+
+def _panel_incomplete_dispatcher(monkeypatch, tmp_path, sent):
+    _CapturingClient.posted = []
+    monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+    return SwarmDispatcher(_notifier(tmp_path, sent), _config())
+
+
+def test_panel_incomplete_repeat_on_same_head_suppresses_send_and_comment(
+    monkeypatch, tmp_path
+):
+    """The ateles#1223 symptom: an unchanged 'gate identity unavailable'
+    condition on an unchanged head must notify AND comment exactly once —
+    not on every dispatcher trigger."""
+    sent = []
+    d = _panel_incomplete_dispatcher(monkeypatch, tmp_path, sent)
+    trig = _trigger(repository="markmhendrickson/ateles", number=1085, head_sha="a" * 40)
+    failed = (
+        ("pm", "gate identity unavailable"),
+        ("arch", "gate identity unavailable"),
+        ("ux", "gate identity unavailable"),
+    )
+
+    for _ in range(23):
+        asyncio.run(
+            d._handle_panel_session_limit(
+                trig, None, "pm, arch, ux", "", "",
+                reason="incomplete review panel",
+                completed_lenses=("qa",),
+                failed_lenses=failed,
+                head=trig.head_sha,
+            )
+        )
+
+    assert len(sent) == 1
+    assert "incomplete review panel" in sent[0]
+    assert len(_CapturingClient.posted) == 1
+    assert "Review incomplete" in _CapturingClient.posted[0]
+
+
+def test_panel_incomplete_new_head_notifies_again(monkeypatch, tmp_path):
+    """A new push (new head) is a NEW condition — must notify + comment
+    again even though the panel fails the same way on the new head, matching
+    the ci-exhausted / process-blocked / fix-exhausted per-head siblings."""
+    sent = []
+    d = _panel_incomplete_dispatcher(monkeypatch, tmp_path, sent)
+    trig1 = _trigger(repository="markmhendrickson/ateles", number=1085, head_sha="a" * 40)
+    trig2 = _trigger(repository="markmhendrickson/ateles", number=1085, head_sha="b" * 40)
+    failed = (("pm", "gate identity unavailable"),)
+
+    asyncio.run(
+        d._handle_panel_session_limit(
+            trig1, None, "pm", "", "",
+            reason="incomplete review panel",
+            failed_lenses=failed,
+            head=trig1.head_sha,
+        )
+    )
+    asyncio.run(
+        d._handle_panel_session_limit(
+            trig1, None, "pm", "", "",
+            reason="incomplete review panel",
+            failed_lenses=failed,
+            head=trig1.head_sha,
+        )
+    )
+    asyncio.run(
+        d._handle_panel_session_limit(
+            trig2, None, "pm", "", "",
+            reason="incomplete review panel",
+            failed_lenses=failed,
+            head=trig2.head_sha,
+        )
+    )
+
+    assert len(sent) == 2  # head A once, head B once — A's repeat suppressed
+    assert len(_CapturingClient.posted) == 2
+
+
+def test_panel_incomplete_changed_missing_lens_set_notifies_again(
+    monkeypatch, tmp_path
+):
+    """A severity/composition change — a DIFFERENT set of missing lenses on
+    the SAME head — must not be suppressed as a repeat of the old condition
+    (ateles#1216's severity-upgrade rule, applied here: pm-only missing is a
+    materially different report than pm+arch+ux missing)."""
+    sent = []
+    d = _panel_incomplete_dispatcher(monkeypatch, tmp_path, sent)
+    trig = _trigger(repository="markmhendrickson/ateles", number=1085, head_sha="a" * 40)
+
+    asyncio.run(
+        d._handle_panel_session_limit(
+            trig, None, "pm", "", "",
+            reason="incomplete review panel",
+            failed_lenses=(("pm", "gate identity unavailable"),),
+            head=trig.head_sha,
+        )
+    )
+    # Same head, but arch now ALSO fails — a materially different report.
+    asyncio.run(
+        d._handle_panel_session_limit(
+            trig, None, "pm, arch", "", "",
+            reason="incomplete review panel",
+            failed_lenses=(
+                ("pm", "gate identity unavailable"),
+                ("arch", "gate identity unavailable"),
+            ),
+            head=trig.head_sha,
+        )
+    )
+
+    assert len(sent) == 2
+    assert len(_CapturingClient.posted) == 2
+
+
+def test_panel_incomplete_different_prs_do_not_suppress_each_other(
+    monkeypatch, tmp_path
+):
+    """Per-PR scope: PR A holding the condition open must not silence the
+    identical notice on PR B (the ateles#1216 global-key defect, applied to
+    this call site)."""
+    sent = []
+    d = _panel_incomplete_dispatcher(monkeypatch, tmp_path, sent)
+    trig_a = _trigger(repository="markmhendrickson/ateles", number=1085, head_sha="a" * 40)
+    trig_b = _trigger(repository="markmhendrickson/ateles", number=1086, head_sha="a" * 40)
+    failed = (("pm", "gate identity unavailable"),)
+
+    asyncio.run(
+        d._handle_panel_session_limit(
+            trig_a, None, "pm", "", "",
+            reason="incomplete review panel", failed_lenses=failed, head=trig_a.head_sha,
+        )
+    )
+    asyncio.run(
+        d._handle_panel_session_limit(
+            trig_b, None, "pm", "", "",
+            reason="incomplete review panel", failed_lenses=failed, head=trig_b.head_sha,
+        )
+    )
+
+    assert len(sent) == 2
+    assert len(_CapturingClient.posted) == 2
+
+
+def test_panel_incomplete_auto_resume_path_is_unaffected(monkeypatch, tmp_path):
+    """Out of scope by design: the auto-resume (usage limit / provider
+    capacity) branch keeps its existing self-clearing marker-replace comment
+    behaviour — no dedupe_key is composed for it, so this fix must not
+    change its repeat-posting shape (it already self-clears via the
+    review-deferred marker delete-and-repost, and reads INFO, which the
+    notifier's own dedupe would never mark anyway)."""
+    sent = []
+    d = _panel_incomplete_dispatcher(monkeypatch, tmp_path, sent)
+    trig = _trigger(repository="markmhendrickson/ateles", number=1085, head_sha="a" * 40)
+
+    for _ in range(3):
+        asyncio.run(
+            d._handle_panel_session_limit(
+                trig, None, "vanellus",
+                "You've hit your session limit · resets 7:30pm", "",
+                head=trig.head_sha,
+            )
+        )
+
+    # Unchanged pre-existing behaviour: Priority.INFO is dropped unconditionally
+    # by the notifier (never delivered, never marks a dedupe key — auto_resume
+    # composes no key at all), so `sent` stays empty; the GitHub comment still
+    # posts fresh on every trigger via the marker delete-and-repost sequence
+    # (this stub's GET always returns [], so there is nothing to delete, but
+    # each call still POSTs its own fresh marker).
+    assert len(sent) == 0
+    assert len(_CapturingClient.posted) == 3
