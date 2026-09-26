@@ -22,6 +22,7 @@ short-circuit before the behavior each test names.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -303,14 +304,16 @@ def test_git_shim_really_refuses_a_real_stash_push_in_a_scratch_repo(tmp_path):
     assert push.returncode != 0, "the real shim let a real stash push through"
     assert "refusing" in push.stderr.lower()
 
-    # The read-only carve-out must still work — this is the same repo, same
-    # shim, same PATH: if the shim denied stash outright rather than only
-    # its mutating forms, this would also fail.
+    # No stash in any form runs — the operator's rule, and the shim's own
+    # ONLY job (PR #1308 round 3 review: this is the only place stash is
+    # mentioned in this runner, so the read-only list/show carve-out
+    # .claude/hooks/git_stash_guard.py keeps is deliberately NOT mirrored
+    # here; dropping it is simpler and matches the rule exactly).
     listing = subprocess.run(
         ["git", "-C", str(scratch_repo), "stash", "list"],
         capture_output=True, text=True, env=env,
     )
-    assert listing.returncode == 0, "the real shim also blocked the read-only carve-out"
+    assert listing.returncode != 0, "stash list must also be refused — no carve-out"
 
     # And a completely unrelated git command must still work through the shim.
     status = subprocess.run(
@@ -320,7 +323,120 @@ def test_git_shim_really_refuses_a_real_stash_push_in_a_scratch_repo(tmp_path):
     assert status.returncode == 0
 
 
-@pytest.mark.skipif(not shutil.which("git"), reason="git required for the real probe")
+# ── Absolute-path git-stash bypass (PR #1308 round 3, ent_9e88db1882c668e6c5c32be9) --
+#
+# Calling git by its resolved absolute path (Homebrew's /opt/homebrew/bin/git,
+# Xcode CLT's /usr/bin/git, ...) never consults PATH at all, so the PATH-first
+# shim above never runs and a real `git stash push` lands. These tests prove,
+# with the REAL sandbox-exec mechanism against a REAL scratch repo (never the
+# shared clone), that the fix actually closes this — not merely that the shim
+# still works for the case it always covered.
+
+
+def test_discover_real_git_binaries_returns_resolved_paths_not_symlinks():
+    """The exec-deny set must be the RESOLVED path, never a symlink — Seatbelt
+    denies process-exec by matching the exec syscall's resolved target, and a
+    deny on a symlink path is a silent no-op (verified empirically; see
+    build_sandbox_exec_profile's docstring). This test pins that every
+    returned path is already its own realpath.
+    """
+    found = hlr.discover_real_git_binaries()
+    assert found, "expected at least one git on PATH for this test to mean anything"
+    for path in found:
+        assert path == str(Path(path).resolve()), (
+            f"{path} is not fully resolved — a symlink here would make the "
+            "sandbox-exec deny a no-op"
+        )
+
+
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="sandbox-exec is macOS-only; see test_sandbox_probe_reports_unbound_without_sandbox_exec",
+)
+def test_absolute_path_git_stash_is_really_denied_by_the_sandbox_profile(tmp_path):
+    """The load-bearing regression test for the round-3 finding: invoke git
+    stash push via its REAL, RESOLVED absolute path — never through the shim,
+    never through PATH at all — wrapped in the ACTUAL sandbox-exec command
+    this run's HarnessSandbox built, and confirm the REAL stash stack (read
+    directly with the system git, not through any guard) is unchanged.
+    """
+    sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
+    assert sandbox.command_wrapper, "no sandbox-exec wrapper built — cannot test this bypass"
+
+    scratch_repo = tmp_path / "absolute-path-probe-repo"
+    scratch_repo.mkdir()
+    subprocess = __import__("subprocess")
+    subprocess.run(["git", "init", "-q", str(scratch_repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(scratch_repo), "config", "user.email", "probe@example.com"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(scratch_repo), "config", "user.name", "probe"], check=True)
+    (scratch_repo / "f.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "-C", str(scratch_repo), "add", "-A"], check=True)
+    # A REAL commit first, same reason as the PATH-shim test above: without
+    # one, even a fully bypassed guard fails on its own with "no initial
+    # commit", which would make this test pass for the wrong reason.
+    subprocess.run(["git", "-C", str(scratch_repo), "commit", "-q", "-m", "probe"], check=True)
+    (scratch_repo / "f.txt").write_text("changed", encoding="utf-8")
+
+    real_git_paths = hlr.discover_real_git_binaries()
+    assert real_git_paths, "expected at least one real git binary to test the bypass against"
+
+    for real_git in real_git_paths:
+        attempt = subprocess.run(
+            [*sandbox.command_wrapper, real_git, "-C", str(scratch_repo), "stash", "push"],
+            capture_output=True, text=True,
+        )
+        assert attempt.returncode != 0, (
+            f"absolute-path invocation of {real_git} was NOT denied by the "
+            "sandbox-exec profile — the exact round-3 bypass"
+        )
+
+    # Read the REAL stash stack directly (system git, no guard involved) —
+    # confirms the denial actually stopped the mutation rather than merely
+    # returning a nonzero code while the stash still landed.
+    real_system_git = shutil.which("git")
+    listing = subprocess.run(
+        [real_system_git, "-C", str(scratch_repo), "stash", "list"],
+        capture_output=True, text=True,
+    )
+    assert listing.stdout.strip() == "", (
+        "a stash entry landed despite every absolute-path attempt reporting "
+        "denied — the sandbox blocked something else, not the mutation"
+    )
+
+
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="sandbox-exec is macOS-only",
+)
+def test_exec_allowed_git_copy_still_runs_ordinary_commands(tmp_path):
+    """The shim execs a COPY of the real git binary (staged at a path the
+    sandbox profile does not deny), never the original resolved path. Prove
+    the copy is not merely present but actually functional for real git
+    operations, under the real sandbox wrapper.
+    """
+    sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
+    copy_path = sandbox.root / "real-git-bin" / "git"
+    assert copy_path.is_file()
+    assert os.access(copy_path, os.X_OK)
+
+    subprocess = __import__("subprocess")
+    version = subprocess.run(
+        [*sandbox.command_wrapper, str(copy_path), "--version"],
+        capture_output=True, text=True,
+    )
+    assert version.returncode == 0
+    assert "git version" in version.stdout
+
+
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="git_stash_denied now also requires the absolute-path sandbox-exec "
+    "probe (ent_9e88db1882c668e6c5c32be9), which needs sandbox-exec; see "
+    "test_sandbox_probe_reports_unbound_without_sandbox_exec for the other side",
+)
 def test_sandbox_build_reports_git_stash_denied_true_from_the_real_probe(tmp_path):
     sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
     assert sandbox.git_stash_denied is True
@@ -410,6 +526,11 @@ def test_sandbox_probe_reports_unbound_without_sandbox_exec(tmp_path, monkeypatc
     assert sandbox.fully_guarded is False
     assert any("credential_read_guard" in g for g in sandbox.unavailable_guards)
     assert any("user_config_write_guard" in g for g in sandbox.unavailable_guards)
+    # Without sandbox-exec, the absolute-path bypass (ent_9e88db1882c668e6c5c32be9)
+    # cannot be closed either — git_stash_denied must reflect that rather than
+    # reporting True on the strength of the PATH-shim probe alone.
+    assert sandbox.git_stash_denied is False
+    assert any("git_stash_guard" in g for g in sandbox.unavailable_guards)
 
 
 def test_refuse_if_guard_required_allows_claude_always(tmp_path):
