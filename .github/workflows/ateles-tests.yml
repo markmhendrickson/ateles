@@ -34,6 +34,8 @@ on:
       - "lib/approval/**"
       - "lib/transcript_clarity.py"
       - "lib/test_transcript_clarity.py"
+      - "lib/github_app_token.py"
+      - "lib/test_github_app_token.py"
       - "execution/scripts/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -122,6 +124,8 @@ jobs:
         run: uv run --extra dev python -m pytest lib/approval/ -q
       - name: Run transcript clarity lib tests
         run: uv run --extra dev python -m pytest lib/test_transcript_clarity.py -q
+      - name: Run GitHub App token helper tests
+        run: uv run --extra dev python -m pytest lib/test_github_app_token.py -q
       # ateles#524 (qa lens, PR #527 round 2): execution/scripts/ has its own
       # test_*.py files (SOPS token fallback, Loxia review, agent-doc render,
       # transcription) but no lane ran them — this closes that gap. Also

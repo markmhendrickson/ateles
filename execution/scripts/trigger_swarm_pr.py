@@ -88,14 +88,20 @@ _ensure_secrets_env()
 from github_gateway import parse_github_event  # noqa: E402
 from swarm_dispatch import SwarmDispatcher  # noqa: E402
 from lib.notify import Notifier  # noqa: E402
+from lib import github_app_token  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("trigger_swarm_pr")
 
 
 async def main(repo: str, kind: str, number: int) -> None:
-    token = os.environ.get("GITHUB_TOKEN", "") or os.environ.get(
-        "ATELES_AGENT_PAT", ""
+    # Read-only fetch of the PR/issue: the swarm App's short-lived token when
+    # configured, else the migration-window env fallback
+    # (credential_rotation_split_by_issuer). The dispatch this script then
+    # drives still posts with the per-repo identity — that migration waits on
+    # the PR-authorship identity decision.
+    token = github_app_token.read_token(
+        repo, fallback_env=("GITHUB_TOKEN", "ATELES_AGENT_PAT")
     )
     headers = {"Accept": "application/vnd.github+json"}
     if token:

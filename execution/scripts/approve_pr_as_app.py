@@ -74,7 +74,8 @@ submits a formal APPROVE review as the App. On any failure it exits non-zero
 and submits nothing.
 
 Env:
-    GITHUB_TOKEN / ATELES_AGENT_PAT       read-only GitHub calls (PR, comments, checks)
+    (App installation token)              read-only GitHub calls (PR, comments, checks);
+    GITHUB_TOKEN / ATELES_AGENT_PAT       fallback only while the App is unconfigured
     ATELES_REVIEWER_APP_ID                reviewer App id (required for --apply)
     ATELES_REVIEWER_APP_PRIVATE_KEY(_PATH) reviewer App private key (required for --apply)
     ATELES_REVIEWER_APP_INSTALLATION_ID   optional; resolved via API if unset
@@ -98,6 +99,8 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
         sys.path.insert(0, _p)
 
 import httpx  # noqa: E402
+
+from lib import github_app_token as _github_app_token  # noqa: E402
 
 from review_panel import LENSES, Lens, select_panel  # noqa: E402
 from swarm_dispatch import (  # noqa: E402
@@ -177,8 +180,18 @@ _EXPECTATION_MARKER_RE = re.compile(
 )
 
 
-def _github_headers() -> dict[str, str]:
-    token = os.environ.get("GITHUB_TOKEN", "") or os.environ.get("ATELES_AGENT_PAT", "")
+def _github_headers(repo: str | None = None) -> dict[str, str]:
+    """Headers for this tool's READ-ONLY GitHub calls.
+
+    The swarm App's short-lived installation token when the App is configured
+    (it already is wherever --apply works), else the migration-window env
+    fallback. Replacing the long-lived agent PAT here is step 1 of
+    credential_rotation_split_by_issuer; the fallback names go when the PATs
+    are revoked.
+    """
+    token = _github_app_token.read_token(
+        repo, fallback_env=("GITHUB_TOKEN", "ATELES_AGENT_PAT")
+    )
     headers = {"Accept": "application/vnd.github+json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -222,7 +235,7 @@ class CheckOutcome:
 
 
 async def _fetch_pr(client: httpx.AsyncClient, repo: str, pr: int) -> dict:
-    resp = await client.get(f"{GITHUB_API}/repos/{repo}/pulls/{pr}", headers=_github_headers())
+    resp = await client.get(f"{GITHUB_API}/repos/{repo}/pulls/{pr}", headers=_github_headers(repo))
     resp.raise_for_status()
     return resp.json() or {}
 
@@ -234,7 +247,7 @@ async def _fetch_issue_comments(client: httpx.AsyncClient, repo: str, pr: int) -
     while True:
         resp = await client.get(
             f"{GITHUB_API}/repos/{repo}/issues/{pr}/comments",
-            headers=_github_headers(),
+            headers=_github_headers(repo),
             params={"per_page": 100, "page": page},
         )
         resp.raise_for_status()
@@ -277,7 +290,7 @@ async def _changed_files(client: httpx.AsyncClient, repo: str, pr: int) -> list[
     while True:
         resp = await client.get(
             f"{GITHUB_API}/repos/{repo}/pulls/{pr}/files",
-            headers=_github_headers(),
+            headers=_github_headers(repo),
             params={"per_page": 100, "page": page},
         )
         resp.raise_for_status()
@@ -305,7 +318,7 @@ async def _preregistered_gate_contributors(
     while True:
         resp = await client.get(
             f"{GITHUB_API}/repos/{repo}/issues/{issue_number}/comments",
-            headers=_github_headers(),
+            headers=_github_headers(repo),
             params={"per_page": 100, "page": page},
         )
         resp.raise_for_status()
@@ -540,7 +553,7 @@ async def fetch_required_check_contexts(
     """
     if not base_ref:
         return None
-    headers = _github_headers()
+    headers = _github_headers(repo)
     try:
         required: set[str] = set()
 
@@ -614,7 +627,7 @@ async def _fetch_job_labels(
         return None
     try:
         resp = await client.get(
-            f"{GITHUB_API}/repos/{repo}/actions/jobs/{job_id}", headers=_github_headers()
+            f"{GITHUB_API}/repos/{repo}/actions/jobs/{job_id}", headers=_github_headers(repo)
         )
         if resp.status_code != 200:
             return None
@@ -643,7 +656,7 @@ async def fetch_online_runner_label_sets(
         while True:
             resp = await client.get(
                 f"{GITHUB_API}/repos/{repo}/actions/runners",
-                headers=_github_headers(),
+                headers=_github_headers(repo),
                 params={"per_page": 100, "page": page},
             )
             if resp.status_code != 200:
@@ -782,7 +795,7 @@ async def evaluate_checks(
     """
     status_resp = await client.get(
         f"{GITHUB_API}/repos/{repo}/commits/{head_sha}/status",
-        headers=_github_headers(),
+        headers=_github_headers(repo),
     )
     status_resp.raise_for_status()
     status_payload = status_resp.json() or {}
@@ -791,7 +804,7 @@ async def evaluate_checks(
 
     checks_resp = await client.get(
         f"{GITHUB_API}/repos/{repo}/commits/{head_sha}/check-runs",
-        headers={**_github_headers(), "Accept": "application/vnd.github+json"},
+        headers={**_github_headers(repo), "Accept": "application/vnd.github+json"},
     )
     checks_resp.raise_for_status()
     runs = (checks_resp.json() or {}).get("check_runs", [])

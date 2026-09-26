@@ -48,6 +48,7 @@ from lib.daemon_runtime import (  # noqa: E402
     hydrate_snapshot,
 )
 from lib.daemon_runtime import label_gate  # noqa: E402
+from lib import github_app_token  # noqa: E402
 from lib.notify import Notifier, Priority  # noqa: E402
 from lib.activity import ActivityLogger  # noqa: E402
 
@@ -371,6 +372,9 @@ async def _fetch_github_labels_and_body(
                 "--json",
                 "labels,body",
             ],
+            # Read-only: the swarm App's short-lived token, not the agent PAT
+            # (credential_rotation_split_by_issuer).
+            env=github_app_token.gh_read_env(str(repo)),
             capture_output=True,
             text=True,
             timeout=15,
@@ -658,6 +662,7 @@ async def _fetch_comments(snap: dict) -> list:
                 "--json",
                 "comments",
             ],
+            env=github_app_token.gh_read_env(str(repo)),
             capture_output=True,
             text=True,
             timeout=15,
