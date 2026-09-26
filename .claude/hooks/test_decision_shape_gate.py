@@ -474,3 +474,33 @@ class TestTrailingFooterStillCaught:
             + "\n\nOn balance the matcher was too broad."
         )
         assert dsg.findings(text) == []
+
+
+class TestNotificationOnlyTurnCarriesNoDecisionList:
+    """Operator ruling, 2026-09-26 (agent_policy `ent_985436c69e2170aeba3287de`):
+    a turn triggered only by a background-agent or PR notification, where no
+    decision changed, carries NO decision list and no count line — that is
+    now correct shape, not an omission.
+
+    None of the three checks in `findings()` require a decision list to be
+    present, and none flags a turn for LACKING one: the permission check
+    fires only on an actual permission question, `UNCHANGED_RE` fires only on
+    the literal word "unchanged", and the operator-only check fires only on a
+    named operator-only action. So a bare notification turn with none of
+    those already produces zero findings — this test pins that shape as a
+    regression case rather than leaving it unverified.
+    """
+
+    def test_bare_notification_turn_with_no_decisions_is_clean(self):
+        text = (
+            "PR #1102 finished CI — all checks green, ready for review.\n\n"
+            "No decisions changed since the last update."
+        )
+        assert dsg.findings(text) == []
+
+    def test_agent_completion_notification_with_no_list_is_clean(self):
+        text = (
+            "The background cleanup agent finished: 3 files renamed, tests "
+            "pass. Nothing else moved."
+        )
+        assert dsg.findings(text) == []
