@@ -136,6 +136,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from lib.daemon_runtime.logging_setup import configure_daemon_logging
+from lib import github_app_token  # noqa: E402
 
 # Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
 # unbounded retry logging filled a 926 GB disk on 2026-08-18.
@@ -478,6 +479,9 @@ def main_ci_green() -> bool | None:
                 "--json", "conclusion,status", "--jq", ".[0]",
             ],
             cwd=str(NEOTOMA_REPO_ROOT),
+            # Read-only CI status: the swarm App's short-lived token, not the
+            # agent PAT (credential_rotation_split_by_issuer).
+            env=github_app_token.gh_read_env(GITHUB_REPO),
             capture_output=True,
             text=True,
             timeout=60,

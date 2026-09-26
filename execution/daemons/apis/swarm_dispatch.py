@@ -46,18 +46,15 @@ import hashlib
 import json
 import logging
 import os
-import pathlib
 import re
 import shutil
 import sys
 import tempfile
-import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import httpx
-import jwt as pyjwt
 
 from gate_waive import (
     CLEARED_GATE_STATES,
@@ -116,6 +113,7 @@ from lib.daemon_runtime.checkpoint_posture import PostureOutcome, evaluate_with_
 from lib.daemon_runtime import label_gate as _label_gate
 from lib.daemon_runtime.gating import load_policy
 from lib.notify import Notifier, Priority
+from lib import github_app_token as _github_app_token
 
 log = logging.getLogger("apis.swarm_dispatch")
 
@@ -2836,6 +2834,12 @@ def _token_for_repo(repo: str) -> str:
     )
 
 
+# The swarm GitHub App's env prefix (ateles-agents). Named "reviewer" for
+# history: it was introduced for binding reviews and now also mints the
+# installation tokens that replace the agent PATs.
+_REVIEWER_APP_ENV_PREFIX = _github_app_token.DEFAULT_APP_ENV_PREFIX
+
+
 def _reviewer_app_private_key_pem() -> str:
     """Return the reviewer App's private key PEM, inline or from a file.
 
@@ -2849,25 +2853,11 @@ def _reviewer_app_private_key_pem() -> str:
     variable still wins when both are set, so existing deployments are
     unaffected.
     """
-    raw = (os.environ.get("ATELES_REVIEWER_APP_PRIVATE_KEY") or "").strip()
-    if raw:
-        return raw.replace("\\n", "\n")
-
-    path = (os.environ.get("ATELES_REVIEWER_APP_PRIVATE_KEY_PATH") or "").strip()
-    if not path:
-        return ""
-    try:
-        return pathlib.Path(path).expanduser().read_text().strip()
-    except OSError as exc:
-        # An unreadable key is a misconfiguration the operator must see: it
-        # otherwise degrades to the same silent `unset` this branch exists to
-        # fix. Returning "" keeps the caller's fail-closed behaviour.
-        log.error(
-            f"[{DAEMON_NAME}] ATELES_REVIEWER_APP_PRIVATE_KEY_PATH is set but "
-            f"could not be read ({exc.__class__.__name__}); binding reviews "
-            "will be skipped until it is readable"
-        )
-        return ""
+    # Single source: lib/github_app_token.py loads every App key (inline wins,
+    # `~` expanded, unreadable path logged at ERROR and answered "").
+    return _github_app_token.app_private_key_pem(
+        _REVIEWER_APP_ENV_PREFIX, logger=log, log_prefix=f"[{DAEMON_NAME}] "
+    )
 
 
 def _binding_review_credential_mode() -> str:
@@ -2889,14 +2879,7 @@ def _clear_reviewer_app_installation_token_cache() -> None:
 
 
 def _mint_reviewer_app_jwt() -> str:
-    app_id = (os.environ.get("ATELES_REVIEWER_APP_ID") or "").strip()
-    pem = _reviewer_app_private_key_pem()
-    now = int(time.time())
-    return pyjwt.encode(
-        {"iat": now - 60, "exp": now + 600, "iss": app_id},
-        pem,
-        algorithm="RS256",
-    )
+    return _github_app_token.mint_app_jwt(_REVIEWER_APP_ENV_PREFIX)
 
 
 async def _mint_reviewer_app_installation_token(
