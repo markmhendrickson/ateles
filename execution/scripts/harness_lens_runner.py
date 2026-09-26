@@ -183,6 +183,7 @@ for _p in (str(REPO_ROOT), str(_DAEMON_DIR)):
 # noqa: E402 — path bootstrap above must run first
 import dispatch_role  # noqa: E402
 from harness_router import configured_headroom  # noqa: E402
+from review_panel import lens_by_name  # noqa: E402
 from skill_runner import SkillResult  # noqa: E402
 
 try:
@@ -1149,7 +1150,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pr", required=True, type=int)
     parser.add_argument("--head", required=True, help="full 40-hex head SHA")
     parser.add_argument("--lens", required=True, help="short lens label, e.g. pm")
-    parser.add_argument("--agent", required=True, help="docs/agents/<agent>.md name")
+    parser.add_argument(
+        "--agent",
+        default=None,
+        help=(
+            "docs/agents/<agent>.md name. Optional when --lens names a lens "
+            "in review_panel.LENSES (the same registry select_panel/"
+            "approve_pr_as_app.py derive a PR's required-lens panel from): "
+            "the agent is then resolved via review_panel.lens_by_name so a "
+            "caller passing the panel's own lens labels cannot mismatch "
+            "lens and agent. Required when --lens names anything else."
+        ),
+    )
     parser.add_argument("--focus-notes", default="")
     parser.add_argument(
         "--task-entity-id",
@@ -1202,12 +1214,29 @@ def main(argv: list[str] | None = None) -> int:
     if args.provider and args.compare:
         parser.error("--provider and --compare are mutually exclusive")
 
+    agent = args.agent
+    if not agent:
+        # --agent omitted: resolve it from the SAME registry select_panel /
+        # approve_pr_as_app.py's derive_required_lenses use to assemble a
+        # PR's required-lens panel, so a caller handing this runner one lens
+        # label out of that derived panel cannot mismatch lens and agent —
+        # the two are looked up together, from one source, rather than typed
+        # separately and trusted to agree.
+        resolved = lens_by_name(args.lens)
+        if resolved is None:
+            parser.error(
+                f"--agent was not given and {args.lens!r} is not a lens in "
+                "review_panel.LENSES — pass --agent explicitly for a lens "
+                "outside that registry"
+            )
+        agent = resolved.agent
+
     target = LensTarget(
         repo=args.repo,
         pr=args.pr,
         head=args.head,
         lens=args.lens,
-        agent=args.agent,
+        agent=agent,
         focus_notes=args.focus_notes,
         task_entity_id=args.task_entity_id,
     )

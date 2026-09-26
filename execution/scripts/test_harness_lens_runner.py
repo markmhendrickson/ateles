@@ -878,6 +878,73 @@ def test_main_requires_brief_flag():
         )
 
 
+# ── --agent resolved from review_panel.LENSES when omitted -----------------------
+#
+# The coordinator's ask: the runner accepts the derived-panel lens list
+# (review_panel.select_panel, the same registry approve_pr_as_app.py's
+# derive_required_lenses reads) as its input, one lens per invocation (this
+# script's own scope is one lens on one head). Rather than trust a caller to
+# type BOTH the lens label and its owning agent consistently, --agent becomes
+# optional and is resolved from the same registry select_panel itself reads.
+
+
+def test_main_resolves_agent_from_lens_when_agent_omitted(
+    monkeypatch, tmp_path, brief_file
+):
+    """--lens pm with no --agent must resolve to pavo (review_panel.LENSES's
+    own mapping), not require the caller to also type --agent pavo."""
+    seen_agent = {}
+
+    async def _capture_dispatch(role, task, **kwargs):
+        seen_agent["role"] = role
+        # A controlled failure (not a raise): resolution is what's under
+        # test, not run_one's own error handling.
+        return SkillResult(role, False, 1, "", "", error="stop before real dispatch")
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _capture_dispatch)
+
+    def _fake_create(self, *, head):
+        self._created = True
+        self.path.mkdir(parents=True, exist_ok=True)
+        agents_dir = self.path / "docs" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "pavo.md").write_text("# pavo prompt\n", encoding="utf-8")
+
+    monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
+    monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
+
+    rc = hlr.main(
+        [
+            "--repo", "markmhendrickson/ateles", "--pr", "1", "--head", SAMPLE_HEAD,
+            "--lens", "pm", "--provider", "codex", "--brief", str(brief_file),
+        ]
+    )
+
+    assert seen_agent["role"] == "pavo"
+    assert rc == 1  # the forced RuntimeError above surfaces as a failure exit
+
+
+def test_main_refuses_when_agent_omitted_for_an_unknown_lens(brief_file):
+    """A lens outside review_panel.LENSES has no agent to resolve — --agent
+    stays mandatory for it, with a clear reason rather than a KeyError."""
+    with pytest.raises(SystemExit):
+        hlr.main(
+            [
+                "--repo", "o/r", "--pr", "1", "--head", SAMPLE_HEAD,
+                "--lens", "not-a-real-lens", "--provider", "codex",
+                "--brief", str(brief_file),
+            ]
+        )
+
+
+def test_lens_by_name_agent_mapping_matches_registry_for_pm_and_arch():
+    """Pin the two mappings this PR's own examples rely on, so a future
+    registry change that silently reassigns an agent is caught here rather
+    than in a stale docstring/PR-body example."""
+    assert hlr.lens_by_name("pm").agent == "pavo"
+    assert hlr.lens_by_name("arch").agent == "waxwing"
+
+
 # ── Worktree lifecycle: guards reach the real dispatch boundary -----------------
 
 
