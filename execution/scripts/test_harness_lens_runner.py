@@ -940,3 +940,71 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
     assert seen["command_wrapper"][0] == "sandbox-exec"
     assert seen["seated_reviewer"] is False
     assert seen["provider"] == "codex"
+
+
+def test_run_one_passes_task_entity_id_to_dispatch_for_neotoma_monitoring(
+    monkeypatch, tmp_path, brief_file
+):
+    """The coordinator's ask: a session must be able to monitor a dispatch
+    from Neotoma alone. dispatch_role.dispatch()->run_skill() already writes
+    task_entity_id onto every harness_event row it emits (start, completion,
+    failure) — this test proves harness_lens_runner actually SUPPLIES one
+    when the caller names a task, rather than always leaving it empty.
+    """
+    target_with_task = hlr.LensTarget(
+        repo="markmhendrickson/ateles", pr=1234, head=SAMPLE_HEAD,
+        lens="pm", agent="pavo", task_entity_id="ent_898998f41372ce24369fb365",
+    )
+
+    guarded = hlr.HarnessSandbox(
+        provider="codex", root=tmp_path / "codex-home",
+        env_extra={"CODEX_HOME": str(tmp_path / "codex-home")},
+        command_wrapper=["sandbox-exec", "-f", str(tmp_path / "profile.sb")],
+        credential_read_denied=True, user_config_write_denied=True,
+        git_stash_denied=True, authentication_ready=True, unavailable_guards=(),
+    )
+    monkeypatch.setattr(
+        hlr.HarnessSandbox, "build", classmethod(lambda cls, provider, tmp_root: guarded)
+    )
+
+    seen = {}
+
+    async def _dispatch(role, task, **kwargs):
+        seen.update(kwargs)
+        verdict_path = Path(kwargs["cwd"]) / "pm1234_verdict.md"
+        verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
+        return SkillResult(role, True, 0, SIGNED_OFF_VERDICT, "", provider="codex")
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+
+    def _fake_create(self, *, head):
+        self._created = True
+        self.path.mkdir(parents=True, exist_ok=True)
+        agents_dir = self.path / "docs" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "pavo.md").write_text("# pavo prompt\n", encoding="utf-8")
+
+    monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
+    monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
+
+    import asyncio
+
+    asyncio.run(
+        hlr.run_one(
+            target_with_task, provider="codex", post=False, dry_run=False,
+            repo_worktree_name="ateles", scratch_root=tmp_path,
+            brief_path=brief_file, timeout=None,
+        )
+    )
+
+    assert seen["task_entity_id"] == "ent_898998f41372ce24369fb365"
+
+
+def test_lens_target_task_entity_id_defaults_to_empty_string():
+    """A one-off comparison run need not name a task — the default must stay
+    an empty string (not None), matching dispatch_role.dispatch's own default
+    and skill_runner's idempotency-key string formatting."""
+    target = hlr.LensTarget(
+        repo="o/r", pr=1, head=SAMPLE_HEAD, lens="pm", agent="pavo"
+    )
+    assert target.task_entity_id == ""

@@ -246,6 +246,12 @@ class LensTarget:
     lens: str  # short label, e.g. "pm"
     agent: str  # docs/agents/<agent>.md name, e.g. "pavo"
     focus_notes: str = ""
+    # Neotoma task entity this dispatch is PART_OF, if any. Optional — a
+    # one-off comparison run need not have one — but when present it is the
+    # durable key a session filters harness_event rows by, so "monitor from
+    # Neotoma alone" (the coordinator's ask) has something to filter on
+    # rather than free-text matching input_summary.
+    task_entity_id: str = ""
 
 
 def render_lens_task(target: LensTarget, brief_path: Path) -> str:
@@ -1018,6 +1024,7 @@ async def run_one(
             provider=provider,
             cwd=str(worktree.path),
             timeout=timeout,
+            task_entity_id=target.task_entity_id,
             env_extra=sandbox.env_extra,
             seated_reviewer=False,  # see module docstring: no MCP grant requested
             command_wrapper=sandbox.command_wrapper,
@@ -1145,6 +1152,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--agent", required=True, help="docs/agents/<agent>.md name")
     parser.add_argument("--focus-notes", default="")
     parser.add_argument(
+        "--task-entity-id",
+        default="",
+        help=(
+            "Neotoma task entity id this dispatch is PART_OF. Optional, but "
+            "recorded on every harness_event row this run writes (via "
+            "dispatch_role.dispatch), so a session can monitor progress by "
+            "filtering harness_event on this id alone, without re-deriving "
+            "it from input_summary text."
+        ),
+    )
+    parser.add_argument(
         "--repo-worktree-name",
         default=None,
         help="Local clone dirname under ~/repos (default: last segment of --repo)",
@@ -1191,6 +1209,7 @@ def main(argv: list[str] | None = None) -> int:
         lens=args.lens,
         agent=args.agent,
         focus_notes=args.focus_notes,
+        task_entity_id=args.task_entity_id,
     )
     repo_worktree_name = args.repo_worktree_name or args.repo.split("/")[-1]
     brief_path = Path(args.brief)
