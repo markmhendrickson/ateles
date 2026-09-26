@@ -94,8 +94,22 @@ import time
 from pathlib import Path
 
 # ── Env bootstrap (launchd does not source shell profiles) ───────────────────
+# Skipped under pytest (ateles#1285): this module is imported directly by
+# several test_*.py in this directory, and the operator's materialized dotenv
+# carries operator-behaviour switches (e.g. ATELES_SWARM_REQUIRE_LABEL) as
+# well as credentials — loading it unconditionally at import time silently
+# turned those switches on for any test importing `apis`, on a machine where
+# the file happens to exist, while CI (no such file) stayed green.
+def _dotenv_should_load() -> bool:
+    if (os.environ.get("ATELES_SKIP_DOTENV") or "").strip().lower() in ("1", "true", "yes"):
+        return False
+    if "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST") is not None:
+        return False
+    return True
+
+
 _NEOTOMA_ENV_FILE = Path.home() / ".config" / "neotoma" / ".env"
-if _NEOTOMA_ENV_FILE.exists():
+if _dotenv_should_load() and _NEOTOMA_ENV_FILE.exists():
     for _line in _NEOTOMA_ENV_FILE.read_text().splitlines():
         _line = _line.strip()
         if _line and not _line.startswith("#") and "=" in _line:
