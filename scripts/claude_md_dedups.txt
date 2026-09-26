@@ -33,4 +33,25 @@ Re-request review yourself when monitoring shows it is warranted. => Re-request 
 # that were both operator-only; the surviving lead narrows to the one class
 # (credential rotation) that is still operator-only, and the deploy content
 # moves to a new clause in the same bullet rather than disappearing.
-Merge stays gated, and two classes stay Mark's absolutely. => Merge stays gated, and credential rotation stays Mark's absolutely.
+# SUPERSEDED 2026-09-26 (chained below): the 2026-09-25 survivor
+# "Merge stays gated, and credential rotation stays Mark's absolutely." was
+# itself dropped by the 2026-09-26 pass, so this entry's kept_lead now points
+# straight at that pass's final survivor rather than at the intermediate lead,
+# keeping both hops honoured against the current file in one entry.
+Merge stays gated, and two classes stay Mark's absolutely. => Merge stays gated, and minting a credential plus anything touching a root secret stay Mark's absolutely.
+
+# Operator ruling, 2026-09-26 — credential rotation split by issuer
+# (Neotoma master plan ent_81aadb43caf2fa493361e8ed,
+# decisions.credential_rotation_split_by_issuer; foundation register decision
+# 118 in docs/foundation/conformance.md). "Credential rotation" was one
+# undifferentiated class reserved to Mark absolutely. It is now four: the
+# swarm rotates unattended what it alone issues and consumes (agent signing
+# keys, internal shared secrets), a long-lived GitHub PAT is replaced by a
+# short-lived GitHub App installation token, Mark mints a provider API key
+# with everything after minting the swarm's, and a root secret (age key,
+# Neotoma mnemonic, 1Password) stays Mark's outright. The surviving lead
+# narrows "credential rotation" to the two classes still absolutely Mark's —
+# minting a provider credential, and anything touching a root secret — and
+# states the swarm's unattended-rotation class and the PAT-to-installation-
+# token replacement in the bullet body rather than dropping them.
+Merge stays gated, and credential rotation stays Mark's absolutely. => Merge stays gated, and minting a credential plus anything touching a root secret stay Mark's absolutely.

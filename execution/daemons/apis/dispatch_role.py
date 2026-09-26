@@ -94,8 +94,21 @@ from pathlib import Path
 # design — see the 2026-08-04 hosted migration). Mirrors apis.py's bootstrap so
 # an ad-hoc run behaves identically to a launchd-started daemon. setdefault
 # throughout: an explicitly exported value always wins over the file.
+#
+# Skipped under pytest (ateles#1285), same rationale as apis.py: this module
+# is imported directly by several test_*.py here, and the operator's
+# materialized dotenv carries operator-behaviour switches (e.g.
+# ATELES_SWARM_REQUIRE_LABEL) that must not silently reach a test process.
+def _dotenv_should_load() -> bool:
+    if (os.environ.get("ATELES_SKIP_DOTENV") or "").strip().lower() in ("1", "true", "yes"):
+        return False
+    if "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST") is not None:
+        return False
+    return True
+
+
 _NEOTOMA_ENV_FILE = Path.home() / ".config" / "neotoma" / ".env"
-if _NEOTOMA_ENV_FILE.exists():
+if _dotenv_should_load() and _NEOTOMA_ENV_FILE.exists():
     for _line in _NEOTOMA_ENV_FILE.read_text().splitlines():
         _line = _line.strip()
         if _line and not _line.startswith("#") and "=" in _line:
