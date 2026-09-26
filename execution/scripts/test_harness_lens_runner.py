@@ -154,6 +154,20 @@ def test_sandbox_build_codex_uses_codex_home_isolation(tmp_path):
     assert sandbox.root.is_dir()
 
 
+def test_sandbox_build_codex_links_auth_without_copying_it(tmp_path, monkeypatch):
+    source = tmp_path / "real-codex-home" / "auth.json"
+    source.parent.mkdir()
+    source.write_text("fixture-not-a-real-token", encoding="utf-8")
+    monkeypatch.setattr(hlr, "_codex_auth_source", lambda: source)
+
+    sandbox = hlr.HarnessSandbox.build("codex", tmp_path / "sandbox")
+
+    linked = sandbox.root / "auth.json"
+    assert sandbox.authentication_ready is True
+    assert linked.is_symlink()
+    assert linked.resolve() == source.resolve()
+
+
 def test_sandbox_build_cursor_uses_home_isolation(tmp_path):
     sandbox = hlr.HarnessSandbox.build("cursor", tmp_path)
     assert sandbox.env_extra["HOME"] == str(sandbox.root)
@@ -237,6 +251,7 @@ def test_git_shim_really_refuses_a_real_stash_push_in_a_scratch_repo(tmp_path):
 def test_sandbox_build_reports_git_stash_denied_true_from_the_real_probe(tmp_path):
     sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
     assert sandbox.git_stash_denied is True
+    assert sandbox.authentication_ready is True
     assert not any("git_stash_guard" in g for g in sandbox.unavailable_guards)
 
 
@@ -353,10 +368,11 @@ def test_refuse_if_guard_required_allows_codex_when_fully_probed_guarded(tmp_pat
     non-claude provider, and it earns that by using the REAL sandbox built
     with nothing faked."""
     sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
-    if not sandbox.fully_guarded:
+    if not sandbox.ready_to_dispatch:
         pytest.skip(
-            "this host cannot fully probe the guard mechanism "
-            f"(unavailable: {sandbox.unavailable_guards}) — covered instead by "
+            "this host cannot fully probe the guard/auth mechanism "
+            f"(unavailable: {sandbox.unavailable_guards}, "
+            f"authentication_ready={sandbox.authentication_ready}) — covered instead by "
             "test_sandbox_probe_reports_unbound_without_sandbox_exec and "
             "test_refuse_if_guard_required_refuses_codex_when_sandbox_exec_is_unavailable"
         )
@@ -373,12 +389,13 @@ def test_refuse_if_guard_required_is_driven_by_fully_guarded_not_a_constant(tmp_
     guarded = hlr.HarnessSandbox(
         provider="codex", root=tmp_path, env_extra={}, command_wrapper=[],
         credential_read_denied=True, user_config_write_denied=True,
-        git_stash_denied=True, unavailable_guards=(),
+        git_stash_denied=True, authentication_ready=True, unavailable_guards=(),
     )
     unguarded = hlr.HarnessSandbox(
         provider="codex", root=tmp_path, env_extra={}, command_wrapper=[],
         credential_read_denied=False, user_config_write_denied=True,
-        git_stash_denied=True, unavailable_guards=("credential_read_guard (…)",),
+        git_stash_denied=True, authentication_ready=True,
+        unavailable_guards=("credential_read_guard (…)",),
     )
     assert hlr.refuse_if_guard_required(guarded) is None
     assert hlr.refuse_if_guard_required(unguarded) is not None
@@ -794,6 +811,7 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
         credential_read_denied=True,
         user_config_write_denied=True,
         git_stash_denied=True,
+        authentication_ready=True,
         unavailable_guards=(),
     )
     monkeypatch.setattr(

@@ -79,10 +79,15 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
     (the two compose: codex's sandbox still governs writes as before,
     ``sandbox-exec`` additionally denies the specific reads/writes named
     above). ``CODEX_HOME``/``HOME`` overrides still relocate each CLI's OWN
-    config/auth store (so the child cannot read the operator's real
+    config store (so the child cannot read the operator's real
     ``~/.codex/config.toml``, whose ``approval_policy = "never"`` and
-    per-project trust would be the opposite of safe for an unattended run) —
-    that claim is unchanged and was never in question.
+    per-project trust would be the opposite of safe for an unattended run).
+    The one required capability, ChatGPT subscription authentication, is
+    exposed without copying its value: the isolated ``CODEX_HOME/auth.json``
+    is a symlink to the existing login file, while the outer sandbox denies
+    writes to the real ``~/.codex`` target. If that source is absent, the
+    runner refuses before dispatch rather than starting a model call that
+    cannot authenticate.
   * **``git stash``** — a PATH-first ``git`` shim script (the
     ``_GIT_STASH_SHIM`` template, written into a directory prepended to the
     child's ``PATH`` via ``env_extra``) refuses every stash-stack MUTATION
@@ -407,6 +412,30 @@ def _real_git_path() -> str:
     return real
 
 
+def _codex_auth_source() -> Path:
+    """The existing Codex subscription-login file, named but never read here."""
+    return Path.home() / ".codex" / "auth.json"
+
+
+def link_codex_auth(sandbox_home: Path) -> bool:
+    """Expose the existing Codex login to an isolated CODEX_HOME by symlink.
+
+    This function never opens or copies the credential value. The sandbox
+    profile independently denies writes to the real ``~/.codex`` target; the
+    link supplies only the authentication capability the CLI needs in order
+    for a subscription-backed run to start.
+    """
+    source = _codex_auth_source()
+    if not source.is_file():
+        return False
+    target = sandbox_home / "auth.json"
+    try:
+        target.symlink_to(source)
+    except OSError:
+        return False
+    return target.is_symlink()
+
+
 def build_sandbox_exec_profile(profile_path: Path) -> None:
     """Write a macOS sandbox-exec profile denying the credential-read and
     user-config-write globs above, and allowing everything else by default
@@ -544,6 +573,7 @@ class HarnessSandbox:
     credential_read_denied: bool
     user_config_write_denied: bool
     git_stash_denied: bool
+    authentication_ready: bool
     unavailable_guards: tuple[str, ...]
 
     @property
@@ -555,6 +585,11 @@ class HarnessSandbox:
             and self.user_config_write_denied
             and self.git_stash_denied
         )
+
+    @property
+    def ready_to_dispatch(self) -> bool:
+        """Both the safety controls and provider authentication are present."""
+        return self.fully_guarded and self.authentication_ready
 
     @classmethod
     def build(cls, provider: str, tmp_root: Path) -> "HarnessSandbox":
@@ -570,6 +605,7 @@ class HarnessSandbox:
                 provider=provider, root=sandbox_home, env_extra={},
                 command_wrapper=[], credential_read_denied=True,
                 user_config_write_denied=True, git_stash_denied=True,
+                authentication_ready=True,
                 unavailable_guards=(),
             )
 
@@ -578,6 +614,7 @@ class HarnessSandbox:
             if provider == "codex"
             else {"HOME": str(sandbox_home)}
         )
+        authentication_ready = provider == "codex" and link_codex_auth(sandbox_home)
 
         # ── git-stash shim: build, then PROBE against a scratch repo ────────
         shim_dir = sandbox_home / "shim-bin"
@@ -694,6 +731,7 @@ class HarnessSandbox:
             credential_read_denied=credential_read_denied,
             user_config_write_denied=user_config_write_denied,
             git_stash_denied=git_stash_denied,
+            authentication_ready=authentication_ready,
             unavailable_guards=tuple(unavailable),
         )
 
@@ -713,6 +751,13 @@ def refuse_if_guard_required(sandbox: "HarnessSandbox") -> str | None:
     """
     if sandbox.provider == "claude":
         return None
+    if not sandbox.authentication_ready:
+        return (
+            f"provider {sandbox.provider!r} has no authentication available "
+            "inside its isolated harness home — refusing before a model call. "
+            "Codex requires an existing ~/.codex/auth.json subscription login; "
+            "Cursor requires a named credential injection that is not yet wired."
+        )
     if not sandbox.fully_guarded:
         missing = "; ".join(sandbox.unavailable_guards) or "unspecified"
         return (
@@ -784,6 +829,7 @@ def dry_run_report(
         "credential_read_denied": sandbox.credential_read_denied,
         "user_config_write_denied": sandbox.user_config_write_denied,
         "git_stash_denied": sandbox.git_stash_denied,
+        "authentication_ready": sandbox.authentication_ready,
         "unavailable_guards": list(sandbox.unavailable_guards),
         "example_command": example_cmd,
         "prompt_chars": len(task_text),
