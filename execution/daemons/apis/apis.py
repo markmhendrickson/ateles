@@ -74,7 +74,11 @@ Task reconciliation sweep (ateles#586 — see task_reconciler.py):
   APIS_RECONCILE_QUERY_LIMIT       Tasks fetched per pass (default: 500)
 
 GitHub trigger layer (ateles#80 — see github_gateway.py / swarm_dispatch.py):
-  APIS_GITHUB_WEBHOOK_SECRET  HMAC secret for the GitHub webhook
+  APIS_GITHUB_WEBHOOK_SECRET       HMAC secret for the GitHub webhook
+  APIS_GITHUB_WEBHOOK_SECRET_NEXT  Incoming value during a staged rotation
+                                   (rotate_swarm_secret.py) — admitted
+                                   alongside the current secret; empty
+                                   outside a rotation
   APIS_GITHUB_WEBHOOK_PORT    Webhook listen port (default: 8742)
   APIS_PANEL_MAX              Max review panelists per PR (default: 6)
   APIS_AUTONOMY_AUTO_MERGE    "1" lets the dispatcher merge after verified
@@ -438,6 +442,10 @@ DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
 # GitHub webhook gateway (ateles#80). Port 8742 — Apus owns 8741.
 GITHUB_WEBHOOK_PORT = int(os.environ.get("APIS_GITHUB_WEBHOOK_PORT", "8742"))
 GITHUB_WEBHOOK_SECRET = os.environ.get("APIS_GITHUB_WEBHOOK_SECRET", "")
+# Rotation overlap window (rotate_swarm_secret.py, authority_model.md#grants):
+# the incoming value, admitted alongside the current one until the rotator
+# retires the old value and clears this. Empty outside a rotation.
+GITHUB_WEBHOOK_SECRET_NEXT = os.environ.get("APIS_GITHUB_WEBHOOK_SECRET_NEXT", "")
 
 
 # ── Domain routing ─────────────────────────────────────────────────────────────
@@ -1923,6 +1931,8 @@ async def main() -> None:
         GITHUB_WEBHOOK_SECRET,
         dispatcher.handle_trigger,
         approve_email_secret=os.environ.get("APIS_APPROVE_EMAIL_SECRET", ""),
+        secret_next=GITHUB_WEBHOOK_SECRET_NEXT,
+        approve_email_secret_next=os.environ.get("APIS_APPROVE_EMAIL_SECRET_NEXT", ""),
     )
 
     # 5. Subscribe to SSE events

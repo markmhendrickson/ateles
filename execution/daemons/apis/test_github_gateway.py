@@ -795,3 +795,199 @@ def test_approve_release_accepted_builds_trigger():
     assert trig.kind == "release_approve"
     assert trig.release_version == "v0.20.0"
     assert trig.action == "approved"
+
+
+# ── rotation overlap window (rotate_swarm_secret.py; authority_model.md#grants) ─
+#
+# "Rotation is staged, never a flag day": the gateway must accept a delivery
+# signed under EITHER the current secret or the incoming one during the
+# overlap window rotate_swarm_secret.py opens, so its own live-verification
+# probe — a real signed delivery sent while both values are configured — can
+# succeed before the old secret retires.
+
+
+def test_webhook_accepts_old_secret_during_overlap_window():
+    """A delivery signed with the OLD secret must still be admitted while a
+    NEXT secret is staged (dual-admit) — an in-flight delivery must not be
+    dropped mid-rotation."""
+
+    async def run() -> int:
+        async def handler(trigger):
+            pass
+
+        app = make_app(TEST_HMAC_KEY, handler, secret_next="incoming-secret")
+        body = b"{}"
+        headers = {"X-GitHub-Event": "ping", "X-Hub-Signature-256": _sign(body, TEST_HMAC_KEY)}
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/github/webhook", data=body, headers=headers)
+            return resp.status
+
+    assert asyncio.run(run()) == 200
+
+
+def test_webhook_accepts_new_secret_during_overlap_window():
+    """A delivery signed with the NEW (incoming) secret must be admitted
+    during the overlap window — this is the rotator's own live-verification
+    probe, sent BEFORE the old secret retires."""
+
+    async def run() -> int:
+        async def handler(trigger):
+            pass
+
+        app = make_app(TEST_HMAC_KEY, handler, secret_next="incoming-secret")
+        body = b"{}"
+        headers = {
+            "X-GitHub-Event": "ping",
+            "X-Hub-Signature-256": _sign(body, "incoming-secret"),
+        }
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/github/webhook", data=body, headers=headers)
+            return resp.status
+
+    assert asyncio.run(run()) == 200
+
+
+def test_webhook_rejects_neither_old_nor_new_during_overlap_window():
+    """A signature that matches NEITHER value must still be rejected —
+    dual-admit widens to two values, not to "anything"."""
+
+    async def run() -> int:
+        async def handler(trigger):
+            pass
+
+        app = make_app(TEST_HMAC_KEY, handler, secret_next="incoming-secret")
+        body = b"{}"
+        headers = {
+            "X-GitHub-Event": "ping",
+            "X-Hub-Signature-256": _sign(body, "some-other-secret"),
+        }
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/github/webhook", data=body, headers=headers)
+            return resp.status
+
+    assert asyncio.run(run()) == 401
+
+
+def test_webhook_secret_next_alone_without_old_secret_still_accepted():
+    """The overlap window must also work when the OLD slot is empty (e.g. a
+    fresh install rotating in its first secret) — not just fail-open, an
+    explicit accept on the new value with no old value configured."""
+
+    async def run() -> int:
+        async def handler(trigger):
+            pass
+
+        app = make_app("", handler, secret_next="incoming-secret")
+        body = b"{}"
+        headers = {
+            "X-GitHub-Event": "ping",
+            "X-Hub-Signature-256": _sign(body, "incoming-secret"),
+        }
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/github/webhook", data=body, headers=headers)
+            return resp.status
+
+    assert asyncio.run(run()) == 200
+
+
+def test_approve_email_accepts_old_secret_during_overlap_window():
+    status, trig = _post_approve_email_overlap(
+        "old-secret", "new-secret", "old-secret", {"repository": "o/r", "pr_number": 5}
+    )
+    assert status == 200
+    assert trig is not None
+
+
+def test_approve_email_accepts_new_secret_during_overlap_window():
+    status, trig = _post_approve_email_overlap(
+        "old-secret", "new-secret", "new-secret", {"repository": "o/r", "pr_number": 5}
+    )
+    assert status == 200
+    assert trig is not None
+
+
+def test_approve_email_rejects_unrelated_secret_during_overlap_window():
+    status, trig = _post_approve_email_overlap(
+        "old-secret", "new-secret", "totally-unrelated", {"repository": "o/r", "pr_number": 5}
+    )
+    assert status == 401
+    assert trig is None
+
+
+def _post_approve_email_overlap(app_secret, app_secret_next, header_secret, body_obj):
+    """Like _post_approve_email, but also stages an APPROVE secret_next."""
+    captured = {}
+
+    async def run():
+        async def handler(trigger):
+            captured["trigger"] = trigger
+
+        app = make_app(
+            TEST_HMAC_KEY,
+            handler,
+            approve_email_secret=app_secret,
+            approve_email_secret_next=app_secret_next,
+        )
+        headers = {"X-Approve-Secret": header_secret}
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/approve-email", data=json.dumps(body_obj), headers=headers
+            )
+            await asyncio.sleep(0)
+            return resp.status
+
+    status = asyncio.run(run())
+    return status, captured.get("trigger")
+
+
+def test_approve_release_accepts_old_secret_during_overlap_window():
+    status, trig = _post_approve_release_overlap(
+        "old-secret", "new-secret", "old-secret", {"version": "v0.20.0"}
+    )
+    assert status == 200
+    assert trig is not None
+
+
+def test_approve_release_accepts_new_secret_during_overlap_window():
+    status, trig = _post_approve_release_overlap(
+        "old-secret", "new-secret", "new-secret", {"version": "v0.20.0"}
+    )
+    assert status == 200
+    assert trig is not None
+
+
+def _post_approve_release_overlap(app_secret, app_secret_next, header_secret, body_obj):
+    captured = {}
+
+    async def run():
+        async def handler(trigger):
+            captured["trigger"] = trigger
+
+        app = make_app(
+            TEST_HMAC_KEY,
+            handler,
+            approve_email_secret=app_secret,
+            approve_email_secret_next=app_secret_next,
+        )
+        headers = {"X-Approve-Secret": header_secret}
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/approve-release", data=json.dumps(body_obj), headers=headers
+            )
+            await asyncio.sleep(0)
+            return resp.status
+
+    status = asyncio.run(run())
+    return status, captured.get("trigger")
+
+
+def test_verify_github_signature_any_checks_every_candidate_no_shortcircuit():
+    """verify_github_signature_any must not skip checking later candidates
+    once one matches or fails — this guards against a future refactor
+    reintroducing a timing side-channel on secret count."""
+    body = b"{}"
+    sig = _sign(body, "the-real-one")
+    assert github_gateway.verify_github_signature_any(("wrong", "the-real-one"), body, sig)
+    assert github_gateway.verify_github_signature_any(("the-real-one", "wrong"), body, sig)
+    assert not github_gateway.verify_github_signature_any(("", ""), body, sig)
+    assert not github_gateway.verify_github_signature_any(("wrong", "also-wrong"), body, sig)
