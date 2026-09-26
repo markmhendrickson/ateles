@@ -1360,6 +1360,7 @@ async def _run_skill_once(
     include_github_contract: bool = False,
     cwd: str | None = None,
     owns_pending_gate: bool = False,
+    command_wrapper: list[str] | None = None,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
@@ -1398,6 +1399,19 @@ async def _run_skill_once(
     of a PR branch so it can author an eval fixture, run ``eval:tier1``, commit,
     and push. When None (every call site that predates QE3), the child inherits
     the daemon's directory unchanged — exact current behaviour, no regression.
+
+    ``command_wrapper`` (harness_lens_runner, ent_89a4d44b063cb0902106da49):
+    when supplied, its elements are PREPENDED to the provider's own argv
+    before ``asyncio.create_subprocess_exec`` runs it below — e.g.
+    ``["sandbox-exec", "-f", "/path/to/profile.sb"]`` to run codex/cursor's
+    real binary under a macOS sandbox that denies specific file reads/writes.
+    This is the only point in the dispatch path where the process that will
+    actually execute is assembled, so it is the only point a caller can make
+    a guard bind onto the REAL subprocess rather than merely describe an
+    intended mitigation next to code that runs unwrapped. Applied
+    unconditionally when given — a caller that only wants it for codex/cursor
+    passes ``None`` here for claude. The wrapper itself never needs and is
+    never handed credential material; it wraps argv only.
     """
     _role = (role or skill).lower()
     timeout = timeout or DISPATCH_TIMEOUT_SECONDS
@@ -1566,6 +1580,11 @@ async def _run_skill_once(
         cwd=cwd,
         network=include_github_contract,
     )
+    if command_wrapper:
+        # Prepended to the REAL argv that create_subprocess_exec below will
+        # run — not a parallel description of a guard, the guard itself. See
+        # this parameter's docstring on _run_skill_once.
+        cmd = [*command_wrapper, *cmd]
 
     # ── Stage 6: inject Neotoma MCP config so dispatched child can reach Neotoma ─
     # Dispatched `claude --print` children inherit the ambient Claude MCP config,
@@ -2109,8 +2128,13 @@ async def run_skill(
     preferred_provider: str | None = None,
     owns_pending_gate: bool = False,
     seated_reviewer: bool = False,
+    command_wrapper: list[str] | None = None,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
+
+    ``command_wrapper``: forwarded verbatim to ``_run_skill_once`` on every
+    attempt — see that function's docstring. Unrelated to provider selection;
+    it wraps whichever provider's binary ends up chosen.
 
     The first candidate is selected with smooth weighted round-robin using the
     operator-supplied headroom estimates. Capacity, authentication, and launch
@@ -2157,7 +2181,7 @@ async def run_skill(
             task_entity_id=task_entity_id, timeout=timeout, env_extra=env_extra,
             notifier=notifier, github_token=github_token,
             include_github_contract=include_github_contract, cwd=cwd,
-            owns_pending_gate=deny_correct,
+            owns_pending_gate=deny_correct, command_wrapper=command_wrapper,
         )
 
     return await _run_provider_attempts(
