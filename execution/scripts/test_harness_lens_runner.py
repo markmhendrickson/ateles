@@ -168,6 +168,38 @@ def test_sandbox_build_codex_links_auth_without_copying_it(tmp_path, monkeypatch
     assert linked.resolve() == source.resolve()
 
 
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="sandbox-exec is macOS-only",
+)
+def test_sandbox_profile_denies_write_through_codex_auth_symlink(tmp_path):
+    """The auth capability is readable, but cannot become a write path back
+    into the operator's real Codex home. Use only a fixture target here.
+    """
+    real_auth = tmp_path / "fixture-user" / ".codex" / "auth.json"
+    real_auth.parent.mkdir(parents=True)
+    real_auth.write_text("fixture-not-a-real-token\n", encoding="utf-8")
+    isolated = tmp_path / "isolated-codex-home"
+    isolated.mkdir()
+    linked = isolated / "auth.json"
+    linked.symlink_to(real_auth)
+    profile = isolated / "profile.sb"
+    hlr.build_sandbox_exec_profile(profile)
+
+    subprocess = __import__("subprocess")
+    attempt = subprocess.run(
+        [
+            "sandbox-exec", "-f", str(profile),
+            "sh", "-c", 'printf changed > "$1"', "probe", str(linked),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert attempt.returncode != 0
+    assert real_auth.read_text(encoding="utf-8") == "fixture-not-a-real-token\n"
+
+
 def test_sandbox_build_cursor_uses_home_isolation(tmp_path):
     sandbox = hlr.HarnessSandbox.build("cursor", tmp_path)
     assert sandbox.env_extra["HOME"] == str(sandbox.root)
