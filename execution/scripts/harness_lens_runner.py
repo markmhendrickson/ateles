@@ -51,7 +51,8 @@ For codex/cursor, this script builds and MECHANICALLY BINDS the two guards
 whose absence has a concrete blast radius, and PROBES each one — against a
 fixture, never a real credential file or the real shared git dir — before
 ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
-``probe_sandbox_exec_denies_read/write``, ``probe_git_shim_denies_stash_push``):
+``probe_sandbox_exec_denies_read/write``,
+``probe_stash_effect_denied_across_git_binaries``):
 
   * **Credential-file reads and user-config writes** — a macOS
     ``sandbox-exec`` profile (``build_sandbox_exec_profile``) denies
@@ -88,47 +89,68 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
     writes to the real ``~/.codex`` target. If that source is absent, the
     runner refuses before dispatch rather than starting a model call that
     cannot authenticate.
-  * **``git stash``** — TWO layers, closing two distinct resolution paths a
-    dispatched child could use to reach a real ``git``. Round 3 review
-    (ent_9e88db1882c668e6c5c32be9) found the first layer alone insufficient:
-    a PATH-first shim never runs for an ABSOLUTE-path invocation, since
-    resolving an absolute path never consults ``PATH`` at all — verified
-    directly (Homebrew's ``/opt/homebrew/bin/git stash push``, invoked by its
-    resolved Cellar path, bypassed an earlier revision of this shim entirely
-    and landed a real stash entry).
+  * **``git stash``** — denied by EFFECT, not by binary, as of round 4
+    (ent_9e88db1882c668e6c5c32be9's own round-4 follow-up). Rounds 1-3 tried
+    enforcing this by refusing/enumerating specific git BINARIES: a
+    PATH-first shim (round 1's revision), then a ``process-exec`` deny for
+    every git binary a ``PATH`` scan could resolve, symlinks included (round
+    3, after round 3's own review found an absolute-path invocation bypassed
+    the shim entirely). Round 4's review found a THIRD real git binary that
+    PATH-scan enumeration never found — Xcode's own bundled copy, reachable
+    via ``xcrun -f git`` or its own absolute path, never on ``PATH`` — and a
+    stash through it landed a real entry while the mechanism reported itself
+    fully bound. **Enumerating binaries loses by construction: there is
+    always another copy.** The fix instead denies the EFFECT every git
+    binary must produce to record a stash — writing (or reading) the stash
+    ref itself:
 
-    1. **PATH resolution** — a ``git`` shim script (``_GIT_STASH_SHIM``,
-       written into a directory prepended to the child's ``PATH`` via
-       ``env_extra``) refuses ``stash`` in ANY form — no read-only carve-out;
-       the operator's rule is "no stash in any form runs," and since this
-       shim is the ONLY place stash is mentioned in this runner, dropping the
-       carve-out ``.claude/hooks/git_stash_guard.py`` keeps for itself is
-       simpler and matches the rule exactly. Execs a COPY of the real git
-       binary (staged by ``_stage_exec_allowed_git_copy``, at a path the
-       profile below does NOT deny) for every non-stash invocation.
-    2. **Absolute-path resolution** — the SAME ``sandbox-exec`` profile used
-       for credential-read/user-config-write additionally denies
-       ``process-exec`` of every git binary ``discover_real_git_binaries``
-       finds on ``PATH`` — symlink-RESOLVED, since Seatbelt's ``process-exec``
-       path filters match the exec syscall's resolved target, not a symlink
-       the caller typed (verified: denying Homebrew's symlink path alone was
-       a no-op; denying the resolved Cellar path it points at worked). This
-       is what stops an absolute-path invocation the shim above never sees.
-       The staged copy above lives outside this deny set specifically so the
-       shim still has a real git to exec.
+    * ``build_sandbox_exec_profile`` denies ``file-write*`` AND
+      ``file-read*`` on ``refs/stash`` and its reflog (``logs/refs/stash``),
+      matched for both a plain repo's ``.git`` and the worktree-common-dir
+      equivalent (``.git/worktrees/<name>/refs/stash`` — see
+      ``_STASH_REF_DENY_REGEXES``). Every git binary that has ever existed
+      or will exist records a stash by writing this SAME ref path, so this
+      deny is binary-agnostic: no enumeration to keep current, no new binary
+      to discover and add.
+    * The ``PATH``-first ``git`` shim (``_GIT_STASH_SHIM``) is now
+      **advisory only** — a friendly early-refusal message for the common
+      case where a dispatched child resolves ``git`` via ``PATH``, exactly
+      like any other tool invocation. It is NOT the control: it execs the
+      REAL git unconditionally for every non-``stash`` invocation, with no
+      staged copy and no exec-path deny, because closing off which binary
+      may run is no longer what stops a stash. If this shim were bypassed
+      entirely (an absolute-path invocation, a binary this host adds
+      tomorrow), the sandbox-exec deny above still stops the write.
 
-    ``HarnessSandbox.git_stash_denied`` is True only when BOTH layers probe
-    as denied (see ``probe_git_shim_denies_stash_push`` and
-    ``probe_absolute_path_git_stash_is_denied``) — either layer alone leaves
-    a real resolution path open, which is exactly the shape of the round-3
-    finding: a guard that reports itself bound while one path through it
-    remains open.
+    ``HarnessSandbox.git_stash_denied`` is set from
+    ``probe_stash_effect_denied_across_git_binaries``, which exercises this
+    deny against every real git invocation this host happens to offer
+    (``PATH``-resolved ``git``, ``/usr/bin/git`` by absolute path, ``xcrun
+    git``, and Xcode's bundled binary by its own absolute path — see
+    ``discover_probe_git_invocations``) — building empirical confidence
+    across several real binaries, but the deny's CORRECTNESS never depended
+    on that list being exhaustive, unlike round 3's mechanism.
 
-  Both mechanisms are built AND ACTUALLY RUN against a throwaway fixture in
-  ``HarnessSandbox.build()`` before any real dispatch: the sandbox-exec
-  profile is tested with a real ``cat``/``touch`` against a fixture file this
-  script creates (never the operator's own files), and the git shim is
-  tested with a real ``git stash push`` inside a scratch repo this script
+    **Residual, stated rather than hidden**: once ``refs/stash`` has been
+    folded into the shared ``packed-refs`` file (by ``git pack-refs --all``
+    or ``gc`` — verified empirically that a plain ``stash push`` writes only
+    the LOOSE ref, never ``packed-refs``, directly), that entry's content
+    sits in a file this profile cannot selectively deny without denying
+    ALL ref resolution for the repository. A NEW stash push still fails
+    correctly even against an already-packed repo (git writes a new loose
+    ref that shadows the packed one — verified), but reading an
+    already-packed stash entry via ``list``/``show``/``apply`` is not
+    covered by this mechanism. This is a real, narrow limitation, not a
+    claim of exhaustive coverage.
+
+  All THREE denies (credential-read, user-config-write, stash-ref) live in
+  the ONE sandbox-exec profile ``build_sandbox_exec_profile`` writes, and
+  each is ACTUALLY RUN against a throwaway fixture in
+  ``HarnessSandbox.build()`` before any real dispatch: the credential/
+  user-config denies are tested with a real ``cat``/``touch`` against a
+  fixture file this script creates (never the operator's own files), and the
+  stash-ref deny is tested with a real ``git stash push`` — via several real
+  git invocations this host offers — inside a scratch repo this script
   ``git init``s for the probe (never the shared clone or its stash ref). The
   resulting booleans (``credential_read_denied``, ``user_config_write_denied``,
   ``git_stash_denied``) are what ``HarnessSandbox.fully_guarded`` and
@@ -426,29 +448,51 @@ _USER_CONFIG_WRITE_DENY_REGEXES: tuple[str, ...] = (
     r"/\.codex(/.*)?$",
 )
 
+# The git-stash EFFECT, denied at both read and write (PR #1308 round 4,
+# ent_9e88db1882c668e6c5c32be9's own round-4 follow-up): matches the stash
+# ref and its reflog in a plain repo's `.git`, AND the worktree-common-dir
+# equivalent under `.git/worktrees/<name>/`. Deliberately binary-agnostic —
+# rounds 1-3 tried enforcing this by refusing/enumerating specific git
+# BINARIES (a PATH shim, then a process-exec deny per discovered path); round
+# 4's own review found a THIRD real git binary neither round enumerated
+# (Xcode's bundled copy, reachable via `xcrun -f git`, never on PATH) that
+# still landed a stash. Denying the EFFECT — any write to `refs/stash` or its
+# reflog, from ANY process — closes this regardless of which or how many git
+# binaries exist on the host, because every one of them writes through the
+# same ref path to record a stash. See DiscussionResidualStashRisk below and
+# the module docstring's GUARD BINDING section for what this does NOT cover
+# (a stash ref already folded into `packed-refs`).
+_STASH_REF_DENY_REGEXES: tuple[str, ...] = (
+    r"/\.git/refs/stash$",
+    r"/\.git/logs/refs/stash$",
+    r"/\.git/worktrees/[^/]+/refs/stash$",
+    r"/\.git/worktrees/[^/]+/logs/refs/stash$",
+)
+
 _GIT_STASH_SHIM = """#!/bin/bash
-# PATH-first git shim (ent_89a4d44b063cb0902106da49, hardened against the
-# absolute-path bypass found in PR #1308 round 3 review — ent_9e88db1882c668e6c5c32be9):
-# refuses EVERY stash-stack invocation for a dispatched harness child, in any
-# form (bare `stash`, `list`, `show`, `push`, `pop`, `apply`, `drop`, `clear`,
-# `branch`, `create`, `store`). The operator's rule is "no stash in any form
-# runs" — this shim used to keep .claude/hooks/git_stash_guard.py's read-only
-# `list`/`show` carve-out, but this is the ONLY place stash is mentioned in
-# this runner, and dropping the carve-out is simpler and matches the rule
-# exactly, so it is gone.
-#
-# Execs REAL_GIT_PLACEHOLDER (the sandbox-exec-ALLOWED copy of the real git
-# binary — see HarnessSandbox.build's ``_stage_exec_allowed_git_copy`` and the
-# module docstring's GUARD BINDING section) for every non-stash invocation, so
-# this shim is otherwise invisible. Deliberately NOT the original resolved
-# real git path: that path is DENIED at the sandbox-exec layer specifically so
-# an absolute-path invocation of git (bypassing this shim's PATH-first
-# position entirely) cannot reach a real git binary that has not been
-# through this refusal — see build_sandbox_exec_profile's process-exec denies.
+# PATH-first git shim (ent_89a4d44b063cb0902106da49) — ADVISORY ONLY, per PR
+# #1308 round 4 review (ent_... round-4 task): this shim is a friendly early
+# refusal for the common case (a dispatched child resolves `git` via PATH,
+# same as any ordinary tool invocation), NOT the enforcement mechanism. The
+# actual control is the sandbox-exec profile's deny on refs/stash and its
+# reflog (see build_sandbox_exec_profile and the module docstring's GUARD
+# BINDING section) — a deny on the EFFECT (writing/reading the stash ref
+# itself), which holds regardless of which git BINARY is used to attempt it.
+# Round 3 tried enumerating and denying every real git binary's exec path;
+# round 4's own review found a THIRD real git binary (Xcode's bundled copy,
+# reachable via `xcrun -f git` or its own absolute path, never on PATH) that
+# enumeration missed and that landed a real stash despite git_stash_denied
+# reporting True. Enumerating binaries loses by construction — there is
+# always another copy (a future Xcode/Homebrew update, an MDM-managed git, a
+# statically linked git someone builds) — so this shim no longer tries; it
+# execs the REAL git unconditionally for every non-stash invocation (no
+# process-exec deny, no staged copy — removed as unneeded complexity now
+# that exec is not what is being denied), and the sandbox profile is what
+# actually stops a stash regardless of which binary attempts it.
 for arg in "$@"; do
   case "$arg" in
     stash)
-      echo "git-stash-shim: refusing 'git stash' in any form for a dispatched harness child (ent_89a4d44b063cb0902106da49)" >&2
+      echo "git-stash-shim: 'git stash' is refused for a dispatched harness child (ent_89a4d44b063cb0902106da49) — this message is a courtesy; the actual enforcement is the sandbox-exec deny on refs/stash, which applies even if this shim is bypassed" >&2
       exit 1
       ;;
   esac
@@ -462,59 +506,6 @@ def _real_git_path() -> str:
     if not real:
         raise RuntimeError("git not found on PATH — cannot build the stash-refusing shim")
     return real
-
-
-def discover_real_git_binaries() -> list[str]:
-    """Return every DISTINCT, symlink-RESOLVED git executable reachable on
-    PATH — the exec-time deny set for the sandbox-exec profile.
-
-    This resolves symlinks (``os.path.realpath``) deliberately: macOS
-    Seatbelt's ``process-exec`` path filters match the exec syscall's
-    RESOLVED target, not the path string the caller invoked. Homebrew's
-    ``/opt/homebrew/bin/git`` is a symlink into a versioned Cellar path —
-    denying ``process-exec`` on the symlink path alone does nothing (verified
-    empirically: ``sandbox-exec`` still ran a symlinked git under a profile
-    denying only the symlink's own path), while denying the RESOLVED Cellar
-    path stops it. Every entry returned here is therefore already the
-    resolved form; the profile denies exactly these strings.
-
-    Deliberately returns EVERY resolved binary found across the WHOLE PATH,
-    not just the first (``shutil.which``'s behaviour) — a dispatched child
-    that resolves a later PATH entry (Xcode CLT's `/usr/bin/git`, a second
-    Homebrew keg, an MDM-managed git) must be denied too.
-    """
-    seen: dict[str, None] = {}
-    for directory in os.environ.get("PATH", "").split(os.pathsep):
-        if not directory:
-            continue
-        candidate = Path(directory) / "git"
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            seen.setdefault(str(candidate.resolve()), None)
-    return list(seen)
-
-
-def _stage_exec_allowed_git_copy(sandbox_home: Path, real_git: str) -> Path:
-    """Copy ONE resolved real git binary into the sandbox's own directory,
-    at a path the sandbox-exec profile does NOT deny, and return that path.
-
-    The shim execs THIS copy for every non-stash invocation — never the
-    original resolved path, which is exactly what
-    ``build_sandbox_exec_profile`` denies for every entry
-    ``discover_real_git_binaries`` found (including this copy's own
-    source). A plain file copy (not a symlink, not a hardlink) is used
-    deliberately: a hardlink renamed to anything but the original basename
-    breaks git's own subcommand dispatch (verified empirically — "cannot
-    handle hardlink as a builtin" — because git resolves its behaviour
-    partly from argv[0]/its own basename), while a same-named plain copy
-    resolves ``--exec-path`` and runs ordinary commands identically to the
-    original, since git's libexec location is baked in at build time rather
-    than derived from a runtime symlink target.
-    """
-    target = sandbox_home / "real-git-bin" / "git"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(real_git, target)
-    target.chmod(0o755)
-    return target
 
 
 def _codex_auth_source() -> Path:
@@ -541,45 +532,68 @@ def link_codex_auth(sandbox_home: Path) -> bool:
     return target.is_symlink()
 
 
-def _sandbox_literal(path: str) -> str:
-    """Escape a path for a Seatbelt ``(literal "...")`` string. Seatbelt's
-    string literals use ordinary double-quote escaping; a path containing a
-    literal `"` or `\\` (vanishingly unlikely for a git binary path, but not
-    provably impossible) must not be allowed to break out of the string.
+def build_sandbox_exec_profile(profile_path: Path) -> None:
+    """Write a macOS sandbox-exec profile denying:
+
+    * reads of the credential-file globs (``_CREDENTIAL_READ_DENY_REGEXES``),
+    * writes to the user-level harness config directories
+      (``_USER_CONFIG_WRITE_DENY_REGEXES``),
+    * reads AND writes of the git-stash ref and its reflog
+      (``_STASH_REF_DENY_REGEXES`` — ent_9e88db1882c668e6c5c32be9, PR #1308
+      round 4),
+
+    and allowing everything else by default (the dispatched child still
+    needs to read/write its own worktree, the isolated CODEX_HOME/HOME, and
+    run its own binaries).
+
+    THE STASH DENY IS BY EFFECT, NOT BY BINARY (round 4's own fix, replacing
+    round 3's ``process-exec`` enumeration). Round 3 denied ``process-exec``
+    of every git binary a PATH scan could find; round 4's own review found a
+    THIRD real git binary (Xcode's bundled copy, reachable via ``xcrun -f
+    git`` or its own absolute path, never on PATH) that enumeration missed,
+    and a stash through it landed while the mechanism reported itself fully
+    bound. Enumerating binaries loses by construction: there is always
+    another copy an enumeration didn't anticipate. Denying WRITES (and
+    READS) to the stash ref path itself is binary-agnostic — every git
+    binary, present or future, records a stash by writing the SAME ref path
+    (``refs/stash``) and reflog (``logs/refs/stash``), so a deny on that path
+    stops ``stash push``/``pop``/``apply``/``drop``/``clear`` regardless of
+    which binary attempts it, with no enumeration to keep current.
+
+    Denying READS too (not just writes) additionally stops ``stash
+    apply``/``list``/``show`` from consuming an existing stash entry — a
+    dispatched child that finds an ALREADY-STASHED entry left by another
+    session could otherwise read (and thereby exfiltrate or reason about)
+    that entry's diff even without writing anything itself. Verified
+    empirically: a sandboxed ``stash list`` against a fixture repo with a
+    real pre-existing entry returns exit 0 with EMPTY output rather than an
+    error — Seatbelt's deny makes git behave as if the ref does not exist,
+    which is functionally the desired outcome (the entry is not visible) even
+    though it is not a nonzero exit code; the probe below checks for this
+    exact "denied reads as absent" shape rather than assuming an error code.
+
+    RESIDUAL, NOT CLOSED BY THIS MECHANISM (stated here, not hidden): once
+    ``refs/stash`` is folded into the shared ``packed-refs`` file (by ``git
+    pack-refs --all`` or ``gc``, never by ``stash push`` itself — verified
+    empirically that a plain ``stash push`` writes only the LOOSE ref, never
+    ``packed-refs``, even when a packed entry already exists for the same ref
+    name; a subsequent push creates a new loose ref that shadows the packed
+    one, which is why this deny still stops every NEW push even against an
+    already-packed repository), that entry's content becomes indistinguishable,
+    at the filesystem level, from every other ref in ``packed-refs`` — a file
+    this profile cannot selectively deny without denying ALL ref resolution
+    for the repository, which would break ordinary git use entirely. This
+    profile does not attempt that; a stash entry that has already been packed
+    by something OTHER than this runner's own dispatch is a residual read
+    exposure this mechanism does not close.
     """
-    return path.replace("\\", "\\\\").replace('"', '\\"')
-
-
-def build_sandbox_exec_profile(
-    profile_path: Path, *, deny_exec_paths: tuple[str, ...] = ()
-) -> None:
-    """Write a macOS sandbox-exec profile denying the credential-read and
-    user-config-write globs above, and allowing everything else by default
-    (the dispatched child still needs to read/write its own worktree, the
-    isolated CODEX_HOME/HOME, and run its own binaries).
-
-    ``deny_exec_paths`` (ent_9e88db1882c668e6c5c32be9, PR #1308 round-3
-    review): additionally denies ``process-exec`` of each given path —
-    the mechanism that closes the absolute-path git-stash bypass a PATH-first
-    shim alone cannot: invoking git by its resolved absolute path never
-    consults ``PATH``, so the shim never runs, and the file-read/write denies
-    above do not gate WHICH BINARY may execute at all. Every path here MUST
-    already be symlink-resolved (``discover_real_git_binaries`` does this) —
-    Seatbelt's ``process-exec`` literal/subpath filters match the exec
-    syscall's resolved target, not a symlink the caller typed; a bare deny on
-    a symlink path is a silent no-op (verified empirically against this
-    exact profile grammar before this fix — see the module docstring).
-    ``(deny process-exec (literal ...))`` under an ``(allow default)``
-    baseline was ALSO verified empirically to work correctly once the
-    literal target is the resolved path — Seatbelt's specificity rule lets
-    a literal-path deny override the broad allow for exactly that path,
-    leaving every other exec (including the sandbox's own allowed copy of
-    git, and every other binary the dispatched child needs) unaffected.
-    """
-    read_denies = "\n".join(f'  (regex #"{p}")' for p in _CREDENTIAL_READ_DENY_REGEXES)
-    write_denies = "\n".join(f'  (regex #"{p}")' for p in _USER_CONFIG_WRITE_DENY_REGEXES)
-    exec_denies = "\n".join(
-        f'  (literal "{_sandbox_literal(p)}")' for p in deny_exec_paths
+    read_denies = "\n".join(
+        f'  (regex #"{p}")'
+        for p in (*_CREDENTIAL_READ_DENY_REGEXES, *_STASH_REF_DENY_REGEXES)
+    )
+    write_denies = "\n".join(
+        f'  (regex #"{p}")'
+        for p in (*_USER_CONFIG_WRITE_DENY_REGEXES, *_STASH_REF_DENY_REGEXES)
     )
     profile = (
         "(version 1)\n"
@@ -591,8 +605,6 @@ def build_sandbox_exec_profile(
         f"{write_denies}\n"
         ")\n"
     )
-    if exec_denies:
-        profile += "(deny process-exec\n" f"{exec_denies}\n" ")\n"
     profile_path.write_text(profile, encoding="utf-8")
 
 
@@ -683,6 +695,17 @@ def probe_git_shim_denies_stash_push(shim_path: Path, scratch_git_dir: Path) -> 
     the normal resolution path) in a SCRATCH git repo (never the shared
     clone) exits non-zero AND leaves the real stash stack untouched.
 
+    ADVISORY-ONLY as of PR #1308 round 4 (ent_9e88db1882c668e6c5c32be9's own
+    round-4 follow-up): this probe verifies the shim's friendly early-refusal
+    message still works for the common PATH-resolved case, but
+    `HarnessSandbox.git_stash_denied` no longer depends on this probe's
+    result — the actual control is
+    `probe_stash_effect_denied_across_git_binaries`, which tests the
+    sandbox-exec deny on the stash ref itself rather than the shim. Kept as
+    a standalone, separately testable diagnostic for the shim's own
+    behaviour rather than removed outright, since the shim itself is kept
+    (as advisory UX, not enforcement) rather than removed.
+
     *scratch_git_dir* must already contain at least one commit — otherwise a
     real, unshimmed `git stash push` would ALSO fail (with "You do not have
     the initial commit yet"), which would make this probe pass for the wrong
@@ -699,34 +722,72 @@ def probe_git_shim_denies_stash_push(shim_path: Path, scratch_git_dir: Path) -> 
     return _real_stash_list(scratch_git_dir) == before
 
 
-def probe_absolute_path_git_stash_is_denied(
-    real_git_paths: tuple[str, ...],
-    command_wrapper: list[str],
-    scratch_git_dir: Path,
-) -> bool:
-    """Return True iff invoking `git stash push` via EVERY discovered
-    absolute real-git path, wrapped in the ACTUAL sandbox-exec command
-    this run would prepend to the real dispatch, is refused AND leaves the
-    real stash stack untouched — the exact bypass PR #1308 round 3 review
-    found (ent_9e88db1882c668e6c5c32be9): a PATH-first shim never runs when
-    the caller invokes git by its resolved absolute path, since that
-    resolution never consults PATH at all.
-
-    Every path in *real_git_paths* is tried, not just one — a profile that
-    denies only the first-discovered git and misses a second PATH entry
-    (Xcode CLT's `/usr/bin/git` beside a Homebrew keg, for instance) would
-    otherwise report a false pass. An empty *command_wrapper* (no
-    sandbox-exec available) always returns False: there is nothing to
-    prepend, so this specific bypass cannot be closed on this host.
+def discover_probe_git_invocations(scratch_git_dir: Path) -> list[list[str]]:
+    """Return several DISTINCT ways to invoke `git stash push` against
+    *scratch_git_dir*, covering every git binary this host happens to have —
+    used ONLY to build confidence in the probe below across several real
+    binaries, never as the deny mechanism itself (round 3 tried enumerating
+    binaries as the mechanism; round 4 replaces that with a deny on the
+    EFFECT, which does not need enumeration to be correct — see
+    build_sandbox_exec_profile). Distinct invocations tried, whichever exist
+    on this host: the `git` resolved via PATH, `/usr/bin/git` by absolute
+    path, `xcrun git` (Xcode's own resolution mechanism, which the previous
+    round's PATH-only enumeration missed entirely), and Xcode's bundled git
+    binary by its own absolute path (`xcrun -f git`'s answer). Each is
+    returned as an argv PREFIX (before `-C <repo> stash push`); a binary this
+    host does not have is simply omitted, never fabricated.
     """
-    if not command_wrapper or not real_git_paths:
+    invocations: list[list[str]] = []
+    on_path = shutil.which("git")
+    if on_path:
+        invocations.append(["git"])
+    if Path("/usr/bin/git").is_file():
+        invocations.append(["/usr/bin/git"])
+    if shutil.which("xcrun"):
+        xcrun_result = subprocess.run(
+            ["xcrun", "-f", "git"], capture_output=True, text=True
+        )
+        if xcrun_result.returncode == 0 and xcrun_result.stdout.strip():
+            xcode_git = xcrun_result.stdout.strip()
+            invocations.append(["xcrun", "git"])
+            if xcode_git not in (on_path, "/usr/bin/git"):
+                invocations.append([xcode_git])
+    return invocations
+
+
+def probe_stash_effect_denied_across_git_binaries(
+    command_wrapper: list[str], scratch_git_dir: Path
+) -> bool:
+    """Return True iff `git stash push` is refused AND leaves the real stash
+    stack untouched, for EVERY git invocation `discover_probe_git_invocations`
+    finds on this host — proving the deny is binary-agnostic rather than
+    merely re-testing one binary, without the probe ITSELF depending on
+    enumeration being exhaustive (unlike round 3's mechanism, this round's
+    deny targets the ref path, so any binary this probe happens to miss would
+    still be denied in production — this function only builds empirical
+    confidence across as many real binaries as this host happens to offer).
+
+    An empty *command_wrapper* (no sandbox-exec available) always returns
+    False. If NO git invocation is discovered at all, also returns False —
+    that would mean the probe proved nothing, which must not be misread as a
+    pass.
+    """
+    if not command_wrapper:
+        return False
+    invocations = discover_probe_git_invocations(scratch_git_dir)
+    if not invocations:
         return False
     before = _real_stash_list(scratch_git_dir)
-    for real_git in real_git_paths:
+    for prefix in invocations:
         attempt = subprocess.run(
-            [*command_wrapper, real_git, "-C", str(scratch_git_dir), "stash", "push"],
+            [*command_wrapper, *prefix, "-C", str(scratch_git_dir), "stash", "push"],
             capture_output=True, text=True,
         )
+        # Seatbelt's read/write deny on refs/stash makes the WRITE attempt
+        # fail outright (nonzero exit) in every case observed — but the
+        # verification is the real stash list, not the exit code, per this
+        # module's own standing practice of never trusting a subject's own
+        # report of its result.
         if attempt.returncode == 0:
             return False
         if _real_stash_list(scratch_git_dir) != before:
@@ -792,19 +853,15 @@ class HarnessSandbox:
         )
         authentication_ready = provider == "codex" and link_codex_auth(sandbox_home)
 
-        # ── Discover every real git binary on PATH — the exec-deny set ─────
-        real_git_paths = tuple(discover_real_git_binaries())
-
-        # ── sandbox-exec profile: build (with process-exec denies), then
-        # PROBE against fixtures. Built BEFORE the shim below because the
-        # shim needs command_wrapper to exist for the absolute-path probe,
-        # and the profile needs real_git_paths resolved above.
+        # ── sandbox-exec profile: build (credential/user-config/stash-ref
+        # denies, all by EFFECT — see build_sandbox_exec_profile), then PROBE
+        # against fixtures.
         profile_path = sandbox_home / "profile.sb"
         credential_read_denied = False
         user_config_write_denied = False
         command_wrapper: list[str] = []
         try:
-            build_sandbox_exec_profile(profile_path, deny_exec_paths=real_git_paths)
+            build_sandbox_exec_profile(profile_path)
             read_fixture_dir = sandbox_home / "probe-fixtures" / ".config" / "neotoma"
             read_fixture_dir.mkdir(parents=True, exist_ok=True)
             read_fixture = read_fixture_dir / ".env"
@@ -826,21 +883,23 @@ class HarnessSandbox:
             credential_read_denied = False
             user_config_write_denied = False
 
-        # ── git-stash shim: exec-allowed copy, then PROBE both resolution
-        # paths (PATH-first, the shim's own job; absolute-path, the sandbox
-        # profile's job — ent_9e88db1882c668e6c5c32be9). Only when BOTH probe
-        # True is the guard actually closed against every way a dispatched
-        # child could invoke git.
+        # ── git-stash: the shim is advisory-only (a friendly early message
+        # for the common PATH-resolved case); the REAL control is the
+        # sandbox-exec profile's deny on refs/stash, already built above.
+        # This probe exercises the sandbox effect across every real git
+        # invocation this host happens to offer (see
+        # discover_probe_git_invocations) to build confidence the deny is
+        # genuinely binary-agnostic — it does NOT need to be exhaustive for
+        # production correctness, unlike round 3's enumeration-as-mechanism,
+        # because production denies the ref path, not a list of binaries.
         shim_dir = sandbox_home / "shim-bin"
         shim_dir.mkdir(parents=True, exist_ok=True)
         shim_path = shim_dir / "git"
-        path_shim_denied = False
-        absolute_path_denied = False
+        git_stash_denied = False
         try:
             real_git = _real_git_path()
-            exec_allowed_copy = _stage_exec_allowed_git_copy(sandbox_home, real_git)
             shim_path.write_text(
-                _GIT_STASH_SHIM.replace("REAL_GIT_PLACEHOLDER", str(exec_allowed_copy)),
+                _GIT_STASH_SHIM.replace("REAL_GIT_PLACEHOLDER", real_git),
                 encoding="utf-8",
             )
             shim_path.chmod(0o755)
@@ -849,54 +908,45 @@ class HarnessSandbox:
             subprocess.run(
                 ["git", "init", "-q", str(scratch_repo)], check=True, capture_output=True
             )
-            probe_env = {**os.environ, "PATH": f"{shim_dir}:{os.environ.get('PATH', '')}"}
             subprocess.run(
                 ["git", "-C", str(scratch_repo), "config", "user.email", "probe@example.com"],
-                check=True, capture_output=True, env=probe_env,
+                check=True, capture_output=True,
             )
             subprocess.run(
                 ["git", "-C", str(scratch_repo), "config", "user.name", "probe"],
-                check=True, capture_output=True, env=probe_env,
+                check=True, capture_output=True,
             )
             (scratch_repo / "probe.txt").write_text("probe\n", encoding="utf-8")
             subprocess.run(
                 ["git", "-C", str(scratch_repo), "add", "-A"],
-                check=True, capture_output=True, env=probe_env,
+                check=True, capture_output=True,
             )
-            # A REAL commit — required so a real (unshimmed/unsandboxed)
-            # `git stash push` would actually succeed, which is what makes
-            # both probes below meaningful: on a broken guard, this commit is
-            # what lets the bypass produce a real stash entry for the probe
-            # to catch, rather than failing on its own with "no initial
-            # commit" for an unrelated reason. See probe_git_shim_denies_
-            # stash_push's and probe_absolute_path_git_stash_is_denied's
-            # docstrings.
+            # A REAL commit — required so a real, unsandboxed `git stash
+            # push` would actually succeed, which is what makes the probe
+            # below meaningful: on a broken guard, this commit is what lets
+            # the bypass produce a real stash entry for the probe to catch,
+            # rather than failing on its own with "no initial commit" for an
+            # unrelated reason. See probe_stash_effect_denied_across_git_
+            # binaries's docstring.
             subprocess.run(
                 ["git", "-C", str(scratch_repo), "commit", "-q", "-m", "probe"],
-                check=True, capture_output=True, env=probe_env,
+                check=True, capture_output=True,
             )
             (scratch_repo / "probe.txt").write_text("probe changed\n", encoding="utf-8")
-            path_shim_denied = probe_git_shim_denies_stash_push(shim_path, scratch_repo)
-            absolute_path_denied = probe_absolute_path_git_stash_is_denied(
-                real_git_paths, command_wrapper, scratch_repo
+            git_stash_denied = probe_stash_effect_denied_across_git_binaries(
+                command_wrapper, scratch_repo
             )
         except (RuntimeError, subprocess.CalledProcessError, OSError):
-            path_shim_denied = False
-            absolute_path_denied = False
+            git_stash_denied = False
         env_extra["PATH"] = f"{shim_dir}:{os.environ.get('PATH', '')}"
-        # BOTH resolution paths must probe as denied — the shim alone does
-        # not close the absolute-path bypass, and the sandbox-exec deny
-        # alone does nothing for a PATH-resolved invocation that never
-        # reaches an absolute path at all.
-        git_stash_denied = path_shim_denied and absolute_path_denied
 
         unavailable = []
         if not git_stash_denied:
             unavailable.append(
-                "git_stash_guard (PATH-first shim denied="
-                f"{path_shim_denied}, absolute-path sandbox-exec denied="
-                f"{absolute_path_denied} — see the sandbox's own probe "
-                "results, not asserted; BOTH must be True)"
+                "git_stash_guard (sandbox-exec unavailable, or its "
+                "refs/stash deny did not probe as denying a real stash "
+                "push across the git binaries this host offers — see the "
+                "sandbox's own probe result, not asserted)"
             )
         if not credential_read_denied:
             unavailable.append(
