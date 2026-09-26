@@ -23,6 +23,7 @@ process environment happen to hold when pytest runs.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -118,6 +119,60 @@ class TestNeotomaCredentials:
         monkeypatch.setattr(si, "_NEOTOMA_ENV_PATH", Path("/really/does/not/exist/.env"))
         base_url, token = si.neotoma_credentials()
         assert token == ""
+
+    def test_non_utf8_bytes_do_not_raise(self, monkeypatch, tmp_path):
+        """Loxia review + qa/security lenses on PR #1298 round 1: the
+        original version caught only `OSError`, so a non-UTF-8-encoded file
+        raised an unhandled `UnicodeDecodeError` (a `ValueError` subclass)
+        straight out of `_read_neotoma_env_file`, `neotoma_credentials`, and
+        `emit_harness_event_raw` — reproduced concretely by both lenses.
+        This pins the fix: a good key/value line followed by invalid UTF-8
+        bytes must degrade to whatever the readable portion parses to,
+        never raise. Written to fail before the fix (bare `except OSError`,
+        `read_text(encoding="utf-8")` with no `errors=`) and pass after."""
+        p = tmp_path / ".env"
+        p.write_bytes(b"NEOTOMA_BEARER_TOKEN=good-token\n\xff\xfe\x00garbage\n")
+        monkeypatch.setattr(si, "_NEOTOMA_ENV_PATH", p)
+        base_url, token = si.neotoma_credentials()
+        assert token == "good-token"
+
+    def test_non_utf8_only_content_yields_empty_not_raise(self, monkeypatch, tmp_path):
+        """Same defect, no readable line at all — must still return empty
+        credentials rather than propagate a UnicodeDecodeError."""
+        p = tmp_path / ".env"
+        p.write_bytes(b"\xff\xfe\xff\xfe\xff\xfe")
+        monkeypatch.setattr(si, "_NEOTOMA_ENV_PATH", p)
+        base_url, token = si.neotoma_credentials()
+        assert token == ""
+
+    def test_path_is_a_directory_does_not_raise(self, monkeypatch, tmp_path):
+        """A directory sitting where the .env file is expected: `.exists()`
+        is True, but `.read_text()` raises `IsADirectoryError` (an
+        `OSError` subclass — already caught before this fix, but pinned
+        here as one of the four required cases so a future narrowing of the
+        except clause back to a specific OSError subtype cannot silently
+        drop it)."""
+        p = tmp_path / ".env"
+        p.mkdir()
+        monkeypatch.setattr(si, "_NEOTOMA_ENV_PATH", p)
+        base_url, token = si.neotoma_credentials()
+        assert token == ""
+
+    def test_permission_denied_file_does_not_raise(self, monkeypatch, tmp_path):
+        """A file that exists but cannot be read: `.read_text()` raises
+        `PermissionError` (an `OSError` subclass). Skipped when running as
+        root, where a permission bit on a file you own is not honored."""
+        if os.geteuid() == 0:
+            pytest.skip("running as root — file permissions are not enforced")
+        p = tmp_path / ".env"
+        p.write_text("NEOTOMA_BEARER_TOKEN=unreadable-token\n")
+        p.chmod(0o000)
+        try:
+            monkeypatch.setattr(si, "_NEOTOMA_ENV_PATH", p)
+            base_url, token = si.neotoma_credentials()
+            assert token == ""
+        finally:
+            p.chmod(0o644)  # restore so tmp_path cleanup can remove it
 
 
 # ---------------------------------------------------------------------------

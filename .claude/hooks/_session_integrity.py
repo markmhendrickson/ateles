@@ -76,15 +76,42 @@ def log(msg: str) -> None:
 def _read_neotoma_env_file() -> dict[str, str]:
     """Parse `NEOTOMA_BASE_URL` / `NEOTOMA_BEARER_TOKEN` out of
     ~/.config/neotoma/.env, if it exists and is readable. Never raises —
-    an absent, unreadable, or malformed file yields {} (fail open; the
-    caller falls back to the process environment, which may also be
-    empty — that is the "still missing" case the warning covers, not a
-    condition this function itself needs to distinguish)."""
+    an absent, unreadable, malformed, or non-UTF-8 file yields {} (fail
+    open; the caller falls back to the process environment, which may also
+    be empty — that is the "still missing" case the warning covers, not a
+    condition this function itself needs to distinguish).
+
+    TWO independent layers make "never raises" true rather than merely
+    documented (Loxia review + qa/security lenses on PR #1298, round 1: the
+    original version caught only `OSError`, so a non-UTF-8-encoded `.env`
+    raised an unhandled `UnicodeDecodeError` — a `ValueError` subclass, not
+    an `OSError` — straight out of this function and every caller above it,
+    including `emit_harness_event_raw`, the shared chokepoint the whole PR
+    exists to make robust. Confirmed reproducible by both lenses, not
+    hypothesized):
+
+      1. `errors="replace"` on `read_text` — a decode error becomes U+FFFD
+         replacement characters in the offending line rather than a raised
+         exception, so malformed encoding degrades the SAME way a malformed
+         line already does (skipped or read as best-effort garbage that
+         fails the key check below), not a crash.
+      2. `except Exception`, not `except OSError` — belt and suspenders for
+         (1): this function's only job is "return a best-effort dict or
+         empty," so nothing it can do file I/O or string processing over
+         should ever propagate past it. A bug INSIDE this function is still
+         a bug, but it must never be the reason a Stop hook crashes a
+         session — that guarantee belongs at this boundary, not left to
+         whichever caller happens to wrap it (today's callers both do, by
+         a top-level `main()` guard and a local `try/except`, but neither
+         is part of THIS function's contract and a future caller should not
+         have to know that to trust "never raises").
+    """
     found: dict[str, str] = {}
     try:
         if not _NEOTOMA_ENV_PATH.exists():
             return found
-        for line in _NEOTOMA_ENV_PATH.read_text(encoding="utf-8").splitlines():
+        text = _NEOTOMA_ENV_PATH.read_text(encoding="utf-8", errors="replace")
+        for line in text.splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
@@ -93,7 +120,7 @@ def _read_neotoma_env_file() -> dict[str, str]:
             if key not in ("NEOTOMA_BASE_URL", BEARER_ENV):
                 continue
             found[key] = value.strip().strip('"').strip("'")
-    except OSError:
+    except Exception:  # noqa: BLE001 — this function's whole contract is "never raises"
         return {}
     return found
 
