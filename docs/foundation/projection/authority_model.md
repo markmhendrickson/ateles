@@ -5,7 +5,7 @@
 
 Every rule `authority_model.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`authority_model.md`](../authority_model.md) and are not repeated here (decision 66).
 
-21 rules.
+28 rules.
 
 ## [The tuple](../authority_model.md#the-tuple)
 
@@ -29,6 +29,7 @@ Every rule `authority_model.md` owns, one entry each: the rule's own statement f
 - **AU-12** — the same: rotation is staged *[M]*
 - **AU-13** — the same: the grant is read at every enforcement point; revocation's reach *[M]*
 - **AU-21** — (ruling 41): write admission per entity type is default-deny; the grant is the allowlist, read at every enforcement point; a capability naming every type is the fail-open shape; attribution is required besides and prevents nothing *[M]*
+- **AU-28** — as widened by ruled conformance.md register row 117 (operator ruling recorded 2026-09-18 on ateles#925; G25 / neotoma#2357 merged 2026-09-21): a capability's `relationship_types[]` beside `entity_types[]` governs edge writes on the same default-deny shape as decision 41 — absent or empty denies every relationship write; naming a type permits that type and denies every other; a wildcard over relationship types is the same fail-open shape AU-21 refuses for entity types *[M (decision 117; G25's relationship-type registry merged as `neotoma#2357`, satisfying the second bounding condition; red-by-design until a resolver enforces the dimension. This row tests the ruled admission shape, not implementation completion)]*
 
 ## [Attribution](../authority_model.md#attribution)
 
@@ -54,3 +55,12 @@ Every rule `authority_model.md` owns, one entry each: the rule's own statement f
 ## [Initiative, proposal, reprioritization](../authority_model.md#initiative-proposal-reprioritization)
 
 - **AU-20** — initiative approval is the checkpoint; what stops is a task, confirmed by the owner seat through the checkpoint and read back, proposing a grant capability; a budget attenuates, consumption is derived, and what is metered is per class on the policy; credit is a read model *[M (51 to 54 ruled 2026-09-06 — `authority_model.md#initiative-proposal-reprioritization`)]*
+
+## [What the credential binding carries, and what a check reads to resolve a credential to a principal](../authority_model.md#what-the-credential-binding-carries-and-what-a-check-reads-to-resolve-a-credential-to-a-principal)
+
+- **AU-22** — resolver-outcome table, row 1: `Permit` (resolved) — at least one live (unended, unexpired) `principal_binding` matches the presented `credential_kind` + `credential_value` (+ `credential_issuer` when required), and every match targets the same principal *[M (decision 101; no resolver exists yet in this checkout, so this row is red until one is built — the operator's 2026-09-18 ruling on ateles#925 requires the row to exist and be able to fail, not to pass)]*
+- **AU-23** — the same table, row 2: `Deny` (no binding) — no matching edge for the presented key; recorded as unattributed, never defaulted to the operator *[M (same red-by-design status as AU-22)]*
+- **AU-24** — the same table, row 3: `Deny` (expired-only) — matching edges exist but all are ended or `now >= expires_at`; distinct from no-binding *[M (same red-by-design status as AU-22)]*
+- **AU-25** — the same table, row 4: `Indeterminate` (binding source unreadable/partial) — the relationship store is unreachable, timed out, or the read is incomplete; the enforcement point treats it as `Deny` and the third value is kept in diagnostics rather than coerced to a plain `Deny` in the recorded decision *[M (same red-by-design status as AU-22)]*
+- **AU-26** — the same table, row 5: `Deny` (ambiguous/conflicting) — two or more live matching edges target different principals; fail closed, never pick the first edge *[M (same red-by-design status as AU-22)]*
+- **AU-27** — the same table, row 6: `Deny` (malformed presentation) — the presented credential is missing a required key part (`credential_kind` / `credential_value` / issuer when the kind requires one), or the kind is unrecognized *[M (same red-by-design status as AU-22)]*
