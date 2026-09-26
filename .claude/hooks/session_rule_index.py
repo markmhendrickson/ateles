@@ -96,11 +96,26 @@ Never logs rule bodies — some `agent_policy` rows hold operator payment
 details (CLAUDE.md). Only the rendered index (which itself contains no rule
 bodies, only entity ids and one-line summaries) reaches stdout; anything
 diagnostic goes to stderr and never includes `rule` text.
+
+RECORDS WHAT IT DELIVERED (ateles#1261 follow-up, audit
+ent_b66293f0dcc8c887d4fdbeae). After a successful render, this hook writes
+the delivered row signature into this session's `.claude/.session_state/`
+file via the SHARED `rule_index_state` module (also used by the
+UserPromptSubmit companion, `session_rule_delivery.py`), so that hook's very
+first comparison finds "nothing changed yet" instead of re-printing the
+whole index the very next prompt. A fail-open render (Neotoma unreachable,
+etc.) records nothing — there is nothing delivered to record, and the
+delivery hook's "no prior signature" fallback (inject everything once it is
+next asked) is the correct behavior in that case, not a bug to route around.
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _session_integrity import read_hook_input, load_state, save_state  # noqa: E402
+from rule_index_state import record_delivery  # noqa: E402
 
 # Resolve siblings relative to THIS FILE, never cwd/CLAUDE_PROJECT_DIR — the
 # one property that makes this hook usable from a user-level settings.json
@@ -116,11 +131,12 @@ def _log(msg: str) -> None:
     sys.stderr.write(f"[session-rule-index] {msg}\n")
 
 
-def _render() -> str | None:
-    """Live-render the index, or None on a genuine failure (fail-open):
-    Neotoma unreachable, the renderer unimportable, or a corpus too large
-    even for tier C. A merely large corpus does NOT hit this path — it
-    returns a tiered (A/B/C) string from render_index_text instead.
+def _render() -> tuple[str, list[dict]] | None:
+    """Live-render the index plus the session-scoped raw rows it was built
+    from (for delivery-signature recording), or None on a genuine failure
+    (fail-open): Neotoma unreachable, the renderer unimportable, or a corpus
+    too large even for tier C. A merely large corpus does NOT hit this path
+    — it returns a tiered (A/B/C) string from render_index_text instead.
     """
     try:
         if str(_REPO_ROOT) not in sys.path:
@@ -131,6 +147,7 @@ def _render() -> str | None:
             fetch_active_policy_rows,
             render_index_text,
             render_skills,
+            _session_scope_ok,
         )
     except Exception as exc:  # noqa: BLE001 — fail open on import (e.g. no httpx)
         _log(f"renderer unavailable: {type(exc).__name__}: {exc}")
@@ -144,15 +161,23 @@ def _render() -> str | None:
 
     try:
         skills = render_skills(rows)
-        return render_index_text(skills, BUDGET_CHARS)
+        text = render_index_text(skills, BUDGET_CHARS)
+        # `rows` is already flattened by unwrap_policy_entities (bare
+        # snapshot dicts with `_entity_id` stamped on) — scope on the row
+        # directly, not `row["snapshot"]`, which does not exist here.
+        scoped_rows = [r for r in rows if _session_scope_ok(r)]
+        return text, scoped_rows
     except Exception as exc:  # noqa: BLE001 — includes the budget-overflow raise
         _log(f"could not render rule index: {type(exc).__name__}: {exc}")
         return None
 
 
 def main() -> int:
-    text = _render()
-    if text is None:
+    ev = read_hook_input()
+    session_id = ev.get("session_id", "")
+
+    rendered = _render()
+    if rendered is None:
         print(
             "[agent_policy] The live rule index could not be loaded this "
             "session — proceeding WITHOUT the swarm's governing rules from "
@@ -160,8 +185,17 @@ def main() -> int:
             "CLAUDE.md still apply."
         )
         return 0
+
+    text, scoped_rows = rendered
     print("# Agent policy rule index (live from Neotoma, ateles#1261)\n")
     print(text)
+
+    if session_id:
+        try:
+            state = load_state(session_id)
+            save_state(session_id, record_delivery(state, scoped_rows))
+        except Exception as exc:  # noqa: BLE001 — never let bookkeeping break delivery
+            _log(f"could not record delivered signature: {exc}")
     return 0
 
 
