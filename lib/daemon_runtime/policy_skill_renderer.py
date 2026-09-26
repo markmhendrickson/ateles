@@ -12,11 +12,15 @@ copies of CLAUDE.md drifted into 31 versions — see docs/foundation history).
 Canonical artifact, per the issue's settled design (imperative source
 revised after Falco's round-2 security review — see below):
   - `name`      — a stable slug derived from the rule's entity id.
-  - `description` — the row's `applies_when` trigger plus, when present, the
-                     row's own `title` field as a one-line imperative (what
-                     a model sees up front, before deciding whether to fetch
-                     the full rule). NEVER derived from `rule`/`body` text —
-                     a row with no `title` renders trigger + id only.
+  - `description` — the row's `applies_when` trigger plus, when present, a
+                     one-line imperative (what a model sees up front, before
+                     deciding whether to fetch the full rule): `index_line`
+                     when the row has one (schema 1.4.0, ateles#1295
+                     follow-up — a field authored specifically to state the
+                     rule's OPERATIVE CONSTRAINT, not just its topic), else
+                     the row's `title`. NEVER derived from `rule`/`body`
+                     text — a row with neither `index_line` nor `title`
+                     renders trigger + id only.
   - `body`      — the full rule text plus its entity id, for a FUTURE
                    transport (an agent explicitly fetching a rule by id);
                    never read back into the rendered SessionStart index
@@ -465,10 +469,15 @@ def to_skill(snap: dict) -> PolicySkill | None:
     Never reads `rule` (the full rule body) into any field that reaches the
     rendered index (Falco, ateles#1268 round 2: "stop deriving tier A's
     imperative from the first sentence of the rule text... never read `rule`
-    or `body` into the index at all"). The imperative comes ONLY from the
-    row's `title` field — short and authored for exactly this purpose — and
-    is omitted (renders tier-B style, trigger + id only) when no title is
-    present, rather than falling back to any rule-derived text.
+    or `body` into the index at all"). The imperative comes from `index_line`
+    when present — a field authored specifically to carry the one-liner's
+    OPERATIVE CONSTRAINT (the concrete URL shape, tool name, limit, or
+    forbidden action), so an agent acting on the summary alone still
+    complies (rule-delivery evals, ateles#1301/#1295: the link-ids rule and
+    the AskUserQuestion rule both failed when only a label-shaped `title`
+    reached the index) — falling back to `title` when `index_line` is
+    absent, and omitted entirely (renders tier-B style, trigger + id only)
+    when neither is present. Never falls back to any rule-derived text.
 
     `applies_when` is sanitized before use, same as the imperative, and
     `entity_id` is cut to the id charset — every row-derived field is
@@ -499,8 +508,15 @@ def to_skill(snap: dict) -> PolicySkill | None:
     # safety meaning (principles.md #5; Falco, ateles#1268 round 3).
     is_preamble = raw_applies_when.strip().lower() == _ALWAYS
 
+    # `index_line` (schema 1.4.0) is a dedicated short-form field for the
+    # one-liner's operative constraint; `title` is the row's display name
+    # and is kept as the fallback so a row authored before `index_line`
+    # existed still renders (ateles#1295 follow-up, ateles#1301 eval).
+    raw_index_line = str(snap.get("index_line") or "")
     raw_title = str(snap.get("title") or "")
-    imperative = _sanitize_field(raw_title, max_len=_IMPERATIVE_MAX)
+    imperative = _sanitize_field(raw_index_line, max_len=_IMPERATIVE_MAX) or (
+        _sanitize_field(raw_title, max_len=_IMPERATIVE_MAX)
+    )
 
     if not applies_when and not is_preamble:
         # No usable trigger and not the literal "always" — nothing safe to
