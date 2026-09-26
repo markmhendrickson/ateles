@@ -326,7 +326,7 @@ def emit_finding_event(session_id: str, found: list[str], enforced: bool) -> Non
         "enforced": enforced,
         "findings_count": len(found),
         "findings": found,
-    }, log_tag="decision-shape")
+    }, log_tag="decision-shape", session_id=session_id)
 
 
 def main() -> int:
