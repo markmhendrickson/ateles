@@ -37,13 +37,13 @@ it was silently read as deciding who is even LOOKED AT. Fix, two parts:
     the approval if this ever finds anything, independent of whether every
     required lens itself passed.
   - `--panel {required,all}` (`all` is the default while bootstrap mode is
-    on, see `_panel_all_default`): `all` folds every one of the six lenses
-    into the required set up front, so the gap above can never open at
-    all — a lens has to clear or it is a required-lens FAILURE, not merely
-    a "non-required block" the second layer has to catch. `required` is
-    the pre-#1293 behaviour (derived floor only). The non-required-block
-    check above stays on regardless of `--panel`, as defense in depth for
-    when `required` is explicitly chosen.
+    on, see `_panel_all_default`): `all` folds every one of the five lenses
+    in the bootstrap roster into the required set up front, so the gap
+    above can never open at all — a lens has to clear or it is a
+    required-lens FAILURE, not merely a "non-required block" the second
+    layer has to catch. `required` is the pre-#1293 behaviour (derived
+    floor only). The non-required-block check above stays on regardless of
+    `--panel`, as defense in depth for when `required` is explicitly chosen.
 
 Reuse, not rebuild:
   - Lens verdict parsing: `swarm_dispatch.lens_own_verdict` /
@@ -89,13 +89,19 @@ Usage:
 `--lenses` ADDS to the derived floor; it can never remove a lens the panel
 logic would itself require for this diff/issue. `--panel all` (the default
 while bootstrap mode is on — see `_panel_all_default` and
-ATELES_APPROVE_PANEL_REQUIRED_ONLY below) additionally requires the six
-lenses in `BOOTSTRAP_PANEL_LENSES` (pm, arch, ux, qa, security, content —
-the panel bootstrap mode actually dispatches; `legal` is deliberately NOT
-in this set and joins the floor only when `review_panel.select_panel`
-itself derives it for the diff) to have signed off on the current head;
-`--panel required` uses the diff-derived floor alone, as before
-ateles#1293's fix. Either way, a live REQUEST_CHANGES/`[BLOCKING]`
+ATELES_APPROVE_PANEL_REQUIRED_ONLY below) additionally requires the five
+lenses in `BOOTSTRAP_PANEL_LENSES` (pm, arch, ux, qa, security — the
+bootstrap roster; NEITHER `legal` NOR `content`/Corvus is in this set)
+to have signed off on the current head; `legal` joins the floor only when
+`review_panel.select_panel` itself derives it for the diff, and
+`content`/Corvus is excluded from bootstrap mode outright (operator
+ruling 2026-09-26, agent_policy `ent_d0f1a840e549b3b299f62397`) — it is
+never required under `--panel all`, and `resolve_lenses` actively strips
+it even if `select_panel` would otherwise have derived it into the floor
+for a non-trivial diff (see `resolve_lenses`). `--panel required` uses the
+diff-derived floor alone, as before ateles#1293's fix — `content` CAN
+still appear there, since that floor mirrors the normal non-bootstrap
+pipeline exactly. Either way, a live REQUEST_CHANGES/`[BLOCKING]`
 verdict from ANY lens on the current head refuses the approval, whether or
 not that lens is in the required set. Without --apply this is always a dry
 run: it prints the derived-lens rationale, the per-lens table, the non-
@@ -168,11 +174,10 @@ LENS_AGENTS: dict[str, str] = {
     "content": "corvus",
 }
 
-# The six lenses bootstrap mode's own panel actually dispatches (agent_policy
+# The five lenses bootstrap mode's own panel actually dispatches (agent_policy
 # `ent_d0f1a840e549b3b299f62397`, "Software work runs in bootstrap mode":
 # "Pavo pm, Waxwing arch, Falco security, Phoenicurus qa, Accipiter ux when
-# UI changes" — plus Corvus content, which the same review round confirmed
-# is part of the live bootstrap roster).
+# UI changes").
 #
 # NOT `list(LENS_AGENTS)` — that is a documented incident, not a typo. PR
 # #1303 round 1 shipped `--panel all` unioning in literally every entry of
@@ -191,9 +196,31 @@ LENS_AGENTS: dict[str, str] = {
 # licensing diff) regardless of what `--panel` is set to. `--panel all`
 # only widens the FLOOR to this bootstrap roster; it never narrows what
 # `select_panel` would otherwise require.
+#
+# `content`/Corvus is likewise NOT in this set, but for a different reason
+# than `legal`: operator ruling 2026-09-26 excludes Corvus from bootstrap
+# review dispatch and the bootstrap approval gate OUTRIGHT — unlike
+# `legal`, `content` must never join the bootstrap floor even when this
+# PR's own diff would otherwise cause `review_panel.select_panel` to
+# select it (its `forward_looking=True`/`min_changed_files=5` opt-in path
+# on a >=5-file diff). `resolve_lenses` enforces this by stripping
+# `content` out of the diff-derived floor whenever `panel_all` is set —
+# see its docstring. `content` remains fully available to the normal
+# non-bootstrap pipeline (`swarm_dispatch.py`'s canary-lane dispatch),
+# which calls `review_panel.select_panel` directly and never goes through
+# this tool or `BOOTSTRAP_PANEL_LENSES`.
 BOOTSTRAP_PANEL_LENSES: frozenset[str] = frozenset(
-    {"pm", "arch", "ux", "qa", "security", "content"}
+    {"pm", "arch", "ux", "qa", "security"}
 )
+
+# Lenses bootstrap mode excludes outright, even when review_panel.select_panel
+# would otherwise derive them into a PR's floor for this diff (ateles#1317,
+# operator ruling 2026-09-26). Currently just Corvus/content — see the
+# BOOTSTRAP_PANEL_LENSES comment above. Kept as a separate named constant
+# (rather than inlined into resolve_lenses) so a future bootstrap-only
+# exclusion has an obvious place to be added, and so tests can pin the exact
+# set the way TestBootstrapPanelLensesConstant already pins the roster.
+BOOTSTRAP_EXCLUDED_LENSES: frozenset[str] = frozenset({"content"})
 
 _FAILING_CHECK_CONCLUSIONS = ("failure", "timed_out", "cancelled", "action_required")
 
@@ -286,7 +313,13 @@ class LensOutcome:
 
 class CheckOutcome:
     def __init__(
-        self, name: str, state: str, passed: bool, *, not_run: bool = False, reason: str = ""
+        self,
+        name: str,
+        state: str,
+        passed: bool,
+        *,
+        not_run: bool = False,
+        reason: str = "",
     ) -> None:
         self.name = name
         self.state = state
@@ -298,12 +331,16 @@ class CheckOutcome:
 
 
 async def _fetch_pr(client: httpx.AsyncClient, repo: str, pr: int) -> dict:
-    resp = await client.get(f"{GITHUB_API}/repos/{repo}/pulls/{pr}", headers=_github_headers(repo))
+    resp = await client.get(
+        f"{GITHUB_API}/repos/{repo}/pulls/{pr}", headers=_github_headers(repo)
+    )
     resp.raise_for_status()
     return resp.json() or {}
 
 
-async def _fetch_issue_comments(client: httpx.AsyncClient, repo: str, pr: int) -> list[dict]:
+async def _fetch_issue_comments(
+    client: httpx.AsyncClient, repo: str, pr: int
+) -> list[dict]:
     """All issue-API comments on the PR (GitHub serves PR comments there)."""
     out: list[dict] = []
     page = 1
@@ -322,9 +359,7 @@ async def _fetch_issue_comments(client: httpx.AsyncClient, repo: str, pr: int) -
     return out
 
 
-def _latest_matching_comment(
-    comments: list[dict], *, marker: str
-) -> dict | None:
+def _latest_matching_comment(comments: list[dict], *, marker: str) -> dict | None:
     """The LATEST comment carrying *marker* verbatim in its body, or None.
 
     Latest, not first: a lens can post more than once for the same head (a
@@ -361,7 +396,9 @@ class NonRequiredBlock:
     object.
     """
 
-    def __init__(self, lens: str, *, agent: str, verdict: str | None, comment_url: str) -> None:
+    def __init__(
+        self, lens: str, *, agent: str, verdict: str | None, comment_url: str
+    ) -> None:
         self.lens = lens
         self.agent = agent
         self.verdict = verdict
@@ -418,7 +455,9 @@ async def _preregistered_gate_contributors(
     return out
 
 
-def _why_lens_selected(lens: Lens, *, changed_files: list[str], gate_contributors: set[str]) -> str:
+def _why_lens_selected(
+    lens: Lens, *, changed_files: list[str], gate_contributors: set[str]
+) -> str:
     """Human-readable reason `select_panel` would have included *lens*.
 
     Descriptive only — `select_panel` itself already decided inclusion; this
@@ -544,7 +583,9 @@ async def derive_required_lenses(
 
     gate_contributors: set[str] = set()
     if parent_issue is not None:
-        gate_contributors = await _preregistered_gate_contributors(client, repo, parent_issue)
+        gate_contributors = await _preregistered_gate_contributors(
+            client, repo, parent_issue
+        )
 
     panel = select_panel(
         gate_contributors=gate_contributors,
@@ -597,7 +638,11 @@ async def evaluate_lens(
     agent = LENS_AGENTS.get(lens, "")
     if not agent:
         return LensOutcome(
-            lens, agent="", head_matched=False, verdict=None, passed=False,
+            lens,
+            agent="",
+            head_matched=False,
+            verdict=None,
+            passed=False,
             reason=f"unknown lens (not in LENS_AGENTS: {sorted(LENS_AGENTS)})",
         )
 
@@ -622,7 +667,11 @@ async def evaluate_lens(
                 "(--panel required, or omit it from --lenses)."
             )
         return LensOutcome(
-            lens, agent=agent, head_matched=False, verdict=None, passed=False,
+            lens,
+            agent=agent,
+            head_matched=False,
+            verdict=None,
+            passed=False,
             reason=reason,
         )
 
@@ -636,7 +685,9 @@ async def evaluate_lens(
         elif verdict not in {"signed_off", "approve"}:
             reason = f"verdict is {verdict!r}, not a clearing verdict"
         else:
-            reason = "a blocking verdict token or a [BLOCKING] finding appears in the body"
+            reason = (
+                "a blocking verdict token or a [BLOCKING] finding appears in the body"
+            )
 
     return LensOutcome(
         lens,
@@ -804,7 +855,8 @@ async def _fetch_job_labels(
         return None
     try:
         resp = await client.get(
-            f"{GITHUB_API}/repos/{repo}/actions/jobs/{job_id}", headers=_github_headers(repo)
+            f"{GITHUB_API}/repos/{repo}/actions/jobs/{job_id}",
+            headers=_github_headers(repo),
         )
         if resp.status_code != 200:
             return None
@@ -813,8 +865,10 @@ async def _fetch_job_labels(
         if str(payload.get("status") or "") not in _UNSCHEDULED_STATUSES:
             return None
         labels = payload.get("labels")
-        if not isinstance(labels, list) or not labels or not all(
-            isinstance(x, str) and x.strip() for x in labels
+        if (
+            not isinstance(labels, list)
+            or not labels
+            or not all(isinstance(x, str) and x.strip() for x in labels)
         ):
             return None
         return [x.strip() for x in labels]
@@ -839,7 +893,9 @@ async def fetch_online_runner_label_sets(
             if resp.status_code != 200:
                 return None
             payload = resp.json()
-            if not isinstance(payload, dict) or not isinstance(payload.get("runners"), list):
+            if not isinstance(payload, dict) or not isinstance(
+                payload.get("runners"), list
+            ):
                 return None
             runners = payload["runners"]
             for runner in runners:
@@ -848,7 +904,9 @@ async def fetch_online_runner_label_sets(
                 if runner.get("status") != "online":
                     continue
                 names = [
-                    lbl.get("name") for lbl in (runner.get("labels") or []) if isinstance(lbl, dict)
+                    lbl.get("name")
+                    for lbl in (runner.get("labels") or [])
+                    if isinstance(lbl, dict)
                 ]
                 out.append(frozenset(n.casefold() for n in names if isinstance(n, str)))
             if len(runners) < 100:
@@ -883,7 +941,9 @@ class _SchedulingContext:
 
     async def online_runner_label_sets(self) -> list[frozenset[str]] | None:
         if self._runners is self._UNSET:
-            self._runners = await fetch_online_runner_label_sets(self.client, repo=self.repo)
+            self._runners = await fetch_online_runner_label_sets(
+                self.client, repo=self.repo
+            )
         return self._runners  # type: ignore[return-value]
 
 
@@ -987,7 +1047,10 @@ async def evaluate_checks(
     runs = (checks_resp.json() or {}).get("check_runs", [])
 
     outcomes: list[CheckOutcome] = []
-    legacy_statuses_green = legacy_status_count == 0 or combined_state in ("success", "")
+    legacy_statuses_green = legacy_status_count == 0 or combined_state in (
+        "success",
+        "",
+    )
     all_green = legacy_statuses_green
     sched = _SchedulingContext(client, repo=repo, base_ref=base_ref)
     for run in runs:
@@ -1001,7 +1064,11 @@ async def evaluate_checks(
             if not_run_reason:
                 outcomes.append(
                     CheckOutcome(
-                        name, NOT_RUN_NO_RUNNER, True, not_run=True, reason=not_run_reason
+                        name,
+                        NOT_RUN_NO_RUNNER,
+                        True,
+                        not_run=True,
+                        reason=not_run_reason,
                     )
                 )
                 continue
@@ -1107,7 +1174,9 @@ async def submit_app_approval(
         )
     pr_author = str((pr_data.get("user") or {}).get("login") or "")
     if not pr_author:
-        raise RuntimeError("could not resolve PR author from the pre-submit re-fetch — refusing")
+        raise RuntimeError(
+            "could not resolve PR author from the pre-submit re-fetch — refusing"
+        )
 
     body_lines = [
         "Approved by the swarm App — every required review lens cleared the "
@@ -1122,7 +1191,9 @@ async def submit_app_approval(
     if not_run:
         body_lines.append("")
     for c in not_run:
-        body_lines.append(f"- check `{c.name}` did not bind — {NOT_RUN_NO_RUNNER}: {c.reason}")
+        body_lines.append(
+            f"- check `{c.name}` did not bind — {NOT_RUN_NO_RUNNER}: {c.reason}"
+        )
     body_lines.append("")
     body_lines.append(f"head_sha={head_sha}")
     body = "\n".join(body_lines)
@@ -1152,7 +1223,9 @@ async def submit_app_approval(
     posted = resp.json() or {}
     review_id = _normalise_github_review_id(posted.get("id"))
     if not review_id:
-        raise RuntimeError("review submission returned no usable review id — cannot read back")
+        raise RuntimeError(
+            "review submission returned no usable review id — cannot read back"
+        )
 
     # 4. Read the created review back. The POST's own response body is NOT
     # treated as proof — only this independent GET is.
@@ -1189,17 +1262,31 @@ async def submit_app_approval(
     return readback
 
 
-def _print_derived_lenses(required: list[RequiredLens], extra: list[str]) -> None:
+def _print_derived_lenses(
+    required: list[RequiredLens], extra: list[str], *, excluded: list[str] | None = None
+) -> None:
     print()
-    print("required lenses (derived from review_panel.select_panel for this diff/issue):")
+    print(
+        "required lenses (derived from review_panel.select_panel for this diff/issue):"
+    )
     for r in required:
         print(f"  - {r.lens}: {r.reason}")
     if extra:
-        print(f"added on top of the derived floor (--lenses and/or --panel all): {', '.join(extra)}")
+        print(
+            f"added on top of the derived floor (--lenses and/or --panel all): {', '.join(extra)}"
+        )
+    if excluded:
+        print(
+            "excluded from bootstrap mode outright (operator ruling 2026-09-26, "
+            f"BOOTSTRAP_EXCLUDED_LENSES) — never evaluated or required despite "
+            f"select_panel deriving it for this diff: {', '.join(excluded)}"
+        )
     print()
 
 
-def _print_table(lens_outcomes: list[LensOutcome], check_outcomes: list[CheckOutcome]) -> None:
+def _print_table(
+    lens_outcomes: list[LensOutcome], check_outcomes: list[CheckOutcome]
+) -> None:
     print(f"{'lens':<10} {'verdict':<14} {'head match':<11} {'pass/fail':<10} reason")
     print("-" * 80)
     for o in lens_outcomes:
@@ -1230,7 +1317,7 @@ async def resolve_lenses(
     pr_body: str,
     extra_lenses: list[str],
     panel_all: bool = False,
-) -> tuple[list[str], list[RequiredLens]]:
+) -> tuple[list[str], list[RequiredLens], list[str]]:
     """The lens set the tool will require: the derived floor plus `--lenses`
     additions, and — with `panel_all` — the bootstrap-mode panel
     (`BOOTSTRAP_PANEL_LENSES`) rather than only the derived floor.
@@ -1239,26 +1326,55 @@ async def resolve_lenses(
     used to shrink it, so a caller can never accidentally (or deliberately)
     drop a lens `review_panel.select_panel` itself would require for this
     diff/issue. `panel_all` is a separate, stronger union: bootstrap mode
-    (agent_policy `ent_d0f1a840e549b3b299f62397`) requires the six lenses
-    the bootstrap panel actually dispatches — pm, arch, ux, qa, security,
-    content — to have signed off on the current head, regardless of what
-    this diff's panel-assembly logic would have seated. This is
-    `BOOTSTRAP_PANEL_LENSES`, NOT `list(LENS_AGENTS)`: the latter also
-    contains `legal`, which bootstrap mode's own roster never dispatches for
-    an ordinary diff (round-1 review on this PR: requiring it unconditionally
-    made `--apply` unable to ever pass). `legal` still joins the floor for a
-    diff that genuinely needs it — via `derive_required_lenses` calling
+    (agent_policy `ent_d0f1a840e549b3b299f62397`) requires the five lenses
+    the bootstrap panel actually dispatches — pm, arch, ux, qa, security —
+    to have signed off on the current head, regardless of what this diff's
+    panel-assembly logic would have seated. This is `BOOTSTRAP_PANEL_LENSES`,
+    NOT `list(LENS_AGENTS)`: the latter also contains `legal`, which
+    bootstrap mode's own roster never dispatches for an ordinary diff
+    (round-1 review on this PR: requiring it unconditionally made `--apply`
+    unable to ever pass). `legal` still joins the floor for a diff that
+    genuinely needs it — via `derive_required_lenses` calling
     `review_panel.select_panel`, unaffected by `panel_all` — this only
-    changes what the BOOTSTRAP DEFAULT widens the floor to. The reasons for
-    the derived floor are still computed and reported (`required`), so the
-    dry-run table still explains WHY each lens was in the diff-derived floor;
-    the panel_all additions are reported as additions, exactly like
-    `--lenses`.
+    changes what the BOOTSTRAP DEFAULT widens the floor to.
+
+    `content`/Corvus is handled differently from `legal`: it is not merely
+    absent from `BOOTSTRAP_PANEL_LENSES` (so `panel_all` never ADDS it) — it
+    is actively EXCLUDED (`BOOTSTRAP_EXCLUDED_LENSES`) from the diff-derived
+    floor itself whenever `panel_all` is set, even though
+    `derive_required_lenses` calls the SAME `review_panel.select_panel` that
+    can independently select `content` as a forward-looking lens for a
+    >=5-file diff (`Lens.min_changed_files=5`). Operator ruling 2026-09-26
+    (ateles#1317): while bootstrap mode is active, Corvus/content must never
+    be required, including by a diff that would normally pull it in. This is
+    a bootstrap-only exclusion — `derive_required_lenses` itself is
+    unaffected, so `--panel required` (the non-bootstrap-default path) can
+    still surface `content` in `required` exactly as `review_panel.py`
+    intends for the normal swarm pipeline (e.g. the swarm-canary lane, which
+    never calls this tool at all and so never sees this filter).
+
+    The reasons for the derived floor are still computed and reported
+    (`required`) even for an excluded lens, so the dry-run table still
+    explains WHY `select_panel` would have seated it; the panel_all
+    additions are reported as additions, exactly like `--lenses`.
+
+    Returns a third element, `actually_excluded`: the lenses this call
+    stripped for being in `BOOTSTRAP_EXCLUDED_LENSES` — from the
+    diff-derived floor, from `extra_lenses`, or both — so the caller can
+    report an explicit `--lenses content`-style request was dropped rather
+    than silently discarding it (round-2 self-review finding: an operator
+    passing `--lenses content` under `--panel all` previously got no
+    indication their addition was ignored).
     """
     required = await derive_required_lenses(client, repo=repo, pr=pr, pr_body=pr_body)
-    floor = [r.lens for r in required]
+    excluded = BOOTSTRAP_EXCLUDED_LENSES if panel_all else frozenset()
+    floor = [r.lens for r in required if r.lens not in excluded]
     all_lenses = sorted(BOOTSTRAP_PANEL_LENSES) if panel_all else []
-    added = [lens for lens in (*extra_lenses, *all_lenses) if lens not in floor]
+    added = [
+        lens
+        for lens in (*extra_lenses, *all_lenses)
+        if lens not in floor and lens not in excluded
+    ]
     # De-duplicate `added` while preserving first-seen order (extra_lenses
     # before the panel_all union), since `--lenses` and panel_all can name
     # the same lens.
@@ -1268,7 +1384,12 @@ async def resolve_lenses(
         if lens not in seen:
             seen.add(lens)
             deduped_added.append(lens)
-    return floor + deduped_added, required
+
+    actually_excluded = sorted(
+        {r.lens for r in required if r.lens in excluded}
+        | {lens for lens in extra_lenses if lens in excluded}
+    )
+    return floor + deduped_added, required, actually_excluded
 
 
 async def run(
@@ -1281,14 +1402,18 @@ async def run(
 ) -> int:
     async with httpx.AsyncClient(timeout=30) as client:
         pr_data = await _fetch_pr(client, repo, pr)
-        head_sha = _normalise_full_sha(str((pr_data.get("head") or {}).get("sha") or ""))
+        head_sha = _normalise_full_sha(
+            str((pr_data.get("head") or {}).get("sha") or "")
+        )
         if not head_sha:
-            print(f"refusing: could not resolve a full 40-char head SHA for {repo}#{pr}")
+            print(
+                f"refusing: could not resolve a full 40-char head SHA for {repo}#{pr}"
+            )
             return 1
         pr_body = pr_data.get("body") or ""
 
         try:
-            lenses, required = await resolve_lenses(
+            lenses, required, excluded = await resolve_lenses(
                 client,
                 repo=repo,
                 pr=pr,
@@ -1320,7 +1445,7 @@ async def run(
 
         floor_names = {r.lens for r in required}
         added = [lens for lens in lenses if lens not in floor_names]
-        _print_derived_lenses(required, added)
+        _print_derived_lenses(required, added, excluded=excluded)
 
         comments = await _fetch_issue_comments(client, repo, pr)
 
@@ -1359,7 +1484,9 @@ async def run(
         if non_required_blocks:
             print("non-required lenses with a LIVE BLOCKING verdict on this head:")
             for b in non_required_blocks:
-                print(f"  - {b.lens} ({b.agent}): {b.verdict or '[BLOCKING] finding'} — {b.comment_url}")
+                print(
+                    f"  - {b.lens} ({b.agent}): {b.verdict or '[BLOCKING] finding'} — {b.comment_url}"
+                )
             print()
 
         all_lenses_pass = all(o.passed for o in lens_outcomes)
@@ -1377,7 +1504,9 @@ async def run(
 
         if not apply:
             print()
-            print("dry run — no review submitted. Pass --apply to submit if the gate is clear.")
+            print(
+                "dry run — no review submitted. Pass --apply to submit if the gate is clear."
+            )
             return 0 if overall_pass else 1
 
         if not overall_pass:
@@ -1400,7 +1529,9 @@ async def run(
             return 1
 
         print()
-        print(f"APPROVED as the App — review id={review.get('id')} state={review.get('state')}")
+        print(
+            f"APPROVED as the App — review id={review.get('id')} state={review.get('state')}"
+        )
         return 0
 
 
@@ -1414,14 +1545,17 @@ def main() -> int:
             "head. The required-lens floor is derived from "
             "review_panel.select_panel for this PR's diff and linked issue; "
             "--lenses can only ADD to that floor. --panel all additionally "
-            "requires the six lenses bootstrap mode actually dispatches "
-            "(pm, arch, ux, qa, security, content — BOOTSTRAP_PANEL_LENSES; "
-            "legal is NOT in this set and joins the floor only when "
-            "select_panel derives it for the diff) to have signed off — "
-            "the bootstrap-mode default (agent_policy "
-            "ent_d0f1a840e549b3b299f62397); pass --panel required to use "
-            "the diff-derived floor alone, or set "
-            "ATELES_APPROVE_PANEL_REQUIRED_ONLY=1 to change the default."
+            "requires the five lenses bootstrap mode actually dispatches "
+            "(pm, arch, ux, qa, security — BOOTSTRAP_PANEL_LENSES; legal is "
+            "NOT in this set and joins the floor only when select_panel "
+            "derives it for the diff; content/Corvus is excluded from "
+            "bootstrap mode outright, per operator ruling, and is stripped "
+            "from the floor even if select_panel would have derived it for "
+            "this diff) to have signed off — the bootstrap-mode default "
+            "(agent_policy ent_d0f1a840e549b3b299f62397); pass --panel "
+            "required to use the diff-derived floor alone (where content "
+            "can still appear), or set ATELES_APPROVE_PANEL_REQUIRED_ONLY=1 "
+            "to change the default."
         )
     )
     parser.add_argument("--repo", required=True, help="owner/name")
@@ -1440,11 +1574,13 @@ def main() -> int:
         default="all" if panel_all_default else "required",
         help=(
             "'all' (default while bootstrap mode is on, see "
-            "ATELES_APPROVE_PANEL_REQUIRED_ONLY) requires every one of the six "
-            "review lenses to have signed off on the current head; 'required' "
+            "ATELES_APPROVE_PANEL_REQUIRED_ONLY) requires every one of the "
+            "five bootstrap-roster review lenses to have signed off on the "
+            "current head, and excludes content/Corvus outright; 'required' "
             "uses only the diff-derived floor from review_panel.select_panel "
-            "(plus --lenses additions). Either way, a live blocking verdict "
-            "from ANY lens — required or not — always refuses the approval."
+            "(plus --lenses additions, where content can still appear). "
+            "Either way, a live blocking verdict from ANY lens — required "
+            "or not — always refuses the approval."
         ),
     )
     parser.add_argument(
