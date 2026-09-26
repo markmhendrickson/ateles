@@ -169,13 +169,25 @@ jobs:
           python3 "$f" --check
 
       # Decision state: the committed docs/foundation/decision_state.md held
-      # equal to a fresh render of origin/main ALONE (ateles#1138). The
-      # committed file is a pure projection of the commit it is checked out
-      # at -- it never reads any other branch -- so this step's verdict does
-      # not move when an unrelated branch moves. The separate cross-branch
-      # "ruled on a branch but not yet merged" view is a report only
-      # (`render_decision_state.py --branches`, printed to stdout), never
-      # committed and never part of this check.
+      # equal to a fresh render of ONE source (ateles#1138). The committed
+      # file is a pure projection of that source -- it never reads any other
+      # branch -- so this step's verdict does not move when an unrelated
+      # branch moves. The separate cross-branch "ruled on a branch but not yet
+      # merged" view is a report only (`render_decision_state.py --branches`,
+      # printed to stdout), never committed and never part of this check.
+      #
+      # --source worktree (the default; named explicitly here) reads
+      # docs/foundation/conformance.md as checked out rather than re-fetching
+      # origin/main. On this job's `pull_request` trigger, `actions/checkout`
+      # has already materialized base-plus-PR as the working tree (GitHub's
+      # own refs/pull/N/merge commit), so a PR that adds or rules a register
+      # row sees that row here and can regenerate decision_state.md correctly
+      # BEFORE it merges -- reading origin/main alone could never see a row
+      # the PR itself is adding, so that render was mechanically incapable of
+      # matching what main needs once the PR lands (ateles#1138 round two,
+      # ateles#1300). On this job's `push`-to-main trigger the working tree
+      # IS that push's own commit, so the source choice makes no difference
+      # there; --source worktree is still named for consistency.
       #
       # Runs on every pull_request in this job's paths filter above AND on
       # every push to main with NO paths filter (ateles#1138): the committed
@@ -198,7 +210,7 @@ jobs:
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           git rev-parse --verify --quiet origin/main >/dev/null || {
             echo "::notice::origin/main not fetchable — decision state skipped"; exit 0; }
-          python3 "$f" --check
+          python3 "$f" --check --source worktree
       # Register narrative: the decision register's prose held to its own table.
       # The rule-coverage contract binds a decision opened in a DOCUMENT to a
       # register row; nothing read the narrative around the table, so the prose

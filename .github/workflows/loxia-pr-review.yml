@@ -5,13 +5,41 @@ name: Loxia — External PR Review
 #
 # Inference uses the shared subscription router; GitHub publication stays here.
 #
+# Canary gate (2026-09-26): bootstrap mode (agent_policy ent_d0f1a840e549b3b299f62397)
+# runs software work through the operator/lens review path, not the swarm
+# panel — so Loxia re-reviewing every push duplicated that work and burned
+# the same Claude subscription quota bootstrap needed. Loxia now runs only
+# for the `swarm-canary` lane: a PR carrying the canary label, or whose
+# linked parent issue carries it. The `gate` job below computes that using
+# the SAME matching rules Apis/Anthus use (`lib/daemon_runtime/label_gate.py`,
+# ATELES_SWARM_REQUIRE_LABEL) so this workflow cannot drift into a different
+# notion of "labelled". `main`'s only required status check today is
+# "gitleaks (secrets + PII)" (verified via `gh api
+# repos/<repo>/branches/main` — Loxia is NOT in required_status_checks), so a
+# job-level `if:` skip is sufficient here: it does not need a fake
+# always-green shadow job to keep a required check satisfied. If Loxia is
+# ever added to required checks, revisit this — GitHub treats a job skipped
+# by `if:` as passing for required-check purposes, but confirm that still
+# holds before relying on it.
+#
 # Triggers:
-#   - pull_request (opened, synchronize) on any branch
-#   - workflow_dispatch for manual invocations
+#   - pull_request (opened, synchronize, reopened, labeled) on any branch
+#     targeting main — `labeled` lets the canary label added AFTER a PR was
+#     opened start review for it. The gate below evaluates CURRENT label
+#     state (PR + parent issue), not the specific label that was just added,
+#     so an unrelated label add on a non-canary PR still correctly denies —
+#     unlike github_gateway.py's own `labeled` handling (see its
+#     _labeled_event_admitted history, ateles#1269), which had to special-case
+#     the triggering label because it fires agent work directly from the
+#     event. This gate only ever flips a boolean read from current state, so
+#     a spurious extra `gate` job run on an unrelated label is a cheap no-op,
+#     not a duplicate review.
+#   - workflow_dispatch for manual invocations (bypasses the gate — an
+#     explicit operator/dispatch invocation is its own authorization).
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -27,8 +55,45 @@ on:
           - true
 
 jobs:
+  gate:
+    name: Loxia canary gate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.base.ref == 'main'
+    outputs:
+      run_review: ${{ steps.check.outputs.run_review }}
+    steps:
+      # Shallow, single-branch checkout: this job only needs
+      # execution/scripts/loxia_canary_gate.py and lib/daemon_runtime/, not
+      # history — keep it cheap since it runs on every PR push, canary or not.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Determine whether this PR is in the swarm-canary lane
+        id: check
+        env:
+          # Same label Apis/Anthus/Formica/neotoma-agent read from
+          # ATELES_SWARM_REQUIRE_LABEL at runtime (lib/daemon_runtime/label_gate.py).
+          # No repo variable exists for it yet (checked 2026-09-26); prefer one
+          # (`vars.ATELES_SWARM_REQUIRE_LABEL`) if it's ever added so this can't
+          # drift from the daemons' own configured value.
+          CANARY_LABEL: ${{ vars.ATELES_SWARM_REQUIRE_LABEL || 'swarm-canary' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "run_review=true" >> "$GITHUB_OUTPUT"
+            echo "workflow_dispatch is an explicit manual invocation — running unconditionally."
+            exit 0
+          fi
+          python execution/scripts/loxia_canary_gate.py
+
   review:
     name: Loxia PR review
+    needs: gate
+    if: needs.gate.outputs.run_review == 'true'
     runs-on: ubuntu-latest
 
     # GITHUB_TOKEN scope: read the code, write the review comment back to the PR.
@@ -36,11 +101,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-
-    # Only run on PRs targeting main
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      github.event.pull_request.base.ref == 'main'
 
     steps:
       - uses: actions/checkout@v4

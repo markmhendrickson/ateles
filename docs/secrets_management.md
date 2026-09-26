@@ -154,6 +154,115 @@ No 1Password in CI at all.
   bootstrap (step above) on each box. To revoke a machine, rotate the age key so
   its old `keys.txt` can no longer decrypt new snapshots.
 
+### Rotating a provider API key (openai / elevenlabs / anthropic)
+
+Operator ruling (master plan `ent_81aadb43caf2fa493361e8ed`, decision
+`credential_rotation_split_by_issuer`): the operator mints provider API keys —
+everything downstream (1Password write, verification, publish, materialize,
+daemon restarts) belongs to the swarm. `execution/scripts/rotate_provider_key.py`
+is the operator-run script that does both halves in one pass, but it is
+**operator-run, not swarm-dispatched** — it talks to your 1Password vault and
+to the provider's admin API, so run it yourself rather than handing it to an
+agent.
+
+It never accepts a secret value on the command line — admin keys are read
+from a 1Password **reference** (`op://vault/item/field`) you pass as an
+argument, and the new value is written back to 1Password by piping a JSON
+template to `op item edit`'s stdin, never as a CLI assignment. The Anthropic
+path (no create endpoint exists) prompts for the new key with `getpass`
+(hidden, not echoed) instead.
+
+Order of operations, every provider: create/accept the new key → write it to
+1Password → verify it with a harmless read-only call → only then, and only if
+you pass `--revoke-old`/`--archive-old`, revoke the old one → run
+`secrets_publish.py` + `secrets_materialize.py` → print the daemons/plists
+that read that var (restart those, not all of them). If verification fails,
+nothing downstream runs and the old key is left alone.
+
+**OpenAI** — creates a new project service account + key
+(`POST /v1/organization/projects/{project_id}/service_accounts`), verifies
+with `GET /v1/models`:
+
+```bash
+python execution/scripts/rotate_provider_key.py openai \
+  --admin-key-ref op://Private/<openai-admin-item>/<field> \
+  --project-id proj_abc123 \
+  --op-item-ref op://Private/<item-that-holds-OPENAI_API_KEY>/<field>
+```
+
+Verify it worked: the command's own `GET /v1/models` check must print
+"new key verified." before anything else runs; independently, `op item get
+<item> --fields label=<field>` (no `--reveal` needed to confirm the edit
+timestamp changed) or check the 1Password item's modified time.
+
+Once you've confirmed the new key works, revoke the OLD service account on a
+second run:
+
+```bash
+python execution/scripts/rotate_provider_key.py openai \
+  --admin-key-ref op://Private/<openai-admin-item>/<field> \
+  --project-id proj_abc123 \
+  --op-item-ref op://Private/<item-that-holds-OPENAI_API_KEY>/<field> \
+  --revoke-old <OLD_SERVICE_ACCOUNT_ID>
+```
+
+**ElevenLabs** — creates a new service-account API key
+(`POST /v1/service-accounts/{service_account_user_id}/api-keys`), verifies
+with `GET /v1/user`:
+
+```bash
+python execution/scripts/rotate_provider_key.py elevenlabs \
+  --admin-key-ref op://Private/<elevenlabs-admin-item>/<field> \
+  --service-account-user-id user_abc123 \
+  --op-item-ref op://Private/<item-that-holds-ELEVENLABS_API_KEY>/<field> \
+  --permission speech_to_text
+```
+
+Verify it worked: same "new key verified." line, backed by the `GET /v1/user`
+call; the response's account details should match your ElevenLabs
+account. `--permission` is repeatable; omit it to default to
+`speech_to_text` only (least privilege for tyto's diarization use).
+
+Once confirmed, delete the OLD key on a second run:
+
+```bash
+python execution/scripts/rotate_provider_key.py elevenlabs \
+  --admin-key-ref op://Private/<elevenlabs-admin-item>/<field> \
+  --service-account-user-id user_abc123 \
+  --op-item-ref op://Private/<item-that-holds-ELEVENLABS_API_KEY>/<field> \
+  --revoke-old <OLD_KEY_ID>
+```
+
+**Anthropic** — no create endpoint exists in the Admin API docs
+(`platform.claude.com/docs/en/api/admin-api/apikeys`, checked 2026-09-26), so
+mint the key yourself in the Anthropic console first, then run:
+
+```bash
+python execution/scripts/rotate_provider_key.py anthropic \
+  --op-item-ref op://Private/<item-that-holds-ANTHROPIC_API_KEY>/<field>
+# prompts: Paste the new ANTHROPIC key (input hidden, not echoed):
+```
+
+Verify it worked: the same "new key verified." line, backed by `GET
+/v1/models` using the pasted key. Once confirmed, archive the OLD key (visible
+in the Anthropic console as `api_key_id`) in a second run:
+
+```bash
+python execution/scripts/rotate_provider_key.py anthropic \
+  --op-item-ref op://Private/<item>/<field> \
+  --admin-key-ref op://Private/<anthropic-admin-item>/<field> \
+  --archive-old apikey_01XXXXXXXXXXXXXXXXXXXXXXXX
+```
+
+Anthropic has no delete endpoint — archive/inactive is the only lifecycle
+action — so this is the terminal step for that provider.
+
+Every run ends by publishing the encrypted snapshot, materializing it, and
+printing the daemons/plists known to consume that var (e.g. `com.ateles.apis`
+for `ANTHROPIC_API_KEY`) so you know what to restart; pass `--no-downstream`
+to skip that and do it by hand. Nothing this script does prints a key value —
+its final summary reports only ids/hints.
+
 ## Agent signing keys (encrypted backup)
 
 Each swarm agent signs its Neotoma requests with its own AAuth key,
@@ -178,6 +287,185 @@ cd ~/repos/ateles-private && git add keys/encrypted && git commit -m "chore(keys
 bytes, so committed ciphertext only changes when a key does. `restore --force`
 overwrites an existing plaintext file. Like the snapshots, decryption needs only
 the machine-local age key; no script here prints key material.
+
+## Swarm-run rotation of shared internal secrets
+
+Operator ruling (`conformance.md` register row 118 / `authority_model.md#grants`,
+2026-09-26, decision `credential_rotation_split_by_issuer`): a credential the
+swarm both issues and consumes — a shared secret internal to the record, an
+agent's signing key — is rotated by the swarm **unattended**, through the
+dual-admit staging `authority_model.md#grants` already requires, plus a live
+verification before the old value retires. A failed (or unrunnable) check is
+not a hold: the rotation rolls back automatically, and either outcome is
+written for the operator to read rather than approved in advance.
+
+`execution/scripts/rotate_swarm_secret.py` covers the two shared secrets named
+as first users of that ruling — `APIS_GITHUB_WEBHOOK_SECRET` (issuer: the
+GitHub webhook config on `markmhendrickson/ateles` and
+`markmhendrickson/neotoma`) and `APIS_APPROVE_EMAIL_SECRET` (internal-only,
+between `apis` and `turdus`) — both consumed by `apis`'s
+`execution/daemons/apis/github_gateway.py`. Sequence: generate a new value in
+memory → stage it in the consumer's `_NEXT` slot (`APIS_GITHUB_WEBHOOK_SECRET_NEXT`
+/ `APIS_APPROVE_EMAIL_SECRET_NEXT`), which `github_gateway.make_app` accepts
+alongside the current value during the overlap window → restart the one
+consuming daemon → send a real signed probe under the NEW value, which the
+script signs **itself** (no GitHub involvement at all — dual-admit already
+lets the daemon accept it) → **only if that probe passes**, and for the
+webhook secret only, update the GitHub issuer to the new value → on success,
+promote the new value to primary, retire the old one, clear `_NEXT`, restart
+again; on a failed probe, clear `_NEXT` and leave the old value as primary
+(rollback), restart again so the daemon returns to exactly its pre-rotation
+state.
+
+**Ordering fix (2026-09-26 review of PR #1306):** an earlier revision updated
+the GitHub issuer *before* verifying, so a failed verification rolled the
+daemon back to the old value while GitHub was left signing with the new
+one — every real delivery would then fail signature verification (401) until
+someone noticed and fixed GitHub's config by hand. Verifying first, with a
+probe the script signs itself, means the daemon-side half of the rotation is
+proven safe with zero GitHub involvement, so a failed probe can never leave
+GitHub and the daemon disagreeing — GitHub was simply never told about the
+new value. The one case this does not eliminate — the issuer update itself
+failing (or timing out) *after* the probe already passed — is not a rollback
+(the daemon-side change is proven good) and not a promotion (GitHub's actual
+state is now unconfirmed): `run_rotation` raises a **checkpoint** instead,
+leaving dual-admit ON (so no delivery is ever rejected either way) and
+stopping rather than guessing. `RotationReport.checkpoint_raised` and the
+CLI's exit code `2` both surface this distinctly from a rollback (exit `1`)
+or a successful rotation (exit `0`).
+
+```bash
+python execution/scripts/rotate_swarm_secret.py github_webhook_secret --dry-run
+python execution/scripts/rotate_swarm_secret.py approve_email_secret --dry-run
+```
+
+`--dry-run` is the only mode this repo's tests and examples exercise: it
+prints the full plan — which files, vars, and daemon get touched, and what the
+live probe will POST — with every value shown as `<redacted>`, and makes no
+write, no HTTP call, no `launchctl` call. A real run additionally requires
+`--i-know-this-calls-real-github` (webhook secret only, tripwire for the
+GitHub write) and `ATELES_ALLOW_DAEMON_RESTART=1` in the *process's own*
+environment (never accepted as a CLI value) before it restarts anything; the
+agent AAuth signing keys named in the same ruling are **not** covered by this
+script yet — the credential registry entry for
+`AAUTH_SIGNING_KEY_APUS`/`AAUTH_SIGNING_KEY_FORMICA` records the current path
+as the manual dual-admit procedure proven 2026-09-25, pending a follow-up
+task to script it.
+
+Verify it worked: the printed outcome line reads `rolled forward (new value
+promoted, old retired)`, `rolled back (old value retained)`, or `CHECKPOINT —
+dual-admit left ON, manual resolution required` — never silent, and the exit
+code (`0` / `1` / `2` respectively) distinguishes the same three outcomes for
+scripting. Independently, `secrets_keys.py`-style verification applies:
+decrypt `secrets/neotoma.sops.env` and confirm the `_NEXT` slot is absent
+after a rolled-forward or rolled-back outcome (present only mid-rotation, or
+deliberately still present after a checkpoint), and that `apis`'s live
+process picked up the change (`launchctl print gui/$(id -u)/com.ateles.apis |
+grep -A2 EnvironmentVariables`, or simply that a subsequent live probe
+against the daemon still returns 200/400 as expected). A checkpoint outcome
+means GitHub's actual webhook secret is unconfirmed — resolve it by hand
+(check the webhook config in GitHub's UI or via `gh api
+repos/<owner>/<repo>/hooks/<id>`, no `--reveal` of a secret involved since
+GitHub never returns the secret value itself) before running the script
+again. Nothing this script does prints a secret value at any point.
+
+## Credential registry (Neotoma)
+
+The `credential` entity type (registered additively, schema v1.0, activated
+2026-09-26) is the record of which credentials exist, never their values:
+`env_var_name`, `issuer_class` (`swarm_issued_and_consumed` /
+`provider_minted` / `root`, per conformance.md row 118's three-way split),
+`consumers`, `rotation_owner`, `rotation_method`, `last_rotated_at`. Rows
+seeded so far: `APIS_GITHUB_WEBHOOK_SECRET`, `APIS_APPROVE_EMAIL_SECRET`,
+`AAUTH_SIGNING_KEY_APUS`, `AAUTH_SIGNING_KEY_FORMICA` — the credentials named
+as first users of the swarm-run rotation ruling. Query it with
+`retrieve_entities(entity_type="credential")` on the operator Neotoma
+instance; add a row whenever a new swarm-issued-and-consumed credential is
+minted, never a value.
+
+### Prior-art check (why a new type, not an existing one)
+
+Before registering, five existing Neotoma schemas were checked for fit. None
+carries an issuer class, a consumer list, or a rotation method together, which
+is the specific gap this registry exists to close — each comparison below
+states the actual fields checked, not just the verdict, per arch review on
+PR #1306 (the reasoning belongs in this doc, not only in a PR thread that
+scrolls away — CLAUDE.md: "a hand-maintained view of a moving register is
+wrong by construction," applied here to the durability of a design decision
+rather than to a plan field).
+
+- **`credential_health`** — fields: `service`, `kind`, `used_by`,
+  `check_method`, `status`, `last_verified_at`, `last_checked_at`,
+  `expires_at`, `reauth_action`, `visibility`. This is a **liveness monitor**
+  for external sessions (OAuth tokens, browser sessions) — it answers "is
+  this credential currently working" via a probe (`check_method`) and what to
+  do if not (`reauth_action`), for a single `used_by` consumer. It has no
+  field for who is *authorized* to rotate a credential (`rotation_owner`),
+  no field for the rotation *procedure* (`rotation_method`), no field for
+  *multiple* consumers, and no `issuer_class` distinguishing swarm-issued
+  from provider-minted from root. Ruled out: this type answers "is it alive
+  right now", the registry answers "who may replace it and how."
+- **`credential_reference`** — fields: `canonical_name`, `role`,
+  `sender_kind`, `content`, `turn_key`, `service`, `purpose`,
+  `storage_location`, `bot_username`, `bot_id`, `chat_id`,
+  `env_var_token`, `env_var_chat_id`. Despite the name, this is a
+  **Telegram-bot-specific** shape — `bot_id`, `chat_id`, `turn_key`,
+  `sender_kind` are all chat-bot concepts with no analog for a webhook
+  secret or a signing key. It has no `issuer_class`, `consumers` (plural),
+  `rotation_owner`, or `rotation_method` field either. Ruled out: not a
+  general credential shape at all, and even setting that aside, missing
+  every field this registry needs.
+- **`vendor_binding`** — fields: `capability`, `vendor`, `tool_namespace`,
+  `credential_location`, `fallback`, `constraints`, `notes`, `visibility`.
+  This is the closest of the five, and the one CLAUDE.md itself names as the
+  home for "third-party tools" and "channels" config, so it deserved the
+  most scrutiny. `credential_location` states *where* a credential lives
+  ("generic", per its own description — e.g. an env-key name), which
+  overlaps `env_var_name`, but the type's whole shape is oriented around
+  **a capability slot filled by a vendor** (`capability` + `vendor` +
+  `tool_namespace` is the identity), not around a credential's own
+  lifecycle. It has no `issuer_class`, no `rotation_owner`, no
+  `rotation_method`, no `last_rotated_at`. Overloading it would mean adding
+  four rotation-specific fields to a type whose canonical identity
+  (`capability`) is not a credential at all — `APIS_GITHUB_WEBHOOK_SECRET`
+  and `APIS_APPROVE_EMAIL_SECRET` are not "vendors filling a capability
+  slot," they are internal shared secrets with no vendor on either end.
+  Ruled out: right neighborhood, wrong identity axis — a `vendor_binding`
+  row answers "which tool did we pick for this job," not "who may rotate
+  this credential and how."
+- **`deployment_configuration`** — fields: `system`, `project`,
+  `environment`, `variables_added`, `variables_pending`, `fly_app`,
+  `public_domain`, `region`, `deploy_branch`, `build_args`,
+  `deploy_command`, plus (per its own doc) `gotchas`. `variables_added` /
+  `variables_pending` record env var **names** already configured for a
+  hosted instance, which is the same "names only, never values" discipline
+  this registry follows, but the type's identity is a **deployment target**
+  (`system` + `project` + `environment`), not a credential — a row exists
+  per Fly app / environment, not per credential, and there is no
+  `issuer_class`, `consumers` list, `rotation_owner`, or `rotation_method`
+  anywhere in it. `APIS_GITHUB_WEBHOOK_SECRET` is not scoped to one
+  deployment; it is consumed by `apis` wherever that daemon runs. Ruled out:
+  answers "what does this deployment need configured," not "who owns
+  rotating this specific credential."
+- **`env_var_mappings`** — fields: `env_var`, `op_reference`, `vault`,
+  `item_name`, `service`, `is_optional`, `notes`. This is the mirror of
+  `ateles-private/secrets/manifest.env-map.json` — it maps an env var name to
+  **where its value is sourced from in 1Password**, for the publish/
+  materialize flow this same doc describes above. It is the type structurally
+  closest to "just an env var name," which made it worth checking carefully,
+  but it has no `issuer_class`, `consumers`, `rotation_owner`, or
+  `rotation_method` field, and its purpose (source-of-truth location) is
+  orthogonal to this registry's purpose (who may rotate it and how) — a
+  credential can appear in `env_var_mappings` and still need a `credential`
+  row, and vice versa (an AAuth signing key has no 1Password `op_reference`
+  at all; it lives in `ateles-private/keys/`). Ruled out: answers "where do I
+  read this value from," not "who may replace it."
+
+**Conclusion:** no existing type carries `issuer_class` + `consumers` +
+`rotation_owner` + `rotation_method` together, which is the minimum a
+rotation script needs to know before it acts. Registering `credential`
+additively (no existing schema modified) closes that gap without duplicating
+any of the five above.
 
 ## Security properties
 

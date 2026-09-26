@@ -72,17 +72,18 @@ line so a session (and a test) can see which one ran without re-deriving it:
             rules from the index is real information loss, and silence
             about it is exactly the failure this file exists to avoid.
 
-Scope filter: `policy_binds_agent` (`lib/daemon_runtime/agent_loader.py`) is
+Scope filter: `policy_binds_agent_by_edge` (`lib/daemon_runtime/agent_loader.py`) is
 imported, never re-implemented — CLAUDE.md's "extend the mechanism that
-already generalizes" rule, and the specific mechanism ateles#1118 fixed. A
-session runs as ONE agent, the session principal (`ATELES_SESSION_PRINCIPAL`,
-default the operator's interactive agent — the same principal
-`execution/mcp/ateles/server.py` resolves rules for on the other session
-transport). The index holds the rows that bind that principal: every
-`global`/`swarm` row, plus an `agent`-scoped row only when its `agent_sub`
-names the principal. A row scoped to a different agent is withheld; a row
-whose `scope` is absent or outside the closed vocabulary
-(`agent_loader.POLICY_SCOPES`) is withheld too. See `_session_scope_ok`.
+already generalizes" rule, and the specific mechanism ateles#1118 fixed and
+decision 114 (2026-09-25) superseded. A session runs as ONE agent, the
+session principal (`ATELES_SESSION_PRINCIPAL`, default the operator's
+interactive agent — the same principal `execution/mcp/ateles/server.py`
+resolves rules for on the other session transport). The index holds the rows
+that bind that principal: every `global`/`swarm` row with no `GOVERNS` edge,
+plus a row with a `GOVERNS` edge to the principal's own `agent_definition`.
+A row edged to a different agent is withheld; a row whose `scope` is absent
+or outside the closed vocabulary (`agent_loader.POLICY_SCOPES`) AND carries
+no edge is withheld too. See `_session_scope_ok`.
 
 `applies_when` is a newer field than the ones `docs/foundation/data_model.md`
 already documents for `agent_policy` (`rule`, `rule_kind`, `scope`,
@@ -122,18 +123,26 @@ if str(_THIS_DIR) not in sys.path:
 
 try:  # package import (normal runtime) with script-import fallback
     from .agent_loader import (  # type: ignore
+        AGENT_POLICY_GOVERNS_EDGE,
         POLICY_QUERY_BODY,
         POLICY_SCOPES,
         POLICY_SCOPES_REACHING_EVERY_AGENT,
+        fetch_governs_edges,
         policy_binds_agent,
+        policy_binds_agent_by_edge,
+        resolve_agent_definition_id,
         unwrap_policy_entities,
     )
 except ImportError:  # pragma: no cover
     from agent_loader import (  # type: ignore
+        AGENT_POLICY_GOVERNS_EDGE,
         POLICY_QUERY_BODY,
         POLICY_SCOPES,
         POLICY_SCOPES_REACHING_EVERY_AGENT,
+        fetch_governs_edges,
         policy_binds_agent,
+        policy_binds_agent_by_edge,
+        resolve_agent_definition_id,
         unwrap_policy_entities,
     )
 
@@ -154,10 +163,12 @@ DEFAULT_SESSION_PRINCIPAL = "ateles@ateles-swarm"
 
 
 def session_principal() -> str:
-    """The `agent_sub` this session evaluates `agent`-scoped rows against.
-    Read at call time, not import time, so the hook and tests see the
-    environment they actually run in. An explicitly empty value binds no
-    `agent`-scoped row (`policy_binds_agent` never matches an empty sub)."""
+    """The `agent_sub` this session resolves to an `agent_definition` id
+    (via `resolve_agent_definition_id`) before evaluating `GOVERNS`-edged
+    rows against it. Read at call time, not import time, so the hook and
+    tests see the environment they actually run in. An explicitly empty
+    value resolves to no `agent_definition` id and so binds no edge-scoped
+    row (`policy_binds_agent_by_edge` never matches an empty id)."""
     return os.environ.get(SESSION_PRINCIPAL_ENV, DEFAULT_SESSION_PRINCIPAL).strip()
 
 # The one literal spelling that promotes a rule into the preamble. Anything
@@ -391,37 +402,59 @@ def fetch_active_policy_rows(
     return unwrap_policy_entities(data)
 
 
-def _session_scope_ok(snap: dict, principal: str | None = None) -> bool:
+def _session_scope_ok(
+    snap: dict,
+    principal: str | None = None,
+    *,
+    agent_definition_id: "str | None" = None,
+    governs: "dict[str, frozenset[str]] | None" = None,
+) -> bool:
     """Whether one row belongs in THIS session's index.
 
     A session runs as one agent — the session principal (`session_principal()`,
     default the operator's interactive agent) — so a row is in scope exactly
-    when it binds that agent, decided by the daemon dispatcher's own
-    predicate, `policy_binds_agent(snap, principal)`, with the principal
-    supplied from OUTSIDE the row. (An earlier revision passed the row's own
-    `agent_sub` back in as the identity, which compared the field with itself
-    and admitted every row that had one — ateles#1268 rounds 1 and 3.)
+    when it binds that agent, decided by the SAME shared predicate the
+    daemon loader uses, `policy_binds_agent_by_edge(snap, agent_definition_id,
+    governs)` (operator ruling 2026-09-25, decision 114). `agent_sub` is
+    read NOWHERE here — a copied predicate is how the two readers drift, and
+    `policy_binds_agent_by_edge` is the ONE place both consult.
 
-    Case by case:
-      - `scope` absent, empty, or outside the closed vocabulary
-        (`agent_loader.POLICY_SCOPES`: global, swarm, agent) -> withheld,
-        whatever `agent_sub` says. `scope` carries the reach of a rule, so an
-        unreadable value fails CLOSED (principles.md #5). This is stricter than
-        `policy_binds_agent` alone, which would still bind such a row to an
-        exactly-matching `agent_sub`; the session index refuses it outright.
-      - `global` / `swarm` -> included.
-      - `agent` -> included only when `agent_sub` equals the session
-        principal. A row scoped to any other agent is withheld, as is one
-        with no `agent_sub`. If the principal is set to an empty string, no
-        `agent`-scoped row is included.
+    Case by case (identical to `policy_binds_agent_by_edge`'s own doc):
+      - A row with a `GOVERNS` edge to ANY agent binds ONLY the agent(s) it
+        has an edge to, regardless of `scope`.
+      - A row with no edge binds every agent when `scope` is `global` or
+        `swarm`.
+      - A row with no edge and no recognised swarm-wide `scope` binds
+        NOBODY — the fail-closed default (`principles.md #5`); an
+        `agent`-scoped row that has not been migrated to an edge is no
+        longer read by its `agent_sub` at all, since that field (and
+        `scope: agent`) are superseded by the edge, not a fallback to it.
 
-    `principal=None` reads `session_principal()`; tests pass one explicitly.
+    `principal` is `session_principal()` by default (or an explicit override
+    in a test) — it is NEVER compared against a row's `agent_sub` (that
+    field is superseded), but it is still the identity `agent_definition_id`
+    is resolved FROM when the caller has not already resolved one.
+    Resolving a principal's `agent_sub` to its `agent_definition` entity id
+    is itself a Neotoma read, so `render_skills` resolves it ONCE per call
+    and passes the result in as `agent_definition_id`, never re-resolving
+    per row; a direct caller of this function (tests; a caller that already
+    has the id) may pass `agent_definition_id` explicitly to skip that
+    lookup entirely. When neither is available, no edge can ever match, so
+    a row is included only through the swarm-wide `scope` branch above —
+    the same fail-closed posture an unresolvable principal already had
+    under the field-based predicate. `governs=None` treats every row as
+    edgeless, for the same reason: never an implicit per-row fetch.
     """
     scope = str(snap.get("scope") or "").strip().lower()
-    if scope not in POLICY_SCOPES:
+    entity_id = str(snap.get("_entity_id") or snap.get("entity_id") or "")
+    edge_targets = (governs or {}).get(entity_id, frozenset())
+    if scope not in POLICY_SCOPES and not edge_targets:
         return False
-    sub = session_principal() if principal is None else principal.strip()
-    return policy_binds_agent(snap, sub)
+    resolved_id = agent_definition_id
+    if resolved_id is None and edge_targets:
+        sub = session_principal() if principal is None else principal.strip()
+        resolved_id = resolve_agent_definition_id(sub) if sub else None
+    return policy_binds_agent_by_edge(snap, resolved_id or "", governs or {})
 
 
 def to_skill(snap: dict) -> PolicySkill | None:
@@ -501,12 +534,26 @@ def to_skill(snap: dict) -> PolicySkill | None:
 
 
 def render_skills(
-    rows: list[dict], principal: str | None = None
+    rows: list[dict],
+    principal: str | None = None,
+    *,
+    agent_definition_id: "str | None" = None,
+    governs: "dict[str, frozenset[str]] | None" = None,
 ) -> list[PolicySkill]:
     """Session-scoped rows, projected to PolicySkill, preamble first.
 
-    Scoping is `_session_scope_ok(row, principal)`; `principal=None` means
-    the session principal from the environment (see `session_principal`).
+    Scoping is `_session_scope_ok(row, principal, agent_definition_id=,
+    governs=)`; `principal=None` means the session principal from the
+    environment (see `session_principal`).
+
+    `agent_definition_id` and `governs` are resolved ONCE here (not once per
+    row) when the caller has not already supplied them — a `GOVERNS` fetch
+    or an `agent_definition` lookup per row would turn one session-start
+    read into N. Both degrade to "resolve/bind nothing" on a Neotoma
+    failure rather than raising: a caller that cannot reach the edge data
+    still gets the swarm-wide (`global`/`swarm`) rows, which is the same
+    fail-open-on-transport / fail-closed-on-data posture every other read
+    in this module takes.
 
     Rows that sanitize to nothing renderable are SKIPPED, not raised —
     Falco's fix says "skip the row and count it," and one malformed or
@@ -514,7 +561,43 @@ def render_skills(
     logged at WARNING so a real data problem (not just an attack) is still
     visible.
     """
-    scoped = [r for r in rows if _session_scope_ok(r, principal)]
+    resolved_governs = governs
+    if resolved_governs is None:
+        try:
+            resolved_governs = fetch_governs_edges(NEOTOMA_BASE_URL, _request=_request)
+        except Exception as exc:  # noqa: BLE001 — degrade to edgeless, don't raise
+            log.warning(
+                "could not fetch GOVERNS edges for the session index: %s: %s — "
+                "treating every row as edgeless",
+                type(exc).__name__, exc,
+            )
+            resolved_governs = {}
+
+    resolved_definition_id = agent_definition_id
+    if resolved_definition_id is None:
+        sub = session_principal() if principal is None else principal.strip()
+        if sub:
+            try:
+                resolved_definition_id = resolve_agent_definition_id(
+                    sub, NEOTOMA_BASE_URL, _request=_request
+                )
+            except Exception as exc:  # noqa: BLE001 — unresolvable, don't raise
+                log.warning(
+                    "could not resolve agent_definition id for %r: %s: %s",
+                    sub, type(exc).__name__, exc,
+                )
+                resolved_definition_id = None
+
+    scoped = [
+        r
+        for r in rows
+        if _session_scope_ok(
+            r,
+            principal,
+            agent_definition_id=resolved_definition_id,
+            governs=resolved_governs,
+        )
+    ]
     skills: list[PolicySkill] = []
     skipped = 0
     for r in scoped:

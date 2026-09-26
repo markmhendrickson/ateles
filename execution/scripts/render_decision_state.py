@@ -40,6 +40,29 @@ commit; it is a projection of whatever else happened to be on the remote at fetc
 time. See ``collect_main`` (committed) and ``collect_branches`` (report-only)
 below.
 
+**Round two: which commit "the checked-out commit" means.** Fixing the first
+defect by pinning the read to ``origin/main`` introduced a narrower one: a PR
+that adds or rules a register row could never regenerate this document
+correctly, because ``origin/main`` does not have that row until the PR merges.
+``ateles#1300`` hit this directly -- its own regeneration attempt found
+``--check`` already red against ``origin/main`` for unrelated reasons and
+could not tell that from "my new row makes this red", because reading
+``origin/main`` can never see a row that only exists on the PR's own branch.
+The moment such a PR merged, the committed file was stale on ``main`` with no
+PR-side check able to have caught it. The fix is ``register_at``'s
+``WORKTREE_SOURCE`` and ``collect_main``'s ``source`` parameter: the CLI's
+default (``--source worktree``) reads ``docs/foundation/conformance.md`` off
+the checked-out working tree rather than re-fetching a ref. On this repo's
+``pull_request`` CI binding, ``actions/checkout`` has already materialized
+base-plus-PR as that working tree (GitHub's own ephemeral
+``refs/pull/N/merge`` commit) before this script runs, so the working tree
+*is* the PR's own merge result -- the row it just added is visible, and the
+PR's regeneration matches what the file needs to be once it merges. On the
+``push``-to-``main`` binding the two sources agree, since the working tree is
+that push's own commit, so nothing about that binding's verdict changes.
+``--source main`` keeps the old always-refetch behaviour for a caller with no
+working tree to trust.
+
 **Why this is generated and not authored.** The predecessor plan carried its
 blockers in a hand-maintained ``decision_blockers`` array; a union-reducer defect
 stacked three generations of entries, several of which had become false —
@@ -130,7 +153,10 @@ runs it both on every ``pull_request`` this job's paths filter matches AND on
 every ``push`` to ``main`` with no paths filter -- the push binding exists
 because the committed document is main's own state, so a push that changes no
 foundation path can still leave it stale, and a paths filter there would skip
-exactly that push silently.
+exactly that push silently. Both bindings pass ``--source worktree``
+(explicitly in the workflow, by default in ``lint.sh``) so a row-adding PR
+regenerates against its own merge result rather than a stale ``origin/main``
+(ateles#1138 round two).
 """
 
 from __future__ import annotations
@@ -147,6 +173,12 @@ FOUNDATION_DIR = Path("docs/foundation")
 REGISTER_DOC = "conformance.md"
 DEFAULT_OUT = FOUNDATION_DIR / "decision_state.md"
 MAIN_REF = "origin/main"
+
+# Sentinel for `register_at`/`collect_main`: read the register from the
+# checked-out working tree rather than a git ref. This is the default source
+# for the committed document -- see `collect_main` for why a row-adding PR
+# cannot regenerate correctly against `origin/main` alone.
+WORKTREE_SOURCE = "WORKTREE"
 
 # A register row: "| 73 | question | pointer | blocks | **open** (date) |", or
 # the combined "| 1–12 |" row. The status is the LAST cell.
@@ -355,7 +387,25 @@ def same_subject(a: tuple[str, str], b: tuple[str, str]) -> bool:
 
 
 def register_at(ref: str) -> dict[str, dict[str, str]] | None:
-    """The register table as it stands at `ref`, or None if it has no copy."""
+    """The register table as it stands at `ref`, or None if it has no copy.
+
+    ``ref == WORKTREE_SOURCE`` reads the file straight off the checked-out
+    working tree instead of asking git for a ref's blob. See ``collect_main``
+    for why this is the default for the committed document: on a `pull_request`
+    run, `actions/checkout` has already materialized base-plus-PR as the
+    working tree (the ephemeral `refs/pull/N/merge` commit), and a PR that adds
+    a register row needs THAT content, not a re-fetch of `origin/main` alone,
+    to regenerate correctly before it merges.
+    """
+    if ref == WORKTREE_SOURCE:
+        path = FOUNDATION_DIR / REGISTER_DOC
+        if not path.is_file():
+            return None
+        out = path.read_text(encoding="utf-8", errors="replace")
+        if not out.strip():
+            return None
+        rows = parse_rows(out)
+        return rows or None
     code, out = run(["git", "show", f"{ref}:{FOUNDATION_DIR}/{REGISTER_DOC}"])
     if code != 0 or not out.strip():
         return None
@@ -482,32 +532,58 @@ def is_superseded(
     return main_row["status"] == "reopened"
 
 
-def collect_main() -> list[Row]:
-    """Build every row's axes from ``origin/main`` alone.
+def collect_main(source: str = MAIN_REF) -> list[Row]:
+    """Build every row's axes from a single source: ``source``.
 
     This is the ONLY input to the committed document and to ``--check``. It
-    reads exactly one ref, so its output is a pure function of the commit
-    ``origin/main`` points at -- nothing about any other branch, and nothing
-    about which refs a particular clone happens to have fetched, can change it.
-    That determinism is the fix for the defect that made this document
-    committed-but-unreproducible: the previous version swept every
-    `origin/*` branch into the committed file, so the file changed whenever
-    *any* branch moved, `--check` failed on PRs whose own content was
-    unchanged, and each regeneration invalidated whatever a review lens had
-    already signed off on.
+    reads exactly one source, so its output is a pure function of that source
+    -- nothing about any other branch, and nothing about which refs a
+    particular clone happens to have fetched, can change it. That determinism
+    is the fix for the defect that made this document committed-but-
+    unreproducible: the previous version swept every `origin/*` branch into
+    the committed file, so the file changed whenever *any* branch moved,
+    `--check` failed on PRs whose own content was unchanged, and each
+    regeneration invalidated whatever a review lens had already signed off on.
 
-    Every row's ``ruled``/``merged`` therefore collapse to what ``main`` itself
-    says: a row main has ruled is both ruled and merged, and a row main has not
+    ``source`` defaults to ``MAIN_REF`` (``origin/main``, read via ``git
+    show``) -- the historical behaviour, still correct for a plain local run
+    and for the `push`-to-`main` CI binding, where the working tree already
+    IS that commit.
+
+    Pass ``source=WORKTREE_SOURCE`` to read the register straight off the
+    checked-out working tree instead of re-fetching a ref. This is what the
+    `pull_request` CI binding now does (ateles#1138 round two): a PR that
+    adds or rules a register row cannot regenerate `decision_state.md`
+    correctly against `origin/main` alone, because that row does not exist on
+    `origin/main` until the PR merges -- the render is mechanically incapable
+    of matching what the file will need to be once merged, no matter how
+    carefully the PR regenerates. `actions/checkout` on a `pull_request` event
+    has already materialized base-plus-PR as the working tree (GitHub's own
+    ephemeral `refs/pull/N/merge` commit), so reading the working tree gives
+    the PR's own merge result, and the PR can pass `--check` on its own
+    content before it ever merges. On `push` to `main` the two sources agree
+    (the working tree is that push's commit), so switching a caller from one
+    to the other never changes that binding's verdict.
+
+    Every row's ``ruled``/``merged`` therefore collapse to what this source
+    says: a row it has ruled is both ruled and merged, and a row it has not
     is neither. The "ruled on a branch but not yet merged" distinction needs a
     second ref to exist at all, so it is not knowable from this function --
     see ``collect_branches``.
     """
-    main_rows = register_at(MAIN_REF)
+    main_rows = register_at(source)
     if main_rows is None:
-        raise SystemExit(
-            f"decision state: no register table at {MAIN_REF}:"
-            f"{FOUNDATION_DIR}/{REGISTER_DOC} — fetch the remote first"
+        where = (
+            "the checked-out working tree"
+            if source == WORKTREE_SOURCE
+            else f"{source}:{FOUNDATION_DIR}/{REGISTER_DOC}"
         )
+        hint = (
+            "checkout has no docs/foundation/conformance.md"
+            if source == WORKTREE_SOURCE
+            else "fetch the remote first"
+        )
+        raise SystemExit(f"decision state: no register table at {where} — {hint}")
 
     rows = [
         Row(
@@ -665,8 +741,9 @@ def render(rows: list[Row]) -> str:
     )
     add(
         "<!-- Source: conformance.md#the-register-of-open-design-decisions, read "
-        f"on {MAIN_REF} only. Run with --branches for the cross-branch, "
-        "report-only view (never committed). -->"
+        "from exactly one source (the checked-out working tree by default; "
+        f"{MAIN_REF} via --source main). Run with --branches for the "
+        "cross-branch, report-only view (never committed). -->"
     )
     add("")
     add("# Decision state: ruled, merged, implemented")
@@ -675,10 +752,11 @@ def render(rows: list[Row]) -> str:
         "**Kind:** foundation companion; generated, never authored. **Generated by:** "
         "`execution/scripts/render_decision_state.py`, held equal to its source by "
         "`--check` in `scripts/lint.sh`. **Source:** the register table at "
-        "`conformance.md#the-register-of-open-design-decisions`, read on "
-        f"`{MAIN_REF}` only, so this document is a deterministic function of the "
-        "commit it is generated from and does not change when any other branch "
-        "moves."
+        "`conformance.md#the-register-of-open-design-decisions`, read from exactly "
+        "one source -- the checked-out working tree by default, or "
+        f"`{MAIN_REF}` via `--source main` -- so this document is a deterministic "
+        "function of what is checked out and does not change when any other "
+        "branch moves."
     )
     add("")
     add(
@@ -953,8 +1031,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="compare only -- does not write. Exits 1 if the file on disk differs "
-        f"from a fresh render of {MAIN_REF} alone, or if it is missing. On a "
+        help="compare only -- does not write. Exits 1 if the file on disk "
+        "differs from a fresh render of --source, or if it is missing. On a "
         "differ or missing file, write the regenerated file yourself with "
         "python3 execution/scripts/render_decision_state.py -- the output is "
         "generated and is never hand-edited.",
@@ -969,6 +1047,21 @@ def main(argv: list[str] | None = None) -> int:
         "row-number collisions) to stdout instead of rendering the committed "
         "document. Never written to disk; not part of --check.",
     )
+    parser.add_argument(
+        "--source",
+        choices=("main", "worktree"),
+        default="worktree",
+        help="where the committed document's ONE input comes from: 'worktree' "
+        "(default) reads docs/foundation/conformance.md as checked out -- on a "
+        "pull_request CI run this is base-plus-PR, GitHub's own merge result, "
+        "so a PR that adds a register row regenerates correctly before it "
+        "merges (ateles#1138 round two). 'main' re-fetches origin/main via git "
+        "show instead, ignoring the working tree entirely -- the pre-fix "
+        "behaviour, kept for a run with no working tree to trust. On push to "
+        "main the two agree, since the working tree IS that push's commit. "
+        "Ignored with --branches, which always reads origin/main plus every "
+        "origin/* branch.",
+    )
     args = parser.parse_args(argv)
 
     if args.branches:
@@ -980,7 +1073,8 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write(render_branches(rows, refs_read, refs_stale, collisions))
         return 1 if collisions else 0
 
-    rows = collect_main()
+    source = WORKTREE_SOURCE if args.source == "worktree" else MAIN_REF
+    rows = collect_main(source)
 
     if args.json:
         sys.stdout.write(as_json(rows))

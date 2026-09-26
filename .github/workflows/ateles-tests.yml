@@ -37,6 +37,10 @@ on:
       - "lib/github_app_token.py"
       - "lib/test_github_app_token.py"
       - "execution/scripts/**"
+      # Rule-delivery evals: the offline harness tests import the real
+      # policy_skill_renderer (already covered by lib/daemon_runtime/**), so a
+      # renderer change that alters what a channel delivers re-runs them.
+      - "execution/evals/**"
       - "pyproject.toml"
       - "uv.lock"
       - "scripts/linters/check_agent_roster.py"
@@ -133,6 +137,11 @@ jobs:
       # scripts/lint.sh bare-python regression eval.
       - name: Run execution/scripts tests
         run: uv run --extra dev python -m pytest execution/scripts/ -q
+      # Rule-delivery eval harness, offline half (no model calls): channel
+      # payloads, fixture Neotoma, sandbox guard, and that every outcome check
+      # can go red. The live matrix runs on demand (runner.py), not in CI.
+      - name: Run rule-delivery eval harness tests
+        run: uv run --extra dev python -m pytest execution/evals/ -q
       # ateles#727 / #731 (qa lens): CLAUDE.md Verification discipline effect
       # test was committed but collected by no lane — same defect class as
       # roster-in-lint.sh-only, anthus (#584/#596), execution/scripts (#524/#527).
