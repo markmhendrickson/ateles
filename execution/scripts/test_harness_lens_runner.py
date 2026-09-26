@@ -547,6 +547,68 @@ def test_dry_run_makes_no_model_call_and_reports_command(
         assert report["fully_guarded"] is False
 
 
+def test_dry_run_claude_provider_needs_no_sandbox_and_pins_cwd_to_the_worktree(
+    monkeypatch, tmp_path, target, brief_file
+):
+    """The operator's decision (bootstrap dispatch defaults to claude first):
+    prove --provider claude reaches the exact real command shape, with no
+    model call, and that it runs with cwd pinned to a real worktree of the
+    TARGET repo -- which is what makes the project .claude/settings.json and
+    the user-level Claude Code hooks apply to it, the same as any ordinary
+    Claude Code session in that directory. This does not and cannot prove a
+    hook actually FIRED (that needs a live claude process, forbidden here);
+    it proves the mechanism that would let it fire is exactly in place:
+    dispatch_role.dispatch -> run_skill -> _run_skill_once passes cwd to
+    asyncio.create_subprocess_exec unchanged (verified by reading that
+    source, not asserted) and this runner supplies the worktree path as cwd.
+    """
+    dispatch_called = False
+
+    async def _boom(*a, **k):
+        nonlocal dispatch_called
+        dispatch_called = True
+        raise AssertionError("dispatch_role.dispatch called during --dry-run")
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _boom)
+
+    def _fake_create(self, *, head):
+        self._created = True
+        self.path.mkdir(parents=True, exist_ok=True)
+        agents_dir = self.path / "docs" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "pavo.md").write_text("# pavo prompt\n", encoding="utf-8")
+
+    monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
+    monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target, provider="claude", post=False, dry_run=True,
+            repo_worktree_name="ateles", scratch_root=tmp_path,
+            brief_path=brief_file, timeout=None,
+        )
+    )
+
+    assert dispatch_called is False
+    assert report["no_model_call_made"] is True
+    assert report["provider"] == "claude"
+    # claude needs no sandbox wrapper -- its own Claude Code hooks bind
+    # every guard this class attempts, so fully_guarded is unconditionally
+    # True for this provider (see HarnessSandbox.build's claude branch).
+    assert report["command_wrapper"] == []
+    assert report["fully_guarded"] is True
+    assert report["sandbox_env_extra"] == {}
+    assert report["example_command"] == [
+        "claude", "--print", "--append-system-prompt", "<system prompt>",
+    ]
+    assert report["would_refuse"] is None
+    # The worktree path IS the real repo's own dedicated throwaway checkout
+    # of the target repo -- this is the cwd a real dispatch would pass.
+    assert report["worktree"].endswith(f"ateles-wt-{target.lens}-{target.pr}-claude")
+
+
 # ── Verdict validation uses the SAME reader Claude runs use -----------------------
 
 

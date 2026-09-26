@@ -150,11 +150,34 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
 
 USAGE
 -----
+The one command a session runs to DISPATCH a lens review (--agent omitted:
+resolved from --lens via review_panel.LENSES; pass --task-entity-id when the
+dispatch is PART_OF a tracked task, so the next command below has something
+to filter on):
+
     python3 execution/scripts/harness_lens_runner.py \\
         --repo owner/name --pr 1234 --head <sha> \\
-        --lens pm --agent pavo --provider codex \\
-        --brief <path-to-lens-brief> \\
+        --lens pm --provider claude \\
+        --brief <path-to-lens-brief> --task-entity-id ent_... \\
         [--post] [--dry-run] [--compare claude,codex]
+
+The one command a session runs to MONITOR it — purely from Neotoma, no
+access to this process or its stdout required — via the Neotoma MCP/REST
+`retrieve_entities` on `harness_event`, filtered by the SAME task_entity_id
+just passed above (every harness_event row this runner's dispatch writes,
+via dispatch_role.dispatch -> run_skill -> skill_runner._write_harness_event,
+carries it — start with success="partial", then a terminal completion or
+failure row):
+
+    retrieve_entities(
+        entity_type="harness_event",
+        snapshot_filters={"task_entity_id": {"op": "eq", "value": "ent_..."}},
+        sort_by="snapshot.event_at", sort_order="desc",
+    )
+
+`tool_name` on each row reads `<provider>:<agent>` (e.g. `claude:pavo`), so
+the SAME query also answers "which provider actually ran this" without
+re-deriving it from this script's own state.
 
 Exit codes: 0 on success (or a clean, reported refusal under --dry-run),
 non-zero on any failure that prevented a verdict or a required post.

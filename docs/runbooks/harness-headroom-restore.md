@@ -123,12 +123,24 @@ still `0.0`:
 ```bash
 python3 execution/scripts/harness_lens_runner.py \
   --repo markmhendrickson/ateles --pr <PR> --head <sha> \
-  --lens <lens> --agent <agent> --provider codex \
+  --lens <lens> --provider codex \
   --brief <path-to-the-lens-brief> --dry-run --json
 ```
+
+(`--agent` is optional — it resolves from `--lens` via `review_panel.LENSES`
+when the lens is in that registry; pass it explicitly only for a lens outside
+it.)
 
 A `HeadroomExhausted` refusal here means the file was not actually restored
 (or an env var is overriding it) — fix that before spending the first real
 model call. Once the dry run reports `"no_model_call_made": true` with a
 sane `example_command`, the first live test described in this PR's body is
 ready to run.
+
+## Monitoring a live dispatch from Neotoma alone
+
+Pass `--task-entity-id ent_...` on the real (non-dry-run) command, then query
+`harness_event` filtered on that same id — see `harness_lens_runner.py`'s own
+module docstring, USAGE section, for the exact `retrieve_entities` call. No
+access to this script's own process or stdout is needed to see whether the
+dispatch started, completed, or failed.
