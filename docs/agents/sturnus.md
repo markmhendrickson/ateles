@@ -39,6 +39,22 @@ operational_entity_types:
 canonical_context_entities:
   - task_policy
   - brand_voice
+observation_ids:
+  name: 82157fc8-7ab5-c616-6b88-42c7b305902c
+  description: ed100026-57a5-5d20-9a7d-cf1cfb2ccd49
+  tier: 82157fc8-7ab5-c616-6b88-42c7b305902c
+  genus: 82157fc8-7ab5-c616-6b88-42c7b305902c
+  status: 980c0c4d-ac95-c98c-4e5d-c561014d801f
+  aauth_sub: 82157fc8-7ab5-c616-6b88-42c7b305902c
+  agent_grant: 82157fc8-7ab5-c616-6b88-42c7b305902c
+  observation_source_default: cb75e825-7893-3740-aaac-b6422754e4b7
+  harness_preferences: 82157fc8-7ab5-c616-6b88-42c7b305902c
+  triggers: 82157fc8-7ab5-c616-6b88-42c7b305902c
+  tool_allowlist: cb75e825-7893-3740-aaac-b6422754e4b7
+  context_entity_types: 9aa1dfcf-f4a8-0ac0-a55b-77698957b5cb
+  operational_entity_types: 22f4df99-a220-c53a-60c6-dd8529c51791
+  user_invocable: 82157fc8-7ab5-c616-6b88-42c7b305902c
+  prompt_markdown: 035f6aff-19fe-40fb-7dcb-e5e4a4223aae
 ---
 
 # sturnus

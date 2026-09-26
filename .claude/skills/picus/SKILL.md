@@ -16,6 +16,12 @@ triggers:
   - modelo 720
   - fbar
 user_invocable: true
+observation_ids:
+  name: 4d6f4bc7-e099-1840-da33-69077905a80f
+  description: 75994133-358a-ba4c-8843-88e3d0005aa7
+  triggers: 4d6f4bc7-e099-1840-da33-69077905a80f
+  user_invocable: 4d6f4bc7-e099-1840-da33-69077905a80f
+  prompt_markdown: 0dc6cd0f-1dfe-4498-2aba-0c0aa69e638e
 ---
 
 <!-- Claude Code adapter for agent `picus`. Canonical file: docs/agents/picus.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

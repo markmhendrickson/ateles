@@ -9,6 +9,12 @@ triggers:
   - vanellus
   - /vanellus
 user_invocable: true
+observation_ids:
+  name: 98390c21-c55b-97c3-7891-e01f5c7b033e
+  description: d7dc41e9-f691-2475-ceae-03c581998b4f
+  triggers: 98390c21-c55b-97c3-7891-e01f5c7b033e
+  user_invocable: 98390c21-c55b-97c3-7891-e01f5c7b033e
+  prompt_markdown: 55dbc52e-464b-a7e1-1256-c7809bd60e49
 ---
 
 <!-- Claude Code adapter for agent `vanellus`. Canonical file: docs/agents/vanellus.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

@@ -64,6 +64,22 @@ canonical_context_entities:
   - swarm_roster
   - vendor_binding
   - constitution
+observation_ids:
+  name: 257ea21a-c4e2-56ff-f384-4c746c4c8c11
+  description: 257ea21a-c4e2-56ff-f384-4c746c4c8c11
+  tier: fd16cec1-e277-4fe5-d23e-07bf86efbbea
+  genus: fd16cec1-e277-4fe5-d23e-07bf86efbbea
+  status: 22b003b3-a189-7fa0-bbfa-14105385323f
+  aauth_sub: unknown
+  agent_grant: fd16cec1-e277-4fe5-d23e-07bf86efbbea
+  observation_source_default: 3097b846-3535-c321-ee1b-dbf473937986
+  harness_preferences: unknown
+  triggers: 257ea21a-c4e2-56ff-f384-4c746c4c8c11
+  tool_allowlist: 3097b846-3535-c321-ee1b-dbf473937986
+  context_entity_types: 6ea65fd7-c9dc-8346-a17b-1f6da75166f7
+  operational_entity_types: 67efefd1-66a6-3312-eeff-d92132bc0457
+  user_invocable: 257ea21a-c4e2-56ff-f384-4c746c4c8c11
+  prompt_markdown: ca78e0a9-5eef-40d9-4e86-499f194aba86
 ---
 
 # buteo

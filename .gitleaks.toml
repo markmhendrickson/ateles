@@ -175,6 +175,15 @@ regexes = [
   # Flagged on ateles#707 / PR tip commit against test_stream_transcript.py.
   '''\bgpt-4o-transcribe\b''',
   '''\bgpt-live-transcribe\b''',
+  # generic-api-key false positive: generated agent mirrors stamp each
+  # frontmatter field's Neotoma observation id, including
+  # `aauth_sub: <uuid>`. The default rule matches because the field name
+  # contains "auth"; the value is an observation id, not a credential.
+  # Anchored to the canonical 8-4-4-4-12 lowercase hex form so prefixed
+  # tokens (ghp_, sk-, AKIA, mixed-case secrets) still fail. A credential
+  # that is exactly this UUID shape would also match — that shape is not
+  # used for secrets in this repo.
+  '''^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$''',
 ]
 paths = [
   "execution/scripts/ga_last_7_days_report.py",

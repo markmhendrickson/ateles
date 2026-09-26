@@ -29,6 +29,22 @@ operational_entity_types:
   - daemon_report
 canonical_context_entities:
   - vendor_binding
+observation_ids:
+  name: 233683b4-d915-382f-b7d1-60bffad4b7f6
+  description: 233683b4-d915-382f-b7d1-60bffad4b7f6
+  tier: 233683b4-d915-382f-b7d1-60bffad4b7f6
+  genus: 233683b4-d915-382f-b7d1-60bffad4b7f6
+  status: 233683b4-d915-382f-b7d1-60bffad4b7f6
+  aauth_sub: 233683b4-d915-382f-b7d1-60bffad4b7f6
+  agent_grant: 233683b4-d915-382f-b7d1-60bffad4b7f6
+  observation_source_default: d98da7d5-2cab-fa16-3804-c08f12463379
+  harness_preferences: d98da7d5-2cab-fa16-3804-c08f12463379
+  triggers: unknown
+  tool_allowlist: d98da7d5-2cab-fa16-3804-c08f12463379
+  context_entity_types: 51f2fb1b-d9f7-aaea-64e3-5db804f294eb
+  operational_entity_types: 0ee59423-34b4-c3f5-0b2d-8101121720bf
+  user_invocable: unknown
+  prompt_markdown: 8c40a9a9-44cc-2ca4-bd93-965a733a38d4
 ---
 
 # turdus

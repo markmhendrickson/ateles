@@ -9,6 +9,12 @@ triggers:
   - lanius
   - /lanius
 user_invocable: true
+observation_ids:
+  name: 3850bad3-bb81-a54f-0c2d-c62174a5fd64
+  description: edad793c-e8bf-632a-adbd-ea993dc9c674
+  triggers: edad793c-e8bf-632a-adbd-ea993dc9c674
+  user_invocable: edad793c-e8bf-632a-adbd-ea993dc9c674
+  prompt_markdown: 30143479-2245-31f6-d3d4-668cbb865b4d
 ---
 
 <!-- Claude Code adapter for agent `lanius`. Canonical file: docs/agents/lanius.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

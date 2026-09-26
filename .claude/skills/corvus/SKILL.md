@@ -5,6 +5,12 @@ entity_id: ent_b95bf915804ac40bba674529
 entity_type: agent_definition
 name: corvus
 description: Content writer and social voice. Owns long-form technical posts, build-in-public threads, changelog narratives, retrospectives, and platform-adapted social content. Direct, technically honest voice adapted per platform.
+observation_ids:
+  name: 8af0a6b5-d795-d3ae-ac61-95a0bc149c4f
+  description: 1438aa2f-9a3e-2aec-c0d3-a10bce629712
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: 388c0651-e046-4f24-57bf-4d2414902203
 ---
 
 <!-- Claude Code adapter for agent `corvus`. Canonical file: docs/agents/corvus.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

@@ -59,6 +59,22 @@ operational_entity_types:
   - strategy_drift_signal
 canonical_context_entities:
   - operator_profile
+observation_ids:
+  name: 8617fda3-bc9d-4985-57fe-cf9231009b0c
+  description: 8617fda3-bc9d-4985-57fe-cf9231009b0c
+  tier: ea9025ba-4446-7040-b05a-b222b506b876
+  genus: ea9025ba-4446-7040-b05a-b222b506b876
+  status: ea9025ba-4446-7040-b05a-b222b506b876
+  aauth_sub: unknown
+  agent_grant: unknown
+  observation_source_default: ea9025ba-4446-7040-b05a-b222b506b876
+  harness_preferences: unknown
+  triggers: ea9025ba-4446-7040-b05a-b222b506b876
+  tool_allowlist: ea9025ba-4446-7040-b05a-b222b506b876
+  context_entity_types: ea9025ba-4446-7040-b05a-b222b506b876
+  operational_entity_types: ea9025ba-4446-7040-b05a-b222b506b876
+  user_invocable: ea9025ba-4446-7040-b05a-b222b506b876
+  prompt_markdown: 634c7776-8cfd-12df-264c-9cea78f66908
 ---
 
 # falco

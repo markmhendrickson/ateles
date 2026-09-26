@@ -20,6 +20,22 @@ tool_allowlist:
   - WebFetch
 canonical_context_entities:
   - operator_profile
+observation_ids:
+  name: 0f0d32f4-436c-979f-e90f-d116cc1ebf1d
+  description: 6657b311-9e59-24c1-e993-0ba4d9546a00
+  tier: e8581d1e-9b1a-2fc5-c0f7-c0ef97b57659
+  genus: e8581d1e-9b1a-2fc5-c0f7-c0ef97b57659
+  status: e8581d1e-9b1a-2fc5-c0f7-c0ef97b57659
+  aauth_sub: unknown
+  agent_grant: e8581d1e-9b1a-2fc5-c0f7-c0ef97b57659
+  observation_source_default: 18ef11d3-08b6-3c17-63f9-be1f8c902d66
+  harness_preferences: unknown
+  triggers: unknown
+  tool_allowlist: 18ef11d3-08b6-3c17-63f9-be1f8c902d66
+  context_entity_types: unknown
+  operational_entity_types: unknown
+  user_invocable: unknown
+  prompt_markdown: e60b54d3-6b24-18c6-7161-3b118895449a
 ---
 
 # aythya

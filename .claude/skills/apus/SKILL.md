@@ -5,6 +5,12 @@ entity_id: ent_692e8533840be7195240a1e4
 entity_type: agent_definition
 name: apus
 description: Neotoma → git mirror webhook daemon. Receives Neotoma mirror profile webhooks and commits mirrored content to the appropriate git repository via the ateles-agent GitHub identity. Lives at the operator's configured Apus webhook host.
+observation_ids:
+  name: 9d9e3f41-e383-090a-1e9b-9403a28c3bf3
+  description: 0057059e-05e9-5fed-0d1b-b974ad961ae0
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: d7f74a35-7889-1b8b-934b-3c36027c2502
 ---
 
 <!-- Claude Code adapter for agent `apus`. Canonical file: docs/agents/apus.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

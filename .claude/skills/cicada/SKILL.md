@@ -9,6 +9,12 @@ triggers:
   - cicada
   - /cicada
 user_invocable: true
+observation_ids:
+  name: 1c385789-fc2a-4791-1acd-d5c72005e9d8
+  description: ba084dfb-1139-b1f2-3a57-d5c410a9926f
+  triggers: 4eaaba2e-f280-d21e-50b9-203d9820c790
+  user_invocable: 1263b705-202a-d9b0-60d7-5b2e00200d4c
+  prompt_markdown: 4de0dabd-6b5c-d3ff-1e49-8a5a430bef49
 ---
 
 <!-- Claude Code adapter for agent `cicada`. Canonical file: docs/agents/cicada.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

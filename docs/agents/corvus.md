@@ -70,6 +70,22 @@ canonical_context_entities:
   - vendor_binding
   - constitution
   - brand_voice
+observation_ids:
+  name: 8af0a6b5-d795-d3ae-ac61-95a0bc149c4f
+  description: 1438aa2f-9a3e-2aec-c0d3-a10bce629712
+  tier: 8af0a6b5-d795-d3ae-ac61-95a0bc149c4f
+  genus: 8af0a6b5-d795-d3ae-ac61-95a0bc149c4f
+  status: 14bc313f-cabc-c606-7e3a-4125bbb2321e
+  aauth_sub: 7298b3db-129a-13c0-58b8-aa86e75f4452
+  agent_grant: 056062f6-fd2f-db92-6455-e8f0744dc9f5
+  observation_source_default: 454e03ef-e807-d557-6c93-001599eba23a
+  harness_preferences: unknown
+  triggers: unknown
+  tool_allowlist: 454e03ef-e807-d557-6c93-001599eba23a
+  context_entity_types: 6e71df60-f2c6-b036-52bd-317f6f3a1a5d
+  operational_entity_types: a5ca9f55-b3f5-6183-f945-19a3931d478b
+  user_invocable: unknown
+  prompt_markdown: 388c0651-e046-4f24-57bf-4d2414902203
 ---
 
 # corvus
