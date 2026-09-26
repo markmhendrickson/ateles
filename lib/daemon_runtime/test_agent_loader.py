@@ -124,42 +124,102 @@ def test_load_active_policies_posts_to_entities_query(monkeypatch):
     """The policy read must hit /entities/query, never /retrieve_entities.
 
     FAILS on origin/main: the URL is ".../retrieve_entities", which 404s live.
+
+    `load_active_policies` also issues an `/entities/query` for
+    `agent_definition` (decision 114's id resolution) and a
+    `/list_relationships` for `GOVERNS` edges — this test tracks calls by
+    URL rather than asserting on the single last one, so it isn't sensitive
+    to how many other reads the edge resolver makes.
     """
     _no_signing(monkeypatch)
     monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
-    seen = {}
+    seen_urls = []
 
     def fake_post(url, **kwargs):
-        seen["url"] = url
-        return _Resp({"entities": []})
+        seen_urls.append(url)
+        return _Resp({"entities": [], "relationships": []})
 
     monkeypatch.setattr(al.httpx, "post", fake_post)
     al.AgentLoader("apis").load_active_policies()
 
-    assert seen["url"].endswith("/entities/query"), seen["url"]
-    assert "retrieve_entities" not in seen["url"], (
+    query_urls = [u for u in seen_urls if u.endswith("/entities/query")]
+    assert query_urls, seen_urls
+    assert not any("retrieve_entities" in u for u in seen_urls), (
         "retrieve_entities is an MCP tool name, not a REST path — it 404s"
     )
 
 
 def test_load_active_policies_returns_matching_agent_policy(monkeypatch):
-    """A successful query yields the agent's own active/provisional policies."""
+    """A successful query yields the agent's own active/provisional policies,
+    bound by a `GOVERNS` edge (decision 114) rather than by `agent_sub`
+    equality — `agent_sub` is superseded and is populated on these fixture
+    rows only to show it is NOT what the resolver reads.
+    """
     _no_signing(monkeypatch)
     monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
-    payload = {
+    policy_payload = {
         "entities": [
-            {"snapshot": {"agent_sub": "apis@ateles-swarm", "status": "active",
+            {"entity_id": "ent_mine",
+             "snapshot": {"agent_sub": "apis@ateles-swarm", "status": "active",
                           "rule": "mine"}},
-            {"snapshot": {"agent_sub": "other@ateles-swarm", "status": "active",
+            {"entity_id": "ent_theirs",
+             "snapshot": {"agent_sub": "other@ateles-swarm", "status": "active",
                           "rule": "theirs"}},
-            {"snapshot": {"agent_sub": "apis@ateles-swarm", "status": "retired",
+            {"entity_id": "ent_old",
+             "snapshot": {"agent_sub": "apis@ateles-swarm", "status": "retired",
                           "rule": "old"}},
         ]
     }
-    monkeypatch.setattr(al.httpx, "post", lambda url, **kw: _Resp(payload))
+    definition_payload = {
+        "entities": [
+            {"entity_id": "ent_apis_def", "snapshot": {"name": "apis"}},
+        ]
+    }
+    relationships_payload = {
+        "relationships": [
+            {"source_entity_id": "ent_mine", "target_entity_id": "ent_apis_def"},
+        ]
+    }
+
+    def fake_post(url, json=None, **kw):
+        if url.endswith("/list_relationships"):
+            return _Resp(relationships_payload)
+        if url.endswith("/entities/query") and (json or {}).get("entity_type") == "agent_definition":
+            return _Resp(definition_payload)
+        return _Resp(policy_payload)
+
+    monkeypatch.setattr(al.httpx, "post", fake_post)
 
     out = al.AgentLoader("apis").load_active_policies()
     assert [p["rule"] for p in out] == ["mine"]
+
+
+def test_load_active_policies_ignores_agent_sub_with_no_edge(monkeypatch):
+    """A row scoped by `agent_sub` alone, with no `GOVERNS` edge, binds
+    NOBODY under decision 114 — `agent_sub`/`scope: agent` are superseded,
+    not a fallback when no edge exists. This is the behavior change the
+    ruling makes: before, this fixture (`agent_sub` populated, matching)
+    would have bound; now it must not, until migrated to an edge.
+    """
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    policy_payload = {
+        "entities": [
+            {"entity_id": "ent_unmigrated",
+             "snapshot": {"agent_sub": "apis@ateles-swarm", "status": "active",
+                          "rule": "unmigrated"}},
+        ]
+    }
+
+    def fake_post(url, **kw):
+        if url.endswith("/list_relationships"):
+            return _Resp({"relationships": []})
+        return _Resp(policy_payload)
+
+    monkeypatch.setattr(al.httpx, "post", fake_post)
+
+    out = al.AgentLoader("apis").load_active_policies()
+    assert out == []
 
 
 def test_policy_404_does_not_present_as_no_policies(monkeypatch, caplog):
@@ -303,6 +363,198 @@ class TestPolicyScoping:
         snap = {"agent_sub": "corvus@ateles-swarm"}
         assert al.policy_binds_agent(snap, "corvus@ateles-swarm")
 
+    def test_still_has_a_live_production_caller_in_generalizer(self):
+        """Decision 114 (2026-09-25) superseded `policy_binds_agent` for the
+        two readers it names (`AgentLoader.load_active_policies`,
+        `policy_skill_renderer._session_scope_ok` — both now call
+        `policy_binds_agent_by_edge` instead), but did NOT remove or
+        deprecate this function, because `generalizer.py`'s
+        `fetch_agent_policies` still calls it directly and decision 114's
+        scope is only the two named readers. This test pins that fact
+        mechanically: if `generalizer.py` is ever migrated off it too, this
+        assertion should be updated in the SAME change that does the
+        migration — not left to silently pass on a function nothing calls.
+        """
+        import ast
+        import inspect
+
+        import generalizer as gz
+
+        source = inspect.getsource(gz)
+        tree = ast.parse(source)
+        calls = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "policy_binds_agent" in calls, (
+            "generalizer.py no longer calls policy_binds_agent — if this is "
+            "an intentional migration to policy_binds_agent_by_edge, remove "
+            "or deprecate policy_binds_agent in the same change rather than "
+            "leaving it an orphaned function"
+        )
+
+
+class TestPolicyBindsAgentByEdge:
+    """Decision 114 (2026-09-25, operator ruling on the master plan's
+    `decisions.agent_policy_binds_agent_by_graph_edge`): an agent-specific
+    `agent_policy` is tied to the agent(s) it governs by a `GOVERNS` edge to
+    their `agent_definition`, resolved by traversal — `scope`/`agent_sub`
+    are superseded, not consulted as a fallback. These tests fail if the
+    edge traversal is reverted to the field-based predicate.
+    """
+
+    def test_edge_bound_row_reaches_only_its_agent(self):
+        # A row with a GOVERNS edge to corvus's agent_definition binds
+        # corvus and NO other agent — including one that would have matched
+        # under the old field-based predicate had `agent_sub` named it.
+        snap = {"_entity_id": "ent_rule", "scope": "swarm"}  # scope ignored: edge wins
+        governs = {"ent_rule": frozenset({"ent_corvus_def"})}
+        assert al.policy_binds_agent_by_edge(snap, "ent_corvus_def", governs) is True
+        assert al.policy_binds_agent_by_edge(snap, "ent_pavo_def", governs) is False
+
+    def test_edge_bound_row_with_scope_swarm_still_doesnt_reach_others(self):
+        # The task's own emphasis: an edge overrides a swarm-wide scope
+        # rather than adding to it. A row with BOTH an edge and
+        # `scope: swarm` must still be refused for an agent the edge does
+        # not name — the edge is more specific and wins outright.
+        snap = {"_entity_id": "ent_rule", "scope": "swarm"}
+        governs = {"ent_rule": frozenset({"ent_corvus_def"})}
+        assert al.policy_binds_agent_by_edge(snap, "ent_corvus_def", governs) is True
+        assert al.policy_binds_agent_by_edge(snap, "ent_lanius_def", governs) is False
+
+    def test_swarm_row_without_edge_reaches_all(self):
+        snap = {"_entity_id": "ent_swarm_rule", "scope": "swarm"}
+        assert al.policy_binds_agent_by_edge(snap, "ent_corvus_def", {}) is True
+        assert al.policy_binds_agent_by_edge(snap, "ent_pavo_def", {}) is True
+
+    def test_global_row_without_edge_reaches_all(self):
+        snap = {"_entity_id": "ent_global_rule", "scope": "global"}
+        assert al.policy_binds_agent_by_edge(snap, "ent_corvus_def", {}) is True
+
+    def test_edgeless_agent_sub_row_binds_nobody(self):
+        # The superseded shape: scope=agent + agent_sub, no edge. Binds
+        # NOBODY — agent_sub is not read as a fallback.
+        snap = {
+            "_entity_id": "ent_unmigrated",
+            "scope": "agent",
+            "agent_sub": "corvus@ateles-swarm",
+        }
+        assert al.policy_binds_agent_by_edge(snap, "ent_corvus_def", {}) is False
+
+    def test_edgeless_unrecognised_scope_binds_nobody(self):
+        snap = {"_entity_id": "ent_bad_scope", "scope": "everyone"}
+        assert al.policy_binds_agent_by_edge(snap, "ent_corvus_def", {}) is False
+
+    def test_edgeless_absent_scope_binds_nobody(self):
+        snap = {"_entity_id": "ent_no_scope"}
+        assert al.policy_binds_agent_by_edge(snap, "ent_corvus_def", {}) is False
+
+    def test_empty_agent_definition_id_matches_no_edge(self):
+        # An unresolvable session principal (agent_definition_id="") must
+        # not accidentally match an edge target — fail closed, never a
+        # wildcard.
+        snap = {"_entity_id": "ent_rule"}
+        governs = {"ent_rule": frozenset({"ent_corvus_def"})}
+        assert al.policy_binds_agent_by_edge(snap, "", governs) is False
+
+
+class TestFetchGovernsEdges:
+    """`fetch_governs_edges` batches ALL `GOVERNS` edges in one
+    `/list_relationships` call and returns {agent_policy_id: {agent_definition_id, ...}}.
+    """
+
+    def test_batches_into_one_call_and_groups_by_source(self):
+        calls = []
+
+        def fake_request(url, body, timeout):
+            calls.append((url, body))
+            return {
+                "relationships": [
+                    {"source_entity_id": "ent_a", "target_entity_id": "ent_x"},
+                    {"source_entity_id": "ent_a", "target_entity_id": "ent_y"},
+                    {"source_entity_id": "ent_b", "target_entity_id": "ent_z"},
+                ]
+            }
+
+        out = al.fetch_governs_edges("https://neotoma.example", _request=fake_request)
+        assert len(calls) == 1, "must issue exactly ONE relationships query per load"
+        assert calls[0][1]["relationship_type"] == "GOVERNS"
+        assert out == {
+            "ent_a": frozenset({"ent_x", "ent_y"}),
+            "ent_b": frozenset({"ent_z"}),
+        }
+
+    def test_malformed_rows_are_skipped_not_fatal(self):
+        def fake_request(url, body, timeout):
+            return {
+                "relationships": [
+                    {"source_entity_id": "ent_a"},  # no target
+                    {"target_entity_id": "ent_x"},  # no source
+                    "not-a-dict",
+                    {"source_entity_id": "ent_ok", "target_entity_id": "ent_ok2"},
+                ]
+            }
+
+        out = al.fetch_governs_edges("https://neotoma.example", _request=fake_request)
+        assert out == {"ent_ok": frozenset({"ent_ok2"})}
+
+    def test_raises_on_transport_failure(self):
+        def boom(url, body, timeout):
+            raise ConnectionError("down")
+
+        try:
+            al.fetch_governs_edges("https://neotoma.example", _request=boom)
+            raise AssertionError("expected the transport error to propagate")
+        except ConnectionError:
+            pass
+
+
+class TestResolveAgentDefinitionId:
+    def test_prefers_aauth_sub_match_over_name_match(self):
+        def fake_request(url, body, timeout):
+            return {
+                "entities": [
+                    {"entity_id": "ent_by_name", "snapshot": {"name": "corvus"}},
+                    {
+                        "entity_id": "ent_by_aauth_sub",
+                        "snapshot": {"name": "corvus-old", "aauth_sub": "corvus@ateles-swarm"},
+                    },
+                ]
+            }
+
+        resolved = al.resolve_agent_definition_id(
+            "corvus@ateles-swarm", "https://neotoma.example", _request=fake_request
+        )
+        assert resolved == "ent_by_aauth_sub"
+
+    def test_falls_back_to_name_match_when_no_aauth_sub_matches(self):
+        def fake_request(url, body, timeout):
+            return {"entities": [{"entity_id": "ent_named", "snapshot": {"name": "corvus"}}]}
+
+        resolved = al.resolve_agent_definition_id(
+            "corvus@ateles-swarm", "https://neotoma.example", _request=fake_request
+        )
+        assert resolved == "ent_named"
+
+    def test_no_match_returns_none(self):
+        def fake_request(url, body, timeout):
+            return {"entities": []}
+
+        resolved = al.resolve_agent_definition_id(
+            "nobody@ateles-swarm", "https://neotoma.example", _request=fake_request
+        )
+        assert resolved is None
+
+    def test_transport_failure_returns_none_rather_than_raising(self):
+        def boom(url, body, timeout):
+            raise ConnectionError("down")
+
+        resolved = al.resolve_agent_definition_id(
+            "corvus@ateles-swarm", "https://neotoma.example", _request=boom
+        )
+        assert resolved is None
+
 
 class TestRenderedPromptCarriesTheRule:
     """The acceptance test ateles#1118 names: assert the RULE TEXT is in the
@@ -364,5 +616,6 @@ class TestRenderedPromptCarriesTheRule:
             out = loader.load_active_policies()
         assert out == []
         assert any(
-            "unpopulated on EVERY one" in r.message for r in caplog.records
+            "no row is agent-scoped by either mechanism" in r.message
+            for r in caplog.records
         ), [r.message for r in caplog.records]
