@@ -41,13 +41,132 @@ LEARNING_TYPES = {
     "learning", "note", "standing_rule", "architectural_decision",
     "strategy_drift_signal", "lesson", "recap_message",
 }
-NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com")
+_DEFAULT_BASE_URL = "https://neotoma.markmhendrickson.com"
+NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", _DEFAULT_BASE_URL)
 BEARER_ENV = "NEOTOMA_BEARER_TOKEN"  # gitleaks:allow
+_NEOTOMA_ENV_PATH = Path.home() / ".config" / "neotoma" / ".env"
 
 
 def log(msg: str) -> None:
     """Diagnostic to stderr — never pollutes hook stdout (which is context/JSON)."""
     sys.stderr.write(f"[session-integrity] {msg}\n")
+
+
+# ---------------------------------------------------------------------------
+# Neotoma credentials (ateles#1261 follow-up, audit ent_b66293f0dcc8c887d4fdbeae)
+# ---------------------------------------------------------------------------
+#
+# stop_finalizer.py skipped ALL 45 runs in the audited session with "no
+# bearer token" — the Stop hook's environment simply never carries
+# NEOTOMA_BEARER_TOKEN, so the session-integrity layer never ran at all for
+# that session's whole lifetime. `emit_harness_event_raw` used to read only
+# `os.environ.get(BEARER_ENV)` and silently return when it was empty.
+#
+# `_neotoma_credentials()` is the ONE place that changes: env first, then a
+# fallback read of `~/.config/neotoma/.env` (same file, same two keys,
+# `execution/scripts/sync_skills.py`'s `_load_env` and
+# `execution/scripts/session_language.py`'s `_bearer_token` already read this
+# way — reusing that shape rather than inventing a third). Parses only
+# NEOTOMA_BASE_URL / NEOTOMA_BEARER_TOKEN; never logs either value.
+#
+# Read at CALL time, not import time — a test (or a long-lived process) that
+# changes the environment or the file between calls must see the change.
+
+
+def _read_neotoma_env_file() -> dict[str, str]:
+    """Parse `NEOTOMA_BASE_URL` / `NEOTOMA_BEARER_TOKEN` out of
+    ~/.config/neotoma/.env, if it exists and is readable. Never raises —
+    an absent, unreadable, malformed, or non-UTF-8 file yields {} (fail
+    open; the caller falls back to the process environment, which may also
+    be empty — that is the "still missing" case the warning covers, not a
+    condition this function itself needs to distinguish).
+
+    TWO independent layers make "never raises" true rather than merely
+    documented (Loxia review + qa/security lenses on PR #1298, round 1: the
+    original version caught only `OSError`, so a non-UTF-8-encoded `.env`
+    raised an unhandled `UnicodeDecodeError` — a `ValueError` subclass, not
+    an `OSError` — straight out of this function and every caller above it,
+    including `emit_harness_event_raw`, the shared chokepoint the whole PR
+    exists to make robust. Confirmed reproducible by both lenses, not
+    hypothesized):
+
+      1. `errors="replace"` on `read_text` — a decode error becomes U+FFFD
+         replacement characters in the offending line rather than a raised
+         exception, so malformed encoding degrades the SAME way a malformed
+         line already does (skipped or read as best-effort garbage that
+         fails the key check below), not a crash.
+      2. `except Exception`, not `except OSError` — belt and suspenders for
+         (1): this function's only job is "return a best-effort dict or
+         empty," so nothing it can do file I/O or string processing over
+         should ever propagate past it. A bug INSIDE this function is still
+         a bug, but it must never be the reason a Stop hook crashes a
+         session — that guarantee belongs at this boundary, not left to
+         whichever caller happens to wrap it (today's callers both do, by
+         a top-level `main()` guard and a local `try/except`, but neither
+         is part of THIS function's contract and a future caller should not
+         have to know that to trust "never raises").
+    """
+    found: dict[str, str] = {}
+    try:
+        if not _NEOTOMA_ENV_PATH.exists():
+            return found
+        text = _NEOTOMA_ENV_PATH.read_text(encoding="utf-8", errors="replace")
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if key not in ("NEOTOMA_BASE_URL", BEARER_ENV):
+                continue
+            found[key] = value.strip().strip('"').strip("'")
+    except Exception:  # noqa: BLE001 — this function's whole contract is "never raises"
+        return {}
+    return found
+
+
+def neotoma_credentials() -> tuple[str, str]:
+    """(base_url, token) — environment first, then
+    ~/.config/neotoma/.env for whichever of the two is still missing.
+    Either or both may come back empty; the caller decides what that means
+    (emit_harness_event_raw treats an empty token as "still missing" and
+    warns once per session rather than skipping silently, per audit
+    ent_b66293f0dcc8c887d4fdbeae).
+    """
+    base_url = os.environ.get("NEOTOMA_BASE_URL", "")
+    token = os.environ.get(BEARER_ENV, "")
+    if not base_url or not token:
+        from_file = _read_neotoma_env_file()
+        if not base_url:
+            base_url = from_file.get("NEOTOMA_BASE_URL", "")
+        if not token:
+            token = from_file.get(BEARER_ENV, "")
+    return (base_url or _DEFAULT_BASE_URL), token
+
+
+def _warn_missing_credentials_once(session_id: str, log_tag: str) -> None:
+    """One VISIBLE stderr warning per session when credentials are still
+    missing after checking both the environment and the dotenv fallback —
+    replacing the silent per-invocation skip audit ent_b66293f0dcc8c887d4fdbeae
+    found (45 skips, zero visible warnings, nothing stored or checked for the
+    whole session). Tracked in this session's state file so a Stop hook that
+    fires more than once (multiple sibling hooks, or a retried Stop) warns
+    exactly once rather than once per hook per stop.
+    """
+    state = load_state(session_id) if session_id else {}
+    if state.get("warned_missing_neotoma_credentials"):
+        return
+    sys.stderr.write(
+        f"[{log_tag}] WARNING: NEOTOMA_BEARER_TOKEN is not set in the "
+        "environment and could not be found in ~/.config/neotoma/.env — "
+        "this session's session-integrity checks (harness_event emission, "
+        "Stop-hook enforcement) are being SKIPPED, not silently passed. Set "
+        "NEOTOMA_BEARER_TOKEN in the environment or in "
+        "~/.config/neotoma/.env to restore them.\n"
+    )
+    if session_id:
+        state["warned_missing_neotoma_credentials"] = True
+        save_state(session_id, state)
 
 
 def read_hook_input() -> dict:
@@ -223,6 +342,7 @@ def _mentions_task_binding(payload: dict) -> bool:
 
 def emit_harness_event_raw(
     idempotency_slug: str, entity_fields: dict, log_tag: str = "harness-event",
+    session_id: str = "",
 ) -> None:
     """POST one `harness_event` entity to Neotoma. Shared by every Stop hook
     in this checkout that emits an audit row — `emit_harness_event` below
@@ -237,13 +357,25 @@ def emit_harness_event_raw(
     `log_tag` names the caller in stderr diagnostics, so a missing-token or
     network-failure line points at the hook that actually failed rather than
     always reading "[session-integrity]" regardless of which hook called in.
+    `session_id`, when given, scopes the once-per-session missing-credentials
+    warning (see `_warn_missing_credentials_once`) — omitted, the warning is
+    still printed but not deduplicated across calls.
 
-    Schema 689230f4-cd83-49b6-baa7-a752cf70629d. Best-effort: no token or a
+    CREDENTIALS (ateles#1261 follow-up, audit ent_b66293f0dcc8c887d4fdbeae):
+    `neotoma_credentials()` checks the environment first, then falls back to
+    ~/.config/neotoma/.env — the same fallback `sync_skills.py` /
+    `session_language.py` already use — so a Stop hook whose environment
+    simply lacks NEOTOMA_BEARER_TOKEN (the exact condition that skipped ALL
+    45 runs in the audited session) still gets credentials when the dotenv
+    file has them. When BOTH are still empty after the fallback, this emits
+    one VISIBLE warning per session (not a silent skip) and returns.
+
+    Schema 689230f4-cd83-49b6-baa7-a752cf70629d. Best-effort otherwise: a
     network error is logged and swallowed — never blocks the hook.
     """
-    token = os.environ.get(BEARER_ENV)
+    base_url, token = neotoma_credentials()
     if not token:
-        sys.stderr.write(f"[{log_tag}] no bearer token — skipping harness_event emission\n")
+        _warn_missing_credentials_once(session_id, log_tag)
         return
     body = {
         "idempotency_key": f"harness-event-{idempotency_slug}-{int(time.time())}",
@@ -256,7 +388,7 @@ def emit_harness_event_raw(
     }
     try:
         req = urllib.request.Request(
-            f"{NEOTOMA_BASE_URL}/store",
+            f"{base_url}/store",
             data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
             method="POST",
@@ -284,4 +416,4 @@ def emit_harness_event(session_id: str, summary: dict, integrity_status: str) ->
         "bound_task": summary.get("bound_task", False),
         "captured_learning": summary.get("captured_learning", False),
         "write_types": sorted(summary.get("write_types", []) or []),
-    }, log_tag="session-integrity")
+    }, log_tag="session-integrity", session_id=session_id)
