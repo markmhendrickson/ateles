@@ -333,7 +333,7 @@ the credential form here untouched, since the several-instance case this ruling 
 
 - A degraded read never synthesizes a value more permissive than success would have returned.
 - Write admission per entity type is default-deny, and the grant is the allowlist (ruled, decision 41, 2026-09-06).
-- Write admission per **relationship** type is the same default-deny shape, on an optional `relationship_types[]` beside `entity_types[]` (ruled, decision 111, 2026-09-22; G25 / neotoma#2357 merged 2026-09-21).
+- Write admission per **relationship** type is the same default-deny shape, on an optional `relationship_types[]` beside `entity_types[]` (ruled, decision 117, 2026-09-22; G25 / neotoma#2357 merged 2026-09-21).
 - A harness provides only the capabilities the principal's grant names, and a non-enforcing provider is one of them (ruled, decision 87, 2026-09-08).
 - A parameter constraint on a write capability is a field allowlist.
 - The tenant a grant is scoped to is carried on the grant, and is never derived from the credential's subject (ruled, decision 80, 2026-09-07).
@@ -465,7 +465,7 @@ disclosure is not a schema fact — a per-row read refusal that leaks whether a 
 record — which is the tenancy question above and would be argued there, not here.
 
 **Write admission per relationship type is default-deny, and the grant is the allowlist, on the same
-shape decision 41 already states for entity types (ruled, decision 111, 2026-09-22; G25 / neotoma#2357
+shape decision 41 already states for entity types (ruled, decision 117, 2026-09-22; G25 / neotoma#2357
 merged 2026-09-21).** Registered in `conformance.md#the-register-of-open-design-decisions`. Decision 41 rules
 write admission for entities; it says nothing about a relationship write, and before this ruling nothing
 in the corpus did — the only hit anywhere for "relationship write" or "edge write" governs acyclicity
