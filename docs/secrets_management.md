@@ -154,6 +154,115 @@ No 1Password in CI at all.
   bootstrap (step above) on each box. To revoke a machine, rotate the age key so
   its old `keys.txt` can no longer decrypt new snapshots.
 
+### Rotating a provider API key (openai / elevenlabs / anthropic)
+
+Operator ruling (master plan `ent_81aadb43caf2fa493361e8ed`, decision
+`credential_rotation_split_by_issuer`): the operator mints provider API keys —
+everything downstream (1Password write, verification, publish, materialize,
+daemon restarts) belongs to the swarm. `execution/scripts/rotate_provider_key.py`
+is the operator-run script that does both halves in one pass, but it is
+**operator-run, not swarm-dispatched** — it talks to your 1Password vault and
+to the provider's admin API, so run it yourself rather than handing it to an
+agent.
+
+It never accepts a secret value on the command line — admin keys are read
+from a 1Password **reference** (`op://vault/item/field`) you pass as an
+argument, and the new value is written back to 1Password by piping a JSON
+template to `op item edit`'s stdin, never as a CLI assignment. The Anthropic
+path (no create endpoint exists) prompts for the new key with `getpass`
+(hidden, not echoed) instead.
+
+Order of operations, every provider: create/accept the new key → write it to
+1Password → verify it with a harmless read-only call → only then, and only if
+you pass `--revoke-old`/`--archive-old`, revoke the old one → run
+`secrets_publish.py` + `secrets_materialize.py` → print the daemons/plists
+that read that var (restart those, not all of them). If verification fails,
+nothing downstream runs and the old key is left alone.
+
+**OpenAI** — creates a new project service account + key
+(`POST /v1/organization/projects/{project_id}/service_accounts`), verifies
+with `GET /v1/models`:
+
+```bash
+python execution/scripts/rotate_provider_key.py openai \
+  --admin-key-ref op://Private/<openai-admin-item>/<field> \
+  --project-id proj_abc123 \
+  --op-item-ref op://Private/<item-that-holds-OPENAI_API_KEY>/<field>
+```
+
+Verify it worked: the command's own `GET /v1/models` check must print
+"new key verified." before anything else runs; independently, `op item get
+<item> --fields label=<field>` (no `--reveal` needed to confirm the edit
+timestamp changed) or check the 1Password item's modified time.
+
+Once you've confirmed the new key works, revoke the OLD service account on a
+second run:
+
+```bash
+python execution/scripts/rotate_provider_key.py openai \
+  --admin-key-ref op://Private/<openai-admin-item>/<field> \
+  --project-id proj_abc123 \
+  --op-item-ref op://Private/<item-that-holds-OPENAI_API_KEY>/<field> \
+  --revoke-old <OLD_SERVICE_ACCOUNT_ID>
+```
+
+**ElevenLabs** — creates a new service-account API key
+(`POST /v1/service-accounts/{service_account_user_id}/api-keys`), verifies
+with `GET /v1/user`:
+
+```bash
+python execution/scripts/rotate_provider_key.py elevenlabs \
+  --admin-key-ref op://Private/<elevenlabs-admin-item>/<field> \
+  --service-account-user-id user_abc123 \
+  --op-item-ref op://Private/<item-that-holds-ELEVENLABS_API_KEY>/<field> \
+  --permission speech_to_text
+```
+
+Verify it worked: same "new key verified." line, backed by the `GET /v1/user`
+call; the response's account details should match your ElevenLabs
+account. `--permission` is repeatable; omit it to default to
+`speech_to_text` only (least privilege for tyto's diarization use).
+
+Once confirmed, delete the OLD key on a second run:
+
+```bash
+python execution/scripts/rotate_provider_key.py elevenlabs \
+  --admin-key-ref op://Private/<elevenlabs-admin-item>/<field> \
+  --service-account-user-id user_abc123 \
+  --op-item-ref op://Private/<item-that-holds-ELEVENLABS_API_KEY>/<field> \
+  --revoke-old <OLD_KEY_ID>
+```
+
+**Anthropic** — no create endpoint exists in the Admin API docs
+(`platform.claude.com/docs/en/api/admin-api/apikeys`, checked 2026-09-26), so
+mint the key yourself in the Anthropic console first, then run:
+
+```bash
+python execution/scripts/rotate_provider_key.py anthropic \
+  --op-item-ref op://Private/<item-that-holds-ANTHROPIC_API_KEY>/<field>
+# prompts: Paste the new ANTHROPIC key (input hidden, not echoed):
+```
+
+Verify it worked: the same "new key verified." line, backed by `GET
+/v1/models` using the pasted key. Once confirmed, archive the OLD key (visible
+in the Anthropic console as `api_key_id`) in a second run:
+
+```bash
+python execution/scripts/rotate_provider_key.py anthropic \
+  --op-item-ref op://Private/<item>/<field> \
+  --admin-key-ref op://Private/<anthropic-admin-item>/<field> \
+  --archive-old apikey_01XXXXXXXXXXXXXXXXXXXXXXXX
+```
+
+Anthropic has no delete endpoint — archive/inactive is the only lifecycle
+action — so this is the terminal step for that provider.
+
+Every run ends by publishing the encrypted snapshot, materializing it, and
+printing the daemons/plists known to consume that var (e.g. `com.ateles.apis`
+for `ANTHROPIC_API_KEY`) so you know what to restart; pass `--no-downstream`
+to skip that and do it by hand. Nothing this script does prints a key value —
+its final summary reports only ids/hints.
+
 ## Agent signing keys (encrypted backup)
 
 Each swarm agent signs its Neotoma requests with its own AAuth key,
