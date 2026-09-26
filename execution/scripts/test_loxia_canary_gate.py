@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -21,6 +23,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import loxia_canary_gate as gate  # noqa: E402
+
+_SCRIPT_PATH = Path(gate.__file__).resolve()
+_REPO_ROOT = _SCRIPT_PATH.parents[2]
 
 
 class _FakeResp(io.BytesIO):
@@ -158,3 +163,94 @@ def test_parent_link_cross_repo_qualifier_ignored_when_same_repo(
     )
     assert gate.main() == 0
     assert _run_review_value(out_path) == "true"
+
+
+class TestRunsWithoutHttpxInstalled:
+    """Regression for ateles#1315 CI run 36242051053: the gate job's runner
+    installs nothing beyond the stdlib. A normal package import of
+    `label_gate` (`from lib.daemon_runtime import label_gate`) runs
+    `lib/daemon_runtime/__init__.py`, which unconditionally imports
+    `agent_loader` -> `httpx`, so the gate job crashed with
+    `ModuleNotFoundError: No module named 'httpx'` even though the gate
+    script itself never touches httpx. The fix loads `label_gate.py` by file
+    path, bypassing `__init__.py` entirely (see `_load_label_gate` in
+    loxia_canary_gate.py).
+
+    This drives the REAL script as a subprocess (not the already-imported
+    module under test) with a clean interpreter (`python -S`, which skips
+    `site.py` and so excludes site-packages — where `httpx` actually lives —
+    from `sys.path`), so a future change that reintroduces the package
+    import goes red here rather than only working by accident on a dev
+    machine that happens to have httpx installed.
+    """
+
+    @staticmethod
+    def _clean_env(out_path: Path, **overrides: str) -> dict[str, str]:
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "CANARY_LABEL": "swarm-canary",
+            "EVENT_NAME": "pull_request",
+            "REPO": "markmhendrickson/ateles",
+            "PR_LABELS_JSON": "[]",
+            "PR_BODY": "",
+            "GITHUB_TOKEN": "",
+            "GITHUB_OUTPUT": str(out_path),
+            # A stray PYTHONPATH could smuggle a vendored httpx back onto
+            # sys.path; scrub it so `-S` is the only thing doing the work.
+            "PYTHONPATH": "",
+        }
+        env.update(overrides)
+        return env
+
+    def test_clean_interpreter_has_no_httpx_available(self, tmp_path):
+        """Prove the isolation is real before trusting it as a test fixture:
+        confirm `-S` actually makes httpx unimportable in THIS environment,
+        so a pass on the gate script below is not a false negative from a
+        no-op isolation flag (CLAUDE.md: "validate the instrument before
+        believing the measurement")."""
+        result = subprocess.run(
+            [sys.executable, "-S", "-c", "import httpx"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode != 0
+        assert "No module named 'httpx'" in result.stderr
+
+    def test_gate_script_runs_clean_without_httpx(self, tmp_path):
+        out_path = tmp_path / "gh_output"
+        out_path.write_text("")
+        env = self._clean_env(
+            out_path, PR_LABELS_JSON=json.dumps([{"name": "swarm-canary"}])
+        )
+        result = subprocess.run(
+            [sys.executable, "-S", str(_SCRIPT_PATH)],
+            cwd=_REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "ModuleNotFoundError" not in result.stderr
+        assert _run_review_value(out_path) == "true"
+
+    def test_gate_script_denies_clean_without_httpx(self, tmp_path):
+        out_path = tmp_path / "gh_output"
+        out_path.write_text("")
+        env = self._clean_env(
+            out_path,
+            PR_LABELS_JSON=json.dumps([{"name": "bug"}]),
+            PR_BODY="no link here",
+        )
+        result = subprocess.run(
+            [sys.executable, "-S", str(_SCRIPT_PATH)],
+            cwd=_REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "ModuleNotFoundError" not in result.stderr
+        assert _run_review_value(out_path) == "false"

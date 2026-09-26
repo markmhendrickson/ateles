@@ -17,6 +17,18 @@ and Anthus import for their own ATELES_SWARM_REQUIRE_LABEL gate (ateles#1269)
 — so this workflow cannot drift into a different notion of "labelled" than
 the daemons that actually dispatch swarm work.
 
+`label_gate.py` is loaded by FILE PATH (`importlib.util.spec_from_file_location`),
+never via `from lib.daemon_runtime import label_gate` / `import lib.daemon_runtime`.
+A normal package import runs `lib/daemon_runtime/__init__.py`, which
+unconditionally imports `agent_loader`, `sse_client`, `aauth_signer`, and
+`grant_checker` — and `agent_loader` does `import httpx` at module level. The
+gate job's runner installs nothing (by design — it should stay cheap and run
+on every PR push, canary or not), so a package import crashes it with
+`ModuleNotFoundError: No module named 'httpx'` (caught live on ateles#1315's
+own PR, run 36242051053). `label_gate.py` itself has no such imports — stdlib
+only (`json`, `os`, `re`, `collections.abc`, `typing`) — so loading it
+standalone, bypassing `__init__.py` entirely, needs nothing extra installed.
+
 Environment variables (set by loxia-pr-review.yml `gate` job):
   CANARY_LABEL      the label name that admits the canary lane
   EVENT_NAME        github.event_name (expected: "pull_request")
@@ -34,18 +46,41 @@ unrelated reason.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import ModuleType
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+_LABEL_GATE_PATH = _REPO_ROOT / "lib" / "daemon_runtime" / "label_gate.py"
 
-from lib.daemon_runtime import label_gate  # noqa: E402
+
+def _load_label_gate() -> ModuleType:
+    """Load label_gate.py by file path, bypassing lib/daemon_runtime/__init__.py.
+
+    A normal package import (`from lib.daemon_runtime import label_gate`)
+    runs the package `__init__.py` first, which unconditionally imports
+    `agent_loader` -> `httpx`. This job installs nothing beyond the stdlib on
+    purpose, so that import crashes with `ModuleNotFoundError: No module
+    named 'httpx'` (ateles#1315 CI run 36242051053). `label_gate.py` itself
+    is stdlib-only, so loading it directly — never touching `__init__.py` —
+    needs nothing extra installed.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "loxia_canary_gate_label_gate", _LABEL_GATE_PATH
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not load spec for {_LABEL_GATE_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+label_gate = _load_label_gate()
 
 GITHUB_API_URL = "https://api.github.com"
 
