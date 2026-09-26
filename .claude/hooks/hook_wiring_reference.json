@@ -38,6 +38,11 @@
     ],
     [
       "SessionStart",
+      "checkout_freshness.py",
+      "startup|resume|clear|compact"
+    ],
+    [
+      "SessionStart",
       "reinject_working_method.py",
       "compact"
     ],
