@@ -23,6 +23,8 @@ Run: pytest lib/workflow_engine/test_engine.py -v
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from lib.workflow_engine.engine import (
@@ -742,3 +744,146 @@ def test_bypass_bug_reproduced_against_the_prior_fix_commit():
     # The fix closes this by never reaching this call path unguarded —
     # test_bare_writer_bypassing_the_wrapper_is_refused_qa_exact_repro
     # proves open_steps() itself refuses before any such call happens.
+
+
+# ── pm/qa round 3 on PR #1310 (2026-09-26): post-construction mutation ──
+
+
+def test_wrapper_fields_are_frozen_reassignment_raises():
+    """
+    pm/qa finding, verbatim: "NonProductionCheckpointWriter is a mutable
+    dataclass, so after legitimate construction, assigning `.writer` or
+    `.instance_label` quietly redirects writes to a production-labelled
+    record." Confirmed against the previous commit (ff2f9ff0): both
+    reassignments succeeded silently, no error, no check re-run.
+
+    The fix: `@dataclass(frozen=True)` (matching every other dataclass in
+    record.py). Reassigning either field after construction must raise
+    `dataclasses.FrozenInstanceError`.
+    """
+    test_double = FakeRecordClient(instance_label="test-double")
+    writer = NonProductionCheckpointWriter(test_double, test_double.instance_label)
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        writer.instance_label = "production"
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        writer.writer = FakeRecordClient(instance_label="production")
+
+    # Confirm the wrapper's own state is genuinely unchanged after both
+    # refused mutation attempts, not partially applied.
+    assert writer.instance_label == "test-double"
+    assert writer.writer is test_double
+
+
+def test_wrapper_fields_frozen_is_shown_red_on_revert():
+    """
+    Shown red first: this reproduces pm/qa's exact repro against a
+    LOCALLY reconstructed pre-fix (mutable) version of the class, since
+    the fix in this same file cannot be un-applied and re-applied within
+    one test without editing source. A plain (non-frozen) dataclass with
+    the identical shape demonstrates the defect: silent reassignment,
+    then a downstream write proceeding on the redirected target.
+    """
+
+    @dataclasses.dataclass  # deliberately NOT frozen — the pre-fix shape
+    class MutableWrapperShape:
+        writer: FakeRecordClient
+        instance_label: str
+
+    test_double = FakeRecordClient(instance_label="test-double")
+    mutable_writer = MutableWrapperShape(test_double, test_double.instance_label)
+
+    # This is exactly what pm/qa's finding describes: reassignment
+    # succeeds with no error and no re-check, because nothing stops it.
+    prod_record = FakeRecordClient(instance_label="production")
+    mutable_writer.writer = prod_record
+    mutable_writer.instance_label = "production"
+
+    assert mutable_writer.writer is prod_record
+    assert mutable_writer.instance_label == "production"
+    # No exception was raised anywhere above — that silence is the bug.
+    # The real (frozen) NonProductionCheckpointWriter, exercised in
+    # test_wrapper_fields_are_frozen_reassignment_raises above, refuses
+    # instead.
+
+
+def test_inner_writer_label_mutated_after_construction_is_refused_at_write_time():
+    """
+    pm/qa finding, second half: "Also re-check the wrapped writer's label
+    on every write rather than only in `__post_init__`." Freezing THIS
+    class's own fields (the test above) does not freeze the *wrapped*
+    writer object — `writer.writer` still points at the same
+    `FakeRecordClient`, and that object's own `instance_label` field is
+    perfectly mutable (it is a plain `@dataclass`, not frozen — it has to
+    stay mutable for its own test-double bookkeeping). So a legitimately
+    constructed, correctly-labelled-at-construction-time wrapper can still
+    end up writing to something now labelled "production" if the INNER
+    object's label changes after the fact.
+
+    Confirmed against the previous commit (ff2f9ff0, before this fix):
+    mutating `test_double.instance_label = "production"` after
+    construction left `writer.instance_label` stale at `"test-double"`
+    (proving the wrapper was trusting its own cached copy), and the
+    subsequent `open_steps()` call wrote successfully with
+    `write_call_count` incrementing to 1 and no exception.
+
+    The fix: `raise_checkpoint()`/`open_checkpoints_for_task()` now read
+    `self.writer.instance_label` LIVE on every call via `_current_label()`
+    and re-run the allow-list check, rather than trusting
+    `self.instance_label` frozen at construction.
+    """
+    record = FakeRecordClient()
+    record.unreadable_workflows.add((SCOPE, WFTYPE))
+
+    test_double = FakeRecordClient(instance_label="test-double")
+    writer = NonProductionCheckpointWriter(test_double, test_double.instance_label)
+
+    # Mutate the INNER writer's own label in place — legal, since
+    # FakeRecordClient is a plain mutable dataclass, and this does not
+    # touch any of the (now frozen) wrapper's own fields at all.
+    test_double.instance_label = "production"
+
+    # The wrapper's own cached field is stale/unaffected — demonstrating
+    # this is genuinely a different bypass than the frozen-fields one.
+    assert writer.instance_label == "test-double"
+
+    with pytest.raises(ProductionWriteRefused):
+        open_steps(
+            record,
+            writer,
+            task_id="ent_inner_mutate_demo",
+            declaration_scope=SCOPE,
+            workflow_type=WFTYPE,
+        )
+
+    assert test_double.write_call_count == 0
+    assert test_double.checkpoints == []
+
+
+def test_inner_writer_label_mutation_is_shown_red_on_revert():
+    """
+    Shown red first: demonstrates that exercising the wrapped writer
+    DIRECTLY (bypassing the wrapper's own `raise_checkpoint` method
+    entirely, calling the inner `FakeRecordClient`'s method as-is) writes
+    successfully on a now-production-labelled object with no refusal —
+    this is the call shape the pre-fix `NonProductionCheckpointWriter.
+    raise_checkpoint` effectively reduced to, since it called
+    `self.writer.raise_checkpoint(...)` with no re-check of the label at
+    call time, only ever checking once in `__post_init__`.
+
+    Contrast with `test_inner_writer_label_mutated_after_construction_is_refused_at_write_time`
+    above, which goes through the actual (fixed) wrapper on the identical
+    setup and is refused — the delta between this test's success and that
+    one's refusal IS the fix.
+    """
+    test_double = FakeRecordClient(instance_label="test-double")
+    test_double.instance_label = "production"  # mutated after the fact
+
+    # Calling the inner writer directly — the effective pre-fix call
+    # shape, since the old wrapper performed no live re-check of its own.
+    checkpoint = test_double.raise_checkpoint(
+        "ent_task_bug_3", UNREADABLE_WORKFLOW, idempotency_key="inner-mutate-bug-demo-key"
+    )
+    assert checkpoint is not None
+    assert test_double.write_call_count == 1  # the exact write the live re-check must prevent

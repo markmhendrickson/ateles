@@ -184,7 +184,7 @@ class ProductionWriteRefused(RuntimeError):
 _ALLOWED_INSTANCE_LABELS = frozenset({"test-double", "disposable"})
 
 
-@dataclass
+@dataclass(frozen=True)
 class NonProductionCheckpointWriter:
     """
     Wraps a `CheckpointWriter` and refuses every write unless the wrapped
@@ -195,24 +195,57 @@ class NonProductionCheckpointWriter:
     skipping the wrapper — there is no other constructor path into
     `open_steps()`'s write side.
 
-    The check runs once at construction (fail fast, not at first write) and
-    again is not re-derived per call — `instance_label` is read once from
-    the wrapped writer and frozen, so a writer that mutates its own label
-    after construction cannot flip an already-approved wrapper into an
-    unapproved one or vice versa; a new label requires a new wrapper.
+    Two mutation paths, two closures (pm/qa follow-up, PR #1310, round 3,
+    2026-09-26):
+
+    1. **The wrapper's own fields.** `frozen=True` (matching every other
+       dataclass in this file) makes `writer.instance_label = "production"`
+       or `writer.writer = other_writer` raise `dataclasses.FrozenInstanceError`
+       after construction — the class used to be a plain mutable
+       `@dataclass`, so a caller holding a legitimately-constructed,
+       already-approved wrapper could silently redirect it to a
+       production-labelled record by reassigning either field, with the
+       `__post_init__` check never running again.
+    2. **The wrapped writer's own state.** Freezing THIS class's fields
+       does not freeze the *inner* `CheckpointWriter` object — nothing
+       stops `writer.writer.instance_label = "production"` (mutating the
+       wrapped object in place, never touching this wrapper's own frozen
+       attributes) from being true at write time even though it was
+       `"test-double"` at construction time. So `instance_label` is no
+       longer cached at construction and trusted forever: every write
+       method re-reads `self.writer.instance_label` live and refuses if
+       it is not on the allow-list at that moment, not only at
+       `__post_init__`. `__post_init__`'s check is kept as a fail-fast
+       — a wrapper is never even usably constructed around an
+       already-bad label — but it is no longer the ONLY check.
     """
 
     writer: CheckpointWriter
     instance_label: str
 
     def __post_init__(self) -> None:
-        if self.instance_label not in _ALLOWED_INSTANCE_LABELS:
+        self._check_label(self.instance_label)
+
+    @staticmethod
+    def _check_label(label: str) -> None:
+        if label not in _ALLOWED_INSTANCE_LABELS:
             raise ProductionWriteRefused(
-                f"refusing to accept a checkpoint writer labelled "
-                f"{self.instance_label!r}: not one of "
-                f"{sorted(_ALLOWED_INSTANCE_LABELS)}. This slice must not "
-                f"write to production or any unrecognized instance."
+                f"refusing to write through a checkpoint writer labelled "
+                f"{label!r}: not one of {sorted(_ALLOWED_INSTANCE_LABELS)}. "
+                f"This slice must not write to production or any "
+                f"unrecognized instance."
             )
+
+    def _current_label(self) -> str:
+        """
+        The label to judge THIS write by: the wrapped writer's live
+        `instance_label`, not `self.instance_label` frozen at construction.
+        If the wrapped object no longer exposes `instance_label` at all
+        (e.g. some other `CheckpointWriter` implementation that never
+        carried one), that is treated the same as an unrecognized label —
+        fail-closed, never "no attribute means assume it's still fine."
+        """
+        return getattr(self.writer, "instance_label", "<no instance_label>")
 
     def raise_checkpoint(
         self,
@@ -222,11 +255,13 @@ class NonProductionCheckpointWriter:
         idempotency_key: str,
         needed_input: str | None = None,
     ) -> CheckpointRaised:
+        self._check_label(self._current_label())
         return self.writer.raise_checkpoint(
             task_id, reason, idempotency_key=idempotency_key, needed_input=needed_input
         )
 
     def open_checkpoints_for_task(self, task_id: str) -> list[CheckpointRaised]:
+        self._check_label(self._current_label())
         return self.writer.open_checkpoints_for_task(task_id)
 
 
