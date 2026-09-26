@@ -245,6 +245,23 @@ jobs:
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           python3 "$f"
 
+      # Decision 117: when register row 117 is ruled, authority_model.md#grants
+      # must carry the widened capability tuple (relationship_types[] beside
+      # entity_types[], default-deny-on-absent/empty), refuse the legacy
+      # entity-types-by-repositories tuple with no relationship-type term, and
+      # the corpus must place principal_binding/delegation_edge/ownership_grant
+      # on the closed governance list or state the entity-only deferral naming
+      # the widened tuple as the alternate mechanism, plus the bootstrap
+      # step-3 admission sentence. Prevents ruled-without-registration drift
+      # (pm/qa REQUEST_CHANGES on ateles#1088, carrying ateles#925's own
+      # Engineering build checklist).
+      - name: Decision 117 — ruled relationship-type grant shape in authority_model
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_decision_117.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
   foundation-tests:
     name: foundation binding tests
     runs-on: ubuntu-latest
