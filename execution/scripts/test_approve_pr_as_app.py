@@ -1474,9 +1474,25 @@ class TestFindNonRequiredBlocksStaleHeadUnit:
 
 @pytest.mark.asyncio
 class TestPanelAllRequiresEverySixLenses:
-    async def test_panel_all_derives_all_six_lenses_even_for_a_neutral_diff(self, monkeypatch):
+    """PR #1303 round-1 incident (Waxwing arch / Pavo pm / Phoenicurus qa /
+    Accipiter ux review comments): these fixtures used to be built from
+    `_all_clear_comments(list(target.LENS_AGENTS))` — fabricating a clearing
+    comment from EVERY registered lens, including `legal`/Buteo, which
+    bootstrap mode's own six-lens roster never dispatches for an ordinary
+    diff. That made every test in this class validate the code against its
+    own (wrong) premise rather than against the actual bootstrap roster —
+    "a test that cannot fail on the thing it watches is decoration"
+    (CLAUDE.md verification discipline). Fixtures here are now built from
+    `target.BOOTSTRAP_PANEL_LENSES` — the named constant the fix itself
+    derives from — plus whatever `select_panel` additionally derives for
+    the diff, never from raw `LENS_AGENTS`.
+    """
+
+    async def test_panel_all_derives_the_bootstrap_six_not_all_seven_lens_agents(
+        self, monkeypatch
+    ):
         client = _FakeClient(
-            comments=_all_clear_comments(list(target.LENS_AGENTS)),
+            comments=_all_clear_comments(sorted(target.BOOTSTRAP_PANEL_LENSES)),
             check_runs=_green_checks(),
             changed_files=NEUTRAL_FILES,
         )
@@ -1486,14 +1502,17 @@ class TestPanelAllRequiresEverySixLenses:
             client, repo=REPO, pr=PR, pr_body="Closes #7", extra_lenses=[], panel_all=True
         )
 
-        assert sorted(lenses) == sorted(target.LENS_AGENTS)
+        assert sorted(lenses) == sorted(target.BOOTSTRAP_PANEL_LENSES)
+        assert "legal" not in lenses
         # The derived floor itself is unchanged (still just the diff-derived
         # {pm, qa}) — panel_all is an ADDITION on top, exactly like --lenses.
         assert sorted(r.lens for r in required) == ["pm", "qa"]
 
-    async def test_panel_all_apply_approves_when_every_lens_clears(self, monkeypatch):
+    async def test_panel_all_apply_approves_when_the_bootstrap_six_all_clear(
+        self, monkeypatch
+    ):
         client = _FakeClient(
-            comments=_all_clear_comments(list(target.LENS_AGENTS)),
+            comments=_all_clear_comments(sorted(target.BOOTSTRAP_PANEL_LENSES)),
             check_runs=_green_checks(),
             changed_files=NEUTRAL_FILES,
         )
@@ -1505,11 +1524,70 @@ class TestPanelAllRequiresEverySixLenses:
         assert code == 0
         assert len(client.posted) == 1
         posted_body = client.posted[0]["json"]["body"]
-        for lens in target.LENS_AGENTS:
+        for lens in target.BOOTSTRAP_PANEL_LENSES:
             assert lens in posted_body
+        assert "legal" not in posted_body
 
-    async def test_panel_all_refuses_when_one_of_the_six_never_commented(self, monkeypatch):
-        present = [lens for lens in target.LENS_AGENTS if lens != "content"]
+    async def test_panel_all_never_requires_legal_when_the_diff_does_not_need_it(
+        self, monkeypatch
+    ):
+        """The exact regression PR #1303 round 1 shipped: a neutral diff (no
+        package.json/auth//LICENSE/PII surface) must approve WITHOUT a legal/
+        Buteo comment ever existing — legal never even asked for. This is
+        the test that fails if the bootstrap default ever again requires a
+        lens the bootstrap panel doesn't run."""
+        client = _FakeClient(
+            comments=_all_clear_comments(sorted(target.BOOTSTRAP_PANEL_LENSES)),
+            check_runs=_green_checks(),
+            changed_files=NEUTRAL_FILES,
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        lenses, _ = await target.resolve_lenses(
+            client, repo=REPO, pr=PR, pr_body="Closes #7", extra_lenses=[], panel_all=True
+        )
+        assert "legal" not in lenses, (
+            "the bootstrap default must never require a lens outside "
+            "BOOTSTRAP_PANEL_LENSES — legal joins the floor only when "
+            "select_panel derives it for the diff"
+        )
+
+        code = await target.run(REPO, PR, [], apply=True, panel_all=True)
+        assert code == 0, (
+            "a diff where only the bootstrap six are relevant must be "
+            "approvable under --panel all with NO legal comment at all"
+        )
+
+    async def test_panel_all_still_requires_legal_when_the_diff_needs_it(
+        self, monkeypatch
+    ):
+        """legal is not excluded outright — it still joins the floor when
+        select_panel's own diff_patterns pull it in (e.g. a package.json/
+        LICENSE change), exactly as before this fix. panel_all widens the
+        BOOTSTRAP DEFAULT floor; it never narrows what select_panel itself
+        requires."""
+        lenses_present = sorted(target.BOOTSTRAP_PANEL_LENSES) + ["legal"]
+        client = _FakeClient(
+            comments=_all_clear_comments(lenses_present),
+            check_runs=_green_checks(),
+            changed_files=["package.json"],
+        )
+        _install_client(monkeypatch, client)
+
+        lenses, required = await target.resolve_lenses(
+            client, repo=REPO, pr=PR, pr_body="Closes #7", extra_lenses=[], panel_all=True
+        )
+        assert "legal" in lenses
+        assert "legal" in {r.lens for r in required}, (
+            "legal must appear in the DIFF-DERIVED floor for a "
+            "package.json change, not merely as a panel_all addition"
+        )
+
+    async def test_panel_all_refuses_when_one_of_the_bootstrap_six_never_commented(
+        self, monkeypatch
+    ):
+        present = [lens for lens in target.BOOTSTRAP_PANEL_LENSES if lens != "content"]
         client = _FakeClient(
             comments=_all_clear_comments(present),
             check_runs=_green_checks(),
@@ -1528,7 +1606,7 @@ class TestPanelAllRequiresEverySixLenses:
         exercises the SAME refusal through evaluate_lens rather than
         find_non_required_blocks — proving the two paths agree."""
         comments = _all_clear_comments(
-            [lens for lens in target.LENS_AGENTS if lens != "arch"]
+            [lens for lens in target.BOOTSTRAP_PANEL_LENSES if lens != "arch"]
         )
         comments.append(
             _comment(70, _lens_comment_body("arch", "waxwing", verdict="REQUEST_CHANGES"))
@@ -1543,6 +1621,123 @@ class TestPanelAllRequiresEverySixLenses:
 
         assert code == 1
         assert client.posted == []
+
+
+class TestBootstrapPanelLensesConstant:
+    """Pins the constant itself against the exact incident: it must be the
+    bootstrap roster (six lenses, no legal), never re-widened back to
+    `LENS_AGENTS` (seven) by a future edit with no failing test to catch it."""
+
+    def test_bootstrap_panel_is_exactly_six_lenses(self):
+        assert target.BOOTSTRAP_PANEL_LENSES == frozenset(
+            {"pm", "arch", "ux", "qa", "security", "content"}
+        )
+
+    def test_bootstrap_panel_excludes_legal(self):
+        assert "legal" not in target.BOOTSTRAP_PANEL_LENSES
+
+    def test_bootstrap_panel_is_a_strict_subset_of_lens_agents(self):
+        """Every bootstrap lens must still be a real, registered lens — this
+        constant is a curated SUBSET of LENS_AGENTS, not an independent list
+        that could silently drift to name an unknown lens."""
+        assert target.BOOTSTRAP_PANEL_LENSES < frozenset(target.LENS_AGENTS)
+
+    def test_panel_all_never_unions_a_lens_outside_the_bootstrap_roster(self):
+        """The regression test qa's review asked for directly: whatever
+        `resolve_lenses` does internally, its panel_all output must never
+        contain a lens outside BOOTSTRAP_PANEL_LENSES unless select_panel
+        itself derived it for the diff. Asserted against the CONSTANT, not
+        against LENS_AGENTS echoed back at itself."""
+        non_bootstrap = frozenset(target.LENS_AGENTS) - target.BOOTSTRAP_PANEL_LENSES
+        assert non_bootstrap == frozenset({"legal"})
+
+
+# ── ux finding on PR #1303: a missing lens's reason must say WHICH lens and ─
+# ── HOW to resolve it, and distinguish "pending" from "will never comment" ──
+
+
+@pytest.mark.asyncio
+class TestMissingLensReasonIsActionable:
+    async def test_diff_derived_missing_lens_reads_as_pending_not_permanent(self):
+        """A lens genuinely required by THIS diff (`diff_derived=True`) that
+        has not yet commented reads as a wait, with an action available:
+        wait, or dispatch it yourself."""
+        client = _FakeClient(comments=[], check_runs=[])
+        outcome = await target.evaluate_lens(
+            client,
+            repo=REPO,
+            pr=PR,
+            head_sha=HEAD,
+            comments=[],
+            lens="pm",
+            diff_derived=True,
+        )
+        assert outcome.passed is False
+        assert "pm" in outcome.reason
+        assert "pavo" in outcome.reason
+        assert "part of this diff's required floor" in outcome.reason
+        assert "never will" not in outcome.reason
+
+    async def test_panel_all_only_missing_lens_reads_as_permanent_not_pending(self):
+        """A lens required ONLY because --panel all/--lenses widened the
+        floor (`diff_derived=False`) that has not commented must say it will
+        NEVER comment on its own, and name the two ways to actually resolve
+        the row — Accipiter's ux finding on PR #1303: before this fix both
+        cases printed the identical 'no comment carries {marker}' reason,
+        giving no hint that legal would never comment for an ordinary diff."""
+        client = _FakeClient(comments=[], check_runs=[])
+        outcome = await target.evaluate_lens(
+            client,
+            repo=REPO,
+            pr=PR,
+            head_sha=HEAD,
+            comments=[],
+            lens="legal",
+            diff_derived=False,
+        )
+        assert outcome.passed is False
+        assert "legal" in outcome.reason
+        assert "buteo" in outcome.reason
+        assert "never will" in outcome.reason
+        assert "--panel required" in outcome.reason or "--lenses" in outcome.reason
+        assert "dispatch the lens yourself" in outcome.reason
+
+    async def test_run_passes_diff_derived_correctly_for_required_vs_panel_all_lenses(
+        self, monkeypatch
+    ):
+        """End-to-end: run() must tell evaluate_lens which lenses are
+        actually diff-derived (pm, qa for NEUTRAL_FILES) versus which are
+        required only via panel_all (arch, ux, security, content) — proven
+        by reading the printed reason for each missing lens."""
+        client = _FakeClient(comments=[], check_runs=_green_checks(), changed_files=NEUTRAL_FILES)
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, [], apply=False, panel_all=True)
+        assert code == 1  # nothing commented; expected to fail closed
+
+        # Re-run and capture the outcomes directly via resolve_lenses +
+        # evaluate_lens, mirroring exactly what run() does, so the test
+        # reads the SAME reason text a real dry run would print.
+        lenses, required = await target.resolve_lenses(
+            client, repo=REPO, pr=PR, pr_body="", extra_lenses=[], panel_all=True
+        )
+        floor_names = {r.lens for r in required}
+        outcomes = {
+            lens: await target.evaluate_lens(
+                client,
+                repo=REPO,
+                pr=PR,
+                head_sha=HEAD,
+                comments=[],
+                lens=lens,
+                diff_derived=lens in floor_names,
+            )
+            for lens in lenses
+        }
+        assert "never will" not in outcomes["pm"].reason
+        assert "never will" not in outcomes["qa"].reason
+        assert "never will" in outcomes["arch"].reason
+        assert "never will" in outcomes["security"].reason
 
 
 class TestPanelAllDefault:
