@@ -37,8 +37,14 @@ Endpoints:
   GET  /health           liveness probe
 
 Environment variables (read by apis.py and passed in):
-  APIS_GITHUB_WEBHOOK_SECRET   HMAC-SHA256 secret configured on the GitHub webhook
+  APIS_GITHUB_WEBHOOK_SECRET       HMAC-SHA256 secret configured on the GitHub webhook
+  APIS_GITHUB_WEBHOOK_SECRET_NEXT  incoming value during a staged rotation
+                                    (rotate_swarm_secret.py) — admitted alongside
+                                    the current secret; empty outside a rotation
   APIS_GITHUB_WEBHOOK_PORT     listen port (default: 8742; Apus owns 8741)
+  APIS_APPROVE_EMAIL_SECRET       shared secret for /approve-email + /approve-release
+  APIS_APPROVE_EMAIL_SECRET_NEXT  incoming value during a staged rotation of the
+                                   above; empty outside a rotation
 """
 
 from __future__ import annotations
@@ -252,6 +258,48 @@ def verify_github_signature(secret: str, body: bytes, signature_header: str) -> 
     return hmac.compare_digest(expected, signature_header[len("sha256=") :])
 
 
+def verify_github_signature_any(
+    secrets: tuple[str, ...], body: bytes, signature_header: str
+) -> bool:
+    """Accept a signature valid under ANY of ``secrets`` (dual-admit overlap).
+
+    Rotation is staged, never a flag day (authority_model.md#grants): during
+    the overlap window the gateway must admit a delivery signed with either
+    the retiring secret or the incoming one, so a rotation's live-verification
+    probe (a real signed delivery) can succeed before the old secret retires,
+    and any in-flight delivery signed under the old secret is not dropped
+    mid-rotation. Empty/falsy entries are skipped so callers may pass a fixed
+    two-slot tuple with the second slot blank outside a rotation. Every
+    candidate is checked (no early return on the false branch) to avoid
+    turning secret count into a timing signal.
+    """
+    verified = False
+    for candidate in secrets:
+        if not candidate:
+            continue
+        if verify_github_signature(candidate, body, signature_header):
+            verified = True
+    return verified
+
+
+def _matches_any(presented: str, secrets: tuple[str, ...]) -> bool:
+    """Constant-time check that ``presented`` equals ANY non-empty ``secrets``.
+
+    Same dual-admit rationale as ``verify_github_signature_any``, for the
+    shared-secret header comparison the /approve-email and /approve-release
+    routes use instead of an HMAC signature. Every candidate is compared (no
+    short-circuit on the first match) so the number of configured secrets is
+    not observable via timing.
+    """
+    matched = False
+    for candidate in secrets:
+        if not candidate:
+            continue
+        if hmac.compare_digest(presented, candidate):
+            matched = True
+    return matched
+
+
 def parse_github_event(
     event_type: str, payload: dict[str, Any], delivery_id: str = ""
 ) -> SwarmTrigger | None:
@@ -428,6 +476,8 @@ def make_app(
     secret: str,
     handler: TriggerHandler,
     approve_email_secret: str = "",
+    secret_next: str = "",
+    approve_email_secret_next: str = "",
 ) -> web.Application:
     """
     Build the aiohttp application for the GitHub webhook receiver.
@@ -441,6 +491,14 @@ def make_app(
     binds 127.0.0.1) AND secret-gated; when the secret is unset the route
     fails closed (503) so an email reply can never drive a merge without the
     shared secret configured on both daemons.
+
+    ``secret_next`` / ``approve_email_secret_next`` (rotation overlap window,
+    `execution/scripts/rotate_swarm_secret.py`): when set, a delivery signed
+    under the NEW value is admitted alongside the OLD one — dual-admit,
+    per `authority_model.md#grants` ("rotation is staged, never a flag day").
+    Both slots are checked on every request during the window; the rotator
+    clears the ``_NEXT`` value once the old secret is retired, so outside a
+    rotation these default to empty and behavior is unchanged.
     """
 
     async def handle_webhook(request: web.Request) -> web.Response:
@@ -451,14 +509,14 @@ def make_app(
         # Fail closed (Loxia review on PR #87): the gateway sits behind a
         # public tunnel — an unset secret must reject deliveries, not accept
         # unsigned ones, or anyone who finds the endpoint can spawn pipelines.
-        if not secret:
+        if not secret and not secret_next:
             log.error(
                 "[apis] APIS_GITHUB_WEBHOOK_SECRET unset — rejecting delivery "
                 f"{delivery_id} (fail closed)"
             )
             return web.Response(status=503, text="Webhook secret not configured")
         sig = request.headers.get("X-Hub-Signature-256", "")
-        if not verify_github_signature(secret, body, sig):
+        if not verify_github_signature_any((secret, secret_next), body, sig):
             log.warning(f"[apis] GitHub signature mismatch, delivery={delivery_id}")
             return web.Response(status=401, text="Signature mismatch")
 
@@ -502,10 +560,13 @@ def make_app(
         The actual merge stays behind APIS_APPROVAL_TRIGGERS_MERGE in the
         dispatcher, identical to the other approval channels.
         """
-        if not approve_email_secret:
+        if not approve_email_secret and not approve_email_secret_next:
             log.error("[apis] /approve-email hit but APPROVE secret unset — 503")
             return web.Response(status=503, text="approve-email not configured")
-        if request.headers.get("X-Approve-Secret", "") != approve_email_secret:
+        if not _matches_any(
+            request.headers.get("X-Approve-Secret", ""),
+            (approve_email_secret, approve_email_secret_next),
+        ):
             log.warning("[apis] /approve-email secret mismatch — 401")
             return web.Response(status=401, text="bad secret")
         try:
@@ -562,10 +623,13 @@ def make_app(
 
         Fails closed: unset secret → 503; wrong secret → 401; bad version → 400.
         """
-        if not approve_email_secret:
+        if not approve_email_secret and not approve_email_secret_next:
             log.error("[apis] /approve-release hit but APPROVE secret unset — 503")
             return web.Response(status=503, text="approve-release not configured")
-        if request.headers.get("X-Approve-Secret", "") != approve_email_secret:
+        if not _matches_any(
+            request.headers.get("X-Approve-Secret", ""),
+            (approve_email_secret, approve_email_secret_next),
+        ):
             log.warning("[apis] /approve-release secret mismatch — 401")
             return web.Response(status=401, text="bad secret")
         try:

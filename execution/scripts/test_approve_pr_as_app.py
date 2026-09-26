@@ -466,6 +466,37 @@ class TestChecksApiOnlyRepoDoesNotFalseFail:
 
 
 @pytest.mark.asyncio
+class TestSkippedLoxiaReviewReadsAsGreen:
+    """Loxia's canary gate (loxia-pr-review.yml, ateles PR ci/loxia-canary-only)
+    makes the `review` job's `if:` false for a non-canary PR, which GitHub
+    reports as a check-run with `conclusion: "skipped"`. "Loxia PR review" is
+    not currently in `required_status_checks` on `main` (verified live via
+    `gh api repos/markmhendrickson/ateles/branches/main` — only "gitleaks
+    (secrets + PII)" is required), so this is already covered by
+    `evaluate_checks`'s existing `conclusion in ("success", "neutral",
+    "skipped")` branch — this test pins that a check-run literally named
+    "Loxia PR review" with a skipped conclusion does not block approval, so a
+    future change to that branch (or to the workflow's job/check name) cannot
+    silently regress it."""
+
+    async def test_skipped_loxia_check_run_does_not_block_approval(self, monkeypatch):
+        client = _FakeClient(
+            comments=_all_clear_comments(ALL_FOUR),
+            check_runs=[
+                *_green_checks(),
+                {"name": "Loxia PR review", "status": "completed", "conclusion": "skipped"},
+            ],
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 0
+        assert len(client.posted) == 1
+
+
+@pytest.mark.asyncio
 class TestDryRunNeverSubmits:
     async def test_dry_run_never_submits_even_when_everything_passes(self, monkeypatch):
         client = _FakeClient(comments=_all_clear_comments(ALL_FOUR), check_runs=_green_checks())
