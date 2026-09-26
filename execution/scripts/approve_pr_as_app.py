@@ -24,6 +24,27 @@ same function `swarm_dispatch.py`'s dispatcher calls to assemble a PR's
 review panel — against THIS PR's changed files and linked issue, so the tool
 can never silently require less than the pipeline itself would review with.
 
+ateles#1293 (2026-09-26): this tool approved a PR with "lenses: ALL PASS"
+while Waxwing (arch) — a lens `select_panel` did NOT seat for that diff —
+had a live REQUEST_CHANGES with a `[BLOCKING]` finding on the SAME head,
+posted ten minutes earlier. The required-lens floor decides who MUST clear;
+it was silently read as deciding who is even LOOKED AT. Fix, two parts:
+  - `find_non_required_blocks` reads every lens in `LENS_AGENTS` — not only
+    the ones in the resolved `lenses` list — for a comment on the PR's
+    CURRENT head, and reports any of them that reads as REQUEST_CHANGES or
+    carries `[BLOCKING]`, with the same `lens_own_verdict` fixed-position
+    parser `evaluate_lens` already uses for required lenses. `run()` refuses
+    the approval if this ever finds anything, independent of whether every
+    required lens itself passed.
+  - `--panel {required,all}` (`all` is the default while bootstrap mode is
+    on, see `_panel_all_default`): `all` folds every one of the six lenses
+    into the required set up front, so the gap above can never open at
+    all — a lens has to clear or it is a required-lens FAILURE, not merely
+    a "non-required block" the second layer has to catch. `required` is
+    the pre-#1293 behaviour (derived floor only). The non-required-block
+    check above stays on regardless of `--panel`, as defense in depth for
+    when `required` is explicitly chosen.
+
 Reuse, not rebuild:
   - Lens verdict parsing: `swarm_dispatch.lens_own_verdict` /
     `swarm_dispatch.sign_off_is_warranted` — the security-reviewed fixed-
@@ -63,15 +84,26 @@ conclusion always blocks. See `_unscheduled_non_required_reason`.
 
 Usage:
     python3 execution/scripts/approve_pr_as_app.py --repo <owner/name> --pr <n> \\
-        [--lenses pm,security] [--apply]
+        [--lenses pm,security] [--panel {required,all}] [--apply]
 
 `--lenses` ADDS to the derived floor; it can never remove a lens the panel
-logic would itself require for this diff/issue. Without --apply this is
-always a dry run: it prints the derived-lens rationale, the per-lens table,
-and the check-run table, and does nothing else, whether every gate passes or
-not. With --apply, and ONLY if every lens and every required check passes, it
-submits a formal APPROVE review as the App. On any failure it exits non-zero
-and submits nothing.
+logic would itself require for this diff/issue. `--panel all` (the default
+while bootstrap mode is on — see `_panel_all_default` and
+ATELES_APPROVE_PANEL_REQUIRED_ONLY below) additionally requires the six
+lenses in `BOOTSTRAP_PANEL_LENSES` (pm, arch, ux, qa, security, content —
+the panel bootstrap mode actually dispatches; `legal` is deliberately NOT
+in this set and joins the floor only when `review_panel.select_panel`
+itself derives it for the diff) to have signed off on the current head;
+`--panel required` uses the diff-derived floor alone, as before
+ateles#1293's fix. Either way, a live REQUEST_CHANGES/`[BLOCKING]`
+verdict from ANY lens on the current head refuses the approval, whether or
+not that lens is in the required set. Without --apply this is always a dry
+run: it prints the derived-lens rationale, the per-lens table, the non-
+required-block list (if any), and the check-run table, and does nothing
+else, whether every gate passes or not. With --apply, and ONLY if every
+required lens passes, no lens of any kind carries a live block, and every
+required check passes, it submits a formal APPROVE review as the App. On
+any failure it exits non-zero and submits nothing.
 
 Env:
     (App installation token)              read-only GitHub calls (PR, comments, checks);
@@ -79,6 +111,10 @@ Env:
     ATELES_REVIEWER_APP_ID                reviewer App id (required for --apply)
     ATELES_REVIEWER_APP_PRIVATE_KEY(_PATH) reviewer App private key (required for --apply)
     ATELES_REVIEWER_APP_INSTALLATION_ID   optional; resolved via API if unset
+    ATELES_APPROVE_PANEL_REQUIRED_ONLY    set to "1" to opt OUT of the bootstrap-
+                                           mode --panel all default (use the
+                                           diff-derived floor alone); --panel on
+                                           the command line always overrides this
 
 This script never prints, logs, or commits the App private key or any token.
 """
@@ -131,6 +167,33 @@ LENS_AGENTS: dict[str, str] = {
     "security": "falco",
     "content": "corvus",
 }
+
+# The six lenses bootstrap mode's own panel actually dispatches (agent_policy
+# `ent_d0f1a840e549b3b299f62397`, "Software work runs in bootstrap mode":
+# "Pavo pm, Waxwing arch, Falco security, Phoenicurus qa, Accipiter ux when
+# UI changes" — plus Corvus content, which the same review round confirmed
+# is part of the live bootstrap roster).
+#
+# NOT `list(LENS_AGENTS)` — that is a documented incident, not a typo. PR
+# #1303 round 1 shipped `--panel all` unioning in literally every entry of
+# `LENS_AGENTS`, seven lenses including `legal`/Buteo. `legal` is not one of
+# `review_panel.LENSES`'s always-on lenses (only `pm`/`qa` carry
+# `always=True`); it is diff/issue-pattern-gated on licensing, `auth/`,
+# `LICENSE`, and PII/privacy surfaces. Bootstrap mode's own roster never
+# dispatches Buteo for an ordinary diff, so requiring it unconditionally
+# meant `--apply` could never pass under the tool's own stated default —
+# Waxwing (arch), Pavo (pm), Phoenicurus (qa) and Accipiter (ux) each
+# independently confirmed this reading #1303's round-1 head and withheld
+# sign-off. `legal` still joins the required set for a diff that actually
+# needs it, exactly as before: `derive_required_lenses` calls
+# `review_panel.select_panel`, which pulls `legal` in via its own
+# `diff_patterns`/`issue_patterns` (e.g. neotoma#2513, a `package.json`/
+# licensing diff) regardless of what `--panel` is set to. `--panel all`
+# only widens the FLOOR to this bootstrap roster; it never narrows what
+# `select_panel` would otherwise require.
+BOOTSTRAP_PANEL_LENSES: frozenset[str] = frozenset(
+    {"pm", "arch", "ux", "qa", "security", "content"}
+)
 
 _FAILING_CHECK_CONCLUSIONS = ("failure", "timed_out", "cancelled", "action_required")
 
@@ -283,6 +346,28 @@ class RequiredLens:
         self.reason = reason
 
 
+class NonRequiredBlock:
+    """A lens the derived floor did NOT require, but which posted a
+    REQUEST_CHANGES / [BLOCKING] verdict on the PR's CURRENT head anyway.
+
+    ateles#1293 (2026-09-26): this tool approved a PR whose required floor
+    was only {pm, qa}, while Waxwing (arch) — not required for that diff —
+    had posted a live REQUEST_CHANGES with a [BLOCKING] finding on the same
+    head ten minutes earlier. The tool never looked at arch's comment at
+    all, because arch was not in the derived floor. A live blocking verdict
+    from ANY lens must refuse the approval, whether or not the panel-
+    assembly logic (`review_panel.select_panel`) happened to seat that lens
+    for this diff — the floor decides who MUST clear, not who is allowed to
+    object.
+    """
+
+    def __init__(self, lens: str, *, agent: str, verdict: str | None, comment_url: str) -> None:
+        self.lens = lens
+        self.agent = agent
+        self.verdict = verdict
+        self.comment_url = comment_url
+
+
 async def _changed_files(client: httpx.AsyncClient, repo: str, pr: int) -> list[str]:
     """Filenames touched by the PR — same endpoint `swarm_dispatch._changed_files` reads."""
     out: list[str] = []
@@ -354,6 +439,27 @@ def _why_lens_selected(lens: Lens, *, changed_files: list[str], gate_contributor
     if lens.gate:
         return f"owns a gate still pending on the linked issue ({lens.gate})"
     return "selected by the panel (reason not otherwise categorized)"
+
+
+def _panel_all_default() -> bool:
+    """Whether `--panel` defaults to `all` rather than `required`.
+
+    Bootstrap mode (agent_policy `ent_d0f1a840e549b3b299f62397`, CLAUDE.md
+    "Software work runs in bootstrap mode"): while the Ateles foundation is
+    not yet in place, the session is the routine approver in place of the
+    operator, so the gate this tool enforces has to be the stricter one —
+    every lens signed off, not merely the ones `review_panel.select_panel`
+    would have seated for this diff. There is no existing flag or env var
+    representing bootstrap mode in code (it lives only as a Neotoma
+    agent_policy + CLAUDE.md mirror), so this tool defines its own:
+    `ATELES_APPROVE_PANEL_REQUIRED_ONLY=1` opts OUT of the bootstrap-mode
+    default and restores the pre-existing derived-floor-only behaviour —
+    set it only once bootstrap mode has ended (the operator judges that, per
+    the policy's own "Exit" clause) or for a deliberate one-off run outside
+    it. `--panel` on the command line always overrides this default either
+    way.
+    """
+    return os.environ.get("ATELES_APPROVE_PANEL_REQUIRED_ONLY", "") != "1"
 
 
 def _always_required_lenses() -> list[Lens]:
@@ -473,7 +579,21 @@ async def evaluate_lens(
     head_sha: str,
     comments: list[dict],
     lens: str,
+    diff_derived: bool = True,
 ) -> LensOutcome:
+    """Evaluate one required lens's verdict on `head_sha`.
+
+    `diff_derived` says whether *this specific PR's diff/issue* actually
+    pulled `lens` into the required floor (`derive_required_lenses` /
+    `review_panel.select_panel`), as opposed to it being required only
+    because `--panel all`/`--lenses` widened the floor past what this diff
+    needs. Accipiter's ux review on PR #1303 round 1: the "no comment
+    carries {marker!r}" reason string read identically for "this lens is
+    just running slow" and "this lens is not part of the bootstrap roster
+    for this diff and will never comment" — a user reading the per-lens
+    table had no way to tell "wait" from "this will never resolve." This
+    distinguishes the two and says what action actually clears the row.
+    """
     agent = LENS_AGENTS.get(lens, "")
     if not agent:
         return LensOutcome(
@@ -484,9 +604,26 @@ async def evaluate_lens(
     marker = compose_lens_review_marker(lens, head_sha)
     comment = _latest_matching_comment(comments, marker=marker)
     if comment is None:
+        if diff_derived:
+            reason = (
+                f"no comment carries {marker!r} yet — {lens} ({agent}) is "
+                "part of this diff's required floor and has not reviewed "
+                "the current head. Wait for it to review, or dispatch it "
+                "yourself and re-run once it has posted."
+            )
+        else:
+            reason = (
+                f"no comment carries {marker!r}, and never will on its own — "
+                f"{lens} ({agent}) is required only because --panel all/"
+                "--lenses widened the floor past what this diff needs; "
+                "nothing in the normal pipeline dispatches this lens for "
+                "this PR. To clear this row: dispatch the lens yourself and "
+                "have it post a review, or drop it from the required set "
+                "(--panel required, or omit it from --lenses)."
+            )
         return LensOutcome(
             lens, agent=agent, head_matched=False, verdict=None, passed=False,
-            reason=f"no comment carries {marker!r} — lens has not reviewed the current head",
+            reason=reason,
         )
 
     body = comment.get("body") or ""
@@ -510,6 +647,46 @@ async def evaluate_lens(
         comment_url=comment.get("html_url", ""),
         reason=reason,
     )
+
+
+def find_non_required_blocks(
+    *, comments: list[dict], head_sha: str, required_lenses: set[str]
+) -> list[NonRequiredBlock]:
+    """Every lens NOT in `required_lenses` whose comment on the CURRENT head
+    (`compose_lens_review_marker`) reads as REQUEST_CHANGES or carries a
+    `[BLOCKING]` finding.
+
+    Reads every lens registered in `LENS_AGENTS` — not only the derived
+    floor — because ateles#1293 was approved with 'lenses: ALL PASS' while a
+    non-required lens's live blocking verdict on the SAME head sat unread.
+    Parsed with `swarm_dispatch.lens_own_verdict`, the identical fixed-
+    position parser `evaluate_lens` already uses for required lenses, so a
+    non-required lens cannot be held to a looser or stricter reading than a
+    required one. A lens with no comment on this head, or whose comment
+    reads as a clearing verdict, is not a block — this function reports
+    ONLY lenses that actively object, never absence.
+    """
+    blocks: list[NonRequiredBlock] = []
+    for lens, agent in LENS_AGENTS.items():
+        if lens in required_lenses:
+            continue
+        marker = compose_lens_review_marker(lens, head_sha)
+        comment = _latest_matching_comment(comments, marker=marker)
+        if comment is None:
+            continue
+        body = comment.get("body") or ""
+        if sign_off_is_warranted(body, lens_agent=agent):
+            continue
+        verdict = lens_own_verdict(body, lens_agent=agent)
+        blocks.append(
+            NonRequiredBlock(
+                lens,
+                agent=agent,
+                verdict=verdict,
+                comment_url=comment.get("html_url", ""),
+            )
+        )
+    return blocks
 
 
 def _contexts_from_required_status_checks(payload: object) -> set[str] | None:
@@ -1018,7 +1195,7 @@ def _print_derived_lenses(required: list[RequiredLens], extra: list[str]) -> Non
     for r in required:
         print(f"  - {r.lens}: {r.reason}")
     if extra:
-        print(f"added by --lenses (on top of the derived floor): {', '.join(extra)}")
+        print(f"added on top of the derived floor (--lenses and/or --panel all): {', '.join(extra)}")
     print()
 
 
@@ -1046,20 +1223,62 @@ def _print_table(lens_outcomes: list[LensOutcome], check_outcomes: list[CheckOut
 
 
 async def resolve_lenses(
-    client: httpx.AsyncClient, *, repo: str, pr: int, pr_body: str, extra_lenses: list[str]
+    client: httpx.AsyncClient,
+    *,
+    repo: str,
+    pr: int,
+    pr_body: str,
+    extra_lenses: list[str],
+    panel_all: bool = False,
 ) -> tuple[list[str], list[RequiredLens]]:
     """The lens set the tool will require: the derived floor plus `--lenses`
-    additions. `--lenses` can only ADD — it is unioned onto the derived
-    floor, never used to shrink it, so a caller can never accidentally (or
-    deliberately) drop a lens `review_panel.select_panel` itself would
-    require for this diff/issue."""
+    additions, and — with `panel_all` — the bootstrap-mode panel
+    (`BOOTSTRAP_PANEL_LENSES`) rather than only the derived floor.
+
+    `--lenses` can only ADD — it is unioned onto the derived floor, never
+    used to shrink it, so a caller can never accidentally (or deliberately)
+    drop a lens `review_panel.select_panel` itself would require for this
+    diff/issue. `panel_all` is a separate, stronger union: bootstrap mode
+    (agent_policy `ent_d0f1a840e549b3b299f62397`) requires the six lenses
+    the bootstrap panel actually dispatches — pm, arch, ux, qa, security,
+    content — to have signed off on the current head, regardless of what
+    this diff's panel-assembly logic would have seated. This is
+    `BOOTSTRAP_PANEL_LENSES`, NOT `list(LENS_AGENTS)`: the latter also
+    contains `legal`, which bootstrap mode's own roster never dispatches for
+    an ordinary diff (round-1 review on this PR: requiring it unconditionally
+    made `--apply` unable to ever pass). `legal` still joins the floor for a
+    diff that genuinely needs it — via `derive_required_lenses` calling
+    `review_panel.select_panel`, unaffected by `panel_all` — this only
+    changes what the BOOTSTRAP DEFAULT widens the floor to. The reasons for
+    the derived floor are still computed and reported (`required`), so the
+    dry-run table still explains WHY each lens was in the diff-derived floor;
+    the panel_all additions are reported as additions, exactly like
+    `--lenses`.
+    """
     required = await derive_required_lenses(client, repo=repo, pr=pr, pr_body=pr_body)
     floor = [r.lens for r in required]
-    added = [lens for lens in extra_lenses if lens not in floor]
-    return floor + added, required
+    all_lenses = sorted(BOOTSTRAP_PANEL_LENSES) if panel_all else []
+    added = [lens for lens in (*extra_lenses, *all_lenses) if lens not in floor]
+    # De-duplicate `added` while preserving first-seen order (extra_lenses
+    # before the panel_all union), since `--lenses` and panel_all can name
+    # the same lens.
+    seen: set[str] = set()
+    deduped_added = []
+    for lens in added:
+        if lens not in seen:
+            seen.add(lens)
+            deduped_added.append(lens)
+    return floor + deduped_added, required
 
 
-async def run(repo: str, pr: int, extra_lenses: list[str], *, apply: bool) -> int:
+async def run(
+    repo: str,
+    pr: int,
+    extra_lenses: list[str],
+    *,
+    apply: bool,
+    panel_all: bool = False,
+) -> int:
     async with httpx.AsyncClient(timeout=30) as client:
         pr_data = await _fetch_pr(client, repo, pr)
         head_sha = _normalise_full_sha(str((pr_data.get("head") or {}).get("sha") or ""))
@@ -1070,7 +1289,12 @@ async def run(repo: str, pr: int, extra_lenses: list[str], *, apply: bool) -> in
 
         try:
             lenses, required = await resolve_lenses(
-                client, repo=repo, pr=pr, pr_body=pr_body, extra_lenses=extra_lenses
+                client,
+                repo=repo,
+                pr=pr,
+                pr_body=pr_body,
+                extra_lenses=extra_lenses,
+                panel_all=panel_all,
             )
         except Exception as exc:
             print(f"refusing: could not derive the required-lens set: {exc}")
@@ -1103,9 +1327,27 @@ async def run(repo: str, pr: int, extra_lenses: list[str], *, apply: bool) -> in
         lens_outcomes: list[LensOutcome] = []
         for lens in lenses:
             outcome = await evaluate_lens(
-                client, repo=repo, pr=pr, head_sha=head_sha, comments=comments, lens=lens
+                client,
+                repo=repo,
+                pr=pr,
+                head_sha=head_sha,
+                comments=comments,
+                lens=lens,
+                diff_derived=lens in floor_names,
             )
             lens_outcomes.append(outcome)
+
+        # ateles#1293: a lens outside the required floor can still have
+        # posted a live blocking verdict on this SAME head. Read EVERY lens
+        # registered in LENS_AGENTS, not only the ones `lenses` required,
+        # and refuse if any of them blocks — naming the lens and linking
+        # its comment. With panel_all this set is always empty (every lens
+        # is already in `lenses`), but the check stays unconditional so it
+        # is defense in depth rather than something panel_all could
+        # silently make redundant and later regress without a failing test.
+        non_required_blocks = find_non_required_blocks(
+            comments=comments, head_sha=head_sha, required_lenses=set(lenses)
+        )
 
         base_ref = str((pr_data.get("base") or {}).get("ref") or "")
         check_outcomes, checks_green = await evaluate_checks(
@@ -1114,11 +1356,22 @@ async def run(repo: str, pr: int, extra_lenses: list[str], *, apply: bool) -> in
 
         _print_table(lens_outcomes, check_outcomes)
 
+        if non_required_blocks:
+            print("non-required lenses with a LIVE BLOCKING verdict on this head:")
+            for b in non_required_blocks:
+                print(f"  - {b.lens} ({b.agent}): {b.verdict or '[BLOCKING] finding'} — {b.comment_url}")
+            print()
+
         all_lenses_pass = all(o.passed for o in lens_outcomes)
-        overall_pass = all_lenses_pass and checks_green
+        no_non_required_blocks = not non_required_blocks
+        overall_pass = all_lenses_pass and no_non_required_blocks and checks_green
 
         print(f"head_sha={head_sha}")
         print(f"lenses: {'ALL PASS' if all_lenses_pass else 'FAIL'}")
+        print(
+            "non-required lens blocks: "
+            f"{'NONE' if no_non_required_blocks else 'BLOCKED'}"
+        )
         print(f"checks: {'GREEN' if checks_green else 'NOT GREEN'}")
         print(f"overall: {'PASS' if overall_pass else 'FAIL'}")
 
@@ -1152,12 +1405,23 @@ async def run(repo: str, pr: int, extra_lenses: list[str], *, apply: bool) -> in
 
 
 def main() -> int:
+    panel_all_default = _panel_all_default()
     parser = argparse.ArgumentParser(
         description=(
             "Approve a PR as the swarm's GitHub App, only when every required "
-            "review lens has cleared the PR's current head. The required-lens "
-            "floor is derived from review_panel.select_panel for this PR's "
-            "diff and linked issue; --lenses can only ADD to that floor."
+            "review lens has cleared the PR's current head, AND no lens of any "
+            "kind carries a live REQUEST_CHANGES/[BLOCKING] verdict on that "
+            "head. The required-lens floor is derived from "
+            "review_panel.select_panel for this PR's diff and linked issue; "
+            "--lenses can only ADD to that floor. --panel all additionally "
+            "requires the six lenses bootstrap mode actually dispatches "
+            "(pm, arch, ux, qa, security, content — BOOTSTRAP_PANEL_LENSES; "
+            "legal is NOT in this set and joins the floor only when "
+            "select_panel derives it for the diff) to have signed off — "
+            "the bootstrap-mode default (agent_policy "
+            "ent_d0f1a840e549b3b299f62397); pass --panel required to use "
+            "the diff-derived floor alone, or set "
+            "ATELES_APPROVE_PANEL_REQUIRED_ONLY=1 to change the default."
         )
     )
     parser.add_argument("--repo", required=True, help="owner/name")
@@ -1171,6 +1435,19 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--panel",
+        choices=("required", "all"),
+        default="all" if panel_all_default else "required",
+        help=(
+            "'all' (default while bootstrap mode is on, see "
+            "ATELES_APPROVE_PANEL_REQUIRED_ONLY) requires every one of the six "
+            "review lenses to have signed off on the current head; 'required' "
+            "uses only the diff-derived floor from review_panel.select_panel "
+            "(plus --lenses additions). Either way, a live blocking verdict "
+            "from ANY lens — required or not — always refuses the approval."
+        ),
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help="submit the APPROVE review as the App if every lens and check passes (default: dry run)",
@@ -1179,7 +1456,15 @@ def main() -> int:
 
     extra_lenses = [x.strip() for x in args.lenses.split(",") if x.strip()]
 
-    return asyncio.run(run(args.repo, args.pr, extra_lenses, apply=args.apply))
+    return asyncio.run(
+        run(
+            args.repo,
+            args.pr,
+            extra_lenses,
+            apply=args.apply,
+            panel_all=(args.panel == "all"),
+        )
+    )
 
 
 if __name__ == "__main__":

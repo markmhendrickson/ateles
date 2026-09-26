@@ -16,12 +16,13 @@ not merely to pass against current behaviour):
    string. Asserts the exception's message names the overflow, not a
    silently shortened index.
 3. `TestScopeFilterExcludesOtherAgent` — driven through `render_skills`,
-   the path the hook runs: an `agent`-scoped row naming a different agent
-   than the session principal is withheld, a row whose `scope` is outside
-   the closed vocabulary is withheld whatever its `agent_sub`, and
-   `global`/`swarm` rows plus the principal's own rows are included.
-   `_session_scope_ok` is built only from the imported `policy_binds_agent`
-   and `POLICY_SCOPES` (never a second predicate).
+   the path the hook runs: a row edged to a different agent than the
+   session principal is withheld, a row whose `scope` is outside the
+   closed vocabulary and carries no edge is withheld regardless of its
+   (superseded) `agent_sub`, and `global`/`swarm` rows plus rows edged to
+   the principal are included. `_session_scope_ok` is built only from the
+   imported `policy_binds_agent_by_edge` and `POLICY_SCOPES` (never a
+   second predicate; decision 114, 2026-09-25).
 4. `TestUnreachableNeotomaFallsOpen` — `fetch_active_policy_rows` raising
    (the transport-failure path `session_rule_index.py` catches) is verified
    at the renderer boundary here; the hook-level "one-line notice + exit 0"
@@ -48,6 +49,27 @@ import policy_skill_renderer as renderer
 # against any revision of the renderer; `test_session_principal_matches_the_
 # mcp_servers` holds the renderer's constants equal to the MCP server's.
 _PRINCIPAL_ENV = "ATELES_SESSION_PRINCIPAL"
+
+
+@pytest.fixture(autouse=True)
+def _no_network_edge_lookup(monkeypatch):
+    """Decision 114 (2026-09-25) added a `GOVERNS`-edge fetch and an
+    `agent_definition` id resolution to `render_skills`'s default path, each
+    a real Neotoma read when the caller doesn't already have the answer.
+    Most tests in this file exercise rendering (preamble order, tiering,
+    sanitizing) and pass no `governs=`/`agent_definition_id=` — without this
+    fixture they would hit the real network on every `render_skills(rows)`
+    call (observed: ~3s of retry per call against an unreachable/401'ing
+    host in CI). Default both resolvers to "nothing found" here so every
+    test in this file is network-free UNLESS it explicitly overrides
+    `governs=`/`agent_definition_id=` on the call (those bypass the fetch
+    entirely — see `render_skills`) or monkeypatches these functions itself
+    for a fetch-path test (`TestUnreachableNeotomaRaises`,
+    `TestRetryOnTransientFailure`, `TestReusesAgentLoaderFetch`, which patch
+    a different layer and are unaffected by this default).
+    """
+    monkeypatch.setattr(renderer, "fetch_governs_edges", lambda *a, **kw: {})
+    monkeypatch.setattr(renderer, "resolve_agent_definition_id", lambda *a, **kw: None)
 
 
 def _row(
@@ -298,7 +320,18 @@ class TestAudienceSplitTierA2:
             )
             for i in range(55)
         ]
-        skills = renderer.render_skills(rows, principal=principal)
+        # Session-only inclusion is now decided by a GOVERNS edge, not by
+        # `scope`/`agent_sub` string equality (operator ruling 2026-09-25,
+        # decision 114) — `agent_sub` above establishes the fixture's
+        # intent but binds nobody on its own, so the edge map is supplied
+        # explicitly (also avoids a live Neotoma fetch in this unit test).
+        governs = {"ent_session_only": frozenset({"ent_session_principal_def"})}
+        skills = renderer.render_skills(
+            rows,
+            principal=principal,
+            agent_definition_id="ent_session_principal_def",
+            governs=governs,
+        )
         text = renderer.render_index_text(skills, budget_chars=8000)
         assert "<!-- tier: A2 -->" in text
         # Session-only row: full line, long_title present verbatim.
@@ -366,6 +399,40 @@ class TestAudienceSplitTierA2:
 # ---------------------------------------------------------------------------
 # 3. Scope filter excludes an agent-scoped rule bound to another agent
 # ---------------------------------------------------------------------------
+class TestSessionIndexEdgeScoping:
+    """The session-index-specific half of decision 114's required coverage:
+    driven through `render_skills` (the shipped session-index path, not the
+    bare predicate), an edge to the DEFAULT session principal's own
+    `agent_definition` (`ateles`, `ent_706f1432822b4a9d9d71c127` per
+    CLAUDE.md) is included, and an edge to a different agent's
+    `agent_definition` (`corvus`) is excluded — proving the session index
+    discriminates by resolved id, not merely that SOME edge exists.
+    """
+
+    def test_edge_to_ateles_included_edge_to_corvus_excluded(self, monkeypatch):
+        monkeypatch.delenv(_PRINCIPAL_ENV, raising=False)  # default: ateles@ateles-swarm
+        rows = [
+            _row("ent_for_ateles", scope="agent", applies_when="ateles doing something"),
+            _row("ent_for_corvus", scope="agent", applies_when="corvus doing something"),
+            _row("ent_glob", scope="global", applies_when="doing X"),
+        ]
+        governs = {
+            "ent_for_ateles": frozenset({"ent_706f1432822b4a9d9d71c127"}),
+            "ent_for_corvus": frozenset({"ent_corvus_definition"}),
+        }
+        included_ids = {
+            s.entity_id
+            for s in renderer.render_skills(
+                rows,
+                agent_definition_id="ent_706f1432822b4a9d9d71c127",
+                governs=governs,
+            )
+        }
+        assert "ent_for_ateles" in included_ids
+        assert "ent_for_corvus" not in included_ids
+        assert "ent_glob" in included_ids
+
+
 class TestScopeFilterExcludesOtherAgent:
     def test_agent_scoped_row_for_a_different_agent_is_excluded(self):
         rows = [
@@ -398,6 +465,12 @@ class TestScopeFilterExcludesOtherAgent:
         scoped to the session principal is included; a row scoped to any
         other agent is withheld. Red before ateles#1268 round 4: the check
         compared a row's agent_sub with itself, so both rows were included.
+
+        Decision 114 (2026-09-25): binding is by `GOVERNS` edge, not
+        `agent_sub` equality — `agent_sub` is populated on these fixture
+        rows only to show it is NOT what the resolver reads; the edge map
+        (passed explicitly so this test makes no network call) is what
+        decides inclusion.
         """
         monkeypatch.setenv(_PRINCIPAL_ENV, "turdus@ateles-swarm")
         rows = [
@@ -407,7 +480,16 @@ class TestScopeFilterExcludesOtherAgent:
                  applies_when="lanius doing something"),
             _row("ent_glob", scope="global", applies_when="doing X"),
         ]
-        included_ids = {s.entity_id for s in renderer.render_skills(rows)}
+        governs = {
+            "ent_for_turdus": frozenset({"ent_turdus_def"}),
+            "ent_for_lanius": frozenset({"ent_lanius_def"}),
+        }
+        included_ids = {
+            s.entity_id
+            for s in renderer.render_skills(
+                rows, agent_definition_id="ent_turdus_def", governs=governs
+            )
+        }
         assert included_ids == {"ent_for_turdus", "ent_glob"}
 
     def test_default_principal_withholds_rows_scoped_to_other_agents(self, monkeypatch):
@@ -418,8 +500,38 @@ class TestScopeFilterExcludesOtherAgent:
             _row("ent_for_lanius", scope="agent", agent_sub="lanius@ateles-swarm",
                  applies_when="b"),
         ]
-        included_ids = {s.entity_id for s in renderer.render_skills(rows)}
+        governs = {
+            "ent_for_session": frozenset({"ent_ateles_def"}),
+            "ent_for_lanius": frozenset({"ent_lanius_def"}),
+        }
+        included_ids = {
+            s.entity_id
+            for s in renderer.render_skills(
+                rows, agent_definition_id="ent_ateles_def", governs=governs
+            )
+        }
         assert included_ids == {"ent_for_session"}
+
+    def test_edgeless_agent_scoped_rows_are_withheld_from_everyone(self, monkeypatch):
+        """The behavior change decision 114 makes explicit: an `agent`-scoped
+        row with NO `GOVERNS` edge binds nobody, even the agent its
+        (superseded) `agent_sub` names. Before this ruling both rows below
+        would have rendered for their own agent; now neither does, because
+        neither has been migrated to an edge.
+        """
+        monkeypatch.setenv(_PRINCIPAL_ENV, "turdus@ateles-swarm")
+        rows = [
+            _row("ent_for_turdus", scope="agent", agent_sub="turdus@ateles-swarm",
+                 applies_when="turdus doing something"),
+            _row("ent_glob", scope="global", applies_when="doing X"),
+        ]
+        included_ids = {
+            s.entity_id
+            for s in renderer.render_skills(
+                rows, agent_definition_id="ent_turdus_def", governs={}
+            )
+        }
+        assert included_ids == {"ent_glob"}
 
     @pytest.mark.parametrize(
         "scope", ["bogus-unrecognized-value", "", "  ", "Agents", "global-ish", "none"]
@@ -431,8 +543,8 @@ class TestScopeFilterExcludesOtherAgent:
         monkeypatch.setenv(_PRINCIPAL_ENV, "turdus@ateles-swarm")
         row = _row("ent_badscope", scope=scope, agent_sub="turdus@ateles-swarm",
                    applies_when="doing X", title="t")
-        assert renderer.render_skills([row]) == []
-        assert renderer._session_scope_ok(row) is False
+        assert renderer.render_skills([row], governs={}) == []
+        assert renderer._session_scope_ok(row, governs={}) is False
 
     def test_empty_principal_includes_no_agent_scoped_row(self, monkeypatch):
         monkeypatch.setenv(_PRINCIPAL_ENV, "")
@@ -440,16 +552,42 @@ class TestScopeFilterExcludesOtherAgent:
             _row("ent_a", scope="agent", agent_sub="turdus@ateles-swarm", applies_when="a"),
             _row("ent_s", scope="swarm", applies_when="s"),
         ]
-        included_ids = {s.entity_id for s in renderer.render_skills(rows)}
+        included_ids = {s.entity_id for s in renderer.render_skills(rows, governs={})}
         assert included_ids == {"ent_s"}
 
     def test_scope_value_case_and_padding_are_normalized_not_refused(self, monkeypatch):
+        """`scope` normalization (strip/lower) still applies to the
+        swarm-wide branch. The `agent`-scoped row here carries no `GOVERNS`
+        edge, so under decision 114 it is withheld regardless of how its
+        `scope`/`agent_sub` are spelled — only the edgeless global row
+        renders.
+        """
         monkeypatch.setenv(_PRINCIPAL_ENV, "turdus@ateles-swarm")
         rows = [
             _row("ent_g", scope=" Global ", applies_when="g"),
             _row("ent_a", scope="AGENT", agent_sub="turdus@ateles-swarm", applies_when="a"),
         ]
-        included_ids = {s.entity_id for s in renderer.render_skills(rows)}
+        included_ids = {s.entity_id for s in renderer.render_skills(rows, governs={})}
+        assert included_ids == {"ent_g"}
+
+    def test_scope_value_case_and_padding_still_bind_via_edge(self, monkeypatch):
+        """The edge-bound counterpart of the case/padding test above: once
+        `ent_a` carries a `GOVERNS` edge to the session principal's
+        `agent_definition`, its (still oddly-cased) `scope` no longer
+        matters — the edge alone decides.
+        """
+        monkeypatch.setenv(_PRINCIPAL_ENV, "turdus@ateles-swarm")
+        rows = [
+            _row("ent_g", scope=" Global ", applies_when="g"),
+            _row("ent_a", scope="AGENT", agent_sub="turdus@ateles-swarm", applies_when="a"),
+        ]
+        governs = {"ent_a": frozenset({"ent_turdus_def"})}
+        included_ids = {
+            s.entity_id
+            for s in renderer.render_skills(
+                rows, agent_definition_id="ent_turdus_def", governs=governs
+            )
+        }
         assert included_ids == {"ent_g", "ent_a"}
 
     def test_scope_vocabulary_is_agent_loaders_closed_set(self):
@@ -623,22 +761,43 @@ class TestReusesAgentLoaderFetch:
 
         # AgentLoader side: same payload through its own _neotoma call,
         # which now also routes through unwrap_policy_entities internally.
+        # decision 114 also has the loader resolve its own agent_definition
+        # id and fetch GOVERNS edges via plain httpx — mocked here to an
+        # empty result (no edges, no resolvable definition) so this test
+        # makes no network call and exercises the edgeless case: ent_mine
+        # (scope=agent, agent_sub only, no edge) is now excluded, which is
+        # the behavior change decision 114 makes.
         monkeypatch_target = agent_loader.AgentLoader("turdus")
         import unittest.mock as mock
 
+        def fake_httpx_post(url, **kw):
+            class _EmptyResp:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    if url.endswith("/list_relationships"):
+                        return {"relationships": []}
+                    return {"entities": []}
+
+            return _EmptyResp()
+
         with mock.patch.object(monkeypatch_target, "_neotoma", return_value=payload):
             with mock.patch.object(agent_loader, "NEOTOMA_BEARER_TOKEN", "tok"):
-                loader_rows = monkeypatch_target.load_active_policies()
+                with mock.patch.object(agent_loader.httpx, "post", fake_httpx_post):
+                    loader_rows = monkeypatch_target.load_active_policies()
         loader_ids = {r["_entity_id"] for r in loader_rows}
 
         # The status filter (excluding ent_retired) must agree exactly —
         # ent_retired is absent from BOTH. The scope filter then legitimately
-        # differs: the loader keeps only rows binding "turdus", the renderer
+        # differs: the loader keeps only rows binding "turdus" BY EDGE
+        # (decision 114 — ent_mine has none, so it is excluded here even
+        # though its now-superseded agent_sub names turdus), the renderer
         # (via render_skills, not exercised here) would keep the union.
         assert "ent_retired" not in renderer_ids
         assert "ent_retired" not in loader_ids
         assert renderer_ids == {"ent_global1", "ent_mine"}  # both live rows
-        assert loader_ids == {"ent_global1", "ent_mine"}  # both bind turdus
+        assert loader_ids == {"ent_global1"}  # only the edgeless-global row binds turdus
 
 
 # ---------------------------------------------------------------------------

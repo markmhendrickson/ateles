@@ -149,15 +149,17 @@ python3 execution/scripts/render_reading_projection.py --check || ERRORS=$((ERRO
 # ruled / merged / implemented, which the register's single status field cannot
 # express. Regenerate with the same script and no flag.
 #
-# The check reads every remote branch, so it needs a fetched remote to be
-# meaningful and is SKIPPED rather than failed where origin/main is absent — a
-# shallow CI clone or an offline machine would otherwise report drift it cannot
-# see. Skipping is the honest verdict there: unknown is not a failure
-# (principles.md), and failing on an unfetchable remote would train the reader
-# to ignore this row.
+# --source worktree (the default; named explicitly here) reads
+# docs/foundation/conformance.md as checked out, not a re-fetched origin/main
+# blob -- ateles#1138 round two: a branch that adds or rules a register row
+# could never regenerate correctly against origin/main alone, since that row
+# does not exist on origin/main until the branch merges. The origin/main guard
+# below stays as a sanity check that this is a real clone with a remote, not
+# because the render itself still sweeps branches (#1292 already made it
+# read exactly one source).
 if git rev-parse --verify --quiet origin/main >/dev/null; then
   echo "  - Checking decision state is in sync with the register..."
-  python3 execution/scripts/render_decision_state.py --check || ERRORS=$((ERRORS + 1))
+  python3 execution/scripts/render_decision_state.py --check --source worktree || ERRORS=$((ERRORS + 1))
 else
   echo "  - Skipping decision state (no origin/main to read the register from)"
 fi
