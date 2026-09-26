@@ -30,12 +30,18 @@ WHAT IS REFUSED (would put file content into context):
   - Glob tool is refused only when its own pattern targets a credential path
     for something a Glob call cannot need — Glob returns file names, never
     content, so it is allowed by default; see `check_glob`.
-  - Bash: cat, head, tail, less, more, bat, sed -n (print mode), awk, and a
-    plain `grep`/`rg` with no -c/-l/-o-names-only mode, run against a
-    credential path. Also `env`, `printenv`, or a bare `set` dump AFTER
-    sourcing one (a source alone does not print anything; the dump does).
-    Also base64/xxd/od/hexdump/strings against a credential path — encoding
-    the bytes is still exfiltrating them into context.
+  - Bash: cat, head, tail, less, more, bat, sed -n (print mode), awk, cut
+    (field extraction, e.g. `cut -d= -f2`), dd, and a plain `grep`/`rg` with
+    no -c/-l/-o-names-only mode, run against a credential path. Also `env`,
+    `printenv`, a bare `set` dump, or `declare -p`/`export -p`/`typeset -p`
+    AFTER sourcing one (a source alone does not print anything; the dump
+    does). Also base64/xxd/od/hexdump/strings against a credential path —
+    encoding the bytes is still exfiltrating them into context. Also an
+    interpreter's inline program (`python3 -c`, `perl -e`, `ruby -e`,
+    `node -e`) whose source text NAMES a credential path — this hook cannot
+    parse arbitrary interpreted code, so any inline program that mentions
+    the path at all is treated as unsafe. Also a `while read`/`read`/`xargs`
+    construct fed the file via `<` input redirection.
 
 WHAT IS ALLOWED (mirrors the task spec — none of these print a value):
   - `grep -c '^NAME='  <file>`             — existence, a count, no value.
@@ -129,23 +135,55 @@ def deny(reason: str) -> int:
     return 2
 
 
-def _safe_alternative(path_desc: str) -> str:
-    return (
+_PROVENANCE_NOTE = (
+    "Three agents have read a credential file whole and printed live secret "
+    "values into a transcript (2026-09-07, 2026-09-25, 2026-09-26) — this is "
+    "mechanical enforcement of the brief that did not hold on its own "
+    "(Neotoma task ent_cbf9bdbdf475eda8900d6b49)."
+)
+
+
+def _safe_alternative(path_desc: str, tool: str = "Bash") -> str:
+    """The remedy must match the TOOL that was actually denied — a Read or
+    Grep denial suggesting a Bash command tells the agent to reach for a
+    tool it wasn't using, which is the UX finding from ateles#1302 round 2
+    (ux/non-blocking): 'Read/Grep denials shouldn't suggest a Bash
+    command.' Each tool gets its own remedy in its own vocabulary; only the
+    Bash remedy talks about shell commands at all."""
+    header = (
         f"Refused: this would put the CONTENT of a credential file ({path_desc}) into "
         f"model context.\n\n"
-        f"Safe alternatives:\n"
-        f"  - To USE a variable's value in a command, source it without echoing:\n"
-        f"      set -a; source <file>; set +a\n"
-        f"    then reference it as $VAR_NAME — never print $VAR_NAME itself.\n"
-        f"  - To check whether a variable EXISTS, count it rather than reading it:\n"
-        f"      grep -c '^VAR_NAME=' <file>\n"
-        f"  - To list which variable NAMES a file defines (no values):\n"
-        f"      grep -o '^[A-Z_]*=' <file>\n\n"
-        f"Three agents have read a credential file whole and printed live secret "
-        f"values into a transcript (2026-09-07, 2026-09-25, 2026-09-26) — this is "
-        f"mechanical enforcement of the brief that did not hold on its own "
-        f"(Neotoma task ent_cbf9bdbdf475eda8900d6b49)."
     )
+    if tool == "Read":
+        body = (
+            f"Read has no safe mode for a credential file — it always returns the "
+            f"whole file, values included, and there is no Read-tool option that "
+            f"limits this to a name, a count, or an in-place use.\n\n"
+            f"If you need to USE a variable's value, or check that one EXISTS or "
+            f"which names a file defines, do that through the Bash tool instead — "
+            f"never through Read on this path.\n\n"
+        )
+    elif tool == "Grep":
+        body = (
+            f"Safe alternatives (use the Grep tool's own safe output modes):\n"
+            f"  - To check whether a pattern EXISTS: output_mode: \"count\"\n"
+            f"  - To list which FILES match, not their content: output_mode: "
+            f"\"files_with_matches\" (the default)\n"
+            f"Grep's \"content\" mode prints matched lines verbatim, which is the "
+            f"one thing refused here.\n\n"
+        )
+    else:  # Bash (and anything else — the general shell remedy is the safest default)
+        body = (
+            f"Safe alternatives:\n"
+            f"  - To USE a variable's value in a command, source it without echoing:\n"
+            f"      set -a; source <file>; set +a\n"
+            f"    then reference it as $VAR_NAME — never print $VAR_NAME itself.\n"
+            f"  - To check whether a variable EXISTS, count it rather than reading it:\n"
+            f"      grep -c '^VAR_NAME=' <file>\n"
+            f"  - To list which variable NAMES a file defines (no values):\n"
+            f"      grep -o '^[A-Z_]*=' <file>\n\n"
+        )
+    return header + body + _PROVENANCE_NOTE
 
 
 def _normalize_path(raw: str) -> str:
@@ -233,11 +271,26 @@ def _split_segments(command: str):
 
 
 # Readers that print file CONTENT verbatim, unconditionally, when pointed at
-# a credential path.
+# a credential path. `cut` (field extraction, e.g. `cut -d= -f2`) is here
+# too: it prints exactly the VALUE half of a `NAME=value` line, which is the
+# one thing this hook exists to stop — this was a live bypass found in
+# security review (arch/security lens, ateles#1302 round 1). `dd` copies
+# raw bytes to stdout by default (`dd if=<path>` with no `of=`) — the same
+# class of hazard, added cheaply alongside the other three findings from
+# that review even though it was flagged non-blocking.
 _CONTENT_DUMP_CMDS = re.compile(
     r"\b(cat|head|tail|less|more|bat|nl|tac|od|hexdump|xxd|strings|"
-    r"base64)\b"
+    r"base64|cut|dd)\b"
 )
+
+# `while read ...; done < <path>` (and similarly `read line < <path>`) feeds
+# the file to a loop that typically echoes it — a shell-native alternative
+# to `cat`. Detected as a bare `<` input redirection from a credential path
+# combined with a `read`/`cat`/`while` construct anywhere in the same
+# segment, which is loose by design (this hook does defense-in-depth, not a
+# hermetic seal — see `_extract_paths`'s docstring) but costs nothing extra
+# to check since the path was already being extracted.
+_STDIN_LOOP_RE = re.compile(r"\b(while\s+read|read\s+-r?\s*\w+|xargs)\b")
 
 # `sed -n '...p'` / bare `sed` without -n prints the whole stream; `sed -n`
 # WITHOUT a print command prints nothing, but that construction is rare
@@ -264,6 +317,14 @@ _GREP_RE = re.compile(r"\b(?:egrep|fgrep|grep|rg)\b")
 # never appear bare).
 _ENV_DUMP_RE = re.compile(r"(?:^|\s)(env|printenv)(?:\s|$)")
 _BARE_SET_DUMP_RE = re.compile(r"(?:^|;|&&|\n)\s*set\s*(?:$|;|&&|\n)")
+
+# `declare -p` / `export -p` / `typeset -p` (bash/ksh builtins) print every
+# variable's current value, same hazard as a bare `env`/`set` dump after
+# sourcing a credential file — a live bypass found in security review
+# (ateles#1302 round 1). `-p` may appear with other flags attached
+# (`declare -px`) or as a separate token; matched loosely on the builtin
+# name plus a `-p` flag anywhere on the same invocation.
+_DECLARE_DUMP_RE = re.compile(r"\b(declare|export|typeset)\b[^;&|\n]*(?:^|\s)-\w*p\w*\b")
 
 _SOURCE_RE = re.compile(r"(?:^|\s)(?:source|\.)\s+(\S+)")
 
@@ -309,9 +370,67 @@ def _extract_paths(segment: str):
         cand = cand.rstrip(";,")
         if not cand or cand.startswith("-"):
             continue
+        # A `key=value` token (`dd if=<path>`, `--file=<path>`) carries the
+        # path after the `=`, not as the whole token — strip a leading
+        # `bareword=`/`--flag=` prefix so `if=/x/.env` yields `/x/.env`
+        # rather than failing every credential-glob match outright. Only
+        # ONE `=` is stripped (rsplit not needed — dd's own value never
+        # contains another `=`), and only when what follows still looks
+        # path-shaped.
+        eq_idx = cand.find("=")
+        if 0 < eq_idx < len(cand) - 1 and re.match(r"^[\w-]+$", cand[:eq_idx]):
+            after = cand[eq_idx + 1:]
+            if "/" in after or "." in after:
+                cand = after
         if "/" in cand or "." in cand:
             out.append(cand)
     return out
+
+
+# Path-shaped substrings ANYWHERE in a string, not just whitespace-delimited
+# tokens — needed for an interpreter's inline program, where the target path
+# sits inside a quoted literal with no surrounding whitespace of its own,
+# e.g. `open('/x/.env')`. Matches a run of "path-ish" characters (no
+# whitespace, no quote, no shell metacharacter) that contains at least one
+# `/` or a dot-extension, mirroring `_extract_paths`'s own definition of
+# "looks like a path" but without requiring whitespace boundaries.
+_EMBEDDED_PATH_RE = re.compile(r"""[^\s'"();`$|&]+""")
+
+
+def _extract_embedded_paths(text: str):
+    out = []
+    for cand in _EMBEDDED_PATH_RE.findall(text):
+        cand = cand.rstrip(";,)")
+        if not cand or cand.startswith("-"):
+            continue
+        if "/" in cand or "." in cand:
+            out.append(cand)
+    return out
+
+
+# Interpreters whose `-c`/`-e` (or `-pe`/`-ne` for perl) flag takes an INLINE
+# PROGRAM as its very next argument, rather than a script file path. Only
+# these forms are in scope — `python3 script.py <credential path>` passes
+# the path as an ordinary argv entry to a FILE-based script this hook cannot
+# see into, which is a different (and already out-of-scope, per this hook's
+# stated "not a hermetic seal" limitation) problem.
+_INTERPRETER_INLINE_RE = re.compile(
+    r"\b(?:python[0-9.]*|perl|ruby|node|nodejs)\b[^;&|\n]*?\s(?:-c|-e|-pe|-ne)\b"
+)
+
+
+def _interpreter_inline_credential_hit(segment: str) -> str | None:
+    """Refuse `python3 -c '...'` / `perl -e '...'` / `ruby -e '...'` /
+    `node -e '...'` whose inline program text NAMES a credential path,
+    regardless of what the program does with it — this hook cannot parse
+    arbitrary interpreted code to tell a safe access from a dump, so any
+    inline program that mentions the path at all is treated as unsafe."""
+    if not _INTERPRETER_INLINE_RE.search(segment):
+        return None
+    for cand in _extract_embedded_paths(segment):
+        if is_credential_path(cand):
+            return cand
+    return None
 
 
 def _segment_touches_credential(segment: str) -> str | None:
@@ -326,6 +445,14 @@ def _segment_touches_credential(segment: str) -> str | None:
         return cred_paths[0]
 
     if _GREP_RE.search(segment) and not _grep_is_safe_mode(segment):
+        return cred_paths[0]
+
+    # `< <credential path>` combined with a read-and-print-shaped construct
+    # (`while read`, `read var`, `xargs`) — the shell-native alternative to
+    # `cat <path>`.
+    if _STDIN_LOOP_RE.search(segment) and re.search(
+        r"<\s*" + re.escape(cred_paths[0]), segment
+    ):
         return cred_paths[0]
 
     return None
@@ -385,10 +512,36 @@ def _chain_touches_credential_via_pipe(chain: str) -> str | None:
     return None
 
 
+def _redirected_stdin_loop_hit(command: str) -> str | None:
+    """`while read ...; done < <credential path>` and `read var < <path>`
+    split across MULTIPLE `;`-separated segments (`while read ...`, `do
+    ...`, `done < <path>` are three different SEGMENT_SPLIT pieces), so
+    neither the per-segment nor the pipe-chain check above sees both the
+    loop construct and the redirected path together. Checked against the
+    WHOLE command text instead, which is safe here specifically because
+    both sides of the check (`_STDIN_LOOP_RE`, the `<` redirection) are
+    narrow enough that a false hit would need a `while read`/`read`/`xargs`
+    keyword AND a credential path literal to co-occur anywhere in the same
+    command — a real bypass found in security review (ateles#1302 round 2
+    follow-up), same shape as the earlier `xargs` pipe-chain fix."""
+    if not _STDIN_LOOP_RE.search(command):
+        return None
+    for cand in _extract_paths(command):
+        if not is_credential_path(cand):
+            continue
+        if re.search(r"<\s*" + re.escape(cand), command):
+            return cand
+    return None
+
+
 def check_bash(command: str):
     if not command or not isinstance(command, str):
         return None
     sourced_a_credential = _command_sources_credential(command)
+
+    hit = _redirected_stdin_loop_hit(command)
+    if hit:
+        return hit
 
     # No text-bearing exemption at the CHAIN level: `echo <path> | xargs
     # cat` legitimately starts with `echo`, which is the same leader this
@@ -413,13 +566,30 @@ def check_bash(command: str):
         if hit:
             return hit
 
-        # env/printenv/bare-set dump AFTER a credential source anywhere in
-        # this command. Sourcing alone (`set -a; source f; set +a`) prints
-        # nothing — only a dump command makes the values reach context.
+        # env/printenv/bare-set/declare-p/export-p/typeset-p dump AFTER a
+        # credential source anywhere in this command. Sourcing alone
+        # (`set -a; source f; set +a`) prints nothing — only a dump command
+        # makes the values reach context.
         if sourced_a_credential and (
-            _ENV_DUMP_RE.search(normalized) or _BARE_SET_DUMP_RE.search(normalized)
+            _ENV_DUMP_RE.search(normalized)
+            or _BARE_SET_DUMP_RE.search(normalized)
+            or _DECLARE_DUMP_RE.search(normalized)
         ):
             return "environment dump after sourcing a credential file"
+
+        # An interpreter's inline program (`-c`/`-e`) that itself NAMES a
+        # credential path is refused outright, regardless of what the
+        # program text does with it — this hook cannot parse arbitrary
+        # Python/Perl/Ruby/JS to tell a safe access from a dump, and an
+        # inline program that mentions the path at all is already the
+        # hazard: it is reading that specific file on purpose. Live bypass
+        # found in security review (ateles#1302 round 1): `python3 -c
+        # "print(open('f.env').read())"` matched no dump-command regex
+        # because the actual read happens inside the interpreter, not as a
+        # shell word this hook's other checks scan for.
+        hit = _interpreter_inline_credential_hit(normalized)
+        if hit:
+            return hit
     return None
 
 
@@ -483,21 +653,21 @@ def main() -> int:
         hit = check_bash(command)
         if hit:
             log(f"blocking Bash read of credential content: {hit}")
-            return deny(_safe_alternative(hit))
+            return deny(_safe_alternative(hit, tool="Bash"))
         return 0
 
     if tool == "Read":
         hit = check_read(tool_input)
         if hit:
             log(f"blocking Read of credential file: {hit}")
-            return deny(_safe_alternative(hit))
+            return deny(_safe_alternative(hit, tool="Read"))
         return 0
 
     if tool == "Grep":
         hit = check_grep(tool_input)
         if hit:
             log(f"blocking Grep content-mode read of credential file: {hit}")
-            return deny(_safe_alternative(hit))
+            return deny(_safe_alternative(hit, tool="Grep"))
         return 0
 
     if tool == "Glob":
