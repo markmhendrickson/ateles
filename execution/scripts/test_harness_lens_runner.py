@@ -13,11 +13,10 @@ the REAL probe — a real `sandbox-exec` invocation against a real fixture file
 this suite creates, and a real `git stash push` against a real scratch repo
 this suite `git init`s — because a mocked-CLI test cannot prove a guard binds;
 only running the actual mechanism can. `sandbox-exec` and `git` are both
-expected to exist on the CI/dev host (macOS + git are the same baseline the
-rest of this repo assumes); a test that skips instead of asserting on a host
-without them would silently stop proving anything, so these assert outright
-and rely on the CI runner being macOS, matching every other sandbox-exec
-usage in this PR.
+expected only on macOS developer hosts; the Linux CI lane exercises the
+fail-closed result when ``sandbox-exec`` is unavailable. Posting/verdict unit
+tests inject a deterministic ready sandbox so host capabilities cannot
+short-circuit before the behavior each test names.
 """
 
 from __future__ import annotations
@@ -74,6 +73,48 @@ def _default_full_headroom(monkeypatch):
         "APIS_HARNESS_HEADROOM", json.dumps({"claude": 1.0, "codex": 1.0, "cursor": 1.0})
     )
     monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", "/nonexistent/harness-headroom.json")
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_codex_auth_source(tmp_path, monkeypatch):
+    """Keep unit tests independent of the developer/CI host's login state.
+
+    Production still resolves the real ``~/.codex/auth.json`` and fails closed
+    when it is absent. Tests receive only a fixture path; the explicit
+    missing-auth test below proves the production refusal.
+    """
+    source = tmp_path / "fixture-codex-home" / "auth.json"
+    source.parent.mkdir(parents=True)
+    source.write_text("fixture-not-a-real-token\n", encoding="utf-8")
+    monkeypatch.setattr(hlr, "_codex_auth_source", lambda: source)
+
+
+@pytest.fixture
+def mock_ready_sandbox(monkeypatch, tmp_path):
+    """Let verdict/posting unit tests reach their own decision boundary.
+
+    Real guard behavior is covered separately. This fixture avoids letting an
+    unauthenticated Linux host turn those tests into authentication tests.
+    """
+
+    def _build(cls, provider, tmp_root):
+        root = tmp_path / f"{provider}-unit-home"
+        root.mkdir(parents=True, exist_ok=True)
+        return hlr.HarnessSandbox(
+            provider=provider,
+            root=root,
+            env_extra={"CODEX_HOME": str(root)} if provider == "codex" else {},
+            command_wrapper=["sandbox-exec", "-f", str(root / "profile.sb")]
+            if provider != "claude"
+            else [],
+            credential_read_denied=True,
+            user_config_write_denied=True,
+            git_stash_denied=True,
+            authentication_ready=True,
+            unavailable_guards=(),
+        )
+
+    monkeypatch.setattr(hlr.HarnessSandbox, "build", classmethod(_build))
 
 
 @pytest.fixture
@@ -394,6 +435,20 @@ def test_refuse_if_guard_required_refuses_codex_when_sandbox_exec_is_unavailable
     assert "credential_read_denied=False" in reason
 
 
+def test_refuse_if_guard_required_refuses_codex_when_authentication_is_missing(
+    tmp_path, monkeypatch
+):
+    """Production must fail closed before dispatch when Codex auth is absent."""
+    missing_auth = tmp_path / "missing-codex-home" / "auth.json"
+    monkeypatch.setattr(hlr, "_codex_auth_source", lambda: missing_auth)
+    sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
+    reason = hlr.refuse_if_guard_required(sandbox)
+    assert sandbox.authentication_ready is False
+    assert reason is not None
+    assert "no authentication available" in reason
+    assert "refusing before a model call" in reason
+
+
 def test_refuse_if_guard_required_allows_codex_when_fully_probed_guarded(tmp_path):
     """The mirror case: when every real probe passes, the run may proceed.
     This is the ONLY test in the suite permitted to assert `is None` for a
@@ -528,7 +583,7 @@ def test_validate_verdict_refuses_rather_than_invent_a_check_if_reader_missing(
 
 
 def test_run_one_does_not_post_when_verdict_unreadable(
-    monkeypatch, tmp_path, target, brief_file
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
 ):
     async def _dispatch(role, task, **kwargs):
         return SkillResult(role, True, 0, UNREADABLE_VERDICT, "", provider="codex")
@@ -570,7 +625,7 @@ def test_run_one_does_not_post_when_verdict_unreadable(
 
 
 def test_run_one_does_not_post_without_post_flag(
-    monkeypatch, tmp_path, target, brief_file
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
 ):
     """A validated verdict with --post NOT set must still refuse to post."""
 
@@ -618,7 +673,7 @@ def test_run_one_does_not_post_without_post_flag(
 
 
 def test_run_one_refuses_to_post_when_head_moved(
-    monkeypatch, tmp_path, target, brief_file
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
 ):
     async def _dispatch(role, task, **kwargs):
         verdict_path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
@@ -660,7 +715,7 @@ def test_run_one_refuses_to_post_when_head_moved(
 
 
 def test_run_one_refuses_to_post_under_wrong_gh_identity(
-    monkeypatch, tmp_path, target, brief_file
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
 ):
     async def _dispatch(role, task, **kwargs):
         verdict_path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
@@ -701,7 +756,7 @@ def test_run_one_refuses_to_post_under_wrong_gh_identity(
 
 
 def test_run_one_posts_when_everything_checks_out(
-    monkeypatch, tmp_path, target, brief_file
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
 ):
     async def _dispatch(role, task, **kwargs):
         verdict_path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
@@ -745,7 +800,7 @@ def test_run_one_posts_when_everything_checks_out(
 
 
 def test_compare_mode_never_posts_even_with_post_flag(
-    monkeypatch, tmp_path, target, brief_file
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
 ):
     seen_posts = []
 
