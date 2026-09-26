@@ -33,7 +33,19 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-DEFAULT_PLAN_ID = "ent_99ace4dd6673aa36ed08b1fe"  # Ateles Agent Swarm Architecture plan
+# SUPERSEDED for new work on 2026-09-21 by operator decision: this plan accepts
+# no new todos, decisions, or tasks. It is deliberately NOT deleted — principles.md
+# cites three of its decision keys by key (operator_only_is_never_auto_executable_
+# not_merely_high_blast and unclassified_action_type_fails_closed_and_loudly at
+# invariant 5; release_terminal_status_must_be_read_back at invariant 2), so the id
+# must stay resolvable.
+#
+# It is kept HERE only as a substring probe for _mentions_plan() below — a session
+# that touches this plan is still touching a plan. It is no longer a binding
+# default: binding every session to one hardcoded plan regardless of workstream is
+# the exact mis-binding the 2026-09-21 decision was made to prevent.
+SUPERSEDED_PLAN_ID = "ent_99ace4dd6673aa36ed08b1fe"  # read-only; see above
+FOUNDATION_PLAN_ID = "ent_81aadb43caf2fa493361e8ed"  # plan:lay-the-foundation-master
 BOOKKEEPING_TYPES = {"conversation", "conversation_message", "agent_message"}
 # Durable insight artifacts whose presence means the session captured a learning
 # (used by the Stop hook's /end nudge — task #3 of the task-spine plan).
@@ -197,7 +209,8 @@ def _entity_types_in(payload: dict) -> set:
 
 def _mentions_plan(payload: dict) -> bool:
     blob = json.dumps(payload) if payload else ""
-    return '"plan"' in blob or "plan_id" in blob or DEFAULT_PLAN_ID in blob
+    return ('"plan"' in blob or "plan_id" in blob
+            or SUPERSEDED_PLAN_ID in blob or FOUNDATION_PLAN_ID in blob)
 
 
 def _mentions_task_binding(payload: dict) -> bool:
