@@ -611,6 +611,63 @@ class TestRoleSigningEnvInjection:
     def _run(self, coro):
         return asyncio.run(coro)
 
+    @pytest.mark.parametrize("provider", ["claude", "cursor", "codex"])
+    @pytest.mark.parametrize("missing", ["key", "definition", "subject", "keys_dir"])
+    @pytest.mark.parametrize("source", ["ambient", "env_extra"])
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner._load_agent_def")
+    def test_unavailable_role_signer_cannot_inherit_another_principal(
+        self, load_def, write_event, monkeypatch, provider, missing, source
+    ) -> None:
+        """Missing role identity must never reuse the dispatcher's signer."""
+        load_def.return_value = (
+            _stub_def() if missing == "definition"
+            else _make_def(aauth_sub="" if missing == "subject" else "gryllus@ateles-swarm")
+        )
+        inherited = {
+            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH": "/secrets/keys/other.jwk.json",
+            "NEOTOMA_AAUTH_SUB": "other@ateles-swarm",
+            "NEOTOMA_AAUTH_ISS": "https://issuer.example",
+            "NEOTOMA_AAUTH_ROLE": "other",
+        }
+        for name, value in inherited.items():
+            monkeypatch.delenv(name, raising=False)
+            if source == "ambient":
+                monkeypatch.setenv(name, value)
+        monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", "" if missing == "keys_dir" else "/secrets/keys")
+        proc = MagicMock(returncode=0)
+
+        async def communicate(input=None):
+            return b"output", b""
+
+        proc.communicate = communicate
+        with (
+            patch("skill_runner._provider_binaries", return_value={provider: f"/bin/{provider}"}),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", return_value=proc) as launch,
+            patch("os.path.exists", return_value=missing != "key"),
+            patch("unroutable_ledger.shared_ledger"),
+        ):
+            result = self._run(skill_runner._run_skill_once(
+                "gryllus", "work prompt", provider=provider, role="gryllus",
+                env_extra=inherited if source == "env_extra" else None,
+            ))
+
+        if provider == "codex":
+            assert not result.ok, "Codex must refuse dispatch without its intended role signer"
+            assert "role signer unavailable" in result.error
+            assert "Codex dispatch refused" in result.error
+            cause = result.error.rsplit("missing ", 1)[-1]
+            assert cause == missing, (
+                f"error should name only the '{missing}' cause: {result.error!r}"
+            )
+            launch.assert_not_called()
+        else:
+            assert result.ok
+            child = launch.call_args.kwargs["env"]
+            assert all(name not in child for name in inherited)
+
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
     def test_real_def_with_jwk_injects_signer_vars(
@@ -782,6 +839,77 @@ class TestRoleSigningEnvInjection:
         assert "NEOTOMA_AAUTH_ROLE" not in captured_env, (
             "NEOTOMA_AAUTH_ROLE must not be injected (it is superseded and was never real)"
         )
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_codex_uses_signed_proxy_without_operator_bearer(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """The role's declared identity must survive the Codex MCP boundary."""
+        fake_def = _make_def(
+            prompt_markdown="Role: Buteo.",
+            aauth_sub="buteo@ateles-swarm",
+            tool_allowlist="mcp__mcpsrv_neotoma__retrieve_entities",
+        )
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        captured_env: dict = {}
+        captured_cmd: list[str] = []
+
+        async def fake_exec(*cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            captured_env.update(kwargs.get("env", {}))
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", "/secrets/keys")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://record.example")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "operator-token")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN_PROD", "operator-prod-token")
+        monkeypatch.setenv("MCP_PROXY_BEARER_TOKEN", "operator-proxy-token")
+        monkeypatch.setenv("NEOTOMA_AAUTH_PRIVATE_JWK_PATH", "/secrets/keys/other.jwk.json")
+        monkeypatch.setenv("NEOTOMA_AAUTH_SUB", "other@ateles-swarm")
+        monkeypatch.setenv("NEOTOMA_AAUTH_ROLE", "other")
+
+        with (
+            patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch("os.path.exists", return_value=True),
+        ):
+            self._run(
+                skill_runner._run_skill_once(
+                    "buteo",
+                    "work prompt",
+                    provider="codex",
+                    role="buteo",
+                    task_entity_id="ent_abc",
+                    env_extra={"NEOTOMA_AAUTH_SUB": "extra@ateles-swarm"},
+                )
+            )
+
+        assert any("mcp_servers.neotoma.command=" in arg for arg in captured_cmd)
+        assert captured_env["NEOTOMA_AAUTH_SUB"] == "buteo@ateles-swarm"
+        assert captured_env["NEOTOMA_AAUTH_PRIVATE_JWK_PATH"] == "/secrets/keys/buteo.jwk.json"
+        assert captured_env.get("NEOTOMA_AAUTH_ROLE") is None
+        assert captured_env["MCP_PROXY_AAUTH"] == "1"
+        assert captured_env["MCP_PROXY_FAIL_CLOSED"] == "1"
+        assert captured_env["MCP_PROXY_DOWNSTREAM_URL"] == "https://record.example/mcp"
+        for bearer in (
+            "MCP_PROXY_BEARER_TOKEN",
+            "NEOTOMA_BEARER_TOKEN",
+            "NEOTOMA_BEARER_TOKEN_PROD",
+        ):
+            assert bearer not in captured_env
 
 
 # ── Stage 6: Neotoma MCP config injection (ateles#1687) ──────────────────────
@@ -2421,11 +2549,14 @@ class TestCrossHarnessRouting:
         # delivery-bearing dispatches: the default carries NO network flag.
         # `/repo` is not a git repo here, so no --add-dir appears;
         # TestCodexSandboxGitRoots covers that against a real linked worktree.
-        assert cmd == [
+        assert cmd[:5] == [
             "/bin/codex",
             "exec",
+            "--ignore-user-config",
             "--sandbox",
             "workspace-write",
+        ]
+        assert cmd[-7:] == [
             "--ephemeral",
             "--skip-git-repo-check",
             "--color",
@@ -2434,9 +2565,91 @@ class TestCrossHarnessRouting:
             "/repo",
             "-",
         ]
+        assert "sandbox_workspace_write.network_access=true" not in cmd
         assert stdin is not None
         assert b"SYSTEM" in stdin
         assert b"WORK" in stdin
+
+    def test_codex_adapter_preapproves_only_declared_neotoma_tools(self) -> None:
+        """Headless Codex must not inherit an unanswerable MCP approval prompt.
+
+        The role's explicit Neotoma capabilities are translated to Codex's
+        per-tool ``approval_mode=approve`` config.  Shell tools, wildcard MCP
+        grants, and blanket approval flags are deliberately excluded.
+        """
+        cmd, _ = skill_runner._provider_command(
+            "codex",
+            "/bin/codex",
+            "SYSTEM",
+            "WORK",
+            cwd="/repo",
+            auto_approve_tools=[
+                "mcp__mcpsrv_neotoma__retrieve_entities",
+                "mcp__mcpsrv_neotoma__store",
+                "mcp__mcpsrv_neotoma__correct",
+                "mcp__mcpsrv_neotoma__*",
+                "Bash",
+            ],
+        )
+
+        config_values = [
+            cmd[i + 1] for i, value in enumerate(cmd[:-1]) if value == "-c"
+        ]
+        assert config_values[0].startswith('mcp_servers.neotoma.command=')
+        assert config_values[1] == (
+            'mcp_servers.neotoma.args=["mcp", "proxy", "--aauth", '
+            '"--fail-closed"]'
+        )
+        assert config_values[2] == (
+            'mcp_servers.neotoma.enabled_tools=["retrieve_entities", "store", '
+            '"correct", "get_session_identity"]'
+        )
+        assert config_values[3] == (
+            'mcp_servers.neotoma.env_vars=["NEOTOMA_AAUTH_PRIVATE_JWK_PATH", '
+            '"NEOTOMA_AAUTH_SUB", "NEOTOMA_AAUTH_ISS", '
+            '"MCP_PROXY_DOWNSTREAM_URL", "MCP_PROXY_AAUTH", '
+            '"MCP_PROXY_FAIL_CLOSED", "MCP_PROXY_CLIENT_NAME"]'
+        )
+        assert config_values[4:] == [
+            'mcp_servers.neotoma.tools.retrieve_entities.approval_mode="approve"',
+            'mcp_servers.neotoma.tools.store.approval_mode="approve"',
+            'mcp_servers.neotoma.tools.correct.approval_mode="approve"',
+            'mcp_servers.neotoma.tools.get_session_identity.approval_mode="approve"',
+        ]
+        assert "--approve-for-me" not in cmd
+        assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+        assert "--ignore-user-config" in cmd
+
+    def test_codex_neotoma_auto_approval_flags_empty_allowlist_preapproves_only_identity(
+        self,
+    ) -> None:
+        """An empty Neotoma tool allowlist must preapprove exactly
+        `get_session_identity` and nothing else — the fail-closed default a
+        dispatched role gets when it declares no explicit Neotoma capability.
+
+        Calls `codex_neotoma_auto_approval_flags` directly (not through
+        `_provider_command`) to keep the assertion tight to the function
+        under test.
+        """
+        flags = skill_runner.codex_neotoma_auto_approval_flags([])
+
+        config_values = [
+            flags[i + 1] for i, value in enumerate(flags[:-1]) if value == "-c"
+        ]
+        assert config_values[0].startswith("mcp_servers.neotoma.command=")
+        assert (
+            "--aauth" in config_values[1]
+            and "--fail-closed" in config_values[1]
+        )
+        assert config_values[2] == (
+            'mcp_servers.neotoma.enabled_tools=["get_session_identity"]'
+        )
+        assert config_values[3].startswith("mcp_servers.neotoma.env_vars=")
+
+        approval_values = [v for v in config_values if "approval_mode=" in v]
+        assert approval_values == [
+            'mcp_servers.neotoma.tools.get_session_identity.approval_mode="approve"'
+        ]
 
     def test_cursor_adapter_uses_headless_agent(self) -> None:
         cmd, stdin = skill_runner._provider_command(
