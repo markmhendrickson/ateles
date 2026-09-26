@@ -71,6 +71,20 @@ def main() -> int:
 
     emit_harness_event(session_id, summary, status)
 
+    # Shadow-only until ateles#965's authoritative planning workflow exists.
+    # This names drift now without making the legacy and target contracts both
+    # blocking at once.  The same findings are carried by the harness_event.
+    if summary.get("planning_spine_status") == "violated":
+        codes = ", ".join(
+            finding.get("code", "unknown")
+            for finding in summary.get("planning_spine_findings", [])
+            if isinstance(finding, dict)
+        )
+        log(
+            "planning-spine shadow audit found: " + codes
+            + ". Advisory until the planning workflow cutover in ateles#965."
+        )
+
     # /end convergence (task-spine plan, task #3): a substantive session that
     # stored no learning artifact is nudged to run /end (which captures turns +
     # learnings and finalizes the plan). Soft by design — encouraged, not blocked,
