@@ -58,6 +58,11 @@
     ],
     [
       "UserPromptSubmit",
+      "session_rule_delivery.py",
+      ""
+    ],
+    [
+      "UserPromptSubmit",
       "user_prompt_submit.py",
       ""
     ]
