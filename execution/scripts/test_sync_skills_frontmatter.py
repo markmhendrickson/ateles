@@ -54,6 +54,62 @@ import sync_skills  # noqa: E402
 
 ENTITY_ID = "ent_0a0a481fb03a8fd9ea292bcb"
 
+ROUTING_SECTION_START = "Positioning work surfaces two different kinds of finding"
+ROUTING_SECTION_END = "\n\n## Scope rules"
+
+BRAND_RESEARCH_REQUIRED_CONTRACTS = {
+    "separate identity and structure tracks": (
+        "Brand identity research:",
+        "Site/page structure research:",
+    ),
+    "ambition and discipline drive selection": (
+        "delegation ambition and enabling discipline",
+        "This premise is the selection brief",
+    ),
+    "three design surfaces are covered": (
+        "Visual language:",
+        "Information architecture and proof:",
+        "Interaction and motion:",
+    ),
+    "stored corpora remain discovery seeds": (
+        "Use them as discovery seeds and query expansion",
+        "it does not prove the linked page still says or looks the same now",
+    ),
+    "live evidence is fetched and dated": (
+        "fetch the actual current pages",
+        "record its date",
+    ),
+    "patterns are translated without copying": (
+        "ADOPT, ADAPT, or REJECT",
+        "Never copy another brand's signature mark",
+    ),
+    "identity and structure have distinct homes": (
+        "Identity findings may revise a product-specific `design_system`",
+        "structural page-craft findings correct the stage-1 template and page inventory",
+    ),
+    "narrow metaphors are challenged": (
+        "Audit the existing identity metaphor against the full current product premise",
+        "Record missing premise coverage in the inventory's `gaps`",
+    ),
+    "the repository preview remains the design ceiling": (
+        "`rendered_page` is not the product-site preview",
+        "repository-built preview",
+    ),
+}
+
+PUBLIC_SURFACE_GATE_SCOPES = {
+    "public_translation": "every public route",
+    "category_noun_integrity": "every public route",
+    "public_source_projection": "each public source-derived block",
+    "public_design_language": "every public route",
+    "audience_read": "every public route",
+    "visual_story": "each major claim",
+    "responsive_visual_qa": (
+        "every public route at representative desktop and mobile widths"
+    ),
+    "internal_leakage_scan": "every public route",
+}
+
 
 def _skill(**overrides) -> dict:
     """A fixture `skill` entity in the shape fetch_skills() produces."""
@@ -91,6 +147,139 @@ def _mirror(description: str, *, triggers: list[str] | None = None) -> str:
         "# build-landing-page\n"
         "\n"
         "Stage 1 — Template.\n"
+    )
+
+
+def _routing_section(path: Path) -> str:
+    """Return the intentionally duplicated routing contract, sans sibling pointer."""
+    text = path.read_text()
+    start = text.index(ROUTING_SECTION_START)
+    end = text.index(ROUTING_SECTION_END, start)
+    return text[start:end]
+
+
+def _missing_brand_research_contracts(text: str) -> list[str]:
+    """Name decision contracts absent from the generated landing-page skill."""
+    normalized = " ".join(text.split())
+    return [
+        contract
+        for contract, markers in BRAND_RESEARCH_REQUIRED_CONTRACTS.items()
+        if any(marker not in normalized for marker in markers)
+    ]
+
+
+def _public_surface_gate_rows(text: str) -> dict[str, tuple[str, str]]:
+    """Parse the stable final-gate table without coupling to its prose."""
+    start = text.index("### Final public-surface gates")
+    end = text.index("\n\nThe audience-read pass", start)
+    rows: dict[str, tuple[str, str]] = {}
+    for line in text[start:end].splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        gate_id = cells[0].strip("`")
+        rows[gate_id] = (cells[1], cells[2])
+    return rows
+
+
+def _public_surface_gate_errors(text: str) -> list[str]:
+    """Validate named gates, route coverage, and a real pass condition."""
+    rows = _public_surface_gate_rows(text)
+    errors = []
+    for gate_id, expected_scope in PUBLIC_SURFACE_GATE_SCOPES.items():
+        if gate_id not in rows:
+            errors.append(f"missing gate: {gate_id}")
+            continue
+        scope, pass_condition = rows[gate_id]
+        if scope != expected_scope:
+            errors.append(f"wrong scope: {gate_id} -> {scope}")
+        if len(pass_condition.split()) < 8:
+            errors.append(f"empty pass condition: {gate_id}")
+    return errors
+
+
+def test_product_finding_routing_contract_stays_in_sync() -> None:
+    """Independently loaded skills must not silently diverge on filing behavior.
+
+    Removing a numbered step from either mirror makes this fail.  The leading
+    sibling-pointer paragraph is intentionally excluded because its entity id
+    differs in each skill.
+    """
+    skills_dir = _REPO_ROOT / ".claude" / "skills"
+    frame = _routing_section(skills_dir / "frame-product-argument" / "SKILL.md")
+    build = _routing_section(skills_dir / "build-landing-page" / "SKILL.md")
+
+    assert frame == build, (
+        "the duplicated product-finding routing contract diverged; correct both "
+        "canonical skill entities, read them back, then regenerate both mirrors"
+    )
+
+
+def test_build_landing_page_keeps_brand_research_decision_contracts() -> None:
+    """Dropping either research track or its destination must fail the skill checks."""
+    skill = (
+        _REPO_ROOT / ".claude" / "skills" / "build-landing-page" / "SKILL.md"
+    ).read_text()
+
+    assert _missing_brand_research_contracts(skill) == [], (
+        "build-landing-page lost brand/site research contracts: "
+        f"{_missing_brand_research_contracts(skill)}"
+    )
+
+
+def test_brand_research_contract_check_fails_when_no_copying_rule_is_removed() -> None:
+    """Mutation proof: the contract check fails on a missing safety boundary."""
+    skill = (
+        _REPO_ROOT / ".claude" / "skills" / "build-landing-page" / "SKILL.md"
+    ).read_text()
+    mutated = skill.replace(
+        "Never copy another brand's signature mark", "Copy a signature mark", 1
+    )
+
+    assert (
+        "patterns are translated without copying"
+        in _missing_brand_research_contracts(mutated)
+    )
+
+
+def test_public_surface_gates_cover_every_route_and_major_claim() -> None:
+    """The public-output contract is structured, scoped, and independently parsed."""
+    skill = (
+        _REPO_ROOT / ".claude" / "skills" / "build-landing-page" / "SKILL.md"
+    ).read_text()
+
+    assert _public_surface_gate_errors(skill) == []
+
+
+def test_public_surface_gate_check_rejects_homepage_only_leakage_scan() -> None:
+    """Mutation proof: checking only the homepage fails the all-routes contract."""
+    skill = (
+        _REPO_ROOT / ".claude" / "skills" / "build-landing-page" / "SKILL.md"
+    ).read_text()
+    mutated = skill.replace(
+        "| `internal_leakage_scan` | every public route |",
+        "| `internal_leakage_scan` | homepage only |",
+        1,
+    )
+
+    assert "wrong scope: internal_leakage_scan -> homepage only" in (
+        _public_surface_gate_errors(mutated)
+    )
+
+
+def test_public_surface_gate_check_rejects_missing_category_integrity() -> None:
+    """Mutation proof: category, metaphor, mechanism, and state cannot collapse."""
+    skill = (
+        _REPO_ROOT / ".claude" / "skills" / "build-landing-page" / "SKILL.md"
+    ).read_text()
+    mutated = "\n".join(
+        line
+        for line in skill.splitlines()
+        if not line.startswith("| `category_noun_integrity` |")
+    )
+
+    assert "missing gate: category_noun_integrity" in (
+        _public_surface_gate_errors(mutated)
     )
 
 
