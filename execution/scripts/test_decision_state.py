@@ -654,6 +654,144 @@ class TestCommittedOutputIsByteStableForACommit(unittest.TestCase):
         )
 
 
+class TestRowAddingPRRegeneratesFromItsOwnMergeResult(unittest.TestCase):
+    """ateles#1138 round two: a PR adding a register row must be able to
+    regenerate `decision_state.md` correctly BEFORE it merges.
+
+    The scenario is ateles#1300 exactly: a PR's branch adds register row 118
+    (and rules it) while `origin/main`'s own register still tops out at 111.
+    On a `pull_request` CI run, `actions/checkout` has already materialized
+    base-plus-PR as the working tree, so `--source worktree` (the default)
+    reads THAT content -- row 118 included -- while `--source main` re-fetches
+    `origin/main` via `git show` and can never see a row that exists only on
+    the PR's own branch.
+
+    `register_at(ds.WORKTREE_SOURCE)` reads `ds.FOUNDATION_DIR / ds.REGISTER_DOC`
+    off the real filesystem, so this test points those module globals at a
+    temp directory standing in for the checked-out working tree, rather than
+    touching this repo's own corpus.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.worktree_foundation_dir = Path(self.tmpdir.name) / "docs" / "foundation"
+        self.worktree_foundation_dir.mkdir(parents=True)
+        self.out = self.worktree_foundation_dir / "decision_state.md"
+
+        # origin/main: the base branch, unaware of row 118.
+        self.main_text = register(**{"1–12": "**ruled** (2026-01-01)", "111": "**open**"})
+        # The PR's own working tree: everything main has, PLUS row 118, ruled
+        # -- exactly what #1300's branch looked like before it merged.
+        self.pr_worktree_text = register(
+            **{
+                "1–12": "**ruled** (2026-01-01)",
+                "111": "**open**",
+                "118": "**ruled** (2026-09-26)",
+            }
+        )
+
+        patch_dir = unittest.mock.patch.object(
+            ds, "FOUNDATION_DIR", self.worktree_foundation_dir
+        )
+        patch_dir.start()
+        self.addCleanup(patch_dir.stop)
+
+        # register_at(MAIN_REF) goes through `ds.run` (git show); stub it to
+        # return the base branch's register regardless of what the PR's
+        # working tree says, exactly as a real `git show origin/main:...`
+        # would on a checkout whose working tree carries the PR's own diff.
+        fake_git = FakeGit({ds.MAIN_REF: self.main_text}, [])
+        patch_run = unittest.mock.patch.object(ds, "run", fake_git)
+        patch_run.start()
+        self.addCleanup(patch_run.stop)
+
+    def _write_conformance(self, text: str) -> None:
+        (self.worktree_foundation_dir / ds.REGISTER_DOC).write_text(
+            text, encoding="utf-8"
+        )
+
+    def test_worktree_source_sees_the_pr_added_row_before_merge(self):
+        """The mechanism this PR adds: register_at(WORKTREE_SOURCE) reads the
+        PR's own working-tree register, row 118 included."""
+        self._write_conformance(self.pr_worktree_text)
+        rows = ds.collect_main(ds.WORKTREE_SOURCE)
+        row_118 = next(r for r in rows if r.number == "118")
+        self.assertEqual(row_118.ruled, "yes")
+        self.assertEqual(row_118.merged, "yes")
+
+    def test_check_fails_before_regeneration_then_passes_after_from_the_pr(self):
+        """`--check --source worktree`, run on the PR's own branch: red
+        against a committed file that predates row 118, green once the PR
+        regenerates against its own working tree."""
+        self._write_conformance(self.pr_worktree_text)
+
+        # The committed file the PR branched FROM -- rendered from main
+        # before row 118 existed anywhere, i.e. main's own last-good
+        # decision_state.md. This is what ships on the PR's branch until the
+        # PR regenerates it.
+        stale_committed = ds.render(ds.collect_main(ds.MAIN_REF))
+        self.out.write_text(stale_committed, encoding="utf-8")
+
+        code_before = ds.main(
+            ["--check", "--source", "worktree", "--out", str(self.out)]
+        )
+        self.assertEqual(
+            code_before,
+            1,
+            "a PR that added row 118 but has not yet regenerated "
+            "decision_state.md must fail --check",
+        )
+
+        code_write = ds.main(["--source", "worktree", "--out", str(self.out)])
+        self.assertEqual(code_write, 0)
+
+        code_after = ds.main(
+            ["--check", "--source", "worktree", "--out", str(self.out)]
+        )
+        self.assertEqual(
+            code_after,
+            0,
+            "regenerating with --source worktree (the PR's own merge "
+            "result) must make --check pass on the PR's own content, "
+            "before it ever merges",
+        )
+        # And the regenerated file actually carries the new row -- the
+        # acceptance criterion is not merely "exits 0" but "contains 118".
+        self.assertIn("| 118 |", self.out.read_text(encoding="utf-8"))
+
+    def test_source_main_mechanism_cannot_pass_this_from_the_pr(self):
+        """The CURRENT (pre-fix) mechanism, exercised the same way, must fail:
+        this is the regression test for main's own mechanism, not just for
+        the absence of a fix. `--source main` re-fetches `origin/main` (via
+        the stubbed `git show`), which never has row 118 -- so no amount of
+        regenerating with `--source main` can produce a file that both (a)
+        contains row 118 and (b) passes `--check --source main`, because the
+        two are mutually exclusive on this branch: writing forgets row 118 by
+        construction, and checking then trivially matches what it just wrote
+        while never having asserted anything about the PR's own new row."""
+        self._write_conformance(self.pr_worktree_text)
+
+        # Regenerate the OLD way: purely from origin/main, blind to the
+        # working tree the PR actually carries.
+        code_write = ds.main(["--source", "main", "--out", str(self.out)])
+        self.assertEqual(code_write, 0)
+        regenerated_old_way = self.out.read_text(encoding="utf-8")
+
+        # This is the failure this PR exists to fix, made mechanically
+        # explicit: main's own render mechanism is structurally incapable of
+        # putting the PR's own new row in the committed file at all.
+        self.assertNotIn(
+            "| 118 |",
+            regenerated_old_way,
+            "if this assertion ever fails, --source main has started "
+            "seeing the PR's own branch content, and this test (along with "
+            "the defect it documents) is obsolete",
+        )
+
+
 WRITE_COMMAND = "python3 execution/scripts/render_decision_state.py"
 
 
@@ -683,7 +821,9 @@ class TestCheckExit(unittest.TestCase):
         stdout, stderr = io.StringIO(), io.StringIO()
         with unittest.mock.patch.object(ds, "run", fake):
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                code = ds.main(["--check", "--out", str(self.out)])
+                code = ds.main(
+                    ["--check", "--source", "main", "--out", str(self.out)]
+                )
         return code, stdout.getvalue(), stderr.getvalue()
 
     def test_missing_file_exits_1_and_names_the_write_command_with_python3(self):
@@ -746,9 +886,14 @@ class TestCheckExit(unittest.TestCase):
         self.assertIn("does not write", help_text)
         self.assertIn("exit", help_text.lower())
         self.assertIn("1", help_text)
-        self.assertIn(WRITE_COMMAND, help_text)
+        # argparse wraps help text to terminal width, which can fall exactly
+        # between "python3" and "execution/scripts/..." depending on how many
+        # other options are registered -- collapse whitespace (including the
+        # line break argparse inserts) before matching the write command, so
+        # this assertion tracks the CONTENT and not one incidental wrap point.
+        self.assertIn(WRITE_COMMAND, " ".join(help_text.split()))
         self.assertIn("never", help_text)
-        self.assertNotIn("python execution", help_text)
+        self.assertNotIn("python execution", " ".join(help_text.split()))
 
 
 if __name__ == "__main__":
