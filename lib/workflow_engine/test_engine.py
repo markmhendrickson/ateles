@@ -11,10 +11,19 @@ fallback when dev is unreachable. Nothing in this file, and nothing the
 module under test does, ever constructs a client pointed at
 NEOTOMA_BASE_URL or any other real Neotoma URL.
 
+pm/qa review on PR #1310 (2026-09-26) added two blocking findings, both
+covered here:
+  1. Repeated polling of a still-unreadable workflow must raise exactly
+     one checkpoint, not one per call.
+  2. The engine's checkpoint-writing capability must be structurally
+     unable to target production, not merely untested against it.
+
 Run: pytest lib/workflow_engine/test_engine.py -v
 """
 
 from __future__ import annotations
+
+import pytest
 
 from lib.workflow_engine.engine import (
     UNDERDETERMINED_INPUTS,
@@ -27,6 +36,8 @@ from lib.workflow_engine.engine import (
 from lib.workflow_engine.record import (
     UNKNOWN,
     FakeRecordClient,
+    NonProductionCheckpointWriter,
+    ProductionWriteRefused,
     StepDeclaration,
     WorkflowDeclaration,
 )
@@ -57,6 +68,11 @@ def _intake_to_digestion_declaration() -> WorkflowDeclaration:
             ),
         ),
     )
+
+
+def _writer(record: FakeRecordClient) -> NonProductionCheckpointWriter:
+    """The only way this test file ever hands a checkpoint writer to open_steps()."""
+    return NonProductionCheckpointWriter(record, record.instance_label)
 
 
 # ── Declaration reader (component 1; GW-1, GW-2, GW-30, GW-31 structural) ──
@@ -205,6 +221,7 @@ def test_unreadable_workflow_halts_with_exactly_one_checkpoint_unreadable_workfl
 
     result = open_steps(
         record,
+        _writer(record),
         task_id="ent_task_1",
         declaration_scope=SCOPE,
         workflow_type=WFTYPE,
@@ -256,6 +273,7 @@ def test_readable_workflow_with_no_completed_steps_opens_first_step():
 
     result = open_steps(
         record,
+        _writer(record),
         task_id="ent_task_2",
         declaration_scope=SCOPE,
         workflow_type=WFTYPE,
@@ -273,6 +291,7 @@ def test_next_step_after_completion_is_the_declared_successor():
 
     result = open_steps(
         record,
+        _writer(record),
         task_id="ent_task_3",
         declaration_scope=SCOPE,
         workflow_type=WFTYPE,
@@ -297,6 +316,7 @@ def test_all_steps_completed_returns_no_steps_and_no_checkpoint():
 
     result = open_steps(
         record,
+        _writer(record),
         task_id="ent_task_4",
         declaration_scope=SCOPE,
         workflow_type=WFTYPE,
@@ -322,6 +342,7 @@ def test_unreadable_dependency_holds_without_the_workflow_level_checkpoint():
 
     result = open_steps(
         record,
+        _writer(record),
         task_id="ent_task_5",
         declaration_scope=SCOPE,
         workflow_type=WFTYPE,
@@ -348,6 +369,7 @@ def test_empty_required_read_raises_underdetermined_inputs_not_unreadable_workfl
 
     result = open_steps(
         record,
+        _writer(record),
         task_id="ent_task_6",
         declaration_scope=SCOPE,
         workflow_type=WFTYPE,
@@ -380,6 +402,7 @@ def test_step_with_none_permitted_opens_despite_empty_required_read():
 
     result = open_steps(
         record,
+        _writer(record),
         task_id="ent_task_7",
         declaration_scope=SCOPE,
         workflow_type="optional_read_workflow",
@@ -388,3 +411,214 @@ def test_step_with_none_permitted_opens_despite_empty_required_read():
     assert result.checkpoint is None
     assert len(result.steps) == 1
     assert result.steps[0].name == "digest"
+
+
+# ── pm/qa finding 1 (PR #1310): repeated polling must not multiply checkpoints ──
+
+
+def test_repeated_poll_of_unreadable_workflow_raises_only_one_checkpoint():
+    """
+    pm's blocking finding, verbatim: "open_steps() calls
+    record.raise_checkpoint() on every read attempt with no stable
+    idempotency key or existing-checkpoint read, so two calls for the same
+    task and declaration produce two checkpoints. Make the halt idempotent
+    across polling/retry, not only within one invocation." qa's finding
+    adds the concrete repro: "Repeating open_steps() twice for the same
+    unreadable (task, scope, workflow) leaves two unreadable_workflow
+    entries in FakeRecordClient.checkpoints."
+
+    This test calls open_steps() three times — a poller would call it
+    repeatedly for as long as the workflow stays unreadable — and asserts
+    the checkpoint count never exceeds one.
+    """
+    record = FakeRecordClient()
+    record.unreadable_workflows.add((SCOPE, WFTYPE))
+    writer = _writer(record)
+
+    first = open_steps(
+        record, writer, task_id="ent_task_poll", declaration_scope=SCOPE, workflow_type=WFTYPE
+    )
+    second = open_steps(
+        record, writer, task_id="ent_task_poll", declaration_scope=SCOPE, workflow_type=WFTYPE
+    )
+    third = open_steps(
+        record, writer, task_id="ent_task_poll", declaration_scope=SCOPE, workflow_type=WFTYPE
+    )
+
+    for result in (first, second, third):
+        assert result.steps == ()
+        assert result.checkpoint is not None
+        assert result.checkpoint.reason == UNREADABLE_WORKFLOW
+
+    # The identity check pm/qa's finding is actually about: the SAME
+    # checkpoint object/key came back every time, and the record holds
+    # exactly one, not three.
+    assert first.checkpoint.idempotency_key == second.checkpoint.idempotency_key
+    assert second.checkpoint.idempotency_key == third.checkpoint.idempotency_key
+
+    checkpoints_on_task = record.open_checkpoints_for_task("ent_task_poll")
+    assert len(checkpoints_on_task) == 1
+    # No new underlying write happened on the 2nd/3rd call either.
+    assert record.write_call_count == 1
+
+
+def test_repeated_poll_of_underdetermined_inputs_also_stays_at_one_checkpoint():
+    """
+    The same idempotency requirement applies to the other checkpoint-
+    raising branch (underdetermined_inputs), not only the
+    unreadable_workflow one — a poller re-checking a step whose required
+    read is still empty must not accumulate checkpoints either.
+    """
+    record = FakeRecordClient()
+    record.register_declaration(_intake_to_digestion_declaration())
+    record.seed_rows("conversation", [])
+    writer = _writer(record)
+
+    for _ in range(3):
+        result = open_steps(
+            record,
+            writer,
+            task_id="ent_task_poll_2",
+            declaration_scope=SCOPE,
+            workflow_type=WFTYPE,
+            completed_steps=("link",),
+        )
+        assert result.checkpoint is not None
+        assert result.checkpoint.reason == UNDERDETERMINED_INPUTS
+
+    checkpoints_on_task = record.open_checkpoints_for_task("ent_task_poll_2")
+    assert len(checkpoints_on_task) == 1
+    assert record.write_call_count == 1
+
+
+def test_different_tasks_get_independent_checkpoints_not_merged():
+    """
+    Idempotency must be scoped to the logical halt's real identity
+    (task + reason + declaration), not collapsed globally — two different
+    tasks hitting the same unreadable workflow are two separate halts and
+    each must get its own checkpoint.
+    """
+    record = FakeRecordClient()
+    record.unreadable_workflows.add((SCOPE, WFTYPE))
+    writer = _writer(record)
+
+    result_a = open_steps(
+        record, writer, task_id="ent_task_a", declaration_scope=SCOPE, workflow_type=WFTYPE
+    )
+    result_b = open_steps(
+        record, writer, task_id="ent_task_b", declaration_scope=SCOPE, workflow_type=WFTYPE
+    )
+
+    assert result_a.checkpoint.idempotency_key != result_b.checkpoint.idempotency_key
+    assert len(record.open_checkpoints_for_task("ent_task_a")) == 1
+    assert len(record.open_checkpoints_for_task("ent_task_b")) == 1
+    assert record.write_call_count == 2
+
+
+# ── pm/qa finding 2 (PR #1310): structural refusal to write production ──
+
+
+def test_engine_refuses_a_checkpoint_writer_labelled_production():
+    """
+    pm's blocking finding, verbatim: "The engine is not structurally
+    unable to write to production... Having only a fake implementation in
+    this PR makes current tests isolated, but it does not enforce the
+    required boundary on the engine." qa's finding: "Add an executable
+    boundary test with a production-marked recording client that must
+    observe zero writes, then make that test pass through a structural
+    guard rather than repository configuration assumptions."
+
+    This constructs a `FakeRecordClient` explicitly labelled
+    `"production"` — standing in for what a real adapter pointed at
+    `NEOTOMA_BASE_URL=https://neotoma.markmhendrickson.com` would declare
+    — and asserts that wrapping it in `NonProductionCheckpointWriter`
+    refuses BEFORE construction succeeds, so `open_steps()` can never even
+    be called with it. Zero writes occur; `write_call_count` never leaves
+    zero because the writer object attached to the record never comes
+    into being.
+    """
+    record = FakeRecordClient(instance_label="production")
+
+    with pytest.raises(ProductionWriteRefused):
+        NonProductionCheckpointWriter(record, record.instance_label)
+
+    # No wrapper was ever successfully constructed, so open_steps() could
+    # not have been called at all with this record as the writer target —
+    # demonstrated here by the fact that nothing wrote anything.
+    assert record.write_call_count == 0
+    assert record.checkpoints == []
+
+
+def test_engine_refuses_a_checkpoint_writer_with_no_label_declared():
+    """
+    Fail-closed, per CLAUDE.md's verification-discipline rule ("fail
+    closed on the field that carries the safety meaning"): an absent or
+    unrecognized label must refuse, not default-permit. This constructs a
+    writer whose label is neither "test-double"/"disposable" (allowed) nor
+    "production" (the obvious deny case) — an arbitrary unrecognized
+    string — and asserts the guard still refuses rather than treating
+    "not literally production" as good enough.
+    """
+    record = FakeRecordClient(instance_label="staging-maybe")
+
+    with pytest.raises(ProductionWriteRefused):
+        NonProductionCheckpointWriter(record, record.instance_label)
+
+    assert record.write_call_count == 0
+
+
+def test_engine_accepts_a_checkpoint_writer_labelled_test_double_or_disposable():
+    """
+    Negative control for the two tests above: the guard is not simply
+    refusing everything. A writer honestly labelled `"test-double"` (the
+    `FakeRecordClient` default) or `"disposable"` (what a future #921
+    disposable-instance adapter would declare) is accepted, and
+    `open_steps()` proceeds normally through it.
+    """
+    test_double = FakeRecordClient(instance_label="test-double")
+    test_double.unreadable_workflows.add((SCOPE, WFTYPE))
+    writer = NonProductionCheckpointWriter(test_double, test_double.instance_label)
+
+    result = open_steps(
+        test_double,
+        writer,
+        task_id="ent_task_ok",
+        declaration_scope=SCOPE,
+        workflow_type=WFTYPE,
+    )
+
+    assert result.checkpoint is not None
+    assert test_double.write_call_count == 1
+
+    disposable = FakeRecordClient(instance_label="disposable")
+    NonProductionCheckpointWriter(disposable, disposable.instance_label)  # does not raise
+
+
+def test_production_write_refusal_is_shown_red_on_revert():
+    """
+    Principle 4 / PR-4: shown red when the mechanism is removed. This
+    simulates the pre-fix world — where `open_steps()` accepted any
+    `RecordClient` and called `raise_checkpoint()` on it directly with no
+    label check at all — by calling the wrapped writer's underlying
+    `raise_checkpoint` directly, bypassing the guard, exactly as the old
+    single-protocol design would have allowed. That this succeeds and
+    writes is the defect qa's finding names; the passing test above
+    (`test_engine_refuses_a_checkpoint_writer_labelled_production`) is
+    what closes it by removing any path that does not go through the
+    guard.
+    """
+    record = FakeRecordClient(instance_label="production")
+
+    # The bug: calling the underlying writer directly, as pre-fix
+    # `open_steps()` did (no NonProductionCheckpointWriter existed to
+    # refuse construction), succeeds and writes — on a client labelled
+    # exactly like a real production adapter would be.
+    checkpoint = record.raise_checkpoint(
+        "ent_task_bug", UNREADABLE_WORKFLOW, idempotency_key="bug-demo-key"
+    )
+    assert checkpoint is not None
+    assert record.write_call_count == 1  # the write the guard exists to prevent
+
+    # Contrast: going through the guard on the SAME record refuses instead.
+    with pytest.raises(ProductionWriteRefused):
+        NonProductionCheckpointWriter(record, record.instance_label)

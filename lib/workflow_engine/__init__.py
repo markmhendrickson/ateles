@@ -21,8 +21,14 @@ this package is exercised only against an in-memory record double
 Neotoma, and never against a "dev" Neotoma instance, because no such
 instance is configured anywhere in this repository (only
 `NEOTOMA_ENV=production` / `NEOTOMA_BASE_URL=https://neotoma.markmhendrickson.com`
-exist). `RecordClient` is the seam a real dev/disposable instance (#921)
-plugs into later without changing this package's logic.
+exist). `RecordReader` (reads) and `CheckpointWriter`/`NonProductionCheckpointWriter`
+(the one write) are the seams a real dev/disposable instance (#921) plugs
+into later without changing this package's logic; the writer seam is a
+structural refusal, not a convention — `NonProductionCheckpointWriter`
+raises `ProductionWriteRefused` at construction if the wrapped writer's
+`instance_label` is not on an explicit non-production allow-list, and
+`open_steps()` only accepts a checkpoint-writing capability of that
+wrapped type.
 """
 
 from __future__ import annotations

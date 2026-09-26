@@ -20,7 +20,7 @@ needs):
   * no verdict read/write (#958) — step close and batch advancement are not
     implemented.
   * no checkpoint QUEUE/resolution UI (#959) — this raises the checkpoint
-    record via `RecordClient.raise_checkpoint` and stops there.
+    record via `CheckpointWriter.raise_checkpoint` and stops there.
   * no adapter-sourced intake (#960) — `open_steps` is called with an
     already-formed batch; batch *formation* from an incoming task is out
     of scope here.
@@ -34,7 +34,7 @@ job, not this one's:
 
   * an unset bearer / unreachable record must not silently become `[]`
     (orchestrator.py lines ~346-348) — here, an unreadable declaration read
-    returns `UNKNOWN` from `RecordClient` and `open_steps` treats that as
+    returns `UNKNOWN` from `RecordReader` and `open_steps` treats that as
     the halt condition below, never as "no workflow" / "zero steps, carry
     on".
   * an unparseable structured field must not be coerced to `[]` and
@@ -43,6 +43,27 @@ job, not this one's:
     record client's problem to signal as `UNKNOWN`, not this module's to
     guess at; nothing in this module ever substitutes an empty collection
     for a value it could not read.
+
+Two findings from pm/qa review on PR #1310 (2026-09-26), both fixed here:
+
+  * **Idempotent halt.** `open_steps()` used to call `raise_checkpoint()`
+    unconditionally on every unreadable-declaration call, so polling the
+    same still-unreadable workflow twice produced two `unreadable_workflow`
+    checkpoints — the acceptance criterion is exactly one. The checkpoint
+    now carries a deterministic `idempotency_key` built from the logical
+    halt's identity (reason + task + declaration_scope + workflow_type, or
+    + needed_input for `underdetermined_inputs`), and the writer
+    (`FakeRecordClient.raise_checkpoint`) returns the existing checkpoint
+    unchanged on a repeat key rather than creating a second one. See
+    `test_repeated_poll_of_unreadable_workflow_raises_only_one_checkpoint`.
+  * **Structural production-write refusal.** `open_steps()` now takes its
+    checkpoint-writing capability as a `NonProductionCheckpointWriter`
+    (record.py), which refuses at construction — before any write is
+    attempted — unless the wrapped writer's `instance_label` is on an
+    allow-list of non-production labels. This holds even once a real
+    `CheckpointWriter` implementation exists; it does not depend on this
+    PR only having a fake. See
+    `test_engine_refuses_a_checkpoint_writer_labelled_production`.
 """
 
 from __future__ import annotations
@@ -54,7 +75,8 @@ from lib.workflow_engine.record import (
     EMPTY,
     UNKNOWN,
     CheckpointRaised,
-    RecordClient,
+    NonProductionCheckpointWriter,
+    RecordReader,
     StepDeclaration,
     Unknown,
     WorkflowDeclaration,
@@ -105,7 +127,7 @@ class OpenStepsResult:
 
 
 def read_workflow_declaration(
-    record: RecordClient, declaration_scope: str, workflow_type: str
+    record: RecordReader, declaration_scope: str, workflow_type: str
 ) -> WorkflowDeclaration | Unknown:
     """
     The declaration reader (implementation spec component 1). Returns the
@@ -121,7 +143,7 @@ def read_workflow_declaration(
 
 
 def hydrate_reads_to_enter(
-    record: RecordClient, step: StepDeclaration
+    record: RecordReader, step: StepDeclaration
 ) -> tuple[HydrationResult, ...]:
     """
     Resolve every type in `step.reads_to_enter` against the record.
@@ -144,8 +166,26 @@ def hydrate_reads_to_enter(
     return tuple(results)
 
 
+def _checkpoint_idempotency_key(
+    *, reason: str, task_id: str, declaration_scope: str, workflow_type: str, needed_input: str
+) -> str:
+    """
+    The identity of a logical halt, not of a single `open_steps()` call.
+    Two calls with the same task, reason, declaration identity, and
+    (where relevant) the same needed_input must produce the SAME key, so
+    that repeated polling of a still-unreadable workflow — the exact
+    scenario pm/qa's review named — finds the existing open checkpoint
+    instead of minting a new one. Deliberately excludes anything that
+    would vary call-to-call for the same underlying condition (a
+    timestamp, a call counter); including either would silently
+    reintroduce the duplicate-checkpoint bug this key exists to prevent.
+    """
+    return f"{reason}:{task_id}:{declaration_scope}:{workflow_type}:{needed_input}"
+
+
 def open_steps(
-    record: RecordClient,
+    record: RecordReader,
+    checkpoints: NonProductionCheckpointWriter,
     *,
     task_id: str,
     declaration_scope: str,
@@ -168,12 +208,33 @@ def open_steps(
     (no batch/time state is threaded through here yet); the hold is
     reported back to the caller via `hydration_holds` so a later slice's
     poller can act on it without this function pretending the step opened.
+
+    `record` is read-only by type (`RecordReader` carries no write method).
+    `checkpoints` must be a `NonProductionCheckpointWriter` — the only
+    write this function performs is routed through it, and its
+    constructor already refused to exist if the wrapped writer is not
+    labelled non-production, so there is no path through this function
+    that reaches a production write.
+
+    Repeated calls with the same `task_id`/`declaration_scope`/
+    `workflow_type` (a poller re-checking a still-unreadable workflow) are
+    idempotent at the checkpoint layer: the same logical halt always
+    derives the same `idempotency_key`, and the writer returns the
+    existing checkpoint rather than creating a second one.
     """
     declaration = read_workflow_declaration(record, declaration_scope, workflow_type)
 
     if declaration is UNKNOWN:
-        checkpoint = record.raise_checkpoint(
-            task_id, UNREADABLE_WORKFLOW, needed_input=f"{declaration_scope}:{workflow_type}"
+        needed_input = f"{declaration_scope}:{workflow_type}"
+        key = _checkpoint_idempotency_key(
+            reason=UNREADABLE_WORKFLOW,
+            task_id=task_id,
+            declaration_scope=declaration_scope,
+            workflow_type=workflow_type,
+            needed_input=needed_input,
+        )
+        checkpoint = checkpoints.raise_checkpoint(
+            task_id, UNREADABLE_WORKFLOW, idempotency_key=key, needed_input=needed_input
         )
         return OpenStepsResult(steps=(), checkpoint=checkpoint)
 
@@ -207,10 +268,19 @@ def open_steps(
         # unreadable-dependency hold above and from the unreadable-
         # workflow halt: the workflow declaration itself was perfectly
         # readable, and the read succeeded — it just found no rows.
-        checkpoint = record.raise_checkpoint(
+        needed_input = empties[0].entity_type
+        key = _checkpoint_idempotency_key(
+            reason=UNDERDETERMINED_INPUTS,
+            task_id=task_id,
+            declaration_scope=declaration_scope,
+            workflow_type=workflow_type,
+            needed_input=needed_input,
+        )
+        checkpoint = checkpoints.raise_checkpoint(
             task_id,
             UNDERDETERMINED_INPUTS,
-            needed_input=empties[0].entity_type,
+            idempotency_key=key,
+            needed_input=needed_input,
         )
         return OpenStepsResult(steps=(), checkpoint=checkpoint, hydration_holds=holds)
 
