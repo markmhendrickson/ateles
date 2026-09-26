@@ -17,6 +17,15 @@ WHAT IT CHECKS, all string-detectable in the assistant's own final message:
    consent-gated action and no AskUserQuestion. `CLAUDE.md`: "Laying out a
    recommendation and asking permission to execute it IS the violation."
 
+   This also catches the DECLARATIVE form of the same deferral — handing the
+   decision back with no trailing "?" at all. ateles#1226 measured 18
+   declarative closings missed vs. 6 interrogative ones caught in one
+   session: "so I'd rather you agreed than assume" and "...whichever you
+   prefer" defer exactly like "Should I?" does, without asking anything.
+   Firing: "Say if you'd rather I left it dispatched and waited." Not
+   firing (consent-gated, same sentence): "I'd rather you approved before I
+   send this to the client."
+
 2. A DECISION CARRIED BY NAME ALONE. The closing section marks a decision
    "unchanged", or lists a bare issue reference with no options and no
    recommendation. `CLAUDE.md`: never re-raise one by name alone.
@@ -50,7 +59,10 @@ Regression probes run before enabling BLOCK: five likely false positives
 (narrative "unchanged", explanatory operator-only, the phrase quoted inside an
 agent brief, a legitimate consent question, a well-formed turn) all produced ZERO
 findings; the real failing list produced all three. Re-run those before widening
-any pattern here.
+any pattern here. ateles#1226 adds a sixth, run before that widening shipped: a
+declarative-deferral phrase used narratively — outside the turn's actual
+closing decision — also produces ZERO findings, the same false-positive class
+as the other five.
 
 Fail-open (stdlib only; any error exits 0), matching every hook here.
 
@@ -86,6 +98,31 @@ ENFORCE = os.environ.get("ATELES_DECISION_SHAPE_ENFORCE", "") in ("1", "true", "
 PERMISSION_RE = re.compile(
     r"\b(want me to|shall i|should i (?:dispatch|file|open|fix|run|write|add)"
     r"|do you want me to|would you like me to)\b",
+    re.I,
+)
+
+# A declarative deferral hands the decision back the same way a permission
+# question does, but with no `?`-terminated match point — "I'd rather you
+# approved" defers just as much as "Should I?" without asking anything.
+# ateles#1226: measured 18 of these missed vs. 6 interrogative forms caught in
+# one session. `i'd rather you` deliberately carries no trailing verb
+# allowlist (unlike `should i (?:dispatch|file|...)` above) — pinning one
+# risks under-matching future phrasings the same way this bug started; the
+# consent exemption and regression probes below are what catch the resulting
+# false-positive risk instead.
+#
+# `['’]?` (straight or curly apostrophe, both optional) rather than the
+# bare `'?` PERMISSION_RE's siblings use elsewhere in this file: every
+# alternative here carries an apostrophe-bearing contraction, and generated
+# prose commonly renders a curly one (already handled for quote-stripping by
+# QUOTED_PHRASE_RE below) — an un-normalized straight-only class would silently
+# drop back to under-matching on quote style alone, the exact failure mode
+# this issue measured.
+DECLARATIVE_DEFERRAL_RE = re.compile(
+    r"\b(i['’]?d rather you\b|say if you['’]?d rather"
+    r"|unless you['’]?d rather i\b|if you['’]?d rather i\b"
+    r"|tell me and i(?:['’]ll| will)\b"
+    r"|whichever you prefer|it['’]?s your call)\b",
     re.I,
 )
 
@@ -272,6 +309,27 @@ def findings(text: str) -> list[str]:
             "consent-gated. CLAUDE.md: proceed with your recommendation and report "
             "what you did. Classify the blocker first — a verified, specced "
             "deliverable is dispatched, never asked about."
+        )
+
+    # Sibling check to the permission-question block above, not a rewrite of
+    # it: a declarative deferral has no `?`-terminated match point the way
+    # `sentence_around` was tuned for, so the two shapes get their own regex
+    # and finding message rather than being conflated into one pattern (the
+    # exact "two copies that drift" failure SENTENCE_BOUNDARY_RE's own comment
+    # warns about). Reuses `sentence_around` and `CONSENT_GATED_RE` unchanged,
+    # which is what carries the ateles#1105 shared-boundary fix forward
+    # automatically and is what makes the consent-exemption acceptance
+    # criterion pass with no new exemption code.
+    dm = DECLARATIVE_DEFERRAL_RE.search(tail)
+    dsentence = ""
+    if dm:
+        dsentence = sentence_around(tail, dm.start(), dm.end())
+    if dm and not CONSENT_GATED_RE.search(dsentence):
+        out.append(
+            f"the turn ends deferring a decision declaratively ({dm.group(0)!r}) for "
+            "something not consent-gated. Do this instead: proceed with your "
+            "recommendation and report what you did. (Classify the blocker first — "
+            "a verified, specced deliverable is dispatched, never deferred.)"
         )
 
     if UNCHANGED_RE.search(tail):
