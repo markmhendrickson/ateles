@@ -320,7 +320,18 @@ class TestAudienceSplitTierA2:
             )
             for i in range(55)
         ]
-        skills = renderer.render_skills(rows, principal=principal)
+        # Session-only inclusion is now decided by a GOVERNS edge, not by
+        # `scope`/`agent_sub` string equality (operator ruling 2026-09-25,
+        # decision 114) — `agent_sub` above establishes the fixture's
+        # intent but binds nobody on its own, so the edge map is supplied
+        # explicitly (also avoids a live Neotoma fetch in this unit test).
+        governs = {"ent_session_only": frozenset({"ent_session_principal_def"})}
+        skills = renderer.render_skills(
+            rows,
+            principal=principal,
+            agent_definition_id="ent_session_principal_def",
+            governs=governs,
+        )
         text = renderer.render_index_text(skills, budget_chars=8000)
         assert "<!-- tier: A2 -->" in text
         # Session-only row: full line, long_title present verbatim.
