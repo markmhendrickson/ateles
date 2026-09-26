@@ -23,6 +23,11 @@
     ],
     [
       "PreToolUse",
+      "refuse_task_chip.py",
+      "^mcp__ccd_session__spawn_task$"
+    ],
+    [
+      "PreToolUse",
       "sibling_repo_worktree_guard.py",
       "Edit|Write|NotebookEdit|Bash"
     ],
