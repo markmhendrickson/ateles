@@ -127,4 +127,5 @@ This document reports only what `origin/main` itself says, so a row ruled on an 
 | 109 | whether an `operator` may hold an **acts-as** `principal_binding` — the corpus says … | no | no | unknown | decision 48's counting rule, which would read such an edge and count two operators … |
 | 110 | whether a **role** may be seated to review what a principal produced … | yes | yes | unknown | nothing in the design; a declaration whose steps seat a producing role and a … |
 | 111 | whether a rule's end may be a **condition** rather than a date … | yes | yes | unknown | the live rows that carry a condition in `scope`, which both defeats that field's … |
+| 118 | whether credential rotation is one authority or several, split by who issues … | yes | yes | unknown | decision 105, open, on where a credential's value comes from and how it reaches … |
 

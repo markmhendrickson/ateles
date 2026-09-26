@@ -74,7 +74,24 @@ POLICY_SCOPES = POLICY_SCOPES_REACHING_EVERY_AGENT | frozenset({"agent"})
 
 
 def policy_binds_agent(snap: dict, agent_sub: str) -> bool:
-    """Whether one `agent_policy` row binds the agent named by `agent_sub`.
+    """Whether one `agent_policy` row binds the agent named by `agent_sub`,
+    under the OLD field-based (`scope`/`agent_sub`) reading.
+
+    SUPERSEDED for the two readers decision 114 names (2026-09-25, master
+    plan `decisions.agent_policy_binds_agent_by_graph_edge`): both
+    `AgentLoader.load_active_policies` (this module) and
+    `policy_skill_renderer._session_scope_ok` now call
+    `policy_binds_agent_by_edge` instead, which does not consult `scope` or
+    `agent_sub` for an agent-specific row at all — only a `GOVERNS` edge (or
+    a swarm-wide `scope` on an edgeless row) binds. This function is KEPT,
+    not removed or deprecated, because it still has a live production
+    caller decision 114 did not name or touch: `generalizer.py`'s
+    `fetch_agent_policies` (reads an agent's own existing policies before
+    proposing a new one — proposal-only, never a live write, so its blast
+    radius is a wrong PROPOSAL rather than a wrong live binding). Migrating
+    that third caller to the edge predicate is out of scope for decision
+    114 as ruled and is tracked separately rather than folded in here
+    unreviewed.
 
     - `global` / `swarm` reach every agent, with or without an `agent_sub`.
     - `agent` binds only the agent its `agent_sub` names.
@@ -89,6 +106,198 @@ def policy_binds_agent(snap: dict, agent_sub: str) -> bool:
         return True
     row_sub = str(snap.get("agent_sub") or "").strip()
     return bool(row_sub) and row_sub == agent_sub
+
+
+# Operator ruling 2026-09-25 (decision 114, master plan
+# `decisions.agent_policy_binds_agent_by_graph_edge`): an agent-specific
+# `agent_policy` is tied to the agent(s) it governs by a graph edge to their
+# `agent_definition`, resolved by traversal — not by the `scope`/`agent_sub`
+# fields `policy_binds_agent` above reads. Those fields are SUPERSEDED by
+# this edge, not repaired in place: G32(a) (`migration.md`) already found
+# `agent_sub` populated on zero live rows and the agent identifier written
+# into `domain` instead, so a fix that stayed inside the two fields would
+# have had to resolve that conflation on the same pass. The edge sidesteps
+# it — an agent-specific row's binding is a relationship, not a string
+# comparison against a field two different things have been written into.
+#
+# No relationship type in this instance's registered vocabulary
+# (`list_relationship_types`) names "a rule governs the agent it binds" —
+# the closest, `manages`, `REFERS_TO` and `related_to`, are respectively a
+# principal-to-principal/org relation, a citation ("mentions or cites", too
+# weak for a binding), and a generic association carrying no directional
+# claim at all. `GOVERNS` is minted for this: `agent_policy` -> `agent_definition`,
+# "the source rule or policy binds the behaviour of the target agent."
+# Registration is a governance act gated on an admitted `agent_grant` with
+# the `register_relationship_type` capability (`services/agent_capabilities.ts`
+# in the neotoma repo — "Governance registration is always grant-gated,
+# independent of rollout flags"); the plain operator bearer token this
+# migration otherwise runs under resolves to no admitted agent identity and
+# cannot register it. Until an admitted grant (the operator, or an agent
+# holding that capability) runs `register_relationship_type`, every write
+# this module attempts against `GOVERNS` fails with
+# `unregistered_relationship_type` — the resolver and its tests do not
+# depend on the type being registered (they operate on already-fetched edge
+# data), but the migration script's `--apply` does, and reports that error
+# rather than silently no-op'ing (`migrate_agent_policy_edges.py`).
+AGENT_POLICY_GOVERNS_EDGE = "GOVERNS"
+
+
+def policy_binds_agent_by_edge(
+    snap: dict, agent_definition_id: str, governs: dict[str, frozenset[str]]
+) -> bool:
+    """Whether one `agent_policy` row binds the agent whose `agent_definition`
+    entity id is `agent_definition_id`, under the graph-edge resolver
+    (operator ruling 2026-09-25, decision 114). The ONE shared predicate for
+    both readers (`AgentLoader.load_active_policies` and
+    `policy_skill_renderer._session_scope_ok`) — a copied predicate is how
+    the two drift (CLAUDE.md: derive from the single source).
+
+    ``governs`` is the batched edge map this module's
+    ``fetch_governs_edges`` returns: ``{agent_policy_entity_id: frozenset of
+    agent_definition_entity_id}``, built from ONE `/list_relationships` call
+    per load rather than one per row.
+
+    The rule, stated once:
+      - A row with a `GOVERNS` edge to ANY `agent_definition` binds ONLY the
+        agent(s) it has an edge to — never another agent, regardless of what
+        `scope` says. An edge is more specific than a scope value, so it
+        overrides rather than adds to it.
+      - A row with NO `GOVERNS` edge binds every agent when `scope` is
+        `global` or `swarm` (`POLICY_SCOPES_REACHING_EVERY_AGENT`) — the
+        swarm-wide case, which the ruling says "carries no edge."
+      - A row with no edge and no recognised swarm-wide scope binds NOBODY.
+        This is the fail-closed default (`principles.md #5`): an edgeless,
+        scope-unrecognised row is not a swarm-wide rule by default, and an
+        absent or malformed `agent_sub`/`scope` pair no longer has a second
+        chance to match by string equality — that fallback is what this
+        ruling supersedes.
+
+    `agent_policy.scope` and `.agent_sub` are read NOWHERE in this function.
+    They are superseded, not consulted as a fallback — a row migrated to an
+    edge and a row never migrated must be judged by the same rule, or the
+    predicate itself would silently re-introduce the two-fields-for-one-
+    concept conflation G32(a) already found.
+    """
+    entity_id = str(snap.get("_entity_id") or snap.get("entity_id") or "").strip()
+    edge_targets = governs.get(entity_id, frozenset())
+    if edge_targets:
+        return agent_definition_id in edge_targets
+    scope = str(snap.get("scope") or "").strip().lower()
+    return scope in POLICY_SCOPES_REACHING_EVERY_AGENT
+
+
+def fetch_governs_edges(
+    base_url: str = "",
+    timeout: float = 10.0,
+    *,
+    _request: "callable | None" = None,
+) -> dict[str, frozenset[str]]:
+    """Batch-fetch every live `GOVERNS` edge in ONE `/list_relationships`
+    call (not one per `agent_policy` row) and return
+    ``{agent_policy_entity_id: frozenset(agent_definition_entity_id, ...)}``.
+
+    `/list_relationships` accepts `relationship_type` alone with no
+    `entity_id` (`ListRelationshipsRequestSchema`'s `.refine` requires only
+    one of the four selector fields) — the whole vocabulary of `GOVERNS`
+    edges reachable at once, same shape as `POLICY_QUERY_BODY`'s
+    `/entities/query` call one level up.
+
+    Raises on transport failure — this module never swallows a fetch error
+    into an empty result (CLAUDE.md: a write/read that fails must not look
+    like an empty result); callers already have a fail-open path for
+    Neotoma being unreachable (`AgentLoader.load_active_policies`'s
+    try/except, `policy_skill_renderer`'s hook-level fail-open) and decide
+    how to degrade at that layer, not inside this fetch.
+
+    `_request` is an injection point for a caller (`policy_skill_renderer`)
+    that must stay stdlib-only and cannot import `httpx` — it passes its own
+    `urllib`-based POST function with the same ``(url, body, timeout) ->
+    dict`` shape. The default here uses `httpx`, matching every other
+    request this module makes.
+    """
+    url = f"{(base_url or NEOTOMA_BASE_URL).rstrip('/')}/list_relationships"
+    body = {"relationship_type": AGENT_POLICY_GOVERNS_EDGE, "limit": 500}
+    if _request is not None:
+        data = _request(url, body, timeout)
+    else:
+        resp = httpx.post(url, json=body, headers=_auth_headers(), timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+
+    out: dict[str, set[str]] = {}
+    for rel in (data.get("relationships") or []) if isinstance(data, dict) else []:
+        if not isinstance(rel, dict):
+            continue
+        source = str(rel.get("source_entity_id") or "").strip()
+        target = str(rel.get("target_entity_id") or "").strip()
+        if not source or not target:
+            continue
+        out.setdefault(source, set()).add(target)
+    return {k: frozenset(v) for k, v in out.items()}
+
+
+def resolve_agent_definition_id(
+    agent_sub: str,
+    base_url: str = "",
+    timeout: float = 10.0,
+    *,
+    _request: "callable | None" = None,
+) -> str | None:
+    """Resolve an agent's `agent_sub` (e.g. ``corvus@ateles-swarm``) to its
+    `agent_definition` entity id, via the SAME name-search route
+    `AgentLoader._load_by_name` already uses — `POST /entities/query` is the
+    canonical list route (`GET /entities` 404s on the hosted instance).
+
+    An agent's name is the local part of its sub (`corvus@ateles-swarm` ->
+    `corvus`); `aauth_sub`, when a row carries one, is matched first and
+    preferred, since it is the field the design names as the identifying
+    credential (`data_model.md`: "the `sub` its `principal_binding`
+    carries"). Falls back to a name match when no row's `aauth_sub` matches
+    exactly — most `agent_definition` rows predate the field.
+
+    Returns None (never a guess) when no row matches, or on transport
+    failure — this is a lookup a caller treats as "unresolvable" rather
+    than raising, since an unresolved session principal must bind no
+    `agent`-scoped row (the same fail-closed posture `policy_binds_agent`
+    already takes on an empty `agent_sub`).
+    """
+    name = agent_sub.split("@", 1)[0].strip().lower()
+    if not name:
+        return None
+    url = f"{(base_url or NEOTOMA_BASE_URL).rstrip('/')}/entities/query"
+    body = {
+        "entity_type": "agent_definition",
+        "search": name,
+        "limit": 5,
+        "include_snapshots": True,
+    }
+    try:
+        if _request is not None:
+            data = _request(url, body, timeout)
+        else:
+            resp = httpx.post(url, json=body, headers=_auth_headers(), timeout=timeout)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:  # noqa: BLE001 — unresolvable, not fatal; caller degrades
+        return None
+
+    entities = (data.get("entities") or []) if isinstance(data, dict) else []
+    name_match: str | None = None
+    for ent in entities:
+        if not isinstance(ent, dict):
+            continue
+        outer = ent.get("snapshot") or {}
+        snap = outer.get("snapshot", outer) if isinstance(outer, dict) else {}
+        if not isinstance(snap, dict):
+            continue
+        entity_id = str(ent.get("entity_id") or "")
+        if not entity_id:
+            continue
+        if str(snap.get("aauth_sub", "")).strip().lower() == agent_sub.strip().lower():
+            return entity_id
+        if name_match is None and str(snap.get("name", "")).strip().lower() == name:
+            name_match = entity_id
+    return name_match
 
 
 # Statuses that count as "live" for any reader of agent_policy. Shared so a
@@ -543,12 +752,38 @@ class AgentLoader:
         # wide caller's union.
         live_rows = unwrap_policy_entities(data)
 
+        # Decision 114 (2026-09-25): resolve this agent's `agent_definition`
+        # id and the batched `GOVERNS` edge map ONCE per load (not once per
+        # row), then judge every row with the ONE shared predicate,
+        # `policy_binds_agent_by_edge`. Both fetches degrade to "resolve/bind
+        # nothing" on failure rather than raising — a Neotoma hiccup on the
+        # edge lookup must not take down a load that would otherwise have
+        # succeeded on the entity fetch above.
+        agent_definition_id = None
+        try:
+            agent_definition_id = resolve_agent_definition_id(agent_sub, NEOTOMA_BASE_URL)
+        except Exception as exc:  # noqa: BLE001 — degrade, do not raise
+            log.warning(
+                f"[{self.agent_name}] could not resolve agent_definition id "
+                f"for {agent_sub!r}: {exc} — edge-scoped policies unresolvable "
+                "this load"
+            )
+        governs: dict[str, frozenset[str]] = {}
+        try:
+            governs = fetch_governs_edges(NEOTOMA_BASE_URL)
+        except Exception as exc:  # noqa: BLE001 — degrade, do not raise
+            log.warning(
+                f"[{self.agent_name}] could not fetch GOVERNS edges: {exc} — "
+                "treating every row as edgeless this load"
+            )
+
         out: list[dict] = []
         scoping_populated = 0
         for snap in live_rows:
-            if str(snap.get("agent_sub") or "").strip():
+            entity_id = str(snap.get("_entity_id") or "")
+            if governs.get(entity_id) or str(snap.get("agent_sub") or "").strip():
                 scoping_populated += 1
-            if not policy_binds_agent(snap, agent_sub):
+            if not policy_binds_agent_by_edge(snap, agent_definition_id or "", governs):
                 continue
             out.append(snap)
 
@@ -556,18 +791,23 @@ class AgentLoader:
         # A 200 returning rows that all fail the filter was indistinguishable
         # from an agent that legitimately has no policies — and most agents
         # legitimately have none, so the empty result looked correct while
-        # every agent loaded zero. `agent_sub` was populated 0 of 25 rows.
+        # every agent loaded zero. `agent_sub` was populated 0 of 25 rows
+        # before the backfill this decision also obsoletes.
         #
         # Distinguishing the two cases is the point: an empty result is only
-        # trustworthy when the field the filter reads is populated SOMEWHERE.
+        # trustworthy when SOME row carries either scoping signal (an edge or
+        # a legacy `agent_sub`) — a corpus with neither is the same
+        # "everything reaches nobody" defect ateles#1118 found, now over the
+        # edge instead of the field.
         if live_rows and not scoping_populated:
             log.error(
                 f"[{self.agent_name}] agent_policy returned {len(live_rows)} "
-                "row(s) but `agent_sub` is unpopulated on EVERY one — the "
-                "filter matched nothing because the scoping field is empty, "
-                "not because this agent has no policies. Dispatching WITHOUT "
-                "policies. Backfill `agent_sub` (docs/foundation/data_model.md "
-                "names it the one field that scopes a rule to an agent)."
+                "row(s) but none carries a GOVERNS edge or a legacy "
+                "`agent_sub` — the filter matched nothing because no row is "
+                "agent-scoped by either mechanism, not because this agent "
+                "has no policies. Dispatching WITHOUT policies. Run "
+                "execution/scripts/migrate_agent_policy_edges.py to convert "
+                "scope=agent/agent_sub rows to GOVERNS edges."
             )
         return out
 

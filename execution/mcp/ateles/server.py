@@ -185,11 +185,11 @@ conversation.
 # sized to that channel's own (unmeasured but real) budget instead of this
 # one's ~2,048-character shared ceiling.
 #
-# The live resolve and `policy_binds_agent` scoping predicate stay in place
-# below: `AgentLoader.render_policy_prompt` is still the dispatch-side
-# renderer (ateles#1118) and other callers still use it. This function now
-# only measures its output against a small fixed budget rather than
-# forwarding it verbatim.
+# The live resolve and edge-based scoping predicate (`policy_binds_agent_by_edge`,
+# decision 114, 2026-09-25) stay in place below: `AgentLoader.render_policy_prompt`
+# is still the dispatch-side renderer (ateles#1118) and other callers still use
+# it. This function now only measures its output against a small fixed budget
+# rather than forwarding it verbatim.
 SESSION_PRINCIPAL = os.environ.get("ATELES_SESSION_PRINCIPAL", "ateles@ateles-swarm")
 
 # Pointer sentence replacing the rendered rule corpus. Standing rules are
