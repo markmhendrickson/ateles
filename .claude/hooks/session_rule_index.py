@@ -39,8 +39,8 @@ physically lives, not at whatever directory launched it.
 
 Fail-open for the SESSION only when there is genuinely nothing to render: if
 Neotoma is unreachable, the renderer's import fails (e.g. no `httpx` in this
-Python environment — the renderer imports `agent_loader.policy_binds_agent`,
-which hard-imports httpx), or the corpus cannot fit even the smallest tier
+Python environment — the renderer imports `agent_loader`, which hard-imports
+httpx), or the corpus cannot fit even the smallest tier
 (`PolicyIndexError`, see policy_skill_renderer.py). Any of these print ONE
 line saying the rules could not be loaded and exit 0. Never crash a session
 start, and never truncate a line mid-rule — but an over-budget corpus is
