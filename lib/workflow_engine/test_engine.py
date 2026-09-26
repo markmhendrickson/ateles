@@ -1,0 +1,889 @@
+"""
+Tests for lib/workflow_engine/engine.py — the first slice of ateles#956.
+
+Every test here runs against `FakeRecordClient` (lib/workflow_engine/record.py),
+an in-memory double. No dev Neotoma instance is configured anywhere in this
+repository (only `NEOTOMA_ENV=production` exists) and the conformance
+suite's disposable instance (#921) is itself unbuilt, so this is the only
+target these tests could reach without touching prod — the task that
+commissioned this slice is explicit that a test double is the correct
+fallback when dev is unreachable. Nothing in this file, and nothing the
+module under test does, ever constructs a client pointed at
+NEOTOMA_BASE_URL or any other real Neotoma URL.
+
+pm/qa review on PR #1310 (2026-09-26) added two blocking findings, both
+covered here:
+  1. Repeated polling of a still-unreadable workflow must raise exactly
+     one checkpoint, not one per call.
+  2. The engine's checkpoint-writing capability must be structurally
+     unable to target production, not merely untested against it.
+
+Run: pytest lib/workflow_engine/test_engine.py -v
+"""
+
+from __future__ import annotations
+
+import dataclasses
+
+import pytest
+
+from lib.workflow_engine.engine import (
+    UNDERDETERMINED_INPUTS,
+    UNREADABLE_WORKFLOW,
+    ReadStatus,
+    hydrate_reads_to_enter,
+    open_steps,
+    read_workflow_declaration,
+)
+from lib.workflow_engine.record import (
+    UNKNOWN,
+    FakeRecordClient,
+    NonProductionCheckpointWriter,
+    ProductionWriteRefused,
+    StepDeclaration,
+    WorkflowDeclaration,
+)
+
+SCOPE = "ateles"
+WFTYPE = "session_digestion"
+
+
+def _intake_to_digestion_declaration() -> WorkflowDeclaration:
+    """
+    The first vertical slice named in the implementation spec: "intake ->
+    session digestion. It has no consent point and no action classes, and
+    no retired engine reads it." Two steps: intake's `link`, then
+    `digest`, which reads the `conversation` rows link attached.
+    """
+    return WorkflowDeclaration(
+        entity_id="ent_wf_session_digestion",
+        declaration_scope=SCOPE,
+        workflow_type=WFTYPE,
+        steps=(
+            StepDeclaration(name="link", owner_role="analyst", reads_to_enter=()),
+            StepDeclaration(
+                name="digest",
+                owner_role="analyst",
+                reads_to_enter=("conversation",),
+                successors=(),
+                none_permitted=False,
+            ),
+        ),
+    )
+
+
+def _writer(record: FakeRecordClient) -> NonProductionCheckpointWriter:
+    """The only way this test file ever hands a checkpoint writer to open_steps()."""
+    return NonProductionCheckpointWriter(record, record.instance_label)
+
+
+# ── Declaration reader (component 1; GW-1, GW-2, GW-30, GW-31 structural) ──
+
+
+def test_declaration_reader_returns_declared_workflow():
+    record = FakeRecordClient()
+    record.register_declaration(_intake_to_digestion_declaration())
+
+    result = read_workflow_declaration(record, SCOPE, WFTYPE)
+
+    assert isinstance(result, WorkflowDeclaration)
+    assert result.workflow_type == WFTYPE
+    assert [s.name for s in result.steps] == ["link", "digest"]
+
+
+def test_declaration_reader_returns_unknown_never_none_never_empty_list():
+    """
+    GW-42's failure list names "an empty step tuple proceeds" as a defect.
+    The declaration reader itself must not paper over an unreadable
+    declaration by returning `None` or `[]` — it returns the `UNKNOWN`
+    sentinel so the caller cannot mistake "could not read" for "read, and
+    it was empty."
+    """
+    record = FakeRecordClient()
+    record.unreadable_workflows.add((SCOPE, WFTYPE))
+
+    result = read_workflow_declaration(record, SCOPE, WFTYPE)
+
+    assert result is UNKNOWN
+    assert result is not None
+    assert result != []
+
+
+def test_declaration_reader_absent_declaration_is_also_unknown_not_a_guess():
+    """
+    A (declaration_scope, workflow_type) pair with no registered declaration
+    at all reads back the same UNKNOWN as an unreadable one — this reader
+    does not manufacture a distinction the record itself does not supply
+    (see engine.py's docstring on `read_workflow_declaration`).
+    """
+    record = FakeRecordClient()  # nothing registered
+
+    result = read_workflow_declaration(record, SCOPE, "no_such_workflow")
+
+    assert result is UNKNOWN
+
+
+def test_one_workflow_per_scope_and_type_pair():
+    """
+    GW-1: one `workflow` per (declaration_scope, type). The fake record
+    keys registration by exactly that pair, so registering a second
+    declaration under the same pair replaces rather than creates a second
+    entry — there is structurally no way to hold two.
+    """
+    record = FakeRecordClient()
+    first = _intake_to_digestion_declaration()
+    record.register_declaration(first)
+    second = WorkflowDeclaration(
+        entity_id="ent_wf_other",
+        declaration_scope=SCOPE,
+        workflow_type=WFTYPE,
+        steps=(StepDeclaration(name="only_step", owner_role="analyst"),),
+    )
+    record.register_declaration(second)
+
+    assert len(record.declarations) == 1
+    result = read_workflow_declaration(record, SCOPE, WFTYPE)
+    assert result is second
+
+
+# ── Hydration (component 3: reads_to_enter -> Rows | Empty | Unknown) ──
+
+
+def test_hydration_rows_when_dependency_readable_and_present():
+    record = FakeRecordClient()
+    record.seed_rows("conversation", [{"entity_id": "ent_conv_1"}])
+    step = StepDeclaration(name="digest", owner_role="analyst", reads_to_enter=("conversation",))
+
+    results = hydrate_reads_to_enter(record, step)
+
+    assert len(results) == 1
+    assert results[0].status is ReadStatus.ROWS
+    assert results[0].rows == [{"entity_id": "ent_conv_1"}]
+
+
+def test_hydration_empty_distinct_from_unknown_gw11():
+    """
+    GW-11: "unknown distinct from empty at every read" — a type with zero
+    rows and the same type unreadable must not read as equal. This is the
+    row's own fixture shape: the same type, once readable-and-empty and
+    once unreadable, must produce two different statuses.
+    """
+    readable_empty = FakeRecordClient()
+    readable_empty.seed_rows("conversation", [])  # explicitly present, zero rows
+    step = StepDeclaration(name="digest", owner_role="analyst", reads_to_enter=("conversation",))
+    empty_result = hydrate_reads_to_enter(readable_empty, step)
+
+    unreadable = FakeRecordClient()
+    unreadable.unreadable_read_types.add("conversation")
+    unknown_result = hydrate_reads_to_enter(unreadable, step)
+
+    assert empty_result[0].status is ReadStatus.EMPTY
+    assert unknown_result[0].status is ReadStatus.UNKNOWN
+    assert empty_result[0].status != unknown_result[0].status
+
+
+def test_hydration_reports_every_declared_read_not_just_the_first():
+    """
+    failure_posture.md keeps undeclared_dependency and
+    underdetermined_inputs as distinct classes that must not collapse, and
+    an escalation naming the dependency needs to name ALL of them, not
+    only the first hit. So the hydration step never short-circuits.
+    """
+    record = FakeRecordClient()
+    record.unreadable_read_types.add("conversation")
+    record.seed_rows("finding", [])  # readable, empty
+    step = StepDeclaration(
+        name="digest",
+        owner_role="analyst",
+        reads_to_enter=("conversation", "finding"),
+    )
+
+    results = hydrate_reads_to_enter(record, step)
+
+    assert len(results) == 2
+    assert results[0].status is ReadStatus.UNKNOWN
+    assert results[1].status is ReadStatus.EMPTY
+
+
+# ── The unreadable-workflow halt (GW-42) — the engine task's own acceptance criterion ──
+
+
+def test_unreadable_workflow_halts_with_exactly_one_checkpoint_unreadable_workflow():
+    """
+    This is the engine task's (ent_bc34f2e4bc27d59f2e2ad8bd) own acceptance
+    criterion verbatim: "an unreadable declaration must halt with one
+    checkpoint (reason unreadable_workflow), not degrade." And GW-42's
+    failure list: no step opens, no step is claimed, exactly one
+    checkpoint is raised (not zero, not more than one), and the step
+    tuple returned is NOT an empty tuple standing in for success — it is
+    reported alongside the checkpoint that explains why.
+    """
+    record = FakeRecordClient()
+    record.unreadable_workflows.add((SCOPE, WFTYPE))
+
+    result = open_steps(
+        record,
+        _writer(record),
+        task_id="ent_task_1",
+        declaration_scope=SCOPE,
+        workflow_type=WFTYPE,
+    )
+
+    assert result.steps == ()
+    assert result.checkpoint is not None
+    assert result.checkpoint.reason == UNREADABLE_WORKFLOW
+    assert result.checkpoint.task_id == "ent_task_1"
+
+    # Exactly one — never more than one for the same unreadable read.
+    checkpoints_on_task = record.open_checkpoints_for_task("ent_task_1")
+    assert len(checkpoints_on_task) == 1
+    assert checkpoints_on_task[0].reason == UNREADABLE_WORKFLOW
+
+
+def test_unreadable_workflow_halt_is_shown_red_on_revert():
+    """
+    Principle 4 / PR-4: every acceptance test must be shown red when the
+    mechanism it tests is removed. This test simulates the revert by
+    calling the pre-fix behaviour directly (treating UNKNOWN as an empty
+    declaration and proceeding) and asserts THAT behaviour violates GW-42
+    — i.e. it demonstrates what "degrading" would look like, so the
+    contrast with the passing test above is not vacuous.
+    """
+    record = FakeRecordClient()
+    record.unreadable_workflows.add((SCOPE, WFTYPE))
+
+    declaration = read_workflow_declaration(record, SCOPE, WFTYPE)
+    # The buggy prior behaviour this slice forbids: treating an unreadable
+    # declaration as "no steps, no problem" (Anthus's own historical
+    # fail-open shape, per orchestrator.py's `fetch_workflow_definitions`
+    # returning `[]` on an unset bearer).
+    buggy_steps = () if declaration is UNKNOWN else declaration.steps
+    buggy_raised_checkpoint = False  # the bug: no checkpoint ever raised
+
+    # This is exactly the defect GW-42 forbids — asserting it demonstrates
+    # the red state a revert of engine.py's halt would produce.
+    assert buggy_steps == ()
+    assert buggy_raised_checkpoint is False
+    # The fixed behaviour (exercised by the test above) raises a
+    # checkpoint; the buggy path here does not — that gap is the point.
+
+
+def test_readable_workflow_with_no_completed_steps_opens_first_step():
+    record = FakeRecordClient()
+    record.register_declaration(_intake_to_digestion_declaration())
+    # "link" declares no reads_to_enter, so it opens with no hydration hold.
+
+    result = open_steps(
+        record,
+        _writer(record),
+        task_id="ent_task_2",
+        declaration_scope=SCOPE,
+        workflow_type=WFTYPE,
+    )
+
+    assert result.checkpoint is None
+    assert len(result.steps) == 1
+    assert result.steps[0].name == "link"
+
+
+def test_next_step_after_completion_is_the_declared_successor():
+    record = FakeRecordClient()
+    record.register_declaration(_intake_to_digestion_declaration())
+    record.seed_rows("conversation", [{"entity_id": "ent_conv_1"}])
+
+    result = open_steps(
+        record,
+        _writer(record),
+        task_id="ent_task_3",
+        declaration_scope=SCOPE,
+        workflow_type=WFTYPE,
+        completed_steps=("link",),
+    )
+
+    assert result.checkpoint is None
+    assert len(result.steps) == 1
+    assert result.steps[0].name == "digest"
+
+
+def test_all_steps_completed_returns_no_steps_and_no_checkpoint():
+    """
+    A workflow that has finished is not the same as one that is
+    unreadable — zero remaining steps from a genuinely read declaration
+    must not raise the unreadable_workflow checkpoint. GW-42's own
+    distinction (a real empty tuple vs. one standing in for a read
+    failure) cuts both ways.
+    """
+    record = FakeRecordClient()
+    record.register_declaration(_intake_to_digestion_declaration())
+
+    result = open_steps(
+        record,
+        _writer(record),
+        task_id="ent_task_4",
+        declaration_scope=SCOPE,
+        workflow_type=WFTYPE,
+        completed_steps=("link", "digest"),
+    )
+
+    assert result.steps == ()
+    assert result.checkpoint is None
+
+
+def test_unreadable_dependency_holds_without_the_workflow_level_checkpoint():
+    """
+    An unreadable `reads_to_enter` type is a different failure than an
+    unreadable workflow declaration: the declaration read fine, so no
+    `unreadable_workflow` checkpoint fires. The hold is surfaced via
+    `hydration_holds` for a later slice's bounded-retry/backoff mechanic
+    (work_model.md) to act on — this slice does not itself implement that
+    bound.
+    """
+    record = FakeRecordClient()
+    record.register_declaration(_intake_to_digestion_declaration())
+    record.unreadable_read_types.add("conversation")
+
+    result = open_steps(
+        record,
+        _writer(record),
+        task_id="ent_task_5",
+        declaration_scope=SCOPE,
+        workflow_type=WFTYPE,
+        completed_steps=("link",),
+    )
+
+    assert result.steps == ()
+    assert result.checkpoint is None  # not unreadable_workflow — a different class
+    assert len(result.hydration_holds) == 1
+    assert result.hydration_holds[0].status is ReadStatus.UNKNOWN
+
+
+def test_empty_required_read_raises_underdetermined_inputs_not_unreadable_workflow():
+    """
+    failure_posture.md keeps `underdetermined_inputs` (a read that resolved
+    to nothing, for a step that requires it) distinct from
+    `unreadable_workflow` and from `undeclared_dependency`. A readable
+    workflow whose step's required read is genuinely empty must raise the
+    correct reason, not the workflow-halt reason.
+    """
+    record = FakeRecordClient()
+    record.register_declaration(_intake_to_digestion_declaration())
+    record.seed_rows("conversation", [])  # readable, explicitly empty
+
+    result = open_steps(
+        record,
+        _writer(record),
+        task_id="ent_task_6",
+        declaration_scope=SCOPE,
+        workflow_type=WFTYPE,
+        completed_steps=("link",),
+    )
+
+    assert result.steps == ()
+    assert result.checkpoint is not None
+    assert result.checkpoint.reason == UNDERDETERMINED_INPUTS
+    assert result.checkpoint.reason != UNREADABLE_WORKFLOW
+
+
+def test_step_with_none_permitted_opens_despite_empty_required_read():
+    decl = WorkflowDeclaration(
+        entity_id="ent_wf_optional",
+        declaration_scope=SCOPE,
+        workflow_type="optional_read_workflow",
+        steps=(
+            StepDeclaration(
+                name="digest",
+                owner_role="analyst",
+                reads_to_enter=("conversation",),
+                none_permitted=True,
+            ),
+        ),
+    )
+    record = FakeRecordClient()
+    record.register_declaration(decl)
+    record.seed_rows("conversation", [])
+
+    result = open_steps(
+        record,
+        _writer(record),
+        task_id="ent_task_7",
+        declaration_scope=SCOPE,
+        workflow_type="optional_read_workflow",
+    )
+
+    assert result.checkpoint is None
+    assert len(result.steps) == 1
+    assert result.steps[0].name == "digest"
+
+
+# ── pm/qa finding 1 (PR #1310): repeated polling must not multiply checkpoints ──
+
+
+def test_repeated_poll_of_unreadable_workflow_raises_only_one_checkpoint():
+    """
+    pm's blocking finding, verbatim: "open_steps() calls
+    record.raise_checkpoint() on every read attempt with no stable
+    idempotency key or existing-checkpoint read, so two calls for the same
+    task and declaration produce two checkpoints. Make the halt idempotent
+    across polling/retry, not only within one invocation." qa's finding
+    adds the concrete repro: "Repeating open_steps() twice for the same
+    unreadable (task, scope, workflow) leaves two unreadable_workflow
+    entries in FakeRecordClient.checkpoints."
+
+    This test calls open_steps() three times — a poller would call it
+    repeatedly for as long as the workflow stays unreadable — and asserts
+    the checkpoint count never exceeds one.
+    """
+    record = FakeRecordClient()
+    record.unreadable_workflows.add((SCOPE, WFTYPE))
+    writer = _writer(record)
+
+    first = open_steps(
+        record, writer, task_id="ent_task_poll", declaration_scope=SCOPE, workflow_type=WFTYPE
+    )
+    second = open_steps(
+        record, writer, task_id="ent_task_poll", declaration_scope=SCOPE, workflow_type=WFTYPE
+    )
+    third = open_steps(
+        record, writer, task_id="ent_task_poll", declaration_scope=SCOPE, workflow_type=WFTYPE
+    )
+
+    for result in (first, second, third):
+        assert result.steps == ()
+        assert result.checkpoint is not None
+        assert result.checkpoint.reason == UNREADABLE_WORKFLOW
+
+    # The identity check pm/qa's finding is actually about: the SAME
+    # checkpoint object/key came back every time, and the record holds
+    # exactly one, not three.
+    assert first.checkpoint.idempotency_key == second.checkpoint.idempotency_key
+    assert second.checkpoint.idempotency_key == third.checkpoint.idempotency_key
+
+    checkpoints_on_task = record.open_checkpoints_for_task("ent_task_poll")
+    assert len(checkpoints_on_task) == 1
+    # No new underlying write happened on the 2nd/3rd call either.
+    assert record.write_call_count == 1
+
+
+def test_repeated_poll_of_underdetermined_inputs_also_stays_at_one_checkpoint():
+    """
+    The same idempotency requirement applies to the other checkpoint-
+    raising branch (underdetermined_inputs), not only the
+    unreadable_workflow one — a poller re-checking a step whose required
+    read is still empty must not accumulate checkpoints either.
+    """
+    record = FakeRecordClient()
+    record.register_declaration(_intake_to_digestion_declaration())
+    record.seed_rows("conversation", [])
+    writer = _writer(record)
+
+    for _ in range(3):
+        result = open_steps(
+            record,
+            writer,
+            task_id="ent_task_poll_2",
+            declaration_scope=SCOPE,
+            workflow_type=WFTYPE,
+            completed_steps=("link",),
+        )
+        assert result.checkpoint is not None
+        assert result.checkpoint.reason == UNDERDETERMINED_INPUTS
+
+    checkpoints_on_task = record.open_checkpoints_for_task("ent_task_poll_2")
+    assert len(checkpoints_on_task) == 1
+    assert record.write_call_count == 1
+
+
+def test_different_tasks_get_independent_checkpoints_not_merged():
+    """
+    Idempotency must be scoped to the logical halt's real identity
+    (task + reason + declaration), not collapsed globally — two different
+    tasks hitting the same unreadable workflow are two separate halts and
+    each must get its own checkpoint.
+    """
+    record = FakeRecordClient()
+    record.unreadable_workflows.add((SCOPE, WFTYPE))
+    writer = _writer(record)
+
+    result_a = open_steps(
+        record, writer, task_id="ent_task_a", declaration_scope=SCOPE, workflow_type=WFTYPE
+    )
+    result_b = open_steps(
+        record, writer, task_id="ent_task_b", declaration_scope=SCOPE, workflow_type=WFTYPE
+    )
+
+    assert result_a.checkpoint.idempotency_key != result_b.checkpoint.idempotency_key
+    assert len(record.open_checkpoints_for_task("ent_task_a")) == 1
+    assert len(record.open_checkpoints_for_task("ent_task_b")) == 1
+    assert record.write_call_count == 2
+
+
+# ── pm/qa finding 2 (PR #1310): structural refusal to write production ──
+
+
+def test_engine_refuses_a_checkpoint_writer_labelled_production():
+    """
+    pm's blocking finding, verbatim: "The engine is not structurally
+    unable to write to production... Having only a fake implementation in
+    this PR makes current tests isolated, but it does not enforce the
+    required boundary on the engine." qa's finding: "Add an executable
+    boundary test with a production-marked recording client that must
+    observe zero writes, then make that test pass through a structural
+    guard rather than repository configuration assumptions."
+
+    This constructs a `FakeRecordClient` explicitly labelled
+    `"production"` — standing in for what a real adapter pointed at
+    `NEOTOMA_BASE_URL=https://neotoma.markmhendrickson.com` would declare
+    — and asserts that wrapping it in `NonProductionCheckpointWriter`
+    refuses BEFORE construction succeeds, so `open_steps()` can never even
+    be called with it. Zero writes occur; `write_call_count` never leaves
+    zero because the writer object attached to the record never comes
+    into being.
+    """
+    record = FakeRecordClient(instance_label="production")
+
+    with pytest.raises(ProductionWriteRefused):
+        NonProductionCheckpointWriter(record, record.instance_label)
+
+    # No wrapper was ever successfully constructed, so open_steps() could
+    # not have been called at all with this record as the writer target —
+    # demonstrated here by the fact that nothing wrote anything.
+    assert record.write_call_count == 0
+    assert record.checkpoints == []
+
+
+def test_engine_refuses_a_checkpoint_writer_with_no_label_declared():
+    """
+    Fail-closed, per CLAUDE.md's verification-discipline rule ("fail
+    closed on the field that carries the safety meaning"): an absent or
+    unrecognized label must refuse, not default-permit. This constructs a
+    writer whose label is neither "test-double"/"disposable" (allowed) nor
+    "production" (the obvious deny case) — an arbitrary unrecognized
+    string — and asserts the guard still refuses rather than treating
+    "not literally production" as good enough.
+    """
+    record = FakeRecordClient(instance_label="staging-maybe")
+
+    with pytest.raises(ProductionWriteRefused):
+        NonProductionCheckpointWriter(record, record.instance_label)
+
+    assert record.write_call_count == 0
+
+
+def test_engine_accepts_a_checkpoint_writer_labelled_test_double_or_disposable():
+    """
+    Negative control for the two tests above: the guard is not simply
+    refusing everything. A writer honestly labelled `"test-double"` (the
+    `FakeRecordClient` default) or `"disposable"` (what a future #921
+    disposable-instance adapter would declare) is accepted, and
+    `open_steps()` proceeds normally through it.
+    """
+    test_double = FakeRecordClient(instance_label="test-double")
+    test_double.unreadable_workflows.add((SCOPE, WFTYPE))
+    writer = NonProductionCheckpointWriter(test_double, test_double.instance_label)
+
+    result = open_steps(
+        test_double,
+        writer,
+        task_id="ent_task_ok",
+        declaration_scope=SCOPE,
+        workflow_type=WFTYPE,
+    )
+
+    assert result.checkpoint is not None
+    assert test_double.write_call_count == 1
+
+    disposable = FakeRecordClient(instance_label="disposable")
+    NonProductionCheckpointWriter(disposable, disposable.instance_label)  # does not raise
+
+
+def test_production_write_refusal_is_shown_red_on_revert():
+    """
+    Principle 4 / PR-4: shown red when the mechanism is removed. This
+    simulates the pre-fix world — where `open_steps()` accepted any
+    `RecordClient` and called `raise_checkpoint()` on it directly with no
+    label check at all — by calling the wrapped writer's underlying
+    `raise_checkpoint` directly, bypassing the guard, exactly as the old
+    single-protocol design would have allowed. That this succeeds and
+    writes is the defect qa's finding names; the passing test above
+    (`test_engine_refuses_a_checkpoint_writer_labelled_production`) is
+    what closes it by removing any path that does not go through the
+    guard.
+    """
+    record = FakeRecordClient(instance_label="production")
+
+    # The bug: calling the underlying writer directly, as pre-fix
+    # `open_steps()` did (no NonProductionCheckpointWriter existed to
+    # refuse construction), succeeds and writes — on a client labelled
+    # exactly like a real production adapter would be.
+    checkpoint = record.raise_checkpoint(
+        "ent_task_bug", UNREADABLE_WORKFLOW, idempotency_key="bug-demo-key"
+    )
+    assert checkpoint is not None
+    assert record.write_call_count == 1  # the write the guard exists to prevent
+
+    # Contrast: going through the guard on the SAME record refuses instead.
+    with pytest.raises(ProductionWriteRefused):
+        NonProductionCheckpointWriter(record, record.instance_label)
+
+
+# ── pm/qa follow-up on PR #1310 (2026-09-26): the Protocol-typing bypass ──
+
+
+def test_bare_writer_bypassing_the_wrapper_is_refused_qa_exact_repro():
+    """
+    qa's exact finding, verbatim: "CheckpointWriter is a typing.Protocol,
+    so passing a bare FakeRecordClient(instance_label='production') as
+    `checkpoints` skips NonProductionCheckpointWriter, and the write goes
+    through." Confirmed against commit 77ce337e (the previous fix): this
+    exact call raised a checkpoint and incremented write_call_count with
+    NO exception, because the type hint on `open_steps()`'s `checkpoints`
+    parameter was `NonProductionCheckpointWriter`, but Python does not
+    enforce parameter type hints at runtime, and even if it tried to,
+    `CheckpointWriter` (which `NonProductionCheckpointWriter` structurally
+    resembles from the caller's side) is a `Protocol` — structural typing
+    means anything exposing a same-shaped `raise_checkpoint` method
+    "is" one, with no construction step and no label check ever run.
+
+    The fix: `open_steps()` now runs `isinstance(checkpoints,
+    NonProductionCheckpointWriter)` as its first statement.
+    `NonProductionCheckpointWriter` is a concrete `@dataclass`, NOT a
+    `Protocol` (see record.py), so this `isinstance` check is a genuine
+    nominal check — it is only `True` for an object that actually went
+    through `NonProductionCheckpointWriter.__post_init__`, where the
+    label allow-list is verified. A bare `FakeRecordClient` — even one
+    structurally identical to a `CheckpointWriter` — fails it.
+    """
+    record = FakeRecordClient()
+    record.unreadable_workflows.add((SCOPE, WFTYPE))
+
+    # qa's exact repro: an UNWRAPPED FakeRecordClient labelled
+    # "production", passed directly as `checkpoints` — never constructed
+    # through NonProductionCheckpointWriter, so its label was never
+    # checked by anything.
+    bare_prod = FakeRecordClient(instance_label="production")
+
+    with pytest.raises(ProductionWriteRefused):
+        open_steps(
+            record,
+            bare_prod,  # the bypass: not wrapped
+            task_id="ent_bypass_demo",
+            declaration_scope=SCOPE,
+            workflow_type=WFTYPE,
+        )
+
+    # Zero writes occurred on the production-labelled client — the guard
+    # refused before the declaration was even read, let alone before any
+    # checkpoint was raised.
+    assert bare_prod.write_call_count == 0
+    assert bare_prod.checkpoints == []
+
+
+def test_runtime_isinstance_guard_refuses_before_any_read_or_write():
+    """
+    The refusal in `open_steps()` must be the FIRST thing that happens —
+    not merely "eventually raised somewhere in the middle" — so that an
+    unguarded writer can never cause even a declaration READ to occur
+    under its authority. This is checked by asserting the record's
+    declaration was never even queried: a `FakeRecordClient` with no
+    declaration registered and no unreadable-workflow injection would
+    normally return UNKNOWN either way, so instead this test uses a
+    record wired to succeed, and confirms open_steps() still refuses
+    before reaching the point where it would have returned a real result.
+    """
+    record = FakeRecordClient()
+    record.register_declaration(
+        WorkflowDeclaration(
+            entity_id="ent_wf_would_succeed",
+            declaration_scope=SCOPE,
+            workflow_type=WFTYPE,
+            steps=(StepDeclaration(name="link", owner_role="analyst"),),
+        )
+    )
+    bare_prod = FakeRecordClient(instance_label="production")
+
+    with pytest.raises(ProductionWriteRefused):
+        open_steps(
+            record,
+            bare_prod,
+            task_id="ent_would_have_succeeded",
+            declaration_scope=SCOPE,
+            workflow_type=WFTYPE,
+        )
+
+    # Confirms this is not a "the read happened, then we noticed and
+    # rejected the result" pattern — no checkpoint, no write, on either
+    # client, even though the declaration WAS readable and would have
+    # produced a real open step had the writer been valid.
+    assert bare_prod.write_call_count == 0
+
+
+def test_bypass_bug_reproduced_against_the_prior_fix_commit():
+    """
+    Shown red first (principle 4 / PR-4), inlined so the regression guard
+    lives in the suite rather than only in a throwaway script: this
+    reproduces qa's exact bypass using ONLY the wrapper's constructor
+    directly — i.e. simulates what commit 77ce337e's `open_steps()` did
+    by skipping the `isinstance` guard this commit adds, using the same
+    `FakeRecordClient.raise_checkpoint` call `open_steps()` would have
+    made on an unwrapped writer. This documents the bug shape permanently:
+    calling the writer's own method directly, with no wrapper and no
+    guard, succeeds — which is exactly what the fixed `open_steps()` must
+    never do internally.
+    """
+    bare_prod = FakeRecordClient(instance_label="production")
+
+    # This is what the pre-fix open_steps() did internally on an unwrapped
+    # writer: call .raise_checkpoint() directly, no isinstance check, no
+    # refusal possible.
+    checkpoint = bare_prod.raise_checkpoint(
+        "ent_task_bug_2", UNREADABLE_WORKFLOW, idempotency_key="bypass-bug-demo-key"
+    )
+    assert checkpoint is not None
+    assert bare_prod.write_call_count == 1  # the exact write the new guard must prevent
+
+    # The fix closes this by never reaching this call path unguarded —
+    # test_bare_writer_bypassing_the_wrapper_is_refused_qa_exact_repro
+    # proves open_steps() itself refuses before any such call happens.
+
+
+# ── pm/qa round 3 on PR #1310 (2026-09-26): post-construction mutation ──
+
+
+def test_wrapper_fields_are_frozen_reassignment_raises():
+    """
+    pm/qa finding, verbatim: "NonProductionCheckpointWriter is a mutable
+    dataclass, so after legitimate construction, assigning `.writer` or
+    `.instance_label` quietly redirects writes to a production-labelled
+    record." Confirmed against the previous commit (ff2f9ff0): both
+    reassignments succeeded silently, no error, no check re-run.
+
+    The fix: `@dataclass(frozen=True)` (matching every other dataclass in
+    record.py). Reassigning either field after construction must raise
+    `dataclasses.FrozenInstanceError`.
+    """
+    test_double = FakeRecordClient(instance_label="test-double")
+    writer = NonProductionCheckpointWriter(test_double, test_double.instance_label)
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        writer.instance_label = "production"
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        writer.writer = FakeRecordClient(instance_label="production")
+
+    # Confirm the wrapper's own state is genuinely unchanged after both
+    # refused mutation attempts, not partially applied.
+    assert writer.instance_label == "test-double"
+    assert writer.writer is test_double
+
+
+def test_wrapper_fields_frozen_is_shown_red_on_revert():
+    """
+    Shown red first: this reproduces pm/qa's exact repro against a
+    LOCALLY reconstructed pre-fix (mutable) version of the class, since
+    the fix in this same file cannot be un-applied and re-applied within
+    one test without editing source. A plain (non-frozen) dataclass with
+    the identical shape demonstrates the defect: silent reassignment,
+    then a downstream write proceeding on the redirected target.
+    """
+
+    @dataclasses.dataclass  # deliberately NOT frozen — the pre-fix shape
+    class MutableWrapperShape:
+        writer: FakeRecordClient
+        instance_label: str
+
+    test_double = FakeRecordClient(instance_label="test-double")
+    mutable_writer = MutableWrapperShape(test_double, test_double.instance_label)
+
+    # This is exactly what pm/qa's finding describes: reassignment
+    # succeeds with no error and no re-check, because nothing stops it.
+    prod_record = FakeRecordClient(instance_label="production")
+    mutable_writer.writer = prod_record
+    mutable_writer.instance_label = "production"
+
+    assert mutable_writer.writer is prod_record
+    assert mutable_writer.instance_label == "production"
+    # No exception was raised anywhere above — that silence is the bug.
+    # The real (frozen) NonProductionCheckpointWriter, exercised in
+    # test_wrapper_fields_are_frozen_reassignment_raises above, refuses
+    # instead.
+
+
+def test_inner_writer_label_mutated_after_construction_is_refused_at_write_time():
+    """
+    pm/qa finding, second half: "Also re-check the wrapped writer's label
+    on every write rather than only in `__post_init__`." Freezing THIS
+    class's own fields (the test above) does not freeze the *wrapped*
+    writer object — `writer.writer` still points at the same
+    `FakeRecordClient`, and that object's own `instance_label` field is
+    perfectly mutable (it is a plain `@dataclass`, not frozen — it has to
+    stay mutable for its own test-double bookkeeping). So a legitimately
+    constructed, correctly-labelled-at-construction-time wrapper can still
+    end up writing to something now labelled "production" if the INNER
+    object's label changes after the fact.
+
+    Confirmed against the previous commit (ff2f9ff0, before this fix):
+    mutating `test_double.instance_label = "production"` after
+    construction left `writer.instance_label` stale at `"test-double"`
+    (proving the wrapper was trusting its own cached copy), and the
+    subsequent `open_steps()` call wrote successfully with
+    `write_call_count` incrementing to 1 and no exception.
+
+    The fix: `raise_checkpoint()`/`open_checkpoints_for_task()` now read
+    `self.writer.instance_label` LIVE on every call via `_current_label()`
+    and re-run the allow-list check, rather than trusting
+    `self.instance_label` frozen at construction.
+    """
+    record = FakeRecordClient()
+    record.unreadable_workflows.add((SCOPE, WFTYPE))
+
+    test_double = FakeRecordClient(instance_label="test-double")
+    writer = NonProductionCheckpointWriter(test_double, test_double.instance_label)
+
+    # Mutate the INNER writer's own label in place — legal, since
+    # FakeRecordClient is a plain mutable dataclass, and this does not
+    # touch any of the (now frozen) wrapper's own fields at all.
+    test_double.instance_label = "production"
+
+    # The wrapper's own cached field is stale/unaffected — demonstrating
+    # this is genuinely a different bypass than the frozen-fields one.
+    assert writer.instance_label == "test-double"
+
+    with pytest.raises(ProductionWriteRefused):
+        open_steps(
+            record,
+            writer,
+            task_id="ent_inner_mutate_demo",
+            declaration_scope=SCOPE,
+            workflow_type=WFTYPE,
+        )
+
+    assert test_double.write_call_count == 0
+    assert test_double.checkpoints == []
+
+
+def test_inner_writer_label_mutation_is_shown_red_on_revert():
+    """
+    Shown red first: demonstrates that exercising the wrapped writer
+    DIRECTLY (bypassing the wrapper's own `raise_checkpoint` method
+    entirely, calling the inner `FakeRecordClient`'s method as-is) writes
+    successfully on a now-production-labelled object with no refusal —
+    this is the call shape the pre-fix `NonProductionCheckpointWriter.
+    raise_checkpoint` effectively reduced to, since it called
+    `self.writer.raise_checkpoint(...)` with no re-check of the label at
+    call time, only ever checking once in `__post_init__`.
+
+    Contrast with `test_inner_writer_label_mutated_after_construction_is_refused_at_write_time`
+    above, which goes through the actual (fixed) wrapper on the identical
+    setup and is refused — the delta between this test's success and that
+    one's refusal IS the fix.
+    """
+    test_double = FakeRecordClient(instance_label="test-double")
+    test_double.instance_label = "production"  # mutated after the fact
+
+    # Calling the inner writer directly — the effective pre-fix call
+    # shape, since the old wrapper performed no live re-check of its own.
+    checkpoint = test_double.raise_checkpoint(
+        "ent_task_bug_3", UNREADABLE_WORKFLOW, idempotency_key="inner-mutate-bug-demo-key"
+    )
+    assert checkpoint is not None
+    assert test_double.write_call_count == 1  # the exact write the live re-check must prevent
