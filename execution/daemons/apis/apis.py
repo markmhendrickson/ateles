@@ -64,6 +64,18 @@ Environment variables:
                               proof (default: https://markmhendrickson.com)
   ATELES_REPO_PATH            Local path to ateles clone (default: ~/repos/ateles)
 
+Task dispatch kill switch (see README.md in this directory):
+  APIS_TASK_DISPATCH_ENABLED  "1" dispatches tasks from Neotoma `task`/
+                              `checkpoint_brief` SSE events, as before. Default
+                              "0" (OFF): task events are logged and skipped —
+                              no dispatch_task call, no status write, no
+                              checkpoint-brief re-dispatch — and the stall
+                              watchdog and reconciliation sweep do not start.
+                              The GitHub issue/PR pipeline is unaffected either
+                              way. Added after a data migration replayed old
+                              Neotoma tasks and Apis re-routed and re-flagged
+                              them within seconds.
+
 Task reconciliation sweep (ateles#586 — see task_reconciler.py):
   APIS_RECONCILE_ENABLED      "1" runs the level-triggered sweep that dispatches
                               `pending` tasks the SSE create path never saw.
@@ -431,6 +443,14 @@ RUN_EMAIL = os.environ.get("APIS_RUN_EMAIL", "0") == "1"
 # under-specified (no clear goal/constraints/tooling), park it in awaiting_input
 # and email the operator the specific gaps instead of executing. Default off.
 READINESS_GATE = os.environ.get("APIS_READINESS_GATE", "0") == "1"
+
+# Task dispatch kill switch. Default OFF: a data migration replaying old
+# Neotoma tasks made Apis route and re-flag every one of them within seconds,
+# and the operator does not trust the current task dispatch path while the
+# foundation workflow overhaul is in flight. The GitHub issue/PR pipeline
+# (github_gateway.py / swarm_dispatch.py) is entirely independent of this flag
+# and keeps running unchanged either way.
+TASK_DISPATCH_ENABLED = os.environ.get("APIS_TASK_DISPATCH_ENABLED", "0") == "1"
 
 # Dispatch timeout per agent invocation (seconds).
 DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
@@ -1443,7 +1463,23 @@ async def handle_checkpoint_brief(
     replayed approved/rejected event whose brief carries that stamp is a no-op.
     Re-dispatch is also safe because the task skill owns its own idempotency, but
     the stamp avoids spawning the work twice on SSE redelivery.
+
+    Gated by APIS_TASK_DISPATCH_ENABLED: this handler exists only to re-dispatch
+    a Neotoma `task` once its checkpoint is resolved (the PR-merge approval flow
+    is a separate path — swarm_dispatch._approve_and_maybe_merge — driven by
+    GitHub webhook events, not this SSE handler). With the flag off there is
+    nothing left for this handler to safely do: re-dispatching would be exactly
+    the task-dispatch path the flag turns off. Checked first, ahead of the
+    durable-state refresh below, so a disabled flag costs neither a Neotoma
+    read nor a write.
     """
+    if not TASK_DISPATCH_ENABLED:
+        log.debug(
+            f"[{DAEMON_NAME}] task dispatch disabled — skipping checkpoint_brief "
+            f"{entity_id}"
+        )
+        return False
+
     # SSE carries the snapshot from the status correction event. The inline MCP
     # consumer may already have stamped and dispatched after that event was
     # emitted, so the event snapshot is stale by construction. Refresh before
@@ -1819,6 +1855,12 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
                 priority=Priority.INFO,
                 handler=DAEMON_NAME,
             )
+        if not TASK_DISPATCH_ENABLED:
+            log.debug(
+                f"[{DAEMON_NAME}] task dispatch disabled — skipping dispatch "
+                f"for created task {entity_id}"
+            )
+            return
         await dispatch_task(
             entity_id,
             snapshot,
@@ -1845,7 +1887,12 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
             priority=Priority.BLOCKER,
             handler=DAEMON_NAME,
         )
-        if AUTO_EXECUTE:
+        if AUTO_EXECUTE and not TASK_DISPATCH_ENABLED:
+            log.debug(
+                f"[{DAEMON_NAME}] task dispatch disabled — skipping due-today "
+                f"dispatch for {entity_id}"
+            )
+        elif AUTO_EXECUTE:
             log.info(
                 f"[{DAEMON_NAME}] AUTO_EXECUTE=1 — dispatching due task {entity_id}"
             )
@@ -1875,17 +1922,41 @@ async def main() -> None:
         f"harness_providers={os.environ.get('APIS_HARNESS_PROVIDERS', 'claude,codex,cursor')} "
         f"dispatch_timeout={DISPATCH_TIMEOUT_SECONDS}s"
     )
+    # State this at boot either way, unconditionally: a dispatch path that is off
+    # must say so as loudly as one that is on, or its absence looks identical to
+    # a healthy path that simply has nothing to do right now — the ambiguity
+    # that hid the dead subscription for 88 days (ateles#589).
+    if TASK_DISPATCH_ENABLED:
+        log.info(
+            f"[{DAEMON_NAME}] task dispatch: ENABLED — SSE task/checkpoint_brief "
+            "events dispatch as before"
+        )
+    else:
+        log.info(
+            f"[{DAEMON_NAME}] task dispatch: DISABLED (APIS_TASK_DISPATCH_ENABLED "
+            "!= 1) — task/checkpoint_brief SSE events are logged and skipped, the "
+            "stall watchdog and reconciliation sweep do not start; the GitHub "
+            "issue/PR pipeline is unaffected. Set APIS_TASK_DISPATCH_ENABLED=1 to "
+            "re-enable."
+        )
+
     # State this at boot either way: a reconciler that is off must say so, or its
     # absence looks identical to a reconciler that ran and found nothing — the
     # very ambiguity that hid the dead subscription for 88 days (ateles#589).
     import task_reconciler as _reconcile_cfg
 
+    _reconcile_actually_enabled = _reconcile_cfg.ENABLED and TASK_DISPATCH_ENABLED
     log.info(
         f"[{DAEMON_NAME}] task reconciliation sweep: "
-        f"{'ENABLED' if _reconcile_cfg.ENABLED else 'DISABLED'} "
+        f"{'ENABLED' if _reconcile_actually_enabled else 'DISABLED'} "
         f"(interval={_reconcile_cfg.INTERVAL_SECONDS}s "
         f"cap={_reconcile_cfg.MAX_PER_SWEEP}/sweep "
         f"grace={_reconcile_cfg.GRACE_SECONDS}s)"
+        + (
+            " — held off by APIS_TASK_DISPATCH_ENABLED=0"
+            if _reconcile_cfg.ENABLED and not TASK_DISPATCH_ENABLED
+            else ""
+        )
     )
 
     # 1. Load agent_definition from Neotoma
@@ -2141,12 +2212,28 @@ async def main() -> None:
             except Exception as exc:  # noqa: BLE001 — never kill the daemon
                 log.warning(f"[{DAEMON_NAME}] unroutable flush failed: {exc}")
 
+    async def _task_sweep_disabled(name: str) -> None:
+        """Stand-in for a task-retry sweeper when APIS_TASK_DISPATCH_ENABLED=0.
+
+        Neither the watchdog nor the reconciler may run their task retries with
+        the flag off — both ultimately call back into dispatch_task, which is
+        exactly the path the flag turns off. Logging once and returning (rather
+        than omitting the coroutine from gather entirely) keeps this branch
+        symmetric with the enabled one and keeps the startup log the single
+        place that states the posture.
+        """
+        log.info(f"[{DAEMON_NAME}] {name}: not starting — task dispatch disabled")
+
     log.info(f"[{DAEMON_NAME}] Subscribing to SSE: {SUBSCRIBE_ENTITY_TYPES}")
     await asyncio.gather(
         sse.stream(dispatch),
         github_gateway.serve(gateway_app, GITHUB_WEBHOOK_PORT),
-        watchdog.run(notifier, watchdog_dispatch),
-        reconciler.run(reconcile_dispatch),
+        watchdog.run(notifier, watchdog_dispatch)
+        if TASK_DISPATCH_ENABLED
+        else _task_sweep_disabled("watchdog"),
+        reconciler.run(reconcile_dispatch)
+        if TASK_DISPATCH_ENABLED
+        else _task_sweep_disabled("reconciler"),
         resume_sweep(),
         clear_closed_issue_markers_sweep(),
         deferred_review_sweep(),
