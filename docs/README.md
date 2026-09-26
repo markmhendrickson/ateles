@@ -208,7 +208,9 @@ Companion report (not a foundation design document; not in the review reading li
 - [**Multi-tenancy**](foundation/multi_tenant.md) — the tenancy axis; in the foundation set since decision 77.
 - [**Data publishing transformation**](data_publishing_transformation.md) ·
   [**Privacy guidelines**](data_publishing_privacy_guidelines.md)
-- [**Operator runbooks**](runbooks/) — operator-specific operational notes.
+- [**Operator runbooks**](runbooks/) — operator-specific operational notes,
+  including [**Neotoma local-fork replay**](runbooks/neotoma_local_fork_replay.md)
+  — replaying rows from a retired local SQLite fork into hosted Neotoma.
 
 ---
 
