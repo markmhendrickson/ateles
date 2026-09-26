@@ -438,5 +438,246 @@ class TestPlantedNegatives(unittest.TestCase):
             self.assertNotIn(row.job_id, job_blocks)
 
 
+# ---------------------------------------------------------------------------
+# ateles#1138: push to main must bind the decision-state check with no paths
+# filter, so a push that touches no foundation path cannot leave the
+# committed docs/foundation/decision_state.md stale and unchecked.
+# ---------------------------------------------------------------------------
+
+
+def parse_on_block(workflow_text: str) -> str:
+    """The `on:` trigger block's raw text, up to the next top-level key."""
+    m = re.search(r"^on:\s*\n((?:[ \t]+.*\n?|\n)*)", workflow_text, re.M)
+    if not m:
+        raise AssertionError("no top-level 'on:' key found in the workflow file")
+    return m.group(1)
+
+
+def push_to_main_has_no_paths_filter(on_block: str) -> bool:
+    """True iff `push.branches` includes `main` and that mapping has no `paths`."""
+    m = re.search(r"^  push:\s*\n((?:[ \t]{4,}.*\n?)*)", on_block, re.M)
+    if not m:
+        return False
+    push_block = m.group(1)
+    branches_m = re.search(r"branches:\s*\n((?:[ \t]+-.*\n?)*)", push_block)
+    if not branches_m or "main" not in branches_m.group(1):
+        return False
+    return "paths:" not in push_block
+
+
+def decision_state_step_text(job_block: str) -> str | None:
+    """The `run:` text of the 'Decision state — matches the register it projects' step."""
+    m = re.search(
+        r"- name:\s*Decision state[^\n]*\n((?:[ \t]+.*\n?)*)",
+        job_block,
+    )
+    return m.group(1) if m else None
+
+
+class TestPushToMainBindsDecisionState(unittest.TestCase):
+    """ateles#1138: the decision-state check must run on every push to main.
+
+    A `paths` filter on that push trigger would silently skip exactly the
+    push most likely to leave the committed decision_state.md stale -- one
+    that lands a register ruling without regenerating and touches no
+    `docs/foundation/**` path itself (e.g. a merge commit, or a change to an
+    unrelated file that happens to land alongside a prior ruling). That is
+    the "reports without binding" defect (`principles.md` #1) aimed at this
+    workflow's own push trigger.
+    """
+
+    def setUp(self) -> None:
+        if not WORKFLOW.is_file():
+            self.skipTest(f"{WORKFLOW} absent on this branch")
+        self.workflow_text = WORKFLOW.read_text(encoding="utf-8")
+        self.on_block = parse_on_block(self.workflow_text)
+        self.job_blocks = parse_job_blocks(self.workflow_text)
+
+    def test_push_to_main_has_no_paths_filter(self) -> None:
+        self.assertTrue(
+            push_to_main_has_no_paths_filter(self.on_block),
+            "on.push.branches must include 'main' with no 'paths' key under "
+            "that push mapping -- found:\n" + self.on_block,
+        )
+
+    def test_decision_state_step_runs_check(self) -> None:
+        self.assertIn("checkers", self.job_blocks)
+        step_text = decision_state_step_text(self.job_blocks["checkers"])
+        self.assertIsNotNone(
+            step_text, "no 'Decision state — matches the register it projects' "
+            "step found in the checkers job"
+        )
+        self.assertIn("python3", step_text)
+        self.assertIn("render_decision_state.py", step_text)
+        self.assertIn("--check", step_text)
+        # A real YAML `continue-on-error:` key must not appear on this step
+        # (the step name line through the next step or end of job). Matched
+        # as a YAML key (leading whitespace + the literal key + colon), not
+        # as a bare substring -- this step's own explanatory comment
+        # legitimately says the words "continue-on-error" in prose (to state
+        # that the fetch step upstream has none), and that prose is not the
+        # YAML directive this assertion exists to catch.
+        step_full = self.job_blocks["checkers"][
+            self.job_blocks["checkers"].index("Decision state") :
+        ]
+        next_step = re.search(r"\n {6}- name:", step_full[1:])
+        if next_step:
+            step_full = step_full[: next_step.start() + 1]
+        self.assertIsNone(
+            re.search(r"^\s*continue-on-error\s*:", step_full, re.M),
+            "found a real 'continue-on-error:' YAML key on the decision-state step",
+        )
+
+    def test_missing_origin_main_does_not_exit_0_on_that_step(self) -> None:
+        step_text = decision_state_step_text(self.job_blocks["checkers"])
+        self.assertIsNotNone(step_text)
+        # The step's own unfetchable-ref skip is a distinct, honest branch
+        # (see the step's comment) from a blanket "exit 0" that would hide a
+        # real check failure; assert there is no bare unconditional exit 0
+        # outside the two guarded skip idioms (`absent on this branch` and
+        # `not fetchable`).
+        for line in step_text.splitlines():
+            if "exit 0" not in line:
+                continue
+            self.assertTrue(
+                "absent on this branch" in line or "not fetchable" in line,
+                f"unexpected unconditional 'exit 0' in the decision-state "
+                f"step, not one of the two guarded skips: {line!r}",
+            )
+        fetch_step_m = re.search(
+            r"- name:\s*Fetch origin/main as a ref\n((?:[ \t]+.*\n?)*)",
+            self.workflow_text,
+        )
+        self.assertIsNotNone(fetch_step_m, "'Fetch origin/main as a ref' step not found")
+        self.assertNotIn("continue-on-error", fetch_step_m.group(1))
+
+    def test_dropped_step_or_path_filtered_push_is_red(self) -> None:
+        """Planted negatives: each mutation must be caught by the assertions above."""
+        # (a) step removed entirely
+        without_step = re.sub(
+            r"      # Decision state.*?\n(?=      # Register narrative)",
+            "",
+            self.workflow_text,
+            flags=re.S,
+        )
+        job_blocks = parse_job_blocks(without_step)
+        self.assertIsNone(decision_state_step_text(job_blocks["checkers"]))
+
+        # (b) continue-on-error inserted on the step
+        with_coe = self.workflow_text.replace(
+            "      - name: Decision state — matches the register it projects\n"
+            "        if: always() && steps.corpus.outputs.present == 'true'\n",
+            "      - name: Decision state — matches the register it projects\n"
+            "        if: always() && steps.corpus.outputs.present == 'true'\n"
+            "        continue-on-error: true\n",
+        )
+        self.assertNotEqual(with_coe, self.workflow_text)
+        job_blocks_coe = parse_job_blocks(with_coe)
+        step_full = job_blocks_coe["checkers"][
+            job_blocks_coe["checkers"].index("Decision state") :
+        ]
+        next_step = re.search(r"\n {6}- name:", step_full[1:])
+        if next_step:
+            step_full = step_full[: next_step.start() + 1]
+        self.assertIn(
+            "continue-on-error",
+            step_full,
+            "planted continue-on-error was not detected by the slice used above",
+        )
+
+        # (c) paths: filter added under push
+        with_paths = self.on_block.replace(
+            "  push:\n    branches:\n      - main\n",
+            "  push:\n    branches:\n      - main\n    paths:\n      - \"docs/foundation/**\"\n",
+        )
+        self.assertNotEqual(with_paths, self.on_block)
+        self.assertFalse(push_to_main_has_no_paths_filter(with_paths))
+
+
+class TestBindingsNamedInProse(unittest.TestCase):
+    """ateles#1138: every surface describing this mechanism names both bindings.
+
+    `scripts/lint.sh`, the `checkers` job on push to main with no path filter,
+    and the `python3` regenerate command must all be named consistently in
+    CLAUDE.md, the generator's own render() source, and conformance.md's
+    mechanical-checks Runs cell -- the same "renamed thing leaves a stale
+    reference" defect class CLAUDE.md itself names, applied to this mechanism.
+    """
+
+    def setUp(self) -> None:
+        self.claude_md = REPO_ROOT / "CLAUDE.md"
+        if not self.claude_md.is_file():
+            self.skipTest(f"{self.claude_md} absent on this branch")
+        if not CONFORMANCE.is_file():
+            self.skipTest(f"{CONFORMANCE} absent on this branch")
+        self.claude_text = self.claude_md.read_text(encoding="utf-8")
+        self.conformance_text = CONFORMANCE.read_text(encoding="utf-8")
+
+    def test_runs_cell_names_lint_and_unfiltered_push(self) -> None:
+        rows = parse_merge_gate_table(self.conformance_text)
+        row = next((r for r in rows if r.check == "Decision state"), None)
+        self.assertIsNotNone(row, "no 'Decision state' row in the mechanical-checks table")
+        self.assertIn("scripts/lint.sh", row.runs)
+        # The row's own prose avoids the literal word "push" -- vocabulary.md
+        # bans it globally (Never, entry "claim") with no per-sense carve-out,
+        # so the design doc states the concept ("lands on main directly, ...
+        # unfiltered by path") without using the banned verb. Assert the
+        # concept, not the word.
+        self.assertIn("lands on", row.runs)
+        self.assertIn("main", row.runs)
+        self.assertIn("unfiltered by path", row.runs)
+        # "What fails" is the table's 4th cell, which MergeGateRow does not
+        # parse (parse_merge_gate_table only captures check/runs/gate) -- read
+        # it directly off the full row line rather than widening that shared
+        # parser for one test.
+        row_line = next(
+            line for line in self.conformance_text.splitlines()
+            if line.startswith("| Decision state |")
+        )
+        self.assertIn("unfetchable", row_line)
+
+    def test_render_header_names_both_bindings(self) -> None:
+        import sys as _sys
+
+        _sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import render_decision_state as ds
+
+        module_doc = ds.__doc__ or ""
+        self.assertIn("scripts/lint.sh", module_doc)
+        self.assertIn("push", module_doc)
+        self.assertIn("main", module_doc)
+
+    def test_claude_md_names_both_bindings_and_python3(self) -> None:
+        # Scope to the decision_state.md bullet itself, not just anywhere in
+        # the file -- CLAUDE.md's unrelated non-binding-controls bullet also
+        # happens to say "push to main", and matching that would pass even if
+        # the decision_state.md bullet itself never named the binding.
+        marker = "`docs/foundation/decision_state.md` is generated, never authored."
+        self.assertIn(marker, self.claude_text)
+        start = self.claude_text.index(marker)
+        end = self.claude_text.index("\n", start + 1)
+        # The bullet in this file wraps as one long line; take to end of line
+        # or a generous window, whichever is available.
+        bullet = self.claude_text[start:end] if end > start else self.claude_text[start:start + 4000]
+        if len(bullet) < 200:  # didn't find a line break -- take a window instead
+            bullet = self.claude_text[start:start + 4000]
+        self.assertIn("scripts/lint.sh", bullet)
+        self.assertIn("lands on", bullet)
+        self.assertIn("main", bullet)
+        self.assertIn("python3 execution/scripts/render_decision_state.py", bullet)
+
+    def test_claude_md_is_on_the_pull_request_path_filter(self) -> None:
+        if not WORKFLOW.is_file():
+            self.skipTest(f"{WORKFLOW} absent on this branch")
+        workflow_text = WORKFLOW.read_text(encoding="utf-8")
+        on_block = parse_on_block(workflow_text)
+        pr_m = re.search(r"  pull_request:\s*\n((?:[ \t]+.*\n?)*)", on_block)
+        self.assertIsNotNone(pr_m, "no pull_request trigger found")
+        self.assertIn("CLAUDE.md", pr_m.group(1))
+        push_m = re.search(r"  push:\s*\n((?:[ \t]+.*\n?)*)", on_block)
+        self.assertIsNotNone(push_m, "no push trigger found")
+        self.assertNotIn("paths", push_m.group(1))
+
+
 if __name__ == "__main__":
     unittest.main()

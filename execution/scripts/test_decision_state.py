@@ -654,5 +654,102 @@ class TestCommittedOutputIsByteStableForACommit(unittest.TestCase):
         )
 
 
+WRITE_COMMAND = "python3 execution/scripts/render_decision_state.py"
+
+
+class TestCheckExit(unittest.TestCase):
+    """ateles#1138's UX section, verbatim: the CLI's own hints must be runnable.
+
+    A hint that says `python` on a repo whose own CI comment states the
+    harness shell has only `python3` is a silent-failure trap for exactly the
+    persona this command serves -- someone who copy-pastes the printed
+    command rather than re-deriving it. Both error messages must also name
+    the write command directly rather than a vaguer "run without --check".
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.out = Path(self.tmpdir.name) / "decision_state.md"
+        self.main_text = register(**{"1": "**open**"})
+
+    def _run_check(self):
+        import contextlib
+        import io
+
+        fake = FakeGit({ds.MAIN_REF: self.main_text}, [])
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with unittest.mock.patch.object(ds, "run", fake):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = ds.main(["--check", "--out", str(self.out)])
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_missing_file_exits_1_and_names_the_write_command_with_python3(self):
+        self.assertFalse(self.out.exists())
+        code, out, err = self._run_check()
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn(str(self.out), err)
+        self.assertIn("does not exist", err)
+        self.assertIn(WRITE_COMMAND, err)
+        # The exact python-vs-python3 gap ateles#1138's UX section names: the
+        # write command must not appear as bare "python " (a Python-2-or-
+        # absent interpreter on the harness shell this repo's own CI comment
+        # documents).
+        self.assertNotIn("python execution", err)
+
+    def test_differ_exits_1_and_names_python3_regenerate(self):
+        self.out.write_text("stale content, not a real render\n", encoding="utf-8")
+        code, out, err = self._run_check()
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("differs from a fresh render", err)
+        self.assertIn("Do not edit it in place", err)
+        self.assertIn(WRITE_COMMAND, err)
+        self.assertNotIn("python execution", err)
+        # File on disk must be unchanged by a --check run (compare-only).
+        self.assertEqual(self.out.read_text(encoding="utf-8"), "stale content, not a real render\n")
+
+    def test_match_prints_success_on_stdout_and_exits_0(self):
+        fake = FakeGit({ds.MAIN_REF: self.main_text}, [])
+        with unittest.mock.patch.object(ds, "run", fake):
+            rendered = ds.render(ds.collect_main())
+        self.out.write_text(rendered, encoding="utf-8")
+        code, out, err = self._run_check()
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self.assertIn(f"decision state: {self.out} matches its source", out)
+        self.assertEqual(self.out.read_text(encoding="utf-8"), rendered)
+
+    def test_second_check_after_match_still_exits_0(self):
+        fake = FakeGit({ds.MAIN_REF: self.main_text}, [])
+        with unittest.mock.patch.object(ds, "run", fake):
+            rendered = ds.render(ds.collect_main())
+        self.out.write_text(rendered, encoding="utf-8")
+        code1, _, _ = self._run_check()
+        code2, _, _ = self._run_check()
+        self.assertEqual(code1, 0)
+        self.assertEqual(code2, 0)
+
+    def test_help_states_no_write_exit_1_and_the_write_command(self):
+        import contextlib
+        import io
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit) as ctx:
+                ds.main(["--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        help_text = out.getvalue()
+        self.assertIn("does not write", help_text)
+        self.assertIn("exit", help_text.lower())
+        self.assertIn("1", help_text)
+        self.assertIn(WRITE_COMMAND, help_text)
+        self.assertIn("never", help_text)
+        self.assertNotIn("python execution", help_text)
+
+
 if __name__ == "__main__":
     unittest.main()

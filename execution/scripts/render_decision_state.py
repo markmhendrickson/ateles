@@ -123,6 +123,14 @@ axis that guessed would be worth less than no axis at all.
 
 Stdlib only, apart from ``git``. Registered in
 ``conformance.md#mechanical-checks-on-this-directory``.
+
+**Where ``--check`` is bound (ateles#1138).** ``scripts/lint.sh`` runs it on every
+invocation, and ``.github/workflows/foundation-checks.yml``'s ``checkers`` job
+runs it both on every ``pull_request`` this job's paths filter matches AND on
+every ``push`` to ``main`` with no paths filter -- the push binding exists
+because the committed document is main's own state, so a push that changes no
+foundation path can still leave it stale, and a paths filter there would skip
+exactly that push silently.
 """
 
 from __future__ import annotations
@@ -925,16 +933,31 @@ def as_json_branches(
     )
 
 
+HELP_EPILOG = (
+    "--check does not write. It exits 1 when the committed file differs from a "
+    "fresh render or is missing, and 0 when it matches. On either failure, "
+    "write the regenerated file yourself: python3 execution/scripts/"
+    "render_decision_state.py -- the output is generated and is never "
+    "hand-edited; a wrong row is fixed in the register "
+    "(docs/foundation/conformance.md) or in this script, never in the output."
+)
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0], epilog=HELP_EPILOG
+    )
     parser.add_argument(
         "--out", type=Path, default=DEFAULT_OUT, help=f"output path (default: {DEFAULT_OUT})"
     )
     parser.add_argument(
         "--check",
         action="store_true",
-        help="do not write; exit 1 if the file on disk differs from a fresh render "
-        f"of {MAIN_REF} alone",
+        help="compare only -- does not write. Exits 1 if the file on disk differs "
+        f"from a fresh render of {MAIN_REF} alone, or if it is missing. On a "
+        "differ or missing file, write the regenerated file yourself with "
+        "python3 execution/scripts/render_decision_state.py -- the output is "
+        "generated and is never hand-edited.",
     )
     parser.add_argument(
         "--json", action="store_true", help="emit JSON to stdout instead of writing"
@@ -967,14 +990,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check:
         if not args.out.is_file():
-            print(f"decision state: {args.out} does not exist — run without --check")
+            print(
+                f"decision state: {args.out} does not exist — regenerate: "
+                "python3 execution/scripts/render_decision_state.py",
+                file=sys.stderr,
+            )
             return 1
         current = args.out.read_text(encoding="utf-8")
         if current != rendered:
             print(
                 f"decision state: {args.out} differs from a fresh render. "
                 "Do not edit it in place — regenerate: "
-                "python execution/scripts/render_decision_state.py"
+                "python3 execution/scripts/render_decision_state.py",
+                file=sys.stderr,
             )
             return 1
         print(f"decision state: {args.out} matches its source")
