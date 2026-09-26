@@ -44,9 +44,24 @@ on:
       - "execution/scripts/test_foundation_mechanical_checks_ci.py"
       - "docs/foundation/decision_state.md"
       - "execution/daemons/apis/test_foundation*.py"
+      - "CLAUDE.md"
       - ".github/workflows/foundation-checks.yml"
     # Synchronize only re-runs when a matching path is in the push delta;
     # empty commits skip this filter (ateles#802 — head 392aee1a missed the lane).
+  # ateles#1138: push to main carries NO paths filter, deliberately, and binds
+  # only the decision-state step (the rest of this job's checkers are read
+  # against the checked-out tree the same as on a PR, so they still run here,
+  # but the defect #1138 exists for is specific to decision-state: the
+  # committed docs/foundation/decision_state.md is a projection of
+  # origin/main itself, so it can go stale from a push that touches no
+  # foundation path -- e.g. a merge that lands a ruling branch into main
+  # without regenerating. A paths filter on this trigger would silently skip
+  # exactly the push most likely to leave main stale, which is the "reports
+  # without binding" failure this workflow exists to catch, applied to its
+  # own push trigger this time instead of to a PR.
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -153,12 +168,29 @@ jobs:
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           python3 "$f" --check
 
-      # Decision state: the register projected onto ruled/merged/implemented,
-      # held equal to a fresh render. The projection reads origin/main plus the
-      # current remote branches, so a ruling that lives only on a branch is
-      # reported rather than read as open. Skipped when origin/main is not
-      # fetchable — the renderer exits nonzero with that diagnostic, and a lane
-      # that cannot read the register must not report the projection as correct.
+      # Decision state: the committed docs/foundation/decision_state.md held
+      # equal to a fresh render of origin/main ALONE (ateles#1138). The
+      # committed file is a pure projection of the commit it is checked out
+      # at -- it never reads any other branch -- so this step's verdict does
+      # not move when an unrelated branch moves. The separate cross-branch
+      # "ruled on a branch but not yet merged" view is a report only
+      # (`render_decision_state.py --branches`, printed to stdout), never
+      # committed and never part of this check.
+      #
+      # Runs on every pull_request in this job's paths filter above AND on
+      # every push to main with NO paths filter (ateles#1138): the committed
+      # file is main's own state, so a push that changes no foundation path
+      # can still leave it stale (e.g. a merge that lands a register ruling
+      # without regenerating), and skipping this step on such a push is the
+      # same "reports without binding" defect this whole workflow exists to
+      # catch, aimed at main this time instead of at a PR.
+      #
+      # Skipped only when origin/main is not fetchable -- the renderer exits
+      # nonzero with that diagnostic, and a lane that cannot read the register
+      # must not report the projection as correct. On push to main this branch
+      # is not expected to be reached: the "Fetch origin/main as a ref" step
+      # above has no continue-on-error, so a failed fetch already fails the
+      # job before this step runs, rather than this step quietly skipping.
       - name: Decision state — matches the register it projects
         if: always() && steps.corpus.outputs.present == 'true'
         run: |

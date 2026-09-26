@@ -21,6 +21,15 @@
             "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/gh_identity_guard.py\""
           }
         ]
+      },
+      {
+        "matcher": "^mcp__ccd_session__spawn_task$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/refuse_task_chip.py\""
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -66,6 +75,10 @@
           {
             "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/user_prompt_submit.py\""
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/session_rule_delivery.py\""
           }
         ]
       }
