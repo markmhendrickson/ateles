@@ -44,6 +44,9 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - "scripts/linters/check_agent_roster.py"
+      - "scripts/linters/check_policy_rule_kind_vocab.py"
+      - "scripts/migrations/**"
+      - "docs/governance/agent_policy_rule_kind_vocab.json"
       # ateles#944 (qa lens): the python3 CLI regression eval
       # (execution/scripts/test_lint_sh_python3_invocations.py) reads
       # scripts/lint.sh's own text — without this entry, a change to
@@ -76,6 +79,14 @@ jobs:
       # agent that does not exist, for seven weeks, with every test green.
       - name: Check agent roster (no retired agent names)
         run: python3 scripts/linters/check_agent_roster.py
+
+      # ateles#1245: the agent_policy rule_kind vocabulary guard. Checks the
+      # committed snapshot (docs/governance/agent_policy_rule_kind_vocab.json)
+      # against {mandatory, advisory} — same posture as check_policy_rule_kind.py
+      # (#1116): CI holds no NEOTOMA_BEARER_TOKEN, so this compares a
+      # deliberately regenerated snapshot rather than reaching the network.
+      - name: Check agent_policy rule_kind vocabulary (no out-of-vocabulary rows)
+        run: python3 scripts/linters/check_policy_rule_kind_vocab.py
 
       - name: Run ateles package tests
         run: uv run --extra dev python -m pytest ateles/ .claude/hooks/ -q
@@ -147,6 +158,14 @@ jobs:
       # roster-in-lint.sh-only, anthus (#584/#596), execution/scripts (#524/#527).
       - name: Run CLAUDE.md verification-discipline effect tests
         run: uv run --extra dev python -m pytest scripts/linters/test_claude_verification_discipline.py -q
+      # ateles#1245: collect the whole scripts/linters/ and scripts/migrations/
+      # directories, not just the files named above, so a new test file (like
+      # this issue's rule_kind vocabulary guard tests and the remediation
+      # script's own contract tests) is run because it exists — the same
+      # committed-but-uncollected gap this workflow closed for anthus (#584),
+      # execution/scripts (#524), tyto/turdus (#198), and this file (#727).
+      - name: Run scripts/linters and scripts/migrations tests
+        run: uv run --extra dev python -m pytest scripts/linters/ scripts/migrations/ -q
 
   mcp-server-tests:
     runs-on: ubuntu-latest
