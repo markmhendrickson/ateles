@@ -341,6 +341,7 @@ the credential form here untouched, since the several-instance case this ruling 
 - A denial raises a checkpoint, and the denied principal does not route around it.
 - Custody by revocability.
 - Rotation is staged, never a flag day.
+- A swarm-run rotation verifies with a live check before retiring the old credential, and rolls back if the check fails (operator ruling, 2026-09-26).
 - Revocation's reach is every grant that matched the credential, and it is only as fast as the check that reads it.
 
 An `agent_grant` is matched on the credential (`sub`, `iss`) and lists capabilities as operation × entity
@@ -548,6 +549,22 @@ credential replaced in one step is a principal whose grants stop matching. So th
 admitted alongside the old one — the grant matching it is written and read back — *before* the agent
 presents it, and the old credential is retired only after read-back shows admissions arriving on the new
 one. The dual-admit window is the whole point: at no moment is the set of matching grants empty.
+
+**A swarm-run rotation verifies with a live check before retiring the old credential, and rolls back if the
+check fails** (operator ruling, 2026-09-26). Where the credential being rotated is one the swarm both
+issues and consumes — an agent's signing key, a shared secret internal to the record
+(`adapters.md#aauth-is-the-internal-credential-not-a-second-identity-system`) — no operator approval gates
+the rotation itself, but the staging above is not enough on its own: dual-admit shows the new credential's
+grant matching on read-back, which is a record-side fact, and says nothing about whether the credential
+actually works where it is presented. So a swarm-run rotation adds one more condition before it retires the
+old credential — a live check exercising the new one against what it is for, not merely that the record
+now admits it — and retires the old credential only once that check passes. A check that fails, or that
+cannot be run, is not a hold: the rotation rolls back, restoring the old credential's standing rather than
+leaving both in an ambiguous state, and either outcome — the check passing and the old credential retired,
+or the check failing and the rotation rolled back — is written to the record with what the check found, so
+the operator reads what happened rather than being asked to approve what is about to. This is the
+dual-admit rule with a gate added on its far side, not a replacement for it — the new credential still
+enters through dual-admit, and what changes is what is required before the old one leaves.
 
 **Revocation's reach is every grant that matched the credential, and it is only as fast as the check that
 reads it.** Withdrawing a credential withdraws every capability any grant conferred on it, across every

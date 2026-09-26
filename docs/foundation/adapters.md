@@ -1254,9 +1254,22 @@ on one credential cannot hold different grants on that system — the finer inst
 becomes unavailable exactly where it was wanted.
 
 **Cost accepted.** N secrets per system that supports them, each provisioned, staged through a dual-admit
-rotation, and audited; and the provisioning is operator-only and out of band, so an agent that needs a
-credential it does not have raises `capability_denied` and waits rather than borrowing one
-(`authority_model.md#grants`).
+rotation, and audited. For a per-agent credential a code host or a comparable system issues to identify
+the agent that presents it, provisioning is operator-only and out of band, end to end — the operator mints
+it, and every rotation of it too, and an agent that needs one it does not have raises `capability_denied`
+and waits rather than borrowing one (`authority_model.md#grants`). Two narrower cases carve out of this,
+each with a different amount of it still the operator's (operator ruling, 2026-09-26). Where a provider
+mints a key naming the swarm as the caller rather than a per-agent identity, the operator mints it — that
+much is unchanged — but everything after minting, including every later rotation, is the swarm's, staged
+through the same dual-admit rotation as before. And the swarm's own credential is the other case
+(`#aauth-is-the-internal-credential-not-a-second-identity-system`): where the swarm is both issuer and
+consumer of the credential — an agent's signing key, a shared secret internal to the record — the swarm
+provisions and rotates it unattended from the start, through the staged rotation `authority_model.md#grants`
+already requires and the live verification and rollback that section now adds for a swarm-run rotation;
+what the rotation did is written to the record for the operator to read, rather than approved before it
+runs. A root secret — the age key, the store's own mnemonic, the password-manager root — is provisioned by
+the operator regardless of which side issued it, since nothing below it can attest to its own replacement
+(`authority_model.md#where-a-credential-comes-from-and-what-happens-when-that-source-cannot-be-read`).
 
 **What would reopen it.** An external system that issues per-agent credentials but whose issuance is rate-
 limited or priced per identity such that one credential per agent is not obtainable — which would argue for
