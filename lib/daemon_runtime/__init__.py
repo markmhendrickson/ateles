@@ -146,13 +146,17 @@ from .run_email import (
     thread_ids,
 )
 from .session_finalize import (
+    RunSession,
     append_turn,
     build_finalize_payload,
     build_run_conversation_payload,
+    build_run_session_payload,
     build_turn_payload,
     create_run_conversation,
+    create_run_session,
     finalize_session,
     load_end_skill,
+    update_run_session_status,
 )
 from .sse_client import NeotomaEvent, SSEClient, hydrate_snapshot
 from .task_lifecycle import (
@@ -219,8 +223,12 @@ __all__ = [
     "load_end_skill",
     # conversation-per-execution-run (E1)
     "build_run_conversation_payload",
+    "build_run_session_payload",
     "build_turn_payload",
     "create_run_conversation",
+    "create_run_session",
+    "RunSession",
+    "update_run_session_status",
     "append_turn",
     # run-thread email (E2)
     "run_subject",

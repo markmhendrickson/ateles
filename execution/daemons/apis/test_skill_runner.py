@@ -1219,6 +1219,50 @@ class TestHarnessEventEmptyToken:
         sent_req = mock_urlopen.call_args.args[0]
         assert sent_req.get_header("Authorization") == "Bearer test-bearer-xyz"
 
+    def test_links_event_to_task_and_agent_session(self, monkeypatch) -> None:
+        import json as _json
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-bearer-xyz")
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=None)
+        cm.__exit__ = MagicMock(return_value=False)
+        with patch("skill_runner.urllib.request.urlopen", return_value=cm) as mock_urlopen:
+            self._call(agent_session_id="ent_session")
+        payload = _json.loads(mock_urlopen.call_args.args[0].data)
+        assert payload["entities"][0]["session_id"] == "ent_session"
+        assert payload["relationships"] == [
+            {"source_index": 0, "target_entity_id": "ent_abc", "relationship_type": "REFERS_TO"},
+            {"source_index": 0, "target_entity_id": "ent_session", "relationship_type": "REFERS_TO"},
+        ]
+
+    def test_reads_back_fields_that_carry_provenance(self, monkeypatch) -> None:
+        import json as _json
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-bearer-xyz")
+        class _Response:
+            def __init__(self, body): self.body = _json.dumps(body).encode()
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def read(self): return self.body
+        responses = iter([
+            _Response({"entities": [{"entity_type": "harness_event", "entity_id": "ent_event"}]}),
+            _Response({"snapshot": {"task_entity_id": "ent_abc", "session_id": "ent_session"}}),
+            _Response({"relationships": [
+                {"source_entity_id": "ent_event", "target_entity_id": "ent_abc",
+                 "relationship_type": "REFERS_TO"},
+                {"source_entity_id": "ent_event", "target_entity_id": "ent_session",
+                 "relationship_type": "REFERS_TO"},
+            ]}),
+        ])
+        with patch("skill_runner.urllib.request.urlopen",
+                   side_effect=lambda *_a, **_k: next(responses)) as mock_urlopen:
+            self._call(agent_session_id="ent_session")
+        assert mock_urlopen.call_count == 3
+        assert mock_urlopen.call_args_list[1].args[0].full_url.endswith("/entities/ent_event")
+        assert mock_urlopen.call_args_list[2].args[0].full_url.endswith(
+            "/entities/ent_event/relationships"
+        )
+
 
 # ── ateles#109 — github_token injection ──────────────────────────────────────
 

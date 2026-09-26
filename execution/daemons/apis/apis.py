@@ -203,10 +203,11 @@ from lib.daemon_runtime import (  # noqa: E402
     enforce_status_or_exit,
     append_turn,
     assess_readiness,
-    create_run_conversation,
+    create_run_session,
     missing_request,
     score_confidence,
     send_run_email,
+    update_run_session_status,
     write_assessment,
     GateAction,
     GateDecision,
@@ -419,10 +420,17 @@ ATELES_REPO = Path(
 
 DRY_RUN = os.environ.get("APIS_DRY_RUN", "0") == "1"
 AUTO_EXECUTE = os.environ.get("APIS_AUTO_EXECUTE", "0") == "1"
-# E1 (docs/task_execution_loop.md): open one conversation per execution run and
-# tell the spawned agent to thread its turns into it. Default off — flag-gated so
-# the live dispatch path is byte-identical until the child side (E2) lands.
-RUN_CONVERSATIONS = os.environ.get("APIS_RUN_CONVERSATIONS", "0") == "1"
+
+
+def _session_capture_enabled(value: str | None) -> bool:
+    """Capture provenance by default; only an explicit ``0`` opts out."""
+    return value != "0"
+
+
+# E1 (docs/task_execution_loop.md): persist every execution run as an
+# agent_session plus its turn conversation. Explicit 0 is the emergency opt-out;
+# provenance is normal dispatch, not an experiment callers must remember.
+RUN_CONVERSATIONS = _session_capture_enabled(os.environ.get("APIS_RUN_CONVERSATIONS"))
 # E2 (docs/task_execution_loop.md): send run kickoff/outcome on a Gmail thread via
 # the dedicated swarm address. Default off; needs the swarm mailbox provisioned
 # (ATELES_SWARM_EMAIL + OPERATOR_EMAIL + ATELES_GMAIL_SEND_CMD). Fail-open.
@@ -537,6 +545,7 @@ async def _spawn_harness_skill(
     *,
     role: str | None = None,
     run_conversation_id: str | None = None,
+    run_agent_session_id: str | None = None,
 ) -> "object":
     """
     Spawn a T4 agent for a task event. The subprocess mechanics live in
@@ -563,9 +572,12 @@ async def _spawn_harness_skill(
         # so progress + finalize append to one task-linked thread (not a new one).
         prompt += (
             f"\n\nThis execution is tracked as Neotoma conversation "
-            f"{run_conversation_id} (PART_OF task {entity_id}). When you finalize "
+            f"{run_conversation_id} (REFERS_TO task {entity_id}). When you finalize "
             f"via /end, store your turns PART_OF this conversation "
-            f"(conversation_id={run_conversation_id}) rather than creating a new one."
+            f"(conversation_id={run_conversation_id}) rather than creating a new one. "
+            f"Every entity or artifact you create during this run must carry a REFERS_TO edge to "
+            f"agent_session {run_agent_session_id}; tasks keep exactly one PART_OF "
+            f"edge to their planning parent."
         )
 
     result = await run_skill(
@@ -573,6 +585,7 @@ async def _spawn_harness_skill(
         prompt,
         role=role or skill,
         task_entity_id=entity_id,
+        agent_session_id=run_agent_session_id or "",
         notifier=notifier,
     )
     return result
@@ -1007,17 +1020,22 @@ async def dispatch_task(
         # E1: open one conversation for this execution run (flag-gated,
         # fail-open).
         run_conversation_id: str | None = None
+        run_agent_session_id: str | None = None
+        run_session = None
         if RUN_CONVERSATIONS:
-            run_conversation_id = create_run_conversation(
+            run_session = create_run_session(
                 task_id=entity_id,
                 plan_id=snapshot.get("plan_id") or None,
                 agent=skill,
                 run_key=run_key,
                 title=f"{skill} run · {title[:60]}",
             )
-            if run_conversation_id:
+            if run_session:
+                run_conversation_id = run_session.conversation_id
+                run_agent_session_id = run_session.agent_session_id
                 log.info(
-                    f"[{DAEMON_NAME}] run conversation {run_conversation_id} opened "
+                    f"[{DAEMON_NAME}] run session {run_agent_session_id} and "
+                    f"conversation {run_conversation_id} opened "
                     f"for task {entity_id} (run={run_key})"
                 )
 
@@ -1055,6 +1073,7 @@ async def dispatch_task(
                 notifier,
                 role=role,
                 run_conversation_id=run_conversation_id,
+                run_agent_session_id=run_agent_session_id,
             )
         except Exception as exc:
             # Unexpected crash in the spawn machinery itself → record as a
@@ -1064,6 +1083,8 @@ async def dispatch_task(
                 f"{skill} dispatch crashed: {type(exc).__name__}: {exc}",
                 stage="crash",
             )
+            if run_session:
+                update_run_session_status(run_session, status="failed")
             set_task_status(
                 entity_id,
                 TaskStatus.FAILED,
@@ -1081,6 +1102,8 @@ async def dispatch_task(
             _run_stage(
                 "assistant", f"{skill} completed (trigger={trigger}).", stage="done"
             )
+            if run_session:
+                update_run_session_status(run_session, status="completed")
             set_task_status(
                 entity_id,
                 TaskStatus.DONE,
@@ -1097,6 +1120,8 @@ async def dispatch_task(
                 f"{skill} failed (trigger={trigger}): {reason}",
                 stage="failed",
             )
+            if run_session:
+                update_run_session_status(run_session, status="failed")
             # FAILED (not BLOCKED): the stall watchdog owns retry-with-backoff
             # and escalation-on-exhaustion out-of-band.
             set_task_status(
