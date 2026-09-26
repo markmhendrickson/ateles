@@ -1,5 +1,17 @@
 # Restoring harness headroom after a provider quota reset
 
+## Purpose
+
+Give the operator (or a session the operator explicitly directs) the exact, verified steps to restore
+Codex/Cursor headroom in `~/.config/ateles/harness-headroom.json` once a provider's quota resets, and the
+exact command to confirm the restore took effect before spending a live model call.
+
+## Scope
+
+Covers only the headroom-restore step for `execution/daemons/apis/harness_router.py` and the callers that
+read it (`dispatch_role.py`, `execution/scripts/harness_lens_runner.py`). It does not cover provisioning new
+provider credentials, changing `APIS_HARNESS_PROVIDERS`, or any other harness configuration.
+
 ## What this file governs
 
 `~/.config/ateles/harness-headroom.json` is the single file
