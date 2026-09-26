@@ -41,7 +41,21 @@ WHAT IS REFUSED (would put file content into context):
     `node -e`) whose source text NAMES a credential path — this hook cannot
     parse arbitrary interpreted code, so any inline program that mentions
     the path at all is treated as unsafe. Also a `while read`/`read`/`xargs`
-    construct fed the file via `<` input redirection.
+    construct fed the file via `<` input redirection. Also `git diff
+    --no-index` against a credential path (prints a unified diff of its
+    content). Also, AFTER sourcing a credential file, an `echo`/`printf`/
+    `cat <<<` that references ANY shell variable (`$VAR`/`${VAR}`) — a
+    direct print of one sourced value, narrower than a bulk `env`/`set`
+    dump but the same hazard; running a PROGRAM that consumes the sourced
+    variables (`source f; python3 script.py`) is the sanctioned idiom and
+    is NOT refused. Also an environment dump sent to a REMOTE shell —
+    `fly`/`flyctl ssh console`, bare `ssh`, `kubectl exec`, `docker exec`
+    whose carried command runs `env`, `printenv`, a bare `set`,
+    `declare -p`/`export -p`/`typeset -p`, or reads `/proc/*/environ`
+    directly — since the exposure there is the REMOTE process's own
+    environment, independent of anything sourced locally. A boolean check
+    (`[ -n "$VAR" ]`, `test -n`) or a `case` statement printing only a
+    fixed label is NOT refused.
 
 WHAT IS ALLOWED (mirrors the task spec — none of these print a value):
   - `grep -c '^NAME='  <file>`             — existence, a count, no value.
@@ -250,7 +264,14 @@ TEXT_BEARING_LEADERS = re.compile(
 # treated as text-bearing regardless of its leader; this was a live bypass
 # found while testing this hook (an earlier revision let both through
 # because "echo" alone was enough to exempt the whole segment).
-_HAS_SUBSTITUTION_RE = re.compile(r"\$\(|`")
+#
+# A bare shell VARIABLE reference (`$VAR`, `${VAR}`) is the same class of
+# problem even with no substitution syntax at all: `echo $VAR` after
+# sourcing a credential file prints whatever that variable holds, and
+# "echo" being a text-bearing leader must not exempt it — a live bypass
+# found in security review (ateles#1302 round 2): `source <cred>; echo
+# $VAR` matched no check because `echo $VAR` was treated as inert prose.
+_HAS_SUBSTITUTION_RE = re.compile(r"\$\(|`|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?")
 
 
 def _is_text_bearing(segment: str) -> bool:
@@ -315,7 +336,20 @@ _GREP_RE = re.compile(r"\b(?:egrep|fgrep|grep|rg)\b")
 # is the sanctioned safe form — those are flag-toggle invocations, not dumps,
 # so they are excluded here explicitly (`set -a` / `set +a` / `set -e` etc.
 # never appear bare).
-_ENV_DUMP_RE = re.compile(r"(?:^|\s)(env|printenv)(?:\s|$)")
+# Word-boundary anchored (not whitespace-only) so this matches `env`/
+# `printenv` immediately adjacent to a quote character too — e.g. the
+# `-C "env"` argument to `fly ssh console` has no SPACE around the word,
+# only quotes, which a whitespace-anchored pattern missed entirely (a live
+# bypass found in security review, ateles#1302 round 3). The `(?<![.\w])`
+# lookbehind excludes a match preceded by `.` or another word character —
+# without it, `\benv\b` also matches the literal "env" substring inside a
+# CREDENTIAL PATH itself (`~/.config/neotoma/.env` ends in exactly "env"
+# preceded by a dot, which IS a non-word/word boundary by regex's own
+# definition), so `set -a; source <path ending in .env>; set +a && python3
+# script.py` — the sanctioned idiom — falsely matched as if it dumped an
+# environment. Found immediately after broadening this pattern from a
+# whitespace-only anchor to `\b`.
+_ENV_DUMP_RE = re.compile(r"(?<![.\w])(env|printenv)\b")
 _BARE_SET_DUMP_RE = re.compile(r"(?:^|;|&&|\n)\s*set\s*(?:$|;|&&|\n)")
 
 # `declare -p` / `export -p` / `typeset -p` (bash/ksh builtins) print every
@@ -325,6 +359,72 @@ _BARE_SET_DUMP_RE = re.compile(r"(?:^|;|&&|\n)\s*set\s*(?:$|;|&&|\n)")
 # (`declare -px`) or as a separate token; matched loosely on the builtin
 # name plus a `-p` flag anywhere on the same invocation.
 _DECLARE_DUMP_RE = re.compile(r"\b(declare|export|typeset)\b[^;&|\n]*(?:^|\s)-\w*p\w*\b")
+
+# `echo $VAR`, `printf '%s' $VAR`, and `cat <<< $VAR` (a here-string) each
+# print ONE sourced variable's value directly — the exact hazard `env`/
+# `set`/`declare -p` cover for a bulk dump, but narrower and easy to miss
+# because nothing here is a "dump everything" command. Live bypass found in
+# security review (arch/security lens, ateles#1302 round 2):
+# `source <cred>; echo $VAR` (and the `set -a; source …; set +a; echo $X`
+# form) printed a sourced secret with no refusal at all. Matched on ANY
+# `$NAME` / `${NAME}` reference after echo/printf/cat<<<, not a specific
+# variable name — this hook does not know in advance which variable in the
+# sourced file the agent will try to print, and after a credential source
+# every shell variable is suspect until the command proves otherwise (by
+# instead running a PROGRAM that consumes them, the sanctioned idiom this
+# check must not flag; see `_is_credential_consuming_program_only`).
+_VAR_PRINT_RE = re.compile(
+    r"\b(echo|printf)\b[^;&|\n]*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?"
+    r"|\bcat\b\s*<<<\s*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?"
+)
+
+# `git diff --no-index <path-a> <path-b>` prints a unified diff of file
+# CONTENT to stdout, same as `cat` when one side is `/dev/null` — a cheap,
+# non-blocking addition from the same round-2 review.
+_GIT_DIFF_NO_INDEX_RE = re.compile(r"\bgit\b[^;&|\n]*\bdiff\b[^;&|\n]*--no-index\b")
+
+# A REMOTE-execution wrapper — the command it carries runs on a different
+# machine/container, which is exactly why this needs its OWN check rather
+# than reusing `_command_sources_credential`: the local shell never sources
+# anything here, but a hosted instance's own environment (holding its own
+# bearer token) gets dumped by the REMOTE process. Live incident: an agent
+# ran `fly ssh console -C "env"` against a hosted instance and printed its
+# bearer token — no local `source` was ever involved, so every check above
+# that gates on `sourced_a_credential` was structurally blind to it.
+_REMOTE_EXEC_RE = re.compile(
+    r"\b(?:flyctl?|fly)\s+ssh\s+console\b"
+    r"|\bssh\b(?!\s*-)"  # bare `ssh host ...`; `ssh-keygen`/`ssh-add` etc. never match (no space before a hyphenated subcommand form, and this alternative requires the word "ssh" as its own token followed by non-hyphen)
+    r"|\bkubectl\s+exec\b"
+    r"|\bdocker\s+exec\b"
+)
+
+# The dump forms this hook already recognizes for a LOCAL sourced-credential
+# case, reused here against the command a remote-exec wrapper carries:
+# bare env/printenv, a bare `set` dump, `export -p`/`declare -p`/`typeset -p`,
+# and reading `/proc/*/environ` directly (the exact bytes of the process's
+# environment, same hazard as `env` with no shell involved at all).
+_PROC_ENVIRON_RE = re.compile(r"/proc/[^\s'\"]*?/environ\b")
+
+
+def _remote_shell_env_dump_hit(command: str) -> str | None:
+    """Refuse a remote-execution wrapper whose carried command dumps an
+    environment. Boolean checks (`[ -n "$VAR" ]`, `test -n "$VAR"`, a `case`
+    statement that prints only a fixed label) are deliberately NOT matched
+    by any of the dump patterns below — none of `env`/`printenv`/bare
+    `set`/`declare -p`/`export -p`/`typeset -p`/`/proc/*/environ` appear in
+    a boolean test, so no explicit allowance is needed for them; they are
+    absent by construction rather than special-cased."""
+    if not _REMOTE_EXEC_RE.search(command):
+        return None
+    if (
+        _ENV_DUMP_RE.search(command)
+        or _BARE_SET_DUMP_RE.search(command)
+        or _DECLARE_DUMP_RE.search(command)
+        or _PROC_ENVIRON_RE.search(command)
+    ):
+        return "environment dump sent to a remote shell"
+    return None
+
 
 _SOURCE_RE = re.compile(r"(?:^|\s)(?:source|\.)\s+(\S+)")
 
@@ -455,6 +555,12 @@ def _segment_touches_credential(segment: str) -> str | None:
     ):
         return cred_paths[0]
 
+    # `git diff --no-index <a> <b>` prints file content as a unified diff,
+    # same hazard class as `cat` — cheap, non-blocking addition from
+    # security review (ateles#1302 round 2).
+    if _GIT_DIFF_NO_INDEX_RE.search(segment):
+        return cred_paths[0]
+
     return None
 
 
@@ -537,6 +643,16 @@ def _redirected_stdin_loop_hit(command: str) -> str | None:
 def check_bash(command: str):
     if not command or not isinstance(command, str):
         return None
+
+    # Checked FIRST and against the WHOLE command text: a remote-exec
+    # wrapper's carried command is almost always one quoted string
+    # (`fly ssh console -C "env"`), so nothing here depends on segment
+    # splitting or on a local `source` ever having happened — the exposure
+    # is the REMOTE process's own environment, unrelated to this shell's.
+    hit = _remote_shell_env_dump_hit(command)
+    if hit:
+        return hit
+
     sourced_a_credential = _command_sources_credential(command)
 
     hit = _redirected_stdin_loop_hit(command)
@@ -566,14 +682,20 @@ def check_bash(command: str):
         if hit:
             return hit
 
-        # env/printenv/bare-set/declare-p/export-p/typeset-p dump AFTER a
-        # credential source anywhere in this command. Sourcing alone
-        # (`set -a; source f; set +a`) prints nothing — only a dump command
-        # makes the values reach context.
+        # env/printenv/bare-set/declare-p/export-p/typeset-p dump, OR a
+        # direct echo/printf/here-string print of a SPECIFIC variable, AFTER
+        # a credential source anywhere in this command. Sourcing alone
+        # (`set -a; source f; set +a`) prints nothing — only a dump or a
+        # print command makes the values reach context. Running a PROGRAM
+        # that consumes the sourced variables (`source f; python3 script.py`,
+        # the sanctioned idiom) does not match `_VAR_PRINT_RE` at all, since
+        # that pattern requires echo/printf/cat<<< specifically — a plain
+        # program invocation with no such leader is unaffected.
         if sourced_a_credential and (
             _ENV_DUMP_RE.search(normalized)
             or _BARE_SET_DUMP_RE.search(normalized)
             or _DECLARE_DUMP_RE.search(normalized)
+            or _VAR_PRINT_RE.search(normalized)
         ):
             return "environment dump after sourcing a credential file"
 

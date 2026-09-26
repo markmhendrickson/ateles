@@ -137,6 +137,36 @@ BASH_BLOCK = [
     ("dd if= a credential path", f"dd if={ENV}"),
     ("while-read loop redirected from the file", f"while read -r line; do echo $line; done < {ENV}"),
     ("read var redirected from the file", f"read -r line < {ENV}"),
+    # Security-review round-2 findings (ateles#1302): sourcing a credential
+    # file and then printing a SPECIFIC variable — narrower than a bulk
+    # env/set dump, and easy to miss because nothing here is a "dump
+    # everything" command.
+    ("source then echo a variable", f"source {ENV}; echo $VAR"),
+    ("source then echo the named token var", f"source {ENV}; echo $NEOTOMA_BEARER_TOKEN"),
+    ("set -a source set +a then echo a variable", f"set -a; source {ENV}; set +a; echo $X"),
+    ("source then printf with format + variable", f'source {ENV}; printf "%s" $VAR'),
+    ("source then bare printf of a variable", f"source {ENV}; printf $VAR"),
+    ("source then cat here-string of a variable", f"source {ENV}; cat <<< $VAR"),
+    ("dot-source then echo a variable", f". {ENV}; echo $VAR"),
+    # Cheap, non-blocking addition from the same round-2 review.
+    ("git diff --no-index against a credential path", f"git diff --no-index /dev/null {ENV}"),
+    # Security-review round-3 finding (ateles#1302): an agent printed a
+    # hosted instance's bearer token by running `env` over a REMOTE shell
+    # (`fly ssh console -C "env"`) — the local shell never sourced anything,
+    # so every round-1/round-2 check above (all gated on a local `source`)
+    # was structurally blind to this. `env`/`printenv` immediately adjacent
+    # to a quote character (`-C "env"`) rather than whitespace was itself a
+    # sub-bypass, fixed by widening `_ENV_DUMP_RE` to a `\b` boundary.
+    ("fly ssh console running env", 'fly ssh console -C "env"'),
+    ("flyctl ssh console running printenv", 'flyctl ssh console -a myapp -C "printenv"'),
+    ("bare ssh running env", 'ssh host "env"'),
+    ("kubectl exec running env", "kubectl exec pod -- env"),
+    ("docker exec running env", "docker exec container env"),
+    ("docker exec wrapped in bash -c running printenv", 'docker exec -it container bash -c "printenv"'),
+    ("ssh reading /proc/*/environ directly", 'ssh host "cat /proc/1/environ"'),
+    ("fly ssh console running export -p", 'fly ssh console -C "export -p"'),
+    ("ssh running declare -p", 'ssh host "declare -p"'),
+    ("ssh running typeset -p", 'ssh host "typeset -p"'),
 ]
 
 BASH_ALLOW = [
@@ -162,6 +192,35 @@ BASH_ALLOW = [
     ("while-read loop over a plain file", "while read -r line; do echo $line; done < " + PLAIN),
     ("xargs over a plain file list", f"find . -name x.txt | xargs cat"),
     ("dd of a plain file", f"dd if={PLAIN}"),
+    # The SANCTIONED idiom (round-2 review, explicitly required as a test):
+    # source, then run a PROGRAM that consumes the variables — never echo,
+    # printf, or cat<<< them directly.
+    ("set -a source set +a THEN run a program (sanctioned idiom)", f"set -a; source {ENV}; set +a && python3 script.py"),
+    ("source then run a program directly", f"source {ENV}; python3 script.py"),
+    ("source then use a variable inside a program's own argument", f'source {ENV}; curl -s https://example.test -H "Authorization: Bearer $TOKEN"'),
+    ("echo a variable with no prior credential source", "echo $HOME"),
+    ("printf a variable with no prior credential source", 'printf "%s" $HOME'),
+    ("echo literal text, no variable, after source", f"set -a; source {ENV}; set +a; echo done"),
+    ("git commit documenting the round-2 fix", f'git commit -m "fix: block source; echo $VAR"'),
+    ("git diff --no-index between two plain files", "git diff --no-index /tmp/a.txt /tmp/b.txt"),
+    # Round-3 allow-list: boolean checks and label-only output over a remote
+    # shell must NOT be refused — none of them dump an environment, and the
+    # operator explicitly required these as tests.
+    ("ssh running a harmless command", 'ssh host "echo hello"'),
+    ("ssh running ls", 'ssh host "ls -la"'),
+    (
+        "fly ssh console with a boolean bracket test",
+        'fly ssh console -C "[ -n \\"$SECRET_KEY\\" ] && echo present || echo missing"',
+    ),
+    ("ssh with a POSIX test -n check", 'ssh host "test -n \\"$VAR\\" && echo yes"'),
+    ("kubectl exec running a harmless command", "kubectl exec pod -- ls /app"),
+    ("docker exec running ps", "docker exec container ps aux"),
+    ("ssh-keygen is not ssh", "ssh-keygen -t ed25519"),
+    ("ssh-add is not ssh", "ssh-add ~/.ssh/id_ed25519"),
+    (
+        "fly ssh console with a case statement printing only a label",
+        'fly ssh console -C "case \\"$ENVIRONMENT\\" in prod) echo PROD;; *) echo OTHER;; esac"',
+    ),
 ]
 
 
