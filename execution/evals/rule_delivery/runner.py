@@ -60,7 +60,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures as cf
 import json
-import selectors
+import queue
 import shutil
 import subprocess
 import sys
@@ -365,8 +365,19 @@ def drive_session(
         text=True,
         bufsize=1,
     )
-    sel = selectors.DefaultSelector()
-    sel.register(proc.stdout, selectors.EVENT_READ)
+    # A reader thread, not select() on the pipe: readline() buffers ahead, so a
+    # `result` line that arrives in the same chunk as the line before it sits
+    # in Python's buffer while select() waits for bytes that never come (the
+    # CLI is waiting for our next message). That stalled 5 per_prompt long
+    # runs as "turn timeout" before this change.
+    lines: queue.Queue = queue.Queue()
+
+    def _pump() -> None:
+        for raw in proc.stdout:
+            lines.put(raw)
+        lines.put(None)
+
+    threading.Thread(target=_pump, daemon=True).start()
     turns: list[list[dict]] = []
     error = None
     try:
@@ -380,13 +391,11 @@ def drive_session(
                 if time.time() > deadline:
                     error = "turn timeout"
                     break
-                if not sel.select(timeout=5):
-                    if proc.poll() is not None:
-                        error = f"claude exited rc={proc.returncode}"
-                        break
+                try:
+                    line = lines.get(timeout=5)
+                except queue.Empty:
                     continue
-                line = proc.stdout.readline()
-                if not line:
+                if line is None:
                     error = f"claude closed stdout rc={proc.poll()}"
                     break
                 events_log.write(line)

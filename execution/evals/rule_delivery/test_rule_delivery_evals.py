@@ -18,6 +18,7 @@ the compliance numbers stop meaning what the results table says they mean:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -495,3 +496,37 @@ def test_cached_cell_is_announced(tmp_path, capsys):
     got = runner.run_one(spec, args, SCENARIOS, ENTITIES, RULES)
     assert got["outcome"] == "pass"
     assert "cached: link_ids__none__short__r1" in capsys.readouterr().err
+
+
+FAKE_CLAUDE = """#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    # Two events in ONE write, as the CLI does at the end of a turn.
+    sys.stdout.write(
+        json.dumps({"type": "system", "subtype": "post_turn_summary"}) + "\\n"
+        + json.dumps({"type": "result", "result": "ok", "total_cost_usd": 0.01}) + "\\n"
+    )
+    sys.stdout.flush()
+"""
+
+
+def test_drive_session_sees_a_result_that_shares_a_chunk(tmp_path, monkeypatch):
+    """The select()-based reader missed a `result` line buffered in the same
+    chunk as the line before it and timed the turn out; this went red on it."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "claude"
+    fake.write_text(FAKE_CLAUDE)
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+    run_dir = tmp_path / "run"
+    (run_dir / "ws").mkdir(parents=True)
+    out = runner.drive_session(
+        run_dir, ["one", "two", "three"], "x", 1.0, turn_timeout=8
+    )
+    assert out["error"] is None
+    assert [runner.result_event(t)["result"] for t in out["turns"]] == [
+        "ok",
+        "ok",
+        "ok",
+    ]
