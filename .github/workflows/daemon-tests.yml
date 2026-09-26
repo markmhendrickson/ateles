@@ -1,15 +1,15 @@
-name: piculet daemon tests
+name: daemon watcher tests
 
-# Runs the piculet daemon test suite in CI (ateles#225 / ateles#228 review
-# finding: test_watch.py existed but was never executed in CI because
-# ateles-tests.yml only triggers on ateles/**). Scoped to piculet + the repo
-# root working directory it's invoked from — not the full execution/daemons/**
-# tree, which has its own pre-existing CI-coverage gap tracked separately.
+# Runs piculet + cyphorhinus daemon test suites in CI (ateles#225 / ateles#228
+# and ateles#1029 review: sidecar Path evals must collect for both meeting
+# watchers). Tyto remains on ateles-tests.yml; this workflow is scoped to the
+# shared report_meeting_recording watchers.
 
 on:
   pull_request:
     paths:
       - "execution/daemons/piculet/**"
+      - "execution/daemons/cyphorhinus/**"
       - ".github/workflows/daemon-tests.yml"
   workflow_dispatch:
 
@@ -26,3 +26,5 @@ jobs:
           python-version: "3.13"
       - name: Run piculet daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/piculet -q
+      - name: Run cyphorhinus daemon tests
+        run: uv run --extra dev python -m pytest execution/daemons/cyphorhinus -q
