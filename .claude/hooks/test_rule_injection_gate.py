@@ -239,9 +239,14 @@ class TestMatchedCategories:
         )
         assert cats == ["harness_config"]
 
-    def test_bash_command_touching_neotoma_aauth_matches_harness_config(self):
+    def test_bash_command_mutating_neotoma_aauth_matches_harness_config(self):
+        """`cat` is a read, not a mutation — moved to
+        `TestBashReadOnlyMentionsDoNotInject` below, which is the point of
+        this PR. This positive case uses an actual mutation shape (`cp` as
+        destination) so the category still has Bash coverage for a real
+        write to the path."""
         cats = gate.matched_categories(
-            "Bash", {"command": "cat ~/.neotoma/aauth/keys.json"}
+            "Bash", {"command": "cp /tmp/keys.json ~/.neotoma/aauth/keys.json"}
         )
         assert cats == ["harness_config"]
 
@@ -279,6 +284,241 @@ class TestMatchedCategories:
 
     def test_bash_unrelated_command_matches_nothing(self):
         assert gate.matched_categories("Bash", {"command": "ls -la"}) == []
+
+
+class TestBashReadOnlyMentionsDoNotInject:
+    """Accipiter's current-head UX review on PR #1320 (task
+    ent_70038a4a54c9bbc82d606774) reproduced full rule-body injection from
+    read-only Bash commands that merely mention a harness-config path —
+    `git diff`, `git show`, `git log`, `cat`, and a `gh` comment body quoting
+    the path. Each of these must fail red against 42fdf432's bare
+    `_HARNESS_CONFIG_PATH_RE.search(command)` and pass green after the
+    bounded command-shape classifier lands."""
+
+    def test_git_diff_with_path_pathspec_does_not_match(self):
+        assert (
+            gate.matched_categories(
+                "Bash",
+                {"command": "git diff HEAD~1 --stat -- .claude/settings.json"},
+            )
+            == []
+        )
+
+    def test_git_show_of_path_does_not_match(self):
+        assert (
+            gate.matched_categories(
+                "Bash", {"command": "git show HEAD:.claude/settings.json"}
+            )
+            == []
+        )
+
+    def test_git_log_with_path_pathspec_does_not_match(self):
+        assert (
+            gate.matched_categories(
+                "Bash",
+                {"command": "git log --oneline -- .claude/settings.json"},
+            )
+            == []
+        )
+
+    def test_cat_of_path_does_not_match(self):
+        assert (
+            gate.matched_categories("Bash", {"command": "cat .claude/settings.json"})
+            == []
+        )
+
+    def test_rg_search_mentioning_path_does_not_match(self):
+        assert (
+            gate.matched_categories(
+                "Bash", {"command": "rg harness_config .claude/settings.json"}
+            )
+            == []
+        )
+
+    def test_gh_pr_comment_body_quoting_path_does_not_match(self):
+        assert (
+            gate.matched_categories(
+                "Bash",
+                {
+                    "command": (
+                        "gh pr comment 1320 --body "
+                        "\"see .claude/settings.json for the wiring\""
+                    )
+                },
+            )
+            == []
+        )
+
+    def test_gh_pr_view_mentioning_path_does_not_match(self):
+        assert (
+            gate.matched_categories(
+                "Bash",
+                {"command": "gh pr view 1320 --json body | grep settings.json"},
+            )
+            == []
+        )
+
+    def test_git_blame_of_path_does_not_match(self):
+        assert (
+            gate.matched_categories(
+                "Bash", {"command": "git blame .claude/settings.json"}
+            )
+            == []
+        )
+
+    def test_ls_of_dot_claude_dir_does_not_match(self):
+        assert gate.matched_categories("Bash", {"command": "ls -la .claude/"}) == []
+
+    def test_head_of_path_does_not_match(self):
+        assert (
+            gate.matched_categories(
+                "Bash", {"command": "head -50 .claude/settings.json"}
+            )
+            == []
+        )
+
+    def test_commit_message_mentioning_path_does_not_match(self):
+        """A commit-message string quoting the path is prose, not a write —
+        the `git commit` leader itself never touches `.claude/settings.json`
+        as an argument."""
+        assert (
+            gate.matched_categories(
+                "Bash",
+                {
+                    "command": (
+                        "git commit -m 'fix(hooks): guard .claude/settings.json path'"
+                    )
+                },
+            )
+            == []
+        )
+
+    def test_gh_comment_body_describing_a_mutation_shape_does_not_match(self):
+        """A self-review (regression case): checking the general mutation-
+        shape allowlist BEFORE the read-only-leader exemption was tried and
+        reverted because it reintroduced exactly this false positive — a
+        `gh pr comment` body that merely DESCRIBES a `sed -i` fix in prose,
+        rather than running one, must not match. Redirection is the only
+        mutation shape allowed to override the leader exemption (see the
+        module-level comment on `_bash_touches_harness_config`), and `gh pr
+        comment` carries no redirect operator here."""
+        assert (
+            gate.matched_categories(
+                "Bash",
+                {
+                    "command": (
+                        "gh pr comment 1320 --body "
+                        "\"the fix uses sed -i to patch .claude/settings.json\""
+                    )
+                },
+            )
+            == []
+        )
+
+    def test_commit_message_describing_a_mutation_shape_does_not_match(self):
+        """Same regression class as above, via `git commit` rather than
+        `gh pr comment`."""
+        assert (
+            gate.matched_categories(
+                "Bash",
+                {
+                    "command": (
+                        "git commit -m "
+                        "'cp fallback for .claude/settings.json restore'"
+                    )
+                },
+            )
+            == []
+        )
+
+    def test_python_interpreter_mutation_is_a_documented_residual_gap(self):
+        """NOT a claim of full coverage: an opaque interpreter invocation
+        (`python3 -c ...`, a custom script) that mutates a harness-config
+        path with no recognized shell mutation keyword (no `>`, `sed -i`,
+        `cp`, ...) is not caught by this bounded heuristic — same posture as
+        `gmail_send_gate.py`'s `TEXT_BEARING_LEADERS` docstring, which
+        explicitly excludes interpreters from its exemption list rather than
+        attempting to parse their payloads. This test documents the
+        boundary rather than asserting a fix: the classifier trades this
+        rare, already-present gap for eliminating the FREQUENT false
+        positives (task ent_70038a4a54c9bbc82d606774) on ordinary
+        inspection commands, which is the tradeoff the task asked for."""
+        assert (
+            gate.matched_categories(
+                "Bash",
+                {
+                    "command": (
+                        "python3 -c \"import json; "
+                        "d=json.load(open('.claude/settings.json')); "
+                        "json.dump(d, open('.claude/settings.json','w'))\""
+                    )
+                },
+            )
+            == []
+        )
+
+
+class TestBashMutationShapesStillInject:
+    """Positive companion to `TestBashReadOnlyMentionsDoNotInject` — the
+    classifier must still catch genuine mutation-capable operations against
+    the same paths, or the fix would have traded false positives for false
+    negatives."""
+
+    def test_redirect_write_to_settings_json_matches(self):
+        assert gate.matched_categories(
+            "Bash", {"command": "echo '{}' > .claude/settings.json"}
+        ) == ["harness_config"]
+
+    def test_append_redirect_matches(self):
+        assert gate.matched_categories(
+            "Bash", {"command": "echo extra >> .claude/settings.local.json"}
+        ) == ["harness_config"]
+
+    def test_sed_in_place_matches(self):
+        assert gate.matched_categories(
+            "Bash",
+            {"command": "sed -i '' 's/foo/bar/' .claude/settings.json"},
+        ) == ["harness_config"]
+
+    def test_tee_matches(self):
+        assert gate.matched_categories(
+            "Bash", {"command": "echo '{}' | tee .claude/settings.json"}
+        ) == ["harness_config"]
+
+    def test_cp_as_destination_matches(self):
+        assert gate.matched_categories(
+            "Bash", {"command": "cp settings.json.bak .claude/settings.json"}
+        ) == ["harness_config"]
+
+    def test_mv_as_destination_matches(self):
+        assert gate.matched_categories(
+            "Bash", {"command": "mv /tmp/mcp.json ~/.cursor/mcp.json"}
+        ) == ["harness_config"]
+
+    def test_rm_of_path_matches(self):
+        assert gate.matched_categories(
+            "Bash", {"command": "rm ~/.neotoma/aauth/keys.json"}
+        ) == ["harness_config"]
+
+    def test_git_checkout_of_path_matches(self):
+        assert gate.matched_categories(
+            "Bash", {"command": "git checkout HEAD~1 -- .claude/settings.json"}
+        ) == ["harness_config"]
+
+    def test_mutation_hidden_after_innocuous_first_segment_still_matches(self):
+        """Compound commands split on `&&` — a mutation must still be caught
+        even when it's the second segment (mirrors gmail_send_gate's
+        equivalent coverage)."""
+        assert gate.matched_categories(
+            "Bash",
+            {"command": "echo starting && echo '{}' > .claude/settings.json"},
+        ) == ["harness_config"]
+
+    def test_line_continuation_mutation_still_matches(self):
+        assert gate.matched_categories(
+            "Bash",
+            {"command": "echo '{}' \\\n  > .claude/settings.json"},
+        ) == ["harness_config"]
 
 
 # --------------------------------------------------------------------- effect (subprocess)
@@ -344,6 +584,55 @@ class TestHarnessConfigInjectsMappedRule:
         payload = json.loads(result.stdout)
         ctx = payload["hookSpecificOutput"]["additionalContext"]
         assert "CURSOR_HTTP_MCP_CANARY" in ctx
+
+    def test_bash_mutation_shape_injects_end_to_end(self, fake_neotoma):
+        """Full-subprocess companion to
+        `TestBashMutationShapesStillInject.test_redirect_write_to_settings_json_matches`
+        — proves the real mutation shape still injects through the actual
+        hook process, not just the pure matcher."""
+        base_url, handler = fake_neotoma
+        handler.rows = [_row("ent_c4d33237ff2d12b4aaec71af", rule="CURSOR_HTTP_MCP_CANARY")]
+        result = _run(
+            {"tool_name": "Bash", "tool_input": {"command": "echo '{}' > .claude/settings.json"}},
+            base_url=base_url,
+        )
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        assert "CURSOR_HTTP_MCP_CANARY" in ctx
+
+
+class TestBashReadOnlyMentionDoesNotInjectEndToEnd:
+    """Full-subprocess companion to `TestBashReadOnlyMentionsDoNotInject` —
+    proves Accipiter's exact reproduction (a read-only `git diff` mentioning
+    `.claude/settings.json`) prints nothing through the real hook process,
+    even when Neotoma has a mapped rule row ready to serve. Fails red at
+    42fdf432 (prints the full rule body); passes green after the fix."""
+
+    def test_git_diff_mentioning_path_prints_nothing(self, fake_neotoma):
+        base_url, handler = fake_neotoma
+        handler.rows = [_row("ent_c4d33237ff2d12b4aaec71af", rule="CURSOR_HTTP_MCP_CANARY")]
+        result = _run(
+            {
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": "git diff HEAD~1 --stat -- .claude/settings.json"
+                },
+            },
+            base_url=base_url,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == ""
+
+    def test_cat_of_path_prints_nothing(self, fake_neotoma):
+        base_url, handler = fake_neotoma
+        handler.rows = [_row("ent_c4d33237ff2d12b4aaec71af", rule="CURSOR_HTTP_MCP_CANARY")]
+        result = _run(
+            {"tool_name": "Bash", "tool_input": {"command": "cat .claude/settings.json"}},
+            base_url=base_url,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == ""
 
 
 class TestOutOfScopeRowIsWithheld:

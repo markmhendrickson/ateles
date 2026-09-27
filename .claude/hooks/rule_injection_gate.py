@@ -102,6 +102,142 @@ _ADVISORY_RE = re.compile(
     r"security[-_]advisor|/security-advisories\b", re.IGNORECASE
 )
 
+# --------------------------------------------------------------------------
+# Bounded Bash command-shape classifier for harness_config.
+#
+# A bare `_HARNESS_CONFIG_PATH_RE.search(command)` matches the path STRING
+# anywhere in the command — including inside a `git diff`/`git show`/`git
+# log` read, a `cat`/`rg`/`grep` inspection, or a `gh` comment body that
+# merely quotes the path. Accipiter's current-head UX review on PR #1320
+# reproduced full rule-body injection from exactly those shapes (task
+# ent_70038a4a54c9bbc82d606774): read-only commands that never write a byte
+# to the file still fired the block, training the same skim-past reflex the
+# hook exists to break, at a higher frequency than the real hazard warrants.
+#
+# The fix narrows matching to command SHAPES that can actually mutate the
+# target path, using the same segment-split + text-bearing-leader-exemption
+# pattern as `gmail_send_gate.py` (mirrored deliberately — one convention
+# for "judge a Bash command per compound-segment, per shape" in this repo,
+# not two that can drift):
+#
+#   - Split on `&&`/`;`/`|`/newline so a mutation hidden after an innocuous
+#     first segment is still caught, and fold `\<newline>` continuations so
+#     a wrapped mutating command stays one segment.
+#   - A segment counts as a harness_config MUTATION only when the path
+#     pattern is present AND the segment matches one of a bounded set of
+#     mutation shapes: output redirection (`>`/`>>` with the path on the
+#     redirect's target side — checked first, see below), `sed -i`, `tee`,
+#     `cp`/`mv`/`install`/`rsync` naming the path, `git
+#     checkout`/`restore`/`apply`/`stash pop` touching the path, or a
+#     direct removal/edit (`rm`, `truncate`, `chmod`) naming the path. This
+#     is an AFFIRMATIVE allowlist, not a leader-exemption blocklist: a
+#     segment that merely mentions the path with no recognized mutation
+#     shape — a `git diff`/`git show`/`git log`/`git blame` pathspec, a
+#     `cat`/`rg`/`grep`/`ls`/`head` read, a `gh pr comment`/`view`/`diff`
+#     body or a `git commit -m` message quoting it — defaults to NOT
+#     matching, which is what keeps read-only inspection and prose quiet
+#     without needing to enumerate every possible read-only command.
+#   - Redirection is checked BEFORE the read-only-leader exemption list
+#     below, because `echo`/`printf` are the only leaders in that list that
+#     can themselves also write a file via shell redirection —
+#     `echo '{}' > .claude/settings.json` must still count as a mutation
+#     even though a bare `echo "mentions the path"` must not. Every OTHER
+#     mutation shape is checked AFTER the leader exemption: none of their
+#     leaders (`sed`, `tee`, `cp`, ...) appears in the exemption list, so a
+#     mutation keyword occurring only as PROSE behind a read-only leader
+#     (e.g. a `gh pr comment --body "uses sed -i to patch
+#     .claude/settings.json"`) is correctly still exempt rather than being
+#     reclassified as a write — checking the general mutation-shape set
+#     before the leader exemption was tried and reverted for exactly this
+#     false-positive.
+#   - The read-only-leader list itself (`git diff`, `git show`, `git log`,
+#     `git blame`, `git commit`/`tag`/`notes`, `cat`, `less`, `head`,
+#     `tail`, `rg`, `grep`, `ls`, `gh pr`/`issue`
+#     `comment`/`view`/`diff`/`list`, `echo`, `printf`) exists only to keep
+#     the AFTER-redirect mutation shapes (`sed`, `tee`, `cp`, ...) from
+#     matching when they appear as prose inside one of these commands'
+#     arguments — it is not itself the source of truth for "mutating",
+#     since the affirmative allowlist already defaults everything else to
+#     not-matching.
+#
+# This intentionally does NOT attempt full shell parsing (no subshell/
+# quoting-aware tokenizer) — same bounded-heuristic posture as
+# `gmail_send_gate.py` and `git_stash_guard.py`, which is why every
+# exemption and mutation shape below is proven by a paired red/green test
+# rather than trusted from the regex alone.
+_SEGMENT_SPLIT = re.compile(r"&&|[;\n|]")
+
+_READ_ONLY_LEADERS = re.compile(
+    r"^(?:"
+    r"git\s+(?:diff|show|log|blame|grep|status|cat-file|commit|tag|notes)\b"
+    r"|cat|less|more|head|tail|wc|file"
+    r"|rg|grep|ag|ack"
+    r"|ls|find\s+.*-name"
+    r"|gh\s+(?:pr|issue)\s+(?:comment|view|diff|list)"
+    r"|echo|printf"
+    r")\b"
+)
+
+# Output redirection is checked separately from, and BEFORE, the leader
+# exemption — see the "Redirection" bullet above for why only this one
+# shape is allowed to override an `echo`/`printf` leader.
+_REDIRECT_TO_PATH_RE = re.compile(
+    r">>?\s*[\"']?[^|;&\n]*" + _HARNESS_CONFIG_PATH_RE.pattern
+)
+
+# Every other bounded mutation shape. Applied only to segments that survive
+# `_READ_ONLY_LEADERS` — unlike the redirect check above, none of these
+# leaders (`sed`, `tee`, `cp`, ...) appears in the exemption list, so
+# checking them after the leader exemption cannot let mutation prose behind
+# a read-only leader (e.g. a `gh pr comment` body that merely says "sed -i")
+# re-trigger a match.
+_OTHER_MUTATION_SHAPE_RE = re.compile(
+    r"(?:"
+    r"\bsed\b.*-i\b"
+    r"|\btee\b"
+    r"|\b(?:cp|mv|install|rsync)\b"
+    r"|\bgit\s+(?:checkout|restore|apply|stash\s+pop)\b"
+    r"|\brm\b"
+    r"|\btruncate\b"
+    r"|\bchmod\b"
+    r")"
+)
+
+
+def _join_line_continuations(command: str) -> str:
+    r"""Fold `\<newline>` sequences so a continued command stays ONE segment
+    (mirrors `gmail_send_gate.py`'s helper of the same name)."""
+    return re.sub(r"\\[ \t]*\n", " ", command)
+
+
+def _bash_touches_harness_config(command: str) -> bool:
+    """True iff some segment of `command` is a mutation-capable operation
+    whose target is a harness-config path — never true for a segment that
+    only reads, inspects, or quotes the path as text.
+
+    Order matters: redirection is checked first (the one shape that can
+    hide behind an exempt `echo`/`printf` leader), then the closed
+    read-only-leader exemption, then every other mutation shape. Checking
+    the general mutation-shape set BEFORE the leader exemption was tried
+    and reverted — it reintroduced false positives for prose mentioning a
+    mutation keyword near the path (e.g. a `gh pr comment` body describing
+    a `sed -i` fix), the same class of bug this classifier exists to fix.
+    """
+    for segment in _SEGMENT_SPLIT.split(_join_line_continuations(command)):
+        normalized = " ".join(segment.split())
+        if not normalized:
+            continue
+        if not _HARNESS_CONFIG_PATH_RE.search(normalized):
+            continue
+        if _REDIRECT_TO_PATH_RE.search(normalized):
+            return True
+        if _READ_ONLY_LEADERS.match(normalized):
+            continue
+        if _OTHER_MUTATION_SHAPE_RE.search(normalized):
+            return True
+    return False
+
+
 _GRANT_ENTITY_TYPES = {"agent_grant"}
 _POLICY_ENTITY_TYPES = {"agent_policy", "relationship_type"}
 
@@ -167,7 +303,7 @@ def matched_categories(tool_name: str, tool_input: dict) -> list[str]:
     if tool_name == "Bash":
         command = _bash_command(tool_input)
         if command:
-            if _HARNESS_CONFIG_PATH_RE.search(command):
+            if _bash_touches_harness_config(command):
                 cats.append("harness_config")
             if command.strip().startswith("gh ") and _ADVISORY_RE.search(command):
                 cats.append("advisory")
