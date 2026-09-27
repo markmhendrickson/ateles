@@ -5,11 +5,11 @@
 
 Which rules a lens reviewing for one kind of failure should select, by the conformance class the matrix assigns each row (`conformance_suite.md#how-the-suite-judges-and-what-a-row-is`). This is an index of row ids and the file each is projected into — the statements themselves are in those files and are not repeated here, so there is one copy of every rule in this directory.
 
-## Class M — 363 rules
+## Class M — 370 rules
 
 - [`adapters.md`](adapters.md) — AD-1, AD-2, AD-3, AD-4, AD-5, AD-6, AD-7, AD-8, AD-8a, AD-9, AD-10, AD-11, AD-12, AD-13, AD-14, AD-15, AD-16, AD-17, AD-18, AD-19, AD-20, AD-21, AD-22, AD-23, AD-24, AD-25, AD-26, AD-27, AD-28, AD-29, AD-30, AD-31, AD-32, AD-33, AD-34, AD-36, AD-37, AD-38, AD-39, AD-40, AD-41, AD-42
 
-- [`authority_model.md`](authority_model.md) — AU-1, AU-2, AU-3, AU-4, AU-5, AU-7, AU-8, AU-9, AU-10, AU-11, AU-12, AU-13, AU-14, AU-15, AU-16, AU-17, AU-18, AU-19, AU-20, AU-21
+- [`authority_model.md`](authority_model.md) — AU-1, AU-2, AU-3, AU-4, AU-5, AU-7, AU-8, AU-9, AU-10, AU-11, AU-12, AU-13, AU-14, AU-15, AU-16, AU-17, AU-18, AU-19, AU-20, AU-21, AU-22, AU-23, AU-24, AU-25, AU-26, AU-27, AU-28
 
 - [`calendar.md`](calendar.md) — CA-1, CA-2, CA-3, CA-4, CA-5, CA-6, CA-7, CA-8
 
