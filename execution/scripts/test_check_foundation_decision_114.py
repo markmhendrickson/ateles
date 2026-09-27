@@ -328,6 +328,122 @@ def test_raises_ambiguous_when_decoy_row_masks_broken_real_row(tmp_path: Path) -
     assert any("more than one" in p and "agent behavioural rule" in p for p in problems)
 
 
+# --- Red: "without" bypass (ateles PR #1321, comment 5856297532) ------------
+#
+# Falco's re-review found the fixed-window negation denylist above still
+# bypassed by any denial phrased with a word outside its hardcoded list.
+# Live-reproduced against the checker at commit 89e952a6: "without" evades
+# `_NEGATION_RE` entirely, so a row denying both claims using only "without"
+# (never "not"/"never"/"no") reported 0 problems. These fixtures pin that
+# exact phrasing plus a second, semantically equivalent negative
+# construction ("lacking") that was never in the old denylist either — the
+# structural affirmative-shape fix must reject both, and for a reason that
+# has nothing to do with recognizing either particular word.
+
+DATA_MODEL_WITHOUT_BYPASS = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope`; `agent_sub` (`scope`/`agent_sub` remains live, without ever being superseded by any edge) | this row functions without any `GOVERNS` -> `agent` edge; `SUPERSEDES` -> `agent_policy` | the rules in force for an agent at a time | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+# A second negative construction outside the old denylist and outside
+# "without" too, to prove the fix isn't itself just a longer word list.
+DATA_MODEL_LACKING_BYPASS = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope`; `agent_sub` (`scope`/`agent_sub` is lacking any superseding claim from an edge) | this row is currently lacking a `GOVERNS` -> `agent` edge; `SUPERSEDES` -> `agent_policy` | the rules in force for an agent at a time | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+
+def test_fails_on_without_phrasing_bypass(tmp_path: Path) -> None:
+    """Falco's live reproduction against 89e952a6: 'without any GOVERNS ->
+    agent edge' and 'without ever being superseded' both evaded the old
+    fixed-word negation denylist entirely and reported 0 problems. Must
+    fail on both halves now."""
+    write_corpus(tmp_path, data_model=DATA_MODEL_WITHOUT_BYPASS)
+
+    problems = decision_114.check(tmp_path)
+
+    assert any("decision-114-data-model" in p and "GOVERNS" in p for p in problems)
+    assert any(
+        "decision-114-data-model" in p and "superseded" in p for p in problems
+    )
+
+
+def test_fails_on_lacking_phrasing_bypass(tmp_path: Path) -> None:
+    """A semantically equivalent denial using 'lacking' rather than
+    'without' or any word the old denylist held — proves the fix rejects by
+    structural shape, not by having grown a longer word list."""
+    write_corpus(tmp_path, data_model=DATA_MODEL_LACKING_BYPASS)
+
+    problems = decision_114.check(tmp_path)
+
+    assert any("decision-114-data-model" in p and "GOVERNS" in p for p in problems)
+    assert any(
+        "decision-114-data-model" in p and "superseded" in p for p in problems
+    )
+
+
+# --- Red: long-distance negation (Waxwing, PR #1321 arch re-review) --------
+#
+# Waxwing's non-blocking finding on the fixed-window denylist: a negation
+# word placed further than the (then) 40-character window from the claim —
+# a longer qualifying clause — was not detected, so the checker would report
+# 0 problems on a row actually denying the claim. The affirmative-shape
+# fix has no character-window at all (the whole field-owned parenthetical is
+# scanned, however long), so this closes as a side effect of that redesign
+# rather than needing a wider or unbounded window.
+
+DATA_MODEL_LONG_DISTANCE_NEGATION = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope`; `agent_sub` (it is not accurate, under any reading of the current ruling text or any of its cited dependencies, to say that this field pair is superseded by the edge) | `GOVERNS` -> `agent`; `SUPERSEDES` -> `agent_policy` | the rules in force for an agent at a time | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+
+def test_fails_on_negation_far_from_the_claim(tmp_path: Path) -> None:
+    """Waxwing's finding: a negation word more than ~40 characters from the
+    claim, inside a longer qualifying clause, must still be caught — the
+    affirmative-shape check has no fixed window to exceed."""
+    write_corpus(tmp_path, data_model=DATA_MODEL_LONG_DISTANCE_NEGATION)
+
+    problems = decision_114.check(tmp_path)
+
+    assert any(
+        "decision-114-data-model" in p and "superseded" in p for p in problems
+    )
+
+
 def test_second_matching_row_outside_concepts_section_is_ignored(
     tmp_path: Path,
 ) -> None:

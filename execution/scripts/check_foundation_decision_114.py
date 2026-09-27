@@ -60,37 +60,91 @@ _AGENT_POLICY_ROW_RE = re.compile(
     r"(?P<edges>[^|]*)\|"
 )
 
-_GOVERNS_EDGE_RE = re.compile(r"`?GOVERNS`?\s*(?:→|->)\s*`?agent`?", re.I)
-_SUPERSEDED_RE = re.compile(
-    r"scope`?\s*/\s*`?agent_sub`?[^.;]{0,80}supersed"
-    r"|supersed[^.;]{0,80}`?scope`?\s*/\s*`?agent_sub`?"
-    r"|`?scope`?\s*/\s*`?agent_sub`?[^.;]{0,80}read\s+nowhere",
+# --- Affirmative-shape requirements (not a negation denylist) --------------
+#
+# A prior revision of this checker matched *any* mention of the required
+# claim and then scanned a fixed character window around it for a hardcoded
+# list of negation words ("never", "not", "no", ...). Falco (PR #1321 review,
+# comment 5856297532) demonstrated that denylist is bypassed by any denial
+# phrased with a synonym outside the list — "without", "lacking", "fails to"
+# all pass a sentence like "this row functions without any `GOVERNS` ->
+# `agent` edge" as a genuine claim, because the substring a genuine claim
+# would contain is *also* present in the prose denying it. Waxwing's
+# follow-up review found the same class one level narrower: a negation more
+# than ~40 characters from the claim (a longer qualifying clause) was missed
+# by the fixed-width window even for a listed word.
+#
+# Both gaps share one root cause: matching "the concept is mentioned, and no
+# denial-shaped text sits nearby" can never be complete against free-form
+# English, because there is no finite list of ways to deny a claim. The fix
+# is to stop trying to recognize every denial and instead require the
+# *specific affirmative shape* the corpus is supposed to carry — text that
+# cannot be produced by casually negating a sentence, because it isn't
+# freeform prose being scanned for a substring; it's a structural position in
+# the table that only a genuine, correctly-directed claim occupies.
+#
+# 1. GOVERNS edge (edges column): the concepts table's edges column is a
+#    ``;``-separated list of ``EDGE_TYPE -> target (...)`` entries. A
+#    genuine edge is always list-entry-shaped: it starts the cell or follows
+#    a ``;``, with nothing but whitespace before the edge-type token. Prose
+#    *about* an edge ("this row functions without any `GOVERNS` -> `agent`
+#    edge") has words before the edge-type token that are not list-entry
+#    syntax, so it can never match this anchor — not because "without" is on
+#    a list, but because a denial is grammatically prose, not a list item.
+_GOVERNS_EDGE_ENTRY_RE = re.compile(
+    r"(?:^|;)\s*`?GOVERNS`?\s*(?:→|->)\s*`?agent`?", re.I
+)
+
+# 2. Superseded claim (fields column): this table's convention is
+#    ``field-name` (parenthetical description of that field)`` — the
+#    parenthetical immediately following `scope` or `agent_sub` is that
+#    field's *own* description, authored by whoever wrote the row, not
+#    arbitrary row prose. Requiring the supersession claim to live inside
+#    that field's own parenthetical (rather than anywhere in the row) is
+#    itself an affirmative-shape requirement: a sentence merely mentioning
+#    "scope/agent_sub" and "superseded" elsewhere in the row — including in
+#    a denial bolted onto some other field's description — cannot satisfy it.
+_FIELD_OWN_PAREN_RE = re.compile(
+    r"`(?:scope|agent_sub)`\s*\(((?:[^()]|\([^()]*\))*)\)", re.I
+)
+
+# Defense in depth, not the primary mechanism: even inside a field's own
+# parenthetical, reject a hedge/denial word. Clause-scoped to that single
+# parenthetical (a real punctuation boundary, not a character count), so
+# this has no long-distance-negation gap — the whole scoped text is checked,
+# however long the clause is. Kept deliberately broader than the two
+# confirmed bypasses (not just "without"/"lacking"/"fails to") because it is
+# now a secondary check over a narrow, structurally-anchored span rather
+# than the sole gate over free-form prose; being one synonym behind here is
+# a much smaller residual than being one synonym behind was when this list
+# was the only thing standing between a denial and a false green.
+_HEDGE_RE = re.compile(
+    r"\b(?:never|not|no|isn't|aren't|doesn't|don't|n't|without|lack(?:s|ing)?|"
+    r"fail(?:s|ed)?\s+to|absent|nor|neither)\b",
     re.I,
 )
-_LEGACY_SCOPE_FIELDS_RE = re.compile(r"`?agent_sub`?", re.I)
-
-# A negation word within this many characters of a matched claim flips its
-# sense: "this row never carries a `GOVERNS` -> `agent` edge" contains the
-# same substring a genuine claim would, so a pure substring/proximity match
-# is bypassed by denial rather than omission. Window is generous (40 chars
-# either side) since negation can lead or trail the claim ("not ... GOVERNS"
-# or "GOVERNS ... is absent").
-_NEGATION_RE = re.compile(r"\b(?:never|not|no|isn't|aren't|doesn't|don't|n't)\b", re.I)
-_NEGATION_WINDOW = 40
 
 
-def _has_unnegated_match(pattern: re.Pattern[str], text: str) -> bool:
-    """True when ``pattern`` matches ``text`` with no negation word nearby.
+def _has_governs_edge_entry(edges_cell: str) -> bool:
+    """True when the edges cell contains a genuine ``GOVERNS -> agent`` entry.
 
-    Every match is checked independently — a genuine claim earlier in the
-    cell and a negated one later (or vice versa) must not let the genuine
-    match vouch for a cell that also denies the same claim elsewhere.
+    Structural, not lexical: the match must be list-entry-shaped (cell-start
+    or after ``;``, then the edge-type token). Prose describing or denying an
+    edge is never list-entry-shaped, so it cannot satisfy this regardless of
+    what words it uses.
     """
-    for match in pattern.finditer(text):
-        start = max(0, match.start() - _NEGATION_WINDOW)
-        end = min(len(text), match.end() + _NEGATION_WINDOW)
-        window = text[start:end]
-        if not _NEGATION_RE.search(window):
+    return bool(_GOVERNS_EDGE_ENTRY_RE.search(edges_cell))
+
+
+def _has_affirmative_superseded_claim(fields_cell: str) -> bool:
+    """True when ``scope``'s or ``agent_sub``'s own parenthetical affirms
+    that it is superseded, with no hedge/denial word in that parenthetical.
+    """
+    for match in _FIELD_OWN_PAREN_RE.finditer(fields_cell):
+        description = match.group(1)
+        if re.search(r"supersed\w*", description, re.I) and not _HEDGE_RE.search(
+            description
+        ):
             return True
     return False
 
@@ -131,8 +185,10 @@ def _iter_concepts_section_lines(data_model_text: str) -> "list[tuple[int, str]]
     return lines
 
 
-def agent_policy_concepts_row(data_model_text: str) -> tuple[int, str, str] | None:
-    """Return (line no, edges cell, whole row) for the concepts-table row.
+def agent_policy_concepts_row(
+    data_model_text: str,
+) -> tuple[int, str, str, str] | None:
+    """Return (line no, fields cell, edges cell, whole row) for the row.
 
     Requires exactly one matching row within ``## Concepts``. Zero matches
     returns ``None`` (handled by the caller as "no row"); more than one
@@ -140,15 +196,15 @@ def agent_policy_concepts_row(data_model_text: str) -> tuple[int, str, str] | No
     a compliant decoy placed first must not be able to mask a broken real
     row placed second.
     """
-    matches: list[tuple[int, str, str]] = []
+    matches: list[tuple[int, str, str, str]] = []
     for no, line in _iter_concepts_section_lines(data_model_text):
         match = _AGENT_POLICY_ROW_RE.match(line)
         if match:
-            matches.append((no, match.group("edges"), line))
+            matches.append((no, match.group("fields"), match.group("edges"), line))
     if not matches:
         return None
     if len(matches) > 1:
-        line_nos = ", ".join(str(no) for no, _, _ in matches)
+        line_nos = ", ".join(str(no) for no, _, _, _ in matches)
         raise AmbiguousCorpusRow(
             "found more than one `agent behavioural rule` concepts-table row "
             f"within ## Concepts (lines {line_nos}); expected exactly one"
@@ -156,21 +212,26 @@ def agent_policy_concepts_row(data_model_text: str) -> tuple[int, str, str] | No
     return matches[0]
 
 
-def check_concepts_row(path: Path, row_no: int, edges_cell: str, whole_row: str) -> list[str]:
+def check_concepts_row(
+    path: Path, row_no: int, fields_cell: str, edges_cell: str
+) -> list[str]:
     problems: list[str] = []
-    if not _has_unnegated_match(_GOVERNS_EDGE_RE, edges_cell):
+    if not _has_governs_edge_entry(edges_cell):
         problems.append(
             f"{path}:{row_no}: decision-114-data-model — `agent_policy` "
             "concepts row's edges column is missing a `GOVERNS` → `agent` "
-            "edge while register row 114 is **ruled** (or the only mention "
-            "found is negated — e.g. 'never carries a GOVERNS -> agent edge')"
+            "edge while register row 114 is **ruled** (a mention of GOVERNS "
+            "in prose does not count — the edges column must carry it as a "
+            "`;`-separated edge-list entry, e.g. '`GOVERNS` -> `agent` (...)')"
         )
-    if not _has_unnegated_match(_SUPERSEDED_RE, whole_row):
+    if not _has_affirmative_superseded_claim(fields_cell):
         problems.append(
             f"{path}:{row_no}: decision-114-data-model — `agent_policy` "
-            "concepts row does not state that `scope`/`agent_sub` is "
-            "superseded by the `GOVERNS` edge for an agent-specific rule "
-            "(or the only mention found is negated)"
+            "concepts row's `scope`/`agent_sub` field description does not "
+            "affirmatively state that it is superseded by the `GOVERNS` "
+            "edge for an agent-specific rule (the claim must live inside "
+            "that field's own parenthetical description, with no hedge or "
+            "denial word in it)"
         )
     return problems
 
@@ -211,8 +272,8 @@ def check(root: Path) -> list[str]:
             "row 114 is **ruled**"
         ]
 
-    concepts_row_no, edges_cell, whole_row = concepts_row
-    return check_concepts_row(data_model_path, concepts_row_no, edges_cell, whole_row)
+    concepts_row_no, fields_cell, edges_cell, _whole_row = concepts_row
+    return check_concepts_row(data_model_path, concepts_row_no, fields_cell, edges_cell)
 
 
 def main(argv: list[str] | None = None) -> int:
