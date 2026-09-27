@@ -1229,6 +1229,22 @@ class TestSanitizeBodyListItemSafeLeadingBlankLineCannotEscapeIndent:
             for line in out.splitlines()
         )
 
+    def test_multiple_leading_blank_lines_do_not_leave_a_spurious_blank_first_line(
+        self,
+    ):
+        # Cosmetic regression guard (code-review finding on the leading-
+        # blank-line fix above, not a security issue on its own): when the
+        # payload's first line is blank and its own first real content is
+        # itself preceded by more blank, the row's rendered bullet must not
+        # end up with a spurious empty first line — there is no real first
+        # line here to preserve a paragraph break AGAINST, so any leading
+        # blank collapses the same way any leading blank normally would.
+        payload = "\n\na"
+        out = renderer._sanitize_body(
+            payload, max_len=renderer._BODY_MAX, list_item_safe=True
+        )
+        assert out == "  a"
+
 
 # ---------------------------------------------------------------------------
 # Preamble content: a row with an unstated applies_when never promotes.

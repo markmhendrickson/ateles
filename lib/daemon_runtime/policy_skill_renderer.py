@@ -526,14 +526,19 @@ def _sanitize_body(raw: str, max_len: int, *, list_item_safe: bool = False) -> s
     if rest_raw:
         # A genuine leading blank/whitespace-only line already present in
         # `rest_raw` (before any sanitization) is a real paragraph break and
-        # must survive; a line that only becomes blank AFTER sanitization
-        # strips its content (a comment marker, a tier tag) is not — it
-        # collapses like any other interior emptied line. Distinguishing the
-        # two requires looking at `rest_raw` itself, once, before the
-        # fixed-point loop runs its own passes and erases which case it was.
+        # must survive ONLY when there is a real first line before it to
+        # break away from (`first_text` non-empty) — a blank with nothing
+        # preceding it is not a paragraph break, it is just more leading
+        # blank, which collapses the same way a leading blank always does.
+        # A line that only becomes blank AFTER sanitization strips its
+        # content (a comment marker, a tier tag) is never preserved either
+        # way — it collapses like any other interior emptied line.
+        # Distinguishing "genuine blank" from "sanitizes to blank" requires
+        # looking at `rest_raw` itself, once, before the fixed-point loop
+        # runs its own passes and erases which case it was.
         rest_starts_blank = rest_raw.split("\n", 1)[0].strip() == ""
         rest_text = _run_body_pass_to_fixed_point(
-            rest_raw, strip_leading_blanks=not rest_starts_blank
+            rest_raw, strip_leading_blanks=not (first_text and rest_starts_blank)
         )
         if rest_text:
             rest_text = "\n".join(
