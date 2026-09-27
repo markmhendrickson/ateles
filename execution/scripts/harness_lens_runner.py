@@ -132,16 +132,17 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
     on that list being exhaustive, unlike round 3's mechanism.
 
     **Residual, stated rather than hidden**: once ``refs/stash`` has been
-    folded into the shared ``packed-refs`` file (by ``git pack-refs --all``
-    or ``gc`` — verified empirically that a plain ``stash push`` writes only
-    the LOOSE ref, never ``packed-refs``, directly), that entry's content
-    sits in a file this profile cannot selectively deny without denying
-    ALL ref resolution for the repository. A NEW stash push still fails
-    correctly even against an already-packed repo (git writes a new loose
-    ref that shadows the packed one — verified), but reading an
-    already-packed stash entry via ``list``/``show``/``apply`` is not
-    covered by this mechanism. This is a real, narrow limitation, not a
-    claim of exhaustive coverage.
+    folded into the shared ``packed-refs`` file, this profile cannot deny
+    only that entry without denying ordinary reads and writes of every packed
+    ref. A dispatched child can therefore read an already-packed stash or
+    hand-edit ``packed-refs`` to redirect it. The runner snapshots both the
+    resolved ``refs/stash`` value and its underlying packed entry immediately
+    before dispatch, then verifies both again immediately afterward before
+    trusting or posting a verdict. That detects a net mutation, including one
+    hidden beneath an unchanged loose ref, and fails the run closed; it does
+    not prevent a transient mutation that the child restores before exit.
+    This is a real, explicit limitation rather than a claim of exhaustive
+    containment.
 
   All THREE denies (credential-read, user-config-write, stash-ref) live in
   the ONE sandbox-exec profile ``build_sandbox_exec_profile`` writes, and
@@ -572,20 +573,62 @@ def build_sandbox_exec_profile(profile_path: Path) -> None:
     though it is not a nonzero exit code; the probe below checks for this
     exact "denied reads as absent" shape rather than assuming an error code.
 
-    RESIDUAL, NOT CLOSED BY THIS MECHANISM (stated here, not hidden): once
-    ``refs/stash`` is folded into the shared ``packed-refs`` file (by ``git
-    pack-refs --all`` or ``gc``, never by ``stash push`` itself — verified
-    empirically that a plain ``stash push`` writes only the LOOSE ref, never
-    ``packed-refs``, even when a packed entry already exists for the same ref
-    name; a subsequent push creates a new loose ref that shadows the packed
-    one, which is why this deny still stops every NEW push even against an
-    already-packed repository), that entry's content becomes indistinguishable,
-    at the filesystem level, from every other ref in ``packed-refs`` — a file
-    this profile cannot selectively deny without denying ALL ref resolution
-    for the repository, which would break ordinary git use entirely. This
-    profile does not attempt that; a stash entry that has already been packed
-    by something OTHER than this runner's own dispatch is a residual read
-    exposure this mechanism does not close.
+    RESIDUAL, NOT CLOSED BY THIS MECHANISM, BOTH READ AND WRITE (stated here,
+    not hidden): ``packed-refs`` is the one file that determines
+    ``refs/stash``'s resolution that this profile does NOT deny, in either
+    direction.
+
+    * **Read**: once ``refs/stash`` is folded into ``packed-refs`` (by ``git
+      pack-refs --all`` or ``gc`` — never by ``stash push`` itself, verified
+      empirically: a plain ``stash push`` writes only the LOOSE ref, even
+      against an already-packed repo, where it creates a new loose ref that
+      shadows the packed one — which is why this deny still stops every NEW
+      push regardless of whether the repo's stash ref happens to already be
+      packed), an entry already resident there is readable, because this
+      profile does not deny reads of ``packed-refs`` itself.
+    * **Write**: a sandboxed process can also WRITE ``packed-refs`` freely (a
+      plain shell append/rewrite succeeds), and a well-formed rewrite
+      replacing the existing
+      ``refs/stash`` line's sha with an attacker-chosen sha already present
+      in the repository's object store makes ``git rev-parse refs/stash``
+      resolve to that content afterward — i.e. a dispatched child can PLANT
+      or REDIRECT a resolvable stash entry via a direct file rewrite, never
+      calling ``git stash`` at all, and without touching any of the four
+      denied paths.
+
+    WHY THIS IS DELIBERATELY OUT OF SCOPE FOR THIS CONTROL, NOT AN OVERSIGHT:
+    denying ``file-write*`` on
+    ``packed-refs`` would break ordinary git operations this runner's own
+    dispatched work legitimately needs — ``branch -d``, ``fetch --prune``,
+    and ``pack-refs``/``gc`` themselves all rewrite ``packed-refs`` as part
+    of NORMAL git use, not as an attack. ``packed-refs`` is shared
+    repository-wide state that git itself rewrites during routine operation;
+    a deny broad enough to stop a hand-crafted rewrite would also stop every
+    legitimate one, for every ref in the repository, not just
+    ``refs/stash``. This control's threat model is an agent USING the
+    stash/git machinery as a normal caller would — the resolution-path gaps
+    rounds 3 and 4 closed were exactly that shape (a normal `git stash`
+    invocation reaching a normal git binary through an unguarded path). A
+    hand-crafted rewrite of a ref-storage file is a DIFFERENT threat model —
+    a deliberately adversarial agent constructing filesystem content rather
+    than calling git — and an agent operating at that level has many
+    easier avenues to cause harm than forging one ref (arbitrary file
+    writes inside the worktree, for one, which this sandbox does not and
+    cannot fully prevent either); closing that broader threat model is the
+    job of the sandbox's OTHER layers (credential-read/user-config-write
+    denies, the throwaway-worktree scoping, dispatch review) and of the
+    swarm's review process, not of this one guard.
+
+    WHAT DETECTS IT INSTEAD: ``verify_stash_ref_unchanged_after_dispatch``
+    (called by ``run_one`` after the dispatched child exits, before the
+    verdict is trusted) reads both the resolved ``refs/stash`` value via the
+    real, unmodified system git and the raw ``refs/stash`` packed entry
+    immediately before dispatch and again immediately after. It fails the run
+    LOUDLY — refusing to post any verdict — if either changes, including a
+    packed mutation hidden beneath an unchanged loose ref. This does not
+    prevent a forge; it turns "silent" into "detected and the run refused,"
+    which is the property this residual can actually be given without
+    breaking the runner's own legitimate git use.
     """
     read_denies = "\n".join(
         f'  (regex #"{p}")'
@@ -1174,6 +1217,140 @@ def current_pr_head(*, repo: str, pr: int) -> str:
         return ""
 
 
+def read_stash_ref_oid(worktree: Path) -> str | None:
+    """Resolve refs/stash through loose or packed storage using real git.
+
+    ``None`` is the single expected missing-ref state. Any other failure is
+    unsafe to interpret as absence: a malformed or unreadable packed-refs file
+    must fail the dispatch closed instead of making a changed ref look empty.
+    """
+    result = subprocess.run(
+        [
+            _real_git_path(),
+            "-C",
+            str(worktree),
+            "show-ref",
+            "--verify",
+            "--hash",
+            "refs/stash",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = result.stdout.strip()
+    if result.returncode == 1 and not output:
+        return None
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip() or f"git exit {result.returncode}"
+        raise RuntimeError(f"cannot resolve refs/stash: {detail}")
+    if (
+        "\n" in output
+        or len(output) not in (40, 64)
+        or any(char not in "0123456789abcdef" for char in output.lower())
+    ):
+        raise RuntimeError(f"cannot resolve refs/stash: invalid object id {output!r}")
+    return output.lower()
+
+
+def read_packed_stash_ref_oid(worktree: Path) -> str | None:
+    """Read the refs/stash entry stored in packed-refs, even if shadowed."""
+    git_path = subprocess.run(
+        [
+            _real_git_path(),
+            "-C",
+            str(worktree),
+            "rev-parse",
+            "--git-path",
+            "packed-refs",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if git_path.returncode != 0 or not git_path.stdout.strip():
+        detail = (git_path.stderr or "").strip() or f"git exit {git_path.returncode}"
+        raise RuntimeError(f"cannot locate packed-refs: {detail}")
+    packed_refs = Path(git_path.stdout.strip())
+    if not packed_refs.is_absolute():
+        packed_refs = worktree / packed_refs
+    if not packed_refs.exists():
+        return None
+
+    matches: list[str] = []
+    try:
+        lines = packed_refs.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError(f"cannot read packed-refs: {exc}") from exc
+    for line in lines:
+        if not line or line.startswith(("#", "^")):
+            continue
+        oid, separator, ref_name = line.partition(" ")
+        if separator and ref_name == "refs/stash":
+            if len(oid) not in (40, 64) or any(
+                char not in "0123456789abcdef" for char in oid.lower()
+            ):
+                raise RuntimeError(f"invalid packed refs/stash object id {oid!r}")
+            matches.append(oid.lower())
+    if len(matches) > 1:
+        raise RuntimeError("packed-refs contains duplicate refs/stash entries")
+    return matches[0] if matches else None
+
+
+@dataclass(frozen=True)
+class StashRefState:
+    """Resolved stash value plus its underlying packed entry, if any."""
+
+    resolved_oid: str | None
+    packed_oid: str | None
+
+
+def capture_stash_ref_state(worktree: Path) -> StashRefState:
+    """Capture both observable and shadowed refs/stash storage state."""
+    return StashRefState(
+        resolved_oid=read_stash_ref_oid(worktree),
+        packed_oid=read_packed_stash_ref_oid(worktree),
+    )
+
+
+def verify_stash_ref_unchanged_after_dispatch(
+    worktree: Path, before: StashRefState
+) -> str | None:
+    """Return a fail-closed reason when dispatch changed refs/stash.
+
+    Resolving the ref through git deliberately covers both loose refs and the
+    residual packed-refs path. This is a postcondition, not prevention: it
+    detects the net effect before any child verdict can be trusted or posted.
+    """
+    try:
+        after = capture_stash_ref_state(worktree)
+    except RuntimeError as exc:
+        return (
+            "refs/stash could not be verified after the dispatched run — "
+            f"refusing to trust its verdict: {exc}"
+        )
+    if after == before:
+        return None
+    changes: list[str] = []
+    if after.resolved_oid != before.resolved_oid:
+        changes.append(
+            "resolved refs/stash changed "
+            f"({before.resolved_oid or '<absent>'} -> "
+            f"{after.resolved_oid or '<absent>'})"
+        )
+    if after.packed_oid != before.packed_oid:
+        changes.append(
+            "packed refs/stash changed "
+            f"({before.packed_oid or '<absent>'} -> "
+            f"{after.packed_oid or '<absent>'})"
+        )
+    return (
+        "refs/stash changed during the dispatched run: "
+        f"{'; '.join(changes)} — refusing to "
+        "trust or post the verdict"
+    )
+
+
 def post_verdict(*, repo: str, pr: int, verdict_path: Path) -> str:
     """Post the verdict file as a PR comment and return the comment URL.
 
@@ -1256,22 +1433,57 @@ async def run_one(
         task_text = render_lens_task(target, brief_path) + "\n\n---\n\n" + agent_prompt
         verdict_path = worktree.path / f"{target.lens}{target.pr}_verdict.md"
 
-        result: SkillResult = await dispatch_role.dispatch(
-            target.agent,
-            (
-                f"{task_text}\n\n---\n\nWrite your verdict to the file "
-                f"{verdict_path} (create it yourself with the exact strict "
-                "format the brief describes) and print its contents to "
-                "stdout when done."
-            ),
-            provider=provider,
-            cwd=str(worktree.path),
-            timeout=timeout,
-            task_entity_id=target.task_entity_id,
-            env_extra=sandbox.env_extra,
-            seated_reviewer=False,  # see module docstring: no MCP grant requested
-            command_wrapper=sandbox.command_wrapper,
+        try:
+            stash_ref_before = capture_stash_ref_state(worktree.path)
+        except RuntimeError as exc:
+            reason = (
+                "refs/stash baseline could not be established before dispatch — "
+                f"refusing before a model call: {exc}"
+            )
+            return {
+                "ok": False,
+                "provider": provider,
+                "reason": reason,
+                "refusal_reason": reason,
+                "posted": False,
+            }
+
+        try:
+            result: SkillResult = await dispatch_role.dispatch(
+                target.agent,
+                (
+                    f"{task_text}\n\n---\n\nWrite your verdict to the file "
+                    f"{verdict_path} (create it yourself with the exact strict "
+                    "format the brief describes) and print its contents to "
+                    "stdout when done."
+                ),
+                provider=provider,
+                cwd=str(worktree.path),
+                timeout=timeout,
+                task_entity_id=target.task_entity_id,
+                env_extra=sandbox.env_extra,
+                seated_reviewer=False,  # see module docstring: no MCP grant requested
+                command_wrapper=sandbox.command_wrapper,
+            )
+        except Exception as dispatch_error:
+            stash_ref_failure = verify_stash_ref_unchanged_after_dispatch(
+                worktree.path, stash_ref_before
+            )
+            if stash_ref_failure:
+                raise RuntimeError(stash_ref_failure) from dispatch_error
+            raise
+
+        stash_ref_failure = verify_stash_ref_unchanged_after_dispatch(
+            worktree.path, stash_ref_before
         )
+        if stash_ref_failure:
+            return {
+                "ok": False,
+                "provider": provider,
+                "reason": stash_ref_failure,
+                "refusal_reason": stash_ref_failure,
+                "posted": False,
+            }
 
         if not result.ok:
             return {

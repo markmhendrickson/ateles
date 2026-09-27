@@ -118,6 +118,14 @@ def mock_ready_sandbox(monkeypatch, tmp_path):
         )
 
     monkeypatch.setattr(hlr.HarnessSandbox, "build", classmethod(_build))
+    # Posting tests use a deliberately minimal fake Worktree.create that does
+    # not initialize git. Stash-ref behavior has dedicated real-repo tests;
+    # keep unrelated posting assertions focused on their own boundary.
+    monkeypatch.setattr(
+        hlr,
+        "capture_stash_ref_state",
+        lambda worktree: hlr.StashRefState(resolved_oid=None, packed_oid=None),
+    )
 
 
 @pytest.fixture
@@ -456,6 +464,103 @@ def test_stash_ref_deny_also_denies_reading_an_existing_entry(tmp_path):
         "the sandboxed list saw an existing stash entry it should not be "
         "able to read"
     )
+
+
+def _packed_stash_fixture(repo: Path) -> tuple[str, str]:
+    """Create two commits and pack refs/stash at the first, without git-stash."""
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "probe@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "probe"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "commit.gpgsign", "false"], check=True
+    )
+    tracked = repo / "tracked.txt"
+    tracked.write_text("first\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "first"], check=True)
+    first = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    tracked.write_text("second\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "second"], check=True)
+    second = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    subprocess.run(
+        ["git", "-C", str(repo), "update-ref", "refs/stash", first], check=True
+    )
+    subprocess.run(["git", "-C", str(repo), "pack-refs", "--all"], check=True)
+    assert not (repo / ".git" / "refs" / "stash").exists()
+    return first, second
+
+
+def _rewrite_packed_stash(repo: Path, replacement: str) -> None:
+    """Model the round-five bypass: direct packed-refs content replacement."""
+    packed_refs = repo / ".git" / "packed-refs"
+    lines = packed_refs.read_text(encoding="utf-8").splitlines()
+    replaced = False
+    for index, line in enumerate(lines):
+        if line.endswith(" refs/stash"):
+            lines[index] = f"{replacement} refs/stash"
+            replaced = True
+    assert replaced, "fixture setup failed: refs/stash was not packed"
+    packed_refs.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_verify_stash_ref_unchanged_detects_direct_packed_ref_rewrite(tmp_path):
+    """A hand-written packed-refs redirect is detected by its observable effect."""
+    repo = tmp_path / "packed-stash-repo"
+    before_oid, replacement_oid = _packed_stash_fixture(repo)
+
+    before = hlr.capture_stash_ref_state(repo)
+    assert before.resolved_oid == before_oid
+    assert before.packed_oid == before_oid
+    _rewrite_packed_stash(repo, replacement_oid)
+
+    reason = hlr.verify_stash_ref_unchanged_after_dispatch(repo, before)
+    assert reason is not None
+    assert "refs/stash changed during the dispatched run" in reason
+    assert before_oid in reason
+    assert replacement_oid in reason
+
+
+def test_verify_stash_ref_detects_shadowed_packed_entry_mutation(tmp_path):
+    """A loose ref must not hide mutation of the packed entry beneath it."""
+    repo = tmp_path / "shadowed-packed-stash-repo"
+    packed_oid, loose_oid = _packed_stash_fixture(repo)
+    subprocess.run(
+        ["git", "-C", str(repo), "update-ref", "refs/stash", loose_oid], check=True
+    )
+
+    before = hlr.capture_stash_ref_state(repo)
+    assert before.resolved_oid == loose_oid
+    assert before.packed_oid == packed_oid
+
+    packed_refs = repo / ".git" / "packed-refs"
+    retained = [
+        line
+        for line in packed_refs.read_text(encoding="utf-8").splitlines()
+        if not line.endswith(" refs/stash")
+    ]
+    packed_refs.write_text("\n".join(retained) + "\n", encoding="utf-8")
+
+    reason = hlr.verify_stash_ref_unchanged_after_dispatch(repo, before)
+    assert reason is not None
+    assert "packed refs/stash changed" in reason
+    assert packed_oid in reason
 
 
 @pytest.mark.skipif(
@@ -882,6 +987,115 @@ def test_run_one_does_not_post_without_post_flag(
     assert "not set" in report["refusal_reason"]
 
 
+def test_run_one_refuses_before_dispatch_when_stash_baseline_is_unreadable(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    dispatched = False
+
+    def _fake_create(self, *, head):
+        self._created = True
+        self.path.mkdir(parents=True, exist_ok=True)
+        agents_dir = self.path / "docs" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "pavo.md").write_text("# pavo prompt\n", encoding="utf-8")
+
+    monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
+    monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
+
+    def _unreadable(worktree):
+        raise RuntimeError("packed-refs malformed")
+
+    monkeypatch.setattr(hlr, "capture_stash_ref_state", _unreadable)
+
+    async def _dispatch(*args, **kwargs):
+        nonlocal dispatched
+        dispatched = True
+        raise AssertionError("dispatch must not start without a stash baseline")
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=False,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+    assert dispatched is False
+    assert report["ok"] is False
+    assert report["posted"] is False
+    assert "baseline could not be established" in report["refusal_reason"]
+
+
+def test_run_one_refuses_verdict_after_direct_packed_stash_rewrite(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    """The residual packed-refs path must fail the run before verdict trust."""
+    replacement_oid = ""
+    monkeypatch.setattr(
+        hlr,
+        "capture_stash_ref_state",
+        lambda worktree: hlr.StashRefState(
+            resolved_oid=hlr.read_stash_ref_oid(worktree),
+            packed_oid=hlr.read_packed_stash_ref_oid(worktree),
+        ),
+    )
+
+    def _fake_create(self, *, head):
+        nonlocal replacement_oid
+        self._created = True
+        _, replacement_oid = _packed_stash_fixture(self.path)
+        agents_dir = self.path / "docs" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "pavo.md").write_text("# pavo prompt\n", encoding="utf-8")
+
+    monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
+    monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
+
+    async def _dispatch(role, task, **kwargs):
+        dispatched_repo = Path(kwargs["cwd"])
+        _rewrite_packed_stash(dispatched_repo, replacement_oid)
+        verdict_path = dispatched_repo / f"{target.lens}{target.pr}_verdict.md"
+        verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
+        return SkillResult(role, True, 0, SIGNED_OFF_VERDICT, "", provider="codex")
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+    monkeypatch.setattr(
+        hlr,
+        "post_verdict",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("must not post after refs/stash changes")
+        ),
+    )
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=True,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["posted"] is False
+    assert "refs/stash changed during the dispatched run" in report["refusal_reason"]
+
+
 def test_run_one_refuses_to_post_when_head_moved(
     monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
 ):
@@ -1122,6 +1336,11 @@ def test_main_resolves_agent_from_lens_when_agent_omitted(
 
     monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
     monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
+    monkeypatch.setattr(
+        hlr,
+        "capture_stash_ref_state",
+        lambda worktree: hlr.StashRefState(resolved_oid=None, packed_oid=None),
+    )
 
     rc = hlr.main(
         [
@@ -1201,6 +1420,11 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
 
     monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
     monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
+    monkeypatch.setattr(
+        hlr,
+        "capture_stash_ref_state",
+        lambda worktree: hlr.StashRefState(resolved_oid=None, packed_oid=None),
+    )
 
     import asyncio
 
@@ -1263,6 +1487,11 @@ def test_run_one_passes_task_entity_id_to_dispatch_for_neotoma_monitoring(
 
     monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
     monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
+    monkeypatch.setattr(
+        hlr,
+        "capture_stash_ref_state",
+        lambda worktree: hlr.StashRefState(resolved_oid=None, packed_oid=None),
+    )
 
     import asyncio
 
