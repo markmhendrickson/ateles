@@ -946,6 +946,53 @@ _POSTED_ACK_LINE_RE = re.compile(
 # veto, never to find the verdict itself.
 _LINE_DECORATION_RE = re.compile(r"^(?:\s|>|\||<[^>\n]*>)*")
 
+# ateles#1326: the harness's own standard attribution footer — appended AFTER
+# a lens has already written its contract-shaped reply, by an instruction
+# layer `SWARM_GITHUB_CONTRACT` does not control — repeats `_HEADER_EMOJI`
+# and so reads as a second header to the count at the bottom of
+# `lens_own_verdict`. `SWARM_GITHUB_CONTRACT` now tells a gate-verdict
+# comment to omit this footer (composition is the primary fix); this pattern
+# is the parser-side backstop for the harness round that still adds it
+# anyway, per Waxwing's ADR (`ent_4db525509391992dfc5efc03`, PR #1320 comment
+# 5856317530): bounded to the ONE real terminal shape, never a general
+# "trailing content is fine" rule.
+#
+# `\Z`-anchored (whole-string end, never mid-body) so it strips ONLY the true
+# tail: a footer-shaped string a lens typed into its own prose, or a forged
+# second header placed BEFORE the real footer, both leave the header-emoji
+# count untouched by this strip and still fail the check that follows it.
+# The `Co-Authored-By:` line is optional (some sessions' harness footer is
+# the "Generated with" line alone) and its label is unconstrained prose —
+# the model name varies release to release (e.g. "Claude Sonnet 5", "Claude
+# Opus 5.5") and pinning one would make the pattern stop matching the next
+# release's real trailer.
+#
+# This pattern is applied to text ALREADY run through
+# `_normalize_for_blocking_scan` (never to the raw reply): that pass's
+# bracketed-spaced-run collapse (`_SPACED_LETTER_RUN_RE`) turns the real
+# footer's `[Claude Code]` link text into `[ClaudeCode]` before this ever
+# sees it, so the pattern must match the POST-normalization shape, not the
+# literal characters a lens's harness appends.
+_KNOWN_TERMINAL_FOOTER_RE = re.compile(
+    r"\n{1,2}\U0001f916\s*Generated with \[ClaudeCode\]"
+    r"\(https://claude\.com/claude-code\)"
+    r"(?:\n{1,2}Co-Authored-By:\s*[^\n<]+\s*<[^>\n]+>)?"
+    r"\n?\s*\Z"
+)
+
+
+def _strip_known_terminal_footer(normalized_text: str) -> str:
+    """*normalized_text* with exactly one known, real, terminal attribution
+    footer removed from its true end — otherwise *normalized_text* unchanged.
+
+    Takes text already passed through `_normalize_for_blocking_scan` — see
+    that pattern's comment for why. Used ONLY to compute the header-emoji
+    count in `lens_own_verdict` (ateles#1326). Never applied to the header/
+    verdict fixed-position reads, the blocking-token scan, or
+    `_VERDICT_LIKE_RE` — those still see the reply exactly as posted.
+    """
+    return _KNOWN_TERMINAL_FOOTER_RE.sub("", normalized_text)
+
 
 def _split_lines_keeping_breaks(text: str) -> list[tuple[str, str]]:
     """``(line, break)`` pairs, splitting on every `_LINE_BREAK_RE` break.
@@ -1043,7 +1090,9 @@ def lens_own_verdict(stdout: str | None, *, lens_agent: str) -> str | None:
         line up to and including the verdict line ends in `\\n`, `\\r\\n` or
         `\\r`, never U+2028, U+2029, U+0085, a form feed or another separator;
       - the reply carries no other header (the header emoji appears exactly
-        once) and no other line that reads as a verdict statement
+        once, AFTER stripping the one known, real, terminal harness
+        attribution footer if present — `_strip_known_terminal_footer`,
+        ateles#1326) and no other line that reads as a verdict statement
         (`Verdict: COMMENT`, `**COMMENT** — …`, `__COMMENT__`,
         `<td>**APPROVE**</td>`, …).
 
@@ -1089,7 +1138,8 @@ def lens_own_verdict(stdout: str | None, *, lens_agent: str) -> str | None:
     verdict = _VERDICT_LINE_RE.match(_normalize_for_blocking_scan(raw_verdict).strip())
     if not verdict:
         return None
-    if _normalize_for_blocking_scan(stdout or "").count(_HEADER_EMOJI) != 1:
+    scanned = _strip_known_terminal_footer(_normalize_for_blocking_scan(stdout or ""))
+    if scanned.count(_HEADER_EMOJI) != 1:
         return None
     for i, (line, _) in enumerate(lines):
         if i == verdict_at:
