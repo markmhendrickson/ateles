@@ -182,7 +182,7 @@ def main() -> int:
             "[agent_policy] The live rule index could not be loaded this "
             "session — proceeding WITHOUT the swarm's governing rules from "
             "the record. See stderr for why; standing constraints in "
-            "CLAUDE.md still apply."
+            "Repository or harness-local standing instructions still apply."
         )
         return 0
 

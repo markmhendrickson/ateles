@@ -355,6 +355,7 @@ row on any ref, so the ruling registers as decision 116.
 | Revision | Pass | What changed |
 |---|---|---|
 | 124 | the harness-carriers pass of 2026-09-25 | document added: the payloads the swarm needs inside a harness, the five carriers, the payload-by-carrier matrix marking each cell guaranteed, discretionary, not applicable, or unverified, the delivery ladder and each evaluated harness's rung, where each payload binds, and the dated measured constraints; consolidates plan `ent_81aadb43caf2fa493361e8ed` decisions `carrier_design_docs`, `harness_delivery_ladder`, and `agent_skills_canonical_rule_index`, with the others its front matter names |
+| 128 | the Codex hook measurement pass of 2026-09-26 | the Codex session-start-hook cell moved from `unverified` to `yes` and its derived rung from protocol beside a generated file to bundle with a hook after a controlled Codex CLI 0.153.4 run returned an opaque identifier supplied only by hook stdout; the measured user-scope install and the unobserved project-local path are recorded separately, and the Cursor question remains open |
 
 ## `migration.md`
 

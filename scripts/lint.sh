@@ -107,6 +107,12 @@ fi
 echo "  - Checking hook-wiring reference matches .claude/settings.json..."
 python3 .claude/hooks/hook_wiring_reference.py --check || ERRORS=$((ERRORS + 1))
 
+# Codex hook delivery (ateles#981). This is an effect check, not a config
+# presence check: it executes the commands named by .codex/hooks.json against
+# a synthetic local agent_policy corpus and a blocked stash command.
+echo "  - Checking Codex live-rule and guard hook effects..."
+python3 execution/scripts/test_codex_rule_hooks.py || ERRORS=$((ERRORS + 1))
+
 # Foundation documents (docs/foundation/). Registered in
 # conformance.md#mechanical-checks-on-this-directory. All stdlib-only, no Neotoma needed.
 echo "  - Checking foundation anchors (every intra-foundation link resolves)..."
