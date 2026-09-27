@@ -204,6 +204,147 @@ def test_fails_when_concepts_row_absent_while_ruled(tmp_path: Path) -> None:
     assert "no concepts-table row" in problems[0]
 
 
+# --- Red: Falco's adversarial reproductions (ateles PR #1321 review) --------
+#
+# Each of these reproduces a phrasing that made the pre-fix checker (pure
+# substring/proximity regexes, first-match-only row lookup) report 0
+# problems on a corpus that states the opposite of what row 114 rules.
+
+DATA_MODEL_NEGATED_GOVERNS = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope`; `agent_sub` | this row never carries a `GOVERNS` -> `agent` edge; `SUPERSEDES` -> `agent_policy` | the rules in force for an agent at a time | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+DATA_MODEL_NEGATED_SUPERSEDE = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope`; `agent_sub` (`scope`/`agent_sub` is NOT superseded by any edge) | `GOVERNS` -> `agent`; `SUPERSEDES` -> `agent_policy` | the rules in force for an agent at a time | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+# Both denials in one row: the exact drift state the checker exists to
+# catch, phrased as an explicit denial rather than an omission.
+DATA_MODEL_NEGATED_BOTH = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope`; `agent_sub` (`scope`/`agent_sub` is not superseded by any edge) | this row never carries a `GOVERNS` -> `agent` edge; `SUPERSEDES` -> `agent_policy` | the rules in force for an agent at a time | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+# A compliant decoy row placed first in ## Concepts, with a broken real row
+# placed second in the same section — the first-match-only lookup masked
+# this before the fix.
+DATA_MODEL_DECOY_THEN_BROKEN_ROW = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope` (legacy; superseded for an agent-specific rule); `agent_sub` (superseded; read nowhere once the edge resolves) | `GOVERNS` -> `agent`; `SUPERSEDES` -> `agent_policy` | decoy row: compliant | the rendered mirrors | an operator's name |
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope`; `agent_sub` | `SUPERSEDES` -> `agent_policy` | real row: broken, no GOVERNS edge, no superseded language | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+
+def test_fails_when_governs_edge_only_appears_negated(tmp_path: Path) -> None:
+    """Falco finding 1: 'this row never carries a GOVERNS -> agent edge'
+    contains the substring a genuine claim would too — must not pass."""
+    write_corpus(tmp_path, data_model=DATA_MODEL_NEGATED_GOVERNS)
+
+    problems = decision_114.check(tmp_path)
+
+    assert any("decision-114-data-model" in p and "GOVERNS" in p for p in problems)
+
+
+def test_fails_when_superseded_claim_only_appears_negated(tmp_path: Path) -> None:
+    """Falco finding 1 (supersede half): 'is NOT superseded by any edge'
+    must not satisfy the superseded-language check."""
+    write_corpus(tmp_path, data_model=DATA_MODEL_NEGATED_SUPERSEDE)
+
+    problems = decision_114.check(tmp_path)
+
+    assert any(
+        "decision-114-data-model" in p and "superseded" in p for p in problems
+    )
+
+
+def test_fails_when_both_claims_appear_negated_in_one_row(tmp_path: Path) -> None:
+    """Falco finding 3: both denials combined in one row must still report
+    both problems, not a false green."""
+    write_corpus(tmp_path, data_model=DATA_MODEL_NEGATED_BOTH)
+
+    problems = decision_114.check(tmp_path)
+
+    assert any("decision-114-data-model" in p and "GOVERNS" in p for p in problems)
+    assert any(
+        "decision-114-data-model" in p and "superseded" in p for p in problems
+    )
+
+
+def test_raises_ambiguous_when_decoy_row_masks_broken_real_row(tmp_path: Path) -> None:
+    """Falco finding 5: a compliant decoy row placed first in ## Concepts
+    must not silently mask a broken real row placed second — the checker
+    must refuse rather than take the first match."""
+    write_corpus(tmp_path, data_model=DATA_MODEL_DECOY_THEN_BROKEN_ROW)
+
+    problems = decision_114.check(tmp_path)
+
+    assert problems
+    assert any("more than one" in p and "agent behavioural rule" in p for p in problems)
+
+
+def test_second_matching_row_outside_concepts_section_is_ignored(
+    tmp_path: Path,
+) -> None:
+    """A second row-shaped line living in a different section (e.g. an
+    appendix) must not trigger the ambiguous-row refusal — only rows inside
+    ## Concepts are candidates."""
+    data_model = DATA_MODEL_RULED.replace(
+        "## Relationships\n\nUnrelated section that must not be scanned as part of Concepts.\n",
+        "## Relationships\n\nUnrelated section that must not be scanned as part of Concepts.\n"
+        "\n## Appendix: pre-114 shape for reference\n\n"
+        "| agent behavioural rule | `agent_policy` | `rule`; `scope`; `agent_sub` | `SUPERSEDES` -> `agent_policy` | n/a | n/a | n/a |\n",
+    )
+    write_corpus(tmp_path, data_model=data_model)
+
+    assert decision_114.check(tmp_path) == []
+
+
 def test_raises_when_conformance_file_is_absent(tmp_path: Path) -> None:
     write_corpus(tmp_path)
     (tmp_path / "docs" / "foundation" / "conformance.md").unlink()

@@ -69,9 +69,38 @@ _SUPERSEDED_RE = re.compile(
 )
 _LEGACY_SCOPE_FIELDS_RE = re.compile(r"`?agent_sub`?", re.I)
 
+# A negation word within this many characters of a matched claim flips its
+# sense: "this row never carries a `GOVERNS` -> `agent` edge" contains the
+# same substring a genuine claim would, so a pure substring/proximity match
+# is bypassed by denial rather than omission. Window is generous (40 chars
+# either side) since negation can lead or trail the claim ("not ... GOVERNS"
+# or "GOVERNS ... is absent").
+_NEGATION_RE = re.compile(r"\b(?:never|not|no|isn't|aren't|doesn't|don't|n't)\b", re.I)
+_NEGATION_WINDOW = 40
+
+
+def _has_unnegated_match(pattern: re.Pattern[str], text: str) -> bool:
+    """True when ``pattern`` matches ``text`` with no negation word nearby.
+
+    Every match is checked independently — a genuine claim earlier in the
+    cell and a negated one later (or vice versa) must not let the genuine
+    match vouch for a cell that also denies the same claim elsewhere.
+    """
+    for match in pattern.finditer(text):
+        start = max(0, match.start() - _NEGATION_WINDOW)
+        end = min(len(text), match.end() + _NEGATION_WINDOW)
+        window = text[start:end]
+        if not _NEGATION_RE.search(window):
+            return True
+    return False
+
 
 class CorpusProblem(Exception):
     """The decision-114 corpus files are missing or unreadable."""
+
+
+class AmbiguousCorpusRow(Exception):
+    """More than one candidate row was found where exactly one is required."""
 
 
 def decision_114_row(conformance_text: str) -> tuple[int, list[str]] | None:
@@ -83,34 +112,65 @@ def decision_114_row(conformance_text: str) -> tuple[int, list[str]] | None:
     return None
 
 
+def _iter_concepts_section_lines(data_model_text: str) -> "list[tuple[int, str]]":
+    """Yield (line no, line) pairs for lines inside the ``## Concepts`` section.
+
+    Scoped to that section specifically — stopping at the next ``## ``
+    heading — rather than the whole document, so a second table sharing the
+    concepts-row shape elsewhere (an appendix, migration notes, a
+    before/after comparison) is never mistaken for the live concepts row.
+    """
+    lines: list[tuple[int, str]] = []
+    in_concepts = False
+    for no, line in enumerate(data_model_text.splitlines(), 1):
+        if line.startswith("## "):
+            in_concepts = line.strip() == "## Concepts"
+            continue
+        if in_concepts:
+            lines.append((no, line))
+    return lines
+
+
 def agent_policy_concepts_row(data_model_text: str) -> tuple[int, str, str] | None:
     """Return (line no, edges cell, whole row) for the concepts-table row.
 
-    Scoped to lines that actually match the concepts-table row shape rather
-    than the whole document, so a mention of ``agent behavioural rule`` in
-    prose elsewhere (there is none today, but the check should not depend on
-    that) is never mistaken for the table row itself.
+    Requires exactly one matching row within ``## Concepts``. Zero matches
+    returns ``None`` (handled by the caller as "no row"); more than one
+    raises ``AmbiguousCorpusRow`` rather than silently taking the first —
+    a compliant decoy placed first must not be able to mask a broken real
+    row placed second.
     """
-    for no, line in enumerate(data_model_text.splitlines(), 1):
+    matches: list[tuple[int, str, str]] = []
+    for no, line in _iter_concepts_section_lines(data_model_text):
         match = _AGENT_POLICY_ROW_RE.match(line)
         if match:
-            return no, match.group("edges"), line
-    return None
+            matches.append((no, match.group("edges"), line))
+    if not matches:
+        return None
+    if len(matches) > 1:
+        line_nos = ", ".join(str(no) for no, _, _ in matches)
+        raise AmbiguousCorpusRow(
+            "found more than one `agent behavioural rule` concepts-table row "
+            f"within ## Concepts (lines {line_nos}); expected exactly one"
+        )
+    return matches[0]
 
 
 def check_concepts_row(path: Path, row_no: int, edges_cell: str, whole_row: str) -> list[str]:
     problems: list[str] = []
-    if not _GOVERNS_EDGE_RE.search(edges_cell):
+    if not _has_unnegated_match(_GOVERNS_EDGE_RE, edges_cell):
         problems.append(
             f"{path}:{row_no}: decision-114-data-model — `agent_policy` "
             "concepts row's edges column is missing a `GOVERNS` → `agent` "
-            "edge while register row 114 is **ruled**"
+            "edge while register row 114 is **ruled** (or the only mention "
+            "found is negated — e.g. 'never carries a GOVERNS -> agent edge')"
         )
-    if not _SUPERSEDED_RE.search(whole_row):
+    if not _has_unnegated_match(_SUPERSEDED_RE, whole_row):
         problems.append(
             f"{path}:{row_no}: decision-114-data-model — `agent_policy` "
             "concepts row does not state that `scope`/`agent_sub` is "
-            "superseded by the `GOVERNS` edge for an agent-specific rule"
+            "superseded by the `GOVERNS` edge for an agent-specific rule "
+            "(or the only mention found is negated)"
         )
     return problems
 
@@ -140,7 +200,10 @@ def check(root: Path) -> list[str]:
         return []
 
     data_model_text = data_model_path.read_text(encoding="utf-8")
-    concepts_row = agent_policy_concepts_row(data_model_text)
+    try:
+        concepts_row = agent_policy_concepts_row(data_model_text)
+    except AmbiguousCorpusRow as exc:
+        return [f"{data_model_path}:1: decision-114-data-model — {exc}"]
     if concepts_row is None:
         return [
             f"{data_model_path}:1: decision-114-data-model — no concepts-table "
