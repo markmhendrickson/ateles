@@ -262,6 +262,20 @@ jobs:
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           python3 "$f"
 
+      # Decision 114: when register row 114 is ruled, data_model.md#concepts'
+      # agent_policy row must carry a GOVERNS -> agent edge and state that
+      # scope/agent_sub is superseded by it for an agent-specific rule.
+      # Prevents ruled-without-registration drift: the ruling is fully argued
+      # in conformance.md and migration.md (G34), but the one table a reader
+      # consults for what fields and edges agent_policy actually carries had
+      # not been updated to match.
+      - name: Decision 114 — ruled GOVERNS-edge shape in data_model
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_decision_114.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
   foundation-tests:
     name: foundation binding tests
     runs-on: ubuntu-latest

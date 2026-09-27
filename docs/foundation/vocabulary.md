@@ -2106,6 +2106,82 @@ else states: a **budget** is one instance of it, a parameter constraint on a num
 constraint for the [grant](#grant) itself (the grant names the entity types and operations; the parameter
 constraint is one further narrowing, on fields, within a write the grant already admits).
 
+### contract
+**Definition:** not a term of its own; every load-bearing use in this corpus is a qualified compound naming
+one obligation set an existing mechanism already carries — the **admission contract** (`adapters.md#the-admission-contract`,
+the six obligations an [adapter](#adapter) must satisfy), the **write contract** (`data_model.md#write-contract`, what a [daemon](#daemon)
+writes and does not write across a [halt](#halt)), the **record-usage contract** (`data_model.md#what-each-actor-reads-and-writes`,
+which actor reads and writes which record), and the **document contract** (`conformance.md#mechanical-checks-on-this-directory`,
+that a check exists on disk and runs somewhere, tracked whether or not it is wired — `status.md`'s distinction from a
+[control](#control)) — plus this file's own use for its **Never**/**Not for** lists (`#scope`, "Both lists are prose, and they
+are read as prose").
+Bare "contract" names no fifth, unifying concept: the swap test applied to this corpus's own uses turns up no sentence
+meaning something none of the four compounds — or an [invariant](#invariant), a [control](#control), or a [grant](#grant) —
+already names. This is the same [finding](#finding) [`policy`](#policy) states for bare "policy" and [`#scope`](#scope) states for bare
+"scope", applied to a third word with the identical shape: a compound already exists everywhere the corpus needs the
+sense, so the bare word is left to the author as ordinary English, the same as the eighteen terms `#scope`'s own section
+lists.
+**A contract is never itself a control.** `conformance.md`'s own distinction — a check existing on disk (a document contract)
+versus a check that runs somewhere a failure is consumed (a [control](#control)) — is exactly principle 1's binding test,
+and the two words are not interchangeable: a contract can be honored in the writing and still bind nobody until something
+wires it.
+**See:** [`adapters.md#the-admission-contract`](adapters.md#the-admission-contract),
+[`data_model.md#write-contract`](data_model.md#write-contract),
+[`conformance.md#mechanical-checks-on-this-directory`](conformance.md#mechanical-checks-on-this-directory),
+[`principles.md#1-a-mechanism-that-does-not-bind-is-not-a-control`](principles.md#1-a-mechanism-that-does-not-bind-is-not-a-control).
+**Never:** —
+**Not for:** bare "contract" for a canonical concept (name the qualified compound the sentence means, or, where none of
+the four fits, name the [invariant](#invariant), [control](#control), or [grant](#grant) the sentence actually means);
+"directive" or "guideline" as a synonym for a contract, a [rule](#rule), or a [policy](#policy) (neither word is used
+anywhere in this corpus to mean anything those already name, retired alongside "guideline" in [`policy`](#policy), above);
+[control](#control) for a contract with no consuming failure path (a document contract not yet wired is reporting, tracked
+as such in `status.md`, never asserted as enforcement).
+
+## Terminology matrix: rule, policy, instruction, and the collision it resolves
+
+One compact table, cited, for the [batch](#batch) of terms this section and `policy`, `instruction`, `guard`,
+`invariant`, `control`, `carrier`, and `parameter constraint` above settle in one pass — the collision
+`ent_f1cd4c7980d2952e2a84dadc` audited across the foundation corpus, Neotoma's schemas, and Ateles' harness
+delivery. Each row names the one canonical term for its concept class, the record or mechanism that
+carries it, and the entry that argues it; a row with no canonical term states the rejection and the term
+that survives instead. This is a **reading aid over entries that already exist above**, not a second
+definition — where this table and an entry's own prose differ, the entry governs.
+
+| Concept class | Canonical term | Carried as / by | Argued in |
+|---|---|---|---|
+| Normative content, imperative, one per row | [rule](#rule) | `agent_policy.rule` | [`rule`](#rule) |
+| Scoped, typed governance record | [policy](#policy) — always qualified: `agent_policy`, `action_policy`, `task_policy`, `hook_policy`, `instance_policy`, `conformance_policy`, `insurance_policy` | one registered entity type per compound | [`policy`](#policy) |
+| Point-in-time model-context rendering | [instruction](#instruction) | assembled at delivery by a [carrier](#carrier); never a second home for the content | [`instruction`](#instruction) |
+| Pre-action refusal mechanism | [guard](#guard) | harness plumbing bound to a hook | [`guard`](#guard) |
+| Design-wide property, argued once | [invariant](#invariant) | `principles.md`'s twelve | [`invariant`](#invariant) |
+| A mechanism that fails visibly on violation | [control](#control) | whatever a [guard](#guard), [gate](#gate), CI step, or admission check names as its failure path | [`control`](#control) |
+| Vehicle delivering a payload into context | [carrier](#carrier) | protocol, integration, bundle, local instruction file, or hook | [`carrier`](#carrier) |
+| Content of one recurring piece of work | [procedure](#procedure) | targeted at a [workflow](#workflow), [step](#step), [adapter](#adapter) operation, or [policy](#policy) | [`procedure`](#procedure) |
+| Harness-matrix row label for a delivered procedure | [method](#method) | `harness_carriers.md#payloads`'s Method row only, never a design type | [`method`](#method) |
+| File a harness loads by name | [skill](#skill) | source state the harnesses hold; never a design target | [`skill`](#skill) |
+| Field allowlist on a write grant | [parameter constraint](#parameter-constraint) | `agent_grant.param_constraints` | [`parameter constraint`](#parameter-constraint) |
+| Interface obligation set an existing mechanism carries | [contract](#contract) — always qualified: admission contract, write contract, record-usage contract, document contract | the mechanism each compound names; no record of its own | [`contract`](#contract) |
+| Decision point evaluating an action against a policy | [gate](#gate) (`action gate`) | `action_policy`, evaluated per action | [`gate`](#gate) |
+| — (rejected; names nothing the six `*_policy` types don't) | ~~guideline~~, ~~directive~~ | — | [`policy`](#policy) |
+
+**Foundation → Ateles → Neotoma, per row above.** The design (this file, `data_model.md`) states the
+concept; `docs/agents/*.md` and `.claude/skills/*/SKILL.md` are Ateles' rendered mirror of the `agent`
+and `agent_policy` rows a harness reads (`conformance.md#direction-of-truth-per-class-of-record`); Neotoma
+is the record the entity types above are registered schemas on. A design term is never inferred backward
+from a live schema or field name — `migration.md` is where an intentional implementation mapping or a
+legacy alias is recorded, and this file never renames a design concept to match what a checkout happens to
+call it (`conformance.md`'s "renamed [agent](#agent) leaves no reference behind" [rule](#rule), applied to concepts as much as
+to agent names).
+
+| Design term (this file) | Ateles carrier | Neotoma schema / field | Notes |
+|---|---|---|---|
+| [rule](#rule) | rendered into `docs/agents/*.md` / `.claude/skills/*/SKILL.md`, and the session rule index | `agent_policy.rule`, `.rule_kind`, `.scope`, `.agent_sub` (legacy; superseded — see [`rule`](#rule)) | one row, one rule; no bundle field |
+| [policy](#policy) compounds | agent-loader / dispatcher reads | `agent_policy`, `action_policy`, `task_policy`, `hook_policy`, `instance_policy`, `conformance_policy`, `insurance_policy` — seven registered schemas | `standing_rule` and `rule_update`, where an instance still carries them, are pre-114 aliases of `agent_policy`'s class, not a second design type |
+| [instruction](#instruction) | session-start hook payload, per-prompt rule index, subagent brief | not a stored entity — assembled at delivery from the types above | never a Neotoma row of its own; storing a rendering would be a second home for the content |
+| [guard](#guard) | `.claude/hooks/*.py` (PreToolUse etc.) | none — the rule it enforces is the `agent_policy` row; the guard is code | a guard with no wired hook is an [instruction](#instruction), not a control |
+| [carrier](#carrier) | harness capability matrix (`harness_carriers.md#capability-matrix`) | none — a carrier is a delivery vehicle, not a record | — |
+| [contract](#contract) | `adapters.md`'s admission contract, `scripts/lint.sh` / CI checks | none — see [`control`](#control) for when a contract becomes enforcement | a document contract with no CI wiring is tracked in `status.md`, never asserted as bound |
+
 ## Conformance (`conformance.md`)
 
 ### kernel document
