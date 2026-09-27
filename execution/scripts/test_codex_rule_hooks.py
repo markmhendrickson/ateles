@@ -396,6 +396,69 @@ class TestCodexRuleDeliveryEffect(unittest.TestCase):
         self.assertIn("CODEX_SUBAGENT_CANARY_91DE", result.stdout)
 
 
+def _pretooluse_groups() -> list[dict]:
+    data = json.loads(HOOKS_FILE.read_text(encoding="utf-8"))
+    return data["hooks"]["PreToolUse"]
+
+
+def _group_for(script_name: str) -> dict:
+    for group in _pretooluse_groups():
+        for hook in group.get("hooks", []):
+            if script_name in hook["command"]:
+                return group
+    raise AssertionError(f"no PreToolUse group wires {script_name}")
+
+
+class TestCodexPreToolUseMatcherSurfaces(unittest.TestCase):
+    """The matcher on each PreToolUse group is a claim about which Codex
+    tool names that group's guards actually parse. gmail_send_gate.py,
+    git_stash_guard.py, and gh_identity_guard.py are shell-command guards
+    with no apply_patch payload to parse (unlike sibling_repo_worktree_guard.py,
+    which genuinely understands both shapes) — so their group must not
+    advertise apply_patch coverage it cannot provide (ateles#1319,
+    security_finding ent_4240262e581f93a0a4cfdbd1, Waxwing correction
+    issuecomment-5853939910)."""
+
+    def test_sibling_guard_group_matches_bash_and_apply_patch(self) -> None:
+        group = _group_for("sibling_repo_worktree_guard.py")
+        self.assertEqual(group["matcher"], "^(Bash|apply_patch)$")
+
+    def test_shell_only_guards_are_grouped_separately_from_apply_patch(self) -> None:
+        for script in (
+            "gmail_send_gate.py",
+            "git_stash_guard.py",
+            "gh_identity_guard.py",
+        ):
+            with self.subTest(script=script):
+                group = _group_for(script)
+                self.assertEqual(group["matcher"], "^Bash$")
+                self.assertNotIn("apply_patch", group["matcher"])
+
+    def test_shell_only_guards_share_one_group_not_the_sibling_guards_group(
+        self,
+    ) -> None:
+        groups = _pretooluse_groups()
+
+        def group_index(script: str) -> int:
+            for index, group in enumerate(groups):
+                for hook in group.get("hooks", []):
+                    if script in hook["command"]:
+                        return index
+            raise AssertionError(f"no PreToolUse group wires {script}")
+
+        shell_guard_indices = {
+            group_index(script)
+            for script in (
+                "gmail_send_gate.py",
+                "git_stash_guard.py",
+                "gh_identity_guard.py",
+            )
+        }
+        self.assertEqual(len(shell_guard_indices), 1)
+        sibling_index = group_index("sibling_repo_worktree_guard.py")
+        self.assertNotIn(sibling_index, shell_guard_indices)
+
+
 class TestCodexGuardEffect(unittest.TestCase):
     def test_configured_git_stash_guard_returns_a_codex_deny(self) -> None:
         commands = _hook_commands("PreToolUse")
@@ -419,6 +482,76 @@ class TestCodexGuardEffect(unittest.TestCase):
         self.assertEqual(output["hookEventName"], "PreToolUse")
         self.assertEqual(output["permissionDecision"], "deny")
         self.assertIn("shared", output["permissionDecisionReason"].lower())
+
+    def test_configured_git_stash_guard_allows_apply_patch_unmatched(self) -> None:
+        """apply_patch is not in this guard's matcher, so Codex would never
+        invoke it for an apply_patch tool call. Directly invoking it anyway
+        (as Falco's reproduction did) must still fail open rather than deny —
+        proving the guard's own tool_name gate, not the matcher, is what a
+        caller falls back on if it is ever misrouted."""
+        commands = _hook_commands("PreToolUse")
+        command = next(c for c in commands if "git_stash_guard.py" in c)
+        result = _run(
+            command,
+            {
+                "session_id": "codex-effect-session",
+                "turn_id": "turn-1b",
+                "hook_event_name": "PreToolUse",
+                "tool_name": "apply_patch",
+                "tool_use_id": "call-1b",
+                "tool_input": {"command": "git stash push -m unsafe"},
+                "cwd": str(REPO_ROOT),
+            },
+        )
+        self.assertEqual(result.returncode, 0)
+
+    def test_configured_gmail_send_gate_returns_a_codex_deny(self) -> None:
+        commands = _hook_commands("PreToolUse")
+        command = next(c for c in commands if "gmail_send_gate.py" in c)
+        result = _run(
+            command,
+            {
+                "session_id": "codex-effect-session",
+                "turn_id": "turn-4",
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_use_id": "call-4",
+                "tool_input": {
+                    "command": "gws gmail users messages send --params '{}'"
+                },
+                "cwd": str(REPO_ROOT),
+            },
+        )
+
+        self.assertEqual(result.returncode, 2)
+        payload = json.loads(result.stdout)
+        output = payload["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], "PreToolUse")
+        self.assertEqual(output["permissionDecision"], "deny")
+
+    def test_configured_gh_identity_guard_returns_a_codex_deny(self) -> None:
+        commands = _hook_commands("PreToolUse")
+        command = next(c for c in commands if "gh_identity_guard.py" in c)
+        result = _run(
+            command,
+            {
+                "session_id": "codex-effect-session",
+                "turn_id": "turn-5",
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_use_id": "call-5",
+                "tool_input": {
+                    "command": 'GH_TOKEN="" gh pr create --title x --body y'
+                },
+                "cwd": str(REPO_ROOT),
+            },
+        )
+
+        self.assertEqual(result.returncode, 2)
+        payload = json.loads(result.stdout)
+        output = payload["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], "PreToolUse")
+        self.assertEqual(output["permissionDecision"], "deny")
 
     def test_configured_sibling_guard_blocks_apply_patch_to_shared_clone(self) -> None:
         data = json.loads(HOOKS_FILE.read_text(encoding="utf-8"))
