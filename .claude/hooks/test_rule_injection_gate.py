@@ -26,6 +26,17 @@ Cases:
      (agent-scoped, no GOVERNS edge) is not injected — same predicate
      session_rule_index.py applies before rendering (decision 114) — and a
      grant write's probe reminder still fires regardless.
+  10. A row that is `scope="global"`/`"swarm"` but carries a live `GOVERNS`
+      edge to a DIFFERENT agent's `agent_definition` is withheld — an edge
+      overrides scope (`policy_binds_agent_by_edge`'s own doc), so this must
+      not fall through to the swarm-wide branch just because the hook never
+      fetched the edge map. This is the live QA finding at head 42fdf432:
+      `_fetch_rows_by_id` called the bare `_session_scope_ok(row)` with no
+      `agent_definition_id`/`governs`, which the function's own docstring
+      says treats every row as edgeless — so a row governed only to another
+      agent was scored purely on `scope` and wrongly injected. The
+      companion positive case proves a row edged to THIS session's own
+      resolved agent identity still renders.
 """
 from __future__ import annotations
 
@@ -90,6 +101,74 @@ class _FakeNeotomaHandler(http.server.BaseHTTPRequestHandler):
 @pytest.fixture
 def fake_neotoma():
     handler = type("Handler", (_FakeNeotomaHandler,), {"rows": []})
+    port = _free_port()
+    server = http.server.HTTPServer(("127.0.0.1", port), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{port}", handler
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+# ent_ateles_def / ent_cicada_def below are fixture-only ids — no relation to
+# any real Neotoma entity — standing in for "this session's own
+# agent_definition" and "a different agent's agent_definition" respectively.
+_ATELES_DEFINITION_ID = "ent_ateles_def"
+_CICADA_DEFINITION_ID = "ent_cicada_def"
+
+
+class _EdgeAwareNeotomaHandler(http.server.BaseHTTPRequestHandler):
+    """Unlike `_FakeNeotomaHandler` (which answers every POST identically
+    with `{"entities": self.rows}`), this handler routes by path so the
+    gate's full `render_skills` path — `/entities/query` for both the
+    `agent_policy` row fetch AND the `agent_definition` name-search
+    (`resolve_agent_definition_id`), plus `/list_relationships` for the
+    `GOVERNS` edge map (`fetch_governs_edges`) — gets a real, distinct
+    response instead of silently being served rows shaped for a different
+    endpoint. Needed because the bug under test is specifically that the old
+    code never made the GOVERNS/agent_definition calls at all; a
+    path-blind fake could not tell the two code paths apart.
+    """
+
+    rows: list[dict] = []
+    governs_relationships: list[dict] = []
+    agent_definition_rows: list[dict] = []
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length)
+        try:
+            req_body = json.loads(raw.decode()) if raw else {}
+        except json.JSONDecodeError:
+            req_body = {}
+
+        if self.path.endswith("/list_relationships"):
+            payload = {"relationships": self.governs_relationships}
+        elif req_body.get("entity_type") == "agent_definition":
+            payload = {"entities": self.agent_definition_rows}
+        else:
+            payload = {"entities": self.rows}
+
+        body = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):  # noqa: A003
+        pass
+
+
+@pytest.fixture
+def edge_aware_fake_neotoma():
+    handler = type(
+        "EdgeAwareHandler",
+        (_EdgeAwareNeotomaHandler,),
+        {"rows": [], "governs_relationships": [], "agent_definition_rows": []},
+    )
     port = _free_port()
     server = http.server.HTTPServer(("127.0.0.1", port), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -336,6 +415,104 @@ class TestOutOfScopeRowIsWithheld:
         ctx = payload["hookSpecificOutput"]["additionalContext"]
         assert "SHOULD_NOT_LEAK_CANARY" not in ctx
         assert "get_session_identity" in ctx
+
+
+class TestGovernsEdgeToAnotherAgentIsWithheld:
+    """The live QA finding at head 42fdf432: a `scope="global"`/`"swarm"`
+    row that carries a real `GOVERNS` edge to a DIFFERENT agent must be
+    withheld from this session, because an edge overrides scope
+    (`policy_binds_agent_by_edge`'s own doc: "an edge is more specific than
+    a scope value, so it overrides rather than adds to it"). The old
+    `_fetch_rows_by_id` called the bare `_session_scope_ok(row)` with no
+    `agent_definition_id`/`governs`, so it never learned the edge existed
+    and fell through to the swarm-wide `scope` branch, wrongly injecting a
+    row meant only for another agent. `render_skills` resolves this
+    session's own identity (`ATELES_SESSION_PRINCIPAL`, default
+    `ateles@ateles-swarm`) and fetches the live edge map before scoping —
+    exercised here via the path-aware fake server so both the
+    `agent_definition` resolve query and the `/list_relationships` GOVERNS
+    fetch are real network round-trips, not skipped.
+    """
+
+    def test_global_scoped_row_edged_only_to_another_agent_is_withheld(
+        self, edge_aware_fake_neotoma
+    ):
+        base_url, handler = edge_aware_fake_neotoma
+        handler.rows = [
+            _row(
+                "ent_1c0cbb99d2c8011358ff1dc3",
+                rule="SHOULD_NOT_LEAK_TO_ATELES_CANARY",
+                scope="global",
+            )
+        ]
+        # This session's own agent_definition (resolved by name from the
+        # default session principal "ateles@ateles-swarm").
+        handler.agent_definition_rows = [
+            {"entity_id": _ATELES_DEFINITION_ID, "snapshot": {"name": "ateles"}}
+        ]
+        # The row is edged ONLY to a different agent (cicada), never to
+        # ateles's own agent_definition id.
+        handler.governs_relationships = [
+            {
+                "source_entity_id": "ent_1c0cbb99d2c8011358ff1dc3",
+                "target_entity_id": _CICADA_DEFINITION_ID,
+            }
+        ]
+        result = _run(
+            {
+                "tool_name": "mcp__mcpsrv_neotoma__correct",
+                "tool_input": {
+                    "entity_id": "ent_x",
+                    "entity_type": "agent_policy",
+                    "field": "rule",
+                },
+            },
+            base_url=base_url,
+        )
+        assert result.returncode == 0, result.stderr
+        # policy_write has no probe reminder, so a withheld row means
+        # nothing was printed at all — same shape as the edgeless case.
+        assert "SHOULD_NOT_LEAK_TO_ATELES_CANARY" not in result.stdout
+
+    def test_global_scoped_row_edged_to_this_sessions_own_agent_is_injected(
+        self, edge_aware_fake_neotoma
+    ):
+        """Companion positive case: a row edged to THIS session's own
+        resolved `agent_definition` id must still render — proving the fix
+        discriminates by resolved identity rather than simply withholding
+        every edged row."""
+        base_url, handler = edge_aware_fake_neotoma
+        handler.rows = [
+            _row(
+                "ent_1c0cbb99d2c8011358ff1dc3",
+                rule="SHOULD_REACH_ATELES_CANARY",
+                scope="global",
+            )
+        ]
+        handler.agent_definition_rows = [
+            {"entity_id": _ATELES_DEFINITION_ID, "snapshot": {"name": "ateles"}}
+        ]
+        handler.governs_relationships = [
+            {
+                "source_entity_id": "ent_1c0cbb99d2c8011358ff1dc3",
+                "target_entity_id": _ATELES_DEFINITION_ID,
+            }
+        ]
+        result = _run(
+            {
+                "tool_name": "mcp__mcpsrv_neotoma__correct",
+                "tool_input": {
+                    "entity_id": "ent_x",
+                    "entity_type": "agent_policy",
+                    "field": "rule",
+                },
+            },
+            base_url=base_url,
+        )
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        assert "SHOULD_REACH_ATELES_CANARY" in ctx
 
 
 class TestNoMatchInjectsNothing:

@@ -43,12 +43,13 @@ CATEGORY -> RULE IDS is a small local map (`_CATEGORY_RULE_IDS` below), never
 rule TEXT: only entity ids are named here, mirroring
 `install_codex_hooks.py`'s `MANAGED_SCRIPT_NAMES` precedent for "a short
 local list of identifiers is fine; the governed content stays in the single
-source." The hook fetches those rows live every time (same reader
-`session_rule_index.py` uses: `fetch_active_policy_rows` /
-`_session_scope_ok`) and renders `.body` (the FULL `rule` text) — so an edit
-to a rule's content in Neotoma is picked up on the next matching action with
-no code change, and a rule retired or rescoped away from this session simply
-stops being injected.
+source." The hook fetches those rows live every time (same readers
+`session_rule_index.py` uses: `fetch_active_policy_rows` / `render_skills`,
+which resolves this session's own agent identity and live `GOVERNS` edges
+before scope-filtering — see `_fetch_rows_by_id`) and renders `.body` (the
+FULL `rule` text) — so an edit to a rule's content in Neotoma is picked up on
+the next matching action with no code change, and a rule retired or
+rescoped away from this session simply stops being injected.
 
 GRANT WRITES ALSO GET A PROBE REMINDER. The audited failure was not just a
 missing rule — it was a write reported "verified" from a read-back that
@@ -190,9 +191,8 @@ def _fetch_rows_by_id(ids: set[str]) -> dict[str, dict]:
         if str(_LIB_DIR) not in sys.path:
             sys.path.insert(0, str(_LIB_DIR))
         from lib.daemon_runtime.policy_skill_renderer import (  # noqa: PLC0415
-            _session_scope_ok,
             fetch_active_policy_rows,
-            to_skill,
+            render_skills,
         )
     except Exception as exc:  # noqa: BLE001 — fail open (e.g. no httpx)
         _log(f"renderer unavailable: {type(exc).__name__}: {exc}")
@@ -204,19 +204,27 @@ def _fetch_rows_by_id(ids: set[str]) -> dict[str, dict]:
         _log(f"could not reach Neotoma: {type(exc).__name__}: {exc}")
         return {}
 
+    # `render_skills(rows)` is the SAME entry point `session_rule_index.py`
+    # calls: with no `agent_definition_id=`/`governs=` supplied, it resolves
+    # this session's own `agent_definition` id (`resolve_agent_definition_id`
+    # against `session_principal()`) and fetches the live `GOVERNS` edge map
+    # (`fetch_governs_edges`) itself, THEN applies `_session_scope_ok` with
+    # those resolved values before projecting to `PolicySkill` (`to_skill`).
+    # Calling the bare `_session_scope_ok(row)` here — as an earlier revision
+    # did — passes neither, so every row (including one edged to a DIFFERENT
+    # agent) is scored as if it had no `GOVERNS` edge at all: a
+    # `global`/`swarm`-scoped row edged only to another agent then falls
+    # through to the swarm-wide branch and is wrongly treated as binding
+    # this session, even though an edge is supposed to override scope
+    # (`policy_binds_agent_by_edge`'s own doc: "an edge overrides rather
+    # than adds to" scope). Reusing `render_skills` end to end is what keeps
+    # this hook and the SessionStart index from silently disagreeing about
+    # who may see a row.
+    skills = render_skills(rows)
     out: dict[str, dict] = {}
-    for row in rows:
-        eid = str(row.get("_entity_id") or row.get("entity_id") or "")
-        # Same scope predicate session_rule_index.py applies before
-        # rendering (`_session_scope_ok`, decision 114) — without it a row
-        # re-scoped to a different agent via a GOVERNS edge would stop
-        # appearing in the session-start index but keep being injected
-        # here, since the two paths would otherwise diverge on the one
-        # thing that determines whether this session may see the row.
-        if eid in ids and _session_scope_ok(row):
-            skill = to_skill(row)
-            if skill is not None:
-                out[eid] = skill
+    for skill in skills:
+        if skill.entity_id in ids:
+            out[skill.entity_id] = skill
     return out
 
 
