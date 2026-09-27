@@ -107,6 +107,34 @@ whole index the very next prompt. A fail-open render (Neotoma unreachable,
 etc.) records nothing — there is nothing delivered to record, and the
 delivery hook's "no prior signature" fallback (inject everything once it is
 next asked) is the correct behavior in that case, not a bug to route around.
+
+RECORDS ONLY WHAT `text` ACTUALLY RENDERED, NOT EVERY `scoped_rows` ENTRY
+(task ent_3f5bc7138628cf5b4116d569, filed during PR #1295's review). Two
+ways a session-scoped row can fail to reach a reader despite being in
+`scoped_rows`: `to_skill` skips a row with nothing safe to render after
+sanitizing (title/applies_when both empty — policy_skill_renderer.py's own
+"skip the row and count it"), and tier C drops whole rows under a single
+omitted-count line when even tier B overflows the budget. Recording either
+kind as delivered would silently and permanently exempt it: an unchanged
+signature is never re-diffed, so a row marked delivered without ever having
+been rendered is never delivered by any later mechanism either.
+
+NEVER INFERRED BY SCANNING RENDERED TEXT (ateles#1323 follow-up, Falco
+security review, task ent_bd3fcf561449b6ebbabc36ca). An earlier revision of
+this fix extracted "what got delivered" with a regex over the printed
+string, matching a trailing `[entity_id]` bracket. That is spoofable: a
+mandatory rule's own `rule`/`body` text is NEVER sanitized for index
+rendering (policy_skill_renderer.py's standing guarantee), and this repo's
+own rule bodies routinely cite entity ids in prose — a bracket appearing
+inside one row's body reads to a text scanner exactly like another row's
+real index line, marking that OTHER row delivered even when it was the one
+tier C actually dropped. Falco reproduced this directly against the
+text-scanning version. Fixed by asking the renderer itself, structurally,
+which rows it emitted a line for:
+`policy_skill_renderer.render_index_text_with_ids` returns
+`(text, emitted_ids)`, where `emitted_ids` is built from the SAME
+`PolicySkill` list each tier's lines are generated from — never derived
+from the string a row's own content could forge a bracket into.
 """
 from __future__ import annotations
 
@@ -115,7 +143,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _session_integrity import read_hook_input, load_state, save_state  # noqa: E402
-from rule_index_state import record_delivery  # noqa: E402
+from rule_index_state import record_delivered_subset  # noqa: E402
 
 # Resolve siblings relative to THIS FILE, never cwd/CLAUDE_PROJECT_DIR — the
 # one property that makes this hook usable from a user-level settings.json
@@ -131,12 +159,13 @@ def _log(msg: str) -> None:
     sys.stderr.write(f"[session-rule-index] {msg}\n")
 
 
-def _render() -> tuple[str, list[dict]] | None:
+def _render() -> tuple[str, frozenset[str], list[dict]] | None:
     """Live-render the index plus the session-scoped raw rows it was built
     from (for delivery-signature recording), or None on a genuine failure
     (fail-open): Neotoma unreachable, the renderer unimportable, or a corpus
     too large even for tier C. A merely large corpus does NOT hit this path
-    — it returns a tiered (A/B/C) string from render_index_text instead.
+    — it returns a tiered (A/B/C) string from render_index_text_with_ids
+    instead.
     """
     try:
         if str(_REPO_ROOT) not in sys.path:
@@ -145,7 +174,7 @@ def _render() -> tuple[str, list[dict]] | None:
             sys.path.insert(0, str(_LIB_DIR))
         from lib.daemon_runtime.policy_skill_renderer import (  # noqa: PLC0415
             fetch_active_policy_rows,
-            render_index_text,
+            render_index_text_with_ids,
             render_skills,
             _session_scope_ok,
         )
@@ -161,12 +190,12 @@ def _render() -> tuple[str, list[dict]] | None:
 
     try:
         skills = render_skills(rows)
-        text = render_index_text(skills, BUDGET_CHARS)
+        text, emitted_ids = render_index_text_with_ids(skills, BUDGET_CHARS)
         # `rows` is already flattened by unwrap_policy_entities (bare
         # snapshot dicts with `_entity_id` stamped on) — scope on the row
         # directly, not `row["snapshot"]`, which does not exist here.
         scoped_rows = [r for r in rows if _session_scope_ok(r)]
-        return text, scoped_rows
+        return text, emitted_ids, scoped_rows
     except Exception as exc:  # noqa: BLE001 — includes the budget-overflow raise
         _log(f"could not render rule index: {type(exc).__name__}: {exc}")
         return None
@@ -186,14 +215,20 @@ def main() -> int:
         )
         return 0
 
-    text, scoped_rows = rendered
+    text, emitted_ids, scoped_rows = rendered
     print("# Agent policy rule index (live from Neotoma, ateles#1261)\n")
     print(text)
 
     if session_id:
         try:
             state = load_state(session_id)
-            save_state(session_id, record_delivery(state, scoped_rows))
+            # Record only the rows the renderer STRUCTURALLY reports as
+            # emitted — not every session-scoped row, and never inferred by
+            # scanning `text` (task ent_bd3fcf561449b6ebbabc36ca: a text
+            # scan is spoofable by a bracket inside a row's own unsanitized
+            # body). `to_skill` skipping a row, or tier C dropping one, are
+            # both simply absent from `emitted_ids`.
+            save_state(session_id, record_delivered_subset(state, scoped_rows, emitted_ids))
         except Exception as exc:  # noqa: BLE001 — never let bookkeeping break delivery
             _log(f"could not record delivered signature: {exc}")
     return 0

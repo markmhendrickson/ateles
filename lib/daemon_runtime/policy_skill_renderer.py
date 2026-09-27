@@ -822,12 +822,28 @@ def _assemble(
     return "\n".join(lines)
 
 
-def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
-    """The plain-text session index, degrading through four tiers rather
-    than failing open on size (operator ruling, ateles#1261 follow-up: size
-    must DEGRADE, never fail open — fail-open is reserved for Neotoma being
-    unreachable or rendering itself raising, never merely for being over
-    budget).
+def render_index_text_with_ids(
+    skills: list[PolicySkill], budget_chars: int
+) -> tuple[str, frozenset[str]]:
+    """Like `render_index_text`, but also returns the exact set of entity ids
+    that were actually given their own rendered line — computed STRUCTURALLY
+    from which `PolicySkill`s were selected into each tier, never by scanning
+    the rendered text for a bracket pattern.
+
+    ateles#1323 follow-up (Falco security review, task
+    ent_bd3fcf561449b6ebbabc36ca). A prior revision inferred "what got
+    delivered" by regex-scanning rendered output for a trailing `[entity_id]`
+    token. That is spoofable: a mandatory row's own `body`/`rule` text is
+    NEVER sanitized for index rendering (this module's own standing
+    guarantee — see the class docstring, "NEVER derived from `rule`/`body`
+    text"), so a rule body that happens to cite another rule's id in prose
+    (e.g. "see agent_policy ent_xxx") reads to a text scanner exactly like
+    that other rule's real index line, even when that other rule was the one
+    tier C actually dropped. This function closes that gap by construction:
+    every skill added to `kept`/`conditional`/`preamble` below is the SAME
+    list a bracketed line is generated FROM, so the returned id set is
+    exactly (and only) the rows that produced their own line — a body's
+    internal text is never consulted.
 
     Tier A:  full conditional lines (trigger + imperative + id) for EVERY
              row, regardless of scope.
@@ -851,14 +867,18 @@ def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
     so a session or a test can see which one ran. Always returns a string
     that fits `budget_chars` — the empty-corpus case (no preamble, no
     conditional) trivially fits at tier A and is not a special case here.
+    Tiers A, A2 and B always emit every row in `skills` (nothing is ever
+    dropped at those tiers), so their returned id set is always the full
+    `{s.entity_id for s in skills}`. Only tier C's id set is a proper subset.
     """
     preamble = [s for s in skills if s.is_preamble]
     conditional = [s for s in skills if not s.is_preamble]
+    all_ids = frozenset(s.entity_id for s in skills)
 
     # --- Tier A ---
     tier_a = _assemble(preamble, [_conditional_line_full(s) for s in conditional], "A")
     if len(tier_a) <= budget_chars:
-        return tier_a
+        return tier_a, all_ids
 
     # --- Tier A2: audience split — compact the both-audience rows only ---
     tier_a2 = _assemble(
@@ -874,7 +894,7 @@ def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
             len(tier_a), budget_chars, len(tier_a2), both_audience_count,
             len(conditional),
         )
-        return tier_a2
+        return tier_a2, all_ids
 
     # --- Tier B ---
     tier_b = _assemble(
@@ -888,7 +908,7 @@ def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
             "kept).",
             len(tier_a), len(tier_a2), budget_chars, len(tier_b), len(conditional),
         )
-        return tier_b
+        return tier_b, all_ids
 
     # --- Tier C: mandatory first, keep whole lines only, state the cut ---
     ordered = sorted(
@@ -912,6 +932,7 @@ def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
     # integer), never on which rules were kept, so probing with the count
     # this candidate WOULD leave omitted is exact, not a worst case.
     kept_lines: list[str] = []
+    kept_skills: list[PolicySkill] = []
     kept_count = 0
     for s in ordered:
         candidate_lines = kept_lines + [_conditional_line_trigger_only(s)]
@@ -921,6 +942,7 @@ def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
         if len(probe) > budget_chars:
             break
         kept_lines = candidate_lines
+        kept_skills.append(s)
         kept_count += 1
 
     omitted = len(ordered) - kept_count
@@ -945,4 +967,20 @@ def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
             "Shorten agent_policy.applies_when / the preamble rules "
             "themselves, or raise the budget."
         )
-    return tier_c
+    # Tier C's emitted set is preamble (always full) + only the KEPT
+    # conditional skills — structurally exact, never inferred from text.
+    tier_c_ids = frozenset(s.entity_id for s in preamble) | frozenset(
+        s.entity_id for s in kept_skills
+    )
+    return tier_c, tier_c_ids
+
+
+def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
+    """Back-compat wrapper: the text only, for callers that don't need the
+    emitted-id set (existing callers outside the two rule-delivery hooks —
+    the eval runner, the module's own test suite). New callers that need to
+    know exactly what was rendered should call
+    `render_index_text_with_ids` instead of re-deriving it from the string.
+    """
+    text, _ids = render_index_text_with_ids(skills, budget_chars)
+    return text
