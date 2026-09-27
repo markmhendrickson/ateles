@@ -816,10 +816,41 @@ class AgentLoader:
         Render this agent's active/provisional policies as a markdown block to
         append to the dispatch system prompt — turning the advisory consultation
         protocol into reliable application. Returns "" when there are none.
+
+        Every row-derived field is sanitized before interpolation. These rows
+        are not operator-authored only — `load_active_policies` (above) draws
+        on rows `generalizer.py` writes autonomously, with no human review
+        gate — the same lower-trust-write-reaching-model-context path
+        `policy_skill_renderer.to_skill` already guards for `PolicySkill.body`
+        via `_sanitize_body`. This method is a second, independent reader of
+        the same raw `agent_policy.rule` text, feeding two live dispatch
+        system prompts (`anthus.py`, `execution/mcp/ateles/server.py`), so it
+        must run the SAME sanitizer rather than a divergent one (Falco, PR
+        #1320 round 3 — CONFIRMED forged-heading/forged-tier-marker injection
+        reproduced directly against this function). `rule_kind`/`status` are
+        row-derived too (`to_skill`'s docstring already flags every
+        row-derived field as untrusted), so they run through the single-line
+        sanitizer alongside `rule` through the multi-line one.
+
+        Imported lazily (not at module scope) because `policy_skill_renderer`
+        imports FROM this module at import time (`policy_binds_agent_by_edge`
+        et al.) — a module-level import here would be circular.
         """
         policies = self.load_active_policies()
         if not policies:
             return ""
+        try:  # package import (normal daemon runtime) with script fallback
+            from .policy_skill_renderer import (  # type: ignore
+                _BODY_MAX,
+                _sanitize_body,
+                _sanitize_field,
+            )
+        except ImportError:  # pragma: no cover
+            from policy_skill_renderer import (  # type: ignore
+                _BODY_MAX,
+                _sanitize_body,
+                _sanitize_field,
+            )
         lines = [
             "\n\n## Active agent policies (apply these)\n",
             "These standing policies were learned for you. `provisional` ones "
@@ -827,8 +858,11 @@ class AgentLoader:
             "`strategy_drift_signal` if one is wrong.\n",
         ]
         for p in policies:
-            kind = p.get("rule_kind", "prefer")
-            status = p.get("status", "active")
-            rule = p.get("rule") or p.get("description", "")
+            kind = _sanitize_field(str(p.get("rule_kind", "prefer")), max_len=40) or "prefer"
+            status = _sanitize_field(str(p.get("status", "active")), max_len=40) or "active"
+            raw_rule = p.get("rule") or p.get("description", "")
+            rule = _sanitize_body(str(raw_rule), max_len=_BODY_MAX)
+            if not rule:
+                continue
             lines.append(f"- ({kind}, {status}) {rule}")
         return "\n".join(lines)
