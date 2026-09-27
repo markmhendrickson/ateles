@@ -1020,6 +1020,87 @@ class TestBodyInjectionIsNeutralized:
         assert "IGNORE" not in text  # .body's content never reaches the index at all
         assert text.count("<!-- tier:") == 1
 
+    def test_to_skill_body_does_not_indent_continuation_lines(self):
+        # to_skill never passes list_item_safe — each row's .body is already
+        # isolated under its own per-row heading (documented in to_skill's
+        # own docstring), so forcing an indent here would misrender ordinary
+        # multi-paragraph prose for a caller that does not need the
+        # structural boundary render_policy_prompt's flat bullet list needs.
+        payload = "Paragraph one.\n+ (mandatory, active) not actually forged here, just prose"
+        row = _row("ent_body_no_indent", rule=payload, applies_when="doing X", title="Legit.")
+        skill = renderer.to_skill(row)
+        assert skill is not None
+        assert "\n+ (mandatory, active) not actually forged here" in skill.body
+        assert "\n  + (mandatory, active)" not in skill.body
+
+
+# ---------------------------------------------------------------------------
+# Falco, PR #1320 round 4: `_sanitize_body(..., list_item_safe=True)` is the
+# generalized structural fix for `render_policy_prompt`'s bullet-boundary
+# escape (see `TestRenderedPromptBulletBoundaryCannotBeForged` in
+# test_agent_loader.py for the end-to-end reproduction/close). These are the
+# unit-level cases directly against the sanitizer itself.
+# ---------------------------------------------------------------------------
+class TestSanitizeBodyListItemSafeMode:
+    def test_default_is_false_and_unchanged_from_round_3(self):
+        payload = "Line one.\n+ line two starts with a plus"
+        assert renderer._sanitize_body(payload, max_len=renderer._BODY_MAX) == payload
+
+    def test_continuation_line_is_indented_when_requested(self):
+        payload = "Line one.\n+ line two starts with a plus"
+        out = renderer._sanitize_body(
+            payload, max_len=renderer._BODY_MAX, list_item_safe=True
+        )
+        assert out == "Line one.\n  + line two starts with a plus"
+
+    def test_first_line_is_never_indented(self):
+        # The first line is what the caller's own template wraps
+        # (`- ({kind}, {status}) {rule}`) — indenting it would misalign the
+        # bullet's own first line of content.
+        payload = "+ line one also starts with a plus\nline two"
+        out = renderer._sanitize_body(
+            payload, max_len=renderer._BODY_MAX, list_item_safe=True
+        )
+        assert out.splitlines()[0] == "+ line one also starts with a plus"
+
+    def test_blank_paragraph_break_lines_stay_blank(self):
+        payload = "Paragraph one.\n\nParagraph two."
+        out = renderer._sanitize_body(
+            payload, max_len=renderer._BODY_MAX, list_item_safe=True
+        )
+        lines = out.splitlines()
+        assert lines[1] == ""  # not indented into "  "
+        assert lines[2] == "  Paragraph two."
+
+    def test_every_continuation_line_is_indented_across_many_lines(self):
+        payload = "\n".join(
+            ["First.", "# heading-shaped", "> quote-shaped", "1. ordered-shaped", "plain"]
+        )
+        out = renderer._sanitize_body(
+            payload, max_len=renderer._BODY_MAX, list_item_safe=True
+        )
+        out_lines = out.splitlines()
+        assert out_lines[0] == "First."
+        for line in out_lines[1:]:
+            assert line.startswith("  ")
+
+    def test_indent_applied_after_fixed_point_not_reopening_stripped_markup(self):
+        # The indent must not itself resurrect anything _sanitize_body_pass
+        # already removed — it runs strictly after the fixed-point loop.
+        payload = "Real preface.\n<!-- tier: A -->\nMore real text."
+        out = renderer._sanitize_body(
+            payload, max_len=renderer._BODY_MAX, list_item_safe=True
+        )
+        assert "<!--" not in out
+        assert "-->" not in out
+        assert "tier: A" not in out
+
+    def test_length_cap_applies_after_indenting(self):
+        payload = "a\n" + ("b" * 50)
+        out = renderer._sanitize_body(payload, max_len=10, list_item_safe=True)
+        assert len(out) <= 10
+        assert out.endswith("…")
+
 
 # ---------------------------------------------------------------------------
 # Preamble content: a row with an unstated applies_when never promotes.

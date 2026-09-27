@@ -832,6 +832,23 @@ class AgentLoader:
         row-derived field as untrusted), so they run through the single-line
         sanitizer alongside `rule` through the multi-line one.
 
+        `_sanitize_body(..., list_item_safe=True)` (Falco, PR #1320 round 4):
+        this method's own `- ({kind}, {status}) {rule}` template puts every
+        row in ONE flat bullet list with no per-row wrapper, unlike
+        `to_skill`'s `body` field (each row isolated under its own heading) —
+        so an embedded newline in `rule` followed by ANY non-indented
+        character puts attacker text at column 0 of that shared list,
+        structurally indistinguishable from a genuine sibling policy bullet
+        (CONFIRMED with a leading `+` and a Unicode dash `‐`, both outside
+        `_LEADING_MARKDOWN`'s ASCII-only stripped class — but the fix is the
+        structural indent boundary, not a wider glyph denylist, since a
+        denylist is always one lookalike behind). `list_item_safe=True`
+        indents every continuation line so it can never open a new list
+        item, heading, or comment regardless of its leading character,
+        while ordinary multi-paragraph rule text still reads as one
+        indented block under its row's bullet rather than being collapsed
+        to a single line.
+
         Imported lazily (not at module scope) because `policy_skill_renderer`
         imports FROM this module at import time (`policy_binds_agent_by_edge`
         et al.) — a module-level import here would be circular.
@@ -861,7 +878,7 @@ class AgentLoader:
             kind = _sanitize_field(str(p.get("rule_kind", "prefer")), max_len=40) or "prefer"
             status = _sanitize_field(str(p.get("status", "active")), max_len=40) or "active"
             raw_rule = p.get("rule") or p.get("description", "")
-            rule = _sanitize_body(str(raw_rule), max_len=_BODY_MAX)
+            rule = _sanitize_body(str(raw_rule), max_len=_BODY_MAX, list_item_safe=True)
             if not rule:
                 continue
             lines.append(f"- ({kind}, {status}) {rule}")

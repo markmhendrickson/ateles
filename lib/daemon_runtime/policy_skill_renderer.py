@@ -362,7 +362,25 @@ def _sanitize_body_pass(text: str) -> str:
     return "\n".join(result)
 
 
-def _sanitize_body(raw: str, max_len: int) -> str:
+# Indent applied to every continuation line (all lines after the first) when
+# `_sanitize_body(..., list_item_safe=True)` is requested. Two spaces is the
+# minimum CommonMark content-column for a `- ` bullet marker: a line indented
+# to or past a list item's content column is a "lazy continuation" of that
+# item's own paragraph, structurally incapable of opening a new sibling block
+# (list item, heading, or HTML comment) regardless of which character starts
+# it — the indentation itself, not the character, is what removes the line
+# from "start of a block" position. This closes the STRUCTURAL class Falco's
+# PR #1320 round-4 finding named (an embedded newline followed by `+` or a
+# Unicode dash surviving `_LEADING_MARKDOWN`'s ASCII-only strip class and
+# rendering as a second, indistinguishable policy bullet), rather than
+# widening `_LEADING_MARKDOWN` to deny more specific leading glyphs — a
+# denylist of characters is always one lookalike behind; an indent boundary
+# has no such gap because it does not depend on recognizing the forging
+# character at all.
+_LIST_ITEM_CONTINUATION_INDENT = "  "
+
+
+def _sanitize_body(raw: str, max_len: int, *, list_item_safe: bool = False) -> str:
     """Multi-line counterpart to `_sanitize_field` (same threat model,
     module header above) — used for `PolicySkill.body`, the one field
     `to_skill` used to leave unsanitized on the theory that "nothing in this
@@ -377,6 +395,23 @@ def _sanitize_body(raw: str, max_len: int) -> str:
     Runs to a fixed point the same way `_sanitize_field` does — a deletion
     can expose a new forbidden sequence at a line boundary — then caps
     length with an ellipsis. Returns "" if nothing survives.
+
+    `list_item_safe=True` (Falco, PR #1320 round 4) additionally indents
+    every line after the first by `_LIST_ITEM_CONTINUATION_INDENT`, AFTER
+    the fixed point and BEFORE the length cap. Set this when the caller is
+    going to interpolate the sanitized text into a single flat bullet-list
+    row shared with sibling rows with no per-row wrapper of its own — exactly
+    `render_policy_prompt`'s `- ({kind}, {status}) {rule}` template, where an
+    embedded newline puts arbitrary attacker text at column 0 of the shared
+    list, structurally indistinguishable from a genuine sibling bullet.
+    `to_skill`'s `body` field does NOT set this: each row there is already
+    isolated under its own `### [category] rule {eid}` heading, so a stray
+    line inside one row's block cannot pose as a DIFFERENT row's policy, and
+    forcing an indent there would misrender genuine multi-paragraph prose
+    users are meant to read as normal body text. The indent is applied only
+    to non-empty lines — a blank paragraph-break line stays blank so runs of
+    blank lines are still collapsed the same way by the caller's own
+    formatting; indenting a blank line would make it visibly non-blank.
     """
     if not raw:
         return ""
@@ -388,6 +423,12 @@ def _sanitize_body(raw: str, max_len: int) -> str:
         text = cleaned
     if not text:
         return ""
+    if list_item_safe:
+        lines = text.split("\n")
+        text = "\n".join(
+            line if i == 0 or not line else _LIST_ITEM_CONTINUATION_INDENT + line
+            for i, line in enumerate(lines)
+        )
     if len(text) > max_len:
         text = text[: max_len - 1].rstrip() + "…"
     return text
